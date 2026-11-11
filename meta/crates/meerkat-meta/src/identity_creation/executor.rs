@@ -470,7 +470,7 @@ fn refused_before_core(commit: &ChangeCommit<'_>) -> Option<IdentityRefusal> {
         RequestAction::Adopt { .. } | RequestAction::Create { .. }
     );
     if commit.configured_target && !adopts_or_creates {
-        return Some(IdentityRefusal::new(IdentityRefusalKind::OwnerReadOnly).at("identity"));
+        return Some(IdentityRefusal::new(IdentityRefusalKind::OwnerReadOnly).at("name"));
     }
     None
 }

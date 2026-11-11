@@ -13,47 +13,446 @@
 //! Writes: create (1 to 256 agents, all or nothing), update, archive,
 //! unarchive, remove, adopt, withdraw, changes hold. Reads: list, get,
 //! operation, directory, plan. A read never wakes an agent.
+//!
+//! The types here are the one spelling of the family for every surface:
+//! a host method's params, an agent tool's arguments, an SDK's call and the
+//! console's form are these, field for field, and an unknown field is
+//! refused. A create names `agents: [{name, profile, display_name?,
+//! instructions?, context?, labels?, first_message?, peers?}]`; a change of
+//! one agent names it `name`; an outcome names `agents[].name`. A refusal's
+//! `field` is a path into the request as written here (`agents[0].name`,
+//! `agents[0].peers[1]`, `set.labels`, `peers_add[0]`).
+
+use std::collections::BTreeMap;
 
 use async_trait::async_trait;
-use meerkat_mob::MobHandle;
+use meerkat_core::ContentInput;
+use meerkat_mob::{MobHandle, ProfileName};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
-use crate::identity_first::DurableAgentSpec;
+use crate::identity_first::{AgentAddressability, AgentIdentity, DisplayName, DurableAgentSpec};
 
 use super::config::{ApprovalKind, ChangeClass, RequesterKind};
 use super::digest::Sha256Digest;
 use super::executor::ChangeRequester;
 use super::operation::OperationId;
 use super::outcome::IdentityOutcome;
-use super::refusal::IdentityRefusal;
+use super::policy::IdentityCreationPolicy;
+use super::refusal::{IdentityRefusal, IdentityRefusalKind, RequestProblem};
 use super::request::{
     AdoptIdentitySpec, ArchiveIdentitySpec, CreateIdentitySpec, RemoveIdentitySpec,
     RequestEnvelope, UnarchiveIdentitySpec, UpdateIdentitySpec,
 };
+use super::request::{Requester, SourceEvidence, UpdateSetSpec};
+
+fn malformed(field: impl Into<String>) -> IdentityRefusal {
+    IdentityRefusal::new(IdentityRefusalKind::InvalidRequest {
+        problem: RequestProblem::Malformed,
+    })
+    .at(field)
+}
+
+/// One agent of a create, as every surface writes it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct AgentSpec {
+    /// Its name: unique in the mob, and never available again once the
+    /// agent is removed.
+    pub name: String,
+    /// Its profile, one of the mob's: it gives the agent's model, tools and
+    /// skills.
+    pub profile: String,
+    /// Its display name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// Its instructions: its standing brief.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub instructions: Vec<String>,
+    /// Its context: descriptive, never authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<Value>,
+    /// Its labels.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+    /// Its first message: its first turn, run once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_message: Option<ContentInput>,
+    /// The agents it can message, by name: agents of the mob, or other
+    /// agents of the same create. Nothing else is wired to it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub peers: Vec<String>,
+}
+
+impl AgentSpec {
+    /// The agent `name` of `profile`, with nothing else set.
+    pub fn new(name: impl Into<String>, profile: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            profile: profile.into(),
+            display_name: None,
+            instructions: Vec::new(),
+            context: None,
+            labels: BTreeMap::new(),
+            first_message: None,
+            peers: Vec::new(),
+        }
+    }
+
+    /// The agent as normalization takes it, as the agent at `index` of its
+    /// create: refused `invalid_name` at `agents[index].name` for a name
+    /// that is no agent name, and `invalid_request` at
+    /// `agents[index].display_name` for an empty display name.
+    pub fn to_create_spec(&self, index: usize) -> Result<CreateIdentitySpec, IdentityRefusal> {
+        let identity = AgentIdentity::parse(&self.name).map_err(|_| {
+            IdentityRefusal::new(IdentityRefusalKind::InvalidName)
+                .at(format!("agents[{index}].name"))
+        })?;
+        let display_name = self
+            .display_name
+            .as_deref()
+            .map(DisplayName::parse)
+            .transpose()
+            .map_err(|_| malformed(format!("agents[{index}].display_name")))?;
+        let mut spec = CreateIdentitySpec::new(DurableAgentSpec {
+            identity,
+            profile: ProfileName::from(self.profile.as_str()),
+            addressability: AgentAddressability::default(),
+            display_name,
+            labels: self.labels.clone(),
+            context: self.context.clone(),
+            additional_instructions: self.instructions.clone(),
+            initial_message: self.first_message.clone(),
+            runtime_mode_override: None,
+            backend: None,
+            binding: None,
+            placement: None,
+        });
+        spec.peers = self.peers.clone();
+        Ok(spec)
+    }
+}
+
+/// A create of 1 to 256 agents, all or nothing, as every surface writes
+/// it. The agents may name each other as peers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct CreateAgents {
+    /// The caller's id of the request: the same id and request return the
+    /// same state. The host plane gives one; a tool call may leave it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// The agents.
+    pub agents: Vec<AgentSpec>,
+    /// Who proposed the request: the host plane's, recorded and never
+    /// authority. An agent's call carries none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposer: Option<String>,
+    /// Host-attested source evidence: the host plane's, recorded and never
+    /// authority. An agent's call carries none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_evidence: Option<SourceEvidence>,
+}
+
+impl CreateAgents {
+    /// A create of `agents`.
+    pub fn new(agents: Vec<AgentSpec>) -> Self {
+        Self {
+            request_id: None,
+            agents,
+            proposer: None,
+            source_evidence: None,
+        }
+    }
+
+    /// The agents as normalization takes them, in the order written.
+    pub fn to_create_specs(&self) -> Result<Vec<CreateIdentitySpec>, IdentityRefusal> {
+        self.agents
+            .iter()
+            .enumerate()
+            .map(|(index, agent)| agent.to_create_spec(index))
+            .collect()
+    }
+
+    /// What the host plane adds to the request.
+    pub fn envelope(&self) -> RequestEnvelope {
+        envelope(self.proposer.as_ref(), self.source_evidence.as_ref())
+    }
+}
+
+fn envelope(
+    proposer: Option<&String>,
+    source_evidence: Option<&SourceEvidence>,
+) -> RequestEnvelope {
+    let mut envelope = RequestEnvelope::default();
+    envelope.proposer = proposer.cloned();
+    envelope.source_evidence = source_evidence.cloned();
+    envelope
+}
+
+/// What an update sets. An absent member is unchanged.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct AgentSet {
+    /// The display name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// The instructions, replaced whole.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<Vec<String>>,
+    /// The context, replaced whole.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<Value>,
+    /// Labels to set: each key takes its value, and the agent's other
+    /// labels stay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub labels: Option<BTreeMap<String, String>>,
+    /// Label keys to remove.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels_remove: Vec<String>,
+    /// The profile: the agent moves to it, on the same conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+}
+
+/// An update of one agent, as every surface writes it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct UpdateAgent {
+    /// The caller's id of the request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// The agent.
+    pub name: String,
+    /// The digest of the spec the requester read: the agent's `spec_digest`
+    /// then. An agent that changed meanwhile answers `stale_spec` with the
+    /// current one.
+    pub expected_spec_digest: Sha256Digest,
+    /// What changes.
+    #[serde(default)]
+    pub set: AgentSet,
+    /// Peers to add, by name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub peers_add: Vec<String>,
+    /// Peers to remove, by name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub peers_remove: Vec<String>,
+    /// Who proposed the request: the host plane's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposer: Option<String>,
+    /// Host-attested source evidence: the host plane's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_evidence: Option<SourceEvidence>,
+}
+
+impl UpdateAgent {
+    /// An update of `name`, at the spec whose digest the requester read,
+    /// that changes nothing yet.
+    pub fn new(name: impl Into<String>, expected_spec_digest: Sha256Digest) -> Self {
+        Self {
+            request_id: None,
+            name: name.into(),
+            expected_spec_digest,
+            set: AgentSet::default(),
+            peers_add: Vec::new(),
+            peers_remove: Vec::new(),
+            proposer: None,
+            source_evidence: None,
+        }
+    }
+
+    /// The update as normalization takes it. `current_labels` are the
+    /// agent's labels now: the labels the update sets and removes are
+    /// applied to them, and the result is split by `policy` into the
+    /// authority fields and the other labels, each handed on only when it
+    /// differs from the agent's. Refused `invalid_request` for a label both
+    /// set and removed (at `set.labels_remove`) and for an empty display
+    /// name (at `set.display_name`).
+    pub fn to_update_spec(
+        &self,
+        policy: &IdentityCreationPolicy,
+        current_labels: &BTreeMap<String, String>,
+    ) -> Result<UpdateIdentitySpec, IdentityRefusal> {
+        let AgentSet {
+            display_name,
+            instructions,
+            context,
+            labels,
+            labels_remove,
+            profile,
+        } = &self.set;
+        let display_name = display_name
+            .as_deref()
+            .map(DisplayName::parse)
+            .transpose()
+            .map_err(|_| malformed("set.display_name"))?;
+        let mut set = UpdateSetSpec::default();
+        set.profile = profile.as_deref().map(ProfileName::from);
+        set.display_name = display_name;
+        set.additional_instructions = instructions.clone();
+        set.context = context.clone();
+        set.peers_add = self.peers_add.clone();
+        set.peers_remove = self.peers_remove.clone();
+        if labels.is_some() || !labels_remove.is_empty() {
+            let mut next = current_labels.clone();
+            for key in labels_remove {
+                if labels
+                    .as_ref()
+                    .is_some_and(|labels| labels.contains_key(key))
+                {
+                    return Err(IdentityRefusal::new(IdentityRefusalKind::InvalidRequest {
+                        problem: RequestProblem::Conflicting,
+                    })
+                    .at("set.labels_remove"));
+                }
+                next.remove(key);
+            }
+            if let Some(labels) = labels {
+                next.extend(labels.clone());
+            }
+            let split = |labels: &BTreeMap<String, String>| {
+                labels
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .partition::<BTreeMap<String, String>, _>(|(key, _)| {
+                        policy.authority_field(key).is_some()
+                    })
+            };
+            let (authority, descriptive) = split(&next);
+            let (authority_now, descriptive_now) = split(current_labels);
+            if authority != authority_now {
+                set.authority_fields = Some(authority);
+            }
+            if descriptive != descriptive_now {
+                set.descriptive_labels = Some(descriptive);
+            }
+        }
+        let mut update: UpdateIdentitySpec =
+            UpdateIdentitySpec::new(self.name.clone(), self.expected_spec_digest.clone());
+        update.set = set;
+        Ok(update)
+    }
+
+    /// What the host plane adds to the request.
+    pub fn envelope(&self) -> RequestEnvelope {
+        envelope(self.proposer.as_ref(), self.source_evidence.as_ref())
+    }
+}
+
+/// A change of one agent as a whole, as every surface writes it: its
+/// archive, its unarchive, its removal or its adoption.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct AgentRef {
+    /// The caller's id of the request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// The agent.
+    pub name: String,
+    /// The digest of the spec the requester read.
+    pub expected_spec_digest: Sha256Digest,
+    /// Who proposed the request: the host plane's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposer: Option<String>,
+    /// Host-attested source evidence: the host plane's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_evidence: Option<SourceEvidence>,
+}
+
+impl AgentRef {
+    /// The agent `name`, at the spec whose digest the requester read.
+    pub fn new(name: impl Into<String>, expected_spec_digest: Sha256Digest) -> Self {
+        Self {
+            request_id: None,
+            name: name.into(),
+            expected_spec_digest,
+            proposer: None,
+            source_evidence: None,
+        }
+    }
+
+    /// The agent's archive, as normalization takes it.
+    pub fn to_archive(&self) -> ArchiveIdentitySpec {
+        ArchiveIdentitySpec::new(self.name.clone(), self.expected_spec_digest.clone())
+    }
+
+    /// The agent's unarchive, as normalization takes it.
+    pub fn to_unarchive(&self) -> UnarchiveIdentitySpec {
+        UnarchiveIdentitySpec::new(self.name.clone(), self.expected_spec_digest.clone())
+    }
+
+    /// The agent's removal, as normalization takes it.
+    pub fn to_remove(&self) -> RemoveIdentitySpec {
+        RemoveIdentitySpec::new(self.name.clone(), self.expected_spec_digest.clone())
+    }
+
+    /// The agent's adoption, as normalization takes it.
+    pub fn to_adopt(&self) -> AdoptIdentitySpec {
+        AdoptIdentitySpec::new(self.name.clone(), self.expected_spec_digest.clone())
+    }
+
+    /// What the host plane adds to the request.
+    pub fn envelope(&self) -> RequestEnvelope {
+        envelope(self.proposer.as_ref(), self.source_evidence.as_ref())
+    }
+}
+
+/// An operation, named by the caller's request id (its own request) or by
+/// the operation id an outcome named. Exactly one is given.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct OperationRef {
+    /// The caller's id of its own request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// The operation id an outcome named.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+}
+
+impl OperationRef {
+    /// The operation, for the caller `requester`: its own request's, or the
+    /// one the operation id names. Refused `invalid_request` when not
+    /// exactly one of the two is given, or when the operation id is none an
+    /// outcome names.
+    pub fn resolve(&self, requester: &Requester) -> Result<OperationId, IdentityRefusal> {
+        match (&self.request_id, &self.operation_id) {
+            (Some(request_id), None) => OperationId::for_request(requester, request_id),
+            (None, Some(operation_id)) => {
+                OperationId::from_recorded(operation_id).ok_or_else(|| malformed("operation_id"))
+            }
+            _ => Err(IdentityRefusal::new(IdentityRefusalKind::InvalidRequest {
+                problem: RequestProblem::Conflicting,
+            })
+            .at("request_id")),
+        }
+    }
+}
 
 /// What one change of the family asks, before the host's rules are applied
 /// to it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "change", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum IdentityChangeSpec {
-    /// Create 1 to 256 agents, all or nothing. They may name each other as
-    /// peers.
-    Create {
-        /// The agents.
-        identities: Vec<CreateIdentitySpec>,
-    },
+    /// Create 1 to 256 agents, all or nothing.
+    Create(CreateAgents),
     /// Update one agent.
-    Update(UpdateIdentitySpec),
+    Update(UpdateAgent),
     /// Archive one agent.
-    Archive(ArchiveIdentitySpec),
+    Archive(AgentRef),
     /// Unarchive one archived agent.
-    Unarchive(UnarchiveIdentitySpec),
+    Unarchive(AgentRef),
     /// Remove one agent for good.
-    Remove(RemoveIdentitySpec),
+    Remove(AgentRef),
     /// Adopt one agent: release it from configuration, after which it is
     /// changed at run time and configuration no longer declares it.
-    Adopt(AdoptIdentitySpec),
+    Adopt(AgentRef),
 }
 
 impl IdentityChangeSpec {
@@ -61,7 +460,7 @@ impl IdentityChangeSpec {
     /// `unarchive`, `remove` or `adopt`.
     pub fn token(&self) -> &'static str {
         match self {
-            Self::Create { .. } => "create",
+            Self::Create(_) => "create",
             Self::Update(_) => "update",
             Self::Archive(_) => "archive",
             Self::Unarchive(_) => "unarchive",
@@ -69,44 +468,58 @@ impl IdentityChangeSpec {
             Self::Adopt(_) => "adopt",
         }
     }
+
+    /// The caller's id of the request, when it gave one.
+    pub fn request_id(&self) -> Option<&str> {
+        match self {
+            Self::Create(create) => create.request_id.as_deref(),
+            Self::Update(update) => update.request_id.as_deref(),
+            Self::Archive(agent)
+            | Self::Unarchive(agent)
+            | Self::Remove(agent)
+            | Self::Adopt(agent) => agent.request_id.as_deref(),
+        }
+    }
+
+    /// What the host plane adds to the request.
+    pub fn envelope(&self) -> RequestEnvelope {
+        match self {
+            Self::Create(create) => create.envelope(),
+            Self::Update(update) => update.envelope(),
+            Self::Archive(agent)
+            | Self::Unarchive(agent)
+            | Self::Remove(agent)
+            | Self::Adopt(agent) => agent.envelope(),
+        }
+    }
 }
 
-/// One change of the family: the operation it is, what the host plane adds
-/// to it, and what it asks.
+/// One change of the family: the operation it is, and what it asks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct IdentityChangeCall {
     /// The operation: the same id and request return the same state, and
-    /// another request under it is refused `operation_reused`.
+    /// another request under it is refused `operation_reused`. Made from
+    /// the request's `request_id` by the requester
+    /// ([`OperationId::for_request`]), or derived for a tool call that gave
+    /// none ([`OperationId::for_tool_call`]).
     pub operation_id: OperationId,
-    /// What the host plane adds: a proposer and source evidence, recorded
-    /// and never authority. An agent's call carries neither.
-    pub envelope: RequestEnvelope,
     /// What it asks.
     pub change: IdentityChangeSpec,
 }
 
 impl IdentityChangeCall {
-    /// The change `change` as the operation `operation_id`, with nothing
-    /// added by the host plane.
+    /// The change `change` as the operation `operation_id`.
     pub fn new(operation_id: OperationId, change: IdentityChangeSpec) -> Self {
         Self {
             operation_id,
-            envelope: RequestEnvelope::default(),
             change,
         }
-    }
-
-    /// This call, with the host plane's `envelope`.
-    #[must_use]
-    pub fn with_envelope(mut self, envelope: RequestEnvelope) -> Self {
-        self.envelope = envelope;
-        self
     }
 }
 
 /// A withdrawal of a change whose decision is still held: by its requester,
-/// or by the host.
+/// or by the host. On the wire it is an [`OperationRef`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct WithdrawRequest {
@@ -200,15 +613,13 @@ pub struct ListAgents {
 #[non_exhaustive]
 pub struct GetAgent {
     /// The agent.
-    pub identity: String,
+    pub name: String,
 }
 
 impl GetAgent {
-    /// The agent `identity`.
-    pub fn new(identity: impl Into<String>) -> Self {
-        Self {
-            identity: identity.into(),
-        }
+    /// The agent `name`.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into() }
     }
 }
 
@@ -234,7 +645,7 @@ pub enum IdentityRead {
     List(ListAgents),
     /// One agent.
     Get(GetAgent),
-    /// The state of one operation.
+    /// The state of one operation ([`OperationRef::resolve`]).
     Operation(OperationId),
     /// What the caller may name in a create or an update.
     Directory(ReadDirectory),
@@ -368,14 +779,21 @@ pub enum ConsentSummary {
     Imported,
 }
 
-/// One agent in full: its summary, its spec and the peers it lists.
+/// One agent in full: what a list says of it, and the rest of what a
+/// create or an update may set, under the names they set it by.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
 pub struct AgentRecord {
-    /// What a list says of it.
+    /// What a list says of it; its members are members of the record.
+    #[serde(flatten)]
     pub agent: AgentSummary,
-    /// Its spec.
-    pub spec: DurableAgentSpec,
+    /// Its instructions.
+    pub instructions: Vec<String>,
+    /// Its context.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<Value>,
+    /// Its labels.
+    pub labels: BTreeMap<String, String>,
     /// The peers its changes listed, by name.
     pub peers: Vec<String>,
 }

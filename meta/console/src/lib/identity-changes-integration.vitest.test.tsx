@@ -148,6 +148,16 @@ function noticeWords(notice: HTMLElement): string {
     .join(" ");
 }
 
+/** The gateway's own sentence of the refusal shown in `scope`, as its
+ * Details disclosure holds it: collapsed, so no primary text. */
+function detailsOf(scope: Element | null): string {
+  const details = scope?.querySelector("details[data-testid='identity-refusal-details']");
+  expect(details).not.toBeNull();
+  expect((details as HTMLDetailsElement).open).toBe(false);
+  expect(details?.querySelector("summary")?.textContent).toBe("Details");
+  return details?.querySelector(".identity-refusal__gateway")?.textContent || "";
+}
+
 describe("long-term agents in the console", () => {
   beforeEach(() => {
     vi.stubGlobal("localStorage", window.localStorage);
@@ -461,11 +471,14 @@ describe("long-term agents in the console", () => {
     const form = await openNewAgent(view);
     fireEvent.click(within(form).getByTestId("identity-profile:worker"));
 
-    // A name that is taken: the gateway's sentence, at the name.
+    // A name that is taken: the console's sentence, at the name, and the
+    // gateway's own behind Details.
     setField(form, "identity-field:name", "warden");
     fireEvent.submit(form);
     const atName = await find(view, "identity-field-error:name");
-    expect(atName.textContent).toBe("The name is taken: choose another. A removed agent's name is never available again.");
+    expect(atName.textContent).toBe("This name is taken. Choose another; a removed agent's name is never free again.");
+    expect(detailsOf(form.querySelector("[data-field='name']")))
+      .toBe("The name is taken: choose another. A removed agent's name is never available again.");
     expect(form.querySelector("[data-field='name']")?.getAttribute("data-invalid")).toBe("true");
     expect(within(form).getByTestId("identity-field:name").getAttribute("aria-invalid")).toBe("true");
     expect(form.textContent).not.toContain("name_taken");
@@ -486,6 +499,8 @@ describe("long-term agents in the console", () => {
     setField(form, "identity-field:first_message", "Hello.");
     fireEvent.submit(form);
     expect((await find(view, "identity-field-error:first_message")).textContent)
+      .toBe("This change needs something this version does not support. Leave it out.");
+    expect(detailsOf(form.querySelector("[data-field='first_message']")))
       .toBe("A governed runtime does not start an agent with a first message: leave it out.");
     expect(form.textContent).not.toContain("unsupported");
 
@@ -496,6 +511,8 @@ describe("long-term agents in the console", () => {
     fireEvent.click(within(form).getByTestId("identity-peer:warden"));
     fireEvent.submit(form);
     expect((await find(view, "identity-field-error:peers")).textContent)
+      .toBe("This peer is not an agent of this team that you can name. Pick another agent.");
+    expect(detailsOf(form.querySelector("[data-field='peers']")))
       .toBe("The peer is no agent you may name: list agents of the mob, or other agents of the same request.");
     fireEvent.click(within(form).getByTestId("identity-peer:warden"));
     expect(present(view, "identity-field-error:peers")).toBe(false);
@@ -506,14 +523,16 @@ describe("long-term agents in the console", () => {
     fireEvent.submit(form);
     const whole = await find(view, "identity-notice");
     expect(whole.querySelector("[data-outcome='refused']")?.textContent)
-      .toBe("The host's rules deny this change for you: it was not made, and repeating it changes nothing.");
+      .toBe("The host's rules do not allow you this change. It was not made, and asking again changes nothing.");
+    expect(detailsOf(whole)).toBe("The host's rules deny this change for you: it was not made, and repeating it changes nothing.");
     expect(whole.textContent).not.toContain("change_denied");
     expect(present(view, "identity-retry")).toBe(false);
     expect(family.agents.has("scout")).toBe(false);
     fireEvent.click(view.getByTestId("identity-cancel"));
 
     // An agent the host's configuration declares: the gateway refuses the
-    // change, and the console shows its sentence.
+    // change, and the console says so in its own words. What the gateway
+    // says of other ways is behind Details.
     await selectAgent(view, "helper");
     fireEvent.click(view.getByTestId("roster-action:helper:edit"));
     const edit = await find(view, "identity-edit:helper");
@@ -521,8 +540,10 @@ describe("long-term agents in the console", () => {
     setField(edit, "identity-field:display_name", "Chief helper");
     fireEvent.submit(edit);
     const refused = await find(view, "identity-notice");
-    expect(refused.querySelector("[data-outcome='refused']")?.textContent).toContain("declared by the host's configuration");
-    expect(refused.textContent).toContain("adopt");
+    expect(refused.querySelector("[data-outcome='refused']")?.textContent)
+      .toBe("This agent is set up in the host's configuration and cannot be changed here. Change it in the configuration.");
+    expect(noticeWords(refused)).not.toContain("adopt");
+    expect(detailsOf(refused)).toContain("declared by the host's configuration");
     expect(refused.textContent).not.toContain("owner_read_only");
 
     // A refusal that names a field of the update shows at that field.
@@ -535,6 +556,8 @@ describe("long-term agents in the console", () => {
     fireEvent.click(within(wardenEdit).getByTestId("identity-profile:reviewer"));
     fireEvent.submit(wardenEdit);
     expect((await find(view, "identity-field-error:profile")).textContent)
+      .toBe("This team has no such profile. Pick one of the team's profiles.");
+    expect(detailsOf(wardenEdit.querySelector("[data-field='profile']")))
       .toBe("The mob has no profile of this name: name one of the mob's profiles.");
     fireEvent.click(view.getByTestId("identity-cancel"));
 
@@ -546,7 +569,8 @@ describe("long-term agents in the console", () => {
     family.agents.delete("warden");
     fireEvent.click(within(confirm).getByTestId("identity-confirm-yes"));
     const unread = await find(view, "identity-notice");
-    expect(unread.querySelector("[data-outcome='unread']")?.textContent).toBe("No agent has this name: list the agents and name one.");
+    expect(unread.querySelector("[data-outcome='unread']")?.textContent).toBe("This team has no agent of this name. It may have been removed.");
+    expect(detailsOf(unread)).toBe("No agent has this name: list the agents and name one.");
     expect(unread.getAttribute("role")).toBe("alert");
     expect(calls(family, "meta/identity/archive")).toEqual([]);
     view.unmount();
@@ -602,8 +626,9 @@ describe("long-term agents in the console", () => {
     family.setProfileChange("operator", "deny");
     fireEvent.click(within(edit).getByTestId("identity-profile:operator"));
     const refused = await find(view, "identity-field-error:profile");
-    expect(refused.textContent).toMatch(/\S/);
-    expect(refused.textContent).not.toContain("change_denied");
+    expect(refused.textContent).toBe("The host's rules do not allow you this change. It was not made, and asking again changes nothing.");
+    expect(detailsOf(edit.querySelector("[data-field='profile']")))
+      .toBe("The host's rules deny this change for you: it was not made, and repeating it changes nothing.");
     expect(present(view, "identity-profile-plan")).toBe(false);
     expect((within(edit).getByTestId("identity-profile:operator") as HTMLInputElement).disabled).toBe(false);
 
@@ -653,7 +678,9 @@ describe("long-term agents in the console", () => {
     let notice = await find(view, "identity-notice");
     // The refusal is shown with Read it again, and nothing else: no Try
     // again, and no second request with the digest the refusal names.
-    expect(notice.querySelector("[data-outcome='refused']")).not.toBeNull();
+    expect(notice.querySelector("[data-outcome='refused']")?.textContent)
+      .toBe("This agent changed since you opened it. Read it again, then make your change.");
+    expect(detailsOf(notice)).toBe("The agent changed since you read it: read it again and send the current spec digest.");
     expect(notice.textContent).not.toContain("stale_spec");
     expect(notice.textContent).not.toContain(moved);
     expect(within(notice).queryByTestId("identity-retry")).toBeNull();
@@ -868,7 +895,8 @@ describe("long-term agents in the console", () => {
       refuse: { kind: "decision_closed", state: "approved", detail: "The decision is closed: it was approved." },
     });
     fireEvent.click(within(card).getByTestId("decision-card-withdraw"));
-    expect((await find(view, "decision-card-withdraw-refused")).textContent).toBe("The decision is closed: it was approved.");
+    expect((await find(view, "decision-card-withdraw-refused")).textContent).toBe("The decision has ended. Ask again if the change is still wanted.");
+    expect(detailsOf(card)).toBe("The decision is closed: it was approved.");
 
     // The withdrawal names the person's own request, and the card goes.
     fireEvent.click(within(card).getByTestId("decision-card-withdraw"));
@@ -1093,7 +1121,8 @@ describe("long-term agents in the console", () => {
     expect(notice.textContent).not.toContain("may or may not");
     expect(notice.textContent).not.toContain("no answer");
     expect(within(notice).queryByTestId("identity-retry")).toBeNull();
-    expect(notice.textContent).toContain("access denied");
+    expect(notice.querySelector("[data-outcome='refused']")?.textContent).toBe("You do not have access to this. Nothing was changed.");
+    expect(detailsOf(notice)).toBe("access denied");
     expect(family.agents.get("oldhand").archived).toBe(true);
     view.unmount();
   }, 60_000);
@@ -1182,7 +1211,8 @@ describe("long-term agents in the console", () => {
     fireEvent.submit(again);
     notice = await find(view, "identity-notice");
     expect(notice.querySelector("[data-outcome='refused']")?.textContent)
-      .toBe("The host holds changes of agents for now: retry the same request later.");
+      .toBe("The host has paused changes of agents for now. Try again later.");
+    expect(detailsOf(notice)).toBe("The host holds changes of agents for now: retry the same request later.");
     fireEvent.click(within(notice).getByTestId("identity-retry"));
     await waitFor(() => expect(noticeWords(view.getByTestId("identity-notice"))).toContain("ranger is created"), { timeout: 5_000 });
     created = calls(family, "meta/identity/create");

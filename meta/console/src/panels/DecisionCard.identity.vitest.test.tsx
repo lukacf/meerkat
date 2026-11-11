@@ -60,7 +60,7 @@ describe("decision cards of agent changes", () => {
   });
 
   it("offers the withdrawal on the open card of a request this page made, and only there", async () => {
-    const withdraw = vi.fn(async () => null as string | null);
+    const withdraw = vi.fn(async () => null as { sentence: string; detail?: string } | null);
     const closed = card({ decisionId: "decision-closed", kind: "identity.create", phase: "withdrawn", statusOnly: true });
     const ownOther = card({ decisionId: "decision-grant", kind: "tool_grant.issue", statusOnly: true });
     const view = render(
@@ -76,9 +76,18 @@ describe("decision cards of agent changes", () => {
     await waitFor(() => expect(withdraw).toHaveBeenCalledWith("decision-own"));
     expect(view.queryByTestId("decision-card-withdraw-refused")).toBeNull();
 
-    // A refusal shows the gateway's sentence on the card.
-    withdraw.mockResolvedValueOnce("The decision is closed: it was approved.");
+    // A refusal shows the console's sentence on the card, and the gateway's
+    // own behind Details.
+    withdraw.mockResolvedValueOnce({ sentence: "The decision has ended. Ask again if the change is still wanted.", detail: "The decision is closed: it was approved." });
     fireEvent.click(within(view.getByTestId("decision-card:decision-own")).getByTestId("decision-card-withdraw"));
-    expect((await view.findByTestId("decision-card-withdraw-refused")).textContent).toBe("The decision is closed: it was approved.");
+    expect((await view.findByTestId("decision-card-withdraw-refused")).textContent).toBe("The decision has ended. Ask again if the change is still wanted.");
+    const details = view.getByTestId("identity-refusal-details") as HTMLDetailsElement;
+    expect(details.open).toBe(false);
+    expect(details.querySelector(".identity-refusal__gateway")?.textContent).toBe("The decision is closed: it was approved.");
+    // A refusal without a sentence of the gateway has no Details.
+    withdraw.mockResolvedValueOnce({ sentence: "This team does not offer this here. Nothing was sent." });
+    fireEvent.click(within(view.getByTestId("decision-card:decision-own")).getByTestId("decision-card-withdraw"));
+    await waitFor(() => expect(view.getByTestId("decision-card-withdraw-refused").textContent).toBe("This team does not offer this here. Nothing was sent."));
+    expect(view.queryByTestId("identity-refusal-details")).toBeNull();
   });
 });

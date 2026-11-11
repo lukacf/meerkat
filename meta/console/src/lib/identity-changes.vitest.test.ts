@@ -4,6 +4,9 @@
  * words, and the request id of an action. The scripted family answers in
  * the wire's own shapes.
  */
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import { createScriptedIdentityFamily } from "../../fixtures/scripted-identity-family.cjs";
@@ -12,6 +15,9 @@ import { agentDisplayTitle } from "./agents";
 import { familiesFor } from "../panels/access-model";
 import {
   IDENTITY_REFUSED_CODE,
+  REFUSAL_KINDS_WITH_A_SENTENCE,
+  UNKNOWN_REFUSAL_SENTENCE,
+  refusalDetail,
   agentChangeConfirmWords,
   agentIdentityControls,
   agentRefRequest,
@@ -386,10 +392,40 @@ describe("where a refusal belongs", () => {
     expect(refusalFormField("update", "agents[0].name")).toBeNull();
   });
 
-  it("says a refusal in the gateway's sentence and never in its kind", () => {
-    expect(refusalSentence({ kind: "name_taken", retryable: false, detail: "The name is taken: choose another.", data: {} }))
-      .toBe("The name is taken: choose another.");
-    expect(refusalSentence({ kind: "name_taken", retryable: false, detail: "", data: {} })).toBe("The change was refused.");
+  it("says each refusal in the console's own sentence, and keeps the gateway's for the details", () => {
+    // The gateway's vocabulary of refusal kinds is closed: the console has
+    // a sentence of its own for every kind of it.
+    const source = readFileSync(resolve(__dirname, "../../../crates/meerkat-meta/src/identity_creation/refusal.rs"), "utf8");
+    const vocabulary = /closed_tokens!\(IdentityRefusalKind \{([^}]*)\}\);/.exec(source);
+    const kinds = Array.from((vocabulary?.[1] ?? "").matchAll(/=> "([a-z_]+)"/g)).map((match) => match[1]!);
+    expect(kinds.length).toBeGreaterThan(50);
+    expect(kinds.filter((kind) => !REFUSAL_KINDS_WITH_A_SENTENCE.includes(kind))).toEqual([]);
+    // Beside them only the gateway's other answers and the console's own.
+    expect(REFUSAL_KINDS_WITH_A_SENTENCE.filter((kind) => !kinds.includes(kind)).sort())
+      .toEqual(["access_denied", "caller_unknown", "no_decision_store", "not_offered", "read_only"]);
+    const refusal = (kind: string, detail = "") => ({ kind, retryable: false, detail, data: {} });
+    for (const kind of REFUSAL_KINDS_WITH_A_SENTENCE) {
+      const sentence = refusalSentence(refusal(kind, "The gateway's own words about the mob and its request_id."));
+      // A sentence of the console: a person's words, never the gateway's,
+      // never the kind, and nothing a person cannot act on.
+      expect(sentence).toMatch(/^[A-Z].*\.$/);
+      expect(sentence).not.toBe(UNKNOWN_REFUSAL_SENTENCE);
+      expect(sentence).not.toContain(kind);
+      expect(sentence).not.toMatch(/\bmobs?\b|request.?id|operation.?id|digest|\badopt|sha256|\bspec\b|\bgateway\b|_/i);
+    }
+    expect(refusalSentence(refusal("name_taken", "The name is taken: choose another.")))
+      .toBe("This name is taken. Choose another; a removed agent's name is never free again.");
+    expect(refusalSentence(refusal("stale_spec"))).toBe("This agent changed since you opened it. Read it again, then make your change.");
+    expect(refusalSentence(refusal("owner_read_only"))).toBe("This agent is set up in the host's configuration and cannot be changed here. Change it in the configuration.");
+    // A kind the console does not know, or none: the plain sentence.
+    expect(refusalSentence(refusal("quota_exceeded", "A sentence of a later gateway."))).toBe(UNKNOWN_REFUSAL_SENTENCE);
+    expect(refusalSentence(refusal(""))).toBe(UNKNOWN_REFUSAL_SENTENCE);
+    expect(refusalSentence(refusal("constructor"))).toBe(UNKNOWN_REFUSAL_SENTENCE);
+    expect(UNKNOWN_REFUSAL_SENTENCE).toBe("The request was refused, and nothing was changed.");
+    // What the details hold is the gateway's sentence, whole; none where it
+    // gave none.
+    expect(refusalDetail(refusal("name_taken", "The name is taken: choose another."))).toBe("The name is taken: choose another.");
+    expect(refusalDetail(refusal("not_offered"))).toBeNull();
   });
 });
 

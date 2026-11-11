@@ -14,6 +14,7 @@ import {
   phaseWords,
   type DecisionCardView,
   type OwnDecisionWithdrawal,
+  type WithdrawalRefused,
 } from "./decision-cards";
 
 /** The tone of a wire phase. A phase this console does not know reads
@@ -50,11 +51,11 @@ export function DecisionCard({ card, now, own }: {
   const identityChange = isIdentityChangeDecision(card.kind);
   const withdrawable = open && identityChange && own?.decisionIds.has(card.decisionId) === true;
   const [busy, setBusy] = React.useState(false);
-  const [refusal, setRefusal] = React.useState("");
+  const [refusal, setRefusal] = React.useState<WithdrawalRefused | null>(null);
   const withdraw = async () => {
     if (!own) return;
     setBusy(true);
-    setRefusal("");
+    setRefusal(null);
     const refused = await own.withdraw(card.decisionId);
     setBusy(false);
     if (refused) setRefusal(refused);
@@ -130,7 +131,15 @@ export function DecisionCard({ card, now, own }: {
         </div>
       ) : null}
       {refusal ? (
-        <p className="cc-decision__note cc-decision__refusal" role="alert" data-testid="decision-card-withdraw-refused">{refusal}</p>
+        <>
+          <p className="cc-decision__note cc-decision__refusal" role="alert" data-testid="decision-card-withdraw-refused">{refusal.sentence}</p>
+          {refusal.detail ? (
+            // The gateway's own sentence, for whoever needs the exact answer.
+            <TechnicalDetails summary="Details" inline={false} copyAll={false} showCount={false} className="identity-refusal__details" testId="identity-refusal-details">
+              <span className="identity-refusal__gateway">{refusal.detail}</span>
+            </TechnicalDetails>
+          ) : null}
+        </>
       ) : null}
       <TechnicalDetails
         className="cc-approval__details"

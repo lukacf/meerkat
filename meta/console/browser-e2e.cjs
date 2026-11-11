@@ -5024,7 +5024,8 @@ async function runIdentityChangesStoryProof() {
     await agent("warden").waitFor();
     assert.equal(await page.getByTestId("roster-panel").getByText(/created|configured|adopted|origin|custody/i).count(), 0);
 
-    // New agent. A taken name is refused at the name, in the gateway's words.
+    // New agent. A taken name is refused at the name, in the console's
+    // words; the gateway's own are behind Details.
     await page.getByTestId("roster-new-agent").click();
     const form = page.getByTestId("identity-new-agent");
     await form.getByTestId("identity-profile:worker").check();
@@ -5033,6 +5034,13 @@ async function runIdentityChangesStoryProof() {
     await form.getByTestId("identity-submit").click();
     assert.equal(
       await page.getByTestId("identity-field-error:name").textContent(),
+      "This name is taken. Choose another; a removed agent's name is never free again.",
+    );
+    const gatewayWords = form.getByTestId("identity-refusal-details");
+    assert.equal(await gatewayWords.locator(".identity-refusal__gateway").isVisible(), false);
+    await gatewayWords.locator("summary").click();
+    assert.equal(
+      await gatewayWords.locator(".identity-refusal__gateway").textContent(),
       "The name is taken: choose another. A removed agent's name is never available again.",
     );
     await form.getByTestId("identity-field:name").fill("scout");

@@ -228,7 +228,7 @@ import {
   type MemoryRecordDetail,
 } from "./panels/MemoryPanel";
 import { RosterPanel } from "./panels/RosterPanel";
-import { agentIdentityControls, identityChangeFlags, parseAgentRecord, refusalSentence } from "./lib/identity-changes";
+import { agentIdentityControls, identityChangeFlags, parseAgentRecord, refusalDetail, refusalSentence } from "./lib/identity-changes";
 import { useIdentityChanges, type IdentityCommand } from "./lib/use-identity-changes";
 import { AgentRecordFacts } from "./panels/IdentityChangePanels";
 import { AgentDetailsPanel, type AgentWorkItem } from "./panels/AgentDetailsPanel";
@@ -3232,8 +3232,11 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         const requestId = requests.get(decisionId);
         if (!requestId) return null;
         const answer = await withdrawIdentityRequest(requestId);
-        if (answer.kind === "refused") return refusalSentence(answer.refusal);
-        if (answer.kind === "failed") return answer.message;
+        if (answer.kind === "refused") {
+          const detail = refusalDetail(answer.refusal);
+          return { sentence: refusalSentence(answer.refusal), ...(detail ? { detail } : {}) };
+        }
+        if (answer.kind === "failed") return { sentence: "The console got no answer. The request may still be open.", detail: answer.message };
         // The withdrawn decision leaves the cards with their next read.
         void refreshDecisions().catch(() => {});
         return null;

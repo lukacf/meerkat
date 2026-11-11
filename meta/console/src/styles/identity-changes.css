@@ -73,6 +73,15 @@
   color: var(--_cc-foreground-meta);
 }
 .identity-form__options > .identity-form__hint { padding: 8px 10px; }
+/* The gateway's own sentence of a refusal, behind its disclosure. */
+.identity-refusal__details { margin-top: 2px; }
+.identity-refusal__gateway {
+  display: block;
+  font-size: var(--_cc-panel-fs-meta);
+  line-height: 1.4;
+  color: var(--_cc-foreground-meta);
+  overflow-wrap: anywhere;
+}
 /* What the gateway says a picked change would get. */
 .identity-form__plan {
   display: flex;

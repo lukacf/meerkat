@@ -4,8 +4,9 @@
 // acceptance fixture in identity mode with its identity policy
 // (META_FIXTURE_IDENTITY_POLICY=1). What the roster offers is the gateway's
 // own answer (the experience read's section and affordances), the profiles
-// and peers of New agent are its directory read, a refusal is its sentence
-// at the field it names, and an agent's details read its record.
+// and peers of New agent are its directory read, a refusal shows at the
+// field it names in the console's sentence for its kind, and an agent's
+// details read its record.
 //
 // The fixture's two agents are declared by its configuration, so a change
 // of either is refused by the gateway; the console shows that sentence and
@@ -70,12 +71,12 @@ async function readsAndRefusals() {
     await form.getByTestId("identity-profile:lead").check();
     await form.getByTestId(`identity-peer:${router}`).waitFor();
     await form.getByTestId(`identity-peer:${delivery}`).waitFor();
-    // A name the gateway refuses: its sentence, at the name.
+    // A name the gateway refuses: the console's sentence, at the name.
     await form.getByTestId("identity-field:name").fill("Not A Name!");
     await form.getByTestId("identity-submit").click();
     assert.equal(
       await page.getByTestId("identity-field-error:name").textContent(),
-      "The name is not a valid agent name: choose another.",
+      "This is not a valid agent name. Choose another.",
     );
     assert.equal(await notice.count(), 0, "a refusal that names a field shows there, not as the form's notice");
     await fs.mkdir(evidence, { recursive: true });
@@ -93,7 +94,7 @@ async function readsAndRefusals() {
     await page.getByTestId(`roster-detail:${router}`).waitFor();
     await page.getByTestId(`roster-action:${router}:archive`).click();
     await page.getByTestId(`identity-confirm:${router}:archive`).getByTestId("identity-confirm-yes").click();
-    await notice.getByText(/declared by the host's configuration/).waitFor();
+    await notice.getByText("This agent is set up in the host's configuration and cannot be changed here. Change it in the configuration.").waitFor();
     assert.equal(await notice.getByText("owner_read_only").count(), 0);
     const archives = sent(fixture, "meta/identity/archive");
     assert.equal(archives.length, 1);

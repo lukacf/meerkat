@@ -779,10 +779,99 @@ export function outcomeWords(change: IdentityChangeKind, outcome: IdentityOutcom
   return { tone: "ok", title, lines };
 }
 
-/** The sentence of a refusal: the gateway's own. A refusal that brings
- * none gets the console's plain one; a kind token is never the sentence. */
+/**
+ * The console's own sentence for each kind of refusal: what happened and
+ * what the person can do, in the console's words. The gateway's sentences
+ * are written for every caller of the family, a model included, and speak
+ * of what a person at the console never sees; they are kept for Details.
+ *
+ * The first block is the family's closed vocabulary, in its own order; the
+ * second the gateway's other answers and the console's own refusals to
+ * send.
+ */
+const REFUSAL_SENTENCES: Readonly<Record<string, string>> = {
+  profile_unknown: "This team has no such profile. Pick one of the team's profiles.",
+  profile_not_allowed: "This profile is not one you may use here. Pick another profile.",
+  privileged_field: "This change sets something you may not set. Leave it out.",
+  grant_revoked: "You are no longer allowed to make this change. It was not made.",
+  reserved_key: "This label key is reserved by the host. Use another key.",
+  authority_field_needs_approval: "This label is one that only a person's decision sets. Leave it out.",
+  authority_field_invalid: "This label, or its value, is not one the host allows.",
+  text_too_large: "This text is too long. Shorten it; text is never cut.",
+  consequences_unavailable: "The host could not say what this change would lead to. Try again later.",
+  invalid_request: "Part of this change is missing, contradicts another part or is not valid. Correct it and try again.",
+  invalid_name: "This is not a valid agent name. Choose another.",
+  name_taken: "This name is taken. Choose another; a removed agent's name is never free again.",
+  peer_not_allowed: "The host's rules do not allow this peer. Leave it out.",
+  peer_unknown: "This peer is not an agent of this team that you can name. Pick another agent.",
+  batch_too_large: "This names more agents than one change can make. Make fewer at a time.",
+  validation_refused: "The host's own check refused this change.",
+  change_denied: "The host's rules do not allow you this change. It was not made, and asking again changes nothing.",
+  unsupported: "This change needs something this version does not support. Leave it out.",
+  identity_unknown: "This team has no agent of this name. It may have been removed.",
+  self_change_refused: "An agent cannot change itself.",
+  private_requester: "A private chat cannot ask for changes of agents. Nothing was made.",
+  stale_spec: "This agent changed since you opened it. Read it again, then make your change.",
+  operation_reused: "The team has already seen another change sent this way. Close this and start the change again.",
+  owner_read_only: "This agent is set up in the host's configuration and cannot be changed here. Change it in the configuration.",
+  not_adoptable: "This agent cannot be released from the host's configuration now.",
+  not_archived: "This agent is not archived, so there is nothing to bring back.",
+  declared_apply_open: "The host is applying its configuration. Try again shortly.",
+  admission_unsettled: "This agent is in the middle of another step. Try again once it has finished.",
+  predecessor_mismatch: "This agent is not as it was when the change was asked for. Read it again.",
+  import_refused: "Only the host itself can carry agents in from outside.",
+  purge_refused: "The host refused to purge the team's records.",
+  preparation_not_pending: "The host is not preparing this agent.",
+  preparation_mismatch: "The host's preparation of this agent belongs to another change.",
+  construction_open: "The host is still setting this agent up.",
+  stale_attempt: "The host's setup of this agent has moved on since this was asked.",
+  not_constructed: "The host has not started setting this agent up.",
+  construction_required: "The host must finish setting this agent up first.",
+  activation_pending: "This agent is being started, and nothing can replace that now.",
+  approval_unavailable: "This change needs a person's decision, and this team has nobody who can be asked. Nothing was made.",
+  decision_open: "A decision about this agent is already open. Wait for its outcome.",
+  subject_widened: "The change is no longer what was approved. Ask again.",
+  decision_closed: "The decision has ended. Ask again if the change is still wanted.",
+  decision_not_found: "There is no open request to act on. It may have been decided or withdrawn already.",
+  evidence_required: "The decision was not recorded as a person's own. Decide it again from the console.",
+  subject_changed: "What was shown is not what the decision is about. Open the decision again.",
+  presentation_incomplete: "The decision was not shown in full. Open the decision again.",
+  requester_cannot_decide: "A person cannot approve their own request.",
+  approver_not_eligible: "You are not the person who decides this request.",
+  decided_before_presentation: "The decision was answered before it was shown. Open the decision again.",
+  changes_held: "The host has paused changes of agents for now. Try again later.",
+  host_preparation_pending: "The host is still preparing this agent. Try again later.",
+  candidate_launch: "This is a trial launch of the team, and a trial launch changes nothing.",
+  identity_member: "This is a long-term agent, and this action is for short-lived helpers.",
+  storage_unsupported: "This team's storage cannot make changes of agents.",
+  mob_not_running: "The team is not running.",
+  purged: "The team's records were cleared before a downgrade, and changes are refused until the team restarts.",
+  construction_refused: "The host could not set this agent up.",
+
+  access_denied: "You do not have access to this. Nothing was changed.",
+  read_only: "This console is read-only. Nothing was changed.",
+  no_decision_store: "This team keeps no decisions, so there is no request to act on.",
+  not_offered: "This team does not offer this here. Nothing was sent.",
+  caller_unknown: "The console does not know who you are signed in as, so it sent nothing. Reload the page and sign in again.",
+};
+
+/** The kinds the console has a sentence of its own for. */
+export const REFUSAL_KINDS_WITH_A_SENTENCE: readonly string[] = Object.keys(REFUSAL_SENTENCES);
+
+/** The sentence of a refusal whose kind the console does not know. */
+export const UNKNOWN_REFUSAL_SENTENCE = "The request was refused, and nothing was changed.";
+
+/** The sentence of a refusal: the console's own for its kind, the plain one
+ * for a kind the console does not know. Never the kind token, and never the
+ * gateway's sentence: that one is the refusal's detail. */
 export function refusalSentence(refusal: IdentityRefusal): string {
-  return refusal.detail || "The change was refused.";
+  return Object.hasOwn(REFUSAL_SENTENCES, refusal.kind) ? REFUSAL_SENTENCES[refusal.kind] : UNKNOWN_REFUSAL_SENTENCE;
+}
+
+/** What a refusal's Details disclosure holds: the gateway's own sentence,
+ * whole. Null where the refusal brings none. */
+export function refusalDetail(refusal: IdentityRefusal): string | null {
+  return refusal.detail || null;
 }
 
 export interface VerdictWords {

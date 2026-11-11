@@ -220,10 +220,16 @@ export function decisionKindWords(kind: string): string {
  * `decisionIds` are the decisions the gateway answered this page's own
  * changes with: the cards the console knows to be the requester's own, from
  * that answer and nothing else. `withdraw` withdraws the request such a
- * decision is held for and answers null, or the gateway's sentence when it
- * refuses.
+ * decision is held for and answers null, or what the console says when the
+ * withdrawal is refused: its own sentence, and for the card's Details the
+ * gateway's own where it gave one.
  */
 export interface OwnDecisionWithdrawal {
   decisionIds: ReadonlySet<string>;
-  withdraw: (decisionId: string) => Promise<string | null>;
+  withdraw: (decisionId: string) => Promise<WithdrawalRefused | null>;
+}
+
+export interface WithdrawalRefused {
+  sentence: string;
+  detail?: string;
 }

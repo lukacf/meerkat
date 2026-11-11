@@ -11,6 +11,8 @@ import {
   editDraftOf,
   outcomeWords,
   planWords,
+  answeredRefusalOf,
+  refusalDetail,
   refusalFormField,
   refusalSentence,
   requestIdFor,
@@ -48,12 +50,45 @@ import {
   type Tone,
 } from "../../../packages/console-components/src/panel-kit";
 
-type FieldErrors = Partial<Record<IdentityFormField, string>>;
+/** What the console says of a refusal or a failure: its own sentence, and
+ * for the Details disclosure the gateway's own, where it gave one. */
+interface Said {
+  sentence: string;
+  detail?: string;
+}
+
+function saidOf(refusal: IdentityRefusal): Said {
+  const detail = refusalDetail(refusal);
+  return { sentence: refusalSentence(refusal), ...(detail ? { detail } : {}) };
+}
+
+/** A failed read in words: a refusal in the console's sentence for it, and
+ * anything else as an answer that did not come. */
+function readFailure(error: unknown): Said {
+  const refusal = answeredRefusalOf(error);
+  return refusal ? saidOf(refusal) : { sentence: "The console got no answer it can read.", detail: errorMessage(error) };
+}
+
+/**
+ * The gateway's own sentence of a refusal, behind a disclosure: the
+ * console's sentence is what a person reads, and this is there for whoever
+ * needs the exact answer.
+ */
+export function RefusalDetails({ detail }: { detail?: string | null }): React.JSX.Element | null {
+  if (!detail) return null;
+  return (
+    <TechnicalDetails summary="Details" inline={false} copyAll={false} showCount={false} className="identity-refusal__details" testId="identity-refusal-details">
+      <span className="identity-refusal__gateway">{detail}</span>
+    </TechnicalDetails>
+  );
+}
+
+type FieldErrors = Partial<Record<IdentityFormField, Said>>;
 
 /** What the notice under a form or a confirmation shows. A note is the
  * console's own word: that nothing is changed yet, or (an alert) that the
  * agent's record could not be read. */
-type ShownResult = IdentityChangeResult | { kind: "withdrawn" } | { kind: "note"; message: string; alert?: boolean };
+type ShownResult = IdentityChangeResult | { kind: "withdrawn" } | { kind: "note"; message: string; detail?: string; alert?: boolean };
 
 /** A field of a form: its label, its control, a hint, and the refusal that
  * names it. */
@@ -67,7 +102,7 @@ function Field({
   field: IdentityFormField;
   label: string;
   hint?: React.ReactNode;
-  error?: string;
+  error?: Said;
   children: (ids: { describedBy?: string; invalid: boolean }) => React.ReactNode;
 }) {
   const errorId = React.useId();
@@ -77,9 +112,12 @@ function Field({
       {children({ describedBy: error ? errorId : undefined, invalid: Boolean(error) })}
       {hint ? <span className="identity-form__hint">{hint}</span> : null}
       {error ? (
-        <span className="identity-form__error" id={errorId} role="alert" data-testid={`identity-field-error:${field}`}>
-          {error}
-        </span>
+        <>
+          <span className="identity-form__error" id={errorId} role="alert" data-testid={`identity-field-error:${field}`}>
+            {error.sentence}
+          </span>
+          <RefusalDetails detail={error.detail} />
+        </>
       ) : null}
     </div>
   );
@@ -237,6 +275,7 @@ export function IdentityResultNotice({
     return (
       <Notice tone={result.alert ? "crit" : "neutral"} role={result.alert ? "alert" : "status"} testId="identity-notice" className="identity-notice">
         <span data-outcome={result.alert ? "unread" : "note"} className="identity-notice__title">{result.message}</span>
+        <RefusalDetails detail={result.detail} />
       </Notice>
     );
   }
@@ -282,6 +321,7 @@ export function IdentityResultNotice({
         }
       >
         <span data-outcome="refused" className="identity-notice__title">{refusalSentence(result.refusal)}</span>
+        <RefusalDetails detail={refusalDetail(result.refusal)} />
       </Notice>
     );
   }
@@ -348,7 +388,7 @@ function useChangeSender(api: IdentityChangesApi, change: IdentityChangeKind, na
 
 function fieldErrorOf(change: IdentityChangeKind, refusal: IdentityRefusal): FieldErrors | null {
   const field = refusalFormField(change, refusal.field);
-  return field ? { [field]: refusalSentence(refusal) } : null;
+  return field ? { [field]: saidOf(refusal) } : null;
 }
 
 /** Whether a result leaves the form open for another try. */
@@ -358,14 +398,14 @@ function keepsForm(result: ShownResult | null): boolean {
 
 function useDirectory(api: IdentityChangesApi) {
   const [directory, setDirectory] = React.useState<IdentityDirectory | null>(null);
-  const [error, setError] = React.useState("");
+  const [error, setError] = React.useState<Said | null>(null);
   const load = React.useRef(api.loadDirectory);
   load.current = api.loadDirectory;
   React.useEffect(() => {
     let active = true;
     load.current().then(
       (value) => { if (active) setDirectory(value); },
-      (failure) => { if (active) setError(errorMessage(failure)); },
+      (failure) => { if (active) setError(readFailure(failure)); },
     );
     return () => { active = false; };
   }, []);
@@ -414,7 +454,9 @@ export function NewAgentForm({ api, onClose }: { api: IdentityChangesApi; onClos
       {open ? (
         directoryError ? (
           <Notice tone="crit" role="alert" testId="identity-directory-error">
-            The team's profiles could not be read: {directoryError}
+            <span className="identity-notice__title">The team's profiles could not be read.</span>
+            <span className="identity-notice__line">{directoryError.sentence}</span>
+            <RefusalDetails detail={directoryError.detail} />
           </Notice>
         ) : !directory ? (
           <LoadingState label="Loading the team's profiles" rows={3} />
@@ -551,7 +593,7 @@ export function EditAgentForm({
 }): React.JSX.Element {
   const [record, setRecord] = React.useState<AgentRecord | null>(null);
   const [draft, setDraft] = React.useState<AgentEditDraft | null>(null);
-  const [loadError, setLoadError] = React.useState("");
+  const [loadError, setLoadError] = React.useState<Said | null>(null);
   const [errors, setErrors] = React.useState<FieldErrors>({});
   const { directory, error: directoryError } = useDirectory(api);
   const sender = useChangeSender(api, "update", displayName);
@@ -559,14 +601,14 @@ export function EditAgentForm({
   loadRecord.current = api.loadRecord;
   const read = React.useCallback(() => {
     let active = true;
-    setLoadError("");
+    setLoadError(null);
     loadRecord.current(name).then(
       (value) => {
         if (!active) return;
         setRecord(value);
         setDraft(editDraftOf(value));
       },
-      (failure) => { if (active) setLoadError(refusalMessage(failure)); },
+      (failure) => { if (active) setLoadError(readFailure(failure)); },
     );
     return () => { active = false; };
   }, [name]);
@@ -581,7 +623,7 @@ export function EditAgentForm({
     setErrors({});
     const built = updateAgentRequest(record, draft);
     if ("contextError" in built) {
-      setErrors({ context: built.contextError });
+      setErrors({ context: { sentence: built.contextError } });
       return;
     }
     if (!built.changed) {
@@ -603,12 +645,12 @@ export function EditAgentForm({
   };
   const open = keepsForm(sender.result);
   const ready = record && draft && directory;
-  const failed = loadError || directoryError;
+  const failed = loadError ?? directoryError;
   // A profile change is its own change under its own rules: the gateway
   // says what it would get, and a refusal of it shows at the profile.
   const profilePlan = useProfilePlan(api, record, draft?.profile ?? "");
   const planned = profilePlan?.kind === "plan" ? planWords(profilePlan.plan) : null;
-  const profileError = errors.profile ?? (profilePlan?.kind === "refused" ? refusalSentence(profilePlan.refusal) : undefined);
+  const profileError = errors.profile ?? (profilePlan?.kind === "refused" ? saidOf(profilePlan.refusal) : undefined);
   return (
     <form
       className="identity-form"
@@ -621,7 +663,10 @@ export function EditAgentForm({
     >
       {open ? (
         failed ? (
-          <Notice tone="crit" role="alert" testId="identity-load-error">{failed}</Notice>
+          <Notice tone="crit" role="alert" testId="identity-load-error">
+            <span className="identity-notice__title">{failed.sentence}</span>
+            <RefusalDetails detail={failed.detail} />
+          </Notice>
         ) : !ready ? (
           <LoadingState label="Loading the agent's record" rows={3} />
         ) : (
@@ -752,13 +797,6 @@ export function EditAgentForm({
   );
 }
 
-/** A failed read in words: a refusal's own sentence, else the failure. */
-function refusalMessage(error: unknown): string {
-  const rpc = (error as { rpcError?: { data?: { detail?: unknown } } } | null)?.rpcError;
-  const detail = rpc?.data?.detail;
-  return typeof detail === "string" && detail.trim() ? detail : errorMessage(error);
-}
-
 /**
  * The confirmation of a change of one agent as a whole: archive, unarchive
  * or remove. It names the agent as people know it and says what happens;
@@ -794,9 +832,9 @@ export function AgentChangeConfirm({
       try {
         request.current = agentRefRequest(await api.loadRecord(name));
       } catch (error) {
-        // The record could not be read, so no change was sent: the
-        // gateway's sentence when it refused the read.
-        sender.setResult({ kind: "note", message: refusalMessage(error), alert: true });
+        // The record could not be read, so no change was sent.
+        const said = readFailure(error);
+        sender.setResult({ kind: "note", message: said.sentence, detail: said.detail, alert: true });
         return;
       } finally {
         setReading(false);
@@ -953,7 +991,7 @@ export function ArchivedAgents({
 }): React.JSX.Element {
   const [open, setOpen] = React.useState(false);
   const [agents, setAgents] = React.useState<AgentSummary[] | null>(null);
-  const [error, setError] = React.useState("");
+  const [error, setError] = React.useState<Said | null>(null);
   const load = React.useRef(api.loadArchived);
   load.current = api.loadArchived;
   const listId = React.useId();
@@ -964,9 +1002,9 @@ export function ArchivedAgents({
       (value) => {
         if (!active) return;
         setAgents(value);
-        setError("");
+        setError(null);
       },
-      (failure) => { if (active) setError(errorMessage(failure)); },
+      (failure) => { if (active) setError(readFailure(failure)); },
     );
     return () => { active = false; };
   }, [open, api.revision]);
@@ -975,7 +1013,7 @@ export function ArchivedAgents({
     // A closed list keeps nothing: opening it reads it.
     if (open) {
       setAgents(null);
-      setError("");
+      setError(null);
     }
     setOpen(!open);
   };
@@ -987,7 +1025,11 @@ export function ArchivedAgents({
       {open ? (
         <section className="identity-archived__section" id={listId} aria-label="Archived agents" data-testid="roster-archived">
           {error ? (
-            <Notice tone="crit" role="alert" testId="roster-archived-error">The archived agents could not be read: {error}</Notice>
+            <Notice tone="crit" role="alert" testId="roster-archived-error">
+              <span className="identity-notice__title">The archived agents could not be read.</span>
+              <span className="identity-notice__line">{error.sentence}</span>
+              <RefusalDetails detail={error.detail} />
+            </Notice>
           ) : agents === null ? (
             <LoadingState label="Loading the archived agents" rows={2} />
           ) : agents.length === 0 ? (
@@ -1035,15 +1077,15 @@ const CHANGE_WORDS: Record<IdentityChangeKind, string> = {
  * the decision closes and its withdrawal. */
 export function PendingIdentityRequests({ api }: { api: IdentityChangesApi }): React.JSX.Element | null {
   const [busy, setBusy] = React.useState("");
-  const [error, setError] = React.useState("");
+  const [error, setError] = React.useState<Said | null>(null);
   if (api.pending.length === 0 && !error) return null;
   const withdraw = async (requestId: string) => {
     setBusy(requestId);
-    setError("");
+    setError(null);
     const answer = await api.withdraw(requestId);
     setBusy("");
-    if (answer.kind === "refused") setError(refusalSentence(answer.refusal));
-    else if (answer.kind === "failed") setError(answer.message);
+    if (answer.kind === "refused") setError(saidOf(answer.refusal));
+    else if (answer.kind === "failed") setError({ sentence: "The console got no answer. The request may still be open.", detail: answer.message });
   };
   return (
     <section className="identity-pending" aria-label="Requests waiting for a decision" data-testid="identity-pending">
@@ -1062,7 +1104,12 @@ export function PendingIdentityRequests({ api }: { api: IdentityChangesApi }): R
           </span>
         </Notice>
       ))}
-      {error ? <Notice tone="crit" role="alert" testId="identity-pending-error">{error}</Notice> : null}
+      {error ? (
+        <Notice tone="crit" role="alert" testId="identity-pending-error">
+          <span className="identity-notice__title">{error.sentence}</span>
+          <RefusalDetails detail={error.detail} />
+        </Notice>
+      ) : null}
     </section>
   );
 }

@@ -145,12 +145,15 @@ them.
   stalled stream), or `llm_provider_error` with the provider's error kind,
   such as `server_overloaded`, `server_error` or `connection_reset`. After a
   model fallback, `provider` and `reason` are those of the fallback target's
-  last failure. `retryable: true` says the failure was retried until the
-  budget ran out, so the same request may succeed later; it is advice for
-  the caller, and the number and timing of Meerkat's own retries are
-  unchanged. `kind`, `detail`, the JSON-RPC code and the `run_failed` event
-  are unchanged, and no field is new: a stored turn error without the three
-  fields still reads, and an earlier release reads one that has them.
+  last failure. `retryable: true` names the class of the failure: one
+  Meerkat retries, which ended the turn after the retries its policy
+  allowed. A failure of that class can succeed on a later attempt; the field
+  does not say that this one will, least of all for the `unknown` and
+  `connection_reset` provider error kinds and for `llm_call_timeout`. It is
+  advice for the caller, and the number and timing of Meerkat's own retries
+  are unchanged. `kind`, `detail`, the JSON-RPC code and the `run_failed`
+  event are unchanged, and no field is new: a stored turn error without the
+  three fields still reads, and an earlier release reads one that has them.
   Affects 0.8.0 through 0.9.13.
 
 ### Known limitations

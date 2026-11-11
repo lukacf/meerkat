@@ -1606,14 +1606,21 @@ one:
 
 | `kind` | When | `retryable` | `reason` |
 |--------|------|-------------|----------|
-| `llm_failure` | A provider failure no retry clears, such as an invalid request, an authentication failure or a missing model. It is not retried | `false` | The failure's typed reason, for example `llm_provider_error` with `provider_error_kind` `invalid_request`, `llm_auth_error`, `llm_invalid_model` or `llm_context_exceeded` |
-| `retry_exhausted` | A provider failure that was retried until the [retry budget](/concepts/configuration#retry-and-stream-watchdog-settings) ran out | `true` | The typed reason of the last failed attempt: `llm_rate_limited` (with `retry_after_ms` when the provider sent a hint), `llm_network_timeout`, `llm_call_timeout` (a call timeout or a stalled stream), or `llm_provider_error` with `provider_error_kind` such as `server_overloaded`, `server_error` or `connection_reset` |
+| `llm_failure` | A provider failure of a class Meerkat does not retry, such as an invalid request, an authentication failure or a missing model | `false` for the failures listed; read the field | The failure's typed reason, for example `llm_provider_error` with `provider_error_kind` `invalid_request`, `llm_auth_error`, `llm_invalid_model` or `llm_context_exceeded` |
+| `retry_exhausted` | A provider failure of a class Meerkat retries, after the retries its [retry policy](/concepts/configuration#retry-and-stream-watchdog-settings) allowed | `true` | The typed reason of the last failed attempt: `llm_rate_limited` (with `retry_after_ms` when the provider sent a hint), `llm_network_timeout`, `llm_call_timeout` (a call timeout or a stalled stream), or `llm_provider_error` with `provider_error_kind` such as `server_overloaded`, `server_error` or `connection_reset` |
 
 `provider` and `reason` describe the attempt that ended the retries: after a
 [model fallback](/concepts/providers#model-fallback) they are the fallback
 target's.
-`retryable: true` says that the same request may succeed later; it is advice
-for the caller, and Meerkat itself does not retry the turn again. Treat the
+`retryable: true` names the class of the failure: a failure of that class can
+succeed on a later attempt. It does not say that this one will. It is advice
+for the caller, and Meerkat itself does not retry the turn again. Read
+`reason` beside it; the advice is weakest for three reasons:
+`llm_provider_error` with `provider_error_kind` `unknown` (a failure nothing
+classified, retried because nothing says it is final), `connection_reset` (an
+endpoint that is never reachable fails the same way every time) and
+`llm_call_timeout` (a `call_timeout` or `stream_inactivity_timeout` set
+shorter than the request needs ends every attempt). Treat the
 provider facts as optional: a turn error with only `kind`, `terminal`,
 `outcome` and `detail` is valid, and it is what a server sends for
 `retry_exhausted` before these fields were filled for it.

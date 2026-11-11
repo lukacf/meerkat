@@ -1150,11 +1150,12 @@ mod tests {
     }
 
     /// A password or a user name that holds a quoting byte (`'`, `"`, `\`,
-    /// `<`, `>`) is still userinfo: both rule sets replace it. The
-    /// diagnostic rules (a process's stderr) keep the authority they have
-    /// always read, to whitespace, `/`, `?` or `#`. The response-text rules
-    /// end it at a quoting byte only where that byte closes a bare host
-    /// and another one follows before the `@`.
+    /// `<`, `>`) is still userinfo: both rule sets replace it, also where
+    /// the quoting bytes wrap the whole password or the whole user name.
+    /// The diagnostic rules (a process's stderr) keep the authority they
+    /// have always read, to whitespace, `/`, `?` or `#`. The response-text
+    /// rules end it at a quoting byte only where that byte closes a bare
+    /// host and another one follows before the `@`.
     #[test]
     fn a_quoting_byte_in_url_userinfo_is_still_userinfo() {
         let replaced = "connect postgres://[REDACTED]@db.internal/app failed";
@@ -1170,16 +1171,29 @@ mod tests {
                 "o'brien:pa55word",
                 // A password that starts with digits, as a port would.
                 "app:1234'rest",
+                // A password in quotes: the `:` before the first quoting
+                // byte is followed by no digit, so it starts no port.
+                "app:'pa55word'",
+                // A user name in quotes: nothing precedes the first quoting
+                // byte, so there is no host for it to close.
+                "'root':'pw99word'",
             ]
             .map(String::from),
         );
+        let mut left = Vec::new();
         for userinfo in userinfos {
             let text = format!("connect postgres://{userinfo}@db.internal/app failed");
             let mut redacted = text.clone();
             redact_credentials(&mut redacted, |_| {});
-            assert_eq!(redacted, replaced, "response text: {text}");
+            if redacted != replaced {
+                left.push(redacted);
+            }
             assert_eq!(redact_secret_shapes(&text), replaced, "diagnostic: {text}");
         }
+        assert!(
+            left.is_empty(),
+            "response text kept the userinfo of: {left:#?}"
+        );
         // The diagnostic rules are the released ones: a quoting byte ends
         // no authority there.
         assert_eq!(
@@ -1189,15 +1203,34 @@ mod tests {
             r#"{"docs":"https://[REDACTED]@upstream.invalid"}"#
         );
         // The declared limit of the response-text rules: userinfo whose
-        // start reads as a bare host (no `:`, or `:` and digits only) and
-        // that holds two quoting bytes is read as a quoted host. The
-        // diagnostic rules replace it.
+        // text before its first quoting byte reads as a bare host (not
+        // empty, and no `:` or a `:` followed by one or more digits and
+        // nothing else) and that holds a second quoting byte is read as a
+        // quoted host. The diagnostic rules replace it.
         for userinfo in ["app:1234're'st", "o'bri'en:pa55word"] {
             let text = format!("connect postgres://{userinfo}@db.internal/app failed");
             let mut redacted = text.clone();
             redact_credentials(&mut redacted, |_| {});
             assert_eq!(redacted, text, "response text: {text}");
             assert_eq!(redact_secret_shapes(&text), replaced, "diagnostic: {text}");
+        }
+        // The other side of that limit costs readability only: a host
+        // that is followed by one quoting byte and a later `@`, and a
+        // bracketed IPv6 host that is followed by a later `@`, are
+        // replaced as userinfo.
+        for (text, shown) in [
+            (
+                "see 'https://docs.upstream.invalid',help@upstream.invalid",
+                "see 'https://[REDACTED]@upstream.invalid",
+            ),
+            (
+                r#"{"docs":"http://[2001:db8::1]:8080","support":"help@upstream.invalid"}"#,
+                r#"{"docs":"http://[REDACTED]@upstream.invalid"}"#,
+            ),
+        ] {
+            let mut redacted = text.to_string();
+            redact_credentials(&mut redacted, |_| {});
+            assert_eq!(redacted, shown, "response text: {text}");
         }
     }
 

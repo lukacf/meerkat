@@ -666,6 +666,198 @@ async fn a_create_with_an_initial_message_answers_its_spawn_and_a_failed_spawn_i
     );
 }
 
+/// A host build preparer that records each build it is asked about and
+/// answers as the row scripts it.
+struct ScriptedPreparer {
+    asked: std::sync::Mutex<Vec<(AgentIdentity, SessionId)>>,
+    answer: std::sync::Mutex<
+        Result<crate::runtime::MemberBuildPrepared, crate::runtime::MemberBuildPreparationRefusal>,
+    >,
+}
+
+impl ScriptedPreparer {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            asked: std::sync::Mutex::new(Vec::new()),
+            answer: std::sync::Mutex::new(Ok(crate::runtime::MemberBuildPrepared::Prepared)),
+        })
+    }
+
+    fn answer(
+        &self,
+        answer: Result<
+            crate::runtime::MemberBuildPrepared,
+            crate::runtime::MemberBuildPreparationRefusal,
+        >,
+    ) {
+        *self.answer.lock().expect("the scripted answer") = answer;
+    }
+
+    fn asked(&self) -> Vec<(AgentIdentity, SessionId)> {
+        self.asked.lock().expect("the asked builds").clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::runtime::MemberBuildPreparer for ScriptedPreparer {
+    async fn prepare_member_build(
+        &self,
+        request: crate::runtime::MemberBuildPreparation,
+    ) -> Result<crate::runtime::MemberBuildPrepared, crate::runtime::MemberBuildPreparationRefusal>
+    {
+        self.asked
+            .lock()
+            .expect("the asked builds")
+            .push((request.agent_identity.clone(), request.session_id.clone()));
+        self.answer.lock().expect("the scripted answer").clone()
+    }
+}
+
+/// Row (RED): the spawn of a store-owned identity that owes a kickoff is a
+/// build the host prepares, as a wake's is: Core asks the host's build
+/// preparer once, off the actor, before the member's provision, naming the
+/// session the member is built on. A refusal is a failed kickoff spawn: the
+/// create stays committed, the identity is owed its seat with no member, and
+/// nothing is built. A hold the host asks for holds the member's run starts
+/// until the host releases them, and its kickoff then runs once.
+///
+/// RED on the old tree: the preparer is never asked about the spawn, so a
+/// member the host has prepared nothing for runs its kickoff.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_creates_kickoff_spawn_asks_the_hosts_build_preparer_before_its_build() {
+    use crate::runtime::{MemberBuildPreparationRefusal, MemberBuildPrepared};
+    let preparer = ScriptedPreparer::new();
+    let mob = StoreOwnedMob::build(
+        store_owned_definition("kickoff-prepared"),
+        MobStorage::in_memory(),
+        {
+            let preparer = preparer.clone();
+            move |builder| builder.with_member_build_preparer(preparer)
+        },
+    )
+    .await;
+    mob.service.set_keep_alive_turns_complete_immediately(true);
+    let kicked = |name: &str, prompt: &str| {
+        spec(name, "worker")
+            .with_runtime_mode_override(crate::MobRuntimeMode::AutonomousHost)
+            .with_initial_message(meerkat_core::types::ContentInput::from(prompt))
+    };
+    let create = |operation_id: &str, identity_spec: CreatedIdentitySpec| {
+        StoreOwnedIdentityCreate::new(
+            operation(operation_id),
+            IdentityChangeRequesterInput::host("console"),
+            vec![CreatedIdentityRequest::new(identity_spec)],
+        )
+    };
+    let embodied_on = |created: &crate::runtime::IdentityCreateOutcome, name: &str| match created
+        .embodied
+        .get(&id(name))
+    {
+        Some(crate::runtime::DeclaredEntryOutcome::Embodied { session_id, .. }) => {
+            session_id.clone()
+        }
+        other => panic!("{name}'s spawn is answered embodied: {other:?}"),
+    };
+
+    // Prepared: asked once, about the session the member is built on.
+    let created = mob
+        .create_outcome(create("create-greeter", kicked("greeter", "Begin.")), ALLOW)
+        .await
+        .expect("the create commits");
+    let session = embodied_on(&created, "greeter");
+    assert_eq!(
+        preparer.asked(),
+        vec![(id("greeter"), session.clone())],
+        "the host is asked once about the kickoff spawn's build, on its session"
+    );
+    assert_eq!(kicked_off(&mob, "greeter", "Begin.").await, session);
+    assert_eq!(turns_with_prompt(&mob, &session, "Begin.").await, 1);
+
+    // A refusal, for now or for good, is a failed kickoff spawn.
+    for (name, refusal) in [
+        (
+            "waiter",
+            MemberBuildPreparationRefusal::Retryable {
+                reason: "the host is not ready for this member yet".to_string(),
+            },
+        ),
+        (
+            "refused",
+            MemberBuildPreparationRefusal::Final {
+                reason: "the host refuses to build this member".to_string(),
+            },
+        ),
+    ] {
+        preparer.answer(Err(refusal.clone()));
+        let created = mob
+            .create_outcome(
+                create(&format!("create-{name}"), kicked(name, "Wait.")),
+                ALLOW,
+            )
+            .await
+            .expect("the create commits");
+        assert!(matches!(
+            created.change,
+            IdentityChangeOutcome::Committed { .. }
+        ));
+        match created.embodied.get(&id(name)) {
+            Some(crate::runtime::DeclaredEntryOutcome::Failed { error }) => assert!(
+                error.to_string().contains(refusal.reason()),
+                "{name}'s failed spawn names the host's reason: {error}"
+            ),
+            other => panic!("{name}'s spawn is answered failed: {other:?}"),
+        }
+        mob.unseated_for(name, UnseatedEntryCause::SeatOwed).await;
+        assert!(!mob.is_member(name).await, "{name} has no member");
+        assert!(
+            preparer.asked().iter().any(|(asked, _)| asked == &id(name)),
+            "the host was asked about {name}"
+        );
+    }
+    assert!(
+        mob.service
+            .recorded_start_turn_prompts()
+            .await
+            .into_iter()
+            .all(|(_, prompt)| prompt != "Wait."),
+        "a refused build runs nothing"
+    );
+
+    // A hold: built, and no run starts until the host releases it.
+    preparer.answer(Ok(MemberBuildPrepared::HoldUntilReleased));
+    let created = mob
+        .create_outcome(create("create-holder", kicked("holder", "Hold.")), ALLOW)
+        .await
+        .expect("the create commits");
+    let session = embodied_on(&created, "holder");
+    assert_eq!(
+        mob.handle
+            .members_holding_run_starts(crate::HostRunStartHoldReason::ToolsNotPublished)
+            .expect("the held members read"),
+        vec![id("holder")],
+        "Core holds the member's run starts for its unpublished tools"
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        turns_with_prompt(&mob, &session, "Hold.").await,
+        0,
+        "a held member starts no run"
+    );
+    mob.handle
+        .release_member_run_starts(
+            &id("holder"),
+            crate::HostRunStartHoldReason::ToolsNotPublished,
+        )
+        .await
+        .expect("the host releases the hold");
+    assert_eq!(kicked_off(&mob, "holder", "Hold.").await, session);
+    assert_eq!(
+        turns_with_prompt(&mob, &session, "Hold.").await,
+        1,
+        "the released member runs its kickoff once"
+    );
+}
+
 /// Row: a create of more identities than one change commits is refused
 /// `batch_too_large`, and nothing is written.
 #[tokio::test]

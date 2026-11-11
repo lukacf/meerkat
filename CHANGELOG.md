@@ -35,6 +35,23 @@ them.
 
 ## [Unreleased]
 
+### Fixed
+
+- Mob: Core asks the host's member build preparer
+  (`MobBuilder::with_member_build_preparer`) before the spawn of a
+  store-owned identity's member, as it asks before a wake and a boot
+  restore: the member Core starts at the identity's create to run its first
+  message, and the seat a start owes it. The preparer is asked once, off
+  the actor, before the provision, about the session the spawn names (which
+  no build has created yet), with no wired peers. Through 0.9.13 that
+  member was built and ran its kickoff with nothing the host prepares for a
+  build, for example without the tools it publishes for the member's
+  identity. A refusal, for now or for good, is a failed kickoff spawn: the
+  create stays committed, nothing is built, the identity is owed its seat,
+  and the mob's next start asks again. A hold the host asks for
+  (`HoldUntilReleased`) holds the member's run starts until
+  `release_member_run_starts`. Hosts with no preparer see no change.
+
 ## [0.9.13] - 2026-11-11
 
 ### Changed

@@ -96,15 +96,15 @@
     "marked": "18.1.0"
   },
   "devDependencies": {
-    "@rkat/meta-sdk": "0.9.10",
-    "@rkat/sdk": "0.9.10",
+    "@rkat/meta-sdk": "file:../../../meta/sdk/typescript",
+    "@rkat/sdk": "file:../../../sdks/typescript",
     "@types/node": "22.19.15",
     "jsdom": "26.1.0",
     "typescript": "5.8.3"
   },
   "peerDependencies": {
-    "@rkat/meta-sdk": ">=0.9.10 <0.10.0",
-    "@rkat/sdk": ">=0.9.10 <0.10.0"
+    "@rkat/meta-sdk": ">=0.9.13 <0.10.0",
+    "@rkat/sdk": ">=0.9.13 <0.10.0"
   },
   "peerDependenciesMeta": {
     "@rkat/sdk": {

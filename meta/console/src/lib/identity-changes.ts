@@ -912,10 +912,11 @@ export function consentWords(form: string): string {
   return CONSENT_WORDS[form] ?? form;
 }
 
+// The surfaces a host asks on. A record says who asked only for an agent
+// that was asked for at run time, so the host's configuration is none.
 const HOST_SURFACE_WORDS: Readonly<Record<string, string>> = {
   console: "This console",
   rpc: "The host's own code",
-  configuration: "The host's configuration",
 };
 
 export type RequesterWords =
@@ -933,7 +934,7 @@ export function requesterWords(provenance: AgentProvenance, personName: (key: st
   if (provenance.requesterKind === "human") {
     return { kind: "person", name: personName(provenance.requester) };
   }
-  return { kind: "host", words: HOST_SURFACE_WORDS[provenance.requester] ?? `The host (${provenance.requester})` };
+  return { kind: "host", words: Object.hasOwn(HOST_SURFACE_WORDS, provenance.requester) ? HOST_SURFACE_WORDS[provenance.requester] : `The host (${provenance.requester})` };
 }
 
 /** What the confirmation of a change of one agent as a whole says. */

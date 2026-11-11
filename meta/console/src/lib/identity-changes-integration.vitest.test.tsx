@@ -1181,6 +1181,61 @@ describe("long-term agents in the console", () => {
     view.unmount();
   }, 60_000);
 
+  it("a_request_decided_or_withdrawn_elsewhere_no_longer_waits_in_the_open_form", async () => {
+    // The console reads the roster again on its own clock; that clock is
+    // the row's to turn.
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      const family = createScriptedIdentityFamily();
+      const { view } = await openRoster(family);
+      const ask = async (name: string, displayName: string): Promise<HTMLElement> => {
+        const form = await openNewAgent(view);
+        fireEvent.click(within(form).getByTestId("identity-profile:reviewer"));
+        setField(form, "identity-field:name", name);
+        setField(form, "identity-field:display_name", displayName);
+        fireEvent.submit(form);
+        const notice = await find(view, "identity-notice");
+        expect(notice.querySelector("[data-outcome='pending_decision']")).not.toBeNull();
+        expect(within(notice).queryByTestId("identity-withdraw")).not.toBeNull();
+        return form;
+      };
+      const settled = async (): Promise<HTMLElement> => {
+        await waitFor(() => expect(view.getByTestId("identity-notice").querySelector("[data-outcome='settled']")).not.toBeNull(), { timeout: 5_000 });
+        return view.getByTestId("identity-notice");
+      };
+
+      // Withdrawn from the roster's list while the form still shows it: the
+      // form stops saying that a person must decide, and offers no
+      // withdrawal of a request that is gone.
+      let form = await ask("censor", "The censor");
+      fireEvent.click(await find(view, "identity-pending-withdraw:The censor"));
+      let notice = await settled();
+      expect(noticeWords(notice)).toContain("The request is no longer waiting for a decision");
+      expect(noticeWords(notice)).not.toContain("A person must decide");
+      expect(within(notice).queryByTestId("identity-withdraw")).toBeNull();
+      // Nothing is left to send: the form does not come back.
+      expect(within(form).queryByTestId("identity-submit")).toBeNull();
+      expect(calls(family, "meta/identity/withdraw")).toHaveLength(1);
+      fireEvent.click(view.getByTestId("identity-cancel"));
+      await gone(view, "identity-new-agent");
+
+      // Decided by a person: the console's next read finds the change made.
+      form = await ask("auditor", "The auditor");
+      family.decide("decision-2", true);
+      await act(async () => {
+        vi.advanceTimersByTime(15_000);
+      });
+      await find(view, "roster-row:auditor");
+      notice = await settled();
+      expect(within(notice).queryByTestId("identity-withdraw")).toBeNull();
+      expect(calls(family, "meta/identity/withdraw")).toHaveLength(1);
+      expect(calls(family, "meta/identity/create")).toHaveLength(2);
+      view.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 60_000);
+
   it("a_retry_of_one_action_reuses_its_request_id", async () => {
     const family = createScriptedIdentityFamily();
     const { view } = await openRoster(family);

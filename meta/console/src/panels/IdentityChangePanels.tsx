@@ -87,8 +87,13 @@ type FieldErrors = Partial<Record<IdentityFormField, Said>>;
 
 /** What the notice under a form or a confirmation shows. A note is the
  * console's own word: that nothing is changed yet, or (an alert) that the
- * agent's record could not be read. */
-type ShownResult = IdentityChangeResult | { kind: "withdrawn" } | { kind: "note"; message: string; detail?: string; alert?: boolean };
+ * agent's record could not be read. `settled` is a request that waited
+ * for a decision and no longer does. */
+type ShownResult =
+  | IdentityChangeResult
+  | { kind: "withdrawn" }
+  | { kind: "settled" }
+  | { kind: "note"; message: string; detail?: string; alert?: boolean };
 
 /** A field of a form: its label, its control, a hint, and the refusal that
  * names it. */
@@ -287,6 +292,14 @@ export function IdentityResultNotice({
       </Notice>
     );
   }
+  if (result.kind === "settled") {
+    return (
+      <Notice tone="neutral" role="status" testId="identity-notice" className="identity-notice">
+        <span data-outcome="settled" className="identity-notice__title">The request is no longer waiting for a decision</span>
+        <span className="identity-notice__line">It was decided or withdrawn. The roster shows the team as it is now.</span>
+      </Notice>
+    );
+  }
   if (result.kind === "failed") {
     return (
       <Notice
@@ -383,6 +396,24 @@ function useChangeSender(api: IdentityChangesApi, change: IdentityChangeKind, na
       setResult(answer);
     }
   };
+  // A request that waits for a decision is one of the page's pending
+  // requests. Once it has left them (decided, or withdrawn from another
+  // place of the console) it waits no longer, and the notice stops saying
+  // that it does.
+  const waiting = result?.kind === "outcome" && result.outcome.outcome === "pending_decision";
+  const requestId = slot.current?.requestId;
+  const listed = api.pending.some((entry) => entry.requestId === requestId);
+  const wasListed = React.useRef(false);
+  React.useEffect(() => {
+    if (!waiting) {
+      wasListed.current = false;
+    } else if (listed) {
+      wasListed.current = true;
+    } else if (wasListed.current) {
+      wasListed.current = false;
+      setResult({ kind: "settled" });
+    }
+  }, [waiting, listed]);
   return { busy, result, setResult, send, withdraw };
 }
 
@@ -687,7 +718,7 @@ export function EditAgentForm({
             <Field
               field="instructions"
               label="Instructions"
-              hint="New instructions reach the agent at its next run. Earlier instructions are never rewritten."
+              hint="The result says when new instructions reach the agent. Earlier instructions are never rewritten."
               error={errors.instructions}
             >
               {(ids) => (

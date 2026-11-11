@@ -7,7 +7,6 @@ import React from "react";
 
 import { createConsoleId } from "./id";
 import {
-  agentRefRequest,
   answeredRefusalOf,
   identityRefusalOf,
   parseAgentPage,
@@ -110,9 +109,6 @@ export interface IdentityChangesApi {
    * Nothing is held and nothing is written, and the question has a request
    * id of its own: the change, when it is sent, is another request. */
   plan(change: IdentityChangeKind, request: Record<string, unknown>): Promise<IdentityPlanResult>;
-  /** Archive, unarchive or remove the agent `name`: reads its record for
-   * the spec digest, then sends the change. */
-  changeWhole(change: "archive" | "unarchive" | "remove", name: string, requestId: string, displayName: string): Promise<IdentityChangeResult>;
   /** Withdraw this page's own request that waits for a decision. */
   withdraw(requestId: string): Promise<IdentityChangeResult | { kind: "withdrawn" }>;
   /** This page's requests that wait for a decision. */
@@ -228,15 +224,6 @@ export function useIdentityChanges({
         }
         const plan = parseChangePlan(answer);
         return plan ? { kind: "plan", plan } : { kind: "unknown" };
-      },
-      changeWhole: async (kind, name, requestId, displayName): Promise<IdentityChangeResult> => {
-        let record: AgentRecord;
-        try {
-          record = await loadRecord(name);
-        } catch (error) {
-          return failure(error);
-        }
-        return change(kind, agentRefRequest(record), requestId, displayName);
       },
       withdraw: async (requestId: string): Promise<IdentityChangeResult | { kind: "withdrawn" }> => {
         try {

@@ -517,6 +517,218 @@ mod tests {
         );
     }
 
+    fn callback_provenance() -> ToolProvenance {
+        ToolProvenance {
+            kind: ToolSourceKind::Callback,
+            source_id: "callback".into(),
+            artifact: None,
+        }
+    }
+
+    fn deferred_entry(
+        name: &str,
+        description: &str,
+        schema: serde_json::Value,
+    ) -> ToolCatalogEntry {
+        ToolCatalogEntry::session_deferred(
+            Arc::new(ToolDef::new(name, description, schema)),
+            true,
+            callback_provenance(),
+        )
+    }
+
+    /// A deferred-eligible tool whose name, description and schema text add
+    /// up to exactly `volume` bytes.
+    fn entry_of_volume(name: &str, volume: usize) -> ToolCatalogEntry {
+        let schema = serde_json::json!({ "type": "object" });
+        let fixed = name.len() + schema.to_string().len();
+        assert!(volume >= fixed, "{volume} is below the fixed part {fixed}");
+        deferred_entry(name, &"d".repeat(volume - fixed), schema)
+    }
+
+    /// A small callback tool: one described string parameter.
+    fn small_tool(name: &str) -> ToolCatalogEntry {
+        deferred_entry(
+            name,
+            "Look up one value by key.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "key": { "type": "string", "description": "The key to look up" }
+                },
+                "required": ["key"]
+            }),
+        )
+    }
+
+    /// A medium tool: three described parameters, two of them required.
+    fn medium_tool(index: usize) -> ToolCatalogEntry {
+        deferred_entry(
+            &format!("host_report_{index:02}"),
+            &format!(
+                "Build report {index} for one account and period. Returns the \
+                 report rows as JSON, with totals, and the period's notes."
+            ),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "account": {
+                        "type": "string",
+                        "description": "Account the report covers."
+                    },
+                    "period": {
+                        "type": "string",
+                        "description": "Reporting period, as YYYY-MM."
+                    },
+                    "include_notes": {
+                        "type": "boolean",
+                        "description": "Whether the period's notes are included."
+                    }
+                },
+                "required": ["account", "period"]
+            }),
+        )
+    }
+
+    fn medium_tools(count: usize) -> Vec<ToolCatalogEntry> {
+        (0..count).map(medium_tool).collect()
+    }
+
+    #[test]
+    fn an_inexact_catalog_is_always_inline() {
+        assert_eq!(
+            select_catalog_mode_from_snapshot(false, &medium_tools(40), &[]),
+            ToolCatalogMode::Inline
+        );
+    }
+
+    /// One tool at the old single-tool line (160 bytes of name, description
+    /// and schema) costs more to defer than it saves.
+    #[test]
+    fn one_tool_of_160_bytes_stays_inline() {
+        let catalog = [entry_of_volume("lookup_value", 160)];
+        assert_eq!(deferred_session_schema_volume(&catalog), 160);
+        assert_eq!(
+            select_catalog_mode_from_snapshot(true, &catalog, &[]),
+            ToolCatalogMode::Inline
+        );
+    }
+
+    /// Two small tools: a count alone never starts the deferred mode.
+    #[test]
+    fn two_small_tools_stay_inline() {
+        let catalog = [small_tool("lookup_value"), small_tool("lookup_owner")];
+        assert_eq!(deferred_session_schema_volume(&catalog), 294);
+        assert_eq!(
+            select_catalog_mode_from_snapshot(true, &catalog, &[]),
+            ToolCatalogMode::Inline
+        );
+    }
+
+    #[test]
+    fn ten_medium_tools_stay_inline() {
+        let catalog = medium_tools(10);
+        assert_eq!(deferred_session_schema_volume(&catalog), 4_260);
+        assert_eq!(
+            select_catalog_mode_from_snapshot(true, &catalog, &[]),
+            ToolCatalogMode::Inline
+        );
+    }
+
+    #[test]
+    fn twenty_medium_tools_defer() {
+        let catalog = medium_tools(20);
+        assert_eq!(deferred_session_schema_volume(&catalog), 8_530);
+        assert_eq!(
+            select_catalog_mode_from_snapshot(true, &catalog, &[]),
+            ToolCatalogMode::Deferred
+        );
+    }
+
+    /// The budget is the line, whatever the number of tools: one byte under
+    /// it stays inline, and the budget itself defers.
+    #[test]
+    fn the_volume_budget_is_the_line() {
+        assert_eq!(DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD, 8_192);
+        for tools in [1, 2, 7] {
+            let share = DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD / tools;
+            let rest = DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD - share * (tools - 1);
+            let at_the_line = (0..tools)
+                .map(|index| {
+                    entry_of_volume(
+                        &format!("tool_{index}"),
+                        if index == 0 { rest } else { share },
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                deferred_session_schema_volume(&at_the_line),
+                DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD
+            );
+            assert_eq!(
+                select_catalog_mode_from_snapshot(true, &at_the_line, &[]),
+                ToolCatalogMode::Deferred,
+                "{tools} tools at the budget defer"
+            );
+
+            let mut under = at_the_line;
+            under[0] = entry_of_volume("tool_0", rest - 1);
+            assert_eq!(
+                deferred_session_schema_volume(&under),
+                DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD - 1
+            );
+            assert_eq!(
+                select_catalog_mode_from_snapshot(true, &under, &[]),
+                ToolCatalogMode::Inline,
+                "{tools} tools one byte under the budget stay inline"
+            );
+        }
+    }
+
+    /// A source that is still connecting keeps an exact catalog deferred,
+    /// whatever it holds so far, so the model can search what arrives.
+    #[test]
+    fn a_connecting_source_defers_whatever_the_volume() {
+        let pending = ["docs-server".to_string()];
+        for catalog in [
+            Vec::new(),
+            vec![small_tool("lookup_value")],
+            medium_tools(40),
+        ] {
+            assert_eq!(
+                select_catalog_mode_from_snapshot(true, &catalog, &pending),
+                ToolCatalogMode::Deferred
+            );
+        }
+        assert_eq!(
+            select_catalog_mode_from_snapshot(false, &medium_tools(40), &pending),
+            ToolCatalogMode::Inline,
+            "an inexact catalog stays inline while a source connects"
+        );
+    }
+
+    /// Inline-only entries never count toward the budget.
+    #[test]
+    fn inline_only_tools_do_not_count() {
+        let catalog = (0..40)
+            .map(|index| {
+                ToolCatalogEntry::session_inline(
+                    Arc::new(ToolDef::new(
+                        format!("inline_{index}"),
+                        "d".repeat(1_000),
+                        serde_json::json!({ "type": "object" }),
+                    )),
+                    true,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(deferred_session_schema_volume(&catalog), 0);
+        assert_eq!(
+            select_catalog_mode_from_snapshot(true, &catalog, &[]),
+            ToolCatalogMode::Inline
+        );
+    }
+
     #[test]
     fn every_catalog_constructor_declares_fast_execution_by_default() {
         let tool = Arc::new(ToolDef::new(

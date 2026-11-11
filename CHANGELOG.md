@@ -46,11 +46,12 @@ them.
   (`code` and `message` at the top level of the event, or under `error`).
   The client ended the response at the first event as
   `ServerError { status: 500, message: "response failed" }`, a retryable
-  class, and never read the cause (since 0.6.7). The codes that name a
-  refused request (`invalid_request_body`, `invalid_encrypted_content`,
-  `invalid_prompt`, `invalid_value`, `invalid_argument`, `unsupported_value`,
-  `unsupported_parameter`, `model_not_found`) were the unknown class as
-  stream codes, which is retried (since 0.8.25). A turn the service would
+  class, and never read the cause (0.6.7 through 0.9.13). The codes that
+  name a refused request (`invalid_request_body`,
+  `invalid_encrypted_content`, `invalid_prompt`, `invalid_value`,
+  `invalid_argument`, `unsupported_value`, `unsupported_parameter`,
+  `model_not_found`) were the unknown class as stream codes, which is
+  retried (0.8.25 through 0.9.13). A turn the service would
   never accept was therefore sent again until the retry policy was used up
   (four attempts with the default `max_retries = 3`) and ended as `retry
   exhausted: ... Server error: 500 - response failed`, with no cause, where
@@ -71,7 +72,7 @@ them.
   plan usage limit) is now an exhausted-quota code:
   `LlmError::QuotaExhausted`, non-retryable, as a stream code, as the `type`
   of a stream error object without a code, and in an HTTP 429 body, which
-  was retried as a rate limit before.
+  was retried as a rate limit through 0.9.13.
 
 ## [0.9.12] - 2026-11-10
 

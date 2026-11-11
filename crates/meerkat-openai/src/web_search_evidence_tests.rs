@@ -220,8 +220,12 @@ fn captured_answer_blocks() -> Vec<AssistantBlock> {
     ]
 }
 
-/// The next step's request body for `history`, as `client` lowers it.
-fn next_step_body(client: &OpenAiClient, history: &[Message]) -> Value {
+/// The next step's request body for `history`, as `client` lowers it in a
+/// process that received `history` from the client's own service (the
+/// session's own history: a search is replayed only to the service the
+/// process received it from).
+fn next_step_body(client: OpenAiClient, history: &[Message]) -> Value {
+    let client = client.having_received(history);
     let projected = client
         .project_replay_messages(history)
         .expect("replay projection");
@@ -357,8 +361,10 @@ fn requests_without_the_hosted_search_chat_completions_and_stored_continuation_k
         store: Some(true),
         ..Default::default()
     });
+    let history = searched_history(captured_answer_blocks());
+    let client = client.having_received(&history);
     let projected = client
-        .project_replay_messages(&searched_history(captured_answer_blocks()))
+        .project_replay_messages(&history)
         .expect("replay projection");
     let (body, plan) = client
         .build_request_body_with_continuation(
@@ -385,8 +391,10 @@ fn a_stored_continuation_with_the_hosted_search_asks_for_its_sources() {
         store: Some(true),
         ..Default::default()
     });
+    let history = searched_history(captured_answer_blocks());
+    let client = client.having_received(&history);
     let projected = client
-        .project_replay_messages(&searched_history(captured_answer_blocks()))
+        .project_replay_messages(&history)
         .expect("replay projection");
     let (body, _) = client
         .build_request_body_with_continuation(
@@ -425,7 +433,7 @@ fn only_url_citations_that_fit_their_text_replay() {
             Some(1),
         ),
     ]);
-    let body = next_step_body(&client, &history);
+    let body = next_step_body(client, &history);
     assert_eq!(
         input_item(&body, "message")["content"][0]["annotations"],
         json!([citation()]),
@@ -492,7 +500,7 @@ fn two_citations_blocks_for_one_message_replay_none() {
         citations_block(Some("msg_1"), json!([citation()]), Some(1)),
         citations_block(Some("msg_1"), json!([citation()]), Some(1)),
     ]);
-    let body = next_step_body(&client, &history);
+    let body = next_step_body(client, &history);
     assert_eq!(
         input_item(&body, "message")["content"][0]["annotations"],
         json!([]),
@@ -517,7 +525,7 @@ fn a_search_recorded_before_this_change_replays_as_it_did() {
         },
         citations_block(Some("msg_1"), json!([citation()]), None),
     ]);
-    let body = next_step_body(&client, &history);
+    let body = next_step_body(client, &history);
     assert_eq!(
         input_item(&body, "web_search_call")["action"],
         call,
@@ -537,12 +545,29 @@ fn a_search_recorded_before_this_change_replays_as_it_did() {
         },
         citations_block(None, json!([citation()]), None),
     ]);
-    let body = next_step_body(&client, &oldest);
+    let body = next_step_body(OpenAiClient::new("test-key".to_string()), &oldest);
     assert_eq!(
         input_item(&body, "message")["content"][0]["annotations"],
         json!([]),
         "{body}"
     );
+
+    // Read from a store by a process that did not receive it, the same
+    // search is of unknown issuer: the answer text is replayed and the call
+    // is not.
+    let restarted = OpenAiClient::new("test-key".to_string())
+        .with_continuity_ledger(Arc::new(meerkat_core::OpenAiContinuityLedger::new()));
+    let projected = restarted
+        .project_replay_messages(&history)
+        .expect("replay projection");
+    let body = restarted
+        .build_request_body(
+            &LlmRequest::new("gpt-5.5", projected).with_provider_params(hosted_web_search()),
+        )
+        .expect("request body");
+    assert!(!has_input_item(&body, "web_search_call"), "{body}");
+    assert_eq!(input_item(&body, "message")["content"], ANSWER, "{body}");
+    assert!(input_item(&body, "message").get("id").is_none(), "{body}");
 }
 
 /// The ChatGPT backend, Azure OpenAI and Copilot wires keep the search shape
@@ -572,7 +597,7 @@ fn the_chatgpt_azure_and_copilot_wires_keep_the_search_shape_they_had() {
     ];
     let history = searched_history(captured_answer_blocks());
     for (wire, client) in wires {
-        let body = next_step_body(&client, &history);
+        let body = next_step_body(client, &history);
         assert!(!asks_for_sources(&body), "{wire}: {body}");
         let call = input_item(&body, "web_search_call");
         assert_eq!(
@@ -590,7 +615,7 @@ fn the_chatgpt_azure_and_copilot_wires_keep_the_search_shape_they_had() {
             "{wire}: {body}"
         );
     }
-    let public = next_step_body(&OpenAiClient::new("test-key".to_string()), &history);
+    let public = next_step_body(OpenAiClient::new("test-key".to_string()), &history);
     assert!(asks_for_sources(&public), "{public}");
     assert_eq!(
         input_item(&public, "web_search_call")["action"]["sources"],

@@ -28,13 +28,13 @@
 //! their own.
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use axum::{Json, Router, extract::State, response::IntoResponse};
+use axum::{Json, Router, response::IntoResponse};
 use futures::StreamExt;
 use meerkat_core::{
-    AssistantBlock, BlockAssistantMessage, Message, OpenAiContinuityIssuer, OpenAiContinuityLedger,
-    ProviderMeta, StopReason, ToolDef, ToolResult, UserMessage,
+    AssistantBlock, BlockAssistantMessage, Message, OpenAiContinuityLedger, ProviderMeta,
+    StopReason, ToolDef, ToolResult, UserMessage,
 };
 use meerkat_llm_core::{LlmClient, LlmEvent, LlmRequest};
 use serde_json::{Value, json};
@@ -51,6 +51,58 @@ type Ledger = Arc<OpenAiContinuityLedger>;
 /// What one process knows: nothing yet.
 fn new_process() -> Ledger {
     Arc::new(OpenAiContinuityLedger::new())
+}
+
+// ---------------------------------------------------------------------------
+// The wire
+// ---------------------------------------------------------------------------
+
+/// The local servers of one test, by name, each standing in for one
+/// endpoint of a service: an issuer is a kind of service at an endpoint, so
+/// a service keeps its address for the whole test, across the clients and
+/// the processes that reach it. Every server answers with the payload set
+/// for the next request and captures the body it received.
+#[derive(Default)]
+struct Wire {
+    endpoints: std::collections::HashMap<String, String>,
+    payload: String,
+    bodies: Vec<Value>,
+}
+
+thread_local! {
+    static WIRE: std::cell::RefCell<Wire> = std::cell::RefCell::new(Wire::default());
+}
+
+async fn capture_body(Json(body): Json<Value>) -> impl IntoResponse {
+    let payload = WIRE.with(|wire| {
+        let mut wire = wire.borrow_mut();
+        wire.bodies.push(body);
+        wire.payload.clone()
+    });
+    ([("content-type", "text/event-stream")], payload)
+}
+
+/// The base URL of the endpoint `name` of this test, started on first use.
+fn endpoint(name: &str) -> String {
+    if let Some(base) = WIRE.with(|wire| wire.borrow().endpoints.get(name).cloned()) {
+        return base;
+    }
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    listener
+        .set_nonblocking(true)
+        .expect("nonblocking listener");
+    let base = format!("http://{}", listener.local_addr().expect("local addr"));
+    let listener = TcpListener::from_std(listener).expect("tokio listener");
+    tokio::spawn(async move {
+        let app = Router::new().fallback(capture_body);
+        axum::serve(listener, app).await.expect("serve");
+    });
+    WIRE.with(|wire| {
+        wire.borrow_mut()
+            .endpoints
+            .insert(name.to_string(), base.clone());
+    });
+    base
 }
 
 /// Every service that speaks the OpenAI Responses grammar, with two
@@ -83,10 +135,11 @@ impl Service {
             .expect("another service")
     }
 
-    /// The client that speaks to this service at `base` in the process
-    /// `ledger` stands for, built with the builders the provider runtime and
-    /// the factory use for it.
-    fn client(self, base: String, ledger: &Ledger) -> Arc<dyn LlmClient> {
+    /// The client that speaks to this service's endpoint of the test in the
+    /// process `ledger` stands for, built with the builders the provider
+    /// runtime and the factory use for it.
+    fn client(self, ledger: &Ledger) -> Arc<dyn LlmClient> {
+        let base = endpoint(&format!("{self:?}"));
         let openai = || {
             OpenAiClient::new_with_base_url("test-key".to_string(), base.clone())
                 .with_continuity_ledger(Arc::clone(ledger))
@@ -94,9 +147,7 @@ impl Service {
         let self_hosted_server = |server: &str| {
             Arc::new(
                 self_hosted(base.clone())
-                    .with_continuity_issuer(OpenAiContinuityIssuer::SelfHosted {
-                        server: server.to_string(),
-                    })
+                    .with_self_hosted_server(server)
                     .with_continuity_ledger(Arc::clone(ledger)),
             )
         };
@@ -137,30 +188,10 @@ fn self_hosted(base: String) -> OpenAiCompatibleClient {
     .with_static_credential()
 }
 
-/// A self-hosted client that never declared its server.
-fn undeclared_self_hosted(base: String, ledger: &Ledger) -> Arc<dyn LlmClient> {
-    Arc::new(self_hosted(base).with_continuity_ledger(Arc::clone(ledger)))
-}
-
-// ---------------------------------------------------------------------------
-// The wire
-// ---------------------------------------------------------------------------
-
-#[derive(Clone)]
-struct Capture {
-    bodies: Arc<Mutex<Vec<Value>>>,
-    payload: Arc<String>,
-}
-
-async fn capture_body(
-    State(capture): State<Capture>,
-    Json(body): Json<Value>,
-) -> impl IntoResponse {
-    capture.bodies.lock().expect("capture lock").push(body);
-    (
-        [("content-type", "text/event-stream")],
-        capture.payload.as_str().to_owned(),
-    )
+/// A self-hosted client that never declared its server, at the endpoint
+/// `name` of the test.
+fn undeclared_self_hosted(name: &str, ledger: &Ledger) -> Arc<dyn LlmClient> {
+    Arc::new(self_hosted(endpoint(name)).with_continuity_ledger(Arc::clone(ledger)))
 }
 
 fn weather_tool() -> Arc<ToolDef> {
@@ -177,40 +208,42 @@ fn weather_tool() -> Arc<ToolDef> {
     })
 }
 
-/// Send `request` through the client `build` makes for a local server that
-/// answers every path with `payload`. Returns the bodies that reached the
-/// wire and the events the client produced.
+fn request(messages: Vec<Message>) -> LlmRequest {
+    let mut request = LlmRequest::new(MODEL, messages);
+    request.tools = vec![weather_tool()];
+    request
+}
+
+/// Arm the wire for one exchange: the next request is answered with
+/// `payload`.
+fn answer_with(payload: &str) {
+    WIRE.with(|wire| {
+        let mut wire = wire.borrow_mut();
+        wire.payload = payload.to_string();
+        wire.bodies.clear();
+    });
+}
+
+/// The bodies that reached the wire since [`answer_with`].
+fn bodies_on_the_wire() -> Vec<Value> {
+    WIRE.with(|wire| std::mem::take(&mut wire.borrow_mut().bodies))
+}
+
+/// Send `request` through `client`, answered with `payload`. Returns the
+/// bodies that reached the wire and the events the client produced.
 async fn send(
-    build: impl FnOnce(String) -> Arc<dyn LlmClient>,
+    client: Arc<dyn LlmClient>,
     request: &LlmRequest,
     payload: &str,
 ) -> (Vec<Value>, Vec<LlmEvent>) {
-    let bodies = Arc::new(Mutex::new(Vec::new()));
-    let app = Router::new().fallback(capture_body).with_state(Capture {
-        bodies: Arc::clone(&bodies),
-        payload: Arc::new(payload.to_string()),
-    });
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr = listener.local_addr().expect("local addr");
-    let server = tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("serve");
-    });
-    let client = build(format!("http://{addr}"));
+    answer_with(payload);
     let mut events = Vec::new();
     let mut stream = client.stream(request);
     while let Some(event) = stream.next().await {
         events.push(event.unwrap_or_else(|error| panic!("the request is accepted: {error}")));
     }
     drop(stream);
-    server.abort();
-    let bodies = std::mem::take(&mut *bodies.lock().expect("capture lock"));
-    (bodies, events)
-}
-
-fn request(messages: Vec<Message>) -> LlmRequest {
-    let mut request = LlmRequest::new(MODEL, messages);
-    request.tools = vec![weather_tool()];
-    request
+    (bodies_on_the_wire(), events)
 }
 
 /// An answer with no output items: for rows that read only the request.
@@ -221,14 +254,33 @@ const PLAIN_ANSWER_SSE: &str = concat!(
     "data: [DONE]\n\n",
 );
 
-/// The one body `messages` puts on the wire of the client `build` makes.
-async fn body_on_the_wire(
-    build: impl FnOnce(String) -> Arc<dyn LlmClient>,
-    messages: Vec<Message>,
-) -> Value {
-    let (mut bodies, _) = send(build, &request(messages), PLAIN_ANSWER_SSE).await;
+/// The one body `messages` puts on the wire of `client`.
+async fn body_on_the_wire(client: Arc<dyn LlmClient>, messages: Vec<Message>) -> Value {
+    let (mut bodies, _) = send(client, &request(messages), PLAIN_ANSWER_SSE).await;
     assert_eq!(bodies.len(), 1, "one request reached the wire: {bodies:?}");
     bodies.remove(0)
+}
+
+/// One provider step the way a session takes it: `history` goes through the
+/// agent's client adapter (projection, prepared request, stream, block
+/// assembly) to `client`, which is answered with `response`. Returns the
+/// request body and the assistant blocks exactly as the session stores
+/// them.
+async fn stored_step(
+    client: Arc<dyn LlmClient>,
+    history: &[Message],
+    response: &str,
+) -> (Value, Vec<AssistantBlock>) {
+    use meerkat_core::AgentLlmClient;
+    answer_with(response);
+    let adapter = meerkat_llm_core::LlmClientAdapter::new(client, MODEL.to_string());
+    let result = adapter
+        .stream_response(history, &[weather_tool()], 1024, None, None)
+        .await
+        .unwrap_or_else(|error| panic!("the step is accepted: {error}"));
+    let mut bodies = bodies_on_the_wire();
+    assert_eq!(bodies.len(), 1, "one request reached the wire: {bodies:?}");
+    (bodies.remove(0), result.blocks().to_vec())
 }
 
 // ---------------------------------------------------------------------------
@@ -366,18 +418,8 @@ fn tool_output(turn: &str) -> Message {
     )])
 }
 
-fn committed_blocks(events: Vec<LlmEvent>) -> Vec<AssistantBlock> {
-    events
-        .into_iter()
-        .find_map(|event| match event {
-            LlmEvent::AssistantOutput { blocks, .. } => Some(blocks),
-            _ => None,
-        })
-        .expect("the response commits its output")
-}
-
-/// One provider step: `history` is sent to `service`, which answers with
-/// `response`. Returns the request body and the committed assistant message.
+/// One provider step on `service` in the process `ledger` stands for:
+/// the request body and the assistant message as the session stores it.
 async fn step(
     service: Service,
     ledger: &Ledger,
@@ -385,18 +427,11 @@ async fn step(
     response: &str,
     stop_reason: StopReason,
 ) -> (Value, Message) {
-    let (mut bodies, events) = send(
-        |base| service.client(base, ledger),
-        &request(history.to_vec()),
-        response,
+    let (body, blocks) = stored_step(service.client(ledger), history, response).await;
+    (
+        body,
+        Message::BlockAssistant(BlockAssistantMessage::new(blocks, stop_reason)),
     )
-    .await;
-    assert_eq!(bodies.len(), 1, "one request reached the wire: {bodies:?}");
-    let message = Message::BlockAssistant(BlockAssistantMessage::new(
-        committed_blocks(events),
-        stop_reason,
-    ));
-    (bodies.remove(0), message)
 }
 
 /// A whole tool turn on `service` in the process `ledger` stands for,
@@ -640,8 +675,7 @@ async fn a_turn_received_from_another_service_is_not_replayed() {
                 continue;
             }
             let case = format!("{source:?} -> {target:?}");
-            let body =
-                body_on_the_wire(|base| target.client(base, &process), transcript.clone()).await;
+            let body = body_on_the_wire(target.client(&process), transcript.clone()).await;
             assert_wholly_dropped(&case, &body);
             assert_carries_no_continuity_of(&case, &body, &["t"]);
             assert_eq!(
@@ -668,7 +702,7 @@ async fn a_turn_received_from_the_same_service_replays_unchanged() {
             "{service:?}: inside the tool loop"
         );
         let body = body_on_the_wire(
-            |base| service.client(base, &process),
+            service.client(&process),
             then_asked(transcript, NEXT_QUESTION),
         )
         .await;
@@ -697,7 +731,7 @@ async fn a_new_process_replays_no_stored_material_to_any_service() {
             let restarted = new_process();
             let case = format!("{service:?}, cold load -> {target:?}");
             let body = body_on_the_wire(
-                |base| target.client(base, &restarted),
+                target.client(&restarted),
                 then_asked(transcript.clone(), NEXT_QUESTION),
             )
             .await;
@@ -711,11 +745,7 @@ async fn a_new_process_replays_no_stored_material_to_any_service() {
 
             // The run stopped after the tool output was recorded.
             let case = format!("{service:?}, cold load inside the tool loop -> {target:?}");
-            let body = body_on_the_wire(
-                |base| target.client(base, &restarted),
-                transcript[..3].to_vec(),
-            )
-            .await;
+            let body = body_on_the_wire(target.client(&restarted), transcript[..3].to_vec()).await;
             assert_wholly_dropped(&case, &body);
             assert_eq!(
                 body["input"],
@@ -764,7 +794,7 @@ async fn stored_steps_and_received_steps_share_one_request() {
 
         let case = format!("{service:?}, the turn after");
         let body = body_on_the_wire(
-            |base| service.client(base, &restarted),
+            service.client(&restarted),
             then_asked(transcript, "And on Sunday?"),
         )
         .await;
@@ -776,49 +806,6 @@ async fn stored_steps_and_received_steps_share_one_request() {
                 native_turn("new", NEXT_QUESTION),
                 vec![user_item("And on Sunday?")],
             ]),
-            "{case}"
-        );
-    }
-}
-
-/// A self-hosted client that never declared its server is nobody's issuer:
-/// what it receives is recorded for no one and it is sent nobody's material,
-/// its own included.
-#[tokio::test]
-async fn an_undeclared_self_hosted_server_is_replayed_no_continuity() {
-    let process = new_process();
-    let (mut bodies, events) = send(
-        |base| undeclared_self_hosted(base, &process),
-        &request(vec![user(QUESTION)]),
-        &tool_step_response("u"),
-    )
-    .await;
-    assert_eq!(bodies.len(), 1);
-    bodies.clear();
-    let own = vec![
-        user(QUESTION),
-        Message::BlockAssistant(BlockAssistantMessage::new(
-            committed_blocks(events),
-            StopReason::ToolUse,
-        )),
-        tool_output("u"),
-    ];
-    let body = body_on_the_wire(|base| undeclared_self_hosted(base, &process), own).await;
-    assert_wholly_dropped("its own step", &body);
-    assert_eq!(
-        body["input"],
-        input_of([vec![user_item(QUESTION)], dropped_tool_step("u")])
-    );
-
-    for source in Service::ALL {
-        let case = format!("{source:?} -> undeclared self-hosted server");
-        let transcript = then_asked(served_turn(source, &process, "t").await, NEXT_QUESTION);
-        let body =
-            body_on_the_wire(|base| undeclared_self_hosted(base, &process), transcript).await;
-        assert_wholly_dropped(&case, &body);
-        assert_eq!(
-            body["input"],
-            input_of([dropped_turn("t", QUESTION), vec![user_item(NEXT_QUESTION)]]),
             "{case}"
         );
     }
@@ -861,7 +848,7 @@ async fn a_step_with_one_unknown_item_is_dropped_as_a_whole() {
 
         let case = format!("{service:?}");
         let body = body_on_the_wire(
-            |base| service.client(base, &process),
+            service.client(&process),
             then_asked(transcript, NEXT_QUESTION),
         )
         .await;
@@ -887,11 +874,11 @@ async fn a_step_with_one_unknown_item_is_dropped_as_a_whole() {
 #[tokio::test]
 async fn a_forgotten_response_is_dropped_as_a_whole() {
     for service in Service::ALL {
-        let process: Ledger = Arc::new(OpenAiContinuityLedger::with_capacity(1));
+        let process: Ledger = Arc::new(OpenAiContinuityLedger::with_generation(1));
         let transcript = served_turn(service, &process, "t").await;
         let case = format!("{service:?}");
         let body = body_on_the_wire(
-            |base| service.client(base, &process),
+            service.client(&process),
             then_asked(transcript, NEXT_QUESTION),
         )
         .await;
@@ -919,7 +906,7 @@ async fn material_two_services_both_returned_belongs_to_neither() {
     for target in [Service::OpenAiApi, Service::Copilot] {
         let case = format!("contested -> {target:?}");
         let body = body_on_the_wire(
-            |base| target.client(base, &process),
+            target.client(&process),
             then_asked(first.clone(), NEXT_QUESTION),
         )
         .await;
@@ -955,7 +942,7 @@ async fn copies_inside_the_process_replay_like_the_original() {
         }
         let fork = session.fork();
         let body = body_on_the_wire(
-            |base| service.client(base, &process),
+            service.client(&process),
             then_asked(fork.messages().to_vec(), NEXT_QUESTION),
         )
         .await;
@@ -966,7 +953,7 @@ async fn copies_inside_the_process_replay_like_the_original() {
         let read_back: Vec<Message> = serde_json::from_slice(&rows).expect("rows decode");
         assert_eq!(read_back, transcript, "{service:?}: live equals stored");
         let body = body_on_the_wire(
-            |base| service.client(base, &process),
+            service.client(&process),
             then_asked(read_back, NEXT_QUESTION),
         )
         .await;
@@ -979,7 +966,7 @@ async fn copies_inside_the_process_replay_like_the_original() {
             transcript[3].clone(),
             user(NEXT_QUESTION),
         ];
-        let body = body_on_the_wire(|base| service.client(base, &process), rewritten).await;
+        let body = body_on_the_wire(service.client(&process), rewritten).await;
         assert_eq!(
             body["input"],
             input_of([
@@ -1075,7 +1062,7 @@ async fn the_dropped_form_passes_the_replay_validators() {
                 ("tool loop", transcript[..3].to_vec()),
             ] {
                 let case = format!("{origin} -> {service:?}, {shape}");
-                let client = service.client("http://127.0.0.1:9".to_string(), &process);
+                let client = service.client(&process);
                 let projected = client
                     .project_replay_messages(&transcript)
                     .unwrap_or_else(|error| panic!("{case}: the replay plan refuses: {error}"));
@@ -1214,7 +1201,7 @@ async fn a_transcript_stored_by_0_9_12_resumes_on_every_service() {
         let process = new_process();
         let case = format!("0.9.12 transcript -> {target:?}");
         let body = body_on_the_wire(
-            |base| target.client(base, &process),
+            target.client(&process),
             then_asked(transcript.clone(), NEXT_QUESTION),
         )
         .await;
@@ -1232,11 +1219,7 @@ async fn a_transcript_stored_by_0_9_12_resumes_on_every_service() {
         );
 
         let case = format!("0.9.12 transcript -> {target:?}, inside the tool loop");
-        let body = body_on_the_wire(
-            |base| target.client(base, &process),
-            transcript[..3].to_vec(),
-        )
-        .await;
+        let body = body_on_the_wire(target.client(&process), transcript[..3].to_vec()).await;
         assert_wholly_dropped(&case, &body);
         assert_eq!(
             body["input"],
@@ -1275,8 +1258,7 @@ async fn a_hosted_tool_item_is_replayed_only_to_the_service_it_came_from() {
         let process = new_process();
         let transcript = hosted_search_turn(service, &process, "h").await;
 
-        let body =
-            body_on_the_wire(|base| service.client(base, &process), transcript.clone()).await;
+        let body = body_on_the_wire(service.client(&process), transcript.clone()).await;
         assert_eq!(
             body["input"],
             json!([
@@ -1307,8 +1289,7 @@ async fn a_hosted_tool_item_is_replayed_only_to_the_service_it_came_from() {
             ("a new process", service, &restarted),
         ] {
             let case = format!("{service:?} -> {case}, hosted web search");
-            let body =
-                body_on_the_wire(|base| target.client(base, ledger), transcript.clone()).await;
+            let body = body_on_the_wire(target.client(ledger), transcript.clone()).await;
             assert_wholly_dropped(&case, &body);
             assert_carries_no_continuity_of(&case, &body, &["h"]);
             assert!(!body.to_string().contains("web_search_call"), "{case}");
@@ -1344,10 +1325,10 @@ async fn a_request_prepared_for_one_service_is_not_replayed_by_another() {
             NEXT_QUESTION,
         );
         let prepared = prepared_for
-            .client("http://127.0.0.1:9".to_string(), &process)
+            .client(&process)
             .project_replay_messages(&transcript)
             .expect("the first service's projection");
-        let body = body_on_the_wire(|base| sender.client(base, &process), prepared).await;
+        let body = body_on_the_wire(sender.client(&process), prepared).await;
         assert_wholly_dropped(&case, &body);
         assert_eq!(
             body["input"],
@@ -1380,9 +1361,7 @@ async fn responses_material_never_reaches_a_chat_completions_wire() {
             supports_image_tool_results: false,
         },
     )
-    .with_continuity_issuer(OpenAiContinuityIssuer::SelfHosted {
-        server: "local-a".to_string(),
-    })
+    .with_self_hosted_server("local-a")
     .with_continuity_ledger(Arc::clone(&process));
     let projected = client
         .project_replay_messages(&transcript)
@@ -1420,7 +1399,7 @@ async fn a_response_id_is_sent_only_to_the_service_it_came_from() {
         let transcript = then_asked(served_turn(service, &process, "t").await, NEXT_QUESTION);
 
         let (bodies, _) = send(
-            |base| service.client(base, &process),
+            service.client(&process),
             &continuation_request(transcript.clone()),
             PLAIN_ANSWER_SSE,
         )
@@ -1443,7 +1422,7 @@ async fn a_response_id_is_sent_only_to_the_service_it_came_from() {
         ] {
             let case = format!("{service:?} -> {case}");
             let (bodies, _) = send(
-                |base| target.client(base, ledger),
+                target.client(ledger),
                 &continuation_request(transcript.clone()),
                 PLAIN_ANSWER_SSE,
             )
@@ -1475,7 +1454,7 @@ async fn the_response_id_shortcut_follows_the_last_step() {
     let (mixed, _) = tool_turn(service, &process, stored.clone(), "new", NEXT_QUESTION).await;
 
     let (bodies, _) = send(
-        |base| service.client(base, &process),
+        service.client(&process),
         &continuation_request(then_asked(mixed, "And on Sunday?")),
         PLAIN_ANSWER_SSE,
     )
@@ -1487,7 +1466,7 @@ async fn the_response_id_shortcut_follows_the_last_step() {
     let mut ends_with_stored = received;
     ends_with_stored.extend(stored);
     let (bodies, _) = send(
-        |base| service.client(base, &process),
+        service.client(&process),
         &continuation_request(then_asked(ends_with_stored, "And on Sunday?")),
         PLAIN_ANSWER_SSE,
     )
@@ -1501,6 +1480,332 @@ async fn the_response_id_shortcut_follows_the_last_step() {
             vec![user_item("And on Sunday?")],
         ])
     );
+}
+
+// ---------------------------------------------------------------------------
+// The issuer is a kind of service at an endpoint
+// ---------------------------------------------------------------------------
+
+/// One kind of service at two endpoints is two issuers: the public API
+/// behind another base URL (a gateway) is not sent what the public API
+/// returned, and the reverse; each is sent its own.
+#[tokio::test]
+async fn two_endpoints_of_one_service_kind_are_two_issuers() {
+    let process = new_process();
+    let gateway = |ledger: &Ledger| -> Arc<dyn LlmClient> {
+        Arc::new(
+            OpenAiClient::new_with_base_url("test-key".to_string(), endpoint("gateway"))
+                .with_continuity_ledger(Arc::clone(ledger)),
+        )
+    };
+    let from_api = then_asked(
+        served_turn(Service::OpenAiApi, &process, "t").await,
+        NEXT_QUESTION,
+    );
+    let body = body_on_the_wire(gateway(&process), from_api.clone()).await;
+    assert_wholly_dropped("public API -> the public wire at another base URL", &body);
+
+    let history = vec![user(QUESTION)];
+    let (_, blocks) = stored_step(gateway(&process), &history, &tool_step_response("g")).await;
+    let from_gateway = vec![
+        user(QUESTION),
+        Message::BlockAssistant(BlockAssistantMessage::new(blocks, StopReason::ToolUse)),
+        tool_output("g"),
+    ];
+    let own = body_on_the_wire(gateway(&process), from_gateway.clone()).await;
+    assert_eq!(
+        own["input"],
+        input_of([vec![user_item(QUESTION)], native_tool_step("g")]),
+        "the gateway's own step replays to the gateway"
+    );
+    let body = body_on_the_wire(Service::OpenAiApi.client(&process), from_gateway).await;
+    assert_wholly_dropped("the other base URL -> public API", &body);
+}
+
+/// A self-hosted client that never declared its server is the self-hosted
+/// server at its base URL: it is sent what it returned itself, another
+/// undeclared server at another address is not, a declared server is not,
+/// and it is sent nobody else's material.
+#[tokio::test]
+async fn an_undeclared_self_hosted_server_is_its_base_url() {
+    let process = new_process();
+    let history = vec![user(QUESTION)];
+    let (_, blocks) = stored_step(
+        undeclared_self_hosted("box-one", &process),
+        &history,
+        &tool_step_response("u"),
+    )
+    .await;
+    let own = vec![
+        user(QUESTION),
+        Message::BlockAssistant(BlockAssistantMessage::new(blocks, StopReason::ToolUse)),
+        tool_output("u"),
+    ];
+    let body = body_on_the_wire(undeclared_self_hosted("box-one", &process), own.clone()).await;
+    assert_eq!(
+        body["input"],
+        input_of([vec![user_item(QUESTION)], native_tool_step("u")]),
+        "its own step"
+    );
+    for (case, client) in [
+        (
+            "another undeclared server",
+            undeclared_self_hosted("box-two", &process),
+        ),
+        ("a declared server", Service::SelfHostedA.client(&process)),
+        ("the public API", Service::OpenAiApi.client(&process)),
+    ] {
+        let body = body_on_the_wire(client, own.clone()).await;
+        assert_wholly_dropped(case, &body);
+        assert_eq!(
+            body["input"],
+            input_of([vec![user_item(QUESTION)], dropped_tool_step("u")]),
+            "{case}"
+        );
+    }
+    for source in Service::ALL {
+        let case = format!("{source:?} -> undeclared self-hosted server");
+        let transcript = then_asked(served_turn(source, &process, "t").await, NEXT_QUESTION);
+        let body = body_on_the_wire(undeclared_self_hosted("box-one", &process), transcript).await;
+        assert_wholly_dropped(&case, &body);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// What is recorded is what is stored
+// ---------------------------------------------------------------------------
+
+/// A response whose stream ends at `[DONE]` without a terminal response:
+/// the client commits what completed.
+fn done_terminated_response(turn: &str) -> String {
+    let output = [reasoning_item(turn, 1, None), call_item(turn)];
+    let mut payload = format!(
+        "data: {}\n\n",
+        json!({"type": "response.created", "response": {"id": format!("resp_{turn}_1")}})
+    );
+    for (index, item) in output.iter().enumerate() {
+        for kind in ["response.output_item.added", "response.output_item.done"] {
+            payload.push_str(&format!(
+                "data: {}\n\n",
+                json!({"type": kind, "output_index": index, "item": item})
+            ));
+        }
+    }
+    payload.push_str("data: [DONE]\n\n");
+    payload
+}
+
+/// A response a compatible server streams as events only: the terminal
+/// response carries no output, so the session stores the blocks assembled
+/// from the events.
+fn events_only_response(turn: &str) -> String {
+    let reasoning = reasoning_item(turn, 1, None);
+    let events = [
+        json!({"type": "response.created", "response": {"id": format!("resp_{turn}_1")}}),
+        json!({"type": "response.reasoning.done", "item": reasoning}),
+        json!({"type": "response.function_call_arguments.done", "call_id": format!("call_{turn}"),
+            "name": "get_weather", "arguments": "{\"city\":\"Oslo\"}"}),
+        json!({"type": "response.completed", "response": {
+            "id": format!("resp_{turn}_1"), "status": "completed",
+            "usage": {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5}
+        }}),
+    ];
+    let mut payload = String::new();
+    for event in events {
+        payload.push_str(&format!("data: {event}\n\n"));
+    }
+    payload.push_str("data: [DONE]\n\n");
+    payload
+}
+
+/// Whatever path commits a step (the terminal response's output, the
+/// `[DONE]` fallback, the blocks assembled from the events), the blocks the
+/// session stores are known to the process that received them: the next
+/// request of the tool loop replays the step's reasoning item to its
+/// service, and another service gets the dropped form.
+#[tokio::test]
+async fn every_commit_path_stores_what_was_recorded() {
+    for (path, response) in [
+        ("terminal output", tool_step_response("p")),
+        ("[DONE] fallback", done_terminated_response("p")),
+        ("assembled from events", events_only_response("p")),
+    ] {
+        // The Copilot route takes an item's identity from its output slot
+        // and has no events-only form.
+        let services: &[Service] = if path == "assembled from events" {
+            &[Service::OpenAiApi, Service::SelfHostedA]
+        } else {
+            &Service::ALL
+        };
+        for &service in services {
+            let case = format!("{service:?}, {path}");
+            let process = new_process();
+            let history = vec![user(QUESTION)];
+            let (_, blocks) = stored_step(service.client(&process), &history, &response).await;
+            assert!(
+                blocks
+                    .iter()
+                    .any(|block| matches!(block, AssistantBlock::Reasoning { .. }))
+                    && blocks
+                        .iter()
+                        .any(|block| matches!(block, AssistantBlock::ToolUse { .. })),
+                "{case}: the step stores its reasoning item and its call: {blocks:?}"
+            );
+            let transcript = vec![
+                user(QUESTION),
+                Message::BlockAssistant(BlockAssistantMessage::new(blocks, StopReason::ToolUse)),
+                tool_output("p"),
+            ];
+            let own = body_on_the_wire(service.client(&process), transcript.clone()).await;
+            assert_eq!(
+                own["input"],
+                input_of([vec![user_item(QUESTION)], native_tool_step("p")]),
+                "{case}: the stored step is the recorded step"
+            );
+            let other = body_on_the_wire(service.other().client(&process), transcript).await;
+            assert_wholly_dropped(&case, &other);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// One decision per request
+// ---------------------------------------------------------------------------
+
+/// The decision is made once, when the request is prepared, and travels
+/// with it: what the process receives or forgets between the projection and
+/// the send changes neither the body nor its measured pressure. Here the
+/// process forgets the step (its ledger holds one response per generation
+/// and receives two more) after the request was prepared.
+#[tokio::test]
+async fn a_prepared_request_keeps_its_decision() {
+    for service in Service::ALL {
+        let process: Ledger = Arc::new(OpenAiContinuityLedger::with_generation(1));
+        let history = vec![user(QUESTION)];
+        let (_, blocks) =
+            stored_step(service.client(&process), &history, &tool_step_response("t")).await;
+        let transcript = vec![
+            user(QUESTION),
+            Message::BlockAssistant(BlockAssistantMessage::new(blocks, StopReason::ToolUse)),
+            tool_output("t"),
+        ];
+
+        let client = service.client(&process);
+        let projection = client
+            .project_replay_request(&transcript)
+            .expect("projection");
+        let prepared =
+            meerkat_llm_core::PreparedLlmRequest::from_projection(request(Vec::new()), projection);
+        let pressure_before = client
+            .prepared_request_pressure(&prepared)
+            .expect("pressure")
+            .expect("the client measures its request")
+            .encoded_bytes;
+
+        // Two later responses push the step out of both generations.
+        for later in ["x", "y"] {
+            stored_step(
+                service.client(&process),
+                &history,
+                &tool_step_response(later),
+            )
+            .await;
+        }
+        let forgotten = body_on_the_wire(service.client(&process), transcript.clone()).await;
+        assert_wholly_dropped(
+            &format!("{service:?}: the process forgot the step"),
+            &forgotten,
+        );
+
+        answer_with(PLAIN_ANSWER_SSE);
+        let mut stream = client.stream_prepared(&prepared);
+        while let Some(event) = stream.next().await {
+            event.unwrap_or_else(|error| panic!("the prepared request is accepted: {error}"));
+        }
+        drop(stream);
+        let bodies = bodies_on_the_wire();
+        assert_eq!(bodies.len(), 1, "{service:?}");
+        assert_eq!(
+            bodies[0]["input"],
+            input_of([vec![user_item(QUESTION)], native_tool_step("t")]),
+            "{service:?}: the prepared request is sent under the decision it was prepared with"
+        );
+        assert_eq!(
+            client
+                .prepared_request_pressure(&prepared)
+                .expect("pressure")
+                .expect("the client measures its request")
+                .encoded_bytes,
+            pressure_before,
+            "{service:?}: the measured request is the sent request"
+        );
+    }
+}
+
+/// Projecting a projected transcript again changes nothing, under the same
+/// process state: the dropped form stays dropped and the admitted form
+/// stays admitted.
+#[tokio::test]
+async fn projecting_twice_is_projecting_once() {
+    for service in Service::ALL {
+        let earlier = new_process();
+        let stored = served_turn(service, &earlier, "old").await;
+        let process = new_process();
+        let (mixed, _) = tool_turn(service, &process, stored, "new", NEXT_QUESTION).await;
+        let client = service.client(&process);
+        let once = client.project_replay_messages(&mixed).expect("projection");
+        let twice = client.project_replay_messages(&once).expect("projection");
+        assert_eq!(once, twice, "{service:?}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// An identity-only message
+// ---------------------------------------------------------------------------
+
+/// A step whose message is empty (it exists only as an identified item)
+/// replays to its service as that item. In the dropped form it is left out:
+/// an empty assistant message is never sent.
+#[tokio::test]
+async fn an_empty_identified_message_is_omitted_in_the_dropped_form() {
+    let empty_then_call = response_stream(
+        "resp_e_1",
+        &[
+            reasoning_item("e", 1, None),
+            json!({
+                "type": "message", "id": "msg_e", "role": "assistant", "status": "completed",
+                "phase": "commentary",
+                "content": [{"type": "output_text", "text": "", "annotations": []}],
+            }),
+            call_item("e"),
+        ],
+    );
+    for service in Service::ALL {
+        let process = new_process();
+        let history = vec![user(QUESTION)];
+        let (_, blocks) = stored_step(service.client(&process), &history, &empty_then_call).await;
+        let transcript = vec![
+            user(QUESTION),
+            Message::BlockAssistant(BlockAssistantMessage::new(blocks, StopReason::ToolUse)),
+            tool_output("e"),
+        ];
+        let own = body_on_the_wire(service.client(&process), transcript.clone()).await;
+        let own_input = own["input"].as_array().expect("input");
+        assert!(
+            own_input
+                .iter()
+                .any(|item| item["type"] == "message" && item["id"] == "msg_e"),
+            "{service:?}: its own identified empty message replays: {own}"
+        );
+        let restarted = new_process();
+        let body = body_on_the_wire(service.client(&restarted), transcript).await;
+        assert_wholly_dropped(&format!("{service:?}, cold load"), &body);
+        assert_eq!(
+            body["input"],
+            input_of([vec![user_item(QUESTION)], dropped_tool_step("e")]),
+            "{service:?}: no empty assistant message in the dropped form"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1535,10 +1840,10 @@ mod copilot_route {
     /// The client the provider runtime builds for an OpenAI model's GitHub
     /// Copilot `/responses` route. Like every client a host builds, it
     /// shares the process's ledger.
-    fn route_client(base: String) -> Arc<dyn LlmClient> {
+    fn route_client() -> Arc<dyn LlmClient> {
         copilot_openai_route_client(
             meerkat_copilot::CopilotEndpoint::Responses,
-            base,
+            endpoint("copilot-route"),
             Arc::new(CopilotTokenAuthorizer),
             &CopilotOpenAiRouteTarget {
                 model: MODEL.to_string(),
@@ -1552,29 +1857,19 @@ mod copilot_route {
     }
 
     /// The public API client a host builds, sharing the process's ledger.
-    fn public_api_client(base: String) -> Arc<dyn LlmClient> {
+    fn public_api_client() -> Arc<dyn LlmClient> {
         Arc::new(OpenAiClient::new_with_base_url(
             "test-key".to_string(),
-            base,
+            endpoint("public-api"),
         ))
     }
 
-    async fn first_step(
-        build: impl FnOnce(String) -> Arc<dyn LlmClient>,
-        turn: &str,
-    ) -> Vec<Message> {
-        let (_, events) = send(
-            build,
-            &request(vec![user(QUESTION)]),
-            &tool_step_response(turn),
-        )
-        .await;
+    async fn first_step(client: Arc<dyn LlmClient>, turn: &str) -> Vec<Message> {
+        let history = vec![user(QUESTION)];
+        let (_, blocks) = stored_step(client, &history, &tool_step_response(turn)).await;
         vec![
             user(QUESTION),
-            Message::BlockAssistant(BlockAssistantMessage::new(
-                committed_blocks(events),
-                StopReason::ToolUse,
-            )),
+            Message::BlockAssistant(BlockAssistantMessage::new(blocks, StopReason::ToolUse)),
             tool_output(turn),
         ]
     }
@@ -1584,8 +1879,8 @@ mod copilot_route {
     /// The route's request carries no reasoning item of the public API.
     #[tokio::test]
     async fn the_copilot_route_is_not_sent_public_api_reasoning() {
-        let transcript = first_step(public_api_client, "public_then_route").await;
-        let body = body_on_the_wire(route_client, transcript).await;
+        let transcript = first_step(public_api_client(), "public_then_route").await;
+        let body = body_on_the_wire(route_client(), transcript).await;
         assert_wholly_dropped("public API -> Copilot route", &body);
         assert_eq!(
             body["input"],
@@ -1598,16 +1893,17 @@ mod copilot_route {
 
     /// Two clients of one service in one process share what the process
     /// received: a step one Copilot route client received replays through
-    /// another, and does not replay to the public API.
+    /// another built for the same API base, and does not replay to the
+    /// public API.
     #[tokio::test]
     async fn clients_of_one_process_share_what_it_received() {
-        let transcript = first_step(route_client, "route_shared").await;
-        let body = body_on_the_wire(route_client, transcript.clone()).await;
+        let transcript = first_step(route_client(), "route_shared").await;
+        let body = body_on_the_wire(route_client(), transcript.clone()).await;
         assert_eq!(
             body["input"],
             input_of([vec![user_item(QUESTION)], native_tool_step("route_shared")])
         );
-        let body = body_on_the_wire(public_api_client, transcript).await;
+        let body = body_on_the_wire(public_api_client(), transcript).await;
         assert_wholly_dropped("Copilot route -> public API", &body);
     }
 }

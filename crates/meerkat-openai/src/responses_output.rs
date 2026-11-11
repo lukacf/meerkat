@@ -876,7 +876,9 @@ mod tests {
         let restored: Session =
             serde_json::from_slice(&serde_json::to_vec(&session).unwrap()).unwrap();
         assert_eq!(restored.messages(), session.messages());
-        let replay_client = OpenAiClient::new("unused".into());
+        // The rows are read back by the process that received them: a
+        // client of the same service in the same process.
+        let replay_client = OpenAiClient::new("unused".into()).having_received(restored.messages());
         let projected = replay_client
             .project_replay_messages(restored.messages())
             .unwrap();
@@ -934,6 +936,7 @@ mod tests {
                 meerkat_core::StopReason::MaxTokens,
             ),
         )];
+        let client = client.having_received(&messages);
         let projected = client.project_replay_messages(&messages).unwrap();
         let body = client
             .build_request_body(&LlmRequest::new("gpt-6-astra", projected))
@@ -1316,10 +1319,11 @@ mod tests {
         expected: &[(&str, &str)],
         case: &str,
     ) {
-        let client = OpenAiClient::new("unused".into());
-        let projected = client
-            .project_replay_messages(&[Message::BlockAssistant(assistant)])
-            .unwrap();
+        // Replayed to the service the step came from, in the process that
+        // received it.
+        let messages = [Message::BlockAssistant(assistant)];
+        let client = OpenAiClient::new("unused".into()).having_received(&messages);
+        let projected = client.project_replay_messages(&messages).unwrap();
         let body = client
             .build_request_body(&LlmRequest::new("gpt-5.5", projected))
             .unwrap();

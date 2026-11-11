@@ -5,52 +5,143 @@ use crate::{
     SystemNoticeMessage, ToolResult,
 };
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
-/// How many responses a ledger remembers before it forgets the oldest. The
-/// material of a forgotten response is of unknown issuer again.
-const OPENAI_CONTINUITY_LEDGER_CAPACITY: usize = 16_384;
+/// How many responses one generation of a ledger holds. A ledger keeps two
+/// generations, so it remembers between this many and twice this many of
+/// the most recent responses.
+const OPENAI_CONTINUITY_LEDGER_GENERATION: usize = 4_096;
+
+/// How many pieces of material (provider metadata values and hosted-tool
+/// items) one response may record. A response that carries more is not
+/// recorded and stays of unknown issuer.
+const OPENAI_CONTINUITY_LEDGER_RESPONSE_MATERIAL: usize = 64;
+
+/// One piece of continuity material an assistant step carries: an
+/// OpenAI-family provider metadata value, or a hosted-tool item, whose
+/// provider-issued id lives inside its content.
+#[derive(Debug, Clone, Copy)]
+pub enum OpenAiContinuityMaterial<'a> {
+    Metadata(&'a ProviderMeta),
+    HostedToolItem(&'a serde_json::Value),
+}
+
+impl<'a> OpenAiContinuityMaterial<'a> {
+    /// The material the block `block` carries: its OpenAI-family provider
+    /// metadata, and its content when it is a hosted-tool block.
+    pub fn of_block(block: &'a AssistantBlock) -> impl Iterator<Item = Self> + 'a {
+        let metadata = replay_provider_metadata(block)
+            .filter(|metadata| {
+                ReplayWireFamily::from_provider_metadata(metadata) == ReplayWireFamily::OpenAi
+            })
+            .map(Self::Metadata);
+        let hosted = match block {
+            AssistantBlock::ServerToolContent { content, .. } => {
+                Some(Self::HostedToolItem(content))
+            }
+            _ => None,
+        };
+        metadata.into_iter().chain(hosted)
+    }
+
+    /// The identity of the material: a digest of the whole value as it is
+    /// stored. `None` for metadata of another provider family.
+    fn key(self) -> Option<[u8; 32]> {
+        let (kind, stored) = match self {
+            Self::Metadata(metadata) => {
+                if ReplayWireFamily::from_provider_metadata(metadata) != ReplayWireFamily::OpenAi {
+                    return None;
+                }
+                (&b"metadata\0"[..], serde_json::to_vec(metadata).ok()?)
+            }
+            Self::HostedToolItem(content) => (
+                &b"hosted-tool-item\0"[..],
+                serde_json::to_vec(content).ok()?,
+            ),
+        };
+        let mut hasher = Sha256::new();
+        hasher.update(b"openai-continuity-material\0");
+        hasher.update(kind);
+        hasher.update(&stored);
+        Some(hasher.finalize().into())
+    }
+}
 
 /// What this process knows about which service issued OpenAI-family
-/// continuity material (reasoning items, message items, response ids).
+/// continuity material (reasoning items, message items, response ids,
+/// hosted-tool items).
 ///
 /// A client records each response it receives; replay asks whether an
 /// assistant step of a transcript is one this process received from the
-/// service it is about to be sent to
-/// ([`replay_admits_provider_metadata`]). The knowledge is of the running
-/// process only: it is never serialized, so another process, or this one
-/// after a restart, knows nothing about the material in a stored transcript
-/// and treats it as of unknown issuer.
+/// service it is about to be sent to ([`ReplayStepAdmission`]). The
+/// knowledge is of the running process only: it is never serialized, so
+/// another process, or this one after a restart, knows nothing about the
+/// material in a stored transcript and treats it as of unknown issuer.
 ///
-/// The ledger is keyed by the material itself (a digest of each provider
-/// metadata value exactly as it is stored: id, ciphertext, response id,
-/// phase), not by the message that carries it, so a clone, a fork, a rewrite
-/// or a serialization round trip of the transcript inside the process does
-/// not lose it, and no message type carries the issuer. Material two issuers
-/// both returned byte for byte is contested and belongs to neither.
+/// The ledger is keyed by the material itself (a SHA-256 of each provider
+/// metadata value and each hosted-tool item exactly as it is stored: id,
+/// ciphertext, response id, phase, item content), not by the message that
+/// carries it, so a clone, a fork, a rewrite or a serialization round trip
+/// of the transcript inside the process does not lose it, and no message
+/// type carries the issuer. Material two issuers both returned byte for
+/// byte is contested and belongs to neither.
 ///
-/// A response is recorded, known and forgotten as a whole: one entry of a
-/// 32-byte digest and the issuer per metadata value, grouped by response, at
-/// most 16,384 responses, oldest response forgotten first.
-/// One ledger serves every session of the process, because the issuer is the
-/// service and not the session.
+/// Bound: digests only, never material. A response records at most 64
+/// pieces of material (one that carries more is not recorded). The ledger
+/// holds two generations of 4,096 responses each: when the current
+/// generation is full the previous one is forgotten as a whole and the
+/// current one becomes the previous, so the ledger remembers the most
+/// recent 4,096 to 8,192 responses and forgets in batches, never one step
+/// per request. An entry is a 32-byte digest and a 4-byte issuer index:
+/// about 1.5 MiB for 8,192 typical responses of four pieces each, and at
+/// most about 24 MiB when every response carries 64.
+///
+/// One ledger serves every session of the process, because the issuer is
+/// the service and not the session. It holds plain `std::sync` state, takes
+/// its lock only inside its own synchronous methods, and recovers a
+/// poisoned lock instead of failing other sessions.
 pub struct OpenAiContinuityLedger {
     inner: Mutex<OpenAiContinuityLedgerInner>,
-    capacity: usize,
+    generation: usize,
 }
 
 #[derive(Default)]
 struct OpenAiContinuityLedgerInner {
-    entries: HashMap<[u8; 32], OpenAiContinuityLedgerEntry>,
-    /// The metadata values each recorded response added, oldest first.
-    responses: VecDeque<Vec<[u8; 32]>>,
+    /// Every issuer this ledger has recorded material for; entries hold an
+    /// index into it.
+    issuers: Vec<OpenAiContinuityIssuer>,
+    current: HashMap<[u8; 32], OpenAiContinuityLedgerEntry>,
+    previous: HashMap<[u8; 32], OpenAiContinuityLedgerEntry>,
+    /// Responses recorded into `current`.
+    current_responses: usize,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum OpenAiContinuityLedgerEntry {
-    Issuer(OpenAiContinuityIssuer),
+    Issuer(u32),
     /// Two issuers returned this exact material: it identifies neither.
     Contested,
+}
+
+impl OpenAiContinuityLedgerInner {
+    fn entry(&self, key: &[u8; 32]) -> Option<OpenAiContinuityLedgerEntry> {
+        self.current
+            .get(key)
+            .or_else(|| self.previous.get(key))
+            .copied()
+    }
+
+    fn issuer_index(&mut self, issuer: &OpenAiContinuityIssuer) -> Option<u32> {
+        let index = match self.issuers.iter().position(|known| known == issuer) {
+            Some(index) => index,
+            None => {
+                self.issuers.push(issuer.clone());
+                self.issuers.len() - 1
+            }
+        };
+        u32::try_from(index).ok()
+    }
 }
 
 impl Default for OpenAiContinuityLedger {
@@ -62,7 +153,7 @@ impl Default for OpenAiContinuityLedger {
 impl std::fmt::Debug for OpenAiContinuityLedger {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OpenAiContinuityLedger")
-            .field("capacity", &self.capacity)
+            .field("generation", &self.generation)
             .finish_non_exhaustive()
     }
 }
@@ -71,15 +162,15 @@ impl OpenAiContinuityLedger {
     /// An empty ledger: one that has received nothing, as a new process.
     #[must_use]
     pub fn new() -> Self {
-        Self::with_capacity(OPENAI_CONTINUITY_LEDGER_CAPACITY)
+        Self::with_generation(OPENAI_CONTINUITY_LEDGER_GENERATION)
     }
 
-    /// An empty ledger that remembers at most `responses` responses.
+    /// An empty ledger whose generations hold `responses` responses each.
     #[must_use]
-    pub fn with_capacity(responses: usize) -> Self {
+    pub fn with_generation(responses: usize) -> Self {
         Self {
             inner: Mutex::new(OpenAiContinuityLedgerInner::default()),
-            capacity: responses,
+            generation: responses.max(1),
         }
     }
 
@@ -91,62 +182,63 @@ impl OpenAiContinuityLedger {
         Arc::clone(PROCESS.get_or_init(|| Arc::new(Self::new())))
     }
 
-    /// The identity of the material `metadata` carries: a digest of the
-    /// whole value as it is stored. `None` for metadata of another provider
-    /// family.
-    fn material_key(metadata: &ProviderMeta) -> Option<[u8; 32]> {
-        if ReplayWireFamily::from_provider_metadata(metadata) != ReplayWireFamily::OpenAi {
-            return None;
-        }
-        let stored = serde_json::to_vec(metadata).ok()?;
-        let mut hasher = Sha256::new();
-        hasher.update(b"openai-continuity-material\0");
-        hasher.update(&stored);
-        Some(hasher.finalize().into())
-    }
-
     /// Record one response this process received from `issuer`: every
-    /// OpenAI-family metadata value it carried, as a whole.
+    /// piece of material it carried, as a whole.
     pub fn record_response<'a>(
         &self,
         issuer: &OpenAiContinuityIssuer,
-        metadata: impl IntoIterator<Item = &'a ProviderMeta>,
+        material: impl IntoIterator<Item = OpenAiContinuityMaterial<'a>>,
     ) {
-        let keys: Vec<[u8; 32]> = metadata
+        let mut keys: Vec<[u8; 32]> = Vec::new();
+        for key in material
             .into_iter()
-            .filter_map(Self::material_key)
-            .collect();
+            .filter_map(OpenAiContinuityMaterial::key)
+        {
+            if !keys.contains(&key) {
+                keys.push(key);
+            }
+            if keys.len() > OPENAI_CONTINUITY_LEDGER_RESPONSE_MATERIAL {
+                return;
+            }
+        }
         if keys.is_empty() {
             return;
         }
         let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
-        let mut added = Vec::with_capacity(keys.len());
+        let Some(index) = inner.issuer_index(issuer) else {
+            return;
+        };
         for key in keys {
-            match inner.entries.get_mut(&key) {
-                Some(OpenAiContinuityLedgerEntry::Issuer(recorded)) if recorded == issuer => {}
-                Some(entry) => *entry = OpenAiContinuityLedgerEntry::Contested,
-                None => {
-                    inner
-                        .entries
-                        .insert(key, OpenAiContinuityLedgerEntry::Issuer(issuer.clone()));
-                    added.push(key);
+            let entry = match inner.entry(&key) {
+                None => OpenAiContinuityLedgerEntry::Issuer(index),
+                Some(OpenAiContinuityLedgerEntry::Issuer(recorded)) if recorded == index => {
+                    OpenAiContinuityLedgerEntry::Issuer(index)
                 }
-            }
+                Some(_) => OpenAiContinuityLedgerEntry::Contested,
+            };
+            inner.current.insert(key, entry);
         }
-        inner.responses.push_back(added);
-        while inner.responses.len() > self.capacity {
-            if let Some(oldest) = inner.responses.pop_front() {
-                for key in oldest {
-                    inner.entries.remove(&key);
-                }
-            }
+        inner.current_responses += 1;
+        if inner.current_responses >= self.generation {
+            inner.previous = std::mem::take(&mut inner.current);
+            inner.current_responses = 0;
         }
     }
 
+    /// Record the assistant step `step` as one response received from
+    /// `issuer`.
+    pub fn record_step(&self, issuer: &OpenAiContinuityIssuer, step: &[AssistantBlock]) {
+        self.record_response(
+            issuer,
+            step.iter().flat_map(OpenAiContinuityMaterial::of_block),
+        );
+    }
+
     /// Whether this process received the assistant step `step` from
-    /// `issuer`: every OpenAI-family metadata value its blocks carry is
-    /// material `issuer`, and no other issuer, returned. A step is known as a
-    /// whole or not at all.
+    /// `issuer`: the step carries material, and every piece of it is
+    /// material `issuer`, and no other issuer, returned. A step is known as
+    /// a whole or not at all, and a step that carries no material proves
+    /// nothing.
     #[must_use]
     pub fn received_step_from(
         &self,
@@ -154,13 +246,22 @@ impl OpenAiContinuityLedger {
         step: &[AssistantBlock],
     ) -> bool {
         let inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
-        step.iter()
-            .filter_map(replay_provider_metadata)
-            .filter_map(Self::material_key)
-            .all(|key| match inner.entries.get(&key) {
-                Some(OpenAiContinuityLedgerEntry::Issuer(recorded)) => recorded == issuer,
-                Some(OpenAiContinuityLedgerEntry::Contested) | None => false,
-            })
+        let Some(index) = inner
+            .issuers
+            .iter()
+            .position(|known| known == issuer)
+            .and_then(|index| u32::try_from(index).ok())
+        else {
+            return false;
+        };
+        let mut material = step
+            .iter()
+            .flat_map(OpenAiContinuityMaterial::of_block)
+            .filter_map(OpenAiContinuityMaterial::key)
+            .peekable();
+        material.peek().is_some()
+            && material
+                .all(|key| inner.entry(&key) == Some(OpenAiContinuityLedgerEntry::Issuer(index)))
     }
 }
 
@@ -184,11 +285,121 @@ pub struct ReplaySystemNoticeContentIndex(pub usize);
 /// The provider wire grammar that receives replay, independently of account
 /// provider identity. Self-hosted and Copilot OpenAI-compatible endpoints use
 /// [`Self::OpenAi`].
+///
+/// The grammar says which shapes a target parses. It does not say whose
+/// opaque continuity material the target can read: every OpenAI-wire service
+/// parses a reasoning item, and only the service that issued one can decrypt
+/// it. [`ReplayStepAdmission`] decides that.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplayWireFamily {
     Anthropic,
     OpenAi,
     Gemini,
+}
+
+/// An OpenAI-wire replay target as a receiver of continuity material: the
+/// service it is, and the ledger that knows what this process received from
+/// which service.
+#[derive(Debug, Clone)]
+pub struct OpenAiContinuityTarget {
+    issuer: OpenAiContinuityIssuer,
+    ledger: Arc<OpenAiContinuityLedger>,
+}
+
+impl OpenAiContinuityTarget {
+    #[must_use]
+    pub fn new(issuer: OpenAiContinuityIssuer, ledger: Arc<OpenAiContinuityLedger>) -> Self {
+        Self { issuer, ledger }
+    }
+
+    /// The service this target is.
+    #[must_use]
+    pub fn issuer(&self) -> &OpenAiContinuityIssuer {
+        &self.issuer
+    }
+}
+
+/// The one owner of the question "may this provider continuity metadata be
+/// replayed to this target", answered for one assistant step (the output of
+/// one provider response).
+///
+/// Metadata is admitted when it is of the target's wire family and, for the
+/// OpenAI family, when the whole step is one this process received from the
+/// service the target is. A step is admitted as a whole or not at all: a
+/// reasoning item, the items beside it and the ids they carry go together,
+/// so no item can keep a provider id whose companion was left out. A step
+/// this process did not receive (a transcript from a store, another process,
+/// a forgotten response), a step another service returned, and any step for
+/// a target that does not say which service it is, are not admitted.
+///
+/// Anthropic and Gemini metadata records no issuer, so for those families
+/// the wire family alone decides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplayStepAdmission {
+    wire_family: ReplayWireFamily,
+    openai_step_received: bool,
+}
+
+impl ReplayStepAdmission {
+    /// Decide for the assistant step `step` of a transcript replayed to a
+    /// target of `wire_family` that, on the OpenAI wire, is the service
+    /// `openai` names. This is the only reader of the continuity ledger.
+    #[must_use]
+    pub fn of(
+        wire_family: ReplayWireFamily,
+        openai: Option<&OpenAiContinuityTarget>,
+        step: &[AssistantBlock],
+    ) -> Self {
+        let openai_step_received = wire_family == ReplayWireFamily::OpenAi
+            && openai.is_some_and(|target| target.ledger.received_step_from(&target.issuer, step));
+        Self {
+            wire_family,
+            openai_step_received,
+        }
+    }
+
+    /// Whether `metadata`, carried by a block of the step, may be replayed
+    /// to the target.
+    #[must_use]
+    pub fn admits(&self, metadata: &ProviderMeta) -> bool {
+        if ReplayWireFamily::from_provider_metadata(metadata) != self.wire_family {
+            return false;
+        }
+        match self.wire_family {
+            ReplayWireFamily::OpenAi => self.openai_step_received,
+            ReplayWireFamily::Anthropic | ReplayWireFamily::Gemini => true,
+        }
+    }
+
+    /// Whether the step's provider-issued items that carry their identity
+    /// in their own content (hosted-tool items, which hold a provider item
+    /// id and are paired with the step's reasoning item) may be replayed to
+    /// the target. On the OpenAI wire they follow their step; the other
+    /// wire families decide by their own content rules, as before.
+    #[must_use]
+    pub fn admits_provider_items(&self) -> bool {
+        match self.wire_family {
+            ReplayWireFamily::OpenAi => self.openai_step_received,
+            ReplayWireFamily::Anthropic | ReplayWireFamily::Gemini => true,
+        }
+    }
+
+    /// Remove from `block`, a block of the step, continuity metadata the
+    /// target does not admit.
+    #[must_use]
+    pub fn strip_foreign_metadata(&self, mut block: AssistantBlock) -> AssistantBlock {
+        if replay_provider_metadata(&block).is_some_and(|metadata| !self.admits(metadata)) {
+            match &mut block {
+                AssistantBlock::Text { meta, .. }
+                | AssistantBlock::Transcript { meta, .. }
+                | AssistantBlock::Reasoning { meta, .. }
+                | AssistantBlock::ToolUse { meta, .. }
+                | AssistantBlock::ServerToolContent { meta, .. } => *meta = None,
+                AssistantBlock::Image { .. } => {}
+            }
+        }
+        block
+    }
 }
 
 impl ReplayWireFamily {
@@ -205,22 +416,14 @@ impl ReplayWireFamily {
         }
     }
 
-    /// Remove continuity metadata that was issued by a different wire family.
+    /// Remove continuity metadata a target of this wire family that names
+    /// no OpenAI service does not admit ([`ReplayStepAdmission`]): metadata
+    /// of another wire family and, on the OpenAI wire, all of it. An
+    /// OpenAI-wire target that knows which service it is asks its plan
+    /// ([`ReplayPlan::step_admission`]).
     #[must_use]
-    pub fn strip_foreign_metadata(self, mut block: AssistantBlock) -> AssistantBlock {
-        if replay_provider_metadata(&block)
-            .is_some_and(|metadata| Self::from_provider_metadata(metadata) != self)
-        {
-            match &mut block {
-                AssistantBlock::Text { meta, .. }
-                | AssistantBlock::Transcript { meta, .. }
-                | AssistantBlock::Reasoning { meta, .. }
-                | AssistantBlock::ToolUse { meta, .. }
-                | AssistantBlock::ServerToolContent { meta, .. } => *meta = None,
-                AssistantBlock::Image { .. } => {}
-            }
-        }
-        block
+    pub fn strip_foreign_metadata(self, block: AssistantBlock) -> AssistantBlock {
+        ReplayStepAdmission::of(self, None, &[]).strip_foreign_metadata(block)
     }
 }
 
@@ -376,6 +579,10 @@ pub enum ReplayPlanError {
 pub struct ReplayPlan {
     target: ReplayTarget,
     entries: Vec<ReplayPlanEntry>,
+    /// The admission of each source message's step, by message index;
+    /// decided once when the plan is built. A message that is not an
+    /// assistant step holds the admission of an empty step.
+    admissions: Vec<ReplayStepAdmission>,
 }
 
 /// O(1) ordered replay-plan verifier. Adapters pass the source and their
@@ -615,10 +822,32 @@ impl ReplayApplication<'_> {
 }
 
 impl ReplayPlan {
+    /// Plan the replay of `messages` to `target`. An OpenAI-wire target
+    /// planned this way names no service, so no OpenAI-family continuity
+    /// metadata is admitted
+    /// ([`Self::build_with_openai_continuity`] names one).
     pub fn build(messages: &[Message], target: ReplayTarget) -> Result<Self, ReplayPlanError> {
+        Self::build_with_openai_continuity(messages, target, None)
+    }
+
+    /// Plan the replay of `messages` to `target`, which on the OpenAI wire
+    /// is the service `openai` names: a step is admitted only when this
+    /// process received it from that service ([`ReplayStepAdmission`]).
+    pub fn build_with_openai_continuity(
+        messages: &[Message],
+        target: ReplayTarget,
+        openai: Option<&OpenAiContinuityTarget>,
+    ) -> Result<Self, ReplayPlanError> {
+        let mut admissions = Vec::with_capacity(messages.len());
         let mut entries = Vec::new();
         for (message_index, message) in messages.iter().enumerate() {
             let index = ReplayMessageIndex(message_index);
+            let step: &[AssistantBlock] = match message {
+                Message::BlockAssistant(assistant) => &assistant.blocks,
+                _ => &[],
+            };
+            let admission = ReplayStepAdmission::of(target.wire_family, openai, step);
+            admissions.push(admission);
             entries.push(ReplayPlanEntry {
                 subject: ReplaySubject::Message(index),
                 disposition: match message {
@@ -655,9 +884,7 @@ impl ReplayPlan {
                                     message: index,
                                     block: block_index,
                                 },
-                                disposition: if ReplayWireFamily::from_provider_metadata(meta)
-                                    == target.wire_family
-                                {
+                                disposition: if admission.admits(meta) {
                                     ReplayDisposition::ProviderNative
                                 } else {
                                     ReplayDisposition::Omit
@@ -724,7 +951,21 @@ impl ReplayPlan {
                 Message::System(_) => {}
             }
         }
-        Ok(Self { target, entries })
+        Ok(Self {
+            target,
+            entries,
+            admissions,
+        })
+    }
+
+    /// The admission of the assistant step at `message` of the planned
+    /// transcript: which of its continuity metadata the target is sent.
+    #[must_use]
+    pub fn step_admission(&self, message: ReplayMessageIndex) -> ReplayStepAdmission {
+        self.admissions
+            .get(message.0)
+            .copied()
+            .unwrap_or_else(|| ReplayStepAdmission::of(self.target.wire_family, None, &[]))
     }
 
     #[must_use]
@@ -751,7 +992,7 @@ impl ReplayPlan {
         application: ReplayApplication<'_>,
     ) -> Result<(), ReplayPlanError> {
         application.finish()?;
-        validate_final_projection(source, projected, self.target)?;
+        validate_final_projection(source, projected, self)?;
         validate_tool_adjacency(projected)
     }
 }
@@ -759,8 +1000,9 @@ impl ReplayPlan {
 fn validate_final_projection(
     source: &[Message],
     projected: &[Message],
-    target: ReplayTarget,
+    plan: &ReplayPlan,
 ) -> Result<(), ReplayPlanError> {
+    let target = plan.target;
     let mut projected_index = 0;
     for (message_index, source_message) in source.iter().enumerate() {
         let message_index = ReplayMessageIndex(message_index);
@@ -777,6 +1019,7 @@ fn validate_final_projection(
                 source_assistant,
                 projected_assistant,
                 target,
+                plan.step_admission(message_index),
             )?;
             projected_index += usize::from(consumed);
             continue;
@@ -860,6 +1103,7 @@ fn validate_final_assistant_projection(
     source: &crate::BlockAssistantMessage,
     projected: Option<&crate::BlockAssistantMessage>,
     target: ReplayTarget,
+    admission: ReplayStepAdmission,
 ) -> Result<bool, ReplayPlanError> {
     let requires_message = source.blocks.iter().any(|block| {
         matches!(
@@ -879,7 +1123,7 @@ fn validate_final_assistant_projection(
             !source
                 .blocks
                 .iter()
-                .any(|block| assistant_block_matches_target(block, first, target))
+                .any(|block| assistant_block_matches_target(block, first, admission))
         })
     {
         return Ok(false);
@@ -901,7 +1145,7 @@ fn validate_final_assistant_projection(
         let actual = projected.blocks.get(projected_block);
         let consumes = match disposition {
             ReplayDisposition::Preserve => {
-                validate_final_assistant_block(subject, source_block, actual, target)?;
+                validate_final_assistant_block(subject, source_block, actual, admission)?;
                 true
             }
             ReplayDisposition::LowerToText => {
@@ -916,9 +1160,9 @@ fn validate_final_assistant_projection(
             ReplayDisposition::Omit => false,
             ReplayDisposition::ProviderNative => {
                 if actual.is_some_and(|block| {
-                    assistant_block_matches_target(source_block, block, target)
+                    assistant_block_matches_target(source_block, block, admission)
                 }) {
-                    validate_final_assistant_block(subject, source_block, actual, target)?;
+                    validate_final_assistant_block(subject, source_block, actual, admission)?;
                     true
                 } else {
                     false
@@ -940,16 +1184,14 @@ fn validate_final_assistant_block(
     subject: ReplaySubject,
     source: &AssistantBlock,
     projected: Option<&AssistantBlock>,
-    target: ReplayTarget,
+    admission: ReplayStepAdmission,
 ) -> Result<(), ReplayPlanError> {
     if !assistant_payload_eq(source, projected) {
         return Err(projection_mismatch(subject, ReplayDisposition::Preserve));
     }
     let source_meta = assistant_meta(source);
     let projected_meta = projected.and_then(assistant_meta);
-    let expected_meta = source_meta.filter(|metadata| {
-        ReplayWireFamily::from_provider_metadata(metadata) == target.wire_family
-    });
+    let expected_meta = source_meta.filter(|metadata| admission.admits(metadata));
     if projected_meta != expected_meta {
         return Err(projection_mismatch(
             subject,
@@ -962,14 +1204,12 @@ fn validate_final_assistant_block(
 fn assistant_block_matches_target(
     source: &AssistantBlock,
     projected: &AssistantBlock,
-    target: ReplayTarget,
+    admission: ReplayStepAdmission,
 ) -> bool {
     if !assistant_payload_eq(source, Some(projected)) {
         return false;
     }
-    let expected_meta = assistant_meta(source).filter(|metadata| {
-        ReplayWireFamily::from_provider_metadata(metadata) == target.wire_family
-    });
+    let expected_meta = assistant_meta(source).filter(|metadata| admission.admits(metadata));
     assistant_meta(projected) == expected_meta
 }
 

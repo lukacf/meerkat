@@ -35,6 +35,105 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- Behaviour-only (not measured by the gate): `meerkat-core`:
+  `ReplayPlan::build` with an OpenAI-wire `ReplayTarget`, and
+  `ReplayWireFamily::OpenAi.strip_foreign_metadata`, no longer keep
+  OpenAI-family provider metadata: a target planned that way names no service,
+  so none of that metadata is its own. A provider adapter for an OpenAI-wire
+  service plans with `ReplayPlan::build_with_openai_continuity` and asks
+  `ReplayPlan::step_admission` (see Added and Fixed). Anthropic and Gemini
+  targets are unchanged.
+
+### Added
+
+- `meerkat-core`: `OpenAiContinuityIssuer` (a kind of service,
+  `OpenAiContinuityService`, at an endpoint: `at_base_url`,
+  `self_hosted_server`, `service`), `OpenAiContinuityLedger` (what the
+  running process received from which service: `new`, `with_generation`,
+  `process`, `record_response`, `record_step`, `received_step_from`),
+  `OpenAiContinuityMaterial`, `OpenAiContinuityTarget`,
+  `ReplayStepAdmission` (`of`, `admits`, `admits_provider_items`,
+  `strip_foreign_metadata`: the one owner of whether a step's provider
+  material is replayed to a target), `ReplayPlan::
+  build_with_openai_continuity` and `ReplayPlan::step_admission`. None of
+  them has a serialized form.
+
+- `meerkat-llm-core`: `LlmReplayProjection::with_replay_witness` and
+  `messages`, and `PreparedLlmRequest::replay_witness`: a projecting client's
+  own evidence of what it decided, carried with the request beside the route
+  witness.
+
+- `meerkat-openai`: `OpenAiClient::continuity_issuer`, `continuity_ledger`
+  and `with_continuity_ledger`, and `OpenAiCompatibleClient::
+  with_self_hosted_server`, `continuity_issuer` and `with_continuity_ledger`.
+  A client is the issuer its service kind and base URL make it; a self-hosted
+  client that declares its configured server is that server.
+  `with_continuity_ledger` gives a client a record of its own in place of
+  the process's.
+
+### Fixed
+
+- `meerkat-openai`, `meerkat-core`: a session whose history one OpenAI-wire
+  service produced no longer fails its first turn on another. Before, the
+  turn ended with a provider refusal (for example `Invalid request:
+  {"error":{"message":"","code":"invalid_request_body"}}` from GitHub
+  Copilot for a history the public OpenAI API produced), because encrypted
+  reasoning items, hosted-tool items, item ids and response ids were replayed
+  to every backend that speaks the Responses grammar (the public OpenAI API,
+  the ChatGPT backend, Azure OpenAI, GitHub Copilot, self-hosted servers),
+  and only the service that issued such material can read it. This could
+  happen between a self-hosted `responses` server and another backend since
+  0.5.2, and between the public OpenAI API and GitHub Copilot since 0.8.31,
+  through 0.9.13. A model or route fallback inside one turn took the same
+  path.
+
+  Such material is now replayed only to the service the running process
+  received it from. A service is a kind of backend at an endpoint: the base
+  URL requests go to, or the configured self-hosted server
+  (`[self_hosted.servers.<id>]`); two Azure OpenAI resources, two
+  self-hosted servers, and the public API behind another base URL are
+  different services. A step (one provider response) the process received
+  from the target service replays exactly as before. Any other step is sent
+  as the conversation it was, in the form a history from another provider
+  family already takes: the assistant text as a plain message, each tool
+  call and its output paired by `call_id`, and no reasoning item, hosted-tool
+  item, item id, phase or `previous_response_id`. A step is replayed whole
+  or in that form, never in part, and one request can carry both kinds.
+
+  The cost, stated plainly: a process knows the issuer only of what it
+  received itself, and that knowledge is not stored. It is shared by every
+  session and mob of the process (the issuer is the service, not the
+  session) and is lost when the process starts again and, a generation of
+  4,096 responses at a time, once the process has received 4,096 to 8,192
+  later responses. So after a restart, or a resume from the store in a new
+  process, earlier turns are replayed without their encrypted reasoning,
+  hosted-tool call items (a web search's queries, sources and citations;
+  the answer text stays) and item ids, on the same service too; the steps
+  of the new process replay in full. Nothing in a stored session, an event,
+  an export or an SDK payload changes: 0.9.12 and this release write the
+  same rows for the same response.
+
+  With `store: true`, the `previous_response_id` shortcut is taken only when
+  the last step is one the process received from the target service. The
+  existing resend without it, when the service no longer has the response,
+  is unchanged.
+
+  An embedder that builds an `OpenAiCompatibleClient` itself and declares no
+  server (`with_self_hosted_server`) is the self-hosted server at its base
+  URL. Anthropic thinking signatures and Gemini thought signatures are still
+  replayed to every backend of their wire family.
+
+### Known limitations
+
+- The issuer of OpenAI-family continuity material is the service (a kind of
+  backend at an endpoint), not the account or organisation. Material one
+  credential received is still replayed under another credential of the
+  same service at the same endpoint inside one process (two API keys of
+  different organisations, two ChatGPT accounts, two Copilot accounts on one
+  API host). Whether a service refuses that is not known; it was not tested.
+
 ## [0.9.12] - 2026-11-10
 
 ### Highlights

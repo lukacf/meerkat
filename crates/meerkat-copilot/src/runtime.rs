@@ -1358,9 +1358,10 @@ impl meerkat_llm_core::LlmClient for CopilotRoutedClient {
     ) -> Result<meerkat_llm_core::LlmReplayProjection, meerkat_llm_core::LlmError> {
         self.refresh_prepared_route().map_err(Self::client_error)?;
         let prepared = self.prepared_route.read().clone();
-        let messages = prepared.client.project_replay_messages(messages)?;
-        Ok(meerkat_llm_core::LlmReplayProjection::new(messages)
-            .with_route_witness(meerkat_llm_core::LlmRequestRouteWitness::new(prepared)))
+        // The route client's projection carries its own replay decision;
+        // the route witness is added beside it.
+        let projection = prepared.client.project_replay_request(messages)?;
+        Ok(projection.with_route_witness(meerkat_llm_core::LlmRequestRouteWitness::new(prepared)))
     }
 
     fn project_replay_messages(

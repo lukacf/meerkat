@@ -904,24 +904,12 @@ pub enum OpenAiAssistantPhase {
     FinalAnswer,
 }
 
-/// The service that issued a piece of OpenAI-family continuity material:
-/// encrypted reasoning, a message or hosted-tool item id, a response id.
-///
-/// Every OpenAI-wire backend speaks the same Responses grammar, but such
-/// material means something only to the service that issued it: another
-/// service cannot read the ciphertext and does not know the ids. The issuer
-/// is the service, not the account or organisation that used it.
-///
-/// The four backend variants are the OpenAI backend kinds of the provider
-/// matrix ([`crate::provider_matrix::OpenAiBackendKind`]); a self-hosted
-/// server is the `[self_hosted.servers.<id>]` entry that serves the model.
-///
-/// A fact of the running process only: it has no serialized form, so it
-/// reaches no stored row, event, export or SDK payload. A process learns it
-/// when it receives the material ([`crate::OpenAiContinuityLedger`]).
+/// The kind of service that issues OpenAI-family continuity material: the
+/// OpenAI backend kinds of the provider matrix
+/// ([`crate::provider_matrix::OpenAiBackendKind`]) and self-hosted servers.
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum OpenAiContinuityIssuer {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OpenAiContinuityService {
     /// The public OpenAI API.
     OpenAiApi,
     /// The ChatGPT backend.
@@ -930,14 +918,11 @@ pub enum OpenAiContinuityIssuer {
     AzureOpenAi,
     /// GitHub Copilot.
     Copilot,
-    /// A configured self-hosted OpenAI-compatible server.
-    SelfHosted {
-        /// The server's id in `[self_hosted.servers.<id>]`.
-        server: String,
-    },
+    /// A self-hosted OpenAI-compatible server.
+    SelfHosted,
 }
 
-impl From<crate::provider_matrix::OpenAiBackendKind> for OpenAiContinuityIssuer {
+impl From<crate::provider_matrix::OpenAiBackendKind> for OpenAiContinuityService {
     fn from(kind: crate::provider_matrix::OpenAiBackendKind) -> Self {
         use crate::provider_matrix::OpenAiBackendKind;
         match kind {
@@ -947,6 +932,84 @@ impl From<crate::provider_matrix::OpenAiBackendKind> for OpenAiContinuityIssuer 
             OpenAiBackendKind::Copilot => Self::Copilot,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum OpenAiContinuityEndpoint {
+    /// The base URL requests are sent to, normalised.
+    BaseUrl(String),
+    /// A configured self-hosted server, by its `[self_hosted.servers.<id>]`
+    /// id.
+    SelfHostedServer(String),
+}
+
+/// The service that issued a piece of OpenAI-family continuity material:
+/// encrypted reasoning, a message or hosted-tool item id, a response id.
+///
+/// Every OpenAI-wire backend speaks the same Responses grammar, but such
+/// material means something only to the service that issued it: another
+/// service cannot read the ciphertext and does not know the ids. An issuer
+/// is a kind of service and the endpoint it is reached at: the base URL the
+/// client sends to, or for a configured self-hosted server its id. Two
+/// Azure OpenAI resources, two self-hosted servers and the public OpenAI API
+/// behind another base URL are therefore different issuers; the account or
+/// organisation is not part of it.
+///
+/// A fact of the running process only: it has no serialized form, so it
+/// reaches no stored row, event, export or SDK payload. A process learns it
+/// when it receives the material ([`crate::OpenAiContinuityLedger`]). It is
+/// compared by value, so it outlives the client that computed it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OpenAiContinuityIssuer {
+    service: OpenAiContinuityService,
+    endpoint: OpenAiContinuityEndpoint,
+}
+
+impl OpenAiContinuityIssuer {
+    /// A service of kind `service` reached at `base_url`.
+    #[must_use]
+    pub fn at_base_url(service: OpenAiContinuityService, base_url: &str) -> Self {
+        Self {
+            service,
+            endpoint: OpenAiContinuityEndpoint::BaseUrl(normalize_continuity_base_url(base_url)),
+        }
+    }
+
+    /// The configured self-hosted server `server`
+    /// (`[self_hosted.servers.<id>]`), wherever its base URL points.
+    #[must_use]
+    pub fn self_hosted_server(server: impl Into<String>) -> Self {
+        Self {
+            service: OpenAiContinuityService::SelfHosted,
+            endpoint: OpenAiContinuityEndpoint::SelfHostedServer(server.into()),
+        }
+    }
+
+    /// The kind of service.
+    #[must_use]
+    pub fn service(&self) -> OpenAiContinuityService {
+        self.service
+    }
+}
+
+/// The one normal form of a base URL inside an issuer: surrounding
+/// whitespace and trailing slashes removed, scheme and host in lower case
+/// (they are case-insensitive; the path is not).
+fn normalize_continuity_base_url(base_url: &str) -> String {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    let Some((scheme, rest)) = trimmed.split_once("://") else {
+        return trimmed.to_string();
+    };
+    let (host, path) = match rest.find('/') {
+        Some(index) => rest.split_at(index),
+        None => (rest, ""),
+    };
+    format!(
+        "{}://{}{}",
+        scheme.to_ascii_lowercase(),
+        host.to_ascii_lowercase(),
+        path
+    )
 }
 
 /// Provider-specific metadata for replay continuity.

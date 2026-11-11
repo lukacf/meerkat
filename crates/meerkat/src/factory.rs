@@ -7914,6 +7914,10 @@ impl AgentFactory {
                     },
                 )
                 .with_image_input_support(spec.supports_image_input)
+                // The configured server that serves the model is the issuer
+                // of the continuity material this client receives: such
+                // material is replayed to that server only.
+                .with_self_hosted_server(spec.server_id)
                 .with_static_credential(),
             );
             // The selected target the session identity will carry: the

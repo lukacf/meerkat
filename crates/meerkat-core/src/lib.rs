@@ -744,12 +744,12 @@ pub use tool_surface::{
     ToolSurfaceGateSlot, ToolSurfaceRefusal, ToolSurfaceSelection,
 };
 pub use transcript_replay::{
-    OpenAiContinuityLedger, ReplayApplication, ReplayAssistantBlockIndex, ReplayCapability,
-    ReplayDisposition, ReplayMessageIndex, ReplayPlan, ReplayPlanEntry, ReplayPlanError,
-    ReplayReasoningProjection, ReplaySubject, ReplaySystemNoticeBlockIndex,
-    ReplaySystemNoticeContentIndex, ReplayTarget, ReplayToolResultContentIndex,
-    ReplayToolResultIndex, ReplayToolResultProjection, ReplayUserContentIndex, ReplayWireFamily,
-    replay_provider_metadata,
+    OpenAiContinuityLedger, OpenAiContinuityMaterial, OpenAiContinuityTarget, ReplayApplication,
+    ReplayAssistantBlockIndex, ReplayCapability, ReplayDisposition, ReplayMessageIndex, ReplayPlan,
+    ReplayPlanEntry, ReplayPlanError, ReplayReasoningProjection, ReplayStepAdmission,
+    ReplaySubject, ReplaySystemNoticeBlockIndex, ReplaySystemNoticeContentIndex, ReplayTarget,
+    ReplayToolResultContentIndex, ReplayToolResultIndex, ReplayToolResultProjection,
+    ReplayUserContentIndex, ReplayWireFamily, replay_provider_metadata,
 };
 pub use turn_boundary::{TurnBoundaryHook, TurnBoundaryMessage};
 pub use turn_execution_authority::{
@@ -768,7 +768,7 @@ pub use types::{
     InstructionActivationIdentity, InstructionContentDigest, InstructionKey, InstructionNamespace,
     InstructionRevisionId, InstructionRevisionRef, InvalidInstructionContentDigest,
     InvalidInstructionIdentifier, LiveContextObservationId, MemoryIndexExclusion,
-    MemoryIndexableContent, Message, OpenAiContinuityIssuer, OutputSchema,
+    MemoryIndexableContent, Message, OpenAiContinuityIssuer, OpenAiContinuityService, OutputSchema,
     PROVIDER_STOP_DETAIL_TEXT_CAP, PROVIDER_STOP_DETAIL_TRUNCATION_MARKER, ProviderMeta,
     ProviderStopDetail, RetiredInstructionBody, RunInput, RunResult, SUPPORTED_VIDEO_MEDIA_TYPES,
     SecurityMode, ServerToolKind, SessionId, StopReason, SystemMessage, SystemMessageIdentity,

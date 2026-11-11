@@ -157,12 +157,10 @@ pub struct OpenAiClient {
     /// request's: the request's model and the id the wire names for it. Set
     /// by the GitHub Copilot route (`with_wire_model`).
     wire_model: Option<(String, String)>,
-    /// The service this client speaks to, as an issuer of continuity
-    /// material (encrypted reasoning, item and response ids): the backend of
-    /// `backend_wire`, or for a self-hosted client's Responses delegate the
-    /// server that client declared, if any. Material is replayed only to the
-    /// issuer this process received it from.
-    continuity_issuer: Option<meerkat_core::OpenAiContinuityIssuer>,
+    /// Which service this client is as an issuer of continuity material
+    /// (encrypted reasoning, item and response ids, hosted-tool items); see
+    /// [`Self::continuity_issuer`].
+    continuity_identity: ContinuityIdentity,
     /// What this process received from which issuer. Written by this
     /// client's response path, read by the replay owner.
     continuity_ledger: std::sync::Arc<meerkat_core::OpenAiContinuityLedger>,
@@ -181,6 +179,18 @@ impl Default for AzureOpenAiWireConfig {
             image_generation_api_version: "preview".to_string(),
         }
     }
+}
+
+/// What a client is, as an issuer of continuity material, besides the base
+/// URL it sends to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ContinuityIdentity {
+    /// The backend of the client's wire.
+    Backend,
+    /// The Responses delegate of a self-hosted client. It speaks the public
+    /// API's wire and is not the public API: it is the configured server
+    /// that client declared, or a self-hosted server known by its base URL.
+    SelfHosted { server: Option<String> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -532,6 +542,69 @@ fn project_openai_tool_result(
         .map_err(|error| invalid_replay(error.to_string()))
 }
 
+/// What a projection decided, carried with the request it prepared
+/// (`LlmReplayProjection::with_replay_witness`): the service the projecting
+/// client is, and a ledger of its own that knows exactly the steps the
+/// projection admitted. The client that later lowers, measures and sends the
+/// request reads this instead of the process ledger, so every use of one
+/// request sees one decision whatever the process receives or forgets in
+/// between.
+#[derive(Debug, Clone)]
+pub(crate) struct OpenAiReplayDecision {
+    target: meerkat_core::OpenAiContinuityTarget,
+}
+
+impl OpenAiReplayDecision {
+    /// Freeze the decision of a projection made for `issuer`: `projected`
+    /// keeps continuity material only on the steps that were admitted, so
+    /// those steps are recorded, as received from `issuer`, in a ledger
+    /// that belongs to this request and never forgets.
+    pub(crate) fn freeze(
+        issuer: &meerkat_core::OpenAiContinuityIssuer,
+        projected: &[Message],
+    ) -> Self {
+        let ledger = meerkat_core::OpenAiContinuityLedger::with_generation(usize::MAX);
+        for message in projected {
+            if let Message::BlockAssistant(assistant) = message {
+                ledger.record_step(issuer, &assistant.blocks);
+            }
+        }
+        Self {
+            target: meerkat_core::OpenAiContinuityTarget::new(
+                issuer.clone(),
+                std::sync::Arc::new(ledger),
+            ),
+        }
+    }
+
+    /// The decision as a replay target, when it was made for `issuer`.
+    pub(crate) fn target_for(
+        &self,
+        issuer: &meerkat_core::OpenAiContinuityIssuer,
+    ) -> Option<meerkat_core::OpenAiContinuityTarget> {
+        (self.target.issuer() == issuer).then(|| self.target.clone())
+    }
+
+    pub(crate) fn witness(self) -> meerkat_llm_core::LlmRequestRouteWitness {
+        meerkat_llm_core::LlmRequestRouteWitness::new(self)
+    }
+}
+
+/// Test scaffolding: record every assistant step of `messages` in `ledger`
+/// as received from `issuer`.
+#[cfg(test)]
+pub(crate) fn record_received_for_test(
+    ledger: &meerkat_core::OpenAiContinuityLedger,
+    issuer: &meerkat_core::OpenAiContinuityIssuer,
+    messages: &[Message],
+) {
+    for message in messages {
+        if let Message::BlockAssistant(assistant) = message {
+            ledger.record_step(issuer, &assistant.blocks);
+        }
+    }
+}
+
 fn openai_reasoning_replayable(
     mode: OpenAiReplayProjectionMode,
     meta: &Option<Box<ProviderMeta>>,
@@ -607,54 +680,87 @@ fn openai_response_id_from_response(response: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-fn openai_continuation_plan(request: &LlmRequest) -> Option<OpenAiContinuationPlan> {
+/// The server-side continuation a `store: true` request may ask for: the
+/// response id of the transcript's last assistant step, with only what
+/// followed it as input. The id is one of the continuity values a service
+/// issues, so the shortcut exists only when `continuity` admits that step
+/// (this process received it from the target service); a step of another
+/// service, or of unknown issuer, is never named, and neither is an older
+/// step behind it.
+fn openai_continuation_plan(
+    request: &LlmRequest,
+    continuity: Option<&meerkat_core::OpenAiContinuityTarget>,
+) -> Option<OpenAiContinuationPlan> {
     let tag = openai_tag(request)?;
     if tag.store != Some(true) {
         return None;
     }
 
-    request
-        .messages
+    let (index, assistant) =
+        request
+            .messages
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, message)| match message {
+                Message::BlockAssistant(assistant) => Some((index, assistant)),
+                _ => None,
+            })?;
+    let admission = meerkat_core::ReplayStepAdmission::of(
+        meerkat_core::ReplayWireFamily::OpenAi,
+        continuity,
+        &assistant.blocks,
+    );
+    assistant
+        .blocks
         .iter()
-        .enumerate()
         .rev()
-        .find_map(|(index, message)| {
-            let Message::BlockAssistant(assistant) = message else {
-                return None;
-            };
-            assistant
-                .blocks
-                .iter()
-                .rev()
-                .find_map(openai_response_id_from_block)
-                .map(|response_id| OpenAiContinuationPlan {
-                    previous_response_id: response_id.to_string(),
-                    replay_from_message_index: index + 1,
-                })
+        .filter(|block| {
+            meerkat_core::replay_provider_metadata(block)
+                .is_some_and(|metadata| admission.admits(metadata))
+        })
+        .find_map(openai_response_id_from_block)
+        .map(|response_id| OpenAiContinuationPlan {
+            previous_response_id: response_id.to_string(),
+            replay_from_message_index: index + 1,
         })
         .filter(|plan| plan.replay_from_message_index < request.messages.len())
 }
 
+/// Project one assistant step for an OpenAI-wire target. `admission` says
+/// whether the target is sent the step's continuity material
+/// ([`meerkat_core::ReplayStepAdmission`]). A step that is not admitted
+/// keeps what the conversation said (text, tool calls) and loses everything
+/// a service issued: its reasoning items, its hosted-tool items (they carry
+/// a provider item id and are paired with the step's reasoning item), an
+/// identity-only empty message, and the metadata of what remains.
 fn project_openai_assistant_blocks(
     replay_application: &mut meerkat_core::ReplayApplication<'_>,
+    admission: meerkat_core::ReplayStepAdmission,
     message: meerkat_core::ReplayMessageIndex,
     mode: OpenAiReplayProjectionMode,
     web_search_evidence: bool,
     blocks: &[AssistantBlock],
 ) -> Result<Vec<AssistantBlock>, LlmError> {
     let mut projected = Vec::with_capacity(blocks.len());
+    let admitted = |meta: &Option<Box<ProviderMeta>>| {
+        meta.as_deref()
+            .is_some_and(|metadata| admission.admits(metadata))
+    };
     let has_output_item = blocks.iter().any(|block| match block {
         AssistantBlock::Text { text, meta } => {
             !text.is_empty()
-                || matches!(
-                    meta.as_deref(),
-                    Some(ProviderMeta::OpenAiAssistantMessage { .. })
-                )
+                || (admitted(meta)
+                    && matches!(
+                        meta.as_deref(),
+                        Some(ProviderMeta::OpenAiAssistantMessage { .. })
+                    ))
         }
         AssistantBlock::Transcript { text, .. } => !text.is_empty(),
         AssistantBlock::ToolUse { .. } => true,
         AssistantBlock::ServerToolContent { content, .. } => {
-            openai_server_tool_content_replayable(mode, content)
+            admission.admits_provider_items()
+                && openai_server_tool_content_replayable(mode, content)
         }
         _ => false,
     });
@@ -662,15 +768,16 @@ fn project_openai_assistant_blocks(
         let projected_block = match block {
             AssistantBlock::Text { text, meta }
                 if text.is_empty()
-                    && !matches!(
-                        meta.as_deref(),
-                        Some(ProviderMeta::OpenAiAssistantMessage { .. })
-                    ) =>
+                    && !(admitted(meta)
+                        && matches!(
+                            meta.as_deref(),
+                            Some(ProviderMeta::OpenAiAssistantMessage { .. })
+                        )) =>
             {
                 None
             }
             AssistantBlock::Text { .. } | AssistantBlock::ToolUse { .. } => {
-                Some(meerkat_core::ReplayWireFamily::OpenAi.strip_foreign_metadata(block.clone()))
+                Some(admission.strip_foreign_metadata(block.clone()))
             }
             // Spoken transcripts replay back to the provider as plain text;
             // OpenAI Responses API sees the assistant's visible output
@@ -681,14 +788,15 @@ fn project_openai_assistant_blocks(
                 meta: None,
             }),
             AssistantBlock::Reasoning { meta, .. }
-                if has_output_item && openai_reasoning_replayable(mode, meta) =>
+                if has_output_item && admitted(meta) && openai_reasoning_replayable(mode, meta) =>
             {
-                Some(meerkat_core::ReplayWireFamily::OpenAi.strip_foreign_metadata(block.clone()))
+                Some(block.clone())
             }
             AssistantBlock::ServerToolContent { content, .. }
-                if openai_server_tool_content_replayable(mode, content) =>
+                if admission.admits_provider_items()
+                    && openai_server_tool_content_replayable(mode, content) =>
             {
-                Some(meerkat_core::ReplayWireFamily::OpenAi.strip_foreign_metadata(block.clone()))
+                Some(admission.strip_foreign_metadata(block.clone()))
             }
             // A message's web-search citations, on a wire that carries search
             // evidence: the Responses lowering puts them back on that
@@ -697,11 +805,12 @@ fn project_openai_assistant_blocks(
                 id: Some(_),
                 content,
                 ..
-            } if web_search_evidence
+            } if admission.admits_provider_items()
+                && web_search_evidence
                 && matches!(mode, OpenAiReplayProjectionMode::Responses)
                 && is_web_search_citations(content) =>
             {
-                Some(meerkat_core::ReplayWireFamily::OpenAi.strip_foreign_metadata(block.clone()))
+                Some(admission.strip_foreign_metadata(block.clone()))
             }
             AssistantBlock::Reasoning { .. }
             | AssistantBlock::ServerToolContent { .. }
@@ -750,14 +859,18 @@ fn project_openai_replay_messages(
     messages: &[Message],
     mode: OpenAiReplayProjectionMode,
 ) -> Result<Vec<Message>, LlmError> {
-    project_openai_replay_messages_for_capabilities(messages, mode, true, true)
+    project_openai_replay_messages_for_capabilities(messages, mode, true, true, None)
 }
 
+/// `continuity`: the service the target is and what this process received
+/// from which service; `None` for a target that issues no Responses
+/// continuity material or does not know which service it is.
 pub(crate) fn project_openai_replay_messages_for_capabilities(
     messages: &[Message],
     mode: OpenAiReplayProjectionMode,
     image_input: bool,
     image_tool_results: bool,
+    continuity: Option<&meerkat_core::OpenAiContinuityTarget>,
 ) -> Result<Vec<Message>, LlmError> {
     project_openai_replay_messages_for_target(
         messages,
@@ -765,6 +878,7 @@ pub(crate) fn project_openai_replay_messages_for_capabilities(
         image_input,
         image_tool_results,
         false,
+        continuity,
     )
 }
 
@@ -778,6 +892,7 @@ pub(crate) fn project_openai_replay_messages_for_target(
     image_input: bool,
     image_tool_results: bool,
     web_search_evidence: bool,
+    continuity: Option<&meerkat_core::OpenAiContinuityTarget>,
 ) -> Result<Vec<Message>, LlmError> {
     let mut projected = Vec::with_capacity(messages.len());
     // Responses can now accept image parts in `function_call_output.output`.
@@ -787,7 +902,7 @@ pub(crate) fn project_openai_replay_messages_for_target(
     // fresh-vs-historical projection policy instead of changing this default.
     let image_tool_results =
         matches!(mode, OpenAiReplayProjectionMode::Responses) && image_tool_results;
-    let replay_plan = meerkat_core::ReplayPlan::build(
+    let replay_plan = meerkat_core::ReplayPlan::build_with_openai_continuity(
         messages,
         meerkat_core::ReplayTarget::new(
             meerkat_core::ReplayWireFamily::OpenAi,
@@ -808,6 +923,7 @@ pub(crate) fn project_openai_replay_messages_for_target(
                 }
             },
         ),
+        continuity,
     )
     .map_err(|error| invalid_replay(error.to_string()))?;
     let mut replay_application = replay_plan.application();
@@ -872,6 +988,7 @@ pub(crate) fn project_openai_replay_messages_for_target(
             Message::BlockAssistant(assistant) => {
                 let blocks = project_openai_assistant_blocks(
                     &mut replay_application,
+                    replay_plan.step_admission(message_index),
                     message_index,
                     mode,
                     web_search_evidence,
@@ -962,7 +1079,7 @@ impl OpenAiClient {
             supports_image_input: true,
             copilot_responses_item_identity: false,
             wire_model: None,
-            continuity_issuer: Some(OpenAiBackendWire::PublicOpenAi.backend_kind().into()),
+            continuity_identity: ContinuityIdentity::Backend,
             continuity_ledger: meerkat_core::OpenAiContinuityLedger::process(),
         }
     }
@@ -980,11 +1097,39 @@ impl OpenAiClient {
         self
     }
 
+    /// Test scaffolding: this client in a process of its own that received
+    /// every assistant step of `messages` from this client's service. For
+    /// rows that write a transcript by hand and mean "this session's own
+    /// history on this service".
+    #[cfg(test)]
+    pub(crate) fn having_received(mut self, messages: &[Message]) -> Self {
+        self.continuity_ledger = std::sync::Arc::new(meerkat_core::OpenAiContinuityLedger::new());
+        record_received_for_test(&self.continuity_ledger, &self.continuity_issuer(), messages);
+        self
+    }
+
     /// The service this client speaks to, as an issuer of continuity
-    /// material; `None` when it does not know (a self-hosted client that
-    /// declared no server).
-    pub fn continuity_issuer(&self) -> Option<&meerkat_core::OpenAiContinuityIssuer> {
-        self.continuity_issuer.as_ref()
+    /// material: the kind of service its wire names and the base URL it
+    /// sends to, or for a self-hosted client's delegate the configured
+    /// server it declared (its base URL when it declared none). Computed
+    /// from what the client is, never from a wrapper around it, and compared
+    /// by value, so a client rebuilt for the same service is the same
+    /// issuer.
+    pub fn continuity_issuer(&self) -> meerkat_core::OpenAiContinuityIssuer {
+        use meerkat_core::{OpenAiContinuityIssuer, OpenAiContinuityService};
+        match &self.continuity_identity {
+            ContinuityIdentity::Backend => OpenAiContinuityIssuer::at_base_url(
+                self.backend_wire.backend_kind().into(),
+                &self.base_url,
+            ),
+            ContinuityIdentity::SelfHosted {
+                server: Some(server),
+            } => OpenAiContinuityIssuer::self_hosted_server(server.clone()),
+            ContinuityIdentity::SelfHosted { server: None } => OpenAiContinuityIssuer::at_base_url(
+                OpenAiContinuityService::SelfHosted,
+                &self.base_url,
+            ),
+        }
     }
 
     /// The record of received continuity material this client writes and
@@ -993,19 +1138,117 @@ impl OpenAiClient {
         &self.continuity_ledger
     }
 
-    /// For the self-hosted client's Responses delegate: the server that
-    /// client declared, or none.
-    pub(crate) fn with_delegate_continuity_issuer(
-        mut self,
-        issuer: Option<meerkat_core::OpenAiContinuityIssuer>,
-    ) -> Self {
-        self.continuity_issuer = issuer;
+    /// For the self-hosted client's Responses delegate: it is a
+    /// self-hosted server, the configured one `server` names when the
+    /// client was given it.
+    pub(crate) fn as_self_hosted_delegate(mut self, server: Option<String>) -> Self {
+        self.continuity_identity = ContinuityIdentity::SelfHosted { server };
         self
     }
 
-    fn set_backend_wire(&mut self, wire: OpenAiBackendWire) {
-        self.continuity_issuer = Some(wire.backend_kind().into());
-        self.backend_wire = wire;
+    /// This client as a receiver of continuity material: the service it
+    /// is and the ledger of what this process received.
+    pub(crate) fn continuity_target(&self) -> meerkat_core::OpenAiContinuityTarget {
+        meerkat_core::OpenAiContinuityTarget::new(
+            self.continuity_issuer(),
+            std::sync::Arc::clone(&self.continuity_ledger),
+        )
+    }
+
+    /// The continuity target a request is lowered against: the decision
+    /// its projection froze, when the request carries one made for this
+    /// client's service, and otherwise what the process knows now.
+    pub(crate) fn decided_continuity(
+        &self,
+        prepared: Option<&PreparedLlmRequest>,
+    ) -> meerkat_core::OpenAiContinuityTarget {
+        let issuer = self.continuity_issuer();
+        prepared
+            .and_then(|request| request.replay_witness::<OpenAiReplayDecision>())
+            .and_then(|decision| decision.target_for(&issuer))
+            .unwrap_or_else(|| self.continuity_target())
+    }
+
+    fn project_replay_messages_for(
+        &self,
+        messages: &[Message],
+        continuity: &meerkat_core::OpenAiContinuityTarget,
+    ) -> Result<Vec<Message>, LlmError> {
+        project_openai_replay_messages_for_target(
+            messages,
+            OpenAiReplayProjectionMode::Responses,
+            self.supports_image_input,
+            true,
+            self.backend_wire.carries_web_search_evidence(),
+            Some(continuity),
+        )
+    }
+
+    /// The response path's one write to the continuity ledger. When a
+    /// response ends successfully, everything it carried is recorded as
+    /// received from this client's service, as one response: the metadata
+    /// and hosted-tool items of every event and of the final output blocks.
+    /// That is a superset of what any commit path stores (the final blocks,
+    /// the blocks assembled from the events, the `[DONE]` fallback), so the
+    /// stored step is always known, and it holds nothing but material this
+    /// response itself delivered from this service, so it can make nothing
+    /// known that the process did not receive from that issuer. A response
+    /// that fails records nothing.
+    fn record_received_continuity<'a>(&'a self, inner: LlmStream<'a>) -> LlmStream<'a> {
+        let issuer = self.continuity_issuer();
+        let ledger = std::sync::Arc::clone(&self.continuity_ledger);
+        let mut metadata: Vec<ProviderMeta> = Vec::new();
+        let mut hosted_items: Vec<Value> = Vec::new();
+        Box::pin(inner.map(move |event| {
+            let mut receive = |meta: Option<&ProviderMeta>, hosted: Option<&Value>| {
+                if let Some(meta) = meta
+                    && !metadata.contains(meta)
+                {
+                    metadata.push(meta.clone());
+                }
+                if let Some(hosted) = hosted
+                    && !hosted_items.contains(hosted)
+                {
+                    hosted_items.push(hosted.clone());
+                }
+            };
+            match &event {
+                Ok(LlmEvent::TextDelta { meta, .. })
+                | Ok(LlmEvent::ReasoningComplete { meta, .. })
+                | Ok(LlmEvent::ToolCallComplete { meta, .. }) => receive(meta.as_deref(), None),
+                Ok(LlmEvent::ServerToolContent { content, meta, .. }) => {
+                    receive(meta.as_deref(), Some(content));
+                }
+                Ok(LlmEvent::AssistantOutput { blocks, .. }) => {
+                    for block in blocks {
+                        let hosted = match block {
+                            AssistantBlock::ServerToolContent { content, .. } => Some(content),
+                            _ => None,
+                        };
+                        receive(meerkat_core::replay_provider_metadata(block), hosted);
+                    }
+                }
+                Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Success { .. },
+                }) => {
+                    ledger.record_response(
+                        &issuer,
+                        metadata
+                            .iter()
+                            .map(meerkat_core::OpenAiContinuityMaterial::Metadata)
+                            .chain(
+                                hosted_items
+                                    .iter()
+                                    .map(meerkat_core::OpenAiContinuityMaterial::HostedToolItem),
+                            ),
+                    );
+                    metadata.clear();
+                    hosted_items.clear();
+                }
+                _ => {}
+            }
+            event
+        }))
     }
 
     /// Install a set of (name, value) headers to include on every request.
@@ -1065,19 +1308,19 @@ impl OpenAiClient {
 
     pub fn with_chatgpt_backend_wire(self) -> Self {
         let mut client = self.with_responses_path("responses");
-        client.set_backend_wire(OpenAiBackendWire::ChatGptBackend);
+        client.backend_wire = OpenAiBackendWire::ChatGptBackend;
         client
     }
 
     pub fn with_azure_openai_wire(mut self, config: AzureOpenAiWireConfig) -> Self {
-        self.set_backend_wire(OpenAiBackendWire::AzureOpenAi(config));
+        self.backend_wire = OpenAiBackendWire::AzureOpenAi(config);
         self
     }
 
     /// For the GitHub Copilot `/responses` route: requests go to the Copilot
     /// backend, which has admitted none of Meerkat's prompt-cache fields.
     pub fn with_copilot_backend_wire(mut self) -> Self {
-        self.set_backend_wire(OpenAiBackendWire::Copilot);
+        self.backend_wire = OpenAiBackendWire::Copilot;
         self
     }
 
@@ -1234,8 +1477,23 @@ impl OpenAiClient {
     /// runs every built-in tool definition through this exact builder to prove
     /// the emitted `tools[].parameters` carry no root-level combinator. It is
     /// not a supported host API.
+    ///
+    /// The lowering asks the replay owner for every assistant step, under
+    /// what the process knows now: continuity material of a step the process
+    /// did not receive from this client's service is not lowered, whether or
+    /// not the caller projected the transcript first.
     #[doc(hidden)]
     pub fn build_request_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
+        self.lower_request_body(request, Some(&self.continuity_target()))
+    }
+
+    /// Lower a request to the Responses body under `continuity`, the
+    /// decision the request was prepared with.
+    fn lower_request_body(
+        &self,
+        request: &LlmRequest,
+        continuity: Option<&meerkat_core::OpenAiContinuityTarget>,
+    ) -> Result<Value, LlmError> {
         let wire_tag = self.wire_openai_tag(request);
         let cache_breakpoints =
             ResponsesCacheBreakpoints::for_request(request, wire_tag.as_deref());
@@ -1247,6 +1505,7 @@ impl OpenAiClient {
                 SystemMessageMode::ExtractToInstructions,
                 cache_breakpoints,
                 web_search_evidence,
+                continuity,
             )?
         } else {
             Self::convert_to_responses_input_with_system_mode(
@@ -1254,6 +1513,7 @@ impl OpenAiClient {
                 SystemMessageMode::IncludeInInput,
                 cache_breakpoints,
                 web_search_evidence,
+                continuity,
             )?
         };
         let reasoning_enabled = Self::request_supports_reasoning_payload(request);
@@ -1601,19 +1861,33 @@ impl OpenAiClient {
         Ok(())
     }
 
+    /// The request body under what the process knows now (rows lower a
+    /// transcript directly; a request in flight is lowered under the decision
+    /// it was prepared with).
+    #[cfg(test)]
     fn build_request_body_with_continuation(
         &self,
         request: &LlmRequest,
     ) -> Result<(Value, Option<OpenAiContinuationPlan>), LlmError> {
-        let Some(plan) = openai_continuation_plan(request) else {
-            return self.build_request_body(request).map(|body| (body, None));
+        self.build_request_body_with_continuation_for(request, &self.continuity_target())
+    }
+
+    fn build_request_body_with_continuation_for(
+        &self,
+        request: &LlmRequest,
+        continuity: &meerkat_core::OpenAiContinuityTarget,
+    ) -> Result<(Value, Option<OpenAiContinuationPlan>), LlmError> {
+        let Some(plan) = openai_continuation_plan(request, Some(continuity)) else {
+            return self
+                .lower_request_body(request, Some(continuity))
+                .map(|body| (body, None));
         };
 
         let mut continuation_request = request.clone();
         continuation_request.messages = request.messages[plan.replay_from_message_index..].to_vec();
-        let mut body = self.build_request_body(&continuation_request)?;
+        let mut body = self.lower_request_body(&continuation_request, Some(continuity))?;
         if self.is_chatgpt_backend_wire() {
-            let full_body = self.build_request_body(request)?;
+            let full_body = self.lower_request_body(request, Some(continuity))?;
             if let Some(instructions) = full_body.get("instructions").cloned() {
                 body["instructions"] = instructions;
             }
@@ -1791,6 +2065,9 @@ impl OpenAiClient {
             SystemMessageMode::IncludeInInput,
             ResponsesCacheBreakpoints::None,
             web_search_evidence,
+            // The image path sends user and system content only; under no
+            // service it lowers no continuity material at all.
+            None,
         )
         .map(|(input, _, _)| input)
     }
@@ -1970,6 +2247,7 @@ impl OpenAiClient {
         system_mode: SystemMessageMode,
         cache_breakpoints: ResponsesCacheBreakpoints,
         web_search_evidence: bool,
+        continuity: Option<&meerkat_core::OpenAiContinuityTarget>,
     ) -> Result<
         (
             Vec<Value>,
@@ -2081,7 +2359,24 @@ impl OpenAiClient {
                     }
                 }
                 Message::BlockAssistant(a) => {
-                    let citations = if web_search_evidence {
+                    // The replay owner decides, for the step as a whole,
+                    // whether the target is sent what a service issued:
+                    // reasoning items, item ids and phases, hosted-tool
+                    // items. Everything else is lowered as the conversation
+                    // it was.
+                    let admission = meerkat_core::ReplayStepAdmission::of(
+                        meerkat_core::ReplayWireFamily::OpenAi,
+                        continuity,
+                        &a.blocks,
+                    );
+                    fn admitted<'m>(
+                        admission: &meerkat_core::ReplayStepAdmission,
+                        meta: &'m Option<Box<ProviderMeta>>,
+                    ) -> Option<&'m ProviderMeta> {
+                        meta.as_deref()
+                            .filter(|metadata| admission.admits(metadata))
+                    }
+                    let citations = if web_search_evidence && admission.admits_provider_items() {
                         WebSearchCitations::of(&a.blocks)
                     } else {
                         WebSearchCitations::default()
@@ -2090,9 +2385,10 @@ impl OpenAiClient {
                     for block in &a.blocks {
                         match block {
                             AssistantBlock::Text { text, meta } => {
+                                let meta = admitted(&admission, meta);
                                 if !text.is_empty()
                                     || matches!(
-                                        meta.as_deref(),
+                                        meta,
                                         Some(ProviderMeta::OpenAiAssistantMessage { .. })
                                     )
                                 {
@@ -2105,7 +2401,7 @@ impl OpenAiClient {
                                         id,
                                         phase,
                                         ..
-                                    }) = meta.as_deref()
+                                    }) = meta
                                     {
                                         item["id"] = Value::String(id.clone());
                                         item["status"] = Value::String("completed".into());
@@ -2130,13 +2426,14 @@ impl OpenAiClient {
                                 }));
                             }
                             AssistantBlock::Reasoning { text, meta } => {
-                                if let Some(item) = meta
-                                    .as_deref()
+                                if let Some(item) = admitted(&admission, meta)
                                     .and_then(|meta| Self::openai_reasoning_input_item(text, meta))
                                 {
                                     items.push(item);
                                 }
                             }
+                            AssistantBlock::ServerToolContent { .. }
+                                if !admission.admits_provider_items() => {}
                             AssistantBlock::ServerToolContent { content, .. } => {
                                 match content.get("type").and_then(Value::as_str) {
                                     // Its citations ride on their message's
@@ -2870,12 +3167,15 @@ impl OpenAiClient {
         prepared: Option<&'a PreparedLlmRequest>,
     ) -> LlmStream<'a> {
         let inner: LlmStream<'a> = Box::pin(async_stream::try_stream! {
+            let continuity = self.decided_continuity(prepared);
             let mut projected_request = request.clone();
-            projected_request.messages = self.project_replay_messages(&request.messages)?;
+            projected_request.messages =
+                self.project_replay_messages_for(&request.messages, &continuity)?;
             let request = &projected_request;
-            let (body, continuation_plan) = self.build_request_body_with_continuation(request)?;
+            let (body, continuation_plan) =
+                self.build_request_body_with_continuation_for(request, &continuity)?;
             let fallback_body = if continuation_plan.is_some() {
-                Some(self.build_request_body(request)?)
+                Some(self.lower_request_body(request, Some(&continuity))?)
             } else {
                 None
             };
@@ -3616,7 +3916,7 @@ impl OpenAiClient {
         // Every error the stream ends with is redacted here, whichever path
         // built it (a rejection body, an error event, a parse failure).
         streaming::redact_stream_diagnostics(
-            streaming::ensure_terminal_done(inner),
+            streaming::ensure_terminal_done(self.record_received_continuity(inner)),
             self.authorizer.as_deref(),
         )
     }
@@ -3645,32 +3945,108 @@ impl LlmClient for OpenAiClient {
         )
     }
 
+    /// Project for this client's service and freeze the decision into
+    /// the projection's replay witness, so the request prepared from it is
+    /// lowered, measured and sent under that one decision.
+    fn project_replay_request(
+        &self,
+        messages: &[Message],
+    ) -> Result<meerkat_llm_core::LlmReplayProjection, LlmError> {
+        let continuity = self.continuity_target();
+        let projected = self.project_replay_messages_for(messages, &continuity)?;
+        let decision = OpenAiReplayDecision::freeze(continuity.issuer(), &projected);
+        Ok(meerkat_llm_core::LlmReplayProjection::new(projected)
+            .with_replay_witness(decision.witness()))
+    }
+
     fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
-        project_openai_replay_messages_for_target(
-            messages,
-            OpenAiReplayProjectionMode::Responses,
-            self.supports_image_input,
-            true,
-            self.backend_wire.carries_web_search_evidence(),
-        )
+        self.project_replay_messages_for(messages, &self.continuity_target())
     }
 
     fn request_pressure(
         &self,
         request: &LlmRequest,
     ) -> Result<Option<meerkat_core::ProviderRequestPressure>, LlmError> {
-        let mut projected_request = request.clone();
-        projected_request.messages = self.project_replay_messages(&request.messages)?;
-        let (body, continuation_plan) =
-            self.build_request_body_with_continuation(&projected_request)?;
+        self.request_pressure_for(request, &self.continuity_target())
+    }
+
+    fn prepared_request_pressure(
+        &self,
+        request: &PreparedLlmRequest,
+    ) -> Result<Option<meerkat_core::ProviderRequestPressure>, LlmError> {
+        self.request_pressure_for(request.request(), &self.decided_continuity(Some(request)))
+    }
+
+    fn authored_cache_breakpoints(
+        &self,
+        request: &LlmRequest,
+        canonical_messages: &[Message],
+    ) -> Result<Vec<meerkat_core::ProviderCacheBreakpointClaim>, LlmError> {
+        self.authored_cache_breakpoints_for(request, canonical_messages, &self.continuity_target())
+    }
+
+    fn prepared_cache_breakpoints(
+        &self,
+        request: &PreparedLlmRequest,
+        canonical_messages: &[Message],
+    ) -> Result<Vec<meerkat_core::ProviderCacheBreakpointClaim>, LlmError> {
+        self.authored_cache_breakpoints_for(
+            request.request(),
+            canonical_messages,
+            &self.decided_continuity(Some(request)),
+        )
+    }
+    fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
+        self.stream_request(request, None)
+    }
+
+    fn stream_prepared<'a>(&'a self, request: &'a PreparedLlmRequest) -> LlmStream<'a> {
+        self.stream_request(request.request(), Some(request))
+    }
+
+    fn provider(&self) -> meerkat_core::Provider {
+        meerkat_core::Provider::OpenAI
+    }
+
+    async fn health_check(&self) -> Result<(), LlmError> {
+        Ok(())
+    }
+
+    fn compile_schema(&self, output_schema: &OutputSchema) -> Result<CompiledSchema, SchemaError> {
+        let mut schema = output_schema.schema.as_value().clone();
+        // OpenAI `strict` controls constrained decoding behavior for structured
+        // output. `compat` is only used for provider-lowering policies where
+        // warnings/errors may be emitted (e.g. Gemini keyword compatibility).
+        if output_schema.strict {
+            ensure_additional_properties_false(&mut schema);
+        }
+
+        Ok(CompiledSchema {
+            schema,
+            warnings: Vec::new(),
+        })
+    }
+}
+
+impl OpenAiClient {
+    /// The pressure of `body`, the lowering of `projected_request`; with a
+    /// continuation, of the larger of it and the full replay it may fall
+    /// back to.
+    fn request_pressure_of(
+        &self,
+        projected_request: &LlmRequest,
+        body: Value,
+        has_continuation: bool,
+        continuity: &meerkat_core::OpenAiContinuityTarget,
+    ) -> Result<Option<meerkat_core::ProviderRequestPressure>, LlmError> {
         let mut encoded_body =
             serde_json::to_vec(&body).map_err(|error| LlmError::InvalidRequest {
                 message: format!("failed to serialize OpenAI request body: {error}"),
             })?;
         // A rejected continuation is retried as a full replay. The pressure
         // witness must cover the largest body this one invocation may send.
-        if continuation_plan.is_some() {
-            let fallback_body = self.build_request_body(&projected_request)?;
+        if has_continuation {
+            let fallback_body = self.lower_request_body(projected_request, Some(continuity))?;
             let fallback_encoded =
                 serde_json::to_vec(&fallback_body).map_err(|error| LlmError::InvalidRequest {
                     message: format!("failed to serialize OpenAI fallback request body: {error}"),
@@ -3694,10 +4070,29 @@ impl LlmClient for OpenAiClient {
         ))
     }
 
-    fn authored_cache_breakpoints(
+    fn request_pressure_for(
+        &self,
+        request: &LlmRequest,
+        continuity: &meerkat_core::OpenAiContinuityTarget,
+    ) -> Result<Option<meerkat_core::ProviderRequestPressure>, LlmError> {
+        let mut projected_request = request.clone();
+        projected_request.messages =
+            self.project_replay_messages_for(&request.messages, continuity)?;
+        let (body, continuation_plan) =
+            self.build_request_body_with_continuation_for(&projected_request, continuity)?;
+        self.request_pressure_of(
+            &projected_request,
+            body,
+            continuation_plan.is_some(),
+            continuity,
+        )
+    }
+
+    fn authored_cache_breakpoints_for(
         &self,
         request: &LlmRequest,
         canonical_messages: &[Message],
+        continuity: &meerkat_core::OpenAiContinuityTarget,
     ) -> Result<Vec<meerkat_core::ProviderCacheBreakpointClaim>, LlmError> {
         let Some(tag) = self.wire_openai_tag(request) else {
             return Ok(Vec::new());
@@ -3715,13 +4110,13 @@ impl LlmClient for OpenAiClient {
         // A previous_response_id request lowers only a replay suffix and may
         // fall back to full replay after provider rejection. It has no single
         // authored rendered prefix, so cache inheritance is unavailable.
-        if openai_continuation_plan(request).is_some() {
+        if openai_continuation_plan(request, Some(continuity)).is_some() {
             return Ok(Vec::new());
         }
 
         // Validate the exact full lowering first. Boundary evidence is minted
         // only if the same renderer successfully authored the body.
-        let body = self.build_request_body(request)?;
+        let body = self.lower_request_body(request, Some(continuity))?;
         let encoded_body = serde_json::to_vec(&body).map_err(|error| LlmError::InvalidRequest {
             message: format!("failed to serialize OpenAI cache evidence body: {error}"),
         })?;
@@ -3736,6 +4131,7 @@ impl LlmClient for OpenAiClient {
             system_mode,
             ResponsesCacheBreakpoints::EveryInput,
             self.backend_wire.carries_web_search_evidence(),
+            Some(continuity),
         )?;
         // Every authored breakpoint is `{"mode": "explicit"}` without its own
         // `ttl`, so it takes the request-level `prompt_cache_options.ttl`.
@@ -3802,37 +4198,6 @@ impl LlmClient for OpenAiClient {
                 })
             })
             .collect()
-    }
-
-    fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
-        self.stream_request(request, None)
-    }
-
-    fn stream_prepared<'a>(&'a self, request: &'a PreparedLlmRequest) -> LlmStream<'a> {
-        self.stream_request(request.request(), Some(request))
-    }
-
-    fn provider(&self) -> meerkat_core::Provider {
-        meerkat_core::Provider::OpenAI
-    }
-
-    async fn health_check(&self) -> Result<(), LlmError> {
-        Ok(())
-    }
-
-    fn compile_schema(&self, output_schema: &OutputSchema) -> Result<CompiledSchema, SchemaError> {
-        let mut schema = output_schema.schema.as_value().clone();
-        // OpenAI `strict` controls constrained decoding behavior for structured
-        // output. `compat` is only used for provider-lowering policies where
-        // warnings/errors may be emitted (e.g. Gemini keyword compatibility).
-        if output_schema.strict {
-            ensure_additional_properties_false(&mut schema);
-        }
-
-        Ok(CompiledSchema {
-            schema,
-            warnings: Vec::new(),
-        })
     }
 }
 
@@ -4560,6 +4925,7 @@ mod tests {
             )),
         ];
 
+        let client = client.having_received(&messages);
         let projected = client.project_replay_messages(&messages)?;
 
         let Message::User(user) = &projected[0] else {
@@ -7059,6 +7425,7 @@ mod tests {
         )
         .with_openai_tag_merge(|t| t.store = Some(true));
 
+        let client = client.having_received(&request.messages);
         let (body, plan) = client
             .build_request_body_with_continuation(&request)
             .expect("build continuation request");
@@ -7099,6 +7466,7 @@ mod tests {
         )
         .with_openai_tag_merge(|t| t.store = Some(true));
 
+        let client = client.having_received(&request.messages);
         let (body, plan) = client
             .build_request_body_with_continuation(&request)
             .expect("build continuation request");
@@ -7324,6 +7692,7 @@ mod tests {
         )
         .with_openai_tag_merge(|t| t.store = Some(true));
 
+        let client = client.having_received(&request.messages);
         let mut stream = client.stream(&request);
         let mut deltas = Vec::new();
         while let Some(event) = stream.next().await {
@@ -7388,6 +7757,7 @@ mod tests {
         )
         .with_openai_tag_merge(|tag| tag.store = Some(true));
 
+        let client = client.having_received(&request.messages);
         let events = client.stream(&request).collect::<Vec<_>>().await;
         server.abort();
 
@@ -8160,6 +8530,7 @@ mod tests {
             ],
         );
 
+        let client = client.having_received(&request.messages);
         let body = build_projected_request_body(&client, &request);
         let input = body["input"].as_array().expect("input should be array");
 
@@ -9955,6 +10326,7 @@ mod tests {
             ],
         );
 
+        let client = client.having_received(&request.messages);
         let body = client.build_request_body(&request).expect("build request");
         let input = body["input"].as_array().expect("input should be array");
 
@@ -10128,6 +10500,7 @@ mod tests {
             ],
         );
 
+        let client = client.having_received(&request.messages);
         let body = client.build_request_body(&request).expect("build request");
         let input = body["input"].as_array().expect("input should be array");
 
@@ -10172,6 +10545,7 @@ mod tests {
             ],
         );
 
+        let client = client.having_received(&request.messages);
         let body = client.build_request_body(&request).expect("build request");
         let input = body["input"].as_array().expect("input should be array");
 

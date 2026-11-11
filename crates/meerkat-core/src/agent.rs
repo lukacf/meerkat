@@ -2994,6 +2994,28 @@ pub trait AgentToolDispatcher: Send + Sync {
         ToolCatalogCapabilities::default()
     }
 
+    /// How this dispatcher needs the deferred catalog's control tools shown.
+    ///
+    /// The default follows
+    /// [`ToolCatalogCapabilities::may_require_catalog_control_plane`]: a
+    /// source that sets it needs the control tools in every model request
+    /// ([`ToolCatalogControlPlane::Always`]), one that does not asks for
+    /// nothing. A source whose tools arrive later can answer
+    /// [`ToolCatalogControlPlane::OnDemand`]: the control tools are mounted
+    /// and stay out of the request until a deferrable tool waits behind the
+    /// catalog. A wrapper forwards its inner dispatcher's answer, and a
+    /// composition takes the strongest of its parts.
+    fn tool_catalog_control_plane(&self) -> crate::ToolCatalogControlPlane {
+        if self
+            .tool_catalog_capabilities()
+            .may_require_catalog_control_plane
+        {
+            crate::ToolCatalogControlPlane::Always
+        } else {
+            crate::ToolCatalogControlPlane::Never
+        }
+    }
+
     /// Return the precedence-resolved tool catalog for this dispatcher.
     ///
     /// The default implementation mirrors `tools()` as a visible-only inline
@@ -4542,6 +4564,10 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher for Filtered
 
     fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
         self.inner.tool_catalog_capabilities()
+    }
+
+    fn tool_catalog_control_plane(&self) -> crate::ToolCatalogControlPlane {
+        self.inner.tool_catalog_control_plane()
     }
 
     fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {

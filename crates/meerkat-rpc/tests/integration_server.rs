@@ -841,12 +841,14 @@ async fn late_registered_callbacks_defer_with_the_control_tools_after_an_inline_
     server_handle.await.unwrap().unwrap();
 }
 
-/// A session created before any tool is registered has nothing to defer and
-/// mounts no catalog control tool. Tools registered later, whatever their
-/// size, are offered directly for its lifetime: nothing is hidden and
-/// nothing has to be loaded.
+/// A plain session, created before any tool is registered, sends no catalog
+/// control tool: the server mounts them for every session, so that tools can
+/// arrive later, and leaves them out while nothing waits. A small tool
+/// registered later is offered directly. When a later registration takes the
+/// session over the byte budget, the next request carries both control tools
+/// and the new tool waits behind the catalog.
 #[tokio::test]
-async fn a_session_created_before_any_registration_keeps_later_tools_in_the_request() {
+async fn a_session_created_before_any_registration_defers_only_once_it_is_over_the_budget() {
     let client = Arc::new(RecordingToolClient::default());
     let (mut writer, mut reader, server_handle) = spawn_test_server_with_client(client.clone());
 
@@ -866,6 +868,7 @@ async fn a_session_created_before_any_registration_keeps_later_tools_in_the_requ
         assert!(response["error"].is_null(), "{method} failed: {response}");
         response
     }
+    let is_control = |name: &String| name == "tool_catalog_search" || name == "tool_catalog_load";
 
     call(
         &mut writer,
@@ -894,49 +897,71 @@ async fn a_session_created_before_any_registration_keeps_later_tools_in_the_requ
         .as_str()
         .expect("session_id missing")
         .to_string();
+    let turn = |id: u64, prompt: &str| {
+        (
+            id,
+            serde_json::json!({"session_id": session_id, "prompt": prompt}),
+        )
+    };
+
+    let (id, params) = turn(3, "A plain turn with no tool.");
+    call(&mut writer, &mut reader, id, "turn/start", params).await;
+    let seen = client.seen_tools();
+    assert_eq!(seen.len(), 1, "expected one LLM call, got {seen:?}");
+    assert!(
+        seen[0].is_empty(),
+        "a plain session sends no tool and no catalog control tool, got {:?}",
+        seen[0]
+    );
+
     call(
         &mut writer,
         &mut reader,
-        3,
+        4,
         "tools/register",
         serde_json::json!({"tools": [{
             "name": "secret_lookup",
             "description": "Look up a secret value.",
             "input_schema": {"type": "object"}
-        }, {
+        }]}),
+    )
+    .await;
+    let (id, params) = turn(5, "A turn with one small registered tool.");
+    call(&mut writer, &mut reader, id, "turn/start", params).await;
+    let seen = client.seen_tools();
+    assert_eq!(seen.len(), 2, "expected two LLM calls, got {seen:?}");
+    assert_eq!(
+        seen[1],
+        vec!["secret_lookup".to_string()],
+        "a small tool registered later is offered directly, with no catalog control tool"
+    );
+
+    call(
+        &mut writer,
+        &mut reader,
+        6,
+        "tools/register",
+        serde_json::json!({"tools": [{
             "name": "secret_audit",
             "description": over_catalog_budget("Audit a secret value."),
             "input_schema": {"type": "object"}
         }]}),
     )
     .await;
-    call(
-        &mut writer,
-        &mut reader,
-        4,
-        "turn/start",
-        serde_json::json!({
-            "session_id": session_id,
-            "prompt": "Inspect the tools registered after the session was created."
-        }),
-    )
-    .await;
-
+    let (id, params) = turn(7, "A turn after a registration over the budget.");
+    call(&mut writer, &mut reader, id, "turn/start", params).await;
     let seen = client.seen_tools();
-    assert_eq!(seen.len(), 1, "expected exactly one LLM call, got {seen:?}");
-    for name in ["secret_lookup", "secret_audit"] {
-        assert!(
-            seen[0].iter().any(|tool| tool == name),
-            "{name} is offered directly, got {:?}",
-            seen[0]
-        );
-    }
+    assert_eq!(seen.len(), 3, "expected three LLM calls, got {seen:?}");
+    assert_eq!(
+        seen[2].iter().filter(|name| is_control(*name)).count(),
+        2,
+        "over the budget both catalog control tools are in the request, got {:?}",
+        seen[2]
+    );
     assert!(
-        !seen[0]
-            .iter()
-            .any(|name| name == "tool_catalog_search" || name == "tool_catalog_load"),
-        "a session that started with nothing to defer has no catalog control tool, got {:?}",
-        seen[0]
+        !seen[2].iter().any(|name| name == "secret_audit"),
+        "the tool that took the session over the budget waits behind the catalog, got {:?}",
+        seen[2]
     );
 
     drop(writer);

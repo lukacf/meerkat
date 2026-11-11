@@ -28,8 +28,8 @@ use meerkat_core::tool_catalog::DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD;
 use meerkat_core::{
     AgentBuilder, AgentError, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
     AssistantBlock, LlmStreamResult, Message, Provider, StopReason, ToolCallView,
-    ToolCatalogCapabilities, ToolCatalogEntry, ToolCatalogMode, ToolCatalogVisibility, ToolDef,
-    ToolProvenance, ToolResult, ToolSourceKind, TurnUsage, Usage,
+    ToolCatalogCapabilities, ToolCatalogControlPlane, ToolCatalogEntry, ToolCatalogMode,
+    ToolCatalogVisibility, ToolDef, ToolProvenance, ToolResult, ToolSourceKind, TurnUsage, Usage,
 };
 use serde_json::json;
 
@@ -91,6 +91,9 @@ struct Source {
     /// Whether the source declares that it needs the control tools whatever
     /// the mode.
     declares_control_plane: bool,
+    /// Whether the source asks for the control tools on demand: mounted
+    /// from the start, shown once a tool waits behind the catalog.
+    on_demand: bool,
     connecting: Mutex<Vec<String>>,
     dispatched: Mutex<Vec<String>>,
 }
@@ -101,6 +104,7 @@ impl Source {
             session: Mutex::new(session),
             control_plane: true,
             declares_control_plane: false,
+            on_demand: false,
             connecting: Mutex::new(Vec::new()),
             dispatched: Mutex::new(Vec::new()),
         }
@@ -129,7 +133,17 @@ impl AgentToolDispatcher for Source {
     fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
         ToolCatalogCapabilities {
             exact_catalog: true,
-            may_require_catalog_control_plane: self.declares_control_plane,
+            may_require_catalog_control_plane: self.declares_control_plane || self.on_demand,
+        }
+    }
+
+    fn tool_catalog_control_plane(&self) -> ToolCatalogControlPlane {
+        if self.on_demand {
+            ToolCatalogControlPlane::OnDemand
+        } else if self.declares_control_plane {
+            ToolCatalogControlPlane::Always
+        } else {
+            ToolCatalogControlPlane::Never
         }
     }
 
@@ -191,6 +205,18 @@ impl AgentToolDispatcher for Source {
 struct Request {
     tools: Vec<String>,
     results: Vec<(String, bool, String)>,
+    /// The text of every user message and runtime notice.
+    user_texts: Vec<String>,
+}
+
+impl Request {
+    /// How many of its messages tell the model how to use the catalog.
+    fn catalog_instructions(&self) -> usize {
+        self.user_texts
+            .iter()
+            .filter(|text| text.contains("to load the ones you need"))
+            .count()
+    }
 }
 
 /// A model that answers each request with the next scripted tool call, and
@@ -228,6 +254,14 @@ impl AgentLlmClient for Model {
         _provider_params: Option<&meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
     ) -> Result<LlmStreamResult, AgentError> {
         let request = Request {
+            user_texts: messages
+                .iter()
+                .filter_map(|message| match message {
+                    Message::User(user) => Some(user.text_content()),
+                    Message::SystemNotice(notice) => notice.body.clone(),
+                    _ => None,
+                })
+                .collect(),
             tools: tools.iter().map(|tool| tool.name.to_string()).collect(),
             results: messages
                 .iter()
@@ -582,5 +616,98 @@ async fn a_control_tool_left_out_of_the_request_cannot_be_called() {
         source.dispatched().is_empty(),
         "a refused call never reaches the tool source: {:?}",
         source.dispatched()
+    );
+}
+
+/// A source that asks for the control tools on demand, as a host does that
+/// gives every session a router so that a server can be added later: the
+/// session mounts them with nothing to defer and sends none. When tools
+/// arrive that take it over the byte budget, the next request carries both
+/// control tools and the notice that says how to use them, the tools wait
+/// behind the catalog, and a load brings one in. The instruction is appended
+/// once, where the catalog starts to defer, not added to what was sent.
+#[tokio::test]
+async fn a_source_on_demand_mounts_the_control_tools_and_shows_them_when_a_tool_waits() {
+    let model = Arc::new(Model::new());
+    let source = Arc::new(Source {
+        on_demand: true,
+        ..Source::new(Vec::new())
+    });
+    let mut agent = agent(&model, &source).await;
+
+    let requests = run(&mut agent, &model).await;
+    assert_eq!(
+        requests[0].tools,
+        names(&[]),
+        "with nothing to defer the mounted control tools are left out"
+    );
+    assert_eq!(requests[0].catalog_instructions(), 0);
+    for name in [SEARCH, LOAD] {
+        assert_eq!(
+            view_visibility(&agent, name),
+            Some(ToolCatalogVisibility::Hidden),
+            "{name} is mounted and hidden"
+        );
+    }
+
+    source.add(small("alpha"));
+    let requests = run(&mut agent, &model).await;
+    assert_eq!(
+        requests[0].tools,
+        names(&["alpha"]),
+        "a small tool that arrives is offered directly, with no control tool"
+    );
+    assert_eq!(requests[0].catalog_instructions(), 0);
+
+    source.add(large("big"));
+    model.will_call(LOAD, json!({ "names": ["big"] }));
+    let requests = run(&mut agent, &model).await;
+    assert_eq!(requests.len(), 2);
+    for name in [SEARCH, LOAD] {
+        assert!(
+            requests[0].tools.iter().any(|tool| tool == name),
+            "{name} is in the request once a tool waits: {:?}",
+            requests[0].tools
+        );
+    }
+    assert!(!requests[0].tools.iter().any(|tool| tool == "big"));
+    assert_eq!(
+        requests[0].catalog_instructions(),
+        1,
+        "the notice that names the waiting tool says how to load it: {:?}",
+        requests[0].user_texts
+    );
+    assert!(
+        requests[1].tools.iter().any(|tool| tool == "big"),
+        "the loaded tool is in the next request: {:?}",
+        requests[1].tools
+    );
+    assert_eq!(
+        requests[1].catalog_instructions(),
+        1,
+        "the instruction is appended once"
+    );
+}
+
+/// A source that declares the control tools for every request is not told
+/// twice: its system prompt explains them, and the notice does not.
+#[tokio::test]
+async fn a_source_that_declares_the_control_plane_gets_no_second_instruction() {
+    let model = Arc::new(Model::new());
+    let source = Arc::new(Source {
+        declares_control_plane: true,
+        ..Source::new(vec![small("alpha")])
+    });
+    let mut agent = agent(&model, &source).await;
+    run(&mut agent, &model).await;
+
+    source.add(large("big"));
+    let requests = run(&mut agent, &model).await;
+    assert!(requests[0].tools.iter().any(|tool| tool == LOAD));
+    assert_eq!(
+        requests[0].catalog_instructions(),
+        0,
+        "the control tools were in the requests all along: {:?}",
+        requests[0].user_texts
     );
 }

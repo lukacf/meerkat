@@ -245,15 +245,47 @@ pub fn stable_owner_key_for_tool(tool: &ToolDef) -> Option<String> {
         .map(stable_owner_key_from_provenance)
 }
 
+/// How a tool source needs the deferred catalog's control tools
+/// (`tool_catalog_search`, `tool_catalog_load`).
+///
+/// `may_require_catalog_control_plane` says whether a session mounts them
+/// for this source. This says whether a mounted control plane is in every
+/// model request or only when it is useful. The variants are ordered: a
+/// composition takes the strongest need of its sources.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ToolCatalogControlPlane {
+    /// The source does not ask for the control tools. A session still mounts
+    /// them when it has a deferrable tool or a connecting source.
+    #[default]
+    Never,
+    /// The source can get deferrable tools later (a server added to a live
+    /// session, tools registered after the session started): the session
+    /// mounts the control tools and shows them only while a deferrable tool
+    /// waits behind the catalog or a source is connecting.
+    OnDemand,
+    /// The source needs the control tools mounted and in every model request
+    /// whatever the catalog mode: its hosts tell the model to search and load
+    /// by name, or expect them before the first tool arrives.
+    Always,
+}
+
 /// Dispatcher-level catalog support flags.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ToolCatalogCapabilities {
     /// True only when `tool_catalog()` is an exact precedence-resolved registry
     /// for this dispatcher.
     pub exact_catalog: bool,
-    /// True when the dispatcher can dynamically require the deferred catalog
-    /// control plane in the future, even if the current adaptive snapshot is
-    /// still inline.
+    /// True when this source may need the deferred catalog's control tools
+    /// (`tool_catalog_search`, `tool_catalog_load`), now or later: a session
+    /// mounts them for it even while its catalog is inline. Whether the
+    /// mounted control tools are in every model request or only when they
+    /// are useful is the dispatcher's
+    /// [`tool_catalog_control_plane`](crate::AgentToolDispatcher::tool_catalog_control_plane),
+    /// which answers [`ToolCatalogControlPlane::Always`] for a source that
+    /// sets this flag and says nothing more. A source that leaves it false
+    /// still gets the control tools mounted when the session has a
+    /// deferrable tool; they are then in a request only while a tool waits
+    /// behind the catalog or a source is connecting.
     pub may_require_catalog_control_plane: bool,
 }
 
@@ -375,22 +407,27 @@ pub struct ToolCatalogView {
 }
 
 /// The names one model-call boundary projects from the dispatcher's exact
-/// catalog, and whether deferral applies at all: control-plane entries are
-/// always visible, and session-plane deferred-eligible entries are deferred
-/// only when the catalog selects the deferred mode and a control plane exists
-/// or may be composed.
+/// catalog, and whether deferral applies at all: session-plane
+/// deferred-eligible entries are deferred only when the catalog selects the
+/// deferred mode and a control plane exists or may be composed. The
+/// control-plane entries show to the model always when a source declares
+/// that it needs them or a source is still connecting; otherwise they show
+/// only while a deferred tool waits behind the catalog.
 #[derive(Debug, Default)]
 pub(crate) struct CatalogBoundaryProjection {
     pub(crate) defers: bool,
     pub(crate) control_tool_names: HashSet<ToolName>,
+    pub(crate) control_tools_always_visible: bool,
     pub(crate) deferred_tool_names: HashSet<ToolName>,
 }
 
 /// The projection of `catalog` (present only for an exact catalog) under the
-/// `selected_mode` its snapshot selects.
+/// `selected_mode` its snapshot selects, with the sources still connecting.
 pub(crate) fn catalog_boundary_projection(
     capabilities: ToolCatalogCapabilities,
+    control_plane: ToolCatalogControlPlane,
     catalog: Option<&[ToolCatalogEntry]>,
+    pending_sources: &[String],
     selected_mode: ToolCatalogMode,
 ) -> CatalogBoundaryProjection {
     let (true, Some(catalog)) = (capabilities.exact_catalog, catalog) else {
@@ -401,6 +438,8 @@ pub(crate) fn catalog_boundary_projection(
         .filter(|entry| entry.plane == ToolPlaneClass::Control)
         .map(|entry| entry.tool.name.clone())
         .collect::<HashSet<_>>();
+    let control_tools_always_visible =
+        control_plane == ToolCatalogControlPlane::Always || !pending_sources.is_empty();
     let defers = (!control_tool_names.is_empty() || capabilities.may_require_catalog_control_plane)
         && matches!(selected_mode, ToolCatalogMode::Deferred);
     let deferred_tool_names = if defers {
@@ -421,6 +460,7 @@ pub(crate) fn catalog_boundary_projection(
     CatalogBoundaryProjection {
         defers,
         control_tool_names,
+        control_tools_always_visible,
         deferred_tool_names,
     }
 }

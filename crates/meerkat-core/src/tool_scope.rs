@@ -1560,6 +1560,10 @@ struct ToolScopeState {
     base_tools: Arc<[Arc<ToolDef>]>,
     known_base_names: ToolNameSet,
     control_tool_names: ToolNameSet,
+    // Whether the control-plane tools show to the model whatever is deferred:
+    // a source asked for them, or a source is still connecting. When false
+    // they show only while a deferred tool waits behind the catalog.
+    control_tools_always_visible: bool,
     deferred_tool_names: ToolNameSet,
     active_turn_allow: Option<ToolNameSet>,
     active_turn_deny: ToolNameSet,
@@ -1721,6 +1725,7 @@ impl ToolScope {
                 base_tools,
                 known_base_names,
                 control_tool_names: control_tool_names.into_iter().collect(),
+                control_tools_always_visible: true,
                 deferred_tool_names,
                 active_turn_allow: None,
                 active_turn_deny: ToolNameSet::new(),
@@ -1730,6 +1735,21 @@ impl ToolScope {
             visibility_authority,
             fail_next_boundary_apply: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Say whether this scope's control-plane tools show to the model
+    /// whatever is deferred (a tool source asked for them, or one is still
+    /// connecting) or only while a deferred tool waits behind the catalog.
+    /// A scope shows them always until told otherwise.
+    pub(crate) fn set_control_tools_always_visible(
+        &self,
+        always: bool,
+    ) -> Result<(), ToolScopeApplyError> {
+        self.state
+            .write()
+            .map_err(|_| ToolScopeApplyError::LockPoisoned)?
+            .control_tools_always_visible = always;
+        Ok(())
     }
 
     fn ensure_generated_authority_for_apply(
@@ -1946,6 +1966,49 @@ impl ToolScope {
         previous_visibility_state: &SessionToolVisibilityState,
         visibility_state: &SessionToolVisibilityState,
     ) -> Result<ToolScopeBoundaryResult, ToolScopeApplyError> {
+        self.apply_projection(
+            new_base_tools,
+            control_tool_names,
+            None,
+            deferred_tool_names,
+            previous_visibility_state,
+            visibility_state,
+        )
+    }
+
+    /// As [`Self::apply_staged_projection_with_previous`], and from this
+    /// boundary on the control-plane tools show always
+    /// (`control_tools_always_visible`) or only while a deferred tool waits
+    /// behind the catalog. The names visible before the boundary are read
+    /// under the rule the scope held until now.
+    pub(crate) fn apply_staged_catalog_projection(
+        &self,
+        new_base_tools: Arc<[Arc<ToolDef>]>,
+        control_tool_names: ToolNameSet,
+        control_tools_always_visible: bool,
+        deferred_tool_names: ToolNameSet,
+        previous_visibility_state: &SessionToolVisibilityState,
+        visibility_state: &SessionToolVisibilityState,
+    ) -> Result<ToolScopeBoundaryResult, ToolScopeApplyError> {
+        self.apply_projection(
+            new_base_tools,
+            control_tool_names,
+            Some(control_tools_always_visible),
+            deferred_tool_names,
+            previous_visibility_state,
+            visibility_state,
+        )
+    }
+
+    fn apply_projection(
+        &self,
+        new_base_tools: Arc<[Arc<ToolDef>]>,
+        control_tool_names: ToolNameSet,
+        control_tools_always_visible: Option<bool>,
+        deferred_tool_names: ToolNameSet,
+        previous_visibility_state: &SessionToolVisibilityState,
+        visibility_state: &SessionToolVisibilityState,
+    ) -> Result<ToolScopeBoundaryResult, ToolScopeApplyError> {
         if self
             .fail_next_boundary_apply
             .swap(false, std::sync::atomic::Ordering::SeqCst)
@@ -1991,6 +2054,9 @@ impl ToolScope {
 
         state.base_tools = new_base_tools;
         state.control_tool_names = control_tool_names;
+        if let Some(always) = control_tools_always_visible {
+            state.control_tools_always_visible = always;
+        }
         state.deferred_tool_names = deferred_tool_names;
         state.known_base_names = state
             .base_tools
@@ -2084,10 +2150,13 @@ impl ToolScope {
             .into()
     }
 
-    /// How one base tool shows to the model: a control-plane tool always,
-    /// any other only when the composed filters allow it and, if it is
-    /// deferred, it was requested. A deferred tool the filters allow but
-    /// nothing requested is behind the deferred catalog.
+    /// How one base tool shows to the model. A control-plane tool shows
+    /// when the scope shows them always, or while a deferred tool waits
+    /// behind the catalog (no filter hides a control-plane tool); otherwise
+    /// it is hidden: with nothing to search or load it would only cost its
+    /// definition. Any other tool shows only when the composed filters allow
+    /// it and, if it is deferred, it was requested. A deferred tool the
+    /// filters allow but nothing requested is behind the deferred catalog.
     fn tool_visibility(
         state: &ToolScopeState,
         visibility_state: &SessionToolVisibilityState,
@@ -2099,7 +2168,13 @@ impl ToolScope {
             return ToolCatalogVisibility::Hidden;
         }
         if state.control_tool_names.contains(tool.name.as_str()) {
-            return ToolCatalogVisibility::Visible;
+            return if state.control_tools_always_visible
+                || Self::a_deferred_tool_waits(state, visibility_state, composed)
+            {
+                ToolCatalogVisibility::Visible
+            } else {
+                ToolCatalogVisibility::Hidden
+            };
         }
         if !composed.allows(tool.name.as_str()) {
             return ToolCatalogVisibility::Hidden;
@@ -2109,6 +2184,21 @@ impl ToolScope {
         } else {
             ToolCatalogVisibility::Deferred
         }
+    }
+
+    /// Whether at least one tool is behind the deferred catalog: deferred,
+    /// allowed by the composed filters and not yet requested.
+    fn a_deferred_tool_waits(
+        state: &ToolScopeState,
+        visibility_state: &SessionToolVisibilityState,
+        composed: &ComposedToolFilter,
+    ) -> bool {
+        state.base_tools.iter().any(|tool| {
+            tool.audience.allows_model()
+                && !state.control_tool_names.contains(tool.name.as_str())
+                && composed.allows(tool.name.as_str())
+                && !Self::is_requested_session_tool_visible(state, visibility_state, tool)
+        })
     }
 
     /// How a boundary that projected `base_tools` with these control-plane
@@ -2121,6 +2211,7 @@ impl ToolScope {
         &self,
         base_tools: Arc<[Arc<ToolDef>]>,
         control_tool_names: HashSet<ToolName>,
+        control_tools_always_visible: bool,
         deferred_tool_names: HashSet<ToolName>,
     ) -> Result<CatalogVisibilityPreview, ToolScopeApplyError> {
         let visibility_state = self.visibility_owner.visibility_state()?;
@@ -2137,6 +2228,7 @@ impl ToolScope {
                     .collect(),
                 base_tools,
                 control_tool_names: control_tool_names.into_iter().collect(),
+                control_tools_always_visible,
                 deferred_tool_names: deferred_tool_names.into_iter().collect(),
                 active_turn_allow: state.active_turn_allow.clone(),
                 active_turn_deny: state.active_turn_deny.clone(),

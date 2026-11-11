@@ -1580,9 +1580,16 @@ where
         let capabilities = self.tools.tool_catalog_capabilities();
         let exact_catalog = capabilities.exact_catalog;
         let catalog = self.tools.tool_catalog();
+        let pending_sources = if exact_catalog {
+            self.tools.pending_catalog_sources()
+        } else {
+            Arc::from([])
+        };
         let projection = crate::tool_catalog::catalog_boundary_projection(
             capabilities,
+            self.tools.tool_catalog_control_plane(),
             exact_catalog.then_some(catalog.as_ref()),
+            pending_sources.as_ref(),
             crate::select_tool_catalog_mode(self.tools.as_ref()),
         );
         let mode = if projection.defers {
@@ -1595,17 +1602,14 @@ where
             .preview_catalog_visibility(
                 self.tools.tools(),
                 projection.control_tool_names,
+                projection.control_tools_always_visible,
                 projection.deferred_tool_names,
             )
             .ok()?;
         Some(crate::ToolCatalogView {
             mode,
             exact_catalog,
-            pending_sources: if exact_catalog {
-                self.tools.pending_catalog_sources().to_vec()
-            } else {
-                Vec::new()
-            },
+            pending_sources: pending_sources.to_vec(),
             staged_changes_pending: preview.staged_changes_pending,
             entries: catalog
                 .iter()

@@ -70,6 +70,54 @@ them.
   - Why: the mode adds about 1.2 KB to every request and two model requests
     to a tool's first use, so below the budget it cost more than it saved.
   - The number is a constant, not a setting.
+- `meerkat-core`, `meerkat-tools`, `meerkat-mcp`, `meerkat-rpc`,
+  `meerkat-workgraph`: the catalog control tools are in a model request
+  only when they are useful.
+  `tool_catalog_search` and `tool_catalog_load` are mounted by the same rule
+  as before (an exact catalog with a deferrable tool, a tool source that is
+  still connecting, or a tool source that declares them). They are now sent
+  only while a deferrable tool waits behind the catalog, while a tool source
+  is still connecting, or when a tool source declares that it needs them.
+  Otherwise they are left out, together with the system prompt line about
+  them, and a call of one is refused like a call of any tool the session
+  does not show (`access_denied`).
+  - Unchanged: a session with an MCP server that the build configured keeps
+    both control tools in every request (a router asks for them always
+    unless its host says otherwise), and so does every host that composes
+    its own router.
+  - Changed on the RPC server (`rkat-rpc`, `rkat rpc`): a session's
+    requests carry no catalog control tools until something can be
+    deferred. The server gives every session a router so that a server can
+    be added later (`mcp/add`), and that router now asks for the control
+    tools on demand. A session with no
+    server and a few small registered tools (`tools/register`,
+    `external_tools`) sends neither control tool and no prompt line about
+    them. When a later registration or a server added later takes the
+    session over the byte budget, the next request carries both control
+    tools, the tools that arrived wait behind the catalog, and the notice
+    that names them says how to load them.
+  - Changed everywhere: once every deferred tool of a session is loaded,
+    the control tools leave its requests (unless a source asks for them
+    always), and a session whose only deferrable tools are WorkGraph's two
+    sends neither control tool.
+  - A session with no source that asks for the control tools and nothing to
+    defer when it starts mounts none, as before. Tools that arrive later
+    stay in every request for its lifetime, whatever their size; the next
+    session defers them.
+  - For Rust embedders: `AgentToolDispatcher::tool_catalog_control_plane`
+    (new, defaulted) says how a source needs the control tools shown:
+    `ToolCatalogControlPlane::Always`, `OnDemand` or `Never` (new enum,
+    `meerkat-core`). The default answers `Always` for a source that sets
+    `ToolCatalogCapabilities::may_require_catalog_control_plane` and `Never`
+    otherwise, so existing sources behave as before; the flag keeps meaning
+    "mount the control tools for this source". A wrapper forwards its inner
+    dispatcher's answer and a composition takes the strongest; a wrapper
+    that forwards only the capabilities turns an inner `OnDemand` into
+    `Always`. `McpRouterAdapter::with_control_plane_on_demand` (new,
+    `meerkat-mcp`) makes a router ask on demand. The RPC callback dispatcher
+    and the WorkGraph tool surface no longer set the flag.
+    `CatalogControlDispatcher::should_announce_for` (new, `meerkat-tools`)
+    says whether a session's system prompt explains the control tools.
 
 ## [0.9.13] - 2026-11-11
 

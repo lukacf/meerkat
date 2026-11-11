@@ -242,9 +242,11 @@ impl AgentToolDispatcher for WorkGraphToolSurface {
     }
 
     fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
+        // The two deferrable WorkGraph tools need no control tool while
+        // they are in the request.
         ToolCatalogCapabilities {
             exact_catalog: true,
-            may_require_catalog_control_plane: true,
+            may_require_catalog_control_plane: false,
         }
     }
 

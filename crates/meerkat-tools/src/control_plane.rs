@@ -184,6 +184,22 @@ impl CatalogControlDispatcher {
         should_compose_tool_catalog_control_plane(session_dispatcher)
     }
 
+    /// Whether a session built on `session_dispatcher` starts with the
+    /// control tools in its model requests, so its system prompt should say
+    /// how to use them: the control plane is composed for it, and a source
+    /// needs the control tools in every request
+    /// ([`meerkat_core::ToolCatalogControlPlane::Always`]) or the catalog
+    /// starts deferred (a source is connecting, or its deferrable tools are
+    /// over the byte budget). A session that starts inline gets no such
+    /// line; when it later defers, the notice that names its deferred tools
+    /// says how to load them.
+    pub fn should_announce_for(session_dispatcher: &dyn AgentToolDispatcher) -> bool {
+        Self::should_compose_for(session_dispatcher)
+            && (session_dispatcher.tool_catalog_control_plane()
+                == meerkat_core::ToolCatalogControlPlane::Always
+                || Self::should_enable_for(session_dispatcher))
+    }
+
     pub fn new(
         session_dispatcher: Arc<dyn AgentToolDispatcher>,
         visibility_provider: Arc<CatalogControlVisibilityProvider>,

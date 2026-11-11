@@ -8126,11 +8126,14 @@ where
             // The same projection a host's catalog view previews.
             let crate::tool_catalog::CatalogBoundaryProjection {
                 control_tool_names,
+                control_tools_always_visible,
                 deferred_tool_names,
                 ..
             } = crate::tool_catalog::catalog_boundary_projection(
                 catalog_capabilities,
+                self.tools.tool_catalog_control_plane(),
                 current_catalog.as_deref(),
+                current_pending_catalog_sources.as_ref(),
                 catalog_mode,
             );
             let previous_visibility_state = self.tool_scope.visibility_state().ok();
@@ -8144,21 +8147,22 @@ where
             }
             let apply_result = match self.tool_scope.promote_staged_visibility() {
                 Ok(visibility_state) => {
-                    if let Some(previous_visibility_state) = previous_visibility_state.as_ref() {
-                        self.tool_scope.apply_staged_projection_with_previous(
-                            dispatcher_tools.clone(),
-                            control_tool_names.into_iter().collect(),
-                            deferred_tool_names.into_iter().collect(),
-                            previous_visibility_state,
-                            &visibility_state,
-                        )
-                    } else {
-                        self.tool_scope.apply_staged_projection(
-                            dispatcher_tools.clone(),
-                            control_tool_names,
-                            deferred_tool_names,
-                            &visibility_state,
-                        )
+                    // Without the state read before the promotion, read the
+                    // promoted one as the previous state too.
+                    match previous_visibility_state
+                        .map_or_else(|| self.tool_scope.visibility_state(), Ok)
+                    {
+                        Ok(previous_visibility_state) => {
+                            self.tool_scope.apply_staged_catalog_projection(
+                                dispatcher_tools.clone(),
+                                control_tool_names.into_iter().collect(),
+                                control_tools_always_visible,
+                                deferred_tool_names.into_iter().collect(),
+                                &previous_visibility_state,
+                                &visibility_state,
+                            )
+                        }
+                        Err(err) => Err(err),
                     }
                 }
                 Err(err) => Err(err),
@@ -8333,6 +8337,31 @@ where
                             notice_parts.push(format!(
                                 "sources still connecting: {}",
                                 pending_sources.join(", ")
+                            ));
+                        }
+                        // A session whose control tools enter its requests at
+                        // this boundary was built while they were left out,
+                        // so its system prompt never explained them. Say it
+                        // here, appended, where the notice names what waits.
+                        let control_tools_entered =
+                            current_catalog.as_ref().is_some_and(|catalog| {
+                                catalog
+                                    .iter()
+                                    .filter(|entry| {
+                                        entry.plane == crate::tool_catalog::ToolPlaneClass::Control
+                                    })
+                                    .any(|entry| {
+                                        visible_names_set.contains(&entry.tool.name)
+                                            && !applied
+                                                .previous_visible_names
+                                                .contains(&entry.tool.name)
+                                    })
+                            });
+                        if control_tools_entered && !notice_parts.is_empty() {
+                            notice_parts.push(format!(
+                                "use `{}` to find deferred tools and `{}` to load the ones you need",
+                                crate::tool_catalog::TOOL_CATALOG_SEARCH_NAME,
+                                crate::tool_catalog::TOOL_CATALOG_LOAD_NAME
                             ));
                         }
                         if !notice_parts.is_empty() {

@@ -182,6 +182,10 @@ impl AgentToolDispatcher for MemberSessionAuthorityReceiver {
         self.inner.tool_catalog_capabilities()
     }
 
+    fn tool_catalog_control_plane(&self) -> meerkat_core::ToolCatalogControlPlane {
+        self.inner.tool_catalog_control_plane()
+    }
+
     fn tool_catalog(&self) -> Arc<[meerkat_core::ToolCatalogEntry]> {
         self.inner.tool_catalog()
     }

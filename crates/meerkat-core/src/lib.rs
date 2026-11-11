@@ -690,11 +690,11 @@ pub use tool_application::{
 };
 pub use tool_bundle::RegisteredToolBundleDispatcher;
 pub use tool_catalog::{
-    ToolCallability, ToolCatalogCapabilities, ToolCatalogDeferredEligibility, ToolCatalogEntry,
-    ToolCatalogLoadRejectedReason, ToolCatalogLoadResolution, ToolCatalogMode, ToolCatalogView,
-    ToolCatalogViewEntry, ToolCatalogVisibility, ToolPlaneClass, ToolUnavailableReason,
-    deferred_session_entry_count, deferred_session_schema_volume,
-    select_catalog_mode_from_snapshot,
+    ToolCallability, ToolCatalogCapabilities, ToolCatalogControlPlane,
+    ToolCatalogDeferredEligibility, ToolCatalogEntry, ToolCatalogLoadRejectedReason,
+    ToolCatalogLoadResolution, ToolCatalogMode, ToolCatalogView, ToolCatalogViewEntry,
+    ToolCatalogVisibility, ToolPlaneClass, ToolUnavailableReason, deferred_session_entry_count,
+    deferred_session_schema_volume, select_catalog_mode_from_snapshot,
 };
 pub use tool_consequence_policy::{
     ApplicationToolPolicyBinding, BoundToolConsequencePolicy,

@@ -1335,9 +1335,12 @@ impl AgentToolDispatcher for CallbackToolDispatcher {
     }
 
     fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
+        // Registered tools need no control tool while they are all in the
+        // request: the control tools are mounted with the first registered
+        // tool and shown only while one waits behind the catalog.
         ToolCatalogCapabilities {
             exact_catalog: true,
-            may_require_catalog_control_plane: true,
+            may_require_catalog_control_plane: false,
         }
     }
 

@@ -10512,7 +10512,9 @@ impl AgentFactory {
             "tool composition: final dispatcher"
         );
 
-        if CatalogControlDispatcher::should_compose_for(tools.as_ref()) {
+        // The system prompt explains the control tools only to a session
+        // that starts with them in its requests.
+        if CatalogControlDispatcher::should_announce_for(tools.as_ref()) {
             if !tool_usage_instructions.is_empty() {
                 tool_usage_instructions.push_str("\n\n");
             }

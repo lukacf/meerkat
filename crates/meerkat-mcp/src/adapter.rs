@@ -141,6 +141,9 @@ impl McpRouterShutdownObserver {
 /// projection snapshot. The adapter keeps a best-effort fallback copy so
 /// `tools()` can stay non-blocking under lock contention.
 pub struct McpRouterAdapter {
+    /// How this router needs the deferred catalog's control tools: in every
+    /// model request (the default), or only once it has tools to defer.
+    control_plane: meerkat_core::ToolCatalogControlPlane,
     router: AsyncRwLock<Option<McpRouter>>,
     has_pending: AtomicBool,
     tools_cache: StdRwLock<Arc<[Arc<ToolDef>]>>,
@@ -432,6 +435,20 @@ impl ExternalToolSurfaceHandle for PoisonedExternalToolSurfaceHandle {
 }
 
 impl McpRouterAdapter {
+    /// Show the deferred catalog's control tools only once this router has
+    /// tools to defer, instead of in every model request.
+    ///
+    /// For a host that gives every session a router so that a server can be
+    /// added later: the session mounts the control tools and its requests
+    /// stay free of them until a server's tools wait behind the catalog or a
+    /// server is connecting. A router keeps them in every request unless its
+    /// host calls this.
+    #[must_use]
+    pub fn with_control_plane_on_demand(mut self) -> Self {
+        self.control_plane = meerkat_core::ToolCatalogControlPlane::OnDemand;
+        self
+    }
+
     pub fn new(router: McpRouter) -> Self {
         let has_pending = router.has_pending_or_notices();
         let tools = AgentToolDispatcher::tools(&router);
@@ -446,6 +463,7 @@ impl McpRouterAdapter {
         let construction = router.construction_id();
         let (shutdown_report, report) = tokio::sync::watch::channel(None);
         Self {
+            control_plane: meerkat_core::ToolCatalogControlPlane::Always,
             router: AsyncRwLock::new(Some(router)),
             has_pending: AtomicBool::new(has_pending),
             tools_cache: StdRwLock::new(tools),
@@ -1728,6 +1746,10 @@ impl AgentToolDispatcher for McpRouterAdapter {
         }
     }
 
+    fn tool_catalog_control_plane(&self) -> meerkat_core::ToolCatalogControlPlane {
+        self.control_plane
+    }
+
     fn execution_binding_epoch(&self, _tool_name: &str) -> u64 {
         self.execution_binding_epoch.load(Ordering::Acquire)
     }
@@ -2218,6 +2240,33 @@ mod tests {
         .await
         .expect("the connection reaches its physical entry");
         tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    /// A router keeps the catalog control tools in every request unless its
+    /// host asks for them on demand; either way the session mounts them.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_router_shows_the_control_tools_always_unless_its_host_asks_on_demand() {
+        use meerkat_core::ToolCatalogControlPlane;
+        let always = McpRouterAdapter::new(generated_surface_router());
+        assert_eq!(
+            always.tool_catalog_control_plane(),
+            ToolCatalogControlPlane::Always
+        );
+        let on_demand =
+            McpRouterAdapter::new(generated_surface_router()).with_control_plane_on_demand();
+        assert_eq!(
+            on_demand.tool_catalog_control_plane(),
+            ToolCatalogControlPlane::OnDemand
+        );
+        for adapter in [&always, &on_demand] {
+            let capabilities = adapter.tool_catalog_capabilities();
+            assert!(capabilities.exact_catalog);
+            assert!(
+                capabilities.may_require_catalog_control_plane,
+                "both mount the control tools"
+            );
+        }
     }
 
     #[cfg(feature = "workspace-tests")]

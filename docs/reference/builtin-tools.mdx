@@ -240,7 +240,7 @@ the internal `dispatch_context` field.
 ## Deferred tool catalog control plane
 
 An exact dispatcher can keep eligible session tools out of the LLM's inline
-schema set and expose two always-inline control tools instead. The selector
+schema set and expose two control tools instead. The selector
 enters deferred mode when a source is still pending, or when the combined
 name, description and schema text of the eligible tools reaches 8,192 bytes
 (`DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD`). The budget counts every
@@ -250,6 +250,19 @@ tools stay in every request: the mode costs about 1.2 KB per request and two
 extra model requests on a tool's first use, so a few small tools are cheaper
 to send than to defer. The number of tools alone never starts the mode. These
 tools are not part of the general builtins gate.
+
+The two control tools are mounted for a session with an exact catalog that
+has an eligible tool, a pending source, or a source that may need them (an
+MCP router does). They are in a model request only while an eligible tool
+waits behind the catalog, while a source is still pending, or when a source
+asks for them always (`ToolCatalogControlPlane::Always`, which a router asks
+unless its host says otherwise); otherwise they are left out and a call of
+one is refused with `access_denied`. The RPC server gives every session a
+router that asks for them on demand, so a session there with a few small
+tools sends neither, and gets both once a later registration or a server
+added with `mcp/add` takes it over the budget. A session with no such source
+and nothing to defer when it starts mounts no control tools and keeps tools
+that arrive later in every request for its lifetime.
 
 A Rust host can read this projection for a live session without a model
 request: `EphemeralSessionService::tool_catalog_view` and

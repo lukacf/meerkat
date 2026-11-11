@@ -18,9 +18,11 @@
 //! mounted, the Console offers changes and a decision is driven exactly
 //! when it is true.
 //!
-//! One change goes through, in this order (before the second step the mob's
-//! owed seats are driven again: an agent whose first message did not start
-//! is seated then, with no restart):
+//! One change goes through, in this order. Every change also has the mob's
+//! owed seats driven again, so an agent whose first message did not start
+//! is seated with no restart; that drive runs beside the change, one at a
+//! time, and the change's answer never waits for it (a seat can take as
+//! long as an agent's start):
 //! 1. the requester: a member private to a person asks for no change
 //!    (`private_requester`), whatever its transport said of it;
 //! 2. the operation: one that committed answers its outcome again and
@@ -63,6 +65,7 @@
 //! identity store or the identity runtime's registration.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, PoisonError, RwLock, Weak};
 
 use async_trait::async_trait;
@@ -282,6 +285,17 @@ pub(crate) struct IdentityGate {
     _driver: Option<Arc<DecisionExecutorDriver>>,
     /// The runtime's decisions, to read the request a decision holds.
     decision_rows: Option<meerkat_runtime::decision::DurableDecisionService>,
+    /// Whether a drive of the mob's owed seats is under way: one at a time.
+    seat_drive: Arc<AtomicBool>,
+}
+
+/// Ends a drive of the owed seats, however its task ends.
+struct SeatDrive(Arc<AtomicBool>);
+
+impl Drop for SeatDrive {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 impl std::fmt::Debug for IdentityGate {
@@ -591,7 +605,37 @@ impl IdentityGate {
             decisions: None,
             _driver: None,
             decision_rows: None,
+            seat_drive: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Drive the mob's owed seats again, beside the change that came by. An
+    /// agent whose first message did not start is owed its seat; the mob
+    /// seats it at its next start, and every change has it seated now, so
+    /// no agent waits for a restart. The change does not wait for the
+    /// drive: a seat can take as long as an agent's start, and a change's
+    /// answer never waits on another agent's start. One drive runs at a
+    /// time. With none owed it reads the mob's published state and does
+    /// nothing.
+    fn drive_owed_seats(&self, mob: &MobHandle) {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        if self.seat_drive.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let drive = SeatDrive(Arc::clone(&self.seat_drive));
+        let mob = mob.clone();
+        runtime.spawn(async move {
+            let _drive = drive;
+            let still_owed = mob.seat_owed_store_owned_identities().await;
+            if !still_owed.is_empty() {
+                tracing::warn!(
+                    owed = still_owed.len(),
+                    "agents are still owed their seat after the seats were driven again"
+                );
+            }
+        });
     }
 
     /// This family, holding the changes a person decides in `decisions`,
@@ -1237,17 +1281,7 @@ impl IdentityGate {
         if self.is_private(mob, requester) {
             return Err(IdentityRefusal::new(IdentityRefusalKind::PrivateRequester));
         }
-        // An agent whose first message did not start is owed its seat. The
-        // mob seats it at its next start; a change that comes by drives the
-        // owed seats now, so no agent waits for a restart. With none owed
-        // this reads the mob's published state and does nothing.
-        let still_owed = mob.seat_owed_store_owned_identities().await;
-        if !still_owed.is_empty() {
-            tracing::warn!(
-                owed = still_owed.len(),
-                "agents are still owed their seat after the seats were driven again"
-            );
-        }
+        self.drive_owed_seats(mob);
         if let Some(receipt) = Self::receipt(mob, &call.operation_id).await? {
             return self.replayed(mob, policy, requester, call, &receipt).await;
         }

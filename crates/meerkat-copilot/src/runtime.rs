@@ -14496,6 +14496,108 @@ mod tests {
             );
         }
 
+        /// A session's routed client observes the route the account's list
+        /// resolves now, not the route it last prepared a request on. A
+        /// session built while the account holds no list answers that the
+        /// list is unavailable. Once the account's model discovery has
+        /// loaded the list, the same session answers the levels the list
+        /// states, and after a refreshed list states other levels it answers
+        /// those: no new session, and no request sent through the session in
+        /// between (a level that was refused prepares no request, so nothing
+        /// else would bring the answer up to date).
+        #[tokio::test]
+        async fn a_session_observes_the_levels_once_the_accounts_list_loads() {
+            use meerkat_core::AccountLevelStatement;
+            use meerkat_core::model_profile::capabilities::EffortLevel;
+
+            let clock = TestClock::new();
+            let transport = Arc::new(ScriptedTransport::new([
+                token_at("derived-one", clock.at(3600), 1800),
+                // The first listing fails, and so does its one immediate retry.
+                json_response(503, serde_json::json!({"message": "temporary"})),
+                json_response(503, serde_json::json!({"message": "temporary"})),
+                listing_stating_levels(&["low", "medium", "high"]),
+                listing_stating_levels(&["low", "medium", "high", "xhigh"]),
+            ]));
+            let account = RouteAccount::new(transport.clone(), &clock).await;
+            let session = account.session([]).await;
+            assert_eq!(
+                transport.request_count(),
+                3,
+                "one mint, two failed listings"
+            );
+            let state = account
+                .runtime
+                .accounts
+                .lock()
+                .values()
+                .find_map(Weak::upgrade)
+                .expect("the account's state");
+            let loaded_list = || {
+                state
+                    .cache
+                    .read()
+                    .as_ref()
+                    .and_then(|cached| cached.models.clone())
+            };
+            let stated_now = || {
+                session
+                    .client
+                    .reasoning_route()
+                    .map(|observed| observed.account)
+            };
+            assert!(loaded_list().is_none());
+            assert_eq!(stated_now(), Some(AccountLevelStatement::ListUnavailable));
+
+            // The listing is due again (30 s after it failed); the token is
+            // still fresh. Preparing the session's credential starts the
+            // discovery off the request path.
+            clock.set(31);
+            session
+                .client
+                .prepare_controller_credential()
+                .await
+                .expect("the token is fresh");
+            settle(|| loaded_list().is_some()).await;
+            assert_eq!(transport.request_count(), 4, "one more listing");
+            assert_eq!(
+                stated_now(),
+                Some(AccountLevelStatement::Stated(vec![
+                    EffortLevel::Low,
+                    EffortLevel::Medium,
+                    EffortLevel::High,
+                ])),
+                "the session answers the list the account now holds"
+            );
+
+            // A refreshed list (300 s later) states one more level.
+            let first_list = loaded_list().expect("a loaded model list");
+            clock.set(31 + 301);
+            session
+                .client
+                .prepare_controller_credential()
+                .await
+                .expect("the token is fresh");
+            settle(|| loaded_list().is_some_and(|current| !Arc::ptr_eq(&first_list, &current)))
+                .await;
+            assert_eq!(transport.request_count(), 5, "one more listing");
+            assert_eq!(
+                stated_now(),
+                Some(AccountLevelStatement::Stated(vec![
+                    EffortLevel::Low,
+                    EffortLevel::Medium,
+                    EffortLevel::High,
+                    EffortLevel::Xhigh,
+                ])),
+                "the session answers the levels the refreshed list states"
+            );
+            assert!(
+                session.bearers().is_empty(),
+                "no request was sent through the session: {:?}",
+                session.bearers()
+            );
+        }
+
         /// A model listing 403 that asks for no account action (a policy, an
         /// integration the account does not allow) is a discovery failure:
         /// the token keeps serving, the sign-in stays valid, and the list is

@@ -1678,16 +1678,16 @@ impl OpenAiClient {
                 return Ok(response);
             }
             let headers = response.headers().clone();
-            let mut text = response
+            let text = response
                 .text()
                 .await
                 .map_err(|error| LlmError::StreamParseError {
                     message: format!("cannot read Responses rejection body: {error}"),
                 })?;
-            // The body is redacted before it is classified, and the decoded
-            // error again: a JSON escape can hide an echoed credential from
-            // the first pass and decoding reveals it.
-            self.redact_diagnostic(&mut text);
+            // The rejection is classified from the body as received, and the
+            // error built from it is redacted: what the redaction removes
+            // can then never change the error's class. (The continuation
+            // fallback below reads the same body; it never shows it.)
             let rejection =
                 self.redacted_error(LlmError::from_http_response(status, text.clone(), &headers));
             // A policy stop must reach the recovery owner before auth refresh

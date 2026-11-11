@@ -2543,8 +2543,9 @@ impl AnthropicClient {
                 Ok(response.bytes_stream())
             } else {
                 let headers = response.headers().clone();
-                let mut text = response.text().await.unwrap_or_default();
-                self.redact_diagnostic(&mut text);
+                let text = response.text().await.unwrap_or_default();
+                // Classified from the body as received, then redacted: what
+                // the redaction removes can never change the error's class.
                 let refusal = self.redacted_error(
                     crate::request_support::provider_forced_tool_choice_rejection(
                         request,

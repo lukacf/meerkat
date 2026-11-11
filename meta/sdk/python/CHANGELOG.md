@@ -4,6 +4,10 @@ All notable changes to the Python SDK are documented here.
 
 ## Unreleased
 
+## 0.9.13
+
+No SDK API changes; released with Meta 0.9.13.
+
 ## 0.9.12
 
 - `MetaRuntime.grant_tool` returns the gateway's `applies` beside the

@@ -494,6 +494,13 @@ async fn write_lease_record(path: &Path, record: &RealmLeaseRecord) -> Result<()
     Ok(())
 }
 
+/// One heartbeat of a lease holder: replace the record at `path` with one
+/// that carries the current time.
+async fn heartbeat_lease_record(path: &Path, record: &mut RealmLeaseRecord) {
+    record.heartbeat_at = now_unix_secs();
+    let _ = write_lease_record(path, record).await;
+}
+
 #[deprecated(
     since = "0.8.4",
     note = "ambient state-root resolution is deprecated; use the `_in` variant with an explicit root (see meerkat_core::StorageLayout)"
@@ -545,8 +552,7 @@ pub async fn start_realm_lease_in(
                     break;
                 }
                 _ = interval.tick() => {
-                    record.heartbeat_at = now_unix_secs();
-                    let _ = write_lease_record(&heartbeat_path, &record).await;
+                    heartbeat_lease_record(&heartbeat_path, &mut record).await;
                 }
             }
         }
@@ -2882,6 +2888,74 @@ mod tests {
                         files_under(&realm_lease_dir(&realm_paths_in(root, REALM))),
                         Vec::<String>::new()
                     );
+                },
+            );
+        }
+
+        /// A holder that is alive, on a filesystem that refuses its
+        /// heartbeat writes (a full disk), must not come to look gone: its
+        /// last good record goes stale after the TTL, and `rkat realm
+        /// delete` and `rkat realm prune`, the natural commands on a full
+        /// disk, would then remove the realm under it without `--force`.
+        ///
+        /// The record the holder is left with here already carries a
+        /// heartbeat older than the TTL: what a record reads like once the
+        /// refused heartbeats have gone on for that long. Delete and prune
+        /// ask exactly what `verify` asks, the lease status with stale
+        /// records cleaned up, and remove the realm unless it blocks.
+        #[test]
+        fn a_refused_write_at_a_heartbeat_keeps_the_lease_blocking_delete_and_prune() {
+            fn lease_path(root: &Path) -> PathBuf {
+                realm_lease_dir(&realm_paths_in(root, REALM)).join("instance.json")
+            }
+            with_writes_refused(
+                module_path!(),
+                "a_refused_write_at_a_heartbeat_keeps_the_lease_blocking_delete_and_prune",
+                |root| {
+                    runtime()
+                        .block_on(write_lease_record(&lease_path(root), &lease(100)))
+                        .expect("the holder's last good lease record");
+                },
+                |root| {
+                    let mut record = lease(100);
+                    runtime().block_on(heartbeat_lease_record(&lease_path(root), &mut record));
+                    assert_eq!(
+                        files_under(&realm_lease_dir(&realm_paths_in(root, REALM))),
+                        ["instance.json"],
+                        "the refused heartbeat leaves the holder's record and no temporary file"
+                    );
+                },
+                |root, ()| {
+                    let runtime = runtime();
+                    // Asked twice: the first answer must not rest on a record
+                    // that the asking itself cleans up.
+                    for _ in 0..2 {
+                        let status = runtime
+                            .block_on(inspect_realm_leases_in(root, REALM, true))
+                            .expect("the lease status");
+                        assert!(
+                            status.blocks_destructive_prune(),
+                            "a live holder whose heartbeat write was refused still blocks \
+                             delete and prune: {status:?}"
+                        );
+                    }
+                    assert!(
+                        lease_path(root).exists(),
+                        "the holder's record is never cleaned up as stale"
+                    );
+
+                    // The next heartbeat that succeeds restores the record.
+                    let mut record = lease(100);
+                    runtime.block_on(heartbeat_lease_record(&lease_path(root), &mut record));
+                    let status = runtime
+                        .block_on(inspect_realm_leases_in(root, REALM, false))
+                        .expect("the lease status");
+                    assert_eq!(
+                        status.active.len(),
+                        1,
+                        "the restored record is live: {status:?}"
+                    );
+                    assert!(status.stale.is_empty() && status.unparseable.is_empty());
                 },
             );
         }

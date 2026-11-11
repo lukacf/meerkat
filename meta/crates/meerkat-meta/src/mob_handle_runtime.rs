@@ -608,6 +608,13 @@ impl LlmClient for ProviderAgnosticLlmClient {
         self.inner.controller_model_selection()
     }
 
+    // The route the wrapped client serves, for the provider-neutral
+    // reasoning effort option. The trait's default is no route, and a level
+    // set on a member whose client reports none is refused as unknown.
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        self.inner.reasoning_route()
+    }
+
     fn plain_model_route(
         &self,
         logical_model: &str,
@@ -725,6 +732,13 @@ impl meerkat_core::AgentLlmClient for ReplaySanitizingAgentLlmClient {
     // admission refuses the member as malformed.
     fn controller_model_selection(&self) -> Option<meerkat_core::ControllerModelSelection> {
         self.inner.controller_model_selection()
+    }
+
+    // The route the wrapped client serves, for the provider-neutral
+    // reasoning effort option. The trait's default is no route, and a level
+    // set on a member whose client reports none is refused as unknown.
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        self.inner.reasoning_route()
     }
 
     fn controller_model_facts(
@@ -937,6 +951,13 @@ impl LlmClient for ReplaySanitizingLlmClient {
 
     fn controller_model_selection(&self) -> Option<meerkat_core::ControllerModelSelection> {
         self.inner.controller_model_selection()
+    }
+
+    // The route the wrapped client serves, for the provider-neutral
+    // reasoning effort option. The trait's default is no route, and a level
+    // set on a member whose client reports none is refused as unknown.
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        self.inner.reasoning_route()
     }
 
     fn plain_model_route(

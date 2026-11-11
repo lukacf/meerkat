@@ -272,7 +272,9 @@ describe("reading the family's answers", () => {
 
     family.seed({ name: "oldhand", display_name: "Old hand", archived: true });
     const page = parseAgentPage(family.handle("meta/identity/list", { include_archived: true }).result);
-    expect(page.agents.map((agent) => [agent.name, agent.archived])).toEqual([["helper", false], ["oldhand", true], ["warden", false]]);
+    // The page's order is the gateway's own (here: the order the agents came
+    // to exist in), not name order; the console keeps it.
+    expect(page.agents.map((agent) => [agent.name, agent.archived])).toEqual([["helper", false], ["warden", false], ["oldhand", true]]);
     expect(page.next).toBeUndefined();
   });
 
@@ -302,7 +304,9 @@ describe("reading the family's answers", () => {
       const page = parseAgentPage(family.handle("meta/identity/list", { include_archived: true, ...(after ? { after } : {}) }).result);
       return { items: page.agents.map((agent) => agent.name), next: page.next };
     });
-    expect(names).toEqual(["helper", "oldhand", "warden"]);
+    // Each page is read after the name the page before named, in the
+    // gateway's order: nothing is sorted and nothing is skipped.
+    expect(names).toEqual(["helper", "warden", "oldhand"]);
     let reads = 0;
     const looped = await readAllPages(async () => {
       reads += 1;

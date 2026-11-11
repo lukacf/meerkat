@@ -2869,7 +2869,7 @@
             "required_fields": [
               "agents"
             ],
-            "note": "A page of the mob's agents in name order, each as get names it without instructions, context, labels and peers; next names the agent to read the next page after. An agent the caller may not view is left out."
+            "note": "A page of the mob's agents in one stable order that after continues (it is not name order), each as get names it without instructions, context, labels and peers; next names the agent to read the next page after. An agent the caller may not view is left out."
           },
           "errors": [
             {

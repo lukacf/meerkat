@@ -460,6 +460,17 @@ describe("long-term agents in the console", () => {
       .toBe("A governed runtime does not start an agent with a first message: leave it out.");
     expect(form.textContent).not.toContain("unsupported");
 
+    // A peer the gateway refuses (it is gone, or none this viewer may
+    // name: the gateway says the same of both) shows at the peers.
+    family.scriptNext("meta/identity/create", { refuse: { kind: "peer_unknown", field: "agents[0].peers[0]" } });
+    setField(form, "identity-field:first_message", "");
+    fireEvent.click(within(form).getByTestId("identity-peer:warden"));
+    fireEvent.submit(form);
+    expect((await find(view, "identity-field-error:peers")).textContent)
+      .toBe("The peer is no agent you may name: list agents of the mob, or other agents of the same request.");
+    fireEvent.click(within(form).getByTestId("identity-peer:warden"));
+    expect(present(view, "identity-field-error:peers")).toBe(false);
+
     // A refusal of the request as a whole is the form's own notice.
     family.scriptNext("meta/identity/create", { refuse: { kind: "change_denied", change: "create" } });
     setField(form, "identity-field:first_message", "");

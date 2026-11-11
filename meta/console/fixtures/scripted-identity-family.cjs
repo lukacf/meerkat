@@ -317,8 +317,11 @@ function createScriptedIdentityFamily(options = {}) {
     return null;
   }
 
+  // A page of a read: one stable order that `after` continues. The order is
+  // the one the agents came to exist in, not name order, as the gateway's
+  // own order is none a caller can compute.
   function page(entries, after, key) {
-    const rest = after ? entries.filter(entry => entry[key] > after) : entries;
+    const rest = after ? entries.slice(entries.findIndex(entry => entry[key] === after) + 1) : entries;
     const size = options.pageSize || 100;
     const shown = rest.slice(0, size);
     return { shown, next: rest.length > size ? shown[shown.length - 1][key] : undefined };
@@ -354,7 +357,6 @@ function createScriptedIdentityFamily(options = {}) {
         const listed = [...agents.values()]
           .filter(agent => params.include_archived === true || !agent.archived)
           .filter(agent => !params.profile || agent.profile === params.profile)
-          .sort((left, right) => left.name.localeCompare(right.name))
           .map(summary);
         const { shown, next } = page(listed, params.after, "name");
         return { result: { agents: shown, ...(next ? { next } : {}) } };
@@ -362,7 +364,6 @@ function createScriptedIdentityFamily(options = {}) {
       case "meta/identity/directory": {
         const peers = [...agents.values()]
           .filter(agent => !agent.archived)
-          .sort((left, right) => left.name.localeCompare(right.name))
           .map(agent => ({
             name: agent.name,
             ...(agent.display_name ? { display_name: agent.display_name } : {}),

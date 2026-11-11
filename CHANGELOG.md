@@ -183,6 +183,12 @@ them.
   Nothing sets the marker yet. A level without it behaves as before: it is
   checked against the row, and dropped for a model without a reasoning
   row. A request without a marked level builds the same body as before.
+  On the Chat Completions wire of `OpenAiCompatibleClient` a marked level
+  is written as any level is; a client built for a model without reasoning
+  support (`supports_reasoning: false`), which has no place for a level,
+  refuses a request that carries a marked one (`LlmError::InvalidRequest`)
+  instead of building it without the level. A level without the marker is
+  still dropped there.
 
 - `meerkat-core`, `meerkat-openai`, `meerkat`: an operator can declare the
   reasoning effort levels a self-hosted model accepts, with

@@ -608,6 +608,21 @@ impl OpenAiCompatibleClient {
                 {
                     body["thinking"] = thinking.as_value();
                 }
+            } else if tag.reasoning_effort_resolved
+                && let Some(effort) = tag.reasoning_effort
+            {
+                // A level that was resolved for this request's route is sent
+                // or refused, never dropped. This client was built for a
+                // model without reasoning support, so its body has no place
+                // for the level. A raw level (no marker) is still dropped
+                // here, as it always was.
+                return Err(LlmError::InvalidRequest {
+                    message: format!(
+                        "reasoning effort '{}' was resolved for this request, but this client \
+                         was built for a model without reasoning support and cannot send it",
+                        effort.as_legacy_str()
+                    ),
+                });
             }
             if let Some(output_schema) = tag.structured_output.as_ref() {
                 let compiled =

@@ -162,9 +162,13 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
     ] {
         assert!(ci.contains(gate), "PR CI must run `{gate}`");
     }
+    // The step calls the installer, which takes the pinned ripgrep release
+    // and runs `rg --version`; the Ubuntu package is the installer's own
+    // fallback, never a workflow step's only source again.
     assert!(
-        ci.contains("sudo apt-get install -y ripgrep") && ci.contains("rg --version"),
-        "PR CI installs ripgrep and proves it is on PATH before the tombstone scans"
+        ci.contains("run: scripts/install-ripgrep.sh")
+            && !ci.contains("apt-get install -y ripgrep"),
+        "PR CI installs ripgrep through scripts/install-ripgrep.sh, which proves it is on PATH before the tombstone scans"
     );
     assert!(ci.contains("name: Enforce lane execution budget"));
     // The budget measures what the code controls: lane execution (started to

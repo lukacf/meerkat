@@ -17,6 +17,7 @@ import os
 import pathlib
 import shutil
 import sys
+import tarfile
 import tempfile
 import unittest
 import unittest.mock
@@ -103,12 +104,15 @@ class FloorResolveProblem(unittest.TestCase):
 # `metadata` in the scratch workspace rewrites its lock and lists meerkat-core
 # from crates.io (or fails as FLOOR_STUB_RESOLVE_ERROR says); `build` and
 # `check` succeed. Every call is logged with its working directory.
+# FLOOR_STUB_PAD (`crate=bytes`) adds that many incompressible bytes under the
+# crate's tests/fixtures, so its archive is at least that large.
 FLOOR_CARGO_STUB = r'''
 import io, json, os, pathlib, sys, tarfile
 args, cwd = sys.argv[1:], pathlib.Path.cwd()
 with open(os.environ["FLOOR_STUB_LOG"], "a") as log:
     log.write(json.dumps({"args": args, "cwd": str(cwd)}) + "\n")
 root = pathlib.Path(os.environ["FLOOR_STUB_ROOT"])
+pad = dict(item.split("=") for item in os.environ.get("FLOOR_STUB_PAD", "").split(",") if item)
 crates = {"meta-extension-state": root / "meta/crates/meta-extension-state",
           "meerkat-meta": root / "meta/crates/meerkat-meta", "meerkat-core": root / "crates/meerkat-core"}
 def package(name, path, source=None, kinds=("lib",)):
@@ -127,6 +131,11 @@ elif args[:1] == ["package"]:
                 info = tarfile.TarInfo(f"{word}-0.8.31/Cargo.toml")
                 info.size = len(body)
                 archive.addfile(info, io.BytesIO(body))
+                if word in pad:
+                    filler = os.urandom(int(pad[word]))
+                    info = tarfile.TarInfo(f"{word}-0.8.31/tests/fixtures/recorded.bin")
+                    info.size = len(filler)
+                    archive.addfile(info, io.BytesIO(filler))
 elif args[:1] == ["metadata"]:
     error = os.environ.get("FLOOR_STUB_RESOLVE_ERROR")
     if error:
@@ -146,10 +155,9 @@ else:
 '''
 
 
-class FloorNoBuild(unittest.TestCase):
-    """`floor --no-build` packages, unpacks and resolves, records the
-    resolved lock's digest, builds nothing, publishes nothing and writes only
-    under --out (a cargo stand-in, no network)."""
+class FloorFixture:
+    """A repository with a Meta product and the cargo stand-in above (no
+    network)."""
 
     def setUp(self):
         self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="floor-no-build-"))
@@ -177,15 +185,21 @@ class FloorNoBuild(unittest.TestCase):
         return {path.relative_to(self.tmp): (path.stat().st_mtime_ns, path.read_bytes())
                 for path in sorted(self.tmp.rglob("*")) if path.is_file() and path != self.log}
 
-    def run_floor(self, name, *, resolve_only, resolve_error=None):
+    def run_floor(self, name, *, resolve_only, resolve_error=None, pad=""):
         out = self.tmp / name
-        env = dict(self.env, FLOOR_STUB_RESOLVE_ERROR=resolve_error or "")
+        env = dict(self.env, FLOOR_STUB_RESOLVE_ERROR=resolve_error or "", FLOOR_STUB_PAD=pad)
         with unittest.mock.patch.dict(os.environ, env), \
                 contextlib.redirect_stdout(io.StringIO()) as stdout:
             status = pcs.floor(self.root, "meta", out, "release", False, resolve_only=resolve_only)
         calls = [json.loads(line) for line in self.log.read_text().splitlines()]
         self.log.write_text("")
         return status, json.loads((out / "floor.json").read_text()), calls, stdout.getvalue(), out
+
+
+class FloorNoBuild(FloorFixture, unittest.TestCase):
+    """`floor --no-build` packages, unpacks and resolves, records the
+    resolved lock's digest, builds nothing, publishes nothing and writes only
+    under --out (a cargo stand-in, no network)."""
 
     def test_no_build_resolves_records_the_lock_and_builds_nothing(self):
         status, report, calls, stdout, out = self.run_floor("out", resolve_only=True)
@@ -226,6 +240,217 @@ class FloorNoBuild(unittest.TestCase):
         self.assertIn('meerkat-core = "=0.8.31"', report["problems"][0])
         self.assertNotIn("lock_sha256", report)
         self.assertEqual([call["args"][0] for call in calls], ["metadata", "package", "metadata"])
+
+
+def crate_archive(directory, crate, files, version="0.9.12", compresslevel=9):
+    """A crate file as `cargo package` writes it: gzip, every member under
+    `<crate>-<version>/`."""
+    path = directory / f"{crate}-{version}.crate"
+    with tarfile.open(path, "w:gz", compresslevel=compresslevel) as archive:
+        for name, body in files.items():
+            info = tarfile.TarInfo(f"{crate}-{version}/{name}")
+            info.size = len(body)
+            archive.addfile(info, io.BytesIO(body))
+    return path
+
+
+class PackageSize(unittest.TestCase):
+    """A crate file crates.io would refuse for its size fails before any
+    publication, and the failure says what weighs most."""
+
+    def setUp(self):
+        self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="package-size-"))
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def test_the_limit_is_the_registrys_and_the_allowed_maximum_leaves_room(self):
+        self.assertEqual(pcs.REGISTRY_MAX_CRATE_BYTES, 10_485_760)
+        self.assertEqual(pcs.REGISTRY_MAX_CRATE_BYTES, 10 * 1024 * 1024)
+        self.assertEqual(pcs.ALLOWED_MAX_CRATE_BYTES, 9_961_472)
+        self.assertEqual(pcs.ALLOWED_MAX_CRATE_BYTES, 19 * 512 * 1024)
+        self.assertLess(pcs.ALLOWED_MAX_CRATE_BYTES, pcs.REGISTRY_MAX_CRATE_BYTES)
+
+    def test_a_crate_file_at_the_allowed_maximum_passes_and_one_byte_above_fails(self):
+        archive = crate_archive(self.tmp, "demo", {"src/lib.rs": os.urandom(2048)})
+        size = archive.stat().st_size
+        with unittest.mock.patch.object(pcs, "ALLOWED_MAX_CRATE_BYTES", size):
+            self.assertEqual(pcs.package_size_problems({"demo": archive}), [])
+        with unittest.mock.patch.object(pcs, "ALLOWED_MAX_CRATE_BYTES", size - 1):
+            problems = pcs.package_size_problems({"demo": archive})
+        self.assertTrue(problems[0].startswith(f"demo: demo-0.9.12.crate is {size} bytes, 1 above the allowed maximum of {size - 1} bytes"),
+                        problems[0])
+
+    def test_the_real_limits_pass_a_crate_file_of_the_allowed_size_and_fail_a_larger_one(self):
+        at_most = self.tmp / "fits-0.9.12.crate"
+        with at_most.open("wb") as handle:
+            handle.truncate(pcs.ALLOWED_MAX_CRATE_BYTES)
+        self.assertEqual(pcs.package_size_problems({"fits": at_most}), [])
+        # 10 MiB of incompressible fixture: the archive is larger than that.
+        heavy = crate_archive(self.tmp, "heavy", {"tests/fixtures/recorded.bin": os.urandom(10 * 1024 * 1024),
+                                                 "src/lib.rs": b"pub fn f() {}\n"}, compresslevel=1)
+        size = heavy.stat().st_size
+        self.assertGreater(size, pcs.REGISTRY_MAX_CRATE_BYTES)
+        problems = pcs.package_size_problems({"fits": at_most, "heavy": heavy})
+        self.assertIn(f"heavy: heavy-0.9.12.crate is {size} bytes", problems[0])
+        self.assertIn("above the allowed maximum of 9961472 bytes (9.5 MiB)", problems[0])
+        self.assertIn("crates.io refuses a crate file above 10485760 bytes (10 MiB)", problems[0])
+        self.assertEqual(problems[1].split()[0], "tests/")
+        self.assertFalse([line for line in problems if line.startswith("fits")])
+
+    def test_the_failure_names_the_heaviest_top_level_entries_first(self):
+        files = {
+            "Cargo.toml": b"[package]\nname = \"demo\"\n",
+            "src/lib.rs": os.urandom(3000),
+            "src/bin/tool.rs": os.urandom(500),
+            "tests/fixtures/recorded.bin": os.urandom(6000),
+            "tests/suite.rs": b"x" * 100,
+            # Large on disk, small in the archive: ranked by what it costs there.
+            "console-dist/app.js": b"a" * 50_000,
+        }
+        archive = crate_archive(self.tmp, "demo", files)
+        with unittest.mock.patch.object(pcs, "ALLOWED_MAX_CRATE_BYTES", 1):
+            headline, *entries = pcs.package_size_problems({"demo": archive})
+        self.assertIn("demo: demo-0.9.12.crate", headline)
+        self.assertEqual([line.split()[0] for line in entries], ["tests/", "src/", "console-dist/", "Cargo.toml"])
+        self.assertIn("6100 unpacked", entries[0])
+        self.assertIn("3500 unpacked", entries[1])
+        self.assertIn("50000 unpacked", entries[2])
+        self.assertEqual(pcs.largest_entries(archive)[0][:2], ("tests/", 6100))
+
+    def test_only_the_heaviest_entries_are_listed(self):
+        files = {f"dir{index:02}/file.bin": os.urandom(100 + index) for index in range(pcs.LARGEST_ENTRIES_SHOWN + 4)}
+        entries = pcs.largest_entries(crate_archive(self.tmp, "demo", files))
+        self.assertEqual(len(entries), pcs.LARGEST_ENTRIES_SHOWN)
+        self.assertEqual(entries[0][0], f"dir{pcs.LARGEST_ENTRIES_SHOWN + 3:02}/")
+
+    def test_each_crate_has_exactly_one_archive(self):
+        crate_archive(self.tmp, "demo", {"Cargo.toml": b""})
+        crate_archive(self.tmp, "demo-extra", {"Cargo.toml": b""})
+        self.assertEqual(pcs.packaged_archives(self.tmp, ["demo"]), {"demo": self.tmp / "demo-0.9.12.crate"})
+        with self.assertRaises(pcs.UsageError):
+            pcs.packaged_archives(self.tmp, ["demo", "missing"])
+        crate_archive(self.tmp, "demo", {"Cargo.toml": b""}, version="0.9.13")
+        with self.assertRaises(pcs.UsageError):
+            pcs.packaged_archives(self.tmp, ["demo"])
+
+    def test_a_census_that_packages_an_oversized_crate_fails(self):
+        too_large = pcs.OversizedPackage(["demo: demo-0.9.12.crate is 2 bytes, 1 above the allowed maximum"])
+        with unittest.mock.patch.object(pcs, "release_crates", return_value=["demo"]), \
+                unittest.mock.patch.object(pcs, "census", side_effect=too_large), \
+                contextlib.redirect_stderr(io.StringIO()) as stderr:
+            self.assertEqual(pcs.main(["census", "--out", str(self.tmp / "census")]), 1)
+        self.assertIn("FAIL demo: demo-0.9.12.crate is 2 bytes", stderr.getvalue())
+
+
+class PackageSizeCommand(unittest.TestCase):
+    """`package-size` weighs the archives another step packaged: every crate
+    the product publishes, and nothing for a product that publishes none."""
+
+    def setUp(self):
+        self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="package-size-command-"))
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.root = self.tmp / "repo"
+        (self.root / "ci").mkdir(parents=True)
+        (self.root / "ci" / "products.json").write_text(json.dumps({"products": [
+            {"name": "core", "root": "", "publish_order": "scripts/release-rust-crates.sh"},
+            {"name": "meta", "root": "meta", "publish_order": ["meta-extension-state", "meerkat-meta"]},
+            {"name": "connect", "root": "connect", "publish_order": []}]}))
+        self.packages = self.tmp / "target" / "package"
+        self.packages.mkdir(parents=True)
+
+    def run_command(self, product, directory=None):
+        with contextlib.redirect_stdout(io.StringIO()) as stdout, contextlib.redirect_stderr(io.StringIO()) as stderr:
+            status = pcs.package_size(self.root, product, directory or self.packages)
+        return status, stdout.getvalue(), stderr.getvalue()
+
+    def test_every_published_crate_within_the_allowed_size_passes(self):
+        small = crate_archive(self.packages, "meta-extension-state", {"src/lib.rs": b"pub fn f() {}\n"})
+        large = crate_archive(self.packages, "meerkat-meta", {"src/lib.rs": os.urandom(4096)})
+        status, stdout, stderr = self.run_command("meta")
+        self.assertEqual((status, stderr), (0, ""))
+        self.assertIn(f"{small.stat().st_size} bytes", stdout)
+        self.assertIn(f"{large.stat().st_size} bytes", stdout)
+
+    def test_an_oversized_crate_fails_and_is_named(self):
+        crate_archive(self.packages, "meta-extension-state", {"src/lib.rs": b"pub fn f() {}\n"})
+        large = crate_archive(self.packages, "meerkat-meta", {"src/lib.rs": b"pub fn f() {}\n",
+                                                             "tests/fixtures/recorded.bin": os.urandom(4096)})
+        with unittest.mock.patch.object(pcs, "ALLOWED_MAX_CRATE_BYTES", 2000):
+            status, _, stderr = self.run_command("meta")
+        self.assertEqual(status, 1)
+        self.assertIn(f"FAIL meerkat-meta: meerkat-meta-0.9.12.crate is {large.stat().st_size} bytes", stderr)
+        self.assertIn("tests/", stderr)
+        self.assertNotIn("FAIL meta-extension-state", stderr)
+
+    def test_a_missing_archive_is_not_a_pass(self):
+        crate_archive(self.packages, "meta-extension-state", {"src/lib.rs": b""})
+        with self.assertRaises(pcs.UsageError):
+            self.run_command("meta")
+        with unittest.mock.patch.object(pcs, "ROOT", self.root), contextlib.redirect_stderr(io.StringIO()) as stderr:
+            status = pcs.main(["package-size", "--product", "meta", "--package-dir", str(self.packages)])
+        self.assertEqual(status, 2)
+        self.assertIn("expected one archive for meerkat-meta", stderr.getvalue())
+
+    def test_a_product_that_publishes_no_crate_has_nothing_to_weigh(self):
+        status, stdout, _ = self.run_command("connect", self.tmp / "never-packaged")
+        self.assertEqual(status, 0)
+        self.assertIn("connect publishes no crate", stdout)
+
+
+class FloorPackageSize(FloorFixture, unittest.TestCase):
+    """The floor check weighs the crates it packages, before it unpacks,
+    resolves or builds anything."""
+
+    def test_an_oversized_package_fails_the_floor_before_resolution(self):
+        with unittest.mock.patch.object(pcs, "ALLOWED_MAX_CRATE_BYTES", 2000):
+            status, report, calls, stdout, out = self.run_floor("out", resolve_only=False, pad="meerkat-meta=4096")
+        self.assertEqual(status, 1)
+        self.assertEqual(report["stage"], "package")
+        size = (out / "target" / "package" / "meerkat-meta-0.8.31.crate").stat().st_size
+        self.assertTrue(report["problems"][0].startswith(f"meerkat-meta: meerkat-meta-0.8.31.crate is {size} bytes"),
+                        report["problems"][0])
+        self.assertEqual(report["problems"][1].split()[0], "tests/")
+        self.assertEqual([call["args"][0] for call in calls], ["metadata", "package"])
+        self.assertFalse((out / "ws").exists())
+        self.assertIn("not releasable (package)", stdout)
+        self.assertIn("meerkat-meta: meerkat-meta-0.8.31.crate", stdout)
+
+    def test_the_floor_report_records_the_packaged_sizes(self):
+        status, report, _, _, out = self.run_floor("out", resolve_only=True, pad="meerkat-meta=4096")
+        self.assertEqual(status, 0)
+        packages = out / "target" / "package"
+        self.assertEqual(report["package_bytes"], {
+            "meta-extension-state": (packages / "meta-extension-state-0.8.31.crate").stat().st_size,
+            "meerkat-meta": (packages / "meerkat-meta-0.8.31.crate").stat().st_size})
+        self.assertGreater(report["package_bytes"]["meerkat-meta"], 4096)
+
+
+class PullRequestLaneWeighsThePackages(unittest.TestCase):
+    """ci.yml's published-floor job: its floor step is advisory on a pull
+    request, so the size check is a step of its own that is not, over the
+    archives the floor step packaged."""
+
+    def job(self):
+        text = (SCRIPT.parent.parent / ".github" / "workflows" / "ci.yml").read_text()
+        body = text.split("\n  published-floor:\n", 1)[1]
+        end = [index for index, line in enumerate(body.splitlines()) if line.startswith("  ") and not line.startswith("   ")]
+        return "\n".join(body.splitlines()[: end[0]] if end else body.splitlines())
+
+    def steps(self):
+        return ("\n" + self.job()).split("\n      - ")[1:]
+
+    def test_a_required_step_weighs_what_the_floor_step_packaged(self):
+        steps = self.steps()
+        floor = [index for index, step in enumerate(steps) if "published_crates_standalone.py floor " in step]
+        size = [index for index, step in enumerate(steps) if "published_crates_standalone.py package-size " in step]
+        self.assertEqual((len(floor), len(size)), (1, 1))
+        self.assertEqual(size[0], floor[0] + 1)
+        self.assertIn('--out "${RUNNER_TEMP}/floor-${PRODUCT}"', steps[floor[0]])
+        self.assertIn('package-size --product "${PRODUCT}" --package-dir "${RUNNER_TEMP}/floor-${PRODUCT}/target/package"',
+                      steps[size[0]])
+        self.assertIn("continue-on-error:", steps[floor[0]])
+        self.assertNotIn("continue-on-error", steps[size[0]])
+        self.assertNotIn("\n        if:", steps[size[0]])
+        self.assertEqual(self.job().count("cargo package"), 0)
 
 
 class StripComments(unittest.TestCase):

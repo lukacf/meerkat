@@ -744,11 +744,12 @@ pub use tool_surface::{
     ToolSurfaceGateSlot, ToolSurfaceRefusal, ToolSurfaceSelection,
 };
 pub use transcript_replay::{
-    ReplayApplication, ReplayAssistantBlockIndex, ReplayCapability, ReplayDisposition,
-    ReplayMessageIndex, ReplayPlan, ReplayPlanEntry, ReplayPlanError, ReplayReasoningProjection,
-    ReplaySubject, ReplaySystemNoticeBlockIndex, ReplaySystemNoticeContentIndex, ReplayTarget,
-    ReplayToolResultContentIndex, ReplayToolResultIndex, ReplayToolResultProjection,
-    ReplayUserContentIndex, ReplayWireFamily, replay_provider_metadata,
+    OpenAiContinuityLedger, ReplayApplication, ReplayAssistantBlockIndex, ReplayCapability,
+    ReplayDisposition, ReplayMessageIndex, ReplayPlan, ReplayPlanEntry, ReplayPlanError,
+    ReplayReasoningProjection, ReplaySubject, ReplaySystemNoticeBlockIndex,
+    ReplaySystemNoticeContentIndex, ReplayTarget, ReplayToolResultContentIndex,
+    ReplayToolResultIndex, ReplayToolResultProjection, ReplayUserContentIndex, ReplayWireFamily,
+    replay_provider_metadata,
 };
 pub use turn_boundary::{TurnBoundaryHook, TurnBoundaryMessage};
 pub use turn_execution_authority::{

@@ -160,10 +160,14 @@ impl OpenAiCompatibleClient {
     ) -> Self {
         let http = http::build_http_client_for_base_url(reqwest::Client::builder(), &base_url);
         let responses_delegate = matches!(mode, OpenAiCompatibleMode::Responses).then(|| {
+            // The delegate speaks the public API's wire to this client's
+            // server; it is not the public API. It issues continuity
+            // material as the server this client declares, or as nobody.
             crate::OpenAiClient::new_with_optional_api_key_and_base_url(
                 bearer_token.clone(),
                 trim_v1_suffix(&base_url),
             )
+            .with_delegate_continuity_issuer(None)
         });
         Self {
             mode,
@@ -192,10 +196,15 @@ impl OpenAiCompatibleClient {
     /// Declare the server this client speaks to as the issuer of its
     /// Responses continuity material (encrypted reasoning, item and response
     /// ids): the configured self-hosted server that serves the model. Such
-    /// material is replayed only to the issuer that produced it. A client
-    /// without a declared issuer records none and is replayed none.
+    /// material is replayed only to the issuer this process received it
+    /// from. A client without a declared issuer records none and is replayed
+    /// none.
     #[must_use]
     pub fn with_continuity_issuer(mut self, issuer: meerkat_core::OpenAiContinuityIssuer) -> Self {
+        self.responses_delegate = self
+            .responses_delegate
+            .take()
+            .map(|delegate| delegate.with_delegate_continuity_issuer(Some(issuer.clone())));
         self.continuity_issuer = Some(issuer);
         self
     }
@@ -203,6 +212,21 @@ impl OpenAiCompatibleClient {
     /// The declared issuer of this client's Responses continuity material.
     pub fn continuity_issuer(&self) -> Option<&meerkat_core::OpenAiContinuityIssuer> {
         self.continuity_issuer.as_ref()
+    }
+
+    /// Give this client its own record of what it received from which
+    /// issuer, in place of the one every client of the process shares (see
+    /// [`crate::OpenAiClient::with_continuity_ledger`]).
+    #[must_use]
+    pub fn with_continuity_ledger(
+        mut self,
+        ledger: Arc<meerkat_core::OpenAiContinuityLedger>,
+    ) -> Self {
+        self.responses_delegate = self
+            .responses_delegate
+            .take()
+            .map(|delegate| delegate.with_continuity_ledger(ledger));
+        self
     }
 
     /// For GitHub Copilot's Chat Completions routes only. A stream counts

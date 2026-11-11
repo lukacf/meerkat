@@ -1,171 +1,193 @@
-//! The continuity issuer recorded on OpenAI-family provider metadata: how it
-//! is stored, what an earlier version reads, and what the replay owner admits.
+//! What a process knows about the issuer of OpenAI-family continuity
+//! material, and what the replay owner admits from it.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use crate::Message;
-use serde_json::{Value, json};
+use super::*;
+use crate::{OpenAiContinuityIssuer, ProviderMeta};
 
-/// One tool turn and its answer exactly as 0.9.12 stored them after an
-/// OpenAI Responses backend returned them (`store: false`,
-/// `include: reasoning.encrypted_content`): the bytes are what the 0.9.12
-/// serializer writes for these messages. No issuer is recorded.
-const STORED_BY_0_9_12: &str = r#"[
-  {
-    "role": "user",
-    "content": "What is the weather in Oslo?",
-    "created_at": "2026-11-10T09:00:00Z"
-  },
-  {
-    "role": "block_assistant",
-    "blocks": [
-      {
-        "block_type": "reasoning",
-        "data": {
-          "text": "",
-          "meta": {
-            "provider": "open_ai",
-            "id": "rs_0a1b",
-            "encrypted_content": "gAAAAAB-ciphertext-1",
-            "response_id": "resp_0001"
-          }
-        }
-      },
-      {
-        "block_type": "tool_use",
-        "data": {
-          "id": "call_weather_1",
-          "name": "get_weather",
-          "args": {"city":"Oslo"},
-          "meta": {
-            "provider": "open_ai_response",
-            "response_id": "resp_0001"
-          }
-        }
-      }
-    ],
-    "stop_reason": "tool_use",
-    "created_at": "2026-11-10T09:00:00Z"
-  },
-  {
-    "role": "tool_results",
-    "results": [
-      {
-        "tool_use_id": "call_weather_1",
-        "content": "4 C, light rain",
-        "is_error": false
-      }
-    ],
-    "created_at": "2026-11-10T09:00:00Z"
-  },
-  {
-    "role": "block_assistant",
-    "blocks": [
-      {
-        "block_type": "reasoning",
-        "data": {
-          "text": "Summarize the reading.",
-          "meta": {
-            "provider": "open_ai",
-            "id": "rs_0c2d",
-            "encrypted_content": "gAAAAAB-ciphertext-2",
-            "response_id": "resp_0002"
-          }
-        }
-      },
-      {
-        "block_type": "text",
-        "data": {
-          "text": "It is 4 C with light rain in Oslo.",
-          "meta": {
-            "provider": "open_ai_assistant_message",
-            "id": "msg_0e3f",
-            "phase": "final_answer",
-            "response_id": "resp_0002"
-          }
-        }
-      }
-    ],
-    "stop_reason": "end_turn",
-    "created_at": "2026-11-10T09:00:00Z"
-  }
-]"#;
-
-/// The transcript revision 0.9.12 computes for [`STORED_BY_0_9_12`].
-const REVISION_COMPUTED_BY_0_9_12: &str =
-    "sha256:9f59d47acab90d62ae31188c037883327763eca5203d5df37a1b28ccdca44e21";
-
-/// [`STORED_BY_0_9_12`] with `issuer` recorded on every OpenAI-family
-/// provider metadata object, as a version that records issuers stores it.
-fn stored_with_issuer(issuer: Value) -> Value {
-    let mut stored: Value = serde_json::from_str(STORED_BY_0_9_12).unwrap();
-    let mut stamped = 0;
-    for message in stored.as_array_mut().unwrap() {
-        let Some(blocks) = message.get_mut("blocks").and_then(Value::as_array_mut) else {
-            continue;
-        };
-        for block in blocks {
-            if let Some(meta) = block["data"].get_mut("meta") {
-                meta["issuer"] = issuer.clone();
-                stamped += 1;
-            }
-        }
-    }
-    assert_eq!(stamped, 4, "every provider metadata object is stamped");
-    stored
-}
-
-fn messages(stored: Value) -> Vec<Message> {
-    serde_json::from_value(stored).expect("stored transcript decodes")
-}
-
-/// The fixture is exactly what the serializer writes for an issuer-less
-/// transcript: decoding it and writing it back changes nothing.
-#[test]
-fn an_issuer_less_transcript_is_written_back_unchanged() {
-    let stored: Value = serde_json::from_str(STORED_BY_0_9_12).unwrap();
-    let written = serde_json::to_value(messages(stored.clone())).unwrap();
-    assert_eq!(written, stored);
-}
-
-/// Rolling back: a reader decodes a transcript whose provider metadata names
-/// an issuer, whether or not it knows the key. (On the commit that adds this
-/// row the metadata type is 0.9.12's, which does not know it.)
-#[test]
-fn a_transcript_that_names_issuers_decodes() {
-    for issuer in [
-        json!({"kind": "openai_api"}),
-        json!({"kind": "copilot"}),
-        json!({"kind": "self_hosted", "server": "local"}),
-    ] {
-        let decoded = messages(stored_with_issuer(issuer.clone()));
-        assert_eq!(decoded.len(), 4, "{issuer}");
+fn reasoning(id: &str, ciphertext: &str) -> AssistantBlock {
+    AssistantBlock::Reasoning {
+        text: String::new(),
+        meta: Some(Box::new(ProviderMeta::OpenAi {
+            id: id.to_string(),
+            encrypted_content: Some(ciphertext.to_string()),
+            phase: None,
+            response_id: Some("resp_1".to_string()),
+        })),
     }
 }
 
-/// Rolling back: the transcript revision is a content address the stores
-/// compare on read and append. A reader that drops the `issuer` key must
-/// compute the revision the writer recorded, so the issuer is not part of
-/// it: a transcript digests to the revision 0.9.12 computes for the same
-/// rows without the key.
+fn answer(id: &str) -> AssistantBlock {
+    AssistantBlock::Text {
+        text: "Done.".to_string(),
+        meta: Some(Box::new(ProviderMeta::OpenAiAssistantMessage {
+            id: id.to_string(),
+            phase: None,
+            response_id: Some("resp_1".to_string()),
+        })),
+    }
+}
+
+fn signed_thinking() -> AssistantBlock {
+    AssistantBlock::Reasoning {
+        text: "plan".to_string(),
+        meta: Some(Box::new(ProviderMeta::Anthropic {
+            signature: "signature".to_string(),
+        })),
+    }
+}
+
+/// One response: a reasoning item and an answer.
+fn response(tag: &str) -> Vec<AssistantBlock> {
+    vec![
+        reasoning(&format!("rs_{tag}"), &format!("ciphertext-{tag}")),
+        answer(&format!("msg_{tag}")),
+    ]
+}
+
+fn record(
+    ledger: &OpenAiContinuityLedger,
+    issuer: &OpenAiContinuityIssuer,
+    step: &[AssistantBlock],
+) {
+    ledger.record_response(issuer, step.iter().filter_map(replay_provider_metadata));
+}
+
+const PUBLIC_API: OpenAiContinuityIssuer = OpenAiContinuityIssuer::OpenAiApi;
+const COPILOT: OpenAiContinuityIssuer = OpenAiContinuityIssuer::Copilot;
+
+fn server(id: &str) -> OpenAiContinuityIssuer {
+    OpenAiContinuityIssuer::SelfHosted {
+        server: id.to_string(),
+    }
+}
+
+/// A response is known to have come from the issuer that returned it and
+/// from no other; a ledger that received nothing knows nothing.
 #[test]
-fn the_transcript_revision_does_not_cover_the_issuer() {
-    let without = messages(serde_json::from_str(STORED_BY_0_9_12).unwrap());
-    assert_eq!(
-        crate::transcript_messages_digest(&without).unwrap(),
-        REVISION_COMPUTED_BY_0_9_12,
-        "the issuer-less rows keep the revision 0.9.12 computed"
+fn a_ledger_knows_what_it_received_and_from_whom() {
+    let ledger = OpenAiContinuityLedger::new();
+    let step = response("a");
+    assert!(
+        !ledger.received_step_from(&PUBLIC_API, &step),
+        "nothing yet"
     );
-    for issuer in [
-        json!({"kind": "openai_api"}),
-        json!({"kind": "copilot"}),
-        json!({"kind": "self_hosted", "server": "local"}),
-    ] {
-        let with = messages(stored_with_issuer(issuer.clone()));
-        assert_eq!(
-            crate::transcript_messages_digest(&with).unwrap(),
-            REVISION_COMPUTED_BY_0_9_12,
-            "rows that name the issuer {issuer} keep the revision a reader \
-             without the key computes"
-        );
+
+    record(&ledger, &PUBLIC_API, &step);
+    assert!(ledger.received_step_from(&PUBLIC_API, &step));
+    for other in [COPILOT, server("local")] {
+        assert!(!ledger.received_step_from(&other, &step), "{other:?}");
     }
+    assert!(
+        !OpenAiContinuityLedger::new().received_step_from(&PUBLIC_API, &step),
+        "another process received nothing"
+    );
+
+    let local = response("b");
+    record(&ledger, &server("local-a"), &local);
+    assert!(ledger.received_step_from(&server("local-a"), &local));
+    assert!(
+        !ledger.received_step_from(&server("local-b"), &local),
+        "one self-hosted server is not another"
+    );
+}
+
+/// The entry is the material, not its id: the same item id with another
+/// ciphertext, response id or phase is other material.
+#[test]
+fn an_id_does_not_claim_other_material() {
+    let ledger = OpenAiContinuityLedger::new();
+    record(&ledger, &PUBLIC_API, &[reasoning("rs_1", "ciphertext-1")]);
+    assert!(ledger.received_step_from(&PUBLIC_API, &[reasoning("rs_1", "ciphertext-1")]));
+    assert!(
+        !ledger.received_step_from(&PUBLIC_API, &[reasoning("rs_1", "other bytes")]),
+        "the same id with another ciphertext"
+    );
+    let other_response = AssistantBlock::Reasoning {
+        text: String::new(),
+        meta: Some(Box::new(ProviderMeta::OpenAi {
+            id: "rs_1".to_string(),
+            encrypted_content: Some("ciphertext-1".to_string()),
+            phase: None,
+            response_id: Some("resp_2".to_string()),
+        })),
+    };
+    assert!(
+        !ledger.received_step_from(&PUBLIC_API, &[other_response]),
+        "the same id and ciphertext under another response id"
+    );
+}
+
+/// A step is known as a whole: one item this process did not receive makes
+/// the step unknown, whichever items beside it are known.
+#[test]
+fn a_step_is_known_as_a_whole() {
+    let ledger = OpenAiContinuityLedger::new();
+    let step = response("a");
+    record(&ledger, &PUBLIC_API, &step);
+    let mut with_a_stranger = step.clone();
+    with_a_stranger.push(answer("msg_never_received"));
+    assert!(!ledger.received_step_from(&PUBLIC_API, &with_a_stranger));
+    assert!(
+        ledger.received_step_from(&PUBLIC_API, &step[..1]),
+        "a part of a received step is received material"
+    );
+}
+
+/// Byte-identical material two issuers both returned identifies neither's.
+#[test]
+fn material_two_issuers_returned_is_contested() {
+    let ledger = OpenAiContinuityLedger::new();
+    let step = response("a");
+    record(&ledger, &PUBLIC_API, &step);
+    record(&ledger, &COPILOT, &step);
+    assert!(!ledger.received_step_from(&PUBLIC_API, &step));
+    assert!(!ledger.received_step_from(&COPILOT, &step));
+    record(&ledger, &PUBLIC_API, &step);
+    assert!(
+        !ledger.received_step_from(&PUBLIC_API, &step),
+        "contested material stays contested"
+    );
+}
+
+/// The ledger forgets a response at a time, oldest first, and a forgotten
+/// response is unknown again.
+#[test]
+fn the_oldest_response_is_forgotten_whole() {
+    let ledger = OpenAiContinuityLedger::with_capacity(2);
+    let (first, second, third) = (response("1"), response("2"), response("3"));
+    record(&ledger, &PUBLIC_API, &first);
+    record(&ledger, &PUBLIC_API, &second);
+    assert!(ledger.received_step_from(&PUBLIC_API, &first));
+    record(&ledger, &PUBLIC_API, &third);
+    assert!(
+        !ledger.received_step_from(&PUBLIC_API, &first[..1])
+            && !ledger.received_step_from(&PUBLIC_API, &first[1..]),
+        "every item of the oldest response is forgotten"
+    );
+    assert!(ledger.received_step_from(&PUBLIC_API, &second));
+    assert!(ledger.received_step_from(&PUBLIC_API, &third));
+}
+
+/// Metadata of another provider family is none of the ledger's material: it
+/// is neither recorded nor required of a step.
+#[test]
+fn other_families_are_not_ledger_material() {
+    let ledger = OpenAiContinuityLedger::new();
+    record(&ledger, &PUBLIC_API, &[signed_thinking()]);
+    let mut step = response("a");
+    record(&ledger, &PUBLIC_API, &step);
+    step.push(signed_thinking());
+    assert!(
+        ledger.received_step_from(&PUBLIC_API, &step),
+        "a signed thinking block beside received OpenAI material does not make the step unknown"
+    );
+}
+
+/// The process ledger is one ledger.
+#[test]
+fn the_process_ledger_is_shared() {
+    let step = response("the_process_ledger_is_shared");
+    record(&OpenAiContinuityLedger::process(), &COPILOT, &step);
+    assert!(OpenAiContinuityLedger::process().received_step_from(&COPILOT, &step));
 }

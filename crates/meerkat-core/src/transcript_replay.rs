@@ -1,10 +1,168 @@
 //! Provider-neutral replay planning and verified adapter lowering.
 
 use crate::{
-    AssistantBlock, ContentBlock, Message, ProviderMeta, SystemNoticeBlock, SystemNoticeMessage,
-    ToolResult,
+    AssistantBlock, ContentBlock, Message, OpenAiContinuityIssuer, ProviderMeta, SystemNoticeBlock,
+    SystemNoticeMessage, ToolResult,
 };
-use std::collections::HashSet;
+use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+
+/// How many responses a ledger remembers before it forgets the oldest. The
+/// material of a forgotten response is of unknown issuer again.
+const OPENAI_CONTINUITY_LEDGER_CAPACITY: usize = 16_384;
+
+/// What this process knows about which service issued OpenAI-family
+/// continuity material (reasoning items, message items, response ids).
+///
+/// A client records each response it receives; replay asks whether an
+/// assistant step of a transcript is one this process received from the
+/// service it is about to be sent to
+/// ([`replay_admits_provider_metadata`]). The knowledge is of the running
+/// process only: it is never serialized, so another process, or this one
+/// after a restart, knows nothing about the material in a stored transcript
+/// and treats it as of unknown issuer.
+///
+/// The ledger is keyed by the material itself (a digest of each provider
+/// metadata value exactly as it is stored: id, ciphertext, response id,
+/// phase), not by the message that carries it, so a clone, a fork, a rewrite
+/// or a serialization round trip of the transcript inside the process does
+/// not lose it, and no message type carries the issuer. Material two issuers
+/// both returned byte for byte is contested and belongs to neither.
+///
+/// A response is recorded, known and forgotten as a whole: one entry of a
+/// 32-byte digest and the issuer per metadata value, grouped by response, at
+/// most 16,384 responses, oldest response forgotten first.
+/// One ledger serves every session of the process, because the issuer is the
+/// service and not the session.
+pub struct OpenAiContinuityLedger {
+    inner: Mutex<OpenAiContinuityLedgerInner>,
+    capacity: usize,
+}
+
+#[derive(Default)]
+struct OpenAiContinuityLedgerInner {
+    entries: HashMap<[u8; 32], OpenAiContinuityLedgerEntry>,
+    /// The metadata values each recorded response added, oldest first.
+    responses: VecDeque<Vec<[u8; 32]>>,
+}
+
+enum OpenAiContinuityLedgerEntry {
+    Issuer(OpenAiContinuityIssuer),
+    /// Two issuers returned this exact material: it identifies neither.
+    Contested,
+}
+
+impl Default for OpenAiContinuityLedger {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Debug for OpenAiContinuityLedger {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenAiContinuityLedger")
+            .field("capacity", &self.capacity)
+            .finish_non_exhaustive()
+    }
+}
+
+impl OpenAiContinuityLedger {
+    /// An empty ledger: one that has received nothing, as a new process.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::with_capacity(OPENAI_CONTINUITY_LEDGER_CAPACITY)
+    }
+
+    /// An empty ledger that remembers at most `responses` responses.
+    #[must_use]
+    pub fn with_capacity(responses: usize) -> Self {
+        Self {
+            inner: Mutex::new(OpenAiContinuityLedgerInner::default()),
+            capacity: responses,
+        }
+    }
+
+    /// The ledger every client of this process shares unless it is built
+    /// with its own.
+    #[must_use]
+    pub fn process() -> Arc<Self> {
+        static PROCESS: OnceLock<Arc<OpenAiContinuityLedger>> = OnceLock::new();
+        Arc::clone(PROCESS.get_or_init(|| Arc::new(Self::new())))
+    }
+
+    /// The identity of the material `metadata` carries: a digest of the
+    /// whole value as it is stored. `None` for metadata of another provider
+    /// family.
+    fn material_key(metadata: &ProviderMeta) -> Option<[u8; 32]> {
+        if ReplayWireFamily::from_provider_metadata(metadata) != ReplayWireFamily::OpenAi {
+            return None;
+        }
+        let stored = serde_json::to_vec(metadata).ok()?;
+        let mut hasher = Sha256::new();
+        hasher.update(b"openai-continuity-material\0");
+        hasher.update(&stored);
+        Some(hasher.finalize().into())
+    }
+
+    /// Record one response this process received from `issuer`: every
+    /// OpenAI-family metadata value it carried, as a whole.
+    pub fn record_response<'a>(
+        &self,
+        issuer: &OpenAiContinuityIssuer,
+        metadata: impl IntoIterator<Item = &'a ProviderMeta>,
+    ) {
+        let keys: Vec<[u8; 32]> = metadata
+            .into_iter()
+            .filter_map(Self::material_key)
+            .collect();
+        if keys.is_empty() {
+            return;
+        }
+        let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut added = Vec::with_capacity(keys.len());
+        for key in keys {
+            match inner.entries.get_mut(&key) {
+                Some(OpenAiContinuityLedgerEntry::Issuer(recorded)) if recorded == issuer => {}
+                Some(entry) => *entry = OpenAiContinuityLedgerEntry::Contested,
+                None => {
+                    inner
+                        .entries
+                        .insert(key, OpenAiContinuityLedgerEntry::Issuer(issuer.clone()));
+                    added.push(key);
+                }
+            }
+        }
+        inner.responses.push_back(added);
+        while inner.responses.len() > self.capacity {
+            if let Some(oldest) = inner.responses.pop_front() {
+                for key in oldest {
+                    inner.entries.remove(&key);
+                }
+            }
+        }
+    }
+
+    /// Whether this process received the assistant step `step` from
+    /// `issuer`: every OpenAI-family metadata value its blocks carry is
+    /// material `issuer`, and no other issuer, returned. A step is known as a
+    /// whole or not at all.
+    #[must_use]
+    pub fn received_step_from(
+        &self,
+        issuer: &OpenAiContinuityIssuer,
+        step: &[AssistantBlock],
+    ) -> bool {
+        let inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        step.iter()
+            .filter_map(replay_provider_metadata)
+            .filter_map(Self::material_key)
+            .all(|key| match inner.entries.get(&key) {
+                Some(OpenAiContinuityLedgerEntry::Issuer(recorded)) => recorded == issuer,
+                Some(OpenAiContinuityLedgerEntry::Contested) | None => false,
+            })
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ReplayMessageIndex(pub usize);

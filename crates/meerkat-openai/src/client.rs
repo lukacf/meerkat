@@ -157,6 +157,15 @@ pub struct OpenAiClient {
     /// request's: the request's model and the id the wire names for it. Set
     /// by the GitHub Copilot route (`with_wire_model`).
     wire_model: Option<(String, String)>,
+    /// The service this client speaks to, as an issuer of continuity
+    /// material (encrypted reasoning, item and response ids): the backend of
+    /// `backend_wire`, or for a self-hosted client's Responses delegate the
+    /// server that client declared, if any. Material is replayed only to the
+    /// issuer this process received it from.
+    continuity_issuer: Option<meerkat_core::OpenAiContinuityIssuer>,
+    /// What this process received from which issuer. Written by this
+    /// client's response path, read by the replay owner.
+    continuity_ledger: std::sync::Arc<meerkat_core::OpenAiContinuityLedger>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -953,7 +962,50 @@ impl OpenAiClient {
             supports_image_input: true,
             copilot_responses_item_identity: false,
             wire_model: None,
+            continuity_issuer: Some(OpenAiBackendWire::PublicOpenAi.backend_kind().into()),
+            continuity_ledger: meerkat_core::OpenAiContinuityLedger::process(),
         }
+    }
+
+    /// Give this client its own record of what it received from which
+    /// issuer, in place of the one every client of the process shares. For a
+    /// host or a test that runs clients which must not see each other's
+    /// responses; a new ledger knows nothing, as a new process.
+    #[must_use]
+    pub fn with_continuity_ledger(
+        mut self,
+        ledger: std::sync::Arc<meerkat_core::OpenAiContinuityLedger>,
+    ) -> Self {
+        self.continuity_ledger = ledger;
+        self
+    }
+
+    /// The service this client speaks to, as an issuer of continuity
+    /// material; `None` when it does not know (a self-hosted client that
+    /// declared no server).
+    pub fn continuity_issuer(&self) -> Option<&meerkat_core::OpenAiContinuityIssuer> {
+        self.continuity_issuer.as_ref()
+    }
+
+    /// The record of received continuity material this client writes and
+    /// replays from.
+    pub fn continuity_ledger(&self) -> &std::sync::Arc<meerkat_core::OpenAiContinuityLedger> {
+        &self.continuity_ledger
+    }
+
+    /// For the self-hosted client's Responses delegate: the server that
+    /// client declared, or none.
+    pub(crate) fn with_delegate_continuity_issuer(
+        mut self,
+        issuer: Option<meerkat_core::OpenAiContinuityIssuer>,
+    ) -> Self {
+        self.continuity_issuer = issuer;
+        self
+    }
+
+    fn set_backend_wire(&mut self, wire: OpenAiBackendWire) {
+        self.continuity_issuer = Some(wire.backend_kind().into());
+        self.backend_wire = wire;
     }
 
     /// Install a set of (name, value) headers to include on every request.
@@ -1013,19 +1065,19 @@ impl OpenAiClient {
 
     pub fn with_chatgpt_backend_wire(self) -> Self {
         let mut client = self.with_responses_path("responses");
-        client.backend_wire = OpenAiBackendWire::ChatGptBackend;
+        client.set_backend_wire(OpenAiBackendWire::ChatGptBackend);
         client
     }
 
     pub fn with_azure_openai_wire(mut self, config: AzureOpenAiWireConfig) -> Self {
-        self.backend_wire = OpenAiBackendWire::AzureOpenAi(config);
+        self.set_backend_wire(OpenAiBackendWire::AzureOpenAi(config));
         self
     }
 
     /// For the GitHub Copilot `/responses` route: requests go to the Copilot
     /// backend, which has admitted none of Meerkat's prompt-cache fields.
     pub fn with_copilot_backend_wire(mut self) -> Self {
-        self.backend_wire = OpenAiBackendWire::Copilot;
+        self.set_backend_wire(OpenAiBackendWire::Copilot);
         self
     }
 

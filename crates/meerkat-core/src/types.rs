@@ -915,19 +915,18 @@ pub enum OpenAiAssistantPhase {
 /// The four backend variants are the OpenAI backend kinds of the provider
 /// matrix ([`crate::provider_matrix::OpenAiBackendKind`]); a self-hosted
 /// server is the `[self_hosted.servers.<id>]` entry that serves the model.
+///
+/// A fact of the running process only: it has no serialized form, so it
+/// reaches no stored row, event, export or SDK payload. A process learns it
+/// when it receives the material ([`crate::OpenAiContinuityLedger`]).
 #[non_exhaustive]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum OpenAiContinuityIssuer {
     /// The public OpenAI API.
-    #[serde(rename = "openai_api")]
     OpenAiApi,
     /// The ChatGPT backend.
-    #[serde(rename = "chatgpt_backend")]
     ChatGptBackend,
     /// Azure OpenAI.
-    #[serde(rename = "azure_openai")]
     AzureOpenAi,
     /// GitHub Copilot.
     Copilot,

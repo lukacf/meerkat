@@ -114,7 +114,9 @@ them.
 - `meerkat-copilot`: Meerkat reads the reasoning effort levels a GitHub
   Copilot account's model list states per model
   (`capabilities.supports.reasoning_effort`). `CopilotModelSupports` keeps
-  the statement as the list words it in `reasoning_effort`, and
+  the statement in `reasoning_effort` in one stored form (each word once,
+  the level words from `none` to `max`, then the words that name no level
+  in ascending order), and
   `CopilotModelSupports::stated_effort_levels` returns it as `EffortLevel`s:
   `None` when the entry states none, otherwise the stated levels, each once,
   from `none` to `max`; a word that names no level is left out. The read is
@@ -124,7 +126,9 @@ them.
   and the account capability gate does not check them. The levels are part
   of what a Copilot route compares, so when a refreshed list states other
   levels for a session's model, the session's prepared route is rebuilt, as
-  it already is when the list changes another capability of the model.
+  it already is when the list changes another capability of the model. A
+  list that only writes the same levels in another order, or writes one
+  twice, states nothing new and changes no route.
 
 - `meerkat-openai`, `meerkat-anthropic`, `meerkat-gemini`,
   `meerkat-copilot`, `meerkat-llm-core`, `meerkat`: every LLM client a
@@ -393,6 +397,19 @@ them.
   left empty without effect, now fail the same way and are removed, so
   neither stays behind to be waited on. A file an earlier release already
   emptied is not restored.
+
+- `meerkat-copilot` (GitHub Copilot device sign-in): an account no longer
+  keeps the model list of an earlier sign-in after a new sign-in whose
+  token exchange is temporarily unavailable. Through 0.9.13 the list the
+  earlier sign-in's token had fetched stayed on the account until an
+  exchange succeeded, so in that window the account's routes resolved from
+  it: which models the account lists, the endpoint that serves each, and
+  what each entry states about the model. No request could be sent in that
+  window (no token serves), and the next successful exchange replaced the
+  list. The account now holds no list until the new sign-in's own token
+  fetches one, and its routes resolve as they do before a first listing.
+  A new sign-in of the same account fetched the same list, so only a
+  sign-in as another account under the same credential was affected.
 
 ### Known limitations
 

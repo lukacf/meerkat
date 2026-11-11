@@ -2453,6 +2453,12 @@ impl CopilotAuthorizer {
             cached.source_generation = source_generation;
             cached.source_published_at_millis = source_published_at_millis;
             cached.source_expires_at = source.expires_at;
+            // The model list was fetched with the earlier sign-in's token and
+            // states what that sign-in may use. The current one has fetched
+            // none, so the account's routes resolve without a list until its
+            // own token fetches one (the next mint replaces the entry whole).
+            cached.models = None;
+            cached.model_discovery_refresh_at = None;
         }
         cached.exchange_unavailable = Some(unavailable);
         Err(CopilotTokenError::ExchangeUnavailable(error))
@@ -14433,6 +14439,63 @@ mod tests {
             );
         }
 
+        /// A refreshed list that states the same levels for a model in
+        /// another order, or states one of them twice, states nothing new:
+        /// the model keeps its route and a session's prepared route stands.
+        #[tokio::test]
+        async fn a_list_that_reorders_a_models_levels_keeps_its_route() {
+            let clock = TestClock::new();
+            let transport = Arc::new(ScriptedTransport::new([
+                token_response("derived-one"),
+                listing_stating_levels(&["low", "medium", "high"]),
+                listing_stating_levels(&["high", "low", "medium", "low"]),
+            ]));
+            let account = RouteAccount::new(transport.clone(), &clock).await;
+            let client = concrete_routed_client(&account).await;
+            assert_eq!(transport.request_count(), 2, "one mint and one listing");
+            let state = account
+                .runtime
+                .connection_state(&client.connection)
+                .expect("the account's state");
+            let loaded_list = || {
+                state
+                    .cache
+                    .read()
+                    .as_ref()
+                    .and_then(|cached| cached.models.clone())
+                    .expect("a loaded model list")
+            };
+            let fingerprint = |model: &str| {
+                CopilotRouteFingerprint::from(
+                    &resolve_route_for_state(&state, Provider::OpenAI, model)
+                        .expect("a cached route"),
+                )
+            };
+            let first_list = loaded_list();
+            let first = fingerprint("gpt-test");
+
+            // Model discovery is due again (300 s); the token is still fresh.
+            clock.set(301);
+            client
+                .connection
+                .resolved_authorizer()
+                .expect("the route's authorizer")
+                .prepare_request()
+                .await
+                .expect("the token is fresh");
+            settle(|| !Arc::ptr_eq(&first_list, &loaded_list())).await;
+            assert_eq!(transport.request_count(), 3, "one more listing");
+
+            assert!(
+                fingerprint("gpt-test") == first,
+                "the same levels in another order, one of them twice, are the same route"
+            );
+            assert!(
+                !client.refresh_prepared_route().expect("the route resolves"),
+                "the prepared route stands: the list states nothing new for the model"
+            );
+        }
+
         /// A model listing 403 that asks for no account action (a policy, an
         /// integration the account does not allow) is a discovery failure:
         /// the token keeps serving, the sign-in stays valid, and the list is
@@ -14990,6 +15053,72 @@ mod tests {
             assert!(retried(error), "{error:?}");
             assert!(first.bearers().is_empty(), "{:?}", first.bearers());
             assert_eq!(transport.request_count(), 4);
+        }
+
+        /// A model list states what the sign-in whose token fetched it may
+        /// use. After a new sign-in whose token exchange is down, the account
+        /// holds no list until that sign-in's own token fetches one: its
+        /// routes resolve as they do before a first listing, never from the
+        /// earlier sign-in's statement.
+        #[tokio::test]
+        async fn an_outage_after_a_new_sign_in_holds_no_model_list() {
+            let clock = TestClock::new();
+            let transport = Arc::new(ScriptedTransport::new([
+                token_at("derived-one", clock.at(3600), 200),
+                listing_stating_levels(&["low", "medium", "high"]),
+                json_response(503, serde_json::json!({"message": "unavailable"})),
+            ]));
+            let account = RouteAccount::admitting_pending_limits(transport.clone(), &clock).await;
+            let _first = account.session([]).await;
+            let state = account
+                .runtime
+                .accounts
+                .lock()
+                .values()
+                .find_map(Weak::upgrade)
+                .expect("the account's state");
+            let route = || {
+                resolve_route_for_state(&state, Provider::OpenAI, "gpt-test")
+                    .expect("the account's route")
+            };
+            assert!(account.lists_model("gpt-test"));
+            assert_eq!(
+                route()
+                    .capabilities
+                    .expect("the first sign-in's list states the model")
+                    .supports
+                    .stated_effort_levels()
+                    .map(|levels| levels.len()),
+                Some(3)
+            );
+
+            // A new sign-in while the exchange is down: the list the account
+            // holds was fetched with the earlier sign-in's token.
+            let new_expiry =
+                DateTime::from_timestamp(clock.at(86_400).timestamp(), 0).expect("a whole second");
+            account.sign_in_again("github-new-token", new_expiry).await;
+            account
+                .runtime
+                .resolve(&account.binding, &account.env)
+                .await
+                .expect("a build that knows its output budget is admitted during the outage");
+            assert_eq!(transport.request_count(), 3);
+            assert!(account.recorded_outage().is_some());
+
+            assert!(
+                !account.lists_model("gpt-test"),
+                "the earlier sign-in's model list must not stay under the new sign-in"
+            );
+            let route = route();
+            assert_eq!(
+                route.access,
+                CopilotModelAccess::Unknown,
+                "the route resolves as it does before a first listing"
+            );
+            assert_eq!(
+                route.capabilities, None,
+                "nothing the earlier sign-in's list stated is the new sign-in's"
+            );
         }
 
         #[tokio::test]

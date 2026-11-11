@@ -689,15 +689,21 @@ pub struct CopilotModelSupports {
     #[serde(default)]
     pub min_thinking_budget: Option<u32>,
     /// The reasoning effort levels the entry states for the model
-    /// (`capabilities.supports.reasoning_effort`), as the list words them.
-    /// Every string of the array is kept, a word that names no
-    /// [`EffortLevel`] and a repeated word included, so the statement
-    /// serializes as it was read and two lists that state different words
-    /// compare as different. `None` when the entry states no levels: the
-    /// field is absent, `null`, or anything other than an array. Elements of
-    /// the array that are not strings are skipped. A value of any other
-    /// shape never fails the parse of the model list.
-    /// [`Self::stated_effort_levels`] reads the levels.
+    /// (`capabilities.supports.reasoning_effort`), in one stored form: each
+    /// word of the array once, the words that name an [`EffortLevel`] first,
+    /// in the order the enum declares them (`none` to `max`), then the words
+    /// that name no level, in ascending order. Two lists that state the same
+    /// words therefore compare equal, whatever order they write the words
+    /// in and however often, and two lists that state different words
+    /// compare as different. A word that names no level is kept, so the
+    /// statement still says that the entry wrote it. `None` when the entry
+    /// states no levels: the field is absent, `null`, or anything other
+    /// than an array. Elements of the array that are not strings are
+    /// skipped. A value of any other shape never fails the parse of the
+    /// model list. [`Self::stated_effort_levels`] reads the levels.
+    ///
+    /// Code that builds the struct itself writes the field as it likes; the
+    /// form above is what the parse of a model list stores.
     ///
     /// [`EffortLevel`]: meerkat_core::model_profile::capabilities::EffortLevel
     #[serde(default, deserialize_with = "stated_reasoning_effort")]
@@ -729,8 +735,9 @@ impl CopilotModelSupports {
 }
 
 /// Reads [`CopilotModelSupports::reasoning_effort`] without ever refusing
-/// the value: an array gives its strings, in order, and skips every other
-/// element; any other value gives `None`.
+/// the value: an array gives its strings in the one stored form
+/// ([`canonical_statement`]) and skips every other element; any other value
+/// gives `None`.
 fn stated_reasoning_effort<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -750,17 +757,40 @@ where
     }
 
     Ok(match Statement::deserialize(deserializer)? {
-        Statement::Array(elements) => Some(
-            elements
-                .into_iter()
-                .filter_map(|element| match element {
-                    Element::Word(word) => Some(word),
-                    Element::Other(_) => None,
-                })
-                .collect(),
-        ),
+        Statement::Array(elements) => Some(canonical_statement(elements.into_iter().filter_map(
+            |element| match element {
+                Element::Word(word) => Some(word),
+                Element::Other(_) => None,
+            },
+        ))),
         Statement::Other(_) => None,
     })
+}
+
+/// The one stored form of a statement: each word once, the words that name
+/// an `EffortLevel` first, in the order the enum declares them, then the
+/// other words in ascending order. The order a list writes its words in and
+/// a repeated word state nothing, so they must not make two statements of
+/// the same words differ: a route compares what the list states.
+fn canonical_statement(words: impl Iterator<Item = String>) -> Vec<String> {
+    use meerkat_core::model_profile::capabilities::EffortLevel;
+    let mut levels = std::collections::BTreeSet::new();
+    let mut others = std::collections::BTreeSet::new();
+    for word in words {
+        match EffortLevel::from_wire_str(&word) {
+            Some(level) => {
+                levels.insert(level);
+            }
+            None => {
+                others.insert(word);
+            }
+        }
+    }
+    levels
+        .into_iter()
+        .map(|level| level.as_wire_str().to_string())
+        .chain(others)
+        .collect()
 }
 
 /// The state of the account's policy for a model, as `/models` states it.
@@ -1803,8 +1833,44 @@ mod tests {
             assert_ne!(stated_by(serde_json::json!([])), None);
         }
 
-        /// The statement is kept as the list words it, so it serializes as
-        /// it was read: words that name no level and repeated words stay.
+        /// A statement is stored in one form: each word once, the words that
+        /// name a level first, in the order of [`EffortLevel`], then the
+        /// other words in ascending order. Two lists that state the same
+        /// words store the same statement, whatever order they write the
+        /// words in and however often, so the two entries compare equal.
+        #[test]
+        fn a_statement_is_stored_once_in_one_order() {
+            let stored = |statement: serde_json::Value| -> CopilotModelSupports {
+                serde_json::from_value(serde_json::json!({
+                    "streaming": true,
+                    "reasoning_effort": statement
+                }))
+                .expect("a supports block")
+            };
+            let one_form = Some(
+                ["none", "low", "high", "max", "alpha", "ultra"]
+                    .map(str::to_string)
+                    .to_vec(),
+            );
+            let as_first_listed = stored(serde_json::json!([
+                "max", "ultra", "low", "none", "alpha", "high"
+            ]));
+            let reordered_and_repeated = stored(serde_json::json!([
+                "high", "low", "low", "alpha", "max", "ultra", "none", "ultra", 3
+            ]));
+            assert_eq!(as_first_listed.reasoning_effort, one_form);
+            assert_eq!(reordered_and_repeated.reasoning_effort, one_form);
+            assert_eq!(as_first_listed, reordered_and_repeated);
+            assert_eq!(
+                stored(serde_json::json!(["low", "medium", "high"])).reasoning_effort,
+                Some(["low", "medium", "high"].map(str::to_string).to_vec()),
+                "a statement already in that form is stored as the list words it"
+            );
+        }
+
+        /// The stored statement serializes as it is stored and reads back
+        /// equal: a word that names no level stays, a repeated word is
+        /// stored once.
         #[test]
         fn a_supports_block_round_trips_its_statement() {
             let stated: CopilotModelSupports = serde_json::from_value(serde_json::json!({
@@ -1816,15 +1882,14 @@ mod tests {
                 stated.reasoning_effort,
                 Some(vec![
                     "low".to_string(),
-                    "ultra".to_string(),
-                    "low".to_string(),
-                    "max".to_string()
+                    "max".to_string(),
+                    "ultra".to_string()
                 ])
             );
             let wire = serde_json::to_value(&stated).expect("serializes");
             assert_eq!(
                 wire["reasoning_effort"],
-                serde_json::json!(["low", "ultra", "low", "max"])
+                serde_json::json!(["low", "max", "ultra"])
             );
             let read_back: CopilotModelSupports =
                 serde_json::from_value(wire).expect("reads its own form");

@@ -679,6 +679,77 @@ that sends none of them (a candidate launch, for one) lists them read-only.
 Schedules are the `meta/schedule/*` methods on the console RPC (see
 [Console schedules](/api/rpc#console-schedules-console)).
 
+### Long-term agents
+
+Where the team's host lets its agents be changed at run time (its
+[identity policy](/reference/identity-policy)), the roster creates and
+changes the team's long-term agents. A long-term agent is listed, opened
+and messaged like every other agent of the team: the roster marks no agent
+by how it came to exist.
+
+- **New agent**, in the roster's header, asks for a profile of the team and
+  a name, and takes a display name, instructions, the agents it can message
+  (its peers) and a first message. Each profile and each peer is shown with
+  what the host's rules give a new agent of it: allowed, needs a decision
+  (with the decision's lines), or not allowed (with the rule's reason; such
+  an entry cannot be picked). A name cannot be changed later.
+- **Edit**, **Archive** and **Remove** are on an agent, in its roster drawer
+  and in the menu of its details. Edit changes the display name, the
+  instructions, the context, the labels, the profile and the peers, and
+  sends only what you changed, against the agent as it was when the form
+  opened. If someone changed the agent in the meantime the change is
+  refused and the form offers **Read it again**: nothing is sent on its
+  own, and what you typed is replaced by the agent as it is now. The result
+  of an edit says when new instructions reach the agent.
+- A profile change is a change of its own under the host's rules. When you
+  pick another profile the Console asks the gateway what that change of
+  that agent would get and shows the answer at the field: allowed, a person
+  must decide it, or the refusal. Asking changes nothing; **Save changes**
+  is the change.
+- **Archive** stops the agent and keeps its name, its record, its
+  conversation and its memory; **Unarchive** brings it back. **Remove** is
+  for good: its confirmation says that the name can never be used again and
+  offers **Archive instead**. A confirmation takes focus on **Cancel**, and
+  Escape or a click outside cancels it.
+- **Archived agents**, under the roster, lists the archived agents with
+  **Unarchive** and **Remove**. They are read when you open the list.
+- A change answers in one of four ways. It is made. A person must decide it
+  first: nothing has changed, the notice shows until when the decision is
+  open, and **Withdraw request** takes the request back. The agent is being
+  prepared by its host. Or it is refused. A person cannot approve their own
+  request: the request's card under **Approvals** says so and offers the
+  withdrawal, from the page that made the request, for as long as that page
+  is open.
+- A refusal is shown at the field it concerns, or as the form's notice, in
+  the Console's own sentence for its kind; **Details** under it holds the
+  gateway's own sentence. A change the gateway allows to be sent again
+  offers **Try again**.
+- If no answer comes, the notice says that the change may or may not have
+  been made. **Try again** sends the same request, so nothing is done
+  twice.
+- The details pane of an agent that was asked for at run time has a
+  **Record** section: who asked for it, when, and whether the host's rules
+  allowed it or a person decided it.
+
+What a viewer is offered is the gateway's answer and nothing the Console
+works out: `identity_changes` of the experience read (`available`,
+`can_create`, `can_change`, `can_remove`) and each agent's
+`can_change_identity` and `can_remove_identity` (see
+[Experience metadata](#experience-metadata)). Under an access policy the
+three permissions are `agent.identity.create`, `agent.identity.manage` and
+`agent.identity.remove` (see [Access control](/concepts/access-control)). A
+read-only console offers no change; the archived agents and an agent's
+record can still be read.
+
+The changes are the `meta/identity/*` methods on the console RPC (see
+[Agent changes](/api/rpc#agent-changes)). A custom panel reaches them
+through the commands `createAgent`, `updateAgent`, `archiveAgent`,
+`unarchiveAgent`, `removeAgent`, `withdrawAgentChange`, `getAgentRecord`,
+`listAgentRecords`, `getAgentChange`, `listAgentDirectory` and
+`planAgentChange`, from the roster and from an agent's chat and details.
+Every change carries a `request_id`: the same request under the same id
+answers the same state again and writes nothing twice.
+
 ### Local action feedback
 
 When a host supplies a recognized native refusal or audit fact, the Console
@@ -1094,11 +1165,19 @@ interface ConsoleAgent {
     can_manage_schedules?: boolean; // under enforced access: agent.send and schedule.manage
     can_retire?: boolean;
     can_respawn?: boolean;
+    can_change_identity?: boolean; // edit and archive this agent at run time (agent.identity.manage)
+    can_remove_identity?: boolean; // remove this agent for good (agent.identity.remove)
     runtime_mode?: string;
   };
   labels?: Record<string, string>;
 }
 ```
+
+`identity_changes` of the same read says what the console offers for the
+team's [long-term agents](#long-term-agents): `available` (the host changes
+agents at run time and the console is writable), and `can_create`,
+`can_change` and `can_remove` for this viewer. A flag that is absent reads
+as false.
 
 Identity-first status and inspect payloads use lowercase wire enums for addressability:
 `"addressable"` and `"internal_only"`.

@@ -136,24 +136,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   each change of a decision (`RuntimeDecisions::notify_work`), and a tick
   only while a decision of its kinds waits. A host with no such decision
   makes no further pass.
-
-### Added
-
 - Console: a person creates, edits, archives, unarchives and removes a
   long-term agent from the Roster, where the launch offers such changes (its
   identity creation policy is enabled and the console is not read-only).
   - New agent takes a profile, a name, a display name, instructions, peers
     and a first message. Each profile and peer is shown with what the host's
-    rules give it: allowed, needs a decision (with the decision's lines) or
-    not allowed (with the rule's reason; it cannot be picked).
+    rules give a new agent of it: allowed, needs a decision (with the
+    decision's lines) or not allowed (with the rule's reason; it cannot be
+    picked).
   - An agent's drawer and its details pane offer Edit (display name,
-    instructions, context, labels, profile, peers), Archive and Remove.
-    Archived agents are listed under the roster with Unarchive and Remove.
-    Remove asks first and says that the name can never be used again and
-    that archive is the reversible choice.
+    instructions, context, labels, profile, peers), Archive and Remove. Edit
+    sends only what changed, against the agent as it was read; an agent that
+    changed in the meantime is refused and read again on request, never
+    resent on its own. A profile change is judged by the gateway: the form
+    asks what the change would get (`meta/identity/plan`) and shows the
+    answer at the field.
+  - Remove asks first and says that the name can never be used again and
+    that archive is the reversible choice. The confirmation of an archive,
+    an unarchive and a removal is a dialog: it takes focus on Cancel, and
+    Escape or a click outside cancels it.
+  - Archived agents are listed under the roster with Unarchive and Remove.
+    They are read when the list is opened.
   - An outcome reads in words; an instructions change says when it reaches
-    the agent. A refusal shows the gateway's sentence, at the form field it
-    names when the form has one.
+    the agent. A refusal reads in the console's own sentence for its kind,
+    at the form field it names when the form has one; the gateway's
+    sentence is under Details. Only a lost answer reads as no answer.
   - A change that waits for a person's decision shows until when it is open
     and offers its withdrawal. A request is withdrawn from the page that made
     it (in the form, in the roster and on its decision card), or by the host
@@ -166,21 +173,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   - The controls follow the experience read's `identity_changes` section
     (`available`, `can_create`, `can_change`, `can_remove`) and each agent's
     `affordances.can_change_identity` and `can_remove_identity`. The details
-    pane shows who asked for an agent and when, as its record says, and the
-    archived agents are listed, wherever the gateway serves those reads, with
-    or without a control. Every agent looks the same in the roster, whoever
-    asked for it.
+    pane shows who asked for an agent and when, as its record says (a person
+    by name, never by key), and the archived agents can be listed, wherever
+    the gateway serves those reads, with or without a control. Every agent
+    looks the same in the roster, whoever asked for it.
 - Console access: the permissions `agent.identity.create`,
   `agent.identity.manage` and `agent.identity.remove` read in words and sit
   with the lifecycle permissions in the Access panel.
 - Console command surface (`@console-core` and the stock console): the
   commands `createAgent`, `updateAgent`, `archiveAgent`, `unarchiveAgent`,
   `removeAgent`, `withdrawAgentChange`, `getAgentRecord`, `listAgentRecords`,
-  `getAgentChange` and `listAgentDirectory` carry `meta/identity/create`,
-  `update`, `archive`, `unarchive`, `remove`, `withdraw`, `get`, `list`,
-  `operation` and `directory` from the roster and an agent's panes. The
-  console contract (`docs/rct/console-rest-sse-contract-v0.5.0.json`)
-  documents the ten methods.
+  `getAgentChange`, `listAgentDirectory` and `planAgentChange` carry
+  `meta/identity/create`, `update`, `archive`, `unarchive`, `remove`,
+  `withdraw`, `get`, `list`, `operation`, `directory` and `plan` from the
+  roster and an agent's panes. The console contract
+  (`docs/rct/console-rest-sse-contract-v0.5.0.json`) documents the family's
+  thirteen methods, `adopt` and `changes_hold` included, and what a launch
+  without an identity policy answers: its reads are served, and a change or
+  a plan is refused `change_denied`. The console guide has a section on
+  long-term agents.
 
 ### Changed
 

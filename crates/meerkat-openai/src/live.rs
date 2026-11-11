@@ -7326,13 +7326,13 @@ mod tests {
                 "content_filter",
             ])
             .collect();
-        for fixed in decided_on.iter().copied() {
+        for fixed in &decided_on {
             let mut incomplete = fake_response("resp_fixed", ResponseStatus::Incomplete);
             incomplete.status_details = Some(oai_rt_rs::protocol::models::ResponseStatusDetails {
-                reason: Some(fixed.to_string()),
+                reason: Some((*fixed).to_string()),
                 error: Some(ServerError {
                     error_type: ApiErrorType::InvalidRequestError,
-                    code: Some(fixed.to_string()),
+                    code: Some((*fixed).to_string()),
                     message: "upstream echo".to_string(),
                     param: None,
                     event_id: None,

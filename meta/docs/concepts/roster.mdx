@@ -428,9 +428,16 @@ update's result:
 - A governed runtime (one with a native work authorization host) takes no
   operator instruction record (`prepared_authorization_required`): there, a
   change applies from the agent's next fresh conversation.
-- A fork of an agent (`fork_off`, a council participant, a helper fork,
-  `meta/fork_member`, a console side chat) starts from the agent's first
-  prompt: it does not carry the agent's changed instructions.
+- A fork of an agent does not carry the agent's changed instructions. What
+  it starts from depends on the route:
+  - a `fork_off` child starts from the agent's first prompt;
+  - a durable fork (`meta/fork_member`, a console side chat) starts from the
+    agent's first prompt too, and reads one header row that says an
+    instruction of its source is not active in it, without the
+    instruction's text;
+  - a helper fork is a fresh member on its own profile's prompt, with the
+    agent's conversation as context: it carries neither the first prompt's
+    text nor the changed one.
 
 ## Deep member status
 

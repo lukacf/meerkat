@@ -531,6 +531,28 @@ appended after the skills text and baked once at materialization, and an
 A host that keeps its own per-profile prompt key (for example a `role_summary` key)
 parses that key itself and lowers it to `additional_instructions`.
 
+A member's session records the instruction sections it was built with in its
+durable build state, and keeps them through every rebuild: a restart, a wake
+and a fork child's seating resume the session and name no sections, so they
+leave the record alone (a fork child records its source's sections).
+`MobHandle::member_build_instructions(identity)` (Rust hosts) reads them from
+the session's committed state without waking the member or reading its
+transcript:
+
+| Answer | Meaning |
+| --- | --- |
+| `Some(sections)` | The sections the session's build was given, in order. |
+| `Some(vec![])` | The session was built with no sections. |
+| `None` | Not known: the identity is not a member, no committed session exists, or the session's record does not say (it was built before 0.9.14, or an earlier release's resume erased the record). |
+
+A seat no build has created yet answers the sections it carries to its first
+build. That build may append the sections the host's spawn customizer adds,
+so afterwards the session records the seat's sections followed by those. A
+host whose session service is a decorator forwards
+`MobSessionService::recorded_build_instructions` to the service it wraps;
+the trait default answers the same from the persisted session, which loads
+its transcript.
+
 There is no `system_prompt` key on a profile. Loading a TOML definition whose
 `[profiles.<name>]` table carries `system_prompt` (or its aliases `prompt` and
 `instructions`) fails with `MobError::UnsupportedProfileKey`, whose message

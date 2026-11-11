@@ -43,6 +43,31 @@
 //! for a change, the host RPC methods and the agent tools build on this
 //! module; none of them is here.
 
+/// The wire tokens of a closed vocabulary, listed once with their variants.
+/// It gives the type `ALL_TOKENS`, every token in declaration order, and
+/// `listed_token`, whose match is exhaustive: a variant that is not listed
+/// here with its token fails to compile, so the list cannot fall behind the
+/// type.
+macro_rules! closed_tokens {
+    ($type:ty { $($variant:ident => $token:literal),+ $(,)? }) => {
+        impl $type {
+            /// Every wire token of the vocabulary, in declaration order.
+            #[allow(
+                dead_code,
+                reason = "read by the rows that compare the SDKs' token files with this list"
+            )]
+            pub(crate) const ALL_TOKENS: &'static [&'static str] = &[$($token),+];
+
+            /// The value's wire token.
+            const fn listed_token(&self) -> &'static str {
+                match self {
+                    $(Self::$variant { .. } => $token),+
+                }
+            }
+        }
+    };
+}
+
 mod approval;
 mod config;
 mod consequences;

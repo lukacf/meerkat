@@ -30,6 +30,7 @@
 //! archive calls nothing: an archived agent keeps what the step holds, so
 //! its unarchive resumes on its current instructions.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -47,6 +48,7 @@ use super::outcome::{
     AgentChangeState, AgentOutcome, AgentSeat, IdentityOutcome, InstructionOutcome,
     InstructionsChanged,
 };
+use super::policy::PreparationRule;
 use super::refusal::{
     IdentityRefusal, IdentityRefusalKind, NameTakenBy, NotAdoptableReason, RequestProblem,
 };
@@ -54,6 +56,8 @@ use super::request::{
     IdentityRequest, RequestAction, Requester, UpdatedSpec, core_member_name,
     identity_name_of_member,
 };
+
+mod core_commit;
 
 /// The consent a change commits under, as Core's commit takes it: the
 /// host's rule committed it without a decision (`Policy`, `allow` or
@@ -216,6 +220,14 @@ pub struct ChangeCommit<'a> {
     /// run-time change of it, other than its adoption, is refused
     /// `owner_read_only` before Core is called. Never set for a create.
     pub configured_target: bool,
+    /// How the host prepares an agent of each profile before its first use,
+    /// by profile, from its policy (`IdentityCreationPolicy::preparations`).
+    /// A create commits each agent with its profile's mode: an agent of a
+    /// profile the host prepares is committed pending its preparation, has
+    /// no member and is not usable until the host settles it, and the
+    /// create answers `pending_preparation`. `None`, and a profile the map
+    /// lacks, prepare nothing.
+    pub preparations: Option<&'a BTreeMap<String, PreparationRule>>,
 }
 
 impl std::fmt::Debug for ChangeCommit<'_> {
@@ -228,6 +240,7 @@ impl std::fmt::Debug for ChangeCommit<'_> {
             .field("consent", &self.consent)
             .field("request", &self.request)
             .field("configured_target", &self.configured_target)
+            .field("preparations", &self.preparations)
             .finish()
     }
 }
@@ -249,7 +262,19 @@ impl<'a> ChangeCommit<'a> {
             consent,
             request,
             configured_target: false,
+            preparations: None,
         }
+    }
+
+    /// This commit, with how the host prepares an agent of each profile
+    /// before its first use (`IdentityCreationPolicy::preparations`).
+    #[must_use]
+    pub fn with_preparations(
+        mut self,
+        preparations: &'a BTreeMap<String, PreparationRule>,
+    ) -> Self {
+        self.preparations = Some(preparations);
+        self
     }
 
     /// This commit, of an agent its host configures when `configured`.
@@ -392,6 +417,10 @@ impl CoreChangeExecutor {
     /// The instruction outcome of a committed update in `mob` that changed
     /// an agent's instructions text: the step's answer, or `None` when the
     /// executor has no step.
+    #[allow(
+        dead_code,
+        reason = "called by the update's body, which is not written yet"
+    )]
     pub(super) async fn after_update(
         &self,
         mob: &MobHandle,
@@ -432,17 +461,51 @@ impl IdentityChangeExecutor for CoreChangeExecutor {
             .map_err(ExecutorError::Request)?;
         let operation = IdentityOperation::new(commit.operation_id.as_str(), digest.as_str());
         match &commit.request.action {
-            RequestAction::Create { .. }
-            | RequestAction::Archive { .. }
-            | RequestAction::Unarchive { .. }
-            | RequestAction::Remove { .. } => Ok(ChangeCommitted::refused(IdentityRefusal::new(
-                IdentityRefusalKind::Unsupported {
-                    feature: format!(
-                        "{} of an agent through the executor",
-                        commit.request.action.token()
-                    ),
-                },
-            ))),
+            RequestAction::Create { identities } => {
+                core_commit::create(&commit, operation, identities).await
+            }
+            RequestAction::Archive {
+                identity,
+                expected_spec_digest,
+            } => {
+                core_commit::entry_change(
+                    self,
+                    &commit,
+                    operation,
+                    core_commit::EntryChange::Archive,
+                    identity,
+                    expected_spec_digest,
+                )
+                .await
+            }
+            RequestAction::Unarchive {
+                identity,
+                expected_spec_digest,
+            } => {
+                core_commit::entry_change(
+                    self,
+                    &commit,
+                    operation,
+                    core_commit::EntryChange::Unarchive,
+                    identity,
+                    expected_spec_digest,
+                )
+                .await
+            }
+            RequestAction::Remove {
+                identity,
+                expected_spec_digest,
+            } => {
+                core_commit::entry_change(
+                    self,
+                    &commit,
+                    operation,
+                    core_commit::EntryChange::Remove,
+                    identity,
+                    expected_spec_digest,
+                )
+                .await
+            }
             RequestAction::Update(update) => commit_update(self, &commit, operation, update).await,
             RequestAction::Adopt {
                 identity,

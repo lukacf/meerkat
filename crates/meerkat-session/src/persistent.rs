@@ -614,6 +614,53 @@ fn durable_session_restore_error(
     ))))
 }
 
+/// The metadata of a session's committed document, read from the
+/// RuntimeStore authority without materializing transcript rows. The typed
+/// facts are decoded from it through the canonical decoders, so the
+/// metadata view and the build state come from the same source.
+enum CommittedSessionMetadata {
+    /// WholeBlob: the metadata-only partial decode of the exact committed
+    /// body.
+    Document(meerkat_core::SessionMetadataDocument),
+    /// WholeBlob on a store that cannot serve raw committed bytes: the full
+    /// committed snapshot.
+    Snapshot(Box<CommittedWholeBlobSnapshot>),
+    /// HeadCanonical: the metadata of the current committed head.
+    Head {
+        session_id: SessionId,
+        metadata: serde_json::Map<String, serde_json::Value>,
+    },
+}
+
+impl CommittedSessionMetadata {
+    fn try_into_view(
+        self,
+    ) -> Result<meerkat_core::PersistedSessionMetadataView, serde_json::Error> {
+        match self {
+            Self::Document(document) => document.try_into_view(),
+            Self::Snapshot(snapshot) => {
+                meerkat_core::PersistedSessionMetadataView::try_from_session(snapshot.session())
+            }
+            Self::Head {
+                session_id,
+                metadata,
+            } => meerkat_core::PersistedSessionMetadataView::try_from_metadata_map(
+                session_id, &metadata,
+            ),
+        }
+    }
+
+    fn try_build_state(
+        &self,
+    ) -> Result<Option<meerkat_core::SessionBuildState>, serde_json::Error> {
+        match self {
+            Self::Document(document) => document.try_build_state(),
+            Self::Snapshot(snapshot) => snapshot.session().try_build_state(),
+            Self::Head { metadata, .. } => meerkat_core::try_session_build_state_from_map(metadata),
+        }
+    }
+}
+
 fn session_id_from_event(event: &meerkat_core::event::AgentEvent) -> Option<SessionId> {
     match event {
         meerkat_core::event::AgentEvent::RunStarted { session_id, .. }
@@ -23283,9 +23330,45 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         id: &SessionId,
     ) -> Result<Option<meerkat_core::PersistedSessionMetadataView>, SessionError> {
-        let corrupt_metadata_error = |err: serde_json::Error| {
-            durable_session_restore_error(id, "durable metadata failed typed restore", err)
+        let Some(committed) = self.load_committed_session_metadata(id).await? else {
+            return Ok(None);
         };
+        committed.try_into_view().map(Some).map_err(|err| {
+            durable_session_restore_error(id, "durable metadata failed typed restore", err)
+        })
+    }
+
+    /// Load the build state the session's committed document records
+    /// ([`meerkat_core::SessionBuildState`]): what its builds were given,
+    /// the instruction sections included.
+    ///
+    /// The metadata-only sibling of reading
+    /// [`Session::build_state`](meerkat_core::Session::build_state) from a
+    /// loaded session, with the sources of
+    /// [`Self::load_authoritative_session_metadata`]: no transcript row is
+    /// materialized. `None` when no committed session exists under `id` or
+    /// its document records no build state; an archived session's record
+    /// stays readable. A corrupt record is a read fault, never `None`.
+    pub async fn load_authoritative_session_build_state(
+        &self,
+        id: &SessionId,
+    ) -> Result<Option<meerkat_core::SessionBuildState>, SessionError> {
+        let Some(committed) = self.load_committed_session_metadata(id).await? else {
+            return Ok(None);
+        };
+        committed.try_build_state().map_err(|err| {
+            durable_session_restore_error(id, "durable build state failed typed restore", err)
+        })
+    }
+
+    /// Read the metadata of the session's committed document from the
+    /// RuntimeStore authority, without materializing transcript rows: the
+    /// one source of [`Self::load_authoritative_session_metadata`] and
+    /// [`Self::load_authoritative_session_build_state`].
+    async fn load_committed_session_metadata(
+        &self,
+        id: &SessionId,
+    ) -> Result<Option<CommittedSessionMetadata>, SessionError> {
         let runtime_id = Self::runtime_id_for_session(id);
         let Some(authority) = self
             .runtime_store
@@ -23326,11 +23409,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     .await
                 {
                     Ok(Some(metadata)) => {
-                        return metadata
-                            .into_document()
-                            .try_into_view()
-                            .map(Some)
-                            .map_err(corrupt_metadata_error);
+                        return Ok(Some(CommittedSessionMetadata::Document(
+                            metadata.into_document(),
+                        )));
                     }
                     Ok(None) => return Err(disappeared()),
                     Err(RuntimeStoreError::Unsupported(_)) => {}
@@ -23342,9 +23423,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     .await
                     .map_err(load_error)?
                     .ok_or_else(disappeared)?;
-                meerkat_core::PersistedSessionMetadataView::try_from_session(snapshot.session())
-                    .map(Some)
-                    .map_err(corrupt_metadata_error)
+                Ok(Some(CommittedSessionMetadata::Snapshot(Box::new(snapshot))))
             }
             RuntimeSessionAuthority::HeadCanonical(_) => {
                 // This read is an observation of the current metadata, and
@@ -23366,12 +23445,10 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 else {
                     return Ok(None);
                 };
-                meerkat_core::PersistedSessionMetadataView::try_from_metadata_map(
-                    id.clone(),
-                    &metadata,
-                )
-                .map(Some)
-                .map_err(corrupt_metadata_error)
+                Ok(Some(CommittedSessionMetadata::Head {
+                    session_id: id.clone(),
+                    metadata,
+                }))
             }
         }
     }

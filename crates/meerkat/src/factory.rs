@@ -10911,15 +10911,34 @@ impl AgentFactory {
         // Per-session MCP attachment intents and their revision counter are
         // session-owned durable state, not build config: a rebuilt or resumed
         // session keeps the ones it recorded.
-        let (recorded_mcp_attachment_intents, mcp_attachment_intent_revision) = session
+        let (
+            recorded_mcp_attachment_intents,
+            mcp_attachment_intent_revision,
+            recorded_instruction_sections,
+        ) = session
             .build_state()
             .map(|state| {
                 (
                     state.mcp_attachment_intents,
                     state.mcp_attachment_intent_revision,
+                    state.additional_instructions,
                 )
             })
             .unwrap_or_default();
+        // The instruction sections are session-owned too. A build that names
+        // sections records those (an empty list clears them). A build that
+        // names none keeps what the session records: a resume authors
+        // nothing, so it names none, and writing that absence would erase
+        // what the first build recorded. A first build that names none
+        // records an empty list, so an absent record only ever means that
+        // the sections are not known (a session built before this record
+        // was kept across resumes, or one whose record such a resume
+        // erased).
+        let recorded_instruction_sections = build_config
+            .additional_instructions
+            .clone()
+            .or(recorded_instruction_sections)
+            .or_else(|| fresh_build.then(Vec::new));
         let persisted_build_state = meerkat_core::SessionBuildState {
             output_schema: build_config.output_schema.clone(),
             hooks_override: build_config.hooks_override.clone(),
@@ -10931,7 +10950,7 @@ impl AgentFactory {
             silent_comms_intents: build_config.silent_comms_intents.clone(),
             max_inline_peer_notifications: build_config.max_inline_peer_notifications,
             app_context: build_config.app_context.clone(),
-            additional_instructions: build_config.additional_instructions.clone(),
+            additional_instructions: recorded_instruction_sections,
             shell_env: build_config.shell_env.clone(),
             shell_timeout_secs: build_config.shell_timeout_secs,
             mob_tool_authority_context: build_config.mob_tool_authority_context.clone(),
@@ -17107,6 +17126,308 @@ mod tests {
                 "the rebuilt session's first request carries the tools it sent before the rebuild"
             );
             after.release_owned_resources().await;
+        }
+    }
+
+    /// The instruction sections a session's durable build state records
+    /// (`SessionBuildState::additional_instructions`), across its builds.
+    mod recorded_instruction_sections {
+        use super::*;
+
+        const BASE_PROMPT: &str = "You answer for one desk.";
+        const SECTION_ONE: &str = "Keep answers to one line.";
+        const SECTION_TWO: &str = "Name the desk you answer for.";
+        /// A session document as Meerkat 0.9.4 persisted it: its build state
+        /// is `{}`, so it records no sections.
+        const V0_9_4_SESSION: &str = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/v0_9_4_staged_prompt_session/session.json"
+        );
+
+        fn sections() -> Vec<String> {
+            vec![SECTION_ONE.to_string(), SECTION_TWO.to_string()]
+        }
+
+        /// A client of `provider` that no row asks for a turn.
+        struct BuildOnlyClient(Provider);
+
+        #[async_trait]
+        impl LlmClient for BuildOnlyClient {
+            fn project_replay_messages(
+                &self,
+                messages: &[meerkat_core::Message],
+            ) -> Result<Vec<meerkat_core::Message>, LlmError> {
+                Ok(messages.to_vec())
+            }
+
+            fn stream<'a>(
+                &'a self,
+                _request: &'a LlmRequest,
+            ) -> Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>>
+            {
+                Box::pin(stream::iter(vec![Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::success(StopReason::EndTurn),
+                })]))
+            }
+
+            fn provider(&self) -> Provider {
+                self.0
+            }
+
+            async fn health_check(&self) -> Result<(), LlmError> {
+                Ok(())
+            }
+        }
+
+        /// One build over `session` on `model`, naming `sections` and
+        /// `system_prompt`.
+        async fn build_on(
+            factory: &AgentFactory,
+            session: Session,
+            (model, provider): (&str, Provider),
+            sections: Option<Vec<String>>,
+            system_prompt: crate::SystemPromptOverride,
+        ) -> DynAgent {
+            let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+            let bindings = runtime
+                .prepare_bindings(session.id().clone())
+                .await
+                .expect("session bindings");
+            let mut build = AgentBuildConfig::new(model);
+            build.provider = Some(provider);
+            build.llm_client_override = Some(Arc::new(BuildOnlyClient(provider)));
+            build.resume_session = Some(session);
+            build.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings);
+            build.override_builtins = ToolCategoryOverride::Disable;
+            build.additional_instructions = sections;
+            build.system_prompt = system_prompt;
+            factory
+                .build_agent(build, &Config::default())
+                .await
+                .expect("the agent builds")
+        }
+
+        /// The first build of a new session.
+        async fn first_build(factory: &AgentFactory, sections: Option<Vec<String>>) -> Session {
+            let agent = build_on(
+                factory,
+                Session::new(),
+                ("gpt-5.6-sol", Provider::OpenAI),
+                sections,
+                crate::SystemPromptOverride::Set(BASE_PROMPT.to_string()),
+            )
+            .await;
+            built_session(agent).await
+        }
+
+        /// A build that resumes `session` and authors nothing: no prompt
+        /// decision, as a restart, a wake or a member rebuild resumes it.
+        async fn resume(
+            factory: &AgentFactory,
+            session: Session,
+            sections: Option<Vec<String>>,
+        ) -> Session {
+            let agent = build_on(
+                factory,
+                session,
+                ("gpt-5.6-sol", Provider::OpenAI),
+                sections,
+                crate::SystemPromptOverride::Inherit,
+            )
+            .await;
+            built_session(agent).await
+        }
+
+        async fn built_session(mut agent: DynAgent) -> Session {
+            let session = agent.session().clone();
+            agent.release_owned_resources().await;
+            session
+        }
+
+        fn recorded(session: &Session) -> Option<Vec<String>> {
+            session
+                .build_state()
+                .expect("a built session records its build state")
+                .additional_instructions
+        }
+
+        /// The stored build state document, as the session row holds it.
+        fn stored_build_state(session: &Session) -> serde_json::Value {
+            session
+                .metadata()
+                .get(meerkat_core::SESSION_BUILD_STATE_KEY)
+                .cloned()
+                .expect("a stored build state")
+        }
+
+        fn system_rows(session: &Session) -> Vec<String> {
+            session
+                .messages()
+                .iter()
+                .filter_map(|message| match message {
+                    meerkat_core::Message::System(system) => Some(system.content.clone()),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// A resume names no sections, because it authors nothing. The
+        /// session keeps the sections its first build recorded, through
+        /// every resume, and the resume writes no prompt row.
+        #[tokio::test]
+        async fn a_resumed_build_that_names_no_sections_keeps_the_recorded_ones() {
+            let temp = tempfile::tempdir().expect("temp root");
+            let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+
+            let first = first_build(&factory, Some(sections())).await;
+            assert_eq!(recorded(&first), Some(sections()));
+            let rows = system_rows(&first);
+            assert!(
+                rows.len() == 1 && rows[0].contains(SECTION_ONE) && rows[0].contains(SECTION_TWO),
+                "the first build renders its sections into its prompt row: {rows:?}"
+            );
+
+            let resumed = resume(&factory, first, None).await;
+            assert_eq!(
+                recorded(&resumed),
+                Some(sections()),
+                "the first resume keeps the recorded sections"
+            );
+            let resumed_again = resume(&factory, resumed, None).await;
+            assert_eq!(
+                recorded(&resumed_again),
+                Some(sections()),
+                "the second resume keeps them too"
+            );
+            assert_eq!(
+                system_rows(&resumed_again),
+                rows,
+                "a resume that authors nothing writes no prompt row"
+            );
+        }
+
+        /// A build that names sections records those, on a resume as on a
+        /// first build: new sections replace the recorded ones, and an empty
+        /// list clears them.
+        #[tokio::test]
+        async fn a_resumed_build_that_names_sections_replaces_the_recorded_ones() {
+            let temp = tempfile::tempdir().expect("temp root");
+            let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+
+            let first = first_build(&factory, Some(sections())).await;
+            let replaced = resume(&factory, first, Some(vec![SECTION_TWO.to_string()])).await;
+            assert_eq!(
+                recorded(&replaced),
+                Some(vec![SECTION_TWO.to_string()]),
+                "the sections a resume names replace the recorded ones"
+            );
+            let kept = resume(&factory, replaced, None).await;
+            assert_eq!(
+                recorded(&kept),
+                Some(vec![SECTION_TWO.to_string()]),
+                "the next resume that names none keeps the replacement"
+            );
+            let cleared = resume(&factory, kept, Some(Vec::new())).await;
+            assert_eq!(
+                recorded(&cleared),
+                Some(Vec::new()),
+                "an empty list clears the recorded sections"
+            );
+        }
+
+        /// A first build that names no sections records that it was built
+        /// with none: an empty list, which a resume keeps. Absent is left to
+        /// mean that the sections are not known.
+        #[tokio::test]
+        async fn a_first_build_that_names_no_sections_records_an_empty_list() {
+            let temp = tempfile::tempdir().expect("temp root");
+            let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+
+            let first = first_build(&factory, None).await;
+            assert_eq!(
+                recorded(&first),
+                Some(Vec::new()),
+                "a first build that names no sections records an empty list"
+            );
+            assert_eq!(
+                stored_build_state(&first)["additional_instructions"],
+                serde_json::json!([]),
+                "the stored document holds the empty list"
+            );
+            let resumed = resume(&factory, first, None).await;
+            assert_eq!(
+                recorded(&resumed),
+                Some(Vec::new()),
+                "a resume keeps the recorded empty list"
+            );
+        }
+
+        fn v0_9_4_session() -> Session {
+            let document = std::fs::read_to_string(V0_9_4_SESSION).expect("the 0.9.4 fixture");
+            serde_json::from_str(&document).expect("a 0.9.4 session document")
+        }
+
+        /// A session an earlier release wrote records no sections (its build
+        /// state has no such key). It loads, and a resume leaves its stored
+        /// build state as it was: nothing is invented for it.
+        #[tokio::test]
+        async fn a_session_an_earlier_release_wrote_keeps_its_stored_build_state() {
+            let temp = tempfile::tempdir().expect("temp root");
+            let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+
+            let stored = v0_9_4_session();
+            let before = stored_build_state(&stored);
+            assert_eq!(
+                before,
+                serde_json::json!({}),
+                "the fixture's build state records nothing"
+            );
+            let agent = build_on(
+                &factory,
+                stored,
+                ("claude-sonnet-4-5", Provider::Anthropic),
+                None,
+                crate::SystemPromptOverride::Inherit,
+            )
+            .await;
+            let resumed = built_session(agent).await;
+            assert_eq!(
+                stored_build_state(&resumed),
+                before,
+                "a resume leaves an earlier release's stored build state as it was"
+            );
+            assert_eq!(recorded(&resumed), None, "its sections stay not known");
+        }
+
+        /// A session an earlier release built with sections, as that release
+        /// stored it: a resume keeps the stored sections.
+        #[tokio::test]
+        async fn a_session_an_earlier_release_built_with_sections_keeps_them() {
+            let temp = tempfile::tempdir().expect("temp root");
+            let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+
+            let document = std::fs::read_to_string(V0_9_4_SESSION).expect("the 0.9.4 fixture");
+            let mut document: serde_json::Value =
+                serde_json::from_str(&document).expect("a 0.9.4 session document");
+            document["metadata"][meerkat_core::SESSION_BUILD_STATE_KEY] =
+                serde_json::json!({ "additional_instructions": [SECTION_ONE] });
+            let stored: Session =
+                serde_json::from_value(document).expect("the document with sections");
+            let before = stored_build_state(&stored);
+            let agent = build_on(
+                &factory,
+                stored,
+                ("claude-sonnet-4-5", Provider::Anthropic),
+                None,
+                crate::SystemPromptOverride::Inherit,
+            )
+            .await;
+            let resumed = built_session(agent).await;
+            assert_eq!(
+                stored_build_state(&resumed),
+                before,
+                "a resume keeps the sections an earlier release stored"
+            );
         }
     }
 

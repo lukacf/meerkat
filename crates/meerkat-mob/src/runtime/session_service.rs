@@ -2438,6 +2438,44 @@ pub trait MobSessionService:
         )))
     }
 
+    /// The instruction sections the committed build state of `session_id`
+    /// records (`SessionBuildState::additional_instructions`): the sections
+    /// the session's builds were given. `Some(vec![])` is a session built
+    /// with none. `Ok(None)` when the service holds no committed session
+    /// under this id, or its build state does not say (a session built
+    /// before 0.9.14, or one whose record an earlier release's resume
+    /// erased). A corrupt record is a read fault (`Err`), never `Ok(None)`.
+    ///
+    /// [`super::MobHandle::member_build_instructions`] asks it for a member
+    /// whose session a build created. It never materializes the session.
+    ///
+    /// Default: derives from [`Self::load_persisted_session_tolerating_tail`],
+    /// so every service answers it, at the cost of loading the persisted
+    /// session with its transcript; that read answers an archived session as
+    /// absent. Persistent services override it with the metadata-only
+    /// authoritative read, which reads no transcript row and still answers
+    /// an archived session's record. A wrapper over such a service forwards
+    /// it to keep the read transcript-free.
+    async fn recorded_build_instructions(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<Vec<String>>, SessionError> {
+        let Some(session) = self
+            .load_persisted_session_tolerating_tail(session_id)
+            .await?
+        else {
+            return Ok(None);
+        };
+        session
+            .try_build_state()
+            .map(|state| state.and_then(|state| state.additional_instructions))
+            .map_err(|err| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                    "session {session_id} durable build state failed typed restore: {err}"
+                )))
+            })
+    }
+
     /// The tool restrictions a session inherited from its spawner (launch
     /// tool access policy and visibility ceiling), as the session's owner
     /// knows them, so a successor that replaces it can keep them.
@@ -4433,6 +4471,18 @@ where
         session_id: &SessionId,
     ) -> Result<Option<meerkat_core::PersistedSessionMetadataView>, SessionError> {
         self.load_authoritative_session_metadata(session_id).await
+    }
+
+    /// Metadata-only authoritative read of the committed build state: no
+    /// transcript row is materialized.
+    async fn recorded_build_instructions(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<Vec<String>>, SessionError> {
+        Ok(self
+            .load_authoritative_session_build_state(session_id)
+            .await?
+            .and_then(|state| state.additional_instructions))
     }
 
     async fn predecessor_tool_restrictions(

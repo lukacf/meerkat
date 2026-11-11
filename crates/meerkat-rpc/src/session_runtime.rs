@@ -45131,4 +45131,20 @@ mod owed_compaction_forward_guard {
             "the RPC wrapper forwards the owed compaction settle to the service it wraps"
         );
     }
+
+    /// The RPC wrapper forwards the read of the instruction sections a
+    /// session's build state records to the persistent service it wraps,
+    /// which answers from the committed metadata alone. The trait default
+    /// answers the same value by loading the persisted session with its
+    /// transcript, so a wrapper without the forward compiles and loads a
+    /// member's whole transcript on every read.
+    #[test]
+    fn the_rpc_wrapper_forwards_the_recorded_build_instructions_read() {
+        let block = wrapper_impl(include_str!("session_runtime.rs"), "RpcMobSessionService");
+        assert!(block.is_some(), "the RPC wrapper is in the source");
+        assert!(
+            block.is_some_and(|block| block.contains("::recorded_build_instructions(")),
+            "the RPC wrapper forwards the recorded build sections read to the service it wraps"
+        );
+    }
 }

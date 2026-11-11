@@ -41226,4 +41226,25 @@ mod owed_compaction_forward_guard {
             );
         }
     }
+
+    /// The CLI wrapper over the persistent service forwards the read of the
+    /// instruction sections a session's build state records, which that
+    /// service answers from the committed metadata alone. The trait default
+    /// answers the same value by loading the persisted session with its
+    /// transcript, so a wrapper without the forward compiles and loads a
+    /// member's whole transcript on every read. (`RunMobSessionService`
+    /// wraps the ephemeral service, which keeps no persisted session.)
+    #[test]
+    fn the_persistent_cli_wrapper_forwards_the_recorded_build_instructions_read() {
+        let block = wrapper_impl(include_str!("main.rs"), "MobCliSessionService");
+        assert!(
+            block.is_some(),
+            "the MobSessionService impl for MobCliSessionService is in the CLI's source"
+        );
+        assert!(
+            block.is_some_and(|block| block.contains("::recorded_build_instructions(")),
+            "the MobSessionService impl for MobCliSessionService forwards the recorded build \
+             sections read to the service it wraps"
+        );
+    }
 }

@@ -17362,6 +17362,72 @@ mod tests {
             );
         }
 
+        /// A resume that is given an explicit system prompt writes a new
+        /// prompt row. The record states the sections that row was written
+        /// with: a build that names none writes none into it and records an
+        /// empty list, and a build that names sections writes and records
+        /// those. Only a resume that writes no prompt keeps the record.
+        #[tokio::test]
+        async fn a_resumed_build_that_writes_a_prompt_records_the_sections_it_wrote() {
+            const NEXT_PROMPT: &str = "You answer for another desk.";
+            let temp = tempfile::tempdir().expect("temp root");
+            let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+            let model = ("gpt-5.6-sol", Provider::OpenAI);
+
+            let first = first_build(&factory, Some(sections())).await;
+            let rewritten = built_session(
+                build_on(
+                    &factory,
+                    first,
+                    model,
+                    None,
+                    crate::SystemPromptOverride::Set(NEXT_PROMPT.to_string()),
+                )
+                .await,
+            )
+            .await;
+            let rows = system_rows(&rewritten);
+            let newest = rows.last().expect("a prompt row");
+            assert!(
+                rows.len() == 2 && newest.contains(NEXT_PROMPT) && !newest.contains(SECTION_ONE),
+                "the resume wrote a new prompt row with no sections: {rows:?}"
+            );
+            assert_eq!(
+                recorded(&rewritten),
+                Some(Vec::new()),
+                "the record states what the newest prompt row was written with: none"
+            );
+            let kept = resume(&factory, rewritten, None).await;
+            assert_eq!(
+                recorded(&kept),
+                Some(Vec::new()),
+                "a later resume that writes no prompt keeps that record"
+            );
+
+            let named = built_session(
+                build_on(
+                    &factory,
+                    kept,
+                    model,
+                    Some(vec![SECTION_TWO.to_string()]),
+                    crate::SystemPromptOverride::Set(BASE_PROMPT.to_string()),
+                )
+                .await,
+            )
+            .await;
+            let rows = system_rows(&named);
+            assert!(
+                rows.last()
+                    .is_some_and(|row| row.contains(BASE_PROMPT) && row.contains(SECTION_TWO)),
+                "a prompt written with sections holds them: {rows:?}"
+            );
+            assert_eq!(
+                recorded(&named),
+                Some(vec![SECTION_TWO.to_string()]),
+                "and the record states them"
+            );
+        }
+
         fn v0_9_4_session() -> Session {
             let document = std::fs::read_to_string(V0_9_4_SESSION).expect("the 0.9.4 fixture");
             serde_json::from_str(&document).expect("a 0.9.4 session document")

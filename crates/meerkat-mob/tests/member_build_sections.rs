@@ -5,7 +5,8 @@
 //! member's first build records them. Every later build of the member (a
 //! restart's restore, a wake, a fork child's seating) resumes its session
 //! and names no sections, because a resume authors nothing: it must keep the
-//! recorded sections, not erase them.
+//! recorded sections, not erase them. `MobHandle::member_build_instructions`
+//! reads them from committed state without waking the member.
 //!
 //! The rows run a persistent mob on the production realm shape (SQLite
 //! session rows and HeadCanonical runtime authority in one database) with
@@ -17,8 +18,9 @@
 use meerkat::{AgentFactory, Config, FactoryAgentBuilder};
 use meerkat_core::types::{HandlingMode, SessionId};
 use meerkat_mob::{
-    AgentIdentity, MemberTurnOptions, MobBuilder, MobDefinition, MobHandle, MobId, MobMemberStatus,
-    MobRuntimeMode, MobStorage, Profile, ProfileBinding, ProfileName, SpawnMemberSpec, ToolConfig,
+    AgentIdentity, DormantSeatOutcome, MemberTurnOptions, MobBuilder, MobDefinition, MobHandle,
+    MobId, MobMemberStatus, MobRuntimeMode, MobStorage, Profile, ProfileBinding, ProfileName,
+    SpawnMemberSpec, ToolConfig,
 };
 use meerkat_session::PersistentSessionService;
 use meerkat_store::{MemoryBlobStore, SqliteSessionStore, StoreAdapter};
@@ -313,6 +315,7 @@ fn sections() -> Vec<String> {
 /// the sections it was built with.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_members_build_sections_survive_a_restart_and_one_turn() {
+    let _window = DIGEST_WINDOW.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let paths = Paths::new(temp.path());
     let client = ShortAnswerClient::default();
@@ -356,6 +359,7 @@ async fn a_members_build_sections_survive_a_restart_and_one_turn() {
 /// The sections survive every resume, not only the first one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_members_build_sections_survive_two_resumes() {
+    let _window = DIGEST_WINDOW.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let paths = Paths::new(temp.path());
     let client = ShortAnswerClient::default();
@@ -385,6 +389,7 @@ async fn a_members_build_sections_survive_two_resumes() {
 /// earlier release's resume erased.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_member_built_with_no_sections_records_an_empty_list_across_a_resume() {
+    let _window = DIGEST_WINDOW.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let paths = Paths::new(temp.path());
     let client = ShortAnswerClient::default();
@@ -417,6 +422,7 @@ async fn a_member_built_with_no_sections_records_an_empty_list_across_a_resume()
 /// records its source's sections.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_fork_childs_recorded_sections_are_its_sources() {
+    let _window = DIGEST_WINDOW.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let paths = Paths::new(temp.path());
     let client = ShortAnswerClient::default();
@@ -458,4 +464,220 @@ async fn a_fork_childs_recorded_sections_are_its_sources() {
         "the fork leaves the source's record alone"
     );
     life.end(&[&source, &fork.session_id]).await;
+}
+
+/// Loading a session with its transcript moves a process-wide digest
+/// counter, which one row measures. Every row of this binary holds this
+/// window for its whole run, so no other row moves the counter meanwhile
+/// (nextest runs each row in its own process; plain `cargo test` shares
+/// one).
+static DIGEST_WINDOW: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// The measured member's first turn carries this much text, so its
+/// transcript is at least this large: a read that loads the transcript
+/// digests at least this many bytes, and one that reads the committed
+/// metadata alone digests a small fraction of it.
+const TRANSCRIPT_FILLER_BYTES: usize = 256 * 1024;
+
+async fn live_actor_registered(service: &Service, session: &SessionId) -> bool {
+    meerkat_mob::MobSessionService::live_session_actor_registered(service.as_ref(), session)
+        .await
+        .expect("read the live actor registry")
+}
+
+/// `MobHandle::member_build_instructions` answers what the member session's
+/// committed build state records, for a live member and for a member a
+/// restart left unmaterialized. The read wakes nothing: the member stays
+/// unmaterialized, no session actor exists, no provider request is made, and
+/// the transcript is not loaded (the content digest counter, which a load of
+/// the session's rows moves by at least their size, moves by a small
+/// fraction of it: the committed head's metadata).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_read_answers_the_recorded_sections_without_waking_the_member() {
+    let _window = DIGEST_WINDOW.lock().await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let client = ShortAnswerClient::default();
+    let member = AgentIdentity::from("desk-north");
+
+    let first = Life::create(&paths, &client).await;
+    let session = first.spawn("desk-north", Some(sections())).await;
+    first
+        .turn(
+            "desk-north",
+            &format!(
+                "first turn {}",
+                "filler ".repeat(TRANSCRIPT_FILLER_BYTES / 7)
+            ),
+        )
+        .await;
+    assert_eq!(
+        first
+            .handle
+            .member_build_instructions(&member)
+            .await
+            .expect("read a live member's sections"),
+        Some(sections()),
+        "a live member answers what its session records"
+    );
+    assert_eq!(
+        first
+            .handle
+            .member_build_instructions(&AgentIdentity::from("nobody"))
+            .await
+            .expect("read an identity the mob does not hold"),
+        None,
+        "an identity that is not a member has no sections to answer"
+    );
+    first.end(&[&session]).await;
+
+    let second = Life::resume(&paths, &client).await;
+    second.wait_active("desk-north").await;
+    assert!(
+        second.handle.member_unmaterialized(&member),
+        "the restart leaves a member with no work unmaterialized"
+    );
+    let requests_before = client.requests();
+    let digest_before = meerkat_core::global_session_content_digest_bytes();
+    assert_eq!(
+        second
+            .handle
+            .member_build_instructions(&member)
+            .await
+            .expect("read an unmaterialized member's sections"),
+        Some(sections()),
+        "an unmaterialized member answers from its session's committed state"
+    );
+    let digest_after_read = meerkat_core::global_session_content_digest_bytes();
+    let read_digest = digest_after_read - digest_before;
+    assert!(
+        read_digest < (TRANSCRIPT_FILLER_BYTES / 8) as u64,
+        "the read does not load the transcript: it digested {read_digest} bytes of a session \
+         whose transcript holds at least {TRANSCRIPT_FILLER_BYTES}"
+    );
+    assert!(
+        second.handle.member_unmaterialized(&member),
+        "the read leaves the member unmaterialized"
+    );
+    assert!(
+        !live_actor_registered(&second.service, &session).await,
+        "the read builds no session actor"
+    );
+    assert_eq!(
+        client.requests(),
+        requests_before,
+        "the read makes no provider request"
+    );
+    second
+        .service
+        .load_authoritative_session(&session)
+        .await
+        .expect("load the committed session")
+        .expect("the session is committed");
+    let load_digest = meerkat_core::global_session_content_digest_bytes() - digest_after_read;
+    assert!(
+        load_digest >= TRANSCRIPT_FILLER_BYTES as u64,
+        "instrument honesty: loading the session with its transcript digests its rows \
+         ({load_digest} bytes for at least {TRANSCRIPT_FILLER_BYTES})"
+    );
+    eprintln!(
+        "[build sections] the read digested {read_digest} bytes; a load of the session \
+         digested {load_digest}"
+    );
+
+    second.turn("desk-north", "turn after the restart").await;
+    assert_eq!(
+        second
+            .handle
+            .member_build_instructions(&member)
+            .await
+            .expect("read after the member's resumed build"),
+        Some(sections()),
+        "the member's resumed build keeps what the read answers"
+    );
+    second.end(&[&session]).await;
+}
+
+/// A seat no build has created yet answers the sections it carries to its
+/// first build, and nothing is built for the read. Once the member's first
+/// wake has built the session, the session's own record answers: the same
+/// sections here, where no spawn customizer appends any. A seat that names
+/// no sections answers an empty list before and after.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_read_answers_an_unborn_seats_sections_then_the_sessions_record() {
+    let _window = DIGEST_WINDOW.lock().await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let client = ShortAnswerClient::default();
+    let carrying = AgentIdentity::from("desk-east");
+    let plain = AgentIdentity::from("desk-west");
+
+    let life = Life::create(&paths, &client).await;
+    let mut carrying_spec = SpawnMemberSpec::new("worker", carrying.clone());
+    carrying_spec.additional_instructions = Some(sections());
+    let outcomes = life
+        .handle
+        .seat_dormant_members(vec![
+            carrying_spec,
+            SpawnMemberSpec::new("worker", plain.clone()),
+        ])
+        .await
+        .expect("the seat batch answers");
+    let seated = outcomes
+        .iter()
+        .map(|outcome| match outcome {
+            DormantSeatOutcome::Seated { session_id, .. } => session_id.clone(),
+            other => panic!("the spec is seated: {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    let expected = [(&carrying, sections()), (&plain, Vec::new())];
+
+    for ((member, sections), session) in expected.iter().zip(&seated) {
+        assert_eq!(
+            life.handle
+                .member_build_instructions(member)
+                .await
+                .expect("read an unborn seat's sections"),
+            Some(sections.clone()),
+            "an unborn seat answers the sections it carries to its first build"
+        );
+        assert!(
+            life.handle.session_unborn(session) && life.handle.member_unmaterialized(member),
+            "the read builds nothing: the seat's session stays unborn"
+        );
+        assert!(
+            life.service
+                .load_authoritative_session(session)
+                .await
+                .expect("read the session store")
+                .is_none(),
+            "no session exists for the seat yet"
+        );
+    }
+    assert_eq!(client.requests(), 0, "no provider request was made");
+
+    for ((member, sections), session) in expected.iter().zip(&seated) {
+        life.handle
+            .ensure_member_live(member)
+            .await
+            .expect("the member's first wake builds its session");
+        assert!(
+            !life.handle.session_unborn(session),
+            "the first wake created the session"
+        );
+        assert_eq!(
+            life.recorded_sections(session).await,
+            Some(sections.clone()),
+            "the first build records the sections the seat carried"
+        );
+        assert_eq!(
+            life.handle
+                .member_build_instructions(member)
+                .await
+                .expect("read the born session's sections"),
+            Some(sections.clone()),
+            "after its first build the session's own record answers"
+        );
+    }
+    life.end(&[&seated[0], &seated[1]]).await;
 }

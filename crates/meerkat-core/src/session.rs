@@ -1638,9 +1638,10 @@ struct SessionMetadataDocumentSerde {
 /// Metadata-only projection of a persisted session envelope.
 ///
 /// Produced by [`session_metadata_document_from_slice`] without materializing
-/// the transcript. Exposes ONLY the two session-authority facts the metadata
-/// read seam is allowed to observe ([`SESSION_METADATA_KEY`] and
-/// [`SESSION_LIFECYCLE_TERMINAL_KEY`]) — deliberately no raw metadata-map
+/// the transcript. Exposes ONLY the typed session-authority facts the
+/// metadata read seam is allowed to observe ([`SESSION_METADATA_KEY`],
+/// [`SESSION_LIFECYCLE_TERMINAL_KEY`] and the build state under
+/// [`SESSION_BUILD_STATE_KEY`]) - deliberately no raw metadata-map
 /// accessor, so the partial decode can never grow into an untyped side
 /// channel around [`Session`]'s authority-gated reads.
 #[derive(Debug, Clone)]
@@ -1665,6 +1666,13 @@ impl SessionMetadataDocument {
     /// comparison against another projection of the same fact.
     pub fn lifecycle_terminal_value(&self) -> Option<&serde_json::Value> {
         self.metadata.get(SESSION_LIFECYCLE_TERMINAL_KEY)
+    }
+
+    /// Decode the session's durable build state through the canonical
+    /// map-level decoder ([`try_session_build_state_from_map`]), failing
+    /// closed on a corrupt value. `None` when the document records none.
+    pub fn try_build_state(&self) -> Result<Option<SessionBuildState>, serde_json::Error> {
+        try_session_build_state_from_map(&self.metadata)
     }
 
     /// Decode the typed metadata view through the canonical map-level
@@ -8254,13 +8262,7 @@ impl Session {
 
     /// Try to load recoverable build-only session state through generated restore authority.
     pub fn try_build_state(&self) -> Result<Option<SessionBuildState>, serde_json::Error> {
-        let Some(value) = self.metadata.get(SESSION_BUILD_STATE_KEY) else {
-            return Ok(None);
-        };
-        let state = serde_json::from_value::<SessionBuildState>(value.clone())?;
-        session_durable_config_authority::restore_session_build_state(state)
-            .map(Some)
-            .map_err(<serde_json::Error as serde::de::Error>::custom)
+        try_session_build_state_from_map(&self.metadata)
     }
 
     /// Store durable tool-visibility control state in the session metadata map.
@@ -10663,6 +10665,26 @@ pub fn try_session_metadata_from_map(
         )
         .map_err(<serde_json::Error as serde::de::Error>::custom)?;
     session_durable_config_authority::restore_session_metadata(metadata)
+        .map(Some)
+        .map_err(<serde_json::Error as serde::de::Error>::custom)
+}
+
+/// Decode the durable build state from a session metadata map, through the
+/// generated restore authority.
+///
+/// Canonical single decoder: [`Session::try_build_state`] and the
+/// metadata-only read ([`SessionMetadataDocument::try_build_state`], a
+/// HeadCanonical head's metadata map) delegate here, so the full-session and
+/// metadata-only decode paths can never drift. An absent key is `None`; a
+/// present-but-corrupt value fails closed.
+pub fn try_session_build_state_from_map(
+    metadata: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Option<SessionBuildState>, serde_json::Error> {
+    let Some(value) = metadata.get(SESSION_BUILD_STATE_KEY) else {
+        return Ok(None);
+    };
+    let state = serde_json::from_value::<SessionBuildState>(value.clone())?;
+    session_durable_config_authority::restore_session_build_state(state)
         .map(Some)
         .map_err(<serde_json::Error as serde::de::Error>::custom)
 }
@@ -19976,6 +19998,62 @@ mod tests {
             full_view.lifecycle_terminal,
             Some(SessionLifecycleTerminal::Archived)
         );
+    }
+
+    /// The metadata-only partial decode answers the same build state as the
+    /// full session: the recorded instruction sections, an empty list as an
+    /// empty list, an absent record as none, and a corrupt value as an
+    /// error, never as absent.
+    #[test]
+    fn session_metadata_document_decodes_the_build_state_like_the_full_session() {
+        fn sections_of(session: &Session) -> (Option<Vec<String>>, Option<Vec<String>>) {
+            let bytes = serde_json::to_vec(session).expect("session should serialize");
+            let partial = session_metadata_document_from_slice(&bytes)
+                .expect("partial decode must accept the canonical envelope")
+                .try_build_state()
+                .expect("the partial document decodes its build state")
+                .and_then(|state| state.additional_instructions);
+            let full = session
+                .try_build_state()
+                .expect("the full session decodes its build state")
+                .and_then(|state| state.additional_instructions);
+            (partial, full)
+        }
+
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("hello".to_string())));
+        assert_eq!(
+            sections_of(&session),
+            (None, None),
+            "no build state records no sections"
+        );
+
+        for recorded in [
+            None,
+            Some(Vec::new()),
+            Some(vec!["Keep answers to one line.".to_string()]),
+        ] {
+            session
+                .set_build_state(SessionBuildState {
+                    additional_instructions: recorded.clone(),
+                    ..SessionBuildState::default()
+                })
+                .expect("build state should persist");
+            assert_eq!(
+                sections_of(&session),
+                (recorded.clone(), recorded),
+                "both decode paths answer what the build state records"
+            );
+        }
+
+        let mut corrupt = serde_json::to_value(&session).expect("session should serialize");
+        corrupt["metadata"][SESSION_BUILD_STATE_KEY] =
+            serde_json::json!({ "additional_instructions": "not a list" });
+        let bytes = serde_json::to_vec(&corrupt).expect("corrupt envelope should serialize");
+        session_metadata_document_from_slice(&bytes)
+            .expect("the envelope itself decodes")
+            .try_build_state()
+            .expect_err("a corrupt build state fails closed, it is never read as absent");
     }
 
     /// The metadata-only partial decode fails closed on an unsupported

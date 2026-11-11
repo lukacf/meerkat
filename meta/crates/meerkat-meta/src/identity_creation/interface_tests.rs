@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::json;
 
 use super::*;
-use crate::identity_first::{AgentAddressability, AgentIdentity, DurableAgentSpec};
+use crate::identity_first::{AgentAddressability, AgentIdentity, DisplayName, DurableAgentSpec};
 
 fn digest(text: &str) -> Sha256Digest {
     Sha256Digest::of(text.as_bytes())
@@ -301,7 +301,7 @@ fn a_name_the_member_id_encoding_maps_elsewhere_is_invalid_for_every_requester()
         let refused = create_of(requester, "mk--keeper").expect_err("the name is refused");
         assert_eq!(
             refused.to_data(),
-            json!({"kind": "invalid_name", "field": "identities[0].spec.identity"}),
+            json!({"kind": "invalid_name", "field": "agents[0].name"}),
             "{:?}",
             requester.requester
         );
@@ -520,12 +520,12 @@ fn the_typed_outcome_has_four_kinds_and_a_refusal_says_what_to_do() {
     );
 
     let refused = IdentityOutcome::Refused(
-        IdentityRefusal::new(IdentityRefusalKind::OwnerReadOnly).at("identity"),
+        IdentityRefusal::new(IdentityRefusalKind::OwnerReadOnly).at("name"),
     )
     .to_json();
     assert_eq!(refused["outcome"], "refused");
     assert_eq!(refused["kind"], "owner_read_only");
-    assert_eq!(refused["field"], "identity");
+    assert_eq!(refused["field"], "name");
     assert_eq!(refused["retryable"], false);
     let detail = refused["detail"].as_str().expect("a sentence");
     assert!(
@@ -571,7 +571,7 @@ fn no_refusal_names_where_a_record_lives() {
     };
     assert_eq!(
         duplicate.to_data(),
-        json!({"kind": "name_taken", "by": "identity", "field": "identities[1].spec.identity"})
+        json!({"kind": "name_taken", "by": "identity", "field": "agents[1].name"})
     );
 
     use meerkat_mob::IdentityChangeRefusal as Core;
@@ -887,4 +887,318 @@ fn the_status_reads_record_facts_are_additive_members() {
     );
     let read: IdentityRecordFacts = serde_json::from_value(written).expect("facts");
     assert_eq!(read, set);
+}
+
+/// The one wire spelling of the family: a full create request and an update
+/// request read and write as these, field for field; an unknown field is
+/// refused; and a refusal names its field as a path into the request as
+/// written.
+#[test]
+fn the_wire_spelling_of_a_create_an_update_and_a_refusal() {
+    let create = json!({
+        "request_id": "req-7",
+        "agents": [
+            {
+                "name": "keeper",
+                "profile": "worker",
+                "display_name": "The keeper",
+                "instructions": ["Keep the records.", "Answer in one paragraph."],
+                "context": {"desk": "archive"},
+                "labels": {"team": "records"},
+                "first_message": "Introduce yourself to the lead.",
+                "peers": ["helper", "warden"]
+            },
+            {"name": "warden", "profile": "worker"}
+        ]
+    });
+    let parsed: CreateAgents = serde_json::from_value(create.clone()).expect("a create request");
+    assert_eq!(
+        serde_json::to_value(&parsed).expect("a create request"),
+        create,
+        "a create request writes as it reads"
+    );
+    let specs = parsed
+        .to_create_specs()
+        .expect("the agents are well formed");
+    let keeper = &specs[0];
+    assert_eq!(
+        (
+            keeper.spec.identity.as_str(),
+            keeper.spec.profile.as_str(),
+            keeper.spec.display_name.as_ref().map(DisplayName::as_str),
+            keeper.spec.additional_instructions.as_slice(),
+            keeper.spec.context.clone(),
+            keeper.spec.labels.get("team").map(String::as_str),
+            keeper.spec.initial_message.is_some(),
+            keeper.peers.as_slice(),
+        ),
+        (
+            "keeper",
+            "worker",
+            Some("The keeper"),
+            [
+                "Keep the records.".to_owned(),
+                "Answer in one paragraph.".to_owned()
+            ]
+            .as_slice(),
+            Some(json!({"desk": "archive"})),
+            Some("records"),
+            true,
+            ["helper".to_owned(), "warden".to_owned()].as_slice(),
+        )
+    );
+    assert_eq!(
+        (
+            keeper.spec.runtime_mode_override,
+            keeper.spec.backend,
+            keeper.spec.binding.is_some(),
+            keeper.spec.placement.is_some(),
+        ),
+        (None, None, false, false),
+        "the request sets nothing it does not name"
+    );
+    for (unknown, what) in [
+        (
+            json!({"agents": [{"name": "k", "profile": "worker", "spec": {}}]}),
+            "spec",
+        ),
+        (
+            json!({"agents": [{"name": "k", "profile": "worker", "grants": []}]}),
+            "grants",
+        ),
+        (
+            json!({"agents": [{"name": "k", "profile": "worker", "schedules": []}]}),
+            "schedules",
+        ),
+        (
+            json!({"agents": [{"name": "k", "profile": "worker", "fork_from": {}}]}),
+            "fork_from",
+        ),
+        (
+            json!({"agents": [{"name": "k", "profile": "worker", "placement": "h"}]}),
+            "placement",
+        ),
+        (
+            json!({"agents": [{"identity": "k", "profile": "worker"}]}),
+            "identity",
+        ),
+        (json!({"mob_id": "m", "agents": []}), "mob_id"),
+        (json!({"identities": []}), "identities"),
+    ] {
+        assert!(
+            serde_json::from_value::<CreateAgents>(unknown).is_err(),
+            "a create request with `{what}` is refused"
+        );
+    }
+
+    let expected = digest("keeper");
+    let update = json!({
+        "request_id": "req-8",
+        "name": "keeper",
+        "expected_spec_digest": expected.as_str(),
+        "set": {
+            "display_name": "Keeper of records",
+            "instructions": ["Keep them in order."],
+            "context": {"desk": "vault"},
+            "labels": {"team": "vault"},
+            "labels_remove": ["shift"],
+            "profile": "worker"
+        },
+        "peers_add": ["warden"],
+        "peers_remove": ["helper"]
+    });
+    let parsed: UpdateAgent = serde_json::from_value(update.clone()).expect("an update request");
+    assert_eq!(
+        serde_json::to_value(&parsed).expect("an update request"),
+        update,
+        "an update request writes as it reads"
+    );
+    let current = BTreeMap::from([
+        ("team".to_owned(), "records".to_owned()),
+        ("shift".to_owned(), "night".to_owned()),
+    ]);
+    let spec = parsed
+        .to_update_spec(&policy(allow(&["descriptive"])), &current)
+        .expect("the update is well formed");
+    assert_eq!(
+        (
+            spec.identity.as_str(),
+            &spec.expected_spec_digest,
+            spec.set.display_name.as_ref().map(DisplayName::as_str),
+            spec.set.additional_instructions.clone(),
+            spec.set.descriptive_labels.clone(),
+            spec.set.authority_fields.clone(),
+            spec.set.peers_add.as_slice(),
+            spec.set.peers_remove.as_slice(),
+        ),
+        (
+            "keeper",
+            &expected,
+            Some("Keeper of records"),
+            Some(vec!["Keep them in order.".to_owned()]),
+            Some(BTreeMap::from([("team".to_owned(), "vault".to_owned())])),
+            None,
+            ["warden".to_owned()].as_slice(),
+            ["helper".to_owned()].as_slice(),
+        ),
+        "the labels set and removed are applied to the agent's labels"
+    );
+    for (unknown, what) in [
+        (
+            json!({"identity": "keeper", "expected_spec_digest": expected.as_str()}),
+            "identity",
+        ),
+        (
+            json!({"name": "keeper", "expected_spec_digest": expected.as_str(),
+                   "set": {"additional_instructions": ["x"]}}),
+            "set.additional_instructions",
+        ),
+        (
+            json!({"name": "keeper", "expected_spec_digest": expected.as_str(),
+                   "set": {"peers_add": ["warden"]}}),
+            "set.peers_add",
+        ),
+        (
+            json!({"name": "keeper", "expected_spec_digest": expected.as_str(), "grants_add": []}),
+            "grants_add",
+        ),
+    ] {
+        assert!(
+            serde_json::from_value::<UpdateAgent>(unknown).is_err(),
+            "an update request with `{what}` is refused"
+        );
+    }
+    let whole: AgentRef = serde_json::from_value(json!({
+        "request_id": "req-9",
+        "name": "keeper",
+        "expected_spec_digest": expected.as_str()
+    }))
+    .expect("a change of one agent as a whole");
+    assert_eq!(whole.to_archive().identity, "keeper");
+    assert_eq!(whole.to_remove().expected_spec_digest, expected);
+
+    let host = RequesterFacts::host("ops");
+    let profiles = BTreeSet::from(["worker".to_owned()]);
+    let peers = BTreeMap::from([("helper".to_owned(), PeerFacts::default())]);
+    let normalize = |request: serde_json::Value| {
+        let request: CreateAgents = serde_json::from_value(request).expect("a create request");
+        let specs = request.to_create_specs()?;
+        normalize_create(
+            &policy(allow(&["create"])),
+            &RequestContext {
+                requester: &host,
+                profiles: &profiles,
+                peers: &peers,
+            },
+            request.envelope(),
+            &specs,
+        )
+    };
+    let unknown_profile = normalize(json!({"agents": [{"name": "keeper", "profile": "ghost"}]}))
+        .expect_err("the mob has no such profile");
+    assert_eq!(
+        unknown_profile.to_refused(),
+        json!({
+            "kind": "profile_unknown",
+            "profile": "ghost",
+            "field": "agents[0].profile",
+            "retryable": false,
+            "detail": "The mob has no profile of this name: name one of the mob's profiles.",
+        })
+    );
+    let unknown_peer = normalize(json!({"agents": [
+        {"name": "warden", "profile": "worker"},
+        {"name": "keeper", "profile": "worker", "peers": ["warden", "stranger"]},
+    ]}))
+    .expect_err("a peer nobody knows");
+    assert_eq!(
+        unknown_peer.to_data(),
+        json!({"kind": "peer_unknown", "field": "agents[1].peers[1]"})
+    );
+    let bad_name = normalize(json!({"agents": [
+        {"name": "warden", "profile": "worker"},
+        {"name": "not a name", "profile": "worker"},
+    ]}))
+    .expect_err("a name with a space");
+    assert_eq!(
+        bad_name.to_data(),
+        json!({"kind": "invalid_name", "field": "agents[1].name"})
+    );
+    let no_agents = normalize(json!({"agents": []})).expect_err("nothing to create");
+    assert_eq!(
+        no_agents.to_data(),
+        json!({"kind": "invalid_request", "problem": "empty", "field": "agents"})
+    );
+
+    let own = Requester::Host {
+        surface: "ops".to_owned(),
+    };
+    let by_request: OperationRef =
+        serde_json::from_value(json!({"request_id": "req-7"})).expect("an operation");
+    assert_eq!(
+        by_request.resolve(&own).expect("the caller's own request"),
+        OperationId::for_request(&own, "req-7").expect("a request id")
+    );
+    let named = OperationId::for_request(&own, "req-7").expect("a request id");
+    let by_id: OperationRef =
+        serde_json::from_value(json!({"operation_id": named.as_str()})).expect("an operation");
+    assert_eq!(by_id.resolve(&own).expect("the named operation"), named);
+    assert!(OperationRef::default().resolve(&own).is_err());
+}
+
+/// A policy may name the change classes `archive` and `adopt` in a rule and
+/// give each its decision timeout; a class the vocabulary lacks is refused.
+#[test]
+fn a_policy_may_name_the_archive_and_adopt_change_classes() {
+    let named = IdentityCreationPolicy::parse(&json!({
+        "enabled": true,
+        "approval": {
+            "rules": [
+                {"change": ["archive"], "outcome": {"kind": "notify", "approver": {"id": "owner"}}},
+                {"change": ["adopt"],
+                 "outcome": {"kind": "require_approval", "approver": {"id": "owner"}}},
+            ],
+            "timeouts_ms": {"archive": 60_000, "adopt": 120_000},
+        },
+    }))
+    .expect("the policy parses")
+    .expect("the policy is enabled");
+    let host = RequesterFacts::host("ops");
+    let target = entry("keeper");
+    let archive = normalize_archive(
+        &named,
+        &host,
+        RequestEnvelope::default(),
+        &target,
+        &ArchiveIdentitySpec::new("keeper", digest("keeper")),
+    )
+    .expect("the archive is planned");
+    assert_eq!(
+        (
+            archive.plan.kind(),
+            archive.plan.change,
+            archive.plan.timeout_ms
+        ),
+        (ApprovalKind::Notify, ChangeClass::Archive, 60_000)
+    );
+    let adopt = normalize_adopt(
+        &named,
+        &host,
+        RequestEnvelope::default(),
+        &target,
+        &AdoptIdentitySpec::new("keeper", digest("keeper")),
+    )
+    .expect("the adoption is planned");
+    assert_eq!(
+        (adopt.plan.kind(), adopt.plan.change, adopt.plan.timeout_ms),
+        (ApprovalKind::RequireApproval, ChangeClass::Adopt, 120_000)
+    );
+    assert!(
+        IdentityCreationPolicy::parse(&json!({
+            "enabled": true,
+            "approval": {"rules": [{"change": ["reset"], "outcome": {"kind": "allow"}}]},
+        }))
+        .is_err(),
+        "a change class the vocabulary lacks is refused"
+    );
 }

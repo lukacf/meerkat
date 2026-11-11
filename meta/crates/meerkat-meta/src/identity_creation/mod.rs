@@ -82,11 +82,12 @@ pub use executor::{
     committed_outcome, consent_of_plan, refusal_of_core, refusal_of_error,
 };
 pub use family::{
-    AgentEntered, AgentPage, AgentProvenance, AgentReadiness, AgentRecord, AgentSummary,
-    ChangePlan, ChangesHold, ChangesHoldRequest, ConsentSummary, DirectoryPage, DirectoryPeer,
-    DirectoryProfile, DirectoryVerdict, GetAgent, IdentityChangeCall, IdentityChangeSpec,
-    IdentityFamily, IdentityRead, IdentityReadAnswer, ListAgents, OperationState, ReadDirectory,
-    WithdrawRequest, Withdrawn,
+    AgentEntered, AgentPage, AgentProvenance, AgentReadiness, AgentRecord, AgentRef, AgentSet,
+    AgentSpec, AgentSummary, ChangePlan, ChangesHold, ChangesHoldRequest, ConsentSummary,
+    CreateAgents, DirectoryPage, DirectoryPeer, DirectoryProfile, DirectoryVerdict, GetAgent,
+    IdentityChangeCall, IdentityChangeSpec, IdentityFamily, IdentityRead, IdentityReadAnswer,
+    ListAgents, OperationRef, OperationState, ReadDirectory, UpdateAgent, WithdrawRequest,
+    Withdrawn,
 };
 pub use operation::{OperationId, REQUEST_ID_MAX_BYTES, ToolCallOrigin};
 pub use outcome::{

@@ -2,7 +2,7 @@
 //! `data.kind`), and the typed refusal of a creation policy.
 //!
 //! Every identity refusal is one kind of a closed list, with the request
-//! field it concerns as a path (`identities[1].spec.labels`). The list is
+//! field it concerns as a path (`agents[1].labels`). The list is
 //! closed: a client must handle every kind, and a new kind is a vocabulary
 //! change. It is one vocabulary for every identity, and no kind or detail
 //! names where an identity's record lives. Normalization produces the request
@@ -31,7 +31,7 @@ pub struct IdentityRefusal {
     /// The kind, with its details.
     pub kind: IdentityRefusalKind,
     /// The request field the refusal concerns, as a path such as
-    /// `identities[1].spec.labels`; `None` for the request as a whole.
+    /// `agents[1].labels`; `None` for the request as a whole.
     pub field: Option<String>,
     /// What was wrong and what to send instead, in one sentence, when the
     /// refusal's source gave one (Core's commit path does). `None` leaves

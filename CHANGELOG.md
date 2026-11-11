@@ -35,6 +35,68 @@ them.
 
 ## [Unreleased]
 
+## [0.9.12] - 2026-11-10
+
+### Highlights
+
+- `rkat auth profile <PROFILE_ID>` no longer prints credential values: it
+  prints the profile's `id`, `provider`, `auth_method` and `source_kind`,
+  as JSON-RPC `auth/profile/get` returns them. See Security.
+
+- The in-process file tools (`apply_patch`, `blob_save_file`) no longer
+  write the engine's own `.rkat` directory, at the project root or in any
+  directory under it, or the paths a host declares as its own state and
+  inputs, so a session without command execution can no longer plant what
+  the next start runs (0.4.6 through 0.9.11). Three limits remain. See
+  Security and Upgrade notes.
+
+- The bundled SQLite is 3.54.1, which closes RUSTSEC-2026-0459: a database
+  opened together with a write-ahead log of another page size could expose
+  the process's memory (0.4.7 through 0.9.11). An application that depends
+  on rusqlite itself moves to rusqlite 0.41 with Meerkat. See Breaking,
+  Security and Upgrade notes.
+
+- On a GitHub Copilot route a Claude model whose ID carries a minor
+  version (`claude-opus-5-5`, `claude-fable-5-2`) runs under its catalog ID,
+  so the default Claude model of such a route works again. Before, the
+  request failed when its client was built (0.8.42 through 0.9.11). See
+  Fixed.
+
+- A run whose operation records an authorization audit observation after
+  its terminal input rows were written settles in the same process again.
+  Before, its terminal completion failed every retry, and so did
+  unregistering its session (a mob teardown included), until a restart
+  (0.8.52 through 0.9.11). See Fixed.
+
+- Credential rotation and OAuth sign-ins keep working after a process drops
+  a second handle of a realm's SQLite runtime store (0.6.0 through 0.9.11).
+  See Fixed.
+
+- An unkeyed `mob/member_send` names the input the member's runtime admitted
+  for it (`admission`), so a client can tell its own send from another
+  client's, and `session/input_status` by idempotency key finds an input
+  `session/external_event` admitted under the caller's key. See Breaking,
+  Added and Fixed.
+
+- Every grant surface answers alike: Core's `tool_grants/grant` and
+  `tool_grants/list`, and now Meta's `meta/tool_grants/grant` and
+  `meta/tool_grants/list`, report whether a grant to a mob member identity
+  applies to the member's running build (`applies`) and the member's gate
+  (`gate`). See Added.
+
+- Claude Fable 5.2 (`claude-fable-5-2`) is a recommended catalog model. The
+  Anthropic default model stays `claude-opus-5-5`. See Added.
+
+- Gemini 4 Carbon (`gemini-4-carbon`) is a recommended catalog model, served
+  only on paid Gemini API tiers. The Gemini default model stays
+  `gemini-4-argon`. See Added.
+
+- `meerkat_schedule_list` filters by `phase` and `target_id` before its page
+  cut. See Added.
+
+- Intel macOS binaries (`x86_64-apple-darwin`) need macOS 11.0 or later
+  (previously 10.12). See Changed.
+
 ### Breaking
 
 - `meerkat-contracts`: `MobMemberSendResult` gains the field
@@ -80,6 +142,17 @@ them.
   (`claude-mythos-5-2`), which Anthropic serves only to organizations it
   has verified, is not a catalog model, as Claude Mythos 5.1 is not. The
   Anthropic default model stays `claude-opus-5-5`.
+
+- `meerkat-models`: Gemini 4 Carbon (`gemini-4-carbon`) is a recommended
+  catalog model with the limits and parameters of Gemini 4 Argon: a
+  1,048,576-token context window shared by input, thinking and output, 64K
+  output, text, image, video, audio and PDF input, thinking levels `low`,
+  `medium` and `high` (default `medium`), no sampling parameters, and
+  forced tool choice. An explicit `minimal` thinking level is refused
+  locally with the typed `LlmError::InvalidRequest`, or with
+  `BuildAgentError::Config` when it is a build parameter. Its call timeout
+  and stream-inactivity window are 900 s. Google serves it only on paid
+  Gemini API tiers. The Gemini default model stays `gemini-4-argon`.
 
 - `meerkat`: `member_tool_grant_applies`, whether a grant to a mob member
   identity applies to the member's running build (a grant's `applies`), and
@@ -152,8 +225,10 @@ them.
 ### Changed
 
 - Intel macOS binaries (`x86_64-apple-darwin`) now need macOS 11.0 or later
-  (previously 10.12). They are built on the BuildBuddy release lane for macOS
-  11.0, and the release refuses one that needs a newer macOS.
+  (previously 10.12), and a release refuses one that needs a newer macOS.
+  They carry no code signature: `codesign -v` reports none, and a policy that
+  allows binaries by their code directory hash cannot list them (see the
+  deployment guide).
 
 - `meerkat-tools`: an agent can no longer edit files under `.rkat/` with the
   file tools (see Security). Asking an agent to add an MCP server to
@@ -268,6 +343,11 @@ them.
   archived, its audit refuses any later observation, so an operation that
   records after its run's rows were archived is refused as observation
   unavailable instead of losing the record. Affects 0.8.52 through 0.9.11.
+
+- `meerkat-meta`: a retirement's harvest and its transcript distillation
+  wait for a busy agent memory background budget instead of ending failed
+  or being skipped, the two 0.9.11 known limitations on that budget. See
+  Meta's 0.9.12 notes.
 
 ### Security
 
@@ -407,6 +487,60 @@ them.
 - A Rust host that keeps its realm state, config documents or credential
   store inside the project root it gives its tools, outside `.rkat`, should
   declare them with `AgentFactory::with_protected_host_inputs`.
+
+- `rkat auth profile <PROFILE_ID>` prints only the profile's `id`,
+  `provider`, `auth_method` and `source_kind`, the `auth_profile` shape
+  JSON-RPC `auth/profile/get` returns; its `source`, `constraints` and
+  `metadata_defaults` are no longer printed (see Security). A script that
+  read a credential value from that output reads it where the profile's
+  source keeps it instead: the realm config that declares an
+  `inline_secret` source, the environment variable, file descriptor or
+  credential command another source names, or the credential store. To
+  check that a binding's credential resolves without reading it, run
+  `rkat auth test <BINDING_ID>`.
+
+- A configuration that defines one of this release's new catalog models
+  itself must drop that entry when upgrading. Model IDs are unique across
+  the catalog, `[models.<id>]` entries and self-hosted models, and this
+  release adds `claude-fable-5-2` and `gemini-4-carbon` to the catalog. If
+  your realm or project configuration has `[models.claude-fable-5-2]` or
+  `[models.gemini-4-carbon]` (for example because you ran the model before
+  the catalog listed it), configuration validation now refuses it with
+  "model id '<id>' must be unique across built-in, custom, and self-hosted
+  entries". Remove the entry; the catalog row then serves the model with
+  its own limits and capabilities. The same applies whenever a release adds
+  a model you had defined yourself.
+
+### Known limitations
+
+- File tools: `apply_patch` and `blob_save_file` check a path against the
+  protected paths, then open it (`blob_save_file` reads the blob in between).
+  A second process that retargets a symbolic link in the project in that
+  window can land the write in a protected directory; a session with only the
+  file tools cannot. The next release checks again at the open.
+
+- Provider errors: when a provider, or a proxy in front of it, answers with
+  an error that repeats the credential a request carried (its
+  `Authorization` or API-key header), the value reaches stderr, RPC error
+  data and events unredacted on every provider route but GitHub Copilot.
+  The next release removes credentials and credential-looking values from
+  provider error text.
+
+- Release binaries: the Linux and macOS archives of `rkat`, `rkat-rpc`,
+  `rkat-rest` and `rkat-mcp` are built with more features than a
+  `cargo install` of the same packages, as in every release since 0.9.3 (the
+  Intel macOS archive joins them in this release; the Windows archive is
+  built with the default features). In those archives `rkat-rpc` accepts
+  `--live-webrtc` and serves `live/webrtc/answer`, and all four binaries
+  link the WebRTC stack (`webrtc` 0.14), although the deploying guide says
+  no shipped binary enables it. That stack carries RUSTSEC-2026-0387
+  (`crypto-bigint` 0.5.5, timing variability in operations meant to be
+  constant-time; it affects the DTLS key exchange of a live WebRTC session,
+  which only `rkat-rpc --live-webrtc` starts) and three unmaintained-crate
+  advisories (RUSTSEC-2025-0141, RUSTSEC-2026-0150, RUSTSEC-2026-0441); the
+  default-feature dependency audit does not cover them. The next release
+  declares each archive's feature set, builds it the same way on every
+  platform and audits it; `rkat-rpc` keeps GPT Live and WebRTC there.
 
 ## [0.9.11] - 2026-11-09
 
@@ -47728,7 +47862,8 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.11...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.12...HEAD
+[0.9.12]: https://github.com/lukacf/meerkat/compare/v0.9.11...v0.9.12
 [0.9.11]: https://github.com/lukacf/meerkat/compare/v0.9.10...v0.9.11
 [0.9.10]: https://github.com/lukacf/meerkat/compare/v0.9.9...v0.9.10
 [0.9.9]: https://github.com/lukacf/meerkat/compare/v0.9.8...v0.9.9

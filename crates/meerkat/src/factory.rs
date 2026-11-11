@@ -13811,6 +13811,11 @@ mod tests {
             "Gemini 4 Argon defaults to its synchronous output cap, above Google's \
              32,768 minimum recommendation"
         );
+        assert_eq!(
+            model_aware_default_max_tokens(&registry, Provider::Gemini, "gemini-4-carbon"),
+            65_536,
+            "Gemini 4 Carbon defaults to its synchronous output cap, as Gemini 4 Argon"
+        );
     }
 
     #[test]

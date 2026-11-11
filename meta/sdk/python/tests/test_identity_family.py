@@ -1197,6 +1197,49 @@ def test_a_closed_value_newer_than_this_sdk_is_kept_as_its_token():
 
 
 # ---------------------------------------------------------------------------
+# The launch policy
+# ---------------------------------------------------------------------------
+
+HOST_MAY_CHANGE_AGENTS = {
+    "enabled": True,
+    "approval": {
+        "rules": [
+            {
+                "requester": {"kind": "host", "surface": "rpc"},
+                "outcome": {"kind": "allow"},
+            }
+        ]
+    },
+}
+
+
+def test_the_builder_sends_the_launch_policy_as_given():
+    """Without a policy every change of the family is refused
+    ``change_denied``; the builder is how an SDK host launches with one."""
+    import copy
+
+    from meerkat_meta import Meta
+
+    def runtime_options(builder):
+        return MetaRuntime(builder._config)._build_init_params()["runtime_options"]
+
+    assert "identity_creation" not in runtime_options(Meta.builder())
+
+    policy = copy.deepcopy(HOST_MAY_CHANGE_AGENTS)
+    builder = Meta.builder()
+    assert builder.identity_creation(policy) is builder
+    assert runtime_options(builder)["identity_creation"] == HOST_MAY_CHANGE_AGENTS
+    # The builder keeps its own copy: a later edit of the caller's object
+    # does not change what the launch sends.
+    policy["approval"]["rules"].clear()
+    policy["enabled"] = False
+    assert runtime_options(builder)["identity_creation"] == HOST_MAY_CHANGE_AGENTS
+
+    with pytest.raises(TypeError):
+        Meta.builder().identity_creation(True)
+
+
+# ---------------------------------------------------------------------------
 # One agent model
 # ---------------------------------------------------------------------------
 

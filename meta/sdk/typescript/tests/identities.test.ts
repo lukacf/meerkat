@@ -1073,6 +1073,46 @@ describe("identity family: tolerance", () => {
   });
 });
 
+describe("identity family: the launch policy", () => {
+  const hostMayChangeAgents = () => ({
+    enabled: true,
+    approval: {
+      rules: [
+        { requester: { kind: "host", surface: "rpc" }, outcome: { kind: "allow" } },
+      ],
+    },
+  });
+  const runtimeOptions = async (builder: unknown): Promise<Record<string, unknown>> => {
+    const { MetaRuntime } = await import("../src/runtime.js");
+    const config = (builder as { _config: unknown })._config;
+    const rt = new MetaRuntime(config as ConstructorParameters<typeof MetaRuntime>[0]);
+    return (rt as unknown as { _buildInitParams(): { runtime_options: Record<string, unknown> } })
+      ._buildInitParams().runtime_options;
+  };
+
+  it("the builder sends the launch policy as given", async () => {
+    // Without a policy every change of the family is refused `change_denied`;
+    // the builder is how an SDK host launches with one.
+    assert.equal("identity_creation" in (await runtimeOptions(sdk.Meta.builder())), false);
+
+    const policy = hostMayChangeAgents();
+    const builder = sdk.Meta.builder();
+    assert.equal(builder.identityCreation(policy), builder);
+    assert.deepEqual((await runtimeOptions(builder)).identity_creation, hostMayChangeAgents());
+    // The builder keeps its own copy: a later edit of the caller's object
+    // does not change what the launch sends.
+    policy.approval.rules.length = 0;
+    policy.enabled = false;
+    assert.deepEqual((await runtimeOptions(builder)).identity_creation, hostMayChangeAgents());
+
+    assert.throws(
+      () => (sdk.Meta.builder() as unknown as { identityCreation(p: unknown): unknown })
+        .identityCreation(true),
+      TypeError,
+    );
+  });
+});
+
 describe("identity family: one agent model", () => {
   it("no answer names where an agent's record lives", async () => {
     const banned = ["custody", "origin", "storeOwned", "intentManaged", "declared", "createdBy"];

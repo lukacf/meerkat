@@ -2355,9 +2355,43 @@ pub fn require_credential_lifecycle_authority(
 
 /// Static header injector used when an external resolver returns
 /// `ResolvedAuthEnvelope::StaticHeaders`.
+///
+/// The resolver does not say which of its headers are secret, so the
+/// header's name decides whether its value is named as a credential (see
+/// [`HttpAuthorizer::visit_signed_credentials`]): `authorization`,
+/// `proxy-authorization` and `cookie`, and a header whose name contains, in
+/// any case, `key`, `token`, `secret`, `auth`, `password`, `credential`,
+/// `signature` or `session`. Naming every value would replace an ordinary
+/// one (a model id, a content type) wherever an error uses it. The value of
+/// any other header is not named; the credential shapes of
+/// [`meerkat_core::redact::redact_credentials`] still apply to it.
 pub struct StaticHeadersAuthorizer {
     headers: Vec<(String, String)>,
     label: String,
+}
+
+/// The words the name of a static header contains when its value is a
+/// credential.
+const CREDENTIAL_HEADER_WORDS: &[&str] = &[
+    "key",
+    "token",
+    "secret",
+    "auth",
+    "password",
+    "credential",
+    "signature",
+    "session",
+];
+
+/// Whether the value of the static header `name` is a credential.
+fn static_header_carries_a_credential(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    matches!(
+        name.as_str(),
+        "authorization" | "proxy-authorization" | "cookie"
+    ) || CREDENTIAL_HEADER_WORDS
+        .iter()
+        .any(|word| name.contains(word))
 }
 
 impl StaticHeadersAuthorizer {
@@ -2377,10 +2411,13 @@ impl HttpAuthorizer for StaticHeadersAuthorizer {
         Ok(())
     }
 
-    /// Every header value: the resolver does not say which are secret.
+    /// The values of the headers whose name says they carry a credential
+    /// (the rule is on [`StaticHeadersAuthorizer`]).
     fn visit_signed_credentials(&self, visit: &mut dyn FnMut(&str)) {
-        for (_, value) in &self.headers {
-            visit(value);
+        for (name, value) in &self.headers {
+            if static_header_carries_a_credential(name) {
+                visit(value);
+            }
         }
     }
 

@@ -137,7 +137,7 @@ mod tests {
     /// a key header are each redacted as sent and, for the two with a
     /// scheme, without it.
     #[tokio::test]
-    async fn static_headers_redact_every_value_they_sign_with() {
+    async fn static_headers_redact_the_credentials_they_sign_with() {
         let bearer = format!("resolver-{}", "madeupbearer".repeat(3));
         let basic = format!("{}==", "bWFkZXVwOnBhaXI".repeat(2));
         let key = format!("resolver-{}", "madeupkey".repeat(3));

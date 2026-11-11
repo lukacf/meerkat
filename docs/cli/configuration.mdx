@@ -552,12 +552,17 @@ the public `ErrorCode`, `category` its group, `message` the text of stderr's
 | An argument the parser refuses, and a host that cannot start | No document | | 2 |
 
 The exit status of a failed turn stays 1 and is not the exit status of the
-document's code. To tell a transient failure from a permanent one without
-reading text, use the typed turn error: the failure is transient, so the same
-request can succeed later, when `error.details.error.kind` is
-`retry_exhausted` (a provider or transport failure that outlasted Meerkat's
-own retries) or `error.details.error.retryable` is `true`. Any other kind
-with `retryable` `false` or absent is not transient.
+document's code. One turn's code differs from JSON-RPC: a turn abandoned
+because its session's build refused a scoped tool grant gate is a failed turn
+here (`INTERNAL_ERROR`, exit status 1, the typed refusal in
+`error.details.error.reason`), where JSON-RPC answers invalid params.
+
+To tell a transient failure from a permanent one without reading text, read
+`error.details.error.retryable`. `true` says the failure is of a class that
+can succeed on a later attempt; it is no promise that it will. A provider or
+transport failure that outlasted Meerkat's own retries (`kind`
+`retry_exhausted`) carries it, with the `provider` and the typed `reason` of
+the last attempt. `false` or absent is not transient.
 
 stdout ends with exactly one of the run result, the pending document
 (`"status": "pending_tool_call"`) or the failure document. With `--stream`,

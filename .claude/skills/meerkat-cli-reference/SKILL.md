@@ -224,8 +224,9 @@ text of stderr's `Error:` line. For a turn that ended in failure,
 `model`, `reason`, `detail`) and `code` follows its `kind`: `PROVIDER_ERROR`
 (`llm_failure`, `retry_exhausted`), `BUDGET_EXHAUSTED` (`budget_exhausted`,
 `time_budget_exceeded`), `HOOK_DENIED` (`hook_denied`), otherwise
-`INTERNAL_ERROR`. The failure is transient when `kind` is `retry_exhausted`
-or `retryable` is `true`. A typed error before the turn prints its own code
+`INTERNAL_ERROR`. The failure is transient when `retryable` is `true` (a
+turn that outlasted the retries, `kind` `retry_exhausted`, carries it): its
+class can succeed on a later attempt. A typed error before the turn prints its own code
 and data; a check made by the CLI itself prints `INTERNAL_ERROR` without
 `details`. Exit statuses do not change with the output mode (a failed turn
 exits 1 whatever the document's code) and stderr keeps its `Error:` line.

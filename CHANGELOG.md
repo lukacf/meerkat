@@ -56,8 +56,12 @@ them.
   `retryable`, `provider`, `model`, `reason`), and `code` follows its
   `kind` as on JSON-RPC (`PROVIDER_ERROR`, `BUDGET_EXHAUSTED`, `HOOK_DENIED`
   or `INTERNAL_ERROR`), so a caller can tell a transient provider failure
-  (`kind` `retry_exhausted`, or `retryable` `true`) from a permanent one
-  without reading text. A typed error before the turn prints its own code
+  (`retryable` `true`, which a turn that outlasted the retries, `kind`
+  `retry_exhausted`, carries) from a permanent one without reading text.
+  One turn's code differs from JSON-RPC: a turn abandoned on a refused
+  scoped tool grant gate stays a failed turn (`INTERNAL_ERROR`, exit status
+  1, the typed refusal inside the turn error), where JSON-RPC answers
+  invalid params. A typed error before the turn prints its own code
   and data; a check made by the CLI itself prints `INTERNAL_ERROR`. Exit
   statuses and the stderr text are unchanged (a failed turn still exits 1),
   text and HTML output print no document, an argument the parser refuses

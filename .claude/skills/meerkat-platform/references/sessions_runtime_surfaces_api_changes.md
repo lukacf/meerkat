@@ -151,8 +151,11 @@ used to be empty. A failed turn still exits 1, and the document carries what
 the exit status does not: `code` by the turn error's `kind` (the code
 JSON-RPC answers for the same turn: `PROVIDER_ERROR`, `BUDGET_EXHAUSTED`,
 `HOOK_DENIED` or `INTERNAL_ERROR`) and the typed turn error as
-`details.error`; the failure is transient when its `kind` is
-`retry_exhausted` or its `retryable` is `true`. Other typed errors print
+`details.error`; the failure is transient when its `retryable` is `true`,
+which a turn that outlasted the retries (`kind` `retry_exhausted`) carries.
+A turn abandoned on a refused scoped tool grant gate stays a failed turn
+here (`INTERNAL_ERROR`, exit 1), where JSON-RPC answers invalid params.
+Other typed errors print
 their own code and data, a check made by the CLI prints `INTERNAL_ERROR`,
 and argument errors print no document. A script must not read non-empty
 stdout as success: check the exit status or the document's top-level key.

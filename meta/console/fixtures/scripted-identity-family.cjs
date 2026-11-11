@@ -79,6 +79,8 @@ function createScriptedIdentityFamily(options = {}) {
   // says of naming one agent as a peer. Absent means allowed.
   const profileChanges = new Map();
   const peerVerdicts = new Map();
+  // The team's members that are no long-term agent of their own.
+  const members = [];
   const tombstones = new Set();
   const operations = new Map();
   const held = new Map();
@@ -444,6 +446,26 @@ function createScriptedIdentityFamily(options = {}) {
       "meta/identity/list", "meta/identity/directory", "meta/identity/plan",
     ],
     seed,
+    /**
+     * A member of the team that is no long-term agent of its own (a side
+     * chat of an agent, a helper an agent started): a roster row, and no
+     * record in the family. `row` gives its `identity`, `label` and what
+     * marks it (`side_chat_of`, or `labels.spawned_by`). Its two
+     * affordances are false; a row that names `affordances` gives its own
+     * (`undefined` for a row that carries none).
+     */
+    seedMember(row) {
+      members.push({
+        agent_id: row.identity,
+        member_id: row.identity,
+        kind: "identity",
+        role: "worker",
+        state: "active",
+        addressable: true,
+        affordances: { can_send_message: true, can_change_identity: false, can_remove_identity: false },
+        ...row,
+      });
+    },
     /** Set one agent's two affordances as the experience read carries them. */
     setAffordances(name, value) { affordances.set(name, value); },
     /** What the host's rules give a change of an agent's profile to
@@ -514,10 +536,20 @@ function createScriptedIdentityFamily(options = {}) {
       if (answered.error) return { error: { code: IDENTITY_REFUSED_CODE, message: answered.error.detail, data: answered.error } };
       return { result: answered.result };
     },
-    /** The roster rows of the family's agents with a member (not archived). */
+    /**
+     * The roster rows of the family's agents with a member (not archived),
+     * and of the team's other members (`seedMember`).
+     *
+     * The two affordances are true only for an agent whose record the team
+     * keeps at run time: false for an agent the host's configuration
+     * declares, and for a member that is no long-term agent of its own (a
+     * side chat, a helper). The script can say otherwise per agent
+     * (`setAffordances`), so a row can turn one input off, or on.
+     */
     experienceAgents() {
-      return [...agents.values()].filter(agent => !agent.archived).map((agent) => {
-        const own = affordances.get(agent.name) || {};
+      const own = [...agents.values()].filter(agent => !agent.archived).map((agent) => {
+        const scripted = affordances.get(agent.name) || {};
+        const offered = !agent.configured;
         return {
           agent_id: agent.name,
           member_id: agent.name,
@@ -528,15 +560,14 @@ function createScriptedIdentityFamily(options = {}) {
           role: agent.profile,
           state: "active",
           addressable: true,
-          // Each affordance is the script's own answer for the agent, so a
-          // row can turn one input off and leave every other on.
           affordances: {
             can_send_message: true,
-            can_change_identity: own.can_change_identity !== false,
-            can_remove_identity: own.can_remove_identity !== false,
+            can_change_identity: scripted.can_change_identity ?? offered,
+            can_remove_identity: scripted.can_remove_identity ?? offered,
           },
         };
       });
+      return [...own, ...members];
     },
     /** The section the experience read carries: each flag as scripted. */
     experienceSection() {

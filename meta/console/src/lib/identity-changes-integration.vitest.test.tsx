@@ -309,16 +309,22 @@ describe("long-term agents in the console", () => {
     // The name people read is the display name; the id is a tooltip.
     expect(rows[1].querySelector(".cc-entity__title")?.textContent).toBe("The warden");
 
-    // Each agent's drawer offers the same controls.
+    // The drawers of two agents that were asked for at run time, one by an
+    // agent and one by a person, offer the same controls. The drawer of the
+    // agent the host configured offers every control but the three changes
+    // the gateway does not offer for it, and says no word of why.
     const controls: string[][] = [];
     for (const name of ["helper", "warden", "courier"]) {
       await selectAgent(view, name);
-      controls.push(Array.from(view.getByTestId(`roster-detail:${name}`).querySelectorAll("[data-testid]"))
+      const drawer = view.getByTestId(`roster-detail:${name}`);
+      expect(drawer.textContent || "").not.toMatch(origin);
+      controls.push(Array.from(drawer.querySelectorAll("[data-testid]"))
         .map((node) => (node.getAttribute("data-testid") || "").split(name).join("<agent>")));
     }
-    expect(controls[0]).toContain("roster-action:<agent>:edit");
-    expect(controls[1]).toEqual(controls[0]);
-    expect(controls[2]).toEqual(controls[0]);
+    const changes = ["roster-action:<agent>:edit", "roster-action:<agent>:archive", "roster-action:<agent>:remove"];
+    expect(controls[1]).toEqual(expect.arrayContaining(changes));
+    expect(controls[2]).toEqual(controls[1]);
+    expect(controls[0]).toEqual(controls[1].filter((control) => !changes.includes(control)));
 
     // A change's outcome names the agent as people know it; ids stay in
     // Technical details.
@@ -465,8 +471,51 @@ describe("long-term agents in the console", () => {
     view.unmount();
   }, 120_000);
 
+  it("an_agent_the_gateway_offers_no_change_of_has_no_edit_archive_or_remove", async () => {
+    // The gateway says per agent whether the viewer may change it at run
+    // time: not an agent its host configures, not a side chat, not a helper
+    // an agent started. The console offers a change exactly where it says
+    // so, in the roster and in the agent's details.
+    const family = createScriptedIdentityFamily();
+    family.seedMember({ identity: "warden-side", label: "Side chat", side_chat_of: "warden" });
+    family.seedMember({ identity: "errand", label: "Errand", labels: { spawned_by: "warden" } });
+    // A member whose row carries no affordance at all: an older gateway's.
+    family.seedMember({ identity: "old-timer", label: "Old timer", affordances: undefined });
+    const CHANGES = ["edit", "archive", "remove"];
+    const { view } = await openRoster(family);
+    for (const name of ["helper", "warden-side", "errand", "old-timer"]) {
+      await selectAgent(view, name);
+      expect(CHANGES.filter((change) => present(view, `roster-action:${name}:${change}`))).toEqual([]);
+    }
+    // The agent that was asked for at run time has all three.
+    await selectAgent(view, "warden");
+    expect(CHANGES.filter((change) => present(view, `roster-action:warden:${change}`))).toEqual(CHANGES);
+    // Nothing of the family was sent for the agents without a change.
+    expect(family.calls.filter((call: { method: string }) => !["meta/identity/get", "meta/identity/list"].includes(call.method))).toEqual([]);
+    view.unmount();
+    cleanup();
+
+    // The same in an agent's details.
+    for (const [name, offered] of [["helper", false], ["warden-side", false], ["errand", false], ["warden", true]] as const) {
+      window.localStorage.clear();
+      seedDock({ id: `inspect:${name}`, kind: "identity-inspect", title: `${name} details`, identity: name, memberId: name });
+      const details = render(<ConsoleApp baseUrl="" transport={transport(family)} />);
+      await details.findByTestId(`inspect-panel:${name}`, undefined, { timeout: 5_000 });
+      await settle(100);
+      const menu = details.queryByTestId(`inspect-menu:${name}`);
+      if (menu) fireEvent.click(menu);
+      expect({ name, changes: CHANGES.filter((change) => present(details, `inspect-action:${name}:${change}`)) })
+        .toEqual({ name, changes: offered ? CHANGES : [] });
+      details.unmount();
+      cleanup();
+    }
+  }, 60_000);
+
   it("a_refusal_is_shown_at_its_field_with_its_sentence", async () => {
     const family = createScriptedIdentityFamily();
+    // The script offers the changes of the configured agent too, so that
+    // the gateway's refusal of one is reached (see below).
+    family.setAffordances("helper", { can_change_identity: true, can_remove_identity: true });
     const { view } = await openRoster(family);
     const form = await openNewAgent(view);
     fireEvent.click(within(form).getByTestId("identity-profile:worker"));
@@ -530,11 +579,14 @@ describe("long-term agents in the console", () => {
     expect(family.agents.has("scout")).toBe(false);
     fireEvent.click(view.getByTestId("identity-cancel"));
 
-    // An agent the host's configuration declares: the gateway refuses the
-    // change, and the console says so in its own words. What the gateway
-    // says of other ways is behind Details.
+    // An agent the host's configuration declares. The gateway offers no
+    // change of it; one that offers it all the same (an older gateway, or a
+    // change that crosses the agent's release from configuration: this
+    // row's script) refuses the change when it is sent, and the console
+    // says so in its own words. What the gateway says of other ways is
+    // behind Details.
     await selectAgent(view, "helper");
-    fireEvent.click(view.getByTestId("roster-action:helper:edit"));
+    fireEvent.click(await find(view, "roster-action:helper:edit"));
     const edit = await find(view, "identity-edit:helper");
     await within(edit).findByTestId("identity-field:display_name", undefined, { timeout: 5_000 });
     setField(edit, "identity-field:display_name", "Chief helper");

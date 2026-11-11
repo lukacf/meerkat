@@ -693,7 +693,9 @@ pub struct AgentSummary {
     pub display_name: Option<String>,
     /// Its profile, which gives its model, tools and skills.
     pub profile: String,
-    /// The digest of its spec: what a change names as the spec it read.
+    /// The digest of its spec: Core's digest of the spec in its row form,
+    /// the one spec digest every surface shows, and what a change names as
+    /// the spec it read.
     pub spec_digest: Sha256Digest,
     /// Its spec revision, when its record counts one.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -830,7 +832,9 @@ pub struct DirectoryPage {
 pub struct DirectoryProfile {
     /// The profile.
     pub profile: String,
-    /// Whether the caller may create an agent of it.
+    /// Whether the caller may create an agent of it. Written flat on the
+    /// entry: `verdict`, with `lines` or `reason` beside it.
+    #[serde(flatten)]
     pub verdict: DirectoryVerdict,
 }
 
@@ -845,11 +849,16 @@ pub struct DirectoryPeer {
     pub display_name: Option<String>,
     /// Its profile.
     pub profile: String,
-    /// Whether the caller may list it as a peer.
+    /// Whether the caller may list it as a peer. Written flat on the
+    /// entry: `verdict`, with `lines` or `reason` beside it.
+    #[serde(flatten)]
     pub verdict: DirectoryVerdict,
 }
 
-/// What the host's rules give one entry of the directory.
+/// What the host's rules give one entry of the directory. An entry
+/// writes it flat: `"verdict": "allowed"`, `"verdict": "needs_decision"`
+/// with `lines`, or `"verdict": "not_allowed"` with `reason` when the
+/// host's rule gives one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "verdict", rename_all = "snake_case")]
 #[non_exhaustive]

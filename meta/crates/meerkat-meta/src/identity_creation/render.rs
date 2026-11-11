@@ -310,21 +310,16 @@ pub fn render_v1(
             text.block();
             update_text(&mut text, update);
         }
-        // A change of one identity as a whole, named with the spec the
-        // requester read: its removal, archive, unarchive or adoption.
+        // An archive, an unarchive and an adoption name the identity. The
+        // spec the requester read is no part of what is shown: a spec that
+        // moved since is refused `stale_spec` at the commit.
+        RequestAction::Archive { identity, .. }
+        | RequestAction::Unarchive { identity, .. }
+        | RequestAction::Adopt { identity, .. } => {
+            text.field(labels::IDENTITY, &quoted(identity));
+            consequence_blocks(&mut text, &request.consequences, &host_lines);
+        }
         RequestAction::Remove {
-            identity,
-            expected_spec_digest,
-        }
-        | RequestAction::Archive {
-            identity,
-            expected_spec_digest,
-        }
-        | RequestAction::Unarchive {
-            identity,
-            expected_spec_digest,
-        }
-        | RequestAction::Adopt {
             identity,
             expected_spec_digest,
         } => {

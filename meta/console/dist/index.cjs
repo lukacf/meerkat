@@ -75714,7 +75714,7 @@ function IdentityResultNotice({
   onReload
 }) {
   if (result.kind === "note") {
-    return /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Notice, { tone: "neutral", role: "status", testId: "identity-notice", className: "identity-notice", children: result.message });
+    return /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Notice, { tone: result.alert ? "crit" : "neutral", role: result.alert ? "alert" : "status", testId: "identity-notice", className: "identity-notice", children: /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { "data-outcome": result.alert ? "unread" : "note", className: "identity-notice__title", children: result.message }) });
   }
   if (result.kind === "withdrawn") {
     return /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)(Notice, { tone: "neutral", role: "status", testId: "identity-notice", className: "identity-notice", children: [
@@ -76158,7 +76158,7 @@ function AgentChangeConfirm({
       try {
         request.current = agentRefRequest(await api.loadRecord(name2));
       } catch (error48) {
-        sender.setResult({ kind: "note", message: refusalMessage(error48) });
+        sender.setResult({ kind: "note", message: refusalMessage(error48), alert: true });
         return;
       } finally {
         setReading(false);

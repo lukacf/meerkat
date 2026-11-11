@@ -4767,6 +4767,11 @@ tier = \"r2\"\n";
         /// (the file was synced without waiting for the write's result), so
         /// the replace reported success and renamed its empty temporary
         /// file over the document.
+        ///
+        /// The failed write also removes the temporary file it created, so
+        /// retries against a full disk leave nothing behind. RED before: each
+        /// failed attempt left its `.config.tmp.<id>` or
+        /// `.config_state.tmp.<id>` beside the document.
         #[test]
         fn a_refused_write_fails_and_publishes_nothing() {
             under_each_umask_refusing_writes(
@@ -4786,6 +4791,11 @@ tier = \"r2\"\n";
                         .expect_err("the refused write fails the replace");
                     assert!(!document.exists(), "no document was published");
                     assert!(!sidecar.exists(), "no generation was published");
+                    assert_eq!(
+                        temporary_files(temp.path(), ".config.tmp."),
+                        Vec::<PathBuf>::new(),
+                        "the failed write removed its temporary file"
+                    );
 
                     // An old document (empty: this process can write none)
                     // stays the file it was.
@@ -4803,6 +4813,11 @@ tier = \"r2\"\n";
                         old,
                         "the old document was not replaced"
                     );
+                    assert_eq!(
+                        temporary_files(&kept, ".config.tmp."),
+                        Vec::<PathBuf>::new(),
+                        "the failed rewrite removed its temporary file"
+                    );
 
                     let guard = AdmissionGuard::try_acquire(vec![AdmissionFence::beside(&sidecar)])
                         .expect("the directory's fence");
@@ -4810,58 +4825,80 @@ tier = \"r2\"\n";
                         .await
                         .expect_err("the refused write fails the publication");
                     assert!(!sidecar.exists(), "no generation was published");
+                    assert_eq!(
+                        temporary_files(temp.path(), ".config_state.tmp."),
+                        Vec::<PathBuf>::new(),
+                        "the failed publication removed its temporary file"
+                    );
                 },
             );
         }
 
+        /// A write whose rename fails removes its temporary file too, and
+        /// returns the rename's error: here the generation path is a
+        /// directory, which a file cannot be renamed onto. RED before: the
+        /// `.config_state.tmp.<id>` file stayed beside it.
+        #[tokio::test]
+        async fn a_failed_rename_removes_the_temporary_file() {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let sidecar = temp.path().join(GENERATION_FILE);
+            std::fs::create_dir(&sidecar).expect("a directory at the generation path");
+            let guard = AdmissionGuard::try_acquire(vec![AdmissionFence::beside(&sidecar)])
+                .expect("the directory's fence");
+            crate::config_runtime::write_generation_at(&guard, &sidecar, 1)
+                .await
+                .expect_err("a file cannot be renamed onto a directory");
+            assert!(sidecar.is_dir(), "the directory is still there");
+            assert_eq!(
+                temporary_files(temp.path(), ".config_state.tmp."),
+                Vec::<PathBuf>::new(),
+                "the failed rename removed its temporary file"
+            );
+        }
+
         /// The temporary file of a write is owner-only from its creation,
-        /// before any byte of the document is in it. Every write to a
-        /// regular file is refused in this row's process, so the write stops
-        /// right after it created its temporary file, which stays as the
-        /// creation left it: empty, and 0600 by name. The same for the
-        /// sidecar's temporary file. RED before: both were created with the
-        /// umask's mode (0644 under 022).
+        /// before any byte of the document is in it: the file the writers'
+        /// one helper creates is empty and 0600 by name, also where a looser
+        /// document is being replaced, and 0640 in a directory shared
+        /// through its group. A failed write removes its temporary file, so
+        /// the row reads the file where it is created, not what a store
+        /// leaves behind. RED before the mode rule: the temporary files were
+        /// created with the umask's mode (0644 under 022).
         #[test]
         fn a_temporary_file_is_owner_only_before_any_byte_under_any_umask() {
-            under_each_umask_refusing_writes(
+            under_each_umask(
                 module_path!(),
                 "a_temporary_file_is_owner_only_before_any_byte_under_any_umask",
                 |_umask| async move {
                     let temp = tempfile::tempdir().expect("tempdir");
-                    let document = temp.path().join("config.toml");
-                    let config = Config {
-                        max_tokens: Some(100),
-                        ..Config::default()
+                    let created = |temporary: PathBuf, document: PathBuf| async move {
+                        let file = crate::document_file::create_replacement(&temporary, &document)
+                            .await
+                            .expect("the write's temporary file");
+                        let metadata = file.metadata().await.expect("its metadata");
+                        assert_eq!(metadata.len(), 0, "no byte was written");
+                        mode_bits(&temporary)
                     };
-                    store_at(&document)
-                        .set(config)
-                        .await
-                        .expect_err("the refused write fails the replace");
-                    assert!(!document.exists(), "nothing was published");
-                    let temporaries = temporary_files(temp.path(), ".config.tmp.");
-                    assert_eq!(temporaries.len(), 1, "the write's temporary file stays");
-                    let created = std::fs::metadata(&temporaries[0]).expect("its metadata");
-                    assert_eq!(created.len(), 0, "no byte was written");
+
+                    let document = temp.path().join("config.toml");
                     assert_eq!(
-                        mode_bits(&temporaries[0]),
+                        created(temp.path().join(".config.tmp.new"), document.clone()).await,
                         0o600,
-                        "the document's temporary file"
+                        "the temporary file of a new document"
+                    );
+                    existing(&document, "max_tokens = 100\n", 0o644);
+                    assert_eq!(
+                        created(temp.path().join(".config.tmp.rewrite"), document).await,
+                        0o600,
+                        "the temporary file of a rewrite of a readable document"
                     );
 
-                    let sidecar = temp.path().join(GENERATION_FILE);
-                    let guard = AdmissionGuard::try_acquire(vec![AdmissionFence::beside(&sidecar)])
-                        .expect("the directory's fence");
-                    crate::config_runtime::write_generation_at(&guard, &sidecar, 1)
-                        .await
-                        .expect_err("the refused write fails the publication");
-                    let temporaries = temporary_files(temp.path(), ".config_state.tmp.");
-                    assert_eq!(temporaries.len(), 1, "the sidecar's temporary file stays");
-                    let created = std::fs::metadata(&temporaries[0]).expect("its metadata");
-                    assert_eq!(created.len(), 0, "no byte was written");
+                    let shared = temp.path().join("shared");
+                    create_setgid_directory(&shared);
                     assert_eq!(
-                        mode_bits(&temporaries[0]),
-                        0o600,
-                        "the sidecar's temporary file"
+                        created(shared.join(".config.tmp.new"), shared.join("config.toml")).await,
+                        0o640,
+                        "the temporary file of a shared directory's document"
                     );
                 },
             );

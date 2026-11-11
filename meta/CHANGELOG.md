@@ -23,7 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   conversation applies the change after a compaction or with a fresh
   conversation. See
   [Changing an agent's instructions](docs/concepts/roster.mdx#changing-an-agents-instructions),
-  with this release's limits (64 operator instruction records per mob,
+  with this release's limits (one agent's set of operator instructions,
   governed runtimes, forks).
 
 ### Changed
@@ -137,10 +137,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Known limitations
 
-- A configured agent whose instructions were edited while the gateway was
-  down, and that has no instruction record yet, keeps the text of its first
-  prompt until the running gateway observes a change of it (a roster
-  refresh with other text) or its conversation is rebuilt.
+- An agent whose instructions were edited while the gateway was down, whose
+  conversation was built before 0.9.14 and that has no instruction record
+  yet, may keep the text of its first prompt until the running gateway
+  observes a change of it (a roster refresh with other text, an update) or
+  its conversation is rebuilt: such a conversation may not record the
+  sections it was built with. A conversation built on 0.9.14 or later
+  does, and the change is recorded at the next start.
 
 - `meta/compact_member` with a compaction floor answers
   `identity_store_owned` for an identity whose record is its row in the

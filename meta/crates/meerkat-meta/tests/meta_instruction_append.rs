@@ -1155,24 +1155,30 @@ async fn a_change_made_while_the_gateway_was_down_is_recorded_at_start() {
 
 /// A text that changed while the gateway was down, for an agent the mob
 /// holds no record of yet: the start check compares the text with the
-/// sections the agent's session was built with, and records the change.
+/// sections the agent's session was built with, records the change, and
+/// wakes nothing. The session's record of its build sections holds through
+/// a restart and a resumed run, so the comparison is the same after them.
 ///
-/// RED until the read of a member session's recorded build sections is
-/// merged (Core: a resumed build keeps the sections its session records,
-/// and `MobHandle::member_build_instructions` reads them): today nothing
-/// says such a session was built with another text, and nothing is written.
+/// RED before a session's recorded build sections could be read
+/// (`MobHandle::member_build_instructions`, and a resumed build that keeps
+/// them): nothing said such a session was built with another text, and
+/// nothing was written.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "waits for the Core read of a session's recorded build sections"]
 async fn a_first_change_made_while_the_gateway_was_down_is_recorded_at_start() {
     let temp = tempfile::tempdir().unwrap();
     let mob = fresh_mob_id();
-    let mut rig = boot(
-        temp.path(),
-        &mob,
-        vec![configured_spec(&["Answer in ALPHA style."])],
-    )
-    .await;
+    let alpha = vec![configured_spec(&["Answer in ALPHA style."])];
+    let mut rig = boot(temp.path(), &mob, alpha.clone()).await;
     rig.turn(CONFIGURED, "FIRST-TURN").await;
+    rig.shutdown_for_reopen().await;
+
+    let mut rig = boot(temp.path(), &mob, alpha).await;
+    rig.turn(CONFIGURED, "RESUMED-TURN").await;
+    assert_eq!(
+        rig.record(CONFIGURED).await,
+        None,
+        "no change, no record, after a restart and a resumed run"
+    );
     rig.shutdown_for_reopen().await;
 
     let beta = vec![configured_spec(&["Answer in BETA style."])];
@@ -1183,9 +1189,71 @@ async fn a_first_change_made_while_the_gateway_was_down_is_recorded_at_start() {
         Some(json!(1)),
         "the start check recorded the first change: {record:#?}"
     );
+    assert!(rig.dormant(CONFIGURED), "the start check woke nothing");
     rig.recorded(CONFIGURED).await;
     rig.turn(CONFIGURED, "SECOND-TURN").await;
-    assert_eq!(entries(&rig.request_messages("SECOND-TURN")).len(), 1);
+    let request = entries(&rig.request_messages("SECOND-TURN"));
+    assert_eq!(request.len(), 1, "{request:#?}");
+    assert!(carries(&request[0], &["Answer in BETA style."]));
+    rig.shutdown().await;
+}
+
+/// An instruction change reaches a store-owned agent's next run exactly as
+/// it reaches a configured agent's: the same text for both gives entries
+/// that differ only in the agent's name, with the same body and digest.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_store_owned_agent_gets_the_same_entry_as_a_configured_one() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut rig = boot(
+        temp.path(),
+        &fresh_mob_id(),
+        vec![configured_spec(&["Answer in ALPHA style."])],
+    )
+    .await;
+    rig.create(&["Answer in ALPHA style."]).await;
+    rig.turn(CONFIGURED, "CONFIGURED-FIRST").await;
+    rig.turn(CREATED, "CREATED-FIRST").await;
+
+    rig.configure(&["Answer in BETA style."]).await;
+    rig.update(
+        "update-one",
+        &["Answer in ALPHA style."],
+        &["Answer in BETA style."],
+    )
+    .await;
+    assert_eq!(
+        rig.after_update(&["Answer in ALPHA style."], &["Answer in BETA style."])
+            .await,
+        InstructionOutcome::AppliesAtNextRun
+    );
+    rig.recorded(CONFIGURED).await;
+    rig.recorded(CREATED).await;
+    rig.turn(CONFIGURED, "CONFIGURED-SECOND").await;
+    rig.turn(CREATED, "CREATED-SECOND").await;
+
+    let configured = entries(&rig.request_messages("CONFIGURED-SECOND"));
+    let created = entries(&rig.request_messages("CREATED-SECOND"));
+    assert_eq!((configured.len(), created.len()), (1, 1));
+    assert_eq!(
+        configured[0].replace(CONFIGURED, "AGENT"),
+        created[0].replace(CREATED, "AGENT"),
+        "the two entries differ in the agent's name alone"
+    );
+    let (configured, created) = (
+        rig.record(CONFIGURED).await.expect("the configured record"),
+        rig.record(CREATED).await.expect("the store-owned record"),
+    );
+    assert_eq!(
+        (
+            configured["revision"].clone(),
+            configured["content_sha256"].clone()
+        ),
+        (
+            created["revision"].clone(),
+            created["content_sha256"].clone()
+        ),
+        "one revision each, of the same body"
+    );
     rig.shutdown().await;
 }
 
@@ -1378,45 +1446,102 @@ async fn a_host_write_to_the_reserved_namespaces_is_refused_and_their_records_ar
     rig.shutdown().await;
 }
 
-/// The mob holds at most 64 instruction records: the change of an agent
-/// that would need the 65th answers `slot_limit_exceeded`, typed, with the
-/// agent's row already changed.
+/// More than 64 agents each hold their own appended instruction: the mob
+/// takes one record per agent whatever their number (one agent's snapshot
+/// is what is bounded), and each agent's next run carries its own text and
+/// nobody else's.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_change_that_needs_a_65th_record_answers_slot_limit_exceeded() {
+async fn more_than_64_agents_each_get_their_own_appended_instruction() {
+    const AGENTS: usize = 66;
+    let names = (0..AGENTS)
+        .map(|agent| format!("agent-{agent:02}"))
+        .collect::<Vec<_>>();
+    let spec = |name: &str, instructions: String| {
+        meerkat_mob::CreatedIdentitySpec::new(name, "worker")
+            .with_additional_instructions(vec![instructions])
+    };
     let temp = tempfile::tempdir().unwrap();
     let mut rig = boot(temp.path(), &fresh_mob_id(), vec![configured_spec(&[])]).await;
-    rig.create(&["Keep ALPHA records."]).await;
-    rig.turn(CREATED, "FIRST-TURN").await;
-    for slot in 0..64 {
-        let set = rig
-            .rpc(
-                "meta/set_instruction",
-                json!({
-                    "namespace": "app.example",
-                    "key": format!("slot-{slot}"),
-                    "revision": 1,
-                    "body": "A host's own text.",
-                    "target": {"kind": "profile", "profile": "nobody"},
-                }),
-            )
-            .await;
-        assert!(set["error"].is_null(), "host record {slot}: {set:#?}");
+    let created = rig
+        .mob()
+        .create_store_owned_identities(
+            meerkat_mob::StoreOwnedIdentityCreate::new(
+                operation("create-many"),
+                host(),
+                names
+                    .iter()
+                    .map(|name| {
+                        meerkat_mob::CreatedIdentityRequest::new(spec(
+                            name,
+                            format!("First text of {name}."),
+                        ))
+                    })
+                    .collect(),
+            ),
+            allow(),
+        )
+        .await
+        .map(|created| created.change);
+    assert!(
+        matches!(
+            created,
+            Ok(meerkat_mob::IdentityChangeOutcome::Committed { .. })
+        ),
+        "Core creates the agents: {created:?}"
+    );
+    for name in &names {
+        rig.turn(name, &format!("FIRST-TURN-OF-{name}.")).await;
     }
 
-    rig.update(
-        "update-one",
-        &["Keep ALPHA records."],
-        &["Keep BETA records."],
-    )
-    .await;
-    assert_eq!(
-        rig.after_update(&["Keep ALPHA records."], &["Keep BETA records."])
-            .await,
-        InstructionOutcome::AppliesAtNextSession {
-            reason: InstructionNextSessionReason::SlotLimitExceeded
-        }
-    );
-    assert_eq!(rig.record(CREATED).await, None, "no record was written");
+    let identities = rig
+        .runtime
+        .identity_runtime()
+        .expect("identity runtime installed");
+    for name in &names {
+        let (previous, current) = (
+            format!("First text of {name}."),
+            format!("Changed text of {name}."),
+        );
+        rig.update_spec(
+            &format!("update-{name}"),
+            spec(name, previous.clone()),
+            spec(name, current.clone()),
+        )
+        .await;
+        assert_eq!(
+            identities
+                .after_update(
+                    &rig.mob(),
+                    &InstructionsChanged {
+                        identity: name.clone(),
+                        previous: vec![previous],
+                        current: vec![current],
+                    },
+                )
+                .await,
+            InstructionOutcome::AppliesAtNextRun,
+            "{name}'s change is recorded"
+        );
+    }
+    let records = rig
+        .rpc("meta/instruction_status", json!({"namespace": NAMESPACE}))
+        .await["result"]["desired"]
+        .as_array()
+        .map_or(0, Vec::len);
+    assert_eq!(records, AGENTS, "one record per agent");
+
+    for name in &names {
+        rig.recorded(name).await;
+        let marker = format!("SECOND-TURN-OF-{name}.");
+        rig.turn(name, &marker).await;
+        let request = entries(&rig.request_messages(&marker));
+        assert_eq!(request.len(), 1, "{name} reads one entry: {request:#?}");
+        assert!(
+            carries(&request[0], &[&format!("Changed text of {name}.")]),
+            "{name} reads its own text: {}",
+            request[0]
+        );
+    }
     rig.shutdown().await;
 }
 

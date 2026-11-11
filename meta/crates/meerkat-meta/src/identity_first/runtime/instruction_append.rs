@@ -32,20 +32,22 @@
 //!   pass that reads an edited configuration, a door or a pass that reads a
 //!   changed row again
 //!   ([`IdentityRuntime::append_changed_instructions_on_registration`]);
-//! - at this process's first roster pass, for every agent the mob holds a
-//!   record of ([`IdentityRuntime::append_changed_instructions_at_start`]):
-//!   a spec change committed before a stop that the record does not hold
-//!   yet is written then.
+//! - at this process's first roster pass, for every registered agent
+//!   ([`IdentityRuntime::append_changed_instructions_at_start`]): a text
+//!   that changed before a stop, or while the gateway was down, without its
+//!   record written is recorded then.
 //!
-//! An agent the mob holds no record of takes its first record only from an
-//! observed change: without one, nothing says its session was built with
-//! another text, and nothing is written. An agent whose session no build
-//! created yet needs no record: its first build takes the current text.
+//! An agent the mob holds no record of takes its first record from an
+//! observed change, or, at start, when the sections its session's build
+//! state records are not the current ones
+//! ([`meerkat_mob::MobHandle::member_build_instructions`]). A session whose
+//! build state does not say (one built or resumed before 0.9.14) gets
+//! nothing written at start: its text changes with the next observed change
+//! or a fresh session, as before. An agent whose session no build created
+//! yet needs no record: its first build takes the current text.
 //!
 //! The removal of an agent revokes its record
 //! ([`IdentityRuntime::after_removal`]). An archive keeps it.
-
-use std::collections::BTreeSet;
 
 use meerkat_core::{
     InstructionContentDigest, InstructionEffect, InstructionKey, InstructionLowering,
@@ -155,8 +157,9 @@ pub(crate) enum InstructionCheck<'a> {
         previous: &'a [String],
         current: &'a [String],
     },
-    /// No change was observed: `current` is the agent's text now. The
-    /// caller holds no lifecycle lock.
+    /// No change was observed: `current` is the agent's text now, compared
+    /// with the mob's record, else with the sections the agent's session
+    /// was built with. The caller holds no lifecycle lock.
     Reconcile { current: &'a [String] },
 }
 
@@ -223,24 +226,51 @@ fn instruction_slot(identity: &str) -> Option<InstructionSlot> {
     Some(InstructionSlot { namespace, key })
 }
 
-/// The mob's records of `namespace` (one slot's with `key`), read from the
-/// mob's committed state. The page it asks for lies past the last member,
-/// so no member's session is read.
-async fn instruction_records(
+/// The mob's record of `slot`, read from the mob's committed state. The
+/// page it asks for lies past the last member, so no member's session is
+/// read.
+async fn instruction_record(
     mob: &MobHandle,
-    namespace: InstructionNamespace,
-    key: Option<InstructionKey>,
-) -> Result<Vec<OperatorInstructionRecordStatus>, OperatorInstructionError> {
+    slot: &InstructionSlot,
+) -> Result<Option<OperatorInstructionRecordStatus>, OperatorInstructionError> {
     mob.operator_instruction_status(OperatorInstructionStatusQuery {
-        namespace: Some(namespace),
-        key,
+        namespace: Some(slot.namespace.clone()),
+        key: Some(slot.key.clone()),
         agent_identity: None,
         profile: None,
         offset: usize::MAX,
         limit: Some(1),
     })
     .await
-    .map(|page| page.desired)
+    .map(|page| page.desired.into_iter().next())
+}
+
+/// Whether the session of `member`, an agent the mob holds no record of,
+/// was built with other sections than `current`: the sections its build
+/// state records do not start with them (a build records the spec's
+/// sections, then whatever its host's customizer added). A session whose
+/// record does not say, as one built or resumed before 0.9.14 does not, was
+/// built with nobody knows what: it answers `false`, and nothing is written
+/// for it until a change is observed.
+async fn built_with_other_sections(
+    mob: &MobHandle,
+    member: &meerkat_mob::AgentIdentity,
+    identity: &AgentIdentity,
+    current: &[String],
+) -> bool {
+    match mob.member_build_instructions(member).await {
+        Ok(Some(recorded)) => !sections(&recorded).starts_with(&sections(current)),
+        Ok(None) => false,
+        Err(error) => {
+            tracing::warn!(
+                %identity,
+                %error,
+                "the sections an agent's session was built with could not be read; its \
+                 instructions are compared again at the next start"
+            );
+            false
+        }
+    }
 }
 
 /// What a refused write means for the change.
@@ -272,9 +302,11 @@ impl IdentityRuntime {
     /// writes nothing.
     ///
     /// A record the mob holds is always kept current. An agent with no
-    /// record takes its first one only from a change the caller observed
-    /// (see [`InstructionCheck`]), and only when a build created its
-    /// session: before that, its first build takes the current text.
+    /// record takes its first one from a change the caller observed, or,
+    /// where the caller observed none ([`InstructionCheck::Reconcile`]),
+    /// when its session was built with other sections; and only when a
+    /// build created its session: before that, its first build takes the
+    /// current text.
     ///
     /// The answer says when the current text reaches the agent. A write the
     /// mob refuses, or cannot take, changes nothing and is answered with
@@ -302,10 +334,8 @@ impl IdentityRuntime {
         };
 
         // What the mob holds for the agent.
-        let record = match instruction_records(mob, slot.namespace.clone(), Some(slot.key.clone()))
-            .await
-        {
-            Ok(records) => records.into_iter().next(),
+        let record = match instruction_record(mob, &slot).await {
+            Ok(record) => record,
             Err(error) => {
                 tracing::warn!(
                     %identity,
@@ -336,15 +366,25 @@ impl IdentityRuntime {
             }
             // The mob holds another text: the record is brought up to date.
             Some(_) => {}
-            // No record yet: the first one comes from an observed change of
-            // an agent whose session a build created.
+            // No record yet: the first one comes from a change of an agent
+            // whose session a build created. The caller observed the
+            // change, or, where it observed none, the session was built
+            // with other sections than the current ones.
             None => {
-                if !check.text_changed() {
-                    return InstructionOutcome::Unchanged;
-                }
                 let built = session_id
                     .as_ref()
                     .is_some_and(|session_id| !mob.session_unborn(session_id));
+                let changed = match check {
+                    InstructionCheck::Changed { .. } | InstructionCheck::Registered { .. } => {
+                        check.text_changed()
+                    }
+                    InstructionCheck::Reconcile { current } => {
+                        built && built_with_other_sections(mob, &member, identity, current).await
+                    }
+                };
+                if !changed {
+                    return InstructionOutcome::Unchanged;
+                }
                 if !built {
                     return InstructionOutcome::AppliesAtNextRun;
                 }
@@ -464,19 +504,18 @@ impl IdentityRuntime {
         };
         let lifecycle_lock = self.lifecycle_lock_for(&identity).await;
         let _lifecycle_guard = lifecycle_lock.lock().await;
-        let record =
-            match instruction_records(mob, slot.namespace.clone(), Some(slot.key.clone())).await {
-                Ok(records) => records.into_iter().next(),
-                Err(error) => {
-                    tracing::warn!(
-                        %identity,
-                        %error,
-                        "the mob's instruction record of a removed agent could not be read; it is \
-                         not revoked"
-                    );
-                    return;
-                }
-            };
+        let record = match instruction_record(mob, &slot).await {
+            Ok(record) => record,
+            Err(error) => {
+                tracing::warn!(
+                    %identity,
+                    %error,
+                    "the mob's instruction record of a removed agent could not be read; it is \
+                     not revoked"
+                );
+                return;
+            }
+        };
         let Some(record) = record.filter(|record| record.effect == InstructionEffect::Active)
         else {
             return;
@@ -536,10 +575,12 @@ impl IdentityRuntime {
     }
 
     /// The start check, after this process's first roster pass
-    /// (`generation` 1): every registered agent the mob holds a record of
-    /// is compared, so a text that changed before the stop without its
-    /// record written is recorded now. One read of the mob's records, and
-    /// no session is read.
+    /// (`generation` 1): every registered agent is compared, so a text that
+    /// changed before the stop without its record written is recorded now.
+    /// Per agent it reads the mob's record of the agent from the mob's
+    /// state and, for an agent with no record whose session a build
+    /// created, the sections that session's build state records. No
+    /// transcript is read, and nothing is woken.
     pub(crate) fn append_changed_instructions_at_start(
         &self,
         generation: u64,
@@ -551,26 +592,6 @@ impl IdentityRuntime {
             let Some(mob) = self.runtime_services.mob_handle() else {
                 return;
             };
-            let Ok(namespace) = InstructionNamespace::new(INSTRUCTIONS_NAMESPACE) else {
-                return;
-            };
-            let recorded = match instruction_records(&mob, namespace, None).await {
-                Ok(records) => records
-                    .into_iter()
-                    .map(|record| record.slot.key)
-                    .collect::<BTreeSet<_>>(),
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        "the mob's instruction records could not be read at start; an agent's next \
-                         observed change of instructions compares them"
-                    );
-                    return;
-                }
-            };
-            if recorded.is_empty() {
-                return;
-            }
             let registered = self
                 .entries
                 .read()
@@ -581,11 +602,6 @@ impl IdentityRuntime {
                 })
                 .collect::<Vec<_>>();
             for (identity, current) in registered {
-                let holds_record = instruction_slot(identity.as_str())
-                    .is_some_and(|slot| recorded.contains(&slot.key));
-                if !holds_record {
-                    continue;
-                }
                 self.append_changed_instructions(
                     &mob,
                     &identity,

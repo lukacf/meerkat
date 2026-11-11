@@ -391,19 +391,24 @@ What to know:
   change once a compaction at a run's first request carries it, or with a
   fresh conversation. A model whose wire carries no system row besides its
   prompt applies it only with a fresh conversation.
-- **A change made while the gateway was down** is recorded at the next start
-  for an agent the gateway already keeps a record of. An agent with no
-  record yet takes its first record from a change the running gateway
-  observes (a roster refresh, an update).
+- **A change made while the gateway was down** (the usual way to edit a
+  configuration) is recorded at the next start: the gateway compares each
+  agent's current text with its record, or, for an agent with no record
+  yet, with the sections its conversation was built with. A conversation
+  built before 0.9.14 may not record those sections: for it nothing is
+  written at start, and it keeps its first prompt's text, as before 0.9.14,
+  until the running gateway observes a change (a roster refresh, an update)
+  or the conversation is rebuilt.
 
 Limits of this release, each reported by `meta/instruction_status` or by the
 update's result:
 
-- A mob holds at most 64 operator instruction records, a host's own
-  included, and 1 MiB of their text. The change of an agent that would need
-  one more is not recorded (`slot_limit_exceeded`,
-  `active_set_budget_exceeded`); it applies from the agent's next fresh
-  conversation.
+- A mob keeps a record for each of any number of agents. What is bounded is
+  one agent's own set: the operator instructions that select it (those for
+  every member or for its profile, and its own) hold at most 64 records and
+  1 MiB of text. The change of an agent whose set is full is not recorded
+  (`slot_limit_exceeded`, `active_set_budget_exceeded`); it applies from the
+  agent's next fresh conversation.
 - A governed runtime (one with a native work authorization host) takes no
   operator instruction record (`prepared_authorization_required`): there, a
   change applies from the agent's next fresh conversation.

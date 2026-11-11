@@ -904,6 +904,52 @@ pub enum OpenAiAssistantPhase {
     FinalAnswer,
 }
 
+/// The service that issued a piece of OpenAI-family continuity material:
+/// encrypted reasoning, a message or hosted-tool item id, a response id.
+///
+/// Every OpenAI-wire backend speaks the same Responses grammar, but such
+/// material means something only to the service that issued it: another
+/// service cannot read the ciphertext and does not know the ids. The issuer
+/// is the service, not the account or organisation that used it.
+///
+/// The four backend variants are the OpenAI backend kinds of the provider
+/// matrix ([`crate::provider_matrix::OpenAiBackendKind`]); a self-hosted
+/// server is the `[self_hosted.servers.<id>]` entry that serves the model.
+#[non_exhaustive]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum OpenAiContinuityIssuer {
+    /// The public OpenAI API.
+    #[serde(rename = "openai_api")]
+    OpenAiApi,
+    /// The ChatGPT backend.
+    #[serde(rename = "chatgpt_backend")]
+    ChatGptBackend,
+    /// Azure OpenAI.
+    #[serde(rename = "azure_openai")]
+    AzureOpenAi,
+    /// GitHub Copilot.
+    Copilot,
+    /// A configured self-hosted OpenAI-compatible server.
+    SelfHosted {
+        /// The server's id in `[self_hosted.servers.<id>]`.
+        server: String,
+    },
+}
+
+impl From<crate::provider_matrix::OpenAiBackendKind> for OpenAiContinuityIssuer {
+    fn from(kind: crate::provider_matrix::OpenAiBackendKind) -> Self {
+        use crate::provider_matrix::OpenAiBackendKind;
+        match kind {
+            OpenAiBackendKind::OpenAiApi => Self::OpenAiApi,
+            OpenAiBackendKind::ChatGptBackend => Self::ChatGptBackend,
+            OpenAiBackendKind::AzureOpenAi => Self::AzureOpenAi,
+            OpenAiBackendKind::Copilot => Self::Copilot,
+        }
+    }
+}
+
 /// Provider-specific metadata for replay continuity.
 #[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

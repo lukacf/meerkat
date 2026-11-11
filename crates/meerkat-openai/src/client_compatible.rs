@@ -117,6 +117,9 @@ pub struct OpenAiCompatibleClient {
     /// GitHub Copilot's Chat Completions stream discipline; see
     /// [`Self::with_copilot_chat_stream`].
     copilot_chat_stream: bool,
+    /// The server that issues this client's Responses continuity material;
+    /// see [`Self::with_continuity_issuer`].
+    continuity_issuer: Option<meerkat_core::OpenAiContinuityIssuer>,
 }
 
 impl OpenAiCompatibleClient {
@@ -182,7 +185,24 @@ impl OpenAiCompatibleClient {
             static_credential: false,
             openai_backend: None,
             copilot_chat_stream: false,
+            continuity_issuer: None,
         }
+    }
+
+    /// Declare the server this client speaks to as the issuer of its
+    /// Responses continuity material (encrypted reasoning, item and response
+    /// ids): the configured self-hosted server that serves the model. Such
+    /// material is replayed only to the issuer that produced it. A client
+    /// without a declared issuer records none and is replayed none.
+    #[must_use]
+    pub fn with_continuity_issuer(mut self, issuer: meerkat_core::OpenAiContinuityIssuer) -> Self {
+        self.continuity_issuer = Some(issuer);
+        self
+    }
+
+    /// The declared issuer of this client's Responses continuity material.
+    pub fn continuity_issuer(&self) -> Option<&meerkat_core::OpenAiContinuityIssuer> {
+        self.continuity_issuer.as_ref()
     }
 
     /// For GitHub Copilot's Chat Completions routes only. A stream counts

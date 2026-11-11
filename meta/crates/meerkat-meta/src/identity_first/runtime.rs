@@ -10197,6 +10197,8 @@ impl IdentityRuntime {
         spec: DurableAgentSpec,
         declaration_refused: Option<bool>,
     ) -> Result<(), IdentityRuntimeError> {
+        self.append_changed_instructions_on_registration(&spec)
+            .await;
         let mut entries = self.entries.write().await;
         let entry = entries
             .get_mut(&spec.identity)

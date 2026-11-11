@@ -1713,8 +1713,9 @@ async fn a_resend_refused_for_a_spend_limit_is_not_retried_as_a_rate_limit() {
     );
     let rendered = format!("{error} {error:?}");
     assert!(
-        rendered.contains("replayed 1 thinking blocks"),
-        "the original error surfaces: {rendered}"
+        matches!(error, LlmError::InvalidRequest { .. })
+            && rendered.contains("bound to a different conversation"),
+        "the first refusal surfaces: {rendered}"
     );
     assert!(
         !rendered.contains("test-key"),

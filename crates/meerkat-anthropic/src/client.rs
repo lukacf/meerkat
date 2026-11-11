@@ -2623,9 +2623,10 @@ impl AnthropicClient {
                                 #[cfg(target_arch = "wasm32")]
                                 let _ = resent_receipt;
                                 let resent_headers = resent_response.headers().clone();
-                                let mut resent_text =
+                                let resent_text =
                                     resent_response.text().await.unwrap_or_default();
-                                self.redact_diagnostic(&mut resent_text);
+                                // Classified from the body as received,
+                                // then redacted, like the first refusal.
                                 let resent_error = self.redacted_error(
                                     LlmError::from_http_response(
                                         resent_status,

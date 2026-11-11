@@ -1774,6 +1774,153 @@ async fn a_dormant_resume_seat_binds_the_hosts_session_at_the_seat() {
     );
 }
 
+fn member_target(identity: &AgentIdentity) -> OperatorInstructionTarget {
+    OperatorInstructionTarget::Member {
+        agent_identity: identity.clone(),
+    }
+}
+
+/// The slot keys a session's committed target names, Active or not.
+async fn named_slots(service: &MockSessionService, session: &SessionId) -> Vec<String> {
+    service
+        .committed_instruction_target(session)
+        .await
+        .map(|state| {
+            state
+                .slots()
+                .iter()
+                .map(|slot| slot.key.as_str().to_owned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A member's recorded target names the shared records and the member's
+/// own, never another member's member-targeted record, and its status row
+/// lists the same. A record retargeted to another member leaves the first
+/// member's target, so its session revokes the slot at its next run start.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_members_target_names_the_shared_records_and_its_own() {
+    let mob =
+        InstructionMob::new("oi-own", &[("oi-own-a", "worker"), ("oi-own-b", "worker")]).await;
+    let (a, a_session) = mob.member(0);
+    let (b, b_session) = mob.member(1);
+    for (key, target) in [
+        ("tone", OperatorInstructionTarget::Mob),
+        ("own-a", member_target(&a)),
+        ("own-b", member_target(&b)),
+    ] {
+        mob.handle
+            .set_operator_instruction(write(key, 1, FORMAL, target))
+            .await
+            .expect("the write commits");
+    }
+    current(&mob.handle, &a).await;
+    current(&mob.handle, &b).await;
+    assert_eq!(
+        named_slots(&mob.service, &a_session).await,
+        vec!["own-a".to_string(), "tone".to_string()],
+        "member a's target names the shared record and its own"
+    );
+    assert_eq!(
+        named_slots(&mob.service, &b_session).await,
+        vec!["own-b".to_string(), "tone".to_string()],
+        "member b's target names the shared record and its own"
+    );
+    let a_status = member_status(&mob.handle, &a).await.expect("a's row");
+    assert_eq!(
+        a_status
+            .slots
+            .iter()
+            .map(|slot| slot.slot.key.as_str().to_owned())
+            .collect::<Vec<_>>(),
+        vec!["own-a".to_string(), "tone".to_string()],
+        "member a's status lists the records of its snapshot: {a_status:?}"
+    );
+    assert!(
+        a_status.slots.iter().all(|slot| !matches!(
+            slot.state,
+            crate::operator_instruction::MemberInstructionSlotState::NotTargeted
+        )),
+        "every listed record targets member a: {a_status:?}"
+    );
+
+    // Member a's record becomes member b's.
+    mob.handle
+        .set_operator_instruction(write("own-a", 2, BRIEF, member_target(&b)))
+        .await
+        .expect("the retarget commits");
+    current(&mob.handle, &a).await;
+    current(&mob.handle, &b).await;
+    assert_eq!(
+        named_slots(&mob.service, &a_session).await,
+        vec!["tone".to_string()],
+        "the record left member a's target"
+    );
+    assert_eq!(
+        active_slots(&mob.service, &b_session).await,
+        vec![
+            ("own-a".to_string(), 2),
+            ("own-b".to_string(), 1),
+            ("tone".to_string(), 1),
+        ]
+    );
+    // Once delivered, the record that left member a is not pending for it.
+    let a_status = member_status(&mob.handle, &a).await.expect("a's row");
+    assert!(
+        a_status
+            .slots
+            .iter()
+            .all(|slot| slot.slot.key.as_str() != "own-b"),
+        "member a's status never lists member b's record: {a_status:?}"
+    );
+}
+
+/// Every agent of a mob takes a member-targeted record of its own, however
+/// many agents the mob has: the slot limit bounds one member's snapshot. A
+/// seated member records exactly its own, and one seated later is born with
+/// exactly its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_agent_of_a_mob_takes_a_record_of_its_own() {
+    let mut mob = InstructionMob::new("oi-many", &[("oi-many-000", "worker")]).await;
+    for index in 0..80 {
+        let identity = AgentIdentity::from(format!("oi-many-{index:03}"));
+        let receipt = mob
+            .handle
+            .set_operator_instruction(write(
+                &format!("agent-{index:03}"),
+                1,
+                FORMAL,
+                member_target(&identity),
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("the record of agent {index} commits: {error}"));
+        assert_eq!(
+            receipt.disposition,
+            OperatorInstructionDisposition::Committed
+        );
+        assert_eq!(receipt.matched_members, u64::from(index == 0));
+    }
+    let (first, first_session) = mob.member(0);
+    current(&mob.handle, &first).await;
+    assert_eq!(
+        named_slots(&mob.service, &first_session).await,
+        vec!["agent-000".to_string()],
+        "the seated member's target names its own record only"
+    );
+    let (late, late_session) = mob.spawn("oi-many-070", "worker").await;
+    current(&mob.handle, &late).await;
+    assert_eq!(
+        named_slots(&mob.service, &late_session).await,
+        vec!["agent-070".to_string()],
+        "a member seated later is born with its own record only"
+    );
+    assert_eq!(
+        active_slots(&mob.service, &late_session).await,
+        vec![("agent-070".to_string(), 1)]
+    );
+}
+
 /// On a governed runtime (a native work authorization host is installed) a
 /// mob's operator-instruction write needs prepared authorization, which this
 /// release does not mint: the write and the revoke are refused typed, a

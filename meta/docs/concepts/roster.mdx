@@ -388,7 +388,8 @@ What to know:
   right after, before the record was revoked, is completed at the next
   start: the record of every removed agent is revoked then. Archiving an
   agent keeps the record: the agent comes back on its conversation with its
-  instructions as they were.
+  instructions as they were. A change made while the agent is archived is
+  recorded and reaches it at its first run after its unarchive.
 - **Models that take a system instruction only ahead of the conversation**
   (in today's model catalog: every Gemini model, the GPT Live models,
   `claude-opus-4-7`, `claude-opus-4-5`, `claude-sonnet-5`,

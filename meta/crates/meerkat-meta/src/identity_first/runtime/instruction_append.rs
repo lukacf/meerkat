@@ -38,13 +38,17 @@
 //!   record written is recorded then.
 //!
 //! An agent the mob holds no record of takes its first record from an
-//! observed change, or, at start, when the sections its session's build
-//! state records are not the current ones
-//! ([`meerkat_mob::MobHandle::member_build_instructions`]). A session whose
-//! build state does not say (one built or resumed before 0.9.14) gets
-//! nothing written at start: its text changes with the next observed change
-//! or a fresh session, as before. An agent whose session no build created
-//! yet needs no record: its first build takes the current text.
+//! observed change, or, at start, when the sections its conversation's
+//! build state records are not the current ones (the session service's
+//! `recorded_build_instructions`: committed metadata, no transcript row). A
+//! session whose build state does not say (one built or resumed before
+//! 0.9.14) gets nothing written at start: its text changes with the next
+//! observed change or a fresh session, as before. An agent whose session no
+//! build created yet needs no record: its first build takes the current
+//! text. An agent with a conversation and no seated member (archived, or
+//! dropped from its host's configuration) is compared against the session
+//! its retirement kept, and its record is delivered when its member is
+//! seated again.
 //!
 //! The removal of an agent revokes its record
 //! ([`IdentityRuntime::after_removal`]). An archive keeps it. A fresh life
@@ -55,6 +59,7 @@
 //! whose step never ran is completed at the next start: the start check
 //! revokes the record of every agent the mob holds as removed.
 
+use meerkat_core::types::SessionId;
 use meerkat_core::{
     InstructionContentDigest, InstructionEffect, InstructionKey, InstructionLowering,
     InstructionNamespace, InstructionRevision, InstructionSlot, InstructionWriteError,
@@ -251,32 +256,32 @@ async fn instruction_record(
     .map(|page| page.desired.into_iter().next())
 }
 
-/// Whether the session of `member`, an agent the mob holds no record of,
-/// was built with other sections than `current`: the sections its build
-/// state records do not start with them (a build records the spec's
-/// sections, then whatever its host's customizer added). A session whose
-/// record does not say, as one built or resumed before 0.9.14 does not, was
-/// built with nobody knows what: it answers `false`, and nothing is written
-/// for it until a change is observed.
-async fn built_with_other_sections(
+/// The session that holds `member`'s conversation, if a build created one:
+/// the session its seat is bound to, once a build created it; or, while no
+/// member holds the agent (it is archived, or its host's configuration
+/// dropped it), the session its retirement archived, which its next seat
+/// comes back on. `None` for an agent no build has created a session for:
+/// its first build takes the current text. Read from the mob's published
+/// state; nothing is woken.
+async fn conversation_of(
     mob: &MobHandle,
     member: &meerkat_mob::AgentIdentity,
-    identity: &AgentIdentity,
-    current: &[String],
-) -> bool {
-    match mob.member_build_instructions(member).await {
-        Ok(Some(recorded)) => !sections(&recorded).starts_with(&sections(current)),
-        Ok(None) => false,
-        Err(error) => {
-            tracing::warn!(
-                %identity,
-                %error,
-                "the sections an agent's session was built with could not be read; its \
-                 instructions are compared again at the next start"
-            );
-            false
-        }
+) -> Option<SessionId> {
+    if let Some(session_id) = mob.resolve_bridge_session_id(member).await {
+        return (!mob.session_unborn(&session_id)).then_some(session_id);
     }
+    match mob.identity_entry(member) {
+        Ok(meerkat_mob::IdentityEntryRead::Entry(entry)) => entry.archived_session,
+        _ => None,
+    }
+}
+
+/// Whether `recorded`, the sections a session's build state records, are
+/// other sections than `current`: they do not start with them (a build
+/// records the spec's sections, then whatever its host's customizer and the
+/// agent's memory added).
+fn other_sections(recorded: &[String], current: &[String]) -> bool {
+    !sections(recorded).starts_with(&sections(current))
 }
 
 /// What a refused write means for the change.
@@ -364,7 +369,10 @@ impl IdentityRuntime {
             .as_ref()
             .filter(|record| record.effect == InstructionEffect::Active);
         let member = crate::member_comms_id::roster_member_id_for_identity(identity.as_str());
-        let session_id = mob.resolve_bridge_session_id(&member).await;
+        // The session that holds the agent's conversation, if a build
+        // created one; an agent with no seated member (archived, or dropped
+        // from its host's configuration) has the one its retirement kept.
+        let conversation = conversation_of(mob, &member).await;
         match held {
             // The mob holds the current text.
             Some(held) if held.content_sha256.as_ref() == Some(&digest) => {
@@ -373,25 +381,27 @@ impl IdentityRuntime {
             // The mob holds another text: the record is brought up to date.
             Some(_) => {}
             // No record yet: the first one comes from a change of an agent
-            // whose session a build created. The caller observed the
-            // change, or, where it observed none, the session was built
-            // with other sections than the current ones.
+            // that has a conversation. The caller observed the change, or,
+            // where it observed none, the conversation was built with other
+            // sections than the current ones. The record of an agent with
+            // no seated member is delivered when its member is seated.
             None => {
-                let built = session_id
-                    .as_ref()
-                    .is_some_and(|session_id| !mob.session_unborn(session_id));
                 let changed = match check {
                     InstructionCheck::Changed { .. } | InstructionCheck::Registered { .. } => {
                         check.text_changed()
                     }
-                    InstructionCheck::Reconcile { current } => {
-                        built && built_with_other_sections(mob, &member, identity, current).await
-                    }
+                    InstructionCheck::Reconcile { current } => match conversation.as_ref() {
+                        Some(session_id) => {
+                            self.built_with_other_sections(session_id, identity, current)
+                                .await
+                        }
+                        None => false,
+                    },
                 };
                 if !changed {
                     return InstructionOutcome::Unchanged;
                 }
-                if !built {
+                if conversation.is_none() {
                     return InstructionOutcome::AppliesAtNextRun;
                 }
             }
@@ -442,19 +452,25 @@ impl IdentityRuntime {
         // Recorded. When it applies is the agent's model's to say: one that
         // takes a system instruction after conversation rows applies it at
         // its next run start.
-        let lowering = match (self.bridge.as_ref(), session_id.as_ref()) {
-            (Some(bridge), Some(session_id)) if !mob.session_unborn(session_id) => {
-                match bridge.member_session_service() {
-                    Some(sessions) => sessions
-                        .read_member_instructions(std::slice::from_ref(session_id))
-                        .await
-                        .into_iter()
-                        .next()
-                        .and_then(Result::ok)
-                        .and_then(|read| read.lowering),
-                    None => None,
-                }
-            }
+        self.applies_when(conversation.as_ref()).await
+    }
+
+    /// When a recorded change reaches the agent whose conversation is the
+    /// session `conversation`: its model's lowering decides.
+    async fn applies_when(&self, conversation: Option<&SessionId>) -> InstructionOutcome {
+        let lowering = match (
+            self.bridge
+                .as_ref()
+                .and_then(|bridge| bridge.member_session_service()),
+            conversation,
+        ) {
+            (Some(sessions), Some(session_id)) => sessions
+                .read_member_instructions(std::slice::from_ref(session_id))
+                .await
+                .into_iter()
+                .next()
+                .and_then(Result::ok)
+                .and_then(|read| read.lowering),
             _ => None,
         };
         match lowering {
@@ -462,10 +478,45 @@ impl IdentityRuntime {
                 InstructionOutcome::AppliesAfterCompaction
             }
             Some(InstructionLowering::Unavailable) => InstructionOutcome::AppliesAtNextSession {
-                reason: Reason::LoweringUnavailable,
+                reason: InstructionNextSessionReason::LoweringUnavailable,
             },
             Some(InstructionLowering::MidConversation) | None => {
                 InstructionOutcome::AppliesAtNextRun
+            }
+        }
+    }
+
+    /// Whether the session `session_id`, the conversation of an agent the
+    /// mob holds no record of, was built with other sections than `current`
+    /// ([`other_sections`]), read from the session's committed build state
+    /// (its metadata; no transcript row). A session whose record does not
+    /// say, as one built or resumed before 0.9.14 does not, was built with
+    /// nobody knows what: it answers `false`, and nothing is written for it
+    /// until a change is observed.
+    async fn built_with_other_sections(
+        &self,
+        session_id: &SessionId,
+        identity: &AgentIdentity,
+        current: &[String],
+    ) -> bool {
+        let Some(sessions) = self
+            .bridge
+            .as_ref()
+            .and_then(|bridge| bridge.member_session_service())
+        else {
+            return false;
+        };
+        match sessions.recorded_build_instructions(session_id).await {
+            Ok(Some(recorded)) => other_sections(&recorded, current),
+            Ok(None) => false,
+            Err(error) => {
+                tracing::warn!(
+                    %identity,
+                    %error,
+                    "the sections an agent's session was built with could not be read; its \
+                     instructions are compared again at the next start"
+                );
+                false
             }
         }
     }

@@ -114,3 +114,135 @@ async fn an_unlisted_retire_failure_is_typed_and_per_identity() {
         "the listed identity's member is untouched"
     );
 }
+
+/// A roster pass reads a row of the mob's identity store only for an
+/// identity it has not registered yet: the first pass over three identities
+/// whose record is their row reads three rows and registers them, a second
+/// pass reads none, and a pass after a fourth one appears reads one more.
+/// The pass tracks them in the bootstrap status beside the roster's
+/// identity, and never retires one.
+///
+/// RED before the pass read Core's entry pages: every pass read every row,
+/// and the bootstrap status tracked the roster's identities only.
+#[tokio::test]
+async fn a_roster_pass_reads_a_row_only_for_an_identity_it_has_not_registered() {
+    use std::sync::atomic::Ordering;
+
+    let bridge = Arc::new(CoreReadsBridge::default());
+    let identities = runtime_over(&bridge, "roster-pass-row-reads");
+    let listed = id("roster-pass-listed");
+    register_live(
+        &identities,
+        &bridge.core,
+        spec(&listed),
+        1,
+        SessionId::new(),
+    )
+    .await
+    .expect("a live registered member");
+    let rows = [id("row-one"), id("row-two"), id("row-three")];
+    let hold = |name: &AgentIdentity| {
+        crate::identity_first::core_test_bridge::bind_live(
+            &bridge.core,
+            name,
+            &meerkat_mob::ProfileName::from("worker"),
+            1,
+            Some(SessionId::new()),
+        )
+        .expect("Core seats the identity");
+        bridge.hold_created(name, "worker");
+    };
+    for name in &rows {
+        hold(name);
+    }
+    let context = IdentityFirstRuntimeContext::new(
+        Arc::clone(&identities),
+        Arc::new(MutableRosterProvider::new(vec![spec(&listed)])),
+        None,
+        None,
+        None,
+    );
+
+    context.refresh_desired_topology().await.expect("the pass");
+    assert_eq!(
+        bridge.row_reads.load(Ordering::SeqCst),
+        3,
+        "the first pass reads one row per identity it has not registered"
+    );
+    let tracked = identities.identity_bootstrap_status();
+    for name in rows.iter().chain([&listed]) {
+        assert!(identities.contains(name).await, "{name} is served");
+        assert!(
+            tracked.identities.contains_key(name),
+            "{name} is tracked by the bootstrap status: {tracked:?}"
+        );
+    }
+
+    context.refresh_desired_topology().await.expect("the pass");
+    assert_eq!(
+        bridge.row_reads.load(Ordering::SeqCst),
+        3,
+        "a pass over identities it serves already reads no row"
+    );
+
+    let fourth = id("row-four");
+    hold(&fourth);
+    context.refresh_desired_topology().await.expect("the pass");
+    assert_eq!(
+        bridge.row_reads.load(Ordering::SeqCst),
+        4,
+        "a pass reads the row of the identity that appeared since"
+    );
+    assert!(identities.contains(&fourth).await);
+    for name in rows.iter().chain([&fourth]) {
+        assert!(
+            bridge
+                .core
+                .live_member(name)
+                .expect("Core's member read")
+                .is_some(),
+            "{name}: no pass retired the identity the roster does not list"
+        );
+    }
+}
+
+/// The registration follows a row after a change of it committed in Core,
+/// with no roster pass and no door: a new row is registered with one row
+/// read, and a name Core holds for no identity registers nothing.
+#[tokio::test]
+async fn the_registration_follows_a_row_after_its_change() {
+    use std::sync::atomic::Ordering;
+
+    let bridge = Arc::new(CoreReadsBridge::default());
+    let identities = runtime_over(&bridge, "registration-follows-row");
+    let name = id("row-changed");
+    crate::identity_first::core_test_bridge::bind_live(
+        &bridge.core,
+        &name,
+        &meerkat_mob::ProfileName::from("worker"),
+        1,
+        Some(SessionId::new()),
+    )
+    .expect("Core seats the identity");
+    bridge.hold_created(&name, "worker");
+
+    assert!(
+        identities
+            .register_from_row(&name)
+            .await
+            .expect("the row reads"),
+        "the new row is registered"
+    );
+    assert!(identities.contains(&name).await);
+    assert_eq!(bridge.row_reads.load(Ordering::SeqCst), 1);
+
+    let unknown = id("row-of-no-identity");
+    assert!(
+        !identities
+            .register_from_row(&unknown)
+            .await
+            .expect("Core's entry reads"),
+        "a name Core holds for no identity registers nothing"
+    );
+    assert!(!identities.contains(&unknown).await);
+}

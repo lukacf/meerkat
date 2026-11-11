@@ -8,13 +8,14 @@
 //! (the grant service of the gateway's `MeerkatMachine`), and a member's
 //! build opens what its identity's live grants cover.
 //!
-//! A grant names an identity the gateway's identity runtime serves. One
-//! created at runtime (store-owned: its record is its row in the mob's
-//! identity store) is served, but Meta's grant methods do not act on a
-//! store-owned identity yet: it is `subject_unknown`. When Core holds
-//! no member of the identity, the grant seats it through the declared
-//! apply's one-identity door, Dormant, building nothing, so its first build
-//! reads the grant. The target must be named by the gate the member's next
+//! A grant names an identity the gateway's identity runtime serves,
+//! whichever record holds its spec (the host's roster, or its row in the
+//! mob's identity store). When Core holds
+//! no member of the identity, the grant seats it through the identity's
+//! seat door, Dormant, building nothing, so its first build
+//! reads the grant; an identity that door seats no member of (it is
+//! archived, or awaits its host's preparation or its seat) answers the
+//! door's typed refusal. The target must be named by the gate the member's next
 //! build resolves ([`meerkat_mob::MobHandle::member_grant_gate`]), and the
 //! grant commits through the mob
 //! ([`meerkat_mob::MobHandle::grant_member_tool`]), which decides it against
@@ -322,8 +323,8 @@ struct GrantSubject {
 }
 
 /// The identity a grant names, resolved to Core's member. It must be one the
-/// identity runtime serves and not store-owned; Core's member of it is
-/// seated through the declared apply's door when Core holds none.
+/// identity runtime serves, whichever record holds its spec; Core's member
+/// of it is seated through the identity's seat door when Core holds none.
 async fn identity_for_grant(
     surface: &ToolGrantSurface<'_>,
     identity: &str,
@@ -337,16 +338,6 @@ async fn identity_for_grant(
         .map_err(|_| unknown())?;
     let handle = surface.mob.handle();
     let member = crate::member_comms_id::roster_member_id_for_identity(identity);
-    if matches!(
-        handle.identity_entry(&member),
-        Ok(meerkat_mob::IdentityEntryRead::Entry(entry))
-            if entry.origin == meerkat_mob::IdentityEntryOrigin::Created
-    ) {
-        return Err(subject_unknown(format!(
-            "'{identity}' is a store-owned identity: Meta's grant methods do not act on \
-             store-owned identities yet"
-        )));
-    }
     let gate = match handle.member_grant_gate(&member).await {
         Ok(gate) => gate,
         Err(meerkat_mob::MobError::MemberNotFound(_)) => {

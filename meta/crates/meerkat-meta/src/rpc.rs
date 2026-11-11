@@ -16070,7 +16070,7 @@ comms = true
     /// before this process's roster pass registered it, `-32052`
     /// (`identity_history_unavailable`, retryable). An identity created at
     /// runtime is registered from its row and goes through its door, which
-    /// refuses the retire: Core drives a store-owned identity.
+    /// serves the retire as any identity's: Core releases its member.
     ///
     /// RED: read `identity_for_member_mutation`'s refusal as "no identity"
     /// in the RPC member verbs: the raw plane retires the member under the
@@ -16155,10 +16155,35 @@ comms = true
             compaction_floors: None,
         };
 
+        // The door of the identity created at runtime registers it from its
+        // row and serves the retire as any identity's: Core releases its
+        // member, and the raw plane retires nothing.
+        let raw = handle_unified_rpc_json(
+            &runtime,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 100,
+                "method": "meta/retire_member",
+                "params": { "member_id": "door-created" },
+            })
+            .to_string(),
+            Duration::from_secs(5),
+            None,
+            Some(&identity_ctx),
+        )
+        .await;
+        let response: Value = serde_json::from_str(&raw)?;
+        assert!(
+            response["error"].is_null(),
+            "door-created: the identity's door serves the retire: {response:#?}"
+        );
+        assert_eq!(
+            core_bridge.releases(),
+            vec![created.clone()],
+            "door-created: Core released the identity's member"
+        );
+
         for (id, (name, code, data)) in [
-            // The door of the identity created at runtime refuses the
-            // retire, as the identity verb's failure.
-            ("door-created", -32000, Value::Null),
             ("door-removed", -32001, Value::Null),
             (
                 "door-unreadable",
@@ -16210,14 +16235,6 @@ comms = true
                 (json!(code), data),
                 "{name}: the identity door's typed refusal: {response:#?}"
             );
-            if name == "door-created" {
-                let message = response["error"]["message"].as_str().unwrap_or_default();
-                assert!(
-                    message.contains("retire_member (identity) failed")
-                        && message.contains("store-owned"),
-                    "{name}: the identity's door refused the retire: {response:#?}"
-                );
-            }
         }
 
         let members = runtime.mob_handle().list_members().await;

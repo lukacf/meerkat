@@ -370,16 +370,21 @@ registered, woken, respawned or retired. Label that member for the identity
 on its session, or retire it, then try again (see
 [Upgrading to 0.9.4](/guides/upgrading-to-0-9-4)).
 
-An identity created at runtime is store-owned: its record is its row in the
-mob's identity store, and Core's MobMachine drives its lifecycle. So is an
-identity a host adopted into store custody. Meta serves its sends,
-dispatches and schedule fires through its door, and its lifecycle verbs
-(reload, retire, respawn, reset, delete, materialize) refuse it before
-anything acts, final: `-32603` with structured data
-`{kind: "identity_store_owned", identity, retryable: false}`
-(`meta/retire_member` and `meta/respawn_member` answer `-32000` and name the
-refusal in their message). Nothing is changed. Its status reads
-`intent_managed: true`, as a host-adopted identity's does. A delivery to one
+An identity created at run time, or one a host adopted into the mob's
+identity store, has its record in its row of that store instead of the
+host's roster. Meta serves it as any identity: its sends, dispatches and
+schedule fires go through its door, and the lifecycle verbs (`meta/retire`,
+`meta/retire_member`, `meta/reload_member`, `meta/respawn`,
+`meta/respawn_member`, `meta/reset`, `meta/delete_identity`,
+`meta/identity/warm`, a scoped retire) act on it with the effect they have
+on a configured identity. Its status reads `intent_managed: false`. Through
+0.9.13 those verbs refused it, final, with `-32603` and structured data
+`{kind: "identity_store_owned", identity, retryable: false}`, and its status
+read `intent_managed: true`. Two things still answer that kind:
+`meta/compact_member` with a compaction floor (the rebuild that carries the
+floor to the member is not available for such an identity; nothing is
+changed), and the offline `meta_gateway identity-reset` (reset it with
+`meta/reset` on the running gateway). A delivery, a wake or a grant to one
 that Core archived answers `-32603` with
 `{kind: "identity_archived", identity, remedy: "unarchive_identity", retryable: false}`:
 nothing is delivered until Core's `unarchive_identity` seats it again. A
@@ -1068,20 +1073,37 @@ this runtime registers is refused for good: a removed identity answers
 `-32001`, and a name whose record Core cannot read answers `-32014`
 (`identity_name_unreadable`).
 
-An identity created at runtime (Core's created entry, whose record is its
-row in the mob's identity store) is served as a registered identity, though
-no host's roster lists it: each roster pass registers the created entries
-Core holds with the spec each row holds, and forgets one Core no longer
-holds. A door that names one created since the last roster pass registers it
-from its row first: a send, a dispatch, a governed input, a member mutation,
-a schedule fire, and the reads of its status, health, events and delivery
-scope. A send, a dispatch and a governed input read the row of a registered
-one again, so Core's update of its addressability, labels, profile or context
-is served at once, and a removal at once forgets it. Its sends, dispatches and
-schedule fires reach its member through its door while Core holds one; a
-delivery to one Core holds no member of is answered from Core's entry (see
-[Meta-specific error codes](#meta-specific-error-codes)). Core drives its
-lifecycle, so Meta's lifecycle verbs refuse it (`identity_store_owned`).
+An identity whose record is its row in the mob's identity store (created at
+run time, or adopted into the store) is served as any registered identity,
+though no host's roster lists it: a roster pass registers each one Core
+holds that it has not registered yet, with the spec its row holds, and
+forgets one Core no longer holds. A pass reads no row of an identity it
+serves already. A door that names one created since the last roster pass
+registers it from its row first: a send, a dispatch, a governed input, a
+member mutation, a schedule fire, and the reads of its status, health,
+events and delivery scope. A send, a dispatch and a governed input read the
+row of a registered one again, so Core's update of its addressability,
+labels, profile or context is served at once, and a removal at once forgets
+it. Its sends, dispatches and schedule fires reach its member through its
+door while Core holds one; a delivery to one Core holds no member of is
+answered from Core's entry (see
+[Meta-specific error codes](#meta-specific-error-codes)). The lifecycle
+verbs, the scoped tool grants, the topology provider, the warm and the
+bootstrap status treat it as a configured identity:
+
+| Verb | Effect, for every identity |
+|------|----------------------------|
+| `meta/retire`, `meta/retire_member`, a scoped retire | The member's live materialization is released. It stays seated on the same session at the same generation, and its next delivery materializes it again |
+| `meta/reload_member` | The member's registration is reloaded on the same session, same incarnation |
+| `meta/identity/warm` | The member is materialized and its tools are recorded |
+| `meta/respawn` | The member is replaced by its successor on the same session at the next generation. A configured identity's successor is seated with the roster's current spec, and one whose record is its row with its row's current profile, runtime mode and labels |
+| `meta/reset`, `meta/respawn_member` | A fresh session at the next generation, seated with the current spec; the name, the record and the peer edges the record declares stay |
+| `meta/delete_identity` | The same fresh life as a reset, with the old session's memory scope dropped and its exit interview owed. The agent keeps its name, its record and its listing: this verb never removes an agent. Removing one for good is a separate change of the identity |
+
+`meta/respawn` keeps the agent's conversation and `meta/respawn_member`
+starts a fresh one, for every identity alike.
+
+A respawn or a reset of an archived identity answers `identity_archived`.
 
 ### Reset and work in flight
 
@@ -1137,7 +1159,10 @@ atomic with the reset.
 ### `meta/delete_identity`
 
 Start the identity over: its earlier session is no longer resumed, and its
-next session starts empty.
+next session starts empty. The agent stays: it keeps its name, its record
+and its listing, whether its record is the host's roster or its row in the
+mob's identity store. This verb gives an agent a fresh life and never
+removes one.
 
 | Param | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -1840,8 +1865,9 @@ The pass is sequential, one identity at a time:
    live member that carries no registered identity is respawned in place. Only raw delegates without a registered
    identity are retired. Each reset ends its member's work in flight as
    `meta/reset` does (see [Reset and work in flight](#reset-and-work-in-flight)).
-   A store-owned identity is not reset (Core's MobMachine drives it): it is
-   listed under `store_owned`, and the others still reset.
+   An identity whose record is its row in the mob's identity store is
+   reset like any other; an archived one has no life to reset and is left
+   archived.
 4. The call waits up to 10 seconds for the reset identities' startup history
    to reach the console timeline, then returns.
 
@@ -1856,7 +1882,7 @@ target set and are neither reset nor retired.
 | `reset_details` / `retired_delegate_details` | Per-row detail, including any `topology_restore_warning` |
 | `warnings` | Always empty; kept for shape stability. A registered identity resets through Core's rotation, which retires the previous incarnation in the same step, so no stale live member is left to warn about |
 | `failed` | `{identity, error, kind?}` rows. When non-empty the response is `-32000` `reset_all failed for one or more identities` with this whole body as `error.data` |
-| `store_owned` | `{identity, kind, error}` per store-owned identity (created at runtime, or adopted into store custody; `kind` is `identity_store_owned`): Core's MobMachine drives it, so the reset refused it before anything acted. It does not fail the call; a host-adopted identity is under `failed` |
+| `store_owned` | Always empty; kept for shape stability. Through 0.9.13 it listed the identities whose record is their row in the mob's identity store, which the reset refused; they are reset like any other identity now and appear under `reset` or `failed` |
 | `startup_history` | `{timeout, ready, pending}` from the 10 s wait; `null` when preflight failed or no console aggregator is attached |
 </Accordion>
 
@@ -3075,7 +3101,7 @@ Every refusal of a request is `-32602` with
 
 | Kind | When |
 |------|------|
-| `subject_unknown` | No identity the gateway serves; an identity created at runtime (Meta's grant methods do not act on store-owned identities); an identity Core still holds no member of after the seat, one placed on a member host or bound to an external runtime, whose host creates its member at its first use; or an identity no longer on the mob's roster when the grant commits |
+| `subject_unknown` | No identity the gateway serves; an identity Core still holds no member of after the seat, one placed on a member host or bound to an external runtime, whose host creates its member at its first use; or an identity no longer on the mob's roster when the grant commits. An identity created at run time takes a grant as a configured one does (it answered this kind through 0.9.13) |
 | `target_not_gated` | The gate the member's next build resolves does not name the target |
 | `invalid_window` | Not exactly one of `duration_ms` and `expires_at_ms`, or a window that is past, empty or longer than the maximum lifetime |
 | `empty_target` | A target that names no tool or server, or an empty `tools` list |

@@ -6105,6 +6105,74 @@ pub trait SessionBridge: Send + Sync {
         })
     }
 
+    /// The names of the identities whose record is their row in the mob's
+    /// identity store, in identity order, read from Core's identity entry
+    /// pages (`MobHandle::identity_entries`): the machine state the mob's
+    /// actor last published, with no store read, no actor command and no
+    /// wake. A name the member-id encoding maps to another member id is left
+    /// out (skipped with a warning), as [`Self::created_identities`] leaves
+    /// it out. The identity runtime's roster pass registers each name it has
+    /// not registered yet from its row ([`Self::created_identity`]), so a
+    /// pass reads no row of an identity it serves already. The default
+    /// answers [`BridgeError::Unsupported`]: the identity runtime then
+    /// registers none. A bridge that wraps another forwards it.
+    async fn created_identity_names(&self) -> Result<Vec<AgentIdentity>, BridgeError> {
+        Err(BridgeError::Unsupported {
+            operation: "created_identity_names",
+        })
+    }
+
+    /// The peers `identity`'s row in the mob's identity store declares as
+    /// its owned edges (`CreatedIdentityRecord::owned_edges`), each as the
+    /// identity its member id names: one store read, no actor command, no
+    /// wake. Empty for an identity with no row (its record is its host's
+    /// roster) and for a row that declares none. The managed topology leaves
+    /// such an edge to its row. The default answers none: a bridge that
+    /// cannot read rows serves no identity that has one. A bridge that wraps
+    /// another forwards it.
+    async fn owned_peers(
+        &self,
+        _identity: &AgentIdentity,
+    ) -> Result<BTreeSet<AgentIdentity>, BridgeError> {
+        Ok(BTreeSet::new())
+    }
+
+    /// Whether Core holds the member id `member` as an identity entry, read
+    /// from the machine state the mob's actor last published
+    /// (`MobHandle::identity_entry`): no store read, no actor command, no
+    /// wake, and no waiting, so Meta's spawn customizer asks it inside
+    /// Core's build of the member. It says nothing of which record holds the
+    /// identity's spec. The default answers `false`. A bridge that wraps
+    /// another forwards it.
+    fn holds_identity_entry(&self, _member: &MobAgentIdentity) -> bool {
+        false
+    }
+
+    /// Replace `identity`'s member by its successor on its own session as
+    /// ONE Core transition (`MobHandle::respawn_member`): the current
+    /// incarnation is retired and the next one is seated Dormant at the next
+    /// generation on the same session, so the identity is never without a
+    /// member, and a mob restarted in between finishes it itself. The
+    /// successor is seated with `spec`'s profile, runtime mode and labels
+    /// (the identity's current record), and keeps the member's conversation;
+    /// under the member's own profile it keeps its wiring too. Nothing is
+    /// materialized: the caller wakes the successor. The identity runtime
+    /// asks it for an identity whose record is its row in the mob's identity
+    /// store, which no declaration seats again.
+    ///
+    /// The default fails closed: composing it from a retire and a seat
+    /// would leave such an identity without a member.
+    async fn respawn_member_on_own_session(
+        &self,
+        identity: &AgentIdentity,
+        _spec: &DurableAgentSpec,
+    ) -> Result<(), BridgeError> {
+        Err(BridgeError::InvalidInput(format!(
+            "this SessionBridge does not implement the same-session successor, so identity \
+             {identity} cannot be respawned: the transition must be one Core step"
+        )))
+    }
+
     /// Whether Core holds an identity intent row for `identity` (a host
     /// adopted it), and whether that row reads.
     async fn identity_management(
@@ -7777,11 +7845,22 @@ impl MobSessionBridge {
             if member_runtimes.contains_key(&member_id) || !endpoints.contains(member_id.as_str()) {
                 continue;
             }
-            let Some(identity) = member.labels.get("agent_identity") else {
-                continue;
+            // An identity's member: labelled `agent_identity` by an
+            // identity-first spawn, or held by Core as an identity entry
+            // under the member id that encodes its name (no caller-owned
+            // member takes an entry's name).
+            let identity = match member.labels.get("agent_identity") {
+                Some(identity) => identity.clone(),
+                None if self.holds_identity_entry(&member.agent_identity) => {
+                    match served_identity_of_member(&member.agent_identity) {
+                        Some(identity) => identity.as_str().to_string(),
+                        None => continue,
+                    }
+                }
+                None => continue,
             };
             let runtime_id = self
-                .committed_identity_member_runtime_id(identity, &member.agent_identity)
+                .committed_identity_member_runtime_id(&identity, &member.agent_identity)
                 .await?;
             committed.insert(member_id, runtime_id);
         }
@@ -8577,6 +8656,25 @@ impl MobSessionBridge {
         }
     }
 
+    /// The custody a seat of `member`'s name holds, as Core's API asks for
+    /// it: `(entry custody, created custody)`. A seat takes an identity
+    /// entry's name only with the custody of that entry
+    /// ([`meerkat_mob::MobError::IdentityMember`] otherwise): entry custody
+    /// for an entry whose record is its host's roster, created custody for
+    /// one whose record is its row in the mob's identity store. A member id
+    /// that is no identity entry is seated without custody, as before. A
+    /// read Core refuses answers no custody, and the seat meets Core's own
+    /// name guard, typed.
+    fn entry_custody_of(&self, member: &MobAgentIdentity) -> (bool, bool) {
+        match self.handle.identity_entry(member) {
+            Ok(meerkat_mob::IdentityEntryRead::Entry(view)) => (
+                view.origin == meerkat_mob::IdentityEntryOrigin::Declared,
+                view.origin == meerkat_mob::IdentityEntryOrigin::Created,
+            ),
+            _ => (false, false),
+        }
+    }
+
     /// Whether a spawn of `member` acts for its identity entry: Core holds
     /// the member id as a declared identity entry, whose name a spawn
     /// without entry custody cannot take
@@ -8585,11 +8683,7 @@ impl MobSessionBridge {
     /// refuses answers no custody, and the spawn meets Core's own name guard,
     /// typed.
     fn declared_entry_custody(&self, member: &MobAgentIdentity) -> bool {
-        matches!(
-            self.handle.identity_entry(member),
-            Ok(meerkat_mob::IdentityEntryRead::Entry(view))
-                if view.origin == meerkat_mob::IdentityEntryOrigin::Declared
-        )
+        self.entry_custody_of(member).0
     }
 
     /// The registered row of the created entry `member` from its row in the
@@ -8616,26 +8710,38 @@ impl MobSessionBridge {
         if record.presence == meerkat_mob::CreatedIdentityPresence::Removed {
             return Ok(None);
         }
-        let (Some(identity), Some(spec)) = (identity_of_member(member), record.spec) else {
+        let (Some(identity), Some(spec)) = (served_identity_of_member(member), record.spec) else {
             tracing::warn!(
                 %member,
-                "a created entry's row carries no spec, or its member id names no identity: \
-                 the identity runtime does not serve it"
+                "a created entry's row carries no spec, or its member id names no identity this \
+                 runtime serves: the identity runtime does not serve it"
             );
             return Ok(None);
         };
-        if member_id_for_identity(&identity) != *member {
-            tracing::warn!(
-                %member,
-                %identity,
-                "the member-id encoding maps a created entry's name to another member id \
-                 (it is no comms name component, or it starts with the reserved mk-- marker \
-                 without being an encoding): the identity runtime does not serve it"
-            );
-            return Ok(None);
-        }
         Ok(Some(durable_spec_of_created(identity, spec)))
     }
+}
+
+/// The identity this runtime serves a store-owned entry's member id as: the
+/// identity the member id encodes, when the member-id encoding maps it back
+/// to the same member id. A name the encoding maps to another member id (a
+/// name that is no comms name component, or one that starts with the
+/// reserved `mk--` marker without being an encoding) is skipped with a
+/// warning: this runtime's doors would act on another member than Core's
+/// entry.
+fn served_identity_of_member(member: &MobAgentIdentity) -> Option<AgentIdentity> {
+    let identity = identity_of_member(member)?;
+    if member_id_for_identity(&identity) != *member {
+        tracing::warn!(
+            %member,
+            %identity,
+            "the member-id encoding maps a created entry's name to another member id \
+             (it is no comms name component, or it starts with the reserved mk-- marker \
+             without being an encoding): the identity runtime does not serve it"
+        );
+        return None;
+    }
+    Some(identity)
 }
 
 /// The spawn spec of `spec`'s lifecycle facts only
@@ -8662,6 +8768,41 @@ fn lifecycle_facts_spawn_spec(spec: &DurableAgentSpec) -> SpawnMemberSpec {
         ));
     }
     spawn_spec
+}
+
+/// The seat spec of an identity whose record is its row in the mob's
+/// identity store, from `spec`, the registered row: what Core seats such an
+/// identity with from that row (its profile, runtime mode, backend, binding
+/// and placement, the row's labels as they are, its context, instructions
+/// and first message), with none of a roster spawn's marks (the
+/// durable-identity marker and the `agent_identity` and `profile_name`
+/// labels), so the seat's labels stay the row's and Core's record census
+/// reads the seat current.
+fn store_owned_seat_spec(spec: &DurableAgentSpec) -> SpawnMemberSpec {
+    let mut seat = SpawnMemberSpec::host_root(spec.profile.clone(), member_id_for_spawn_spec(spec));
+    if let Some(runtime_mode) = spec.runtime_mode_override {
+        seat = seat.with_runtime_mode(runtime_mode);
+    }
+    seat.backend = spec.backend;
+    if let Some(binding) = spec.binding.clone() {
+        seat.binding = runtime_binding_from_wire(binding);
+    }
+    if let Some(placement) = spec.placement.as_ref() {
+        seat.placement = Some(meerkat_mob::machines::mob_machine::HostId::from(
+            placement.0.clone(),
+        ));
+    }
+    seat = seat.with_labels(spec.labels.clone());
+    if let Some(context) = spec.context.as_ref() {
+        seat = seat.with_context(context.clone());
+    }
+    if !spec.additional_instructions.is_empty() {
+        seat = seat.with_additional_instructions(spec.additional_instructions.clone());
+    }
+    if let Some(message) = spec.initial_message.as_ref() {
+        seat = seat.with_initial_message(message.clone());
+    }
+    seat
 }
 
 /// The identity a Core member id stands for: the identity its member id
@@ -9484,7 +9625,9 @@ impl SessionBridge for MobSessionBridge {
         &self,
         aliases: &BTreeSet<String>,
     ) -> Result<BTreeSet<String>, BridgeError> {
-        // One roster read answers every alias.
+        // One roster read answers every alias. A member Core holds as an
+        // identity entry is its identity's own, whoever seated it (no
+        // caller-owned member takes an entry's name): it is never raw.
         let members = self.handle.list_members_including_retiring().await;
         let authoritative_members = self.runtime_members.read().await;
         Ok(members
@@ -9497,7 +9640,8 @@ impl SessionBridge for MobSessionBridge {
                         .values()
                         .any(|owned| owned == member.agent_identity.as_str())
                     && crate::member_comms_id::durable_identity_label(&member.labels)
-                        != Some(alias.as_ref());
+                        != Some(alias.as_ref())
+                    && !self.holds_identity_entry(&member.agent_identity);
                 held.then(|| alias.into_owned())
             })
             .collect())
@@ -9694,20 +9838,29 @@ impl SessionBridge for MobSessionBridge {
         // rotation ends the old incarnation's wiring; the identity runtime
         // wires the identity's managed edges again once the rotation answers.
         let roster_id = crate::member_comms_id::roster_member_id_for_identity(identity.as_str());
-        // A spec that cannot be lowered is refused before Core is asked.
-        let mut successor = build_spawn_spec(spec, draft, None).map_err(|error| {
-            BridgeError::InvalidInput(format!(
-                "lowering the fresh life spec of {identity} for its rotation: {error}"
-            ))
-        })?;
+        // The fresh life of an identity Core holds no member for is a seat of
+        // its name, which takes an identity entry's name only with the
+        // custody of that entry, as the create paths carry it.
+        let (entry_custody, created_custody) = self.entry_custody_of(&roster_id);
+        // A spec that cannot be lowered is refused before Core is asked. An
+        // identity whose record is its row is seated as Core seats it from
+        // that row (`store_owned_seat_spec`): the seat carries the row's
+        // labels and nothing of a roster spawn.
+        let mut successor = if created_custody {
+            store_owned_seat_spec(spec)
+        } else {
+            build_spawn_spec(spec, draft, None).map_err(|error| {
+                BridgeError::InvalidInput(format!(
+                    "lowering the fresh life spec of {identity} for its rotation: {error}"
+                ))
+            })?
+        };
         self.apply_compaction_floor(identity, spec, &mut successor)?;
         successor.identity = roster_id.clone();
         successor.launch_mode = meerkat_mob::launch::MemberLaunchMode::Fresh;
         successor.auto_wire_parent = false;
-        // The fresh life of an identity Core holds no member for is a seat of
-        // its name, which takes a declared entry's name only with the
-        // entry's custody, as the create paths carry it.
-        successor.entry_custody = self.declared_entry_custody(&roster_id);
+        successor.entry_custody = entry_custody;
+        let successor = successor.with_created_custody(created_custody);
         let session_id =
             self.handle
                 .rotate_member(successor)
@@ -10397,11 +10550,18 @@ impl SessionBridge for MobSessionBridge {
     ) -> Result<Option<MemberRuntimeBinding>, BridgeError> {
         // Host adoption first, before any other Core call, so a refusal
         // ensures nothing: a Core intent row for the identity is the host's.
-        ensure_member_live_intent_gate(
-            read_identity_intent(&self.handle, identity).await,
-            identity,
-        )?;
+        // The row of an identity whose record is its row in the identity
+        // store shares that table at a later schema version and is no
+        // intent: Core holds the name as such an entry, so it reads as no
+        // adoption, never as a row that could not be read.
         let member_id = member_id_for_identity(identity);
+        let intent = match read_identity_intent(&self.handle, identity).await {
+            IdentityIntentRead::Unreadable(_) if self.entry_custody_of(&member_id).1 => {
+                IdentityIntentRead::Missing
+            }
+            intent => intent,
+        };
+        ensure_member_live_intent_gate(intent, identity)?;
         match self.handle.ensure_member_live(&member_id).await {
             // Core answers MemberNotFound both when it holds no member and for
             // a member bound to no session, which has nothing to revive. The
@@ -10695,6 +10855,99 @@ impl SessionBridge for MobSessionBridge {
             Err(error) => return Err(created_identity_read_error("created_identity", error)),
         }
         self.created_identity_of_member(&member).await
+    }
+
+    async fn created_identity_names(&self) -> Result<Vec<AgentIdentity>, BridgeError> {
+        let mut names = Vec::new();
+        let mut after: Option<MobAgentIdentity> = None;
+        loop {
+            let page = self
+                .handle
+                .identity_entries(after.as_ref(), meerkat_mob::IDENTITY_ENTRY_PAGE_MAX)
+                .map_err(|error| created_identity_read_error("created_identity_names", error))?;
+            for view in page
+                .entries
+                .iter()
+                .filter(|view| view.origin == meerkat_mob::IdentityEntryOrigin::Created)
+            {
+                if let Some(identity) = served_identity_of_member(&view.identity) {
+                    names.push(identity);
+                }
+            }
+            match page.next {
+                None => return Ok(names),
+                Some(next) if after.as_ref().is_none_or(|current| &next > current) => {
+                    after = Some(next);
+                }
+                Some(_) => {
+                    return Err(BridgeError::Mob(
+                        "Core's identity entry pages returned a cursor that does not advance"
+                            .to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
+    async fn owned_peers(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<BTreeSet<AgentIdentity>, BridgeError> {
+        let member = member_id_for_identity(identity);
+        let observation = self
+            .handle
+            .identity_record(&member)
+            .await
+            .map_err(|error| created_identity_read_error("owned_peers", error))?;
+        let Some(meerkat_mob::CreatedIdentityObservation::Created(record)) = observation else {
+            return Ok(BTreeSet::new());
+        };
+        Ok(record
+            .owned_edges
+            .iter()
+            .filter_map(|edge| identity_of_member(&edge.peer))
+            .collect())
+    }
+
+    fn holds_identity_entry(&self, member: &MobAgentIdentity) -> bool {
+        matches!(
+            self.handle.identity_entry(member),
+            Ok(meerkat_mob::IdentityEntryRead::Entry(_))
+        )
+    }
+
+    async fn respawn_member_on_own_session(
+        &self,
+        identity: &AgentIdentity,
+        spec: &DurableAgentSpec,
+    ) -> Result<(), BridgeError> {
+        let member = member_id_for_identity(identity);
+        let mut request = meerkat_mob::MemberRespawn::new()
+            .with_profile(spec.profile.clone())
+            .with_labels(spec.labels.clone());
+        if let Some(runtime_mode) = spec.runtime_mode_override {
+            request = request.with_runtime_mode(runtime_mode);
+        }
+        self.handle
+            .respawn_member(member.clone(), request)
+            .await
+            .map_err(|error| match error {
+                // Core's typed refusals before any of the step starts: a mob
+                // that is not running, or another lifecycle operation of the
+                // member in progress. Nothing was retired.
+                error @ (meerkat_mob::MobError::InvalidTransition { .. }
+                | meerkat_mob::MobError::LifecycleOperationPending { .. }) => {
+                    BridgeError::RotationRefused {
+                        identity: member.clone(),
+                        detail: error.to_string(),
+                    }
+                }
+                error => spawn_bridge_error("respawn_member", &error),
+            })?;
+        // The retired incarnation's runtime id names nothing now; the seated
+        // one is read from Core when a delivery needs it.
+        self.forget_member_bindings(&member).await;
+        Ok(())
     }
 
     async fn identity_management(
@@ -11917,6 +12170,31 @@ impl SessionBridge for super::PublicSessionBridge {
         identity: &AgentIdentity,
     ) -> Result<Option<DurableAgentSpec>, BridgeError> {
         self.bridge.created_identity(identity).await
+    }
+
+    async fn created_identity_names(&self) -> Result<Vec<AgentIdentity>, BridgeError> {
+        self.bridge.created_identity_names().await
+    }
+
+    async fn owned_peers(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<BTreeSet<AgentIdentity>, BridgeError> {
+        self.bridge.owned_peers(identity).await
+    }
+
+    fn holds_identity_entry(&self, member: &MobAgentIdentity) -> bool {
+        self.bridge.holds_identity_entry(member)
+    }
+
+    async fn respawn_member_on_own_session(
+        &self,
+        identity: &AgentIdentity,
+        spec: &DurableAgentSpec,
+    ) -> Result<(), BridgeError> {
+        self.bridge
+            .respawn_member_on_own_session(identity, spec)
+            .await
     }
 
     async fn identity_management(

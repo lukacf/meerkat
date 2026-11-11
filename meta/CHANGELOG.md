@@ -38,12 +38,131 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `invalid_request`): those namespaces hold each agent's own instructions.
   `meta/instruction_status` still reads them.
 
+- Meta serves an identity whose record is its row in the mob's identity
+  store (one created at run time, or one a host adopted into the store) as
+  any identity. The lifecycle verbs act on it with the effect they have on a
+  configured identity, and no longer answer `-32603` with kind
+  `identity_store_owned`:
+  - `meta/retire`, `meta/retire_member` and a scoped retire release the
+    member's live materialization; it stays seated on the same session at
+    the same generation;
+  - `meta/reload_member` reloads the member's registration on the same
+    session;
+  - `meta/identity/warm` and a materialization wake the member;
+  - `meta/respawn` replaces the member by its successor on the same session
+    at the next generation, seated with the row's current profile, runtime
+    mode and labels;
+  - `meta/reset` and `meta/respawn_member` seat a fresh session at the next
+    generation with the row's current spec. The name, the row and the peer
+    edges the row declares stay;
+  - `meta/delete_identity` gives the same fresh life, with the old session's
+    memory scope dropped and its exit interview owed, as for a configured
+    identity. The agent keeps its name, its row and its listing: the verb
+    removes no agent of either kind;
+  - `meta/reset_all` resets it with the others. Its `store_owned` list stays
+    in the result, always empty; an archived identity is left archived and
+    fails nothing.
+
+  A verb on an archived identity answers `identity_archived`. Two things
+  still answer `identity_store_owned`: `meta/compact_member` with a
+  compaction floor, and the offline `meta_gateway identity-reset` (see
+  Known limitations).
+
+- `IdentityStatus.intent_managed` (`meta/status_identity`, the status
+  lists, both SDKs) reads `false` for an identity whose record is its row
+  in the mob's identity store. It read `true` through 0.9.13, when the
+  host's verbs refused it. It still reads `true` for an identity a host
+  adopted through an identity intent row.
+
+- `meta/tool_grants/grant` issues a scoped tool grant to an identity
+  whose record is its row in the mob's identity store, and no longer
+  answers `subject_unknown` for it. A grant to one Core holds no member of
+  (it is archived, or awaits its host's preparation or its seat) answers
+  the door's typed refusal (`identity_archived`, or `-32052`).
+
+- A topology provider is asked about every identity the runtime serves:
+  `target_identities` and `TopologyContext.roster` hold the roster's
+  identities and the ones whose record is their row, and an edge the
+  provider answers to one of them is wired. Under a topology provider, a
+  live edge between two identities that no owner declares (not the
+  provider, not the mob definition's wiring, not a row's owned edges) is
+  pruned whichever record holds the identities' specs; through 0.9.13 no
+  edge of an identity created at run time was pruned. An edge a row
+  declares as its identity's owned edge is never pruned.
+
+- The bootstrap status (`meta/status_identity_bootstrap`,
+  `meta/wait_identity_bootstrap`) tracks the identities whose record is
+  their row beside the roster's, and a background warm
+  (`lazy_with_background_warm`) materializes them alike. One Core holds no
+  member of, because it awaits its host's preparation, its held creation or
+  its seat, reads `broken` with that cause; an archived one is not tracked.
+  `IdentityRuntime::materialize_all` covers them too and skips an archived
+  one.
+
+- A roster pass reads no row of an identity it serves already: it reads
+  the names from Core's identity entries and one row for each name it has
+  not registered yet. Through 0.9.13 every pass read every row. A row Core
+  changed is read again at the identity's next delivery, as before.
+
+- Rust: `SessionBridge` has four new methods, each with a default:
+  `created_identity_names` (the names of the identities whose record is
+  their row; default `BridgeError::Unsupported`), `owned_peers` (the peer
+  edges an identity's row declares; default none), `holds_identity_entry`
+  (whether Core holds a member id as an identity entry; default `false`)
+  and `respawn_member_on_own_session` (Core's same-session successor;
+  default a refusal). A host's own wrapper of a session bridge forwards
+  them to the bridge it wraps. The identity runtime no longer calls
+  `created_identities`.
+
+- A held add (`IdentityFirstRuntimeContext::add_member_held`) of a name an
+  identity holds through its row answers
+  `HeldBootstrapRefusal::ExistingContinuity`, as the add of a configured
+  identity that has continuity does. It answered `IdentityStoreOwned`.
+
+### Fixed
+
+- The first build of an identity created at run time carries the host
+  customizer's tools when Core wakes its member before a roster pass or a
+  door named the identity. Meta's spawn customizer attaches the identity's
+  tool dispatcher to each build of a member Core holds as an identity
+  entry, and the build preparer publishes the host customizer's tools into
+  it. Through 0.9.13 such a build offered none of them until the member's
+  next build.
+
+- The lifecycle side effects of an identity whose record is its row run as
+  a configured identity's: a reset and a delete note the old session's
+  boundary for agent memory, and a retirement's hooks name the member.
+  They were skipped, because the member carried no mark of an
+  identity-first spawn.
+
 ### Known limitations
 
 - A configured agent whose instructions were edited while the gateway was
   down, and that has no instruction record yet, keeps the text of its first
   prompt until the running gateway observes a change of it (a roster
   refresh with other text) or its conversation is rebuilt.
+
+- `meta/compact_member` with a compaction floor answers
+  `identity_store_owned` for an identity whose record is its row in the
+  mob's identity store: the rebuild that carries the floor to the member is
+  a build Meta lowers, and Core's same-session successor of such an
+  identity takes none. Nothing is changed.
+
+- The offline `meta_gateway identity-reset` refuses such an identity
+  (`identity_store_owned`): the row it leaves is carried out by a roster
+  compile that lists the identity, and no roster lists it. Reset it with
+  `meta/reset` on the running gateway.
+
+- The member Core starts at such an identity's create to run its first
+  message, and a member the mob's start restores before the identity
+  runtime is bound (one that owes work), is built without the host
+  customizer's tools until its next build, as before: Core asks Meta's
+  build preparer before a wake and a restore, not before the member it
+  starts at a create.
+
+- A host customizer's model, system prompt, provider parameters, labels
+  and context for a build do not reach the seat of such an identity, at its
+  create or at a reset: Core seats it from its row. Its tools do.
 
 ## [0.9.13] - 2026-11-11
 

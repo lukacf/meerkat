@@ -2010,12 +2010,13 @@ pub struct IdentityStatus {
     pub labels: std::collections::BTreeMap<String, String>,
     /// Core's generation of the binding `session_id` comes from.
     pub generation: Option<meerkat_mob::Generation>,
-    /// Whether Core drives the identity itself, so Meta's lifecycle verbs
-    /// refuse it: Core holds an identity intent row for it (a host adopted
-    /// it; the verbs answer `-32053`), or it is store-owned (created at
-    /// runtime, or adopted into store custody: Core holds its created entry's
-    /// row; the verbs answer `-32603` with `data.kind`
-    /// `identity_store_owned`).
+    /// Whether the host's lifecycle verbs refuse the identity because Core
+    /// drives it itself: Core holds an identity intent row for it (a host
+    /// adopted it; the verbs answer `-32053`), or a row this build cannot
+    /// read. `false` for every other identity, whichever record holds its
+    /// spec: an identity created at run time, or adopted into the mob's
+    /// identity store, is served by the verbs as a configured one is (it
+    /// read `true` through 0.9.13, when the verbs refused it).
     #[serde(default)]
     pub intent_managed: bool,
     /// Core's convergence diagnostics for an intent-managed identity, when

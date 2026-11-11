@@ -402,6 +402,14 @@ async def test_a_call_that_cannot_be_spelled_sends_nothing():
         )
     with pytest.raises(ValueError):
         await identities.plan("adopt", CreateAgents(agents=[], request_id="r"))
+    # Host code names each change: a blank or missing request id is not sent.
+    for request_id in ("", "  ", None):
+        with pytest.raises(ValueError):
+            await identities.adopt(
+                "scout", expected_spec_digest=DIGEST, request_id=request_id
+            )
+        with pytest.raises(ValueError):
+            await identities.create([], request_id=request_id)
     assert transport.calls == []
 
 
@@ -640,6 +648,12 @@ def test_an_answer_that_is_no_outcome_is_a_contract_mismatch():
         {"outcome": "done", "agents": []},
         {"outcome": "done", "operation_id": OPERATION_ID, "agents": [{"state": "committed"}]},
         {"outcome": "pending_decision", "operation_id": OPERATION_ID},
+        {
+            "outcome": "pending_decision",
+            "operation_id": OPERATION_ID,
+            "decision_id": DECISION_ID,
+            "deadline_ms": True,
+        },
         {"outcome": "refused"},
     ):
         with pytest.raises(ContractMismatchError):

@@ -595,6 +595,12 @@ describe("identity family: typed answers", () => {
       { outcome: "done", operation_id: OPERATION_ID },
       { outcome: "done", operation_id: OPERATION_ID, agents: [{ state: "committed" }] },
       { outcome: "pending_decision", operation_id: OPERATION_ID },
+      {
+        outcome: "pending_decision",
+        operation_id: OPERATION_ID,
+        decision_id: DECISION_ID,
+        deadline_ms: true,
+      },
       { outcome: "refused" },
     ]) {
       assert.throws(() => parseIdentityOutcome(answer), ContractMismatchError);

@@ -388,6 +388,13 @@ describe("long-term agents in the console", () => {
         expect(family.calls.map((call: { method: string }) => call.method).every((method: string) =>
           method === "meta/identity/list" || method === "meta/identity/get" || method === "meta/identity/operation")).toBe(true);
       }
+      // Remove offers "Archive instead" only to a viewer who may archive
+      // the agent.
+      if (entry.off === "nothing" || entry.off === "affordances.can_change_identity") {
+        fireEvent.click(view.getByTestId("roster-action:warden:remove"));
+        const confirm = await find(view, "identity-confirm:warden:remove");
+        expect(within(confirm).queryByTestId("identity-confirm-archive-instead") !== null).toBe(entry.off === "nothing");
+      }
       view.unmount();
       cleanup();
     }

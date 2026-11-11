@@ -14,6 +14,7 @@ import {
 import { CONSOLE_REST_PATHS, CONSOLE_RPC_METHODS, CONSOLE_RPC_PATHS } from "./contract";
 import {
   CONSOLE_COMMAND_NAMES,
+  consoleCommandMethod,
   createHttpConsoleTransport,
   createMetaConsoleController,
   type ConsoleCapabilities,
@@ -564,6 +565,55 @@ test("stock and shared-core headless topology contracts cannot drift", async () 
     ),
     commands,
   );
+});
+
+test("stock and shared-core command surfaces carry the changes of long-term agents alike", async () => {
+  const commands = [
+    [CONSOLE_COMMAND_NAMES.createAgent, "meta/identity/create"],
+    [CONSOLE_COMMAND_NAMES.updateAgent, "meta/identity/update"],
+    [CONSOLE_COMMAND_NAMES.archiveAgent, "meta/identity/archive"],
+    [CONSOLE_COMMAND_NAMES.unarchiveAgent, "meta/identity/unarchive"],
+    [CONSOLE_COMMAND_NAMES.removeAgent, "meta/identity/remove"],
+    [CONSOLE_COMMAND_NAMES.withdrawAgentChange, "meta/identity/withdraw"],
+    [CONSOLE_COMMAND_NAMES.getAgentRecord, "meta/identity/get"],
+    [CONSOLE_COMMAND_NAMES.listAgentRecords, "meta/identity/list"],
+    [CONSOLE_COMMAND_NAMES.getAgentChange, "meta/identity/operation"],
+    [CONSOLE_COMMAND_NAMES.listAgentDirectory, "meta/identity/directory"],
+  ] as const;
+  for (const [command, method] of commands) {
+    assert.equal(consoleCommandMethod(command), method);
+    assert.equal(sharedConsoleCommandMethod(SHARED_CONSOLE_COMMAND_NAMES[command]), method);
+  }
+  const roster = migrateConsoleWorkbenchTarget({ id: "roster", kind: "roster", title: "Roster" });
+  assert.ok(roster);
+  const methods = commands.map(([, method]) => method);
+  for (const createController of [createMetaConsoleController, createSharedMetaConsoleController]) {
+    const transport = createFakeTransport({ capabilities: { methods, version: "agents-v1" } });
+    const controller = createController({ transport });
+    // The roster and an agent's own panes carry the family; no other pane does.
+    for (const target of [roster, identityTarget()]) {
+      for (const [command] of commands) {
+        assert.equal((await controller.commands.execute({ command, target, params: { name: "scout" } })).accepted, true);
+      }
+    }
+    await assert.rejects(
+      () => controller.commands.execute({ command: CONSOLE_COMMAND_NAMES.createAgent, target: controlTarget("routing") }),
+      /cannot execute command createAgent/,
+    );
+    // A change names its agent `name`: nothing is filled in from the target.
+    assert.deepEqual(
+      (transport.commands.at(-1) as { params?: unknown }).params,
+      { name: "scout" },
+    );
+    // A gateway that does not serve the family refuses before anything is sent.
+    const without = createController({
+      transport: createFakeTransport({ capabilities: { methods: [CONSOLE_RPC_METHODS.send], version: "none" } }),
+    });
+    await assert.rejects(
+      () => without.commands.execute({ command: CONSOLE_COMMAND_NAMES.createAgent, target: roster }),
+      /capability missing.*meta\/identity\/create/i,
+    );
+  }
 });
 
 test("headless transport keeps uploads and blob URLs typed optional hooks", async () => {

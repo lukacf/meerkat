@@ -269,6 +269,13 @@ function startMockConsoleServer(options = {}) {
   const identityAffordances = includeLifecycleActions
     ? { can_send_message: true, can_respawn: true, can_retire: true }
     : { can_send_message: true };
+  // A scripted family of the long-term agent changes
+  // (fixtures/scripted-identity-family.cjs): its agents join the roster, the
+  // experience read carries its section and affordances, and it answers the
+  // `meta/identity/*` methods.
+  const identityFamily = options.identityFamily && typeof options.identityFamily === "object"
+    ? options.identityFamily
+    : null;
   const requests = [];
 
   function cursorOrdinal(cursor, cursorOrder) {
@@ -486,9 +493,11 @@ function startMockConsoleServer(options = {}) {
                   affordances: { can_send_message: true },
                 }] : []),
                 ...extraSidebarAgents,
+                ...(identityFamily ? identityFamily.experienceAgents() : []),
               ],
             },
           },
+          ...(identityFamily ? { identity_changes: identityFamily.experienceSection() } : {}),
           identity_status: {
             panel_id: "console.identity_status",
             schema_version: "1",
@@ -570,11 +579,29 @@ function startMockConsoleServer(options = {}) {
                 "meta/gating/audit",
                 "meta/gating/decide",
                 ...(topologyControl ? topologyControl.methods || [] : []),
+                ...(identityFamily ? identityFamily.methods : []),
               ],
               ...(topologyControl ? { topology_control: topologyControl.capabilities || {} } : {}),
             },
           }));
           return;
+        }
+        if (identityFamily) {
+          const answered = identityFamily.handle(payload.method, payload.params || {});
+          if (answered) {
+            // A scripted loss: the connection ends without an answer.
+            if (answered.lost) {
+              res.destroy();
+              return;
+            }
+            res.writeHead(200, { "content-type": "application/json" });
+            res.end(JSON.stringify({
+              jsonrpc: "2.0",
+              id: rpcId,
+              ...(answered.error ? { error: answered.error } : { result: answered.result }),
+            }));
+            return;
+          }
         }
         if (payload.method === "meta/topology/query" && topologyControl) {
           res.writeHead(200, { "content-type": "application/json" });
@@ -4954,6 +4981,166 @@ const scenarios = [
   { id: "headless-control-surface", family: "console", backend: "mock", run: runHeadlessControlSurfaceBrowserProof },
 ];
 
+// A person creates, edits, archives, unarchives and removes a long-term agent
+// from the roster, in a real browser, against the mock console server with
+// the scripted family of the agent changes. It also meets a refusal at the
+// field it names and a request that waits for a decision, and withdraws it.
+async function runIdentityChangesStoryProof() {
+  const { createScriptedIdentityFamily } = require("./fixtures/scripted-identity-family.cjs");
+  const family = createScriptedIdentityFamily();
+  const server = await startMockConsoleServer({ identityFamily: family });
+  const evidenceDir = process.env.META_BROWSER_EVIDENCE || path.join(repoRoot, "output/playwright/console-acceptance");
+  fs.mkdirSync(evidenceDir, { recursive: true });
+  let browser;
+
+  try {
+    browser = await launchBrowser();
+    const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+    page.setDefaultTimeout(15_000);
+    const pageErrors = [];
+    page.on("pageerror", (error) => pageErrors.push(String(error)));
+    await gotoConsole(page, `${server.baseUrl}/console`);
+    await page.getByTestId("nav:roster").click();
+    await page.getByTestId("roster-panel").waitFor();
+
+    const agent = (name) => page.locator(`[data-testid="roster-card:${name}"], [data-testid="roster-row:${name}"]`);
+    const openAgent = async (name) => {
+      await agent(name).locator(".cc-entity__hit").click();
+      await page.getByTestId(`roster-detail:${name}`).waitFor();
+    };
+    const notice = page.getByTestId("identity-notice");
+    const familyCalls = (method) => family.calls.filter((call) => call.method === method).map((call) => call.params);
+    const gone = async (locator, label) => {
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        if ((await locator.count()) === 0) return;
+        await sleep(50);
+      }
+      throw new Error(`still shown: ${label}`);
+    };
+
+    // The roster shows the agent the host configured and the one an agent
+    // asked for the same way.
+    await agent("helper").waitFor();
+    await agent("warden").waitFor();
+    assert.equal(await page.getByTestId("roster-panel").getByText(/created|configured|adopted|origin|custody/i).count(), 0);
+
+    // New agent. A taken name is refused at the name, in the gateway's words.
+    await page.getByTestId("roster-new-agent").click();
+    const form = page.getByTestId("identity-new-agent");
+    await form.getByTestId("identity-profile:worker").check();
+    assert.equal(await form.getByTestId("identity-profile:operator").isDisabled(), true);
+    await form.getByTestId("identity-field:name").fill("warden");
+    await form.getByTestId("identity-submit").click();
+    assert.equal(
+      await page.getByTestId("identity-field-error:name").textContent(),
+      "The name is taken: choose another. A removed agent's name is never available again.",
+    );
+    await form.getByTestId("identity-field:name").fill("scout");
+    await form.getByTestId("identity-field:display_name").fill("Scout");
+    await form.getByTestId("identity-field:instructions:0").fill("Scout the archive.");
+    await form.getByTestId("identity-peer:warden").check();
+    await form.getByTestId("identity-field:first_message").fill("Introduce yourself.");
+    await page.screenshot({ path: path.join(evidenceDir, "identity-changes-new-agent.png"), fullPage: true });
+    await form.getByTestId("identity-submit").click();
+    await notice.getByText("Scout is created").waitFor();
+    await agent("scout").waitFor();
+    const created = familyCalls("meta/identity/create");
+    assert.equal(created.length, 2);
+    assert.notEqual(created[1].request_id, created[0].request_id, "a changed request is sent under a new id");
+    assert.deepEqual(created[1].agents, [{
+      name: "scout",
+      profile: "worker",
+      display_name: "Scout",
+      instructions: ["Scout the archive."],
+      first_message: "Introduce yourself.",
+      peers: ["warden"],
+    }]);
+    await page.getByTestId("identity-cancel").click();
+
+    // Edit.
+    await openAgent("scout");
+    await page.getByTestId("roster-action:scout:edit").click();
+    const edit = page.getByTestId("identity-edit:scout");
+    await edit.getByTestId("identity-field:display_name").fill("Chief scout");
+    await edit.getByTestId("identity-field:instructions:0").fill("Scout the vault.");
+    await edit.getByTestId("identity-submit").click();
+    await notice.getByText("Scout is updated").waitFor();
+    await notice.getByText(/reach the agent at its next run/).waitFor();
+    assert.deepEqual(familyCalls("meta/identity/update")[0].set, { display_name: "Chief scout", instructions: ["Scout the vault."] });
+    await agent("scout").getByText("Chief scout").first().waitFor();
+    await page.screenshot({ path: path.join(evidenceDir, "identity-changes-edited.png"), fullPage: true });
+    await page.getByTestId("identity-cancel").click();
+
+    // Archive, then unarchive from the archived agents.
+    await openAgent("scout");
+    await page.getByTestId("roster-action:scout:archive").click();
+    await page.getByTestId("identity-confirm:scout:archive").getByTestId("identity-confirm-yes").click();
+    await notice.getByText("Chief scout is archived").waitFor();
+    await gone(agent("scout"), "the archived agent in the roster");
+    await page.getByTestId("roster-archived:scout").waitFor();
+    await page.screenshot({ path: path.join(evidenceDir, "identity-changes-archived.png"), fullPage: true });
+    await page.getByTestId("identity-confirm-cancel").click();
+    await page.getByTestId("roster-archived-action:scout:unarchive").click();
+    await page.getByTestId("identity-confirm:scout:unarchive").getByTestId("identity-confirm-yes").click();
+    await notice.getByText("Chief scout is back").waitFor();
+    await agent("scout").waitFor();
+    await page.getByTestId("identity-confirm-cancel").click();
+
+    // Remove: the confirmation says it is for good.
+    await openAgent("scout");
+    await page.getByTestId("roster-action:scout:remove").click();
+    const confirm = page.getByTestId("identity-confirm:scout:remove");
+    await confirm.getByText(/Its name can never be used again/).waitFor();
+    await confirm.getByText(/Archive is the reversible choice/).waitFor();
+    await page.screenshot({ path: path.join(evidenceDir, "identity-changes-remove-confirm.png"), fullPage: true });
+    await confirm.getByTestId("identity-confirm-yes").click();
+    await notice.getByText("Chief scout is removed").waitFor();
+    await gone(agent("scout"), "the removed agent in the roster");
+    assert.equal(family.agents.has("scout"), false);
+    await page.getByTestId("identity-confirm-cancel").click();
+
+    // A profile that needs a decision: the request waits, and its requester
+    // withdraws it.
+    await page.getByTestId("roster-new-agent").click();
+    await form.getByTestId("identity-profile:reviewer").check();
+    await form.getByTestId("identity-field:name").fill("auditor");
+    await form.getByTestId("identity-submit").click();
+    await notice.getByText("A person must decide this change").waitFor();
+    await notice.getByTestId("identity-deadline").waitFor();
+    await page.screenshot({ path: path.join(evidenceDir, "identity-changes-pending.png"), fullPage: true });
+    await notice.getByTestId("identity-withdraw").click();
+    await notice.getByText("The request is withdrawn").waitFor();
+    const held = familyCalls("meta/identity/create").at(-1);
+    assert.deepEqual(familyCalls("meta/identity/withdraw"), [{ request_id: held.request_id }]);
+    assert.equal(family.agents.has("auditor"), false);
+
+    // Every change the browser sent names its request id, and nothing but
+    // the family's own members and the console's caller scope.
+    const sent = server.requests
+      .filter((request) => request.method === "POST" && request.url === "/console/rpc")
+      .map((request) => JSON.parse(request.body || "{}"))
+      .filter((request) => /^meta\/identity\/(create|update|archive|unarchive|remove)$/.test(request.method));
+    assert.equal(sent.length, 7);
+    for (const request of sent) {
+      assert.equal(typeof request.params.request_id, "string", request.method);
+      const members = Object.keys(request.params).filter((key) => key !== "expected_caller_scope").sort();
+      const allowed = request.method === "meta/identity/create"
+        ? ["agents", "request_id"]
+        : request.method === "meta/identity/update"
+          ? ["expected_spec_digest", "name", "request_id", "set"]
+          : ["expected_spec_digest", "name", "request_id"];
+      assert.deepEqual(members, allowed, request.method);
+    }
+    assert.deepEqual(pageErrors, []);
+    process.stdout.write("browser identity changes story ok\n");
+  } finally {
+    if (browser) {
+      await browser.close();
+    }
+    await server.close();
+  }
+}
+
 const allScenarios = [
     ...scenarios,
     ...require("./scenarios/settled-history-queue.cjs").scenarios,
@@ -4983,6 +5170,7 @@ const allScenarios = [
     { id: "topology-role-chip-pane-reuse", family: "topology", backend: "mock", run: runTopologyRoleChipPaneReuseBrowserProof },
     { id: "gating-audit-refresh-error", family: "console", backend: "mock", run: runGatingAuditRefreshErrorProof },
     { id: "chat-pane-older-history-after-today-prefill", family: "presentation", backend: "mock", run: runChatPaneOlderHistoryAfterTodayPrefillProof },
+    { id: "identity-changes-story", family: "console", backend: "mock", run: runIdentityChangesStoryProof },
   ];
 
 module.exports = { scenarios: allScenarios };

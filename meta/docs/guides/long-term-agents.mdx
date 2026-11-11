@@ -38,6 +38,7 @@ runtime = await (
     .identity_creation({
         "enabled": True,
         "approval": {"rules": [{
+            "change": ["adopt"],
             "requester": {"kind": "host", "surface": "rpc"},
             "outcome": {"kind": "allow"},
         }]},
@@ -57,6 +58,7 @@ const runtime = await Meta.builder()
   .identityCreation({
     enabled: true,
     approval: { rules: [{
+      change: ["adopt"],
       requester: { kind: "host", surface: "rpc" },
       outcome: { kind: "allow" },
     }] },
@@ -66,10 +68,15 @@ const runtime = await Meta.builder()
 
 </CodeGroup>
 
-A rule selects by the change, the requester and the target, and gives an
-outcome. Your SDK calls are the host on the `rpc` surface, which the rule
-above selects. Add `"change": ["adopt"]` to a rule to limit it to one kind of
-change. A change no rule matches gets the default outcome, which is `deny`.
+A rule names the changes it governs in `change`, selects by the requester and
+the target, and gives an outcome. The rule above lets your SDK calls, which
+are the host on the `rpc` surface, adopt agents. A rule must name at least one
+change: `create`, `descriptive` (display name, instructions, context, labels),
+`capability`, `peers`, `profile`, `archive` (an archive and an unarchive),
+`remove`, `adopt` or `authority`. A change no rule matches gets the default
+outcome, which is `deny`, so the sections below need their changes added to
+the rule. An `authority` change always needs a person's decision: a rule that
+allows it is refused at init.
 
 The outcomes of this release are `allow`, `require_approval` (a person
 decides; the rule names an `approver`) and `deny`. A policy that names

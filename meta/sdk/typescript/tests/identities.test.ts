@@ -1069,7 +1069,20 @@ describe("identity family: the launch policy", () => {
     enabled: true,
     approval: {
       rules: [
-        { requester: { kind: "host", surface: "rpc" }, outcome: { kind: "allow" } },
+        {
+          change: [
+            "create",
+            "descriptive",
+            "capability",
+            "peers",
+            "profile",
+            "archive",
+            "remove",
+            "adopt",
+          ],
+          requester: { kind: "host", surface: "rpc" },
+          outcome: { kind: "allow" },
+        },
       ],
     },
   });

@@ -68,6 +68,11 @@ mod child_mob_tests;
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+#[path = "mob_handle_runtime_identity_tools_tests.rs"]
+mod identity_tools_tests;
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 #[path = "mob_handle_runtime_reserved_identity_tests.rs"]
 mod reserved_identity_tests;
 
@@ -2249,6 +2254,11 @@ struct MobToolCaller {
     session_id: meerkat_core::types::SessionId,
     private_owners: crate::private_owners::PrivateOwners,
     state: std::sync::Weak<meerkat_mob_mcp::MobMcpState>,
+    /// The member of the runtime's own mob this session belongs to, once
+    /// that mob's roster named it. A session belongs to one member for its
+    /// whole life, so the answer is kept; the tool list, which cannot wait,
+    /// reads it here (see [`Self::member_in`]).
+    member: Arc<std::sync::OnceLock<meerkat_mob::AgentIdentity>>,
 }
 
 /// The policy denial code of a council a member private to a person asks
@@ -2256,6 +2266,34 @@ struct MobToolCaller {
 const PRIVATE_MEMBER_COUNCIL: &str = "private_member_council";
 
 impl MobToolCaller {
+    /// The caller of the member session `session_id`.
+    fn new(
+        session_id: meerkat_core::types::SessionId,
+        private_owners: crate::private_owners::PrivateOwners,
+        state: std::sync::Weak<meerkat_mob_mcp::MobMcpState>,
+    ) -> Self {
+        Self {
+            session_id,
+            private_owners,
+            state,
+            member: Arc::default(),
+        }
+    }
+
+    /// The member of `mob` the calling session belongs to, without waiting:
+    /// the kept answer, else one read of the mob's own roster state, which
+    /// asks nothing of the mob's actor. `None` for a session no member of
+    /// `mob` holds, and while the roster is being written: the caller asks
+    /// again at its next read.
+    fn member_in(&self, mob: &MobHandle) -> Option<meerkat_mob::AgentIdentity> {
+        if let Some(member) = self.member.get() {
+            return Some(member.clone());
+        }
+        let (member, _) =
+            futures::FutureExt::now_or_never(mob.member_of_session(&self.session_id))??;
+        Some(self.member.get_or_init(|| member).clone())
+    }
+
     /// The person the calling member is private to, when it is private to
     /// one. A caller whose member cannot be read is refused: whom it acts
     /// for is unknown.
@@ -2300,11 +2338,11 @@ impl meerkat_core::service::MobToolsFactory for AutoWireParentMobToolsFactory {
     ) -> Result<Arc<dyn meerkat_core::AgentToolDispatcher>, Box<dyn std::error::Error + Send + Sync>>
     {
         let spawner_comms_name = args.comms_name.clone();
-        let caller = MobToolCaller {
-            session_id: args.session_id.clone(),
-            private_owners: self.private_owners.clone(),
-            state: self.state.clone(),
-        };
+        let caller = MobToolCaller::new(
+            args.session_id.clone(),
+            self.private_owners.clone(),
+            self.state.clone(),
+        );
         let inner = self.inner.build_mob_tools(args).await?;
         Ok(Arc::new(AutoWireParentMobToolDispatcher {
             inner,
@@ -2400,14 +2438,14 @@ pub(crate) fn agent_mob_tool_wrapper_as_member_for_test(
         member_auth_binding: None,
         member_auth_binding_recorded: None,
         realm_profiles: None,
-        caller: Some(MobToolCaller {
-            session_id: session,
-            private_owners: runtime.private_owners().clone(),
-            state: runtime
+        caller: Some(MobToolCaller::new(
+            session,
+            runtime.private_owners().clone(),
+            runtime
                 .agent_mob_mcp_state()
                 .as_ref()
                 .map_or_else(std::sync::Weak::new, Arc::downgrade),
-        }),
+        )),
     })
 }
 
@@ -2424,30 +2462,51 @@ impl meerkat_core::AgentToolDispatcher for AutoWireParentMobToolDispatcher {
     }
 
     fn tools(&self) -> Arc<[Arc<meerkat_core::types::ToolDef>]> {
-        self.inner
+        let mut tools = self
+            .inner
             .tools()
             .iter()
             .map(idle_retire_patched_tool_def)
-            .collect::<Vec<_>>()
-            .into()
+            .collect::<Vec<_>>();
+        if self.mounted_identity_tools().is_some() {
+            tools.extend(
+                crate::identity_creation::identity_tool_defs()
+                    .iter()
+                    .cloned(),
+            );
+        }
+        tools.into()
     }
 
-    /// The wrapper patches three tool definitions and adds none, so the inner
-    /// exactness holds for the patched catalog as well.
+    /// The wrapper patches three tool definitions of the inner catalog and
+    /// adds none to it, so the inner exactness holds for them. The identity
+    /// tools it adds for a member are its own exact entries, and they may
+    /// wait behind the deferred catalog: a member's surface can come to need
+    /// the catalog's control plane when the mob's identity family comes to
+    /// take changes, after the surface was built.
     fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
-        self.inner.tool_catalog_capabilities()
+        let inner = self.inner.tool_catalog_capabilities();
+        meerkat_core::ToolCatalogCapabilities {
+            exact_catalog: inner.exact_catalog,
+            may_require_catalog_control_plane: inner.may_require_catalog_control_plane
+                || self.caller.is_some(),
+        }
     }
 
     fn tool_catalog(&self) -> Arc<[meerkat_core::ToolCatalogEntry]> {
-        self.inner
+        let mut catalog = self
+            .inner
             .tool_catalog()
             .iter()
             .map(|entry| meerkat_core::ToolCatalogEntry {
                 tool: idle_retire_patched_tool_def(&entry.tool),
                 ..entry.clone()
             })
-            .collect::<Vec<_>>()
-            .into()
+            .collect::<Vec<_>>();
+        if self.mounted_identity_tools().is_some() {
+            catalog.extend(crate::identity_creation::identity_tool_catalog());
+        }
+        catalog.into()
     }
 
     async fn dispatch(
@@ -2476,6 +2535,13 @@ impl meerkat_core::AgentToolDispatcher for AutoWireParentMobToolDispatcher {
                      would carry that person's conversation into forks of shared members",
                 ),
             ));
+        }
+        // The identity tools: a member private to a person asks for no
+        // change of long-term agents either, refused the same way.
+        if crate::identity_creation::is_identity_tool(call.name) {
+            // Heap-placed: the call's future stays out of this dispatch's
+            // own future, whose layout every member build computes.
+            return Box::pin(self.dispatch_identity_tool(call, context)).await;
         }
         // A member private to a person the caller is not private to is
         // checked and retired as a name no member holds: nothing tells the
@@ -2759,6 +2825,123 @@ fn raw_member_tool_arguments(tool_name: &str, args: &Value) -> Vec<(&'static str
 }
 
 impl AutoWireParentMobToolDispatcher {
+    /// The identity tools of the runtime's mob: its identity family over the
+    /// identity runtime's own handle to the mob, while the family takes
+    /// changes (the launch has an identity policy, and it is enabled).
+    /// `None` on a launch without an enabled policy, whose family serves
+    /// reads only and refuses every change, before the identity authority
+    /// is installed and once the mob stopped. Nothing here keeps what it
+    /// reads: the identity runtime's own answer is the only fact that the
+    /// tools exist.
+    fn identity_tools(&self) -> Option<crate::identity_creation::IdentityAgentTools> {
+        let identity_runtime = self
+            .identity_runtime
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()?;
+        if !identity_runtime.identity_changes_enabled() {
+            return None;
+        }
+        let family = identity_runtime.identity_family()?;
+        let mob = identity_runtime.runtime_services().mob_handle()?;
+        Some(crate::identity_creation::IdentityAgentTools::new(
+            family, mob,
+        ))
+    }
+
+    /// The identity tools this surface's member is offered, or `None`: its
+    /// tool list then does not name them at all. A member is offered them
+    /// when the mob's identity family takes changes, its own live grant admits spawn
+    /// tooling in the mob, and it is not private to a person (such a member
+    /// would carry that person's conversation into a shared agent's
+    /// instructions or first message). A session whose member the mob's
+    /// roster does not name yet is offered none.
+    fn mounted_identity_tools(&self) -> Option<crate::identity_creation::IdentityAgentTools> {
+        let caller = self.caller.as_ref()?;
+        let tools = self.identity_tools()?;
+        if !tools.grant_admits_spawn_tooling(&caller.session_id) {
+            return None;
+        }
+        let member = caller.member_in(tools.mob())?;
+        if caller
+            .private_owners
+            .owner_of(tools.mob().mob_id().as_str(), member.as_str())
+            .is_some()
+        {
+            return None;
+        }
+        Some(tools)
+    }
+
+    /// One call of an identity tool. Who asks is the member whose session
+    /// this surface was built for, read from the mob's roster, never from
+    /// the call's arguments. A member private to a person is refused
+    /// `private_requester`, as its council is; a surface with no identity
+    /// tools, and a session no member of the mob holds, answer as for a tool
+    /// that does not exist. Whether the member's grant admits the change is
+    /// the family's to answer, from Core's admission.
+    async fn dispatch_identity_tool(
+        &self,
+        call: meerkat_core::types::ToolCallView<'_>,
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
+        let (Some(caller), Some(tools)) = (self.caller.as_ref(), self.identity_tools()) else {
+            return Err(meerkat_core::ToolError::not_found(call.name));
+        };
+        let Some((member, _)) = tools.mob().member_of_session(&caller.session_id).await else {
+            return Err(meerkat_core::ToolError::not_found(call.name));
+        };
+        let requester = crate::identity_creation::IdentityToolCaller::new(
+            crate::identity_creation::identity_name_of_member(&member),
+            caller.session_id.clone(),
+        )
+        .private_to_a_person(
+            caller
+                .private_owners
+                .owner_of(tools.mob().mob_id().as_str(), member.as_str())
+                .is_some(),
+        );
+        if requester.private {
+            let refusal = crate::identity_creation::IdentityRefusalKind::PrivateRequester;
+            return Err(meerkat_core::ToolError::policy_denied(
+                meerkat_core::ToolConsequenceDenial::new(refusal.token(), refusal.describe()),
+            ));
+        }
+        // The dispatch names the session the call ran in: it is this
+        // surface's member session, or whom the call acts for is unknown.
+        if context
+            .origin_session_id()
+            .is_some_and(|origin| origin != &caller.session_id)
+        {
+            return Err(meerkat_core::ToolError::execution_failed(format!(
+                "tool '{}': its call did not run in the session of the member this tool \
+                 surface serves",
+                call.name
+            )));
+        }
+        let run_id = context.run_id().map(ToString::to_string);
+        let site = match (run_id.as_deref(), context.round()) {
+            (Some(run_id), Some(round)) => {
+                crate::identity_creation::IdentityToolCallSite::in_round(run_id, round, call.id)
+            }
+            _ => crate::identity_creation::IdentityToolCallSite::outside_a_run(call.id),
+        };
+        let answer = tools
+            .call(&requester, &site, call.name, call.args.get())
+            .await
+            .map_err(|fault| {
+                meerkat_core::ToolError::execution_failed(format!("tool '{}': {fault}", call.name))
+            })?;
+        Ok(
+            meerkat_core::types::ToolResult::new(
+                call.id.to_string(),
+                answer.text(),
+                answer.refused,
+            )
+            .into(),
+        )
+    }
+
     async fn dispatch_mob_spawn_member(
         &self,
         call: meerkat_core::types::ToolCallView<'_>,

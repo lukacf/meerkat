@@ -38,7 +38,7 @@ const UNREGISTER_PENDING: &str = "UnregisterPending { stage: \"shutdown_runtime_
 
 static NEXT_MOB: AtomicU64 = AtomicU64::new(0);
 
-fn unique(prefix: &str) -> String {
+pub(super) fn unique(prefix: &str) -> String {
     format!("{prefix}-{}", NEXT_MOB.fetch_add(1, Ordering::Relaxed))
 }
 
@@ -244,13 +244,13 @@ impl LlmClient for ScriptedModel {
 
 /// What persists across lifetimes besides the state directory: the model and
 /// the record of host tool calls.
-struct Host {
+pub(super) struct Host {
     model: Arc<ScriptedModel>,
     dispatched: Arc<Mutex<Vec<String>>>,
 }
 
 impl Host {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             model: Arc::new(ScriptedModel::default()),
             dispatched: Arc::new(Mutex::new(Vec::new())),
@@ -288,7 +288,7 @@ fn durable(dir: &Path) -> ChildMobStorage {
 /// One runtime lifetime: the stock persistent composition over `dir`, with
 /// persistent sessions, a persistent root mob, child-available host tools and
 /// whatever `configure` selects.
-async fn lifetime(
+pub(super) async fn lifetime(
     dir: &Path,
     mob_id: &str,
     host: &Host,

@@ -567,6 +567,120 @@ mod tests {
         }
     }
 
+    /// A route read from JSON holds what `ReasoningRoute::new` builds: its
+    /// backend is a provider-matrix backend string. Every such string reads
+    /// back with every API; any other backend is a deserialization error
+    /// that names it, for a route alone and for a route inside a refusal, a
+    /// resolution and a report.
+    #[test]
+    fn route_deserialization_refuses_a_backend_outside_the_provider_matrix() {
+        let mut backends: Vec<ReasoningBackend> = Vec::new();
+        backends.extend(
+            OpenAiBackendKind::ALL
+                .iter()
+                .copied()
+                .map(ReasoningBackend::OpenAi),
+        );
+        backends.extend(
+            AnthropicBackendKind::ALL
+                .iter()
+                .copied()
+                .map(ReasoningBackend::Anthropic),
+        );
+        backends.extend(
+            GoogleBackendKind::ALL
+                .iter()
+                .copied()
+                .map(ReasoningBackend::Google),
+        );
+        backends.extend(
+            SelfHostedBackendKind::ALL
+                .iter()
+                .copied()
+                .map(ReasoningBackend::SelfHosted),
+        );
+        assert_eq!(backends.len(), 15, "every kind of the four families");
+        for backend in backends {
+            for api in ALL_APIS {
+                let route = ReasoningRoute::new(backend, api);
+                let document =
+                    serde_json::json!({"backend": backend.as_str(), "api": api.as_str()});
+                assert_eq!(
+                    serde_json::from_value::<ReasoningRoute>(document)
+                        .expect("a provider-matrix backend reads back"),
+                    route
+                );
+            }
+        }
+
+        for backend in [
+            "typo",
+            "",
+            "OPENAI_API",
+            "openai",
+            "copilot ",
+            "open_ai_api",
+        ] {
+            let error = serde_json::from_value::<ReasoningRoute>(
+                serde_json::json!({"backend": backend, "api": "responses"}),
+            )
+            .expect_err("a backend outside the provider matrix is refused");
+            assert!(
+                error.to_string().contains(&format!("{backend:?}")),
+                "the error names the backend {backend:?}: {error}"
+            );
+        }
+        for document in [
+            serde_json::json!({"api": "responses"}),
+            serde_json::json!({"backend": 7, "api": "responses"}),
+            serde_json::json!({"backend": null, "api": "responses"}),
+            serde_json::json!({"backend": "openai_api"}),
+            serde_json::json!({"backend": "openai_api", "api": "typo"}),
+        ] {
+            assert!(
+                serde_json::from_value::<ReasoningRoute>(document.clone()).is_err(),
+                "{document}"
+            );
+        }
+
+        // The same refusal wherever a route is carried.
+        let typo = serde_json::json!({"backend": "typo", "api": "responses"});
+        let mut refusal =
+            serde_json::to_value(unsupported_level_refusal()).expect("a refusal serializes");
+        assert!(serde_json::from_value::<ReasoningEffortRefusal>(refusal.clone()).is_ok());
+        refusal["route"] = typo.clone();
+        assert!(
+            serde_json::from_value::<ReasoningEffortRefusal>(refusal).is_err(),
+            "a refusal with a route outside the provider matrix is refused"
+        );
+
+        let mut resolution = serde_json::json!({
+            "requested": "high", "level": "high", "provider": "openai",
+            "model": "test-openai-default",
+            "route": {"backend": "openai_api", "api": "responses"},
+            "fields": ["reasoning.effort"], "facts": "catalog", "decided_by": "request",
+        });
+        assert!(serde_json::from_value::<ReasoningEffortResolution>(resolution.clone()).is_ok());
+        resolution["route"] = typo.clone();
+        assert!(
+            serde_json::from_value::<ReasoningEffortResolution>(resolution).is_err(),
+            "a resolution with a route outside the provider matrix is refused"
+        );
+
+        let mut report = serde_json::json!({"requested": "high", "sent": [{
+            "level": "high", "provider": "openai", "model": "test-openai-default",
+            "route": {"backend": "openai_api", "api": "responses"},
+            "fields": ["reasoning.effort"], "facts": "catalog", "decided_by": "request",
+            "requests": 1,
+        }]});
+        assert!(serde_json::from_value::<ReasoningEffortReport>(report.clone()).is_ok());
+        report["sent"][0]["route"] = typo;
+        assert!(
+            serde_json::from_value::<ReasoningEffortReport>(report).is_err(),
+            "a report with a route outside the provider matrix is refused"
+        );
+    }
+
     /// A documented JSON example without the whitespace between its tokens:
     /// the bytes `serde_json::to_string` produces for the same document.
     fn compact(document: &str) -> String {

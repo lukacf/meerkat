@@ -20,9 +20,18 @@ moving one from configuration to run-time changes.
 
 ## 1. Launch with a policy
 
-The gateway changes agents only under your policy. Without one, every change
-is refused `change_denied`. Give the policy on the builder. It is sent as
-`runtime_options.identity_creation`, and it needs a persistent launch.
+The gateway changes agents only under your policy. Give the policy on the
+builder. It is sent as `runtime_options.identity_creation`, and it needs a
+persistent launch.
+
+| The launch gives | Reads (`list`, `get`, `directory`, `operation`) | A change, and `plan` |
+| --- | --- | --- |
+| no policy | answer | refused `change_denied` |
+| a policy with `"enabled": false` | answer | refused `change_denied` |
+| an enabled policy | answer | each change gets the outcome of the rules that match it; a change no rule matches is refused `change_denied` |
+
+A call of this family never answers "method not found" on a gateway of this
+release: that answer means the gateway is older.
 
 <CodeGroup>
 
@@ -338,7 +347,10 @@ await identities.remove("editor", { expectedSpecDigest: digest, requestId: "remo
   first message did not start; it is seated at its next delivery, without a
   restart. On a governed runtime a create that gives a first message is
   refused before anything is written (`unsupported` at
-  `agents[i].first_message`): create the agent without one.
+  `agents[i].first_message`): create the agent without one. The peers an
+  agent lists are checked against the policy's `peers` rules, whose default
+  is `deny` (`peer_not_allowed`): allow them there, for example with
+  `"peers": {"default": "allow"}`.
 - **Update.** `set` names what changes; a member left out is unchanged.
   `instructions` and `context` are replaced whole. `labels` sets the keys it
   names, and `labels_remove` removes keys. A `profile` change moves the agent

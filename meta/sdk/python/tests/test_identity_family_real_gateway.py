@@ -121,6 +121,8 @@ _HOST_MAY_CHANGE_AGENTS = {
             }
         ]
     },
+    # Which peers an agent may list; the default is deny.
+    "peers": {"default": "allow"},
 }
 
 
@@ -495,16 +497,75 @@ async def test_a_policy_the_gateway_cannot_read_refuses_the_launch(tmp_path):
         assert where in str(failure), (policy, str(failure))
 
 
-async def test_a_launch_without_the_policy_refuses_every_change(tmp_path):
-    async with gateway(tmp_path, policy=None) as identities:
-        record = await identities.get("scout")
+async def _reads_answer_and_every_change_is_denied(identities) -> None:
+    """The family's reads answer; a change, and the plan of one, is refused
+    ``change_denied`` and writes nothing."""
+    record = await identities.get("scout")
+    assert record.spec_digest.startswith("sha256:")
+    assert "scout" in {agent.name for agent in (await identities.list()).agents}
+    assert isinstance(await identities.directory(), AgentDirectoryPage)
+    request = AgentRef(
+        name="scout", expected_spec_digest=record.spec_digest, request_id="adopt-scout"
+    )
+    for refused_call in (
+        lambda: identities.adopt(
+            "scout", expected_spec_digest=record.spec_digest, request_id="adopt-scout"
+        ),
+        lambda: identities.plan("adopt", request),
+        lambda: identities.create(
+            [AgentSpec(name="editor", profile="writer")], request_id="create-editor"
+        ),
+    ):
         with pytest.raises(IdentityRefusedError) as refused:
-            await identities.adopt(
-                "scout", expected_spec_digest=record.spec_digest, request_id="adopt-scout"
-            )
+            await refused_call()
         assert refused.value.kind == "change_denied"
         assert refused.value.kind in IDENTITY_REFUSAL_KINDS
-        assert refused.value.details.get("change") == "adopt"
+        assert refused.value.retryable is False
+    assert isinstance(
+        await identities.operation(request_id="adopt-scout"), IdentityOperationUnknown
+    )
+    assert {agent.name for agent in (await identities.list()).agents} == {"scout"}
+
+
+async def test_a_launch_without_the_policy_refuses_every_change(tmp_path):
+    """Never method not found: on a launch that gives no policy the reads
+    answer and every change is the family's refusal."""
+    async with gateway(tmp_path, policy=None) as identities:
+        await _reads_answer_and_every_change_is_denied(identities)
+
+
+async def test_a_disabled_policy_refuses_every_change(tmp_path):
+    async with gateway(tmp_path, policy={"enabled": False}) as identities:
+        await _reads_answer_and_every_change_is_denied(identities)
+
+
+async def test_a_policy_without_a_matching_rule_denies_the_change(tmp_path):
+    """An enabled policy governs the changes its rules name; a change no
+    rule matches gets the default, deny."""
+    adopt_only = {
+        "enabled": True,
+        "approval": {
+            "rules": [
+                {
+                    "change": ["adopt"],
+                    "requester": {"kind": "host", "surface": "rpc"},
+                    "outcome": {"kind": "allow"},
+                }
+            ]
+        },
+    }
+    async with gateway(tmp_path, policy=adopt_only) as identities:
+        record = await identities.get("scout")
+        with pytest.raises(IdentityRefusedError) as refused:
+            await identities.create(
+                [AgentSpec(name="editor", profile="writer")], request_id="create-editor"
+            )
+        assert refused.value.kind == "change_denied"
+        assert refused.value.details.get("change") == "create"
+        adopted = await identities.adopt(
+            "scout", expected_spec_digest=record.spec_digest, request_id="adopt-scout"
+        )
+        assert isinstance(adopted, IdentityDone), adopted
 
 
 async def test_params_the_gateway_cannot_read_are_the_familys_refusal(tmp_path):

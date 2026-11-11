@@ -66,6 +66,8 @@ const HOST_MAY_CHANGE_AGENTS = {
       },
     ],
   },
+  // Which peers an agent may list; the default is deny.
+  peers: { default: "allow" },
 };
 
 // The agents the host's configuration declares: one, `scout`.
@@ -446,19 +448,74 @@ describe("identity family on a real gateway", () => {
     }
   });
 
-  it("a launch without the policy refuses every change", { skip }, async () => {
-    await withGateway(async (identities) => {
-      const record = await identities.get("scout");
-      const refused = await refusedBy(
-        identities.adopt("scout", {
-          expectedSpecDigest: record.specDigest,
-          requestId: "adopt-scout",
-        }),
-      );
+  // The family's reads answer; a change, and the plan of one, is refused
+  // `change_denied` and writes nothing.
+  async function readsAnswerAndEveryChangeIsDenied(identities: IdentitiesHandle): Promise<void> {
+    const record = await identities.get("scout");
+    assert.ok(record.specDigest.startsWith("sha256:"));
+    assert.ok((await identities.list()).agents.some((agent) => agent.name === "scout"));
+    assert.ok(Array.isArray((await identities.directory()).profiles));
+    const request = {
+      name: "scout",
+      expectedSpecDigest: record.specDigest,
+      requestId: "adopt-scout",
+    };
+    for (const call of [
+      () => identities.adopt("scout", request),
+      () => identities.plan("adopt", request),
+      () =>
+        identities.create([{ name: "editor", profile: "writer" }], { requestId: "create-editor" }),
+    ]) {
+      const refused = await refusedBy(call());
       assert.equal(refused.kind, "change_denied");
       assert.ok(IDENTITY_REFUSAL_KINDS.has(refused.kind));
-      assert.equal(refused.details.change, "adopt");
-    }, null);
+      assert.equal(refused.retryable, false);
+    }
+    assert.equal((await identities.operation({ requestId: "adopt-scout" })).outcome, "unknown");
+    assert.deepEqual(
+      (await identities.list()).agents.map((agent) => agent.name),
+      ["scout"],
+    );
+  }
+
+  it("a launch without the policy refuses every change", { skip }, async () => {
+    // Never method not found: on a launch that gives no policy the reads
+    // answer and every change is the family's refusal.
+    await withGateway(readsAnswerAndEveryChangeIsDenied, null);
+  });
+
+  it("a disabled policy refuses every change", { skip }, async () => {
+    await withGateway(readsAnswerAndEveryChangeIsDenied, { enabled: false });
+  });
+
+  it("a policy without a matching rule denies the change", { skip }, async () => {
+    // An enabled policy governs the changes its rules name; a change no
+    // rule matches gets the default, deny.
+    const adoptOnly = {
+      enabled: true,
+      approval: {
+        rules: [
+          {
+            change: ["adopt"],
+            requester: { kind: "host", surface: "rpc" },
+            outcome: { kind: "allow" },
+          },
+        ],
+      },
+    };
+    await withGateway(async (identities) => {
+      const record = await identities.get("scout");
+      const denied = await refusedBy(
+        identities.create([{ name: "editor", profile: "writer" }], { requestId: "create-editor" }),
+      );
+      assert.equal(denied.kind, "change_denied");
+      assert.equal(denied.details.change, "create");
+      const adopted = await identities.adopt("scout", {
+        expectedSpecDigest: record.specDigest,
+        requestId: "adopt-scout",
+      });
+      assert.equal(adopted.outcome, "done");
+    }, adoptOnly);
   });
 
   it("params the gateway cannot read are the family's refusal", { skip }, async () => {

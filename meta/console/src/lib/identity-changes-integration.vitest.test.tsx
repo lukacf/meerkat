@@ -353,12 +353,18 @@ describe("long-term agents in the console", () => {
     expect(facts(warden)).not.toMatch(/sha256:/);
     cleanup();
 
-    // A person is named as a decision's requester is; the key is a tooltip.
+    // A person is named as a decision's requester is. The person's key is
+    // shown nowhere: not as text, and not behind a tooltip or any other
+    // attribute.
     const courier = await record("courier");
     expect(facts(courier)).toContain("dana");
     expect(facts(courier)).toContain("Decided by a person");
     expect(courier.textContent || "").not.toContain(key);
-    expect(courier.querySelector(`[title='${key}']`)?.textContent).toBe("dana");
+    for (const node of [courier, ...Array.from(courier.querySelectorAll("*"))]) {
+      for (const attribute of Array.from(node.attributes)) {
+        expect(`${attribute.name}=${attribute.value}`).not.toContain("principal:");
+      }
+    }
     expect(courier.textContent || "").not.toMatch(origin);
     cleanup();
 

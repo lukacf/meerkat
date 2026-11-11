@@ -1072,7 +1072,7 @@ export function AgentRecordFacts({
                   value: requester.kind === "agent"
                     ? <AgentName id={requester.identity} link />
                     : requester.kind === "person"
-                      ? <span title={requester.key}>{requester.name}</span>
+                      ? requester.name
                       : requester.words,
                 }
               : null,

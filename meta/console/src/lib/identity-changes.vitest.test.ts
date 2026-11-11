@@ -450,8 +450,9 @@ describe("an outcome in words", () => {
   it("says who asked and the consent in words", () => {
     const name = (key: string) => (key === 'principal:["human","example","dana"]' ? "dana" : key);
     expect(requesterWords({ requesterKind: "agent", requester: "helper", atMs: 1, consentForm: "allowed" }, name)).toEqual({ kind: "agent", identity: "helper" });
+    // A person is named, and the person's key is not carried on.
     expect(requesterWords({ requesterKind: "human", requester: 'principal:["human","example","dana"]', atMs: 1, consentForm: "decided" }, name))
-      .toEqual({ kind: "person", name: "dana", key: 'principal:["human","example","dana"]' });
+      .toEqual({ kind: "person", name: "dana" });
     expect(requesterWords({ requesterKind: "host", requester: "console", atMs: 1, consentForm: "allowed" }, name)).toEqual({ kind: "host", words: "This console" });
     expect(requesterWords({ requesterKind: "host", requester: "ops", atMs: 1, consentForm: "allowed" }, name)).toEqual({ kind: "host", words: "The host (ops)" });
     expect(consentWords("allowed")).toBe("Allowed by the host's rules");

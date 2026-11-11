@@ -832,9 +832,9 @@ const HOST_SURFACE_WORDS: Readonly<Record<string, string>> = {
 export type RequesterWords =
   /** An agent: shown by its name, as the roster names it. */
   | { kind: "agent"; identity: string }
-  /** A person: `name` as the console names a decision's requester, `key`
-   * the tooltip. */
-  | { kind: "person"; name: string; key: string }
+  /** A person: `name` as the console names a decision's requester. The
+   * person's key is not carried on: it is shown nowhere. */
+  | { kind: "person"; name: string }
   | { kind: "host"; words: string };
 
 /** Who asked for an agent, as the record says. `personName` is how the
@@ -842,7 +842,7 @@ export type RequesterWords =
 export function requesterWords(provenance: AgentProvenance, personName: (key: string) => string): RequesterWords {
   if (provenance.requesterKind === "agent") return { kind: "agent", identity: provenance.requester };
   if (provenance.requesterKind === "human") {
-    return { kind: "person", name: personName(provenance.requester), key: provenance.requester };
+    return { kind: "person", name: personName(provenance.requester) };
   }
   return { kind: "host", words: HOST_SURFACE_WORDS[provenance.requester] ?? `The host (${provenance.requester})` };
 }

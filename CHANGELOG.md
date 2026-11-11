@@ -72,8 +72,10 @@ them.
     the message names one. `model_not_found` is `LlmError::ModelNotFound`
     (reason `invalid_model`), the class of an HTTP 404 with that code and of
     the realtime adapter. The turn fails once, on the LLM failure itself and
-    not on used-up retries. A refusal code outside this list is still the
-    unknown class.
+    not on used-up retries. A code outside this list is classified the same
+    way, as the invalid request, when its error object's `type` is
+    `invalid_request_error`; with any other type, or with none, it is still
+    the unknown class and is retried.
   - An error object that names no `code` is classified by its `type` when
     the type is `invalid_request_error` or an exhausted-quota code. Any
     other type decides nothing, as before: a type alone is never a policy

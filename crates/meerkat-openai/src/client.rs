@@ -3556,7 +3556,7 @@ impl OpenAiClient {
                                 "OpenAI response failed"
                             );
 
-                            let error = map_responses_stream_error(error_code, error_msg);
+                            let error = cause.error(error_code, error_msg);
 
                             done_emitted = true;
                             chunk_yielded.set(true);
@@ -3578,7 +3578,7 @@ impl OpenAiClient {
                                 "OpenAI streaming error"
                             );
 
-                            let error = map_responses_stream_error(error_code, error_msg);
+                            let error = cause.error(error_code, error_msg);
 
                             done_emitted = true;
                             chunk_yielded.set(true);
@@ -3913,20 +3913,25 @@ fn map_responses_stream_error(error_code: &str, error_message: &str) -> LlmError
         | "invalid_value"
         | "invalid_argument"
         | "unsupported_value"
-        | "unsupported_parameter" => {
-            match LlmError::from_http_status(400, error_message.to_string(), None) {
-                LlmError::InvalidRequest { message } => LlmError::InvalidRequest {
-                    message: format!("{error_code}: {message}"),
-                },
-                other => other,
-            }
-        }
+        | "unsupported_parameter" => refused_request_error(error_code, error_message),
         // One code, one class, whatever carries it: over HTTP this code is a
         // 404, and the realtime adapter maps it the same way.
         "model_not_found" => LlmError::from_http_status(404, error_message.to_string(), None),
         _ => LlmError::Unknown {
             message: format!("{error_code}: {error_message}"),
         },
+    }
+}
+
+/// A refused request named by `error_code`, classified as the body of an
+/// HTTP 400 with `error_message` is: the invalid request with the code in
+/// front of the message, or the class the message itself names.
+fn refused_request_error(error_code: &str, error_message: &str) -> LlmError {
+    match LlmError::from_http_status(400, error_message.to_string(), None) {
+        LlmError::InvalidRequest { message } => LlmError::InvalidRequest {
+            message: format!("{error_code}: {message}"),
+        },
+        other => other,
     }
 }
 
@@ -3958,6 +3963,23 @@ impl<'a> ResponsesStreamCause<'a> {
                     || LlmError::code_signals_quota_exhausted(error_type)
             })
         })
+    }
+
+    /// The typed error of this cause for `error_code` (its classifying
+    /// code, or the event's default) and `error_message`. A code this
+    /// client does not know, on an error object whose type is the
+    /// request-refusal type, is classified by that type, as the status
+    /// classifies the same refusal over HTTP 400; the message keeps the
+    /// code. With any other type an unknown code stays the unknown class.
+    fn error(&self, error_code: &str, error_message: &str) -> LlmError {
+        match map_responses_stream_error(error_code, error_message) {
+            LlmError::Unknown { .. }
+                if self.code.is_some() && self.error_type == Some("invalid_request_error") =>
+            {
+                refused_request_error(error_code, error_message)
+            }
+            error => error,
+        }
     }
 }
 

@@ -145,6 +145,7 @@ Use `rkat models` for every supported ID and its current limits.
 
     | Model | Context | Max output | Positioning |
     |-------|---------|------------|-------------|
+    | `gemini-4-carbon` | 1M (shared by input, thinking, and output) | 64K | Google's strongest Gemini 4 reasoning model; paid Gemini API tiers only; thinking levels `low`/`medium`/`high` (default `medium`), no sampling parameters |
     | `gemini-4-argon` | 1M (shared by input, thinking, and output) | 64K | Default Gemini model; paid Gemini API tiers only; thinking levels `low`/`medium`/`high` (default `medium`), no sampling parameters |
     | `gemini-3.8-flash` | 1M | 64K | Recommended Flash model; also available on the free tier |
     | `gemini-3.7-flash` | 1M | 64K | Deprecated upstream; Google serves it with `gemini-3.8-flash` |
@@ -316,6 +317,14 @@ name prefixes.
   is defined for that build by the account's model list: its provider is the
   family of the protocol its listed endpoints name, and its limits are the
   account's. A model the account does not offer is refused, typed.
+- On a route of a GitHub Copilot account, two IDs that are equal once every
+  `.` is read as `-` name the same model: the account lists
+  `claude-opus-5.5`, the catalog `claude-opus-5-5`. A session created or
+  resumed under either spelling runs the registry model under the registry
+  ID, and the request names the account's ID. An ID the account lists
+  exactly wins; an ID that matches two of its entries and none exactly is
+  refused. A live model switch and a fallback target take the registry ID
+  only. Other routes match IDs exactly.
 
 All public session-creation surfaces use the same resolver. Inherited bindings
 retain the realm that owns their config.
@@ -325,11 +334,11 @@ Rust applications can select only the provider adapters they use:
 <CodeGroup>
 
 ```toml Anthropic-only feature selection
-meerkat = { version = "=0.9.11", default-features = false, features = ["anthropic", "jsonl-store"] }
+meerkat = { version = "=0.9.12", default-features = false, features = ["anthropic", "jsonl-store"] }
 ```
 
 ```toml All providers
-meerkat = { version = "=0.9.11", features = ["all-providers", "jsonl-store"] }
+meerkat = { version = "=0.9.12", features = ["all-providers", "jsonl-store"] }
 ```
 
 </CodeGroup>
@@ -674,7 +683,7 @@ current REST router does not expose a blob-byte fetch route. See
 
 ```toml
 # Exactly pin the pre-1.0 Meerkat crate family.
-meerkat = { version = "=0.9.11", features = ["sqlite-store", "session-store"] }
+meerkat = { version = "=0.9.12", features = ["sqlite-store", "session-store"] }
 ```
 
 The `meerkat` facade enables `anthropic`, `openai`, and `gemini` by

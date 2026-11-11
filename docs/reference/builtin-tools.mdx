@@ -1236,6 +1236,62 @@ Returns an empty array if no matches are found.
 
 Utility tools are general-purpose helpers enabled by default when builtins are on.
 
+### Paths the file tools never write
+
+`apply_patch` and `blob_save_file` run inside the host process, so no OS
+process confinement applies to them. They refuse to create, change, delete or
+move:
+
+- any path in a `.rkat` directory, the engine's own, at the project root
+  or in any directory under it: the project's MCP servers (`mcp.toml`),
+  hooks (`config.toml`) and skills, and, with the CLI's default
+  project-local state, the realm's config document and stores. A host
+  started from a subdirectory reads that directory's `.rkat`, so a nested
+  one is refused like the one at the root. The name is matched in any
+  letter case, through `..`, an absolute path or a symbolic link, and when
+  the directory does not exist yet.
+- any path the host declares as its own state or input that lies inside the
+  project root, with everything under it: the realm state root (also one
+  given with `--state-root`), the realm's documents (`config.toml`,
+  `config_state.json`, `realm_manifest.json`, the `authorization`
+  directory), the user config document, the MCP, hook and skill sources and
+  a file credential store. `rkat`, `rkat-rpc`, `rkat-rest` and `rkat-mcp`
+  declare theirs. A Rust host declares its own with
+  `AgentFactory::with_protected_host_inputs` (or
+  `CompositeDispatcher::protect_host_paths` on a dispatcher it builds
+  itself); without it only `.rkat/` is refused.
+- any path with a symbolic link whose target does not exist: the write would
+  create the link's target, wherever it points.
+
+The refusal is an ordinary invalid-arguments tool error, returned to the
+model, and nothing is written. Reading (`view_image`, `blob_load_file`, an
+update hunk's context of an ordinary file) is not restricted by this rule,
+and neither is the `shell` tool, whose reach its
+[confinement](/concepts/configuration#the-hosts-own-inputs) decides. To change
+engine configuration, use the CLI (`rkat mcp add`, `rkat config`,
+`rkat auth`, `rkat skill add`) or edit the files yourself.
+
+A declared path that contains the project root, or is the project root, is
+not applied as a whole. That is the layout of `rkat-rpc` and `rkat-mcp`
+started without `--context-root`: they root these tools in the realm
+directory itself. The realm's documents are refused there like everywhere
+else, with the hooks and skills read from that directory's `.rkat`, and
+other files are written as before. The realm's stores (sessions, runtime,
+jobs, tasks, blobs and the rest) lie in the same directory and are not
+refused in that layout. Start the server with `--context-root <dir>` (SDK
+option `context_root` / `contextRoot`) to give agents a project directory of
+their own and keep the whole realm out of these tools' reach. `rkat-rest`
+without a context root roots the tools in its own instance directory, which
+does not hold the realm.
+
+Three limits of the rule: a hard link that already exists in the project to
+a protected file is written through; a symbolic link deeper inside a
+protected directory is not followed (the rule follows a link at
+`<project root>/.rkat` and at each declared path, so the directory such a
+link leads to is refused under its own name; a link inside it to another
+place is not); and a `.rkat` below the project root that is itself a
+symbolic link is refused by its name, not where it leads.
+
 <Accordion title="datetime">
 Get the current date and time. Returns ISO 8601 formatted datetime and Unix timestamp.
 
@@ -1276,6 +1332,12 @@ A pure rename is not supported: a move must include at least one update hunk.
 Multi-file patches are applied in order and are not transactional, so an error
 after an earlier operation can leave that earlier operation applied.
 
+Every path of the patch (each add, update and delete target and both ends of
+a move) is checked before the first change against the
+[paths the file tools never write](#paths-the-file-tools-never-write). A patch
+that names one is refused with an invalid-arguments error and applies none of
+its operations.
+
 The JSON result reports `status: "success"` plus `added_files`,
 `modified_files`, and `deleted_files`.
 
@@ -1313,6 +1375,9 @@ Save decoded bytes from the session blob store to a file inside the project root
 
 <ParamField body="path" type="String" required>
   Destination path, relative to the project root or absolute within the project root.
+  A path in `.rkat/` or in another of the
+  [paths the file tools never write](#paths-the-file-tools-never-write) is
+  refused before anything is created.
 </ParamField>
 
 <ParamField body="overwrite" type="Boolean" default="false">

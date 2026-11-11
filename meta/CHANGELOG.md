@@ -28,6 +28,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   [Changing an agent's instructions](docs/concepts/roster.mdx#changing-an-agents-instructions),
   with this release's limits (one agent's set of operator instructions,
   governed runtimes, forks).
+- Rust, in `meerkat_meta::identity_first::runtime`: the steps an identity
+  change runs after its commit, `IdentityRuntime::after_update` (answers an
+  `InstructionOutcome`, with an `InstructionNextSessionReason` where the
+  change waits for a fresh conversation; its input is an
+  `InstructionsChanged`) and `IdentityRuntime::after_removal`;
+  `INSTRUCTIONS_NAMESPACE`, `RESERVED_INSTRUCTION_NAMESPACE_PREFIX` and
+  `is_reserved_instruction_namespace`. `SessionBridge` gains
+  `member_session_service`, with a default that answers none.
 
 ### Changed
 

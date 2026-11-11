@@ -389,14 +389,17 @@ What to know:
   start: the record of every removed agent is revoked then. Archiving an
   agent keeps the record: the agent comes back on its conversation with its
   instructions as they were. A change made while the agent is archived is
-  recorded and reaches it at its first run after its unarchive.
+  recorded and reaches it after its unarchive: at its first run, or at the
+  next one when the first starts before the mob's delivery lands. The same
+  holds for an agent the host's configuration dropped and lists again with
+  other instructions.
 - **Models that take a system instruction only ahead of the conversation**
-  (in today's model catalog: every Gemini model, the GPT Live models,
-  `claude-opus-4-7`, `claude-opus-4-5`, `claude-sonnet-5`,
-  `claude-sonnet-4-6`, `claude-sonnet-4-5` and `claude-haiku-4-5`) apply the
-  change once a compaction at a run's first request carries it, or with a
-  fresh conversation. A model whose wire carries no system row besides its
-  prompt applies it only with a fresh conversation.
+  apply the change once a compaction at a run's first request carries it,
+  or with a fresh conversation. The update's result says
+  `applies_after_compaction`, and `meta/instruction_status` reports such a
+  member's slot with `leading_prefix_only_lowering`. A model whose wire
+  carries no system row besides its prompt applies it only with a fresh
+  conversation.
 - **A change made while the gateway was down** (the usual way to edit a
   configuration) is recorded when the gateway next registers the agent: at
   its start for the agents its roster lists and the rows it serves, and
@@ -415,6 +418,26 @@ What to know:
   memory added after the agent's own, so a text those sections start with
   reads as unchanged. Make such an edit while the gateway runs (a roster
   refresh or an update records it), or reset the agent.
+
+What an update's result says. The step that runs after an update of an
+agent's instructions committed answers one of:
+
+- `applies_at_next_run`: the change is recorded and reaches the agent at
+  its next run (a run that starts within moments may still use the earlier
+  instructions). For an agent no build has created a conversation for,
+  nothing is recorded: its first build takes the current text.
+- `applies_after_compaction`: the change is recorded; the agent's model
+  takes a system instruction only ahead of the conversation.
+- `applies_at_next_session`, with a `reason`: the change is not recorded,
+  or cannot reach this conversation, and applies from the agent's next
+  fresh conversation. The reasons are `prepared_authorization_required`,
+  `slot_limit_exceeded`, `active_set_budget_exceeded`, `body_too_large`,
+  `lowering_unavailable` and `record_unavailable` (the mob's record could
+  not be read or written now; the gateway compares the agent again when it
+  next registers it).
+- `unchanged`: the update left the instructions as they were.
+
+The update of the spec itself always stands.
 
 Limits of this release, each reported by `meta/instruction_status` or by the
 update's result:

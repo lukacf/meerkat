@@ -464,22 +464,23 @@ describe("identity family on a real gateway", () => {
   it("params the gateway cannot read are the family's refusal", { skip }, async () => {
     await withGateway(async (_identities, rpc) => {
       const digest = `sha256:${"0".repeat(64)}`;
-      const cases: Array<[Record<string, unknown>, string, string]> = [
+      const cases: Array<[Record<string, unknown>, string | null, string]> = [
         // A change names its operation.
         [{ name: "scout", expected_spec_digest: digest }, "request_id", "empty"],
         // A member is missing.
-        [{ request_id: "r", name: "scout" }, "expected_spec_digest", "malformed"],
+        [{ request_id: "r", name: "scout" }, null, "malformed"],
         // A member the request does not have.
         [
           { request_id: "r", name: "scout", expected_spec_digest: digest, custody: "store" },
-          "custody",
+          null,
           "malformed",
         ],
       ];
-      for (const [params, , problem] of cases) {
+      for (const [params, field, problem] of cases) {
         const refused = await refusedBy(rpc("meta/identity/adopt", params));
         assert.equal(refused.kind, "invalid_request", JSON.stringify(params));
         assert.equal(refused.details.problem, problem, JSON.stringify(params));
+        assert.equal(refused.field, field, JSON.stringify(params));
       }
     });
   });

@@ -511,11 +511,11 @@ async def test_params_the_gateway_cannot_read_are_the_familys_refusal(tmp_path):
     async with gateway(tmp_path) as identities:
         runtime = identities._runtime
         digest = "sha256:" + "0" * 64
-        for params, problem in (
+        for params, problem, field in (
             # A change names its operation.
-            ({"name": "scout", "expected_spec_digest": digest}, "empty"),
+            ({"name": "scout", "expected_spec_digest": digest}, "empty", "request_id"),
             # A member is missing.
-            ({"request_id": "r", "name": "scout"}, "malformed"),
+            ({"request_id": "r", "name": "scout"}, "malformed", None),
             # A member the request does not have.
             (
                 {
@@ -525,9 +525,11 @@ async def test_params_the_gateway_cannot_read_are_the_familys_refusal(tmp_path):
                     "custody": "store",
                 },
                 "malformed",
+                None,
             ),
         ):
             with pytest.raises(IdentityRefusedError) as refused:
                 await runtime._rpc("meta/identity/adopt", params)
             assert refused.value.kind == "invalid_request", params
             assert refused.value.details.get("problem") == problem, params
+            assert refused.value.field == field, params

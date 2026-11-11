@@ -789,7 +789,6 @@ describe("identity family: one refusal error, a closed vocabulary", () => {
       refusal("changes_held", { retryable: true, detail: "Retry later." }),
       refusal("owner_read_only"),
       refusal("invalid_request", {
-        field: "custody",
         retryable: false,
         detail: "What was wrong, and what to send instead.",
         problem: "malformed",
@@ -821,12 +820,12 @@ describe("identity family: one refusal error, a closed vocabulary", () => {
     assert.equal(bare.retryable, null);
 
     // Params the gateway cannot read are the same error, never -32602:
-    // `malformed` for an unknown member or a wrong type, `empty` for a
-    // change without its request id.
+    // `malformed` with no field for an unknown member or a wrong type,
+    // `empty` at `request_id` for a change without its request id.
     const malformed = await rejection(identities.adopt("scout", options));
     assert.ok(malformed instanceof IdentityRefusedError);
     assert.equal(malformed.kind, "invalid_request");
-    assert.equal(malformed.field, "custody");
+    assert.equal(malformed.field, null);
     assert.deepEqual(malformed.details, { problem: "malformed" });
     const unnamed = await rejection(identities.adopt("scout", options));
     assert.ok(unnamed instanceof IdentityRefusedError);

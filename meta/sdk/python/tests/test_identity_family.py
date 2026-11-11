@@ -927,19 +927,20 @@ def test_only_the_family_code_with_a_kind_is_an_identity_refusal():
 
 def test_params_the_gateway_cannot_read_are_the_same_typed_error():
     """Params that do not parse (an unknown member, a wrong type) are refused
-    ``invalid_request`` with problem ``malformed`` on the family's code, and
-    a change without its ``request_id`` with problem ``empty``: never as
-    JSON-RPC invalid params."""
+    ``invalid_request`` with problem ``malformed`` and no field on the
+    family's code, and a change without its ``request_id`` with problem
+    ``empty`` at ``request_id``: never as JSON-RPC invalid params."""
     from meerkat_meta import IdentityRefusedError
 
-    for field, problem in (("custody", "malformed"), ("request_id", "empty")):
+    for field, problem in ((None, "malformed"), ("request_id", "empty")):
+        members = {"field": field} if field is not None else {}
         error = _rpc_error_from_payload(
             refusal_error(
                 "invalid_request",
-                field=field,
                 retryable=False,
                 detail="What was wrong, and what to send instead.",
                 problem=problem,
+                **members,
             ),
             request_id="1",
             method="meta/identity/adopt",

@@ -443,8 +443,11 @@ pub(crate) mod refused_writes_test_support {
     /// `verify` compares against. `verify` runs last, in this process again.
     /// All three get the same fresh directory.
     ///
-    /// On a platform where the limit does not refuse the write the row is
-    /// skipped, with a line on stderr that says so.
+    /// On Linux the limit always refuses the write, so a probe write that
+    /// succeeded there means the recipe broke: the row FAILS, because a
+    /// proof that did not run must not pass. Elsewhere, where a platform may
+    /// not enforce the limit this way, the row is skipped, with a line on
+    /// stderr that says so.
     pub(crate) fn with_writes_refused<T>(
         module: &str,
         test: &str,
@@ -490,10 +493,15 @@ pub(crate) mod refused_writes_test_support {
             .output()
             .expect("start the test with writes refused");
         let stdout = String::from_utf8_lossy(&output.stdout);
-        if output.status.success() && stdout.contains(REFUSED_CHILD_NOT_REFUSED) {
+        let not_refused = output.status.success() && stdout.contains(REFUSED_CHILD_NOT_REFUSED);
+        if not_refused && !cfg!(target_os = "linux") {
             eprintln!("SKIPPED {test}: {REFUSED_CHILD_NOT_REFUSED}");
             return;
         }
+        assert!(
+            !not_refused,
+            "{test} proved nothing: {REFUSED_CHILD_NOT_REFUSED}, and Linux always does"
+        );
         assert!(
             output.status.success() && stdout.contains(REFUSED_CHILD_DONE),
             "{test} failed with writes refused ({}):\n{stdout}\n{}",

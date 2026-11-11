@@ -10153,16 +10153,36 @@ pub enum SessionLlmIdentityOverrideError {
         requested: String,
         configured: String,
     },
-    #[error(
-        "reasoning_effort is '{}' but provider_params.reasoning_effort is '{}': set one of \
-         them, or the same level in both",
-        top_level.as_wire_str(),
-        nested.as_wire_str()
-    )]
+    /// The change names the reasoning effort level in two places that
+    /// disagree. `top_level` is what the `reasoning_effort` field asks for:
+    /// `Some(level)` when it sets a level, `None` when it clears the level.
+    /// `nested` is the level the new `provider_params` name.
+    #[error("{}", reasoning_effort_disagreement_text(*top_level, *nested))]
     ReasoningEffortSpellingsDisagree {
-        top_level: crate::model_profile::capabilities::EffortLevel,
+        top_level: Option<crate::model_profile::capabilities::EffortLevel>,
         nested: crate::model_profile::capabilities::EffortLevel,
     },
+}
+
+/// The text of
+/// [`SessionLlmIdentityOverrideError::ReasoningEffortSpellingsDisagree`]:
+/// what each place asks for, then what a caller can do.
+fn reasoning_effort_disagreement_text(
+    top_level: Option<crate::model_profile::capabilities::EffortLevel>,
+    nested: crate::model_profile::capabilities::EffortLevel,
+) -> String {
+    let nested = nested.as_wire_str();
+    match top_level {
+        Some(top_level) => format!(
+            "reasoning_effort is '{}' but provider_params.reasoning_effort is '{nested}': set \
+             one of them, or the same level in both",
+            top_level.as_wire_str()
+        ),
+        None => format!(
+            "reasoning_effort is cleared but provider_params.reasoning_effort is '{nested}': \
+             clear the level or name one, not both"
+        ),
+    }
 }
 
 /// Resolve a turn-time model/provider/auth override against the current
@@ -10296,9 +10316,13 @@ pub fn resolve_session_llm_identity_override(
 /// and a params value that clearing the level leaves empty is dropped. With no
 /// level anywhere the result is the params tri-state alone.
 ///
-/// A change that gives both spellings, the field and the nested key, with
-/// different levels is refused
+/// A change that names the level in both places, the field and the nested
+/// key of its new params, must ask for one outcome. Two different levels are
+/// refused, and so is a field that clears the level beside new params that
+/// name one, whatever level that is
 /// ([`SessionLlmIdentityOverrideError::ReasoningEffortSpellingsDisagree`]).
+/// The same level in both is accepted, and a clear beside new params that
+/// name no level is a clear.
 pub fn resolve_session_provider_params(
     current: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
     params_override: Option<
@@ -10309,17 +10333,22 @@ pub fn resolve_session_provider_params(
     Option<crate::lifecycle::run_primitive::ProviderParamsOverride>,
     SessionLlmIdentityOverrideError,
 > {
-    if let (Some(TurnMetadataOverride::Set(params)), Some(TurnMetadataOverride::Set(top_level))) =
+    if let (Some(TurnMetadataOverride::Set(params)), Some(field)) =
         (params_override.as_ref(), reasoning_effort.as_ref())
         && let Some(nested) = params.reasoning_effort
-        && nested != *top_level
     {
-        return Err(
-            SessionLlmIdentityOverrideError::ReasoningEffortSpellingsDisagree {
-                top_level: *top_level,
-                nested,
-            },
-        );
+        let top_level = match field {
+            TurnMetadataOverride::Set(level) => Some(*level),
+            TurnMetadataOverride::Clear => None,
+        };
+        if top_level != Some(nested) {
+            return Err(
+                SessionLlmIdentityOverrideError::ReasoningEffortSpellingsDisagree {
+                    top_level,
+                    nested,
+                },
+            );
+        }
     }
     Ok(session_provider_params_rule(
         current,

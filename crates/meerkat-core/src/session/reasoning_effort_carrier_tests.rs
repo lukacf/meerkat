@@ -171,7 +171,7 @@ fn turn_reasoning_effort_is_field_level_and_sticky() {
     assert_eq!(
         turn(None, Some(Set(&nested)), Some(Set(High))).unwrap_err(),
         SessionLlmIdentityOverrideError::ReasoningEffortSpellingsDisagree {
-            top_level: High,
+            top_level: Some(High),
             nested: Low,
         }
     );
@@ -227,6 +227,16 @@ fn a_cleared_turn_level_with_a_nested_level_is_refused() {
                 } if *named == nested_level
             ),
             "{current:?} / {nested_level:?}: {refused:?}"
+        );
+        // The refusal says that the field cleared the level: it carries no
+        // top-level level, and the level the params name.
+        assert_eq!(
+            refused,
+            SessionLlmIdentityOverrideError::ReasoningEffortSpellingsDisagree {
+                top_level: None,
+                nested: nested_level,
+            },
+            "{current:?} / {nested_level:?}"
         );
         let text = refused.to_string();
         assert!(

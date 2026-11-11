@@ -7250,11 +7250,13 @@ mod tests {
     }
 
     /// The client identity and the API versions a Copilot route sends when
-    /// its backend options set none, pinned value by value. The Copilot API
-    /// answers a model listing whose `Editor-Version` is too old with a
-    /// `client_version_deprecated` warning on every entry, and a listing
-    /// without `X-GitHub-Api-Version` with reduced limits, so a change of any
-    /// of these values is a deliberate one, made with a live list read.
+    /// its backend options set none, pinned value by value: the rows below
+    /// fail when a header is no longer sent or a value changes. In our own
+    /// list reads on one account a listing whose `Editor-Version` was too
+    /// old came back with a `client_version_deprecated` warning on every
+    /// entry, and a listing without `X-GitHub-Api-Version` returned other
+    /// limits, so a change of any of these values is a deliberate one, made
+    /// with a live list read.
     const PINNED_CLIENT_IDENTITY: [(&str, &str); 3] = [
         ("user-agent", "GitHubCopilotChat/0.73.0"),
         ("editor-version", "vscode/1.145.2"),
@@ -8655,10 +8657,11 @@ mod tests {
         }
 
         /// A token route sends the pinned client identity on its model
-        /// listing and on inference, with the Copilot API's version on both:
-        /// the listing (discovery) states an account's full limits only when
-        /// it carries `X-GitHub-Api-Version`. GitHub's identity lookup gets
-        /// the User-Agent and GitHub's own API version, and no editor header.
+        /// listing and on inference, with the Copilot API's version on both
+        /// (in our own list reads on one account a listing without
+        /// `X-GitHub-Api-Version` returned other limits). GitHub's identity
+        /// lookup gets the User-Agent and GitHub's own API version, and no
+        /// editor header.
         #[tokio::test]
         async fn token_routes_send_the_pinned_client_identity_and_api_versions() {
             let harness = Harness::new([Ok(svc_bot()), Ok(models_response())]);

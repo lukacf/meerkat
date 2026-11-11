@@ -107,13 +107,18 @@ them.
   session and mob of the process (the issuer is the service, not the
   session) and is lost when the process starts again and, a generation of
   4,096 responses at a time, once the process has received 4,096 to 8,192
-  later responses. So after a restart, or a resume from the store in a new
+  later responses (sooner when responses carry very many items: a generation
+  also closes at 262,144 pieces of material; a response is always recorded
+  whole). So after a restart, or a resume from the store in a new
   process, earlier turns are replayed without their encrypted reasoning,
   hosted-tool call items (a web search's queries, sources and citations;
   the answer text stays) and item ids, on the same service too; the steps
-  of the new process replay in full. Nothing in a stored session, an event,
-  an export or an SDK payload changes: 0.9.12 and this release write the
-  same rows for the same response.
+  of the new process replay in full. The first request after a restart, and
+  the first after a generation is forgotten, therefore renders those earlier
+  turns differently than the request before it did, and the provider's
+  prompt cache misses once from the first such turn on. Nothing in a stored
+  session, an event, an export or an SDK payload changes: 0.9.12 and this
+  release write the same rows for the same response.
 
   With `store: true`, the `previous_response_id` shortcut is taken only when
   the last step is one the process received from the target service. The

@@ -602,7 +602,11 @@ out in the plain form, on the same service too, and the steps of the new
 process replay in full. One request can carry both. The knowledge is shared
 by every session and mob of the process, because the issuer is the service
 and not the session, and a process remembers its most recent 4,096 to 8,192
-responses.
+responses (fewer when responses carry very many items; a response is always
+remembered whole). The first request after a restart, and the first after
+the process forgets a batch of responses, renders the earlier turns
+differently than the request before it did, so the provider's prompt cache
+misses once from the first such turn on.
 
 The issuer is the service, not the account or organisation: material one
 credential received is still replayed under another credential of the same

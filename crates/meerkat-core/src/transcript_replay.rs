@@ -14,9 +14,11 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 const OPENAI_CONTINUITY_LEDGER_GENERATION: usize = 4_096;
 
 /// How many pieces of material (provider metadata values and hosted-tool
-/// items) one response may record. A response that carries more is not
-/// recorded and stays of unknown issuer.
-const OPENAI_CONTINUITY_LEDGER_RESPONSE_MATERIAL: usize = 64;
+/// items) a generation holds per response it is sized for. A generation
+/// closes when it has recorded its number of responses, or earlier once it
+/// holds this many pieces for each of them, so its memory is bounded
+/// whatever one response carries. A response is always recorded whole.
+const OPENAI_CONTINUITY_LEDGER_GENERATION_PIECES_PER_RESPONSE: usize = 64;
 
 /// One piece of continuity material an assistant step carries: an
 /// OpenAI-family provider metadata value, or a hosted-tool item, whose
@@ -46,7 +48,9 @@ impl<'a> OpenAiContinuityMaterial<'a> {
     }
 
     /// The identity of the material: a digest of the whole value as it is
-    /// stored. `None` for metadata of another provider family.
+    /// stored. `None` for what is not continuity material: metadata of
+    /// another provider family, and a hosted-tool block that holds a stream
+    /// progress event instead of a provider item.
     fn key(self) -> Option<[u8; 32]> {
         let (kind, stored) = match self {
             Self::Metadata(metadata) => {
@@ -55,10 +59,15 @@ impl<'a> OpenAiContinuityMaterial<'a> {
                 }
                 (&b"metadata\0"[..], serde_json::to_vec(metadata).ok()?)
             }
-            Self::HostedToolItem(content) => (
-                &b"hosted-tool-item\0"[..],
-                serde_json::to_vec(content).ok()?,
-            ),
+            Self::HostedToolItem(content) => {
+                if is_stream_progress_event(content) {
+                    return None;
+                }
+                (
+                    &b"hosted-tool-item\0"[..],
+                    serde_json::to_vec(content).ok()?,
+                )
+            }
         };
         let mut hasher = Sha256::new();
         hasher.update(b"openai-continuity-material\0");
@@ -66,6 +75,31 @@ impl<'a> OpenAiContinuityMaterial<'a> {
         hasher.update(&stored);
         Some(hasher.finalize().into())
     }
+}
+
+/// Whether hosted-tool content is a stream progress event (its `type` is an
+/// event name, `response.<...>`, such as
+/// `response.web_search_call.searching`) and not a provider item. A progress
+/// event is never replayed, so it is no continuity material: it neither
+/// needs to be known for its step to be admitted nor takes room in a ledger.
+fn is_stream_progress_event(content: &serde_json::Value) -> bool {
+    content
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|kind| kind.starts_with("response."))
+}
+
+/// The keys of the material `material` holds, each once, in order. Hashing
+/// happens here, before any ledger lock is taken.
+fn continuity_keys<'a>(
+    material: impl IntoIterator<Item = OpenAiContinuityMaterial<'a>>,
+) -> Vec<[u8; 32]> {
+    let mut seen = HashSet::new();
+    material
+        .into_iter()
+        .filter_map(OpenAiContinuityMaterial::key)
+        .filter(|key| seen.insert(*key))
+        .collect()
 }
 
 /// What this process knows about which service issued OpenAI-family
@@ -87,20 +121,28 @@ impl<'a> OpenAiContinuityMaterial<'a> {
 /// type carries the issuer. Material two issuers both returned byte for
 /// byte is contested and belongs to neither.
 ///
-/// Bound: digests only, never material. A response records at most 64
-/// pieces of material (one that carries more is not recorded). The ledger
-/// holds two generations of 4,096 responses each: when the current
-/// generation is full the previous one is forgotten as a whole and the
-/// current one becomes the previous, so the ledger remembers the most
-/// recent 4,096 to 8,192 responses and forgets in batches, never one step
-/// per request. An entry is a 32-byte digest and a 4-byte issuer index:
-/// about 1.5 MiB for 8,192 typical responses of four pieces each, and at
-/// most about 24 MiB when every response carries 64.
+/// Bound: digests only, never material, and every response is recorded
+/// whole, however much it carries. The ledger holds two generations of
+/// 4,096 responses each: when the current generation is full the previous
+/// one is forgotten as a whole and the current one becomes the previous, so
+/// the ledger remembers the most recent 4,096 to 8,192 responses and
+/// forgets in batches, never one step per request. A generation is also
+/// full once it holds 262,144 pieces of material (64 for each of its
+/// responses), so responses that carry very much close it sooner. An entry
+/// is a 32-byte digest and a 4-byte issuer index: about 1.5 MiB for 8,192
+/// typical responses of four pieces each, and about 24 MiB for two
+/// generations full of pieces, plus the last response recorded.
 ///
 /// One ledger serves every session of the process, because the issuer is
-/// the service and not the session. It holds plain `std::sync` state, takes
-/// its lock only inside its own synchronous methods, and recovers a
-/// poisoned lock instead of failing other sessions.
+/// the service and not the session. It holds plain `std::sync` state and
+/// recovers a poisoned lock instead of failing other sessions. Its lock is
+/// taken in one place and covers lookups and inserts of digests only:
+/// material is serialized and hashed before the lock is taken.
+///
+/// The writers ([`Self::record_response`], [`Self::record_step`]) assert
+/// provenance: they say "this process received this material from this
+/// service". A provider client calls them for the responses it receives. A
+/// host or a test that calls them takes that statement on itself.
 pub struct OpenAiContinuityLedger {
     inner: Mutex<OpenAiContinuityLedgerInner>,
     generation: usize,
@@ -124,6 +166,8 @@ enum OpenAiContinuityLedgerEntry {
     Contested,
 }
 
+// Everything that runs under the ledger's lock is in this block, and it
+// sees digests only (`continuity_keys` made them before the lock was taken).
 impl OpenAiContinuityLedgerInner {
     fn entry(&self, key: &[u8; 32]) -> Option<OpenAiContinuityLedgerEntry> {
         self.current
@@ -141,6 +185,46 @@ impl OpenAiContinuityLedgerInner {
             }
         };
         u32::try_from(index).ok()
+    }
+
+    /// One response of `issuer` with the material `keys`, in a ledger whose
+    /// generations hold `generation` responses.
+    fn record(&mut self, issuer: &OpenAiContinuityIssuer, keys: &[[u8; 32]], generation: usize) {
+        let Some(index) = self.issuer_index(issuer) else {
+            return;
+        };
+        for key in keys {
+            let entry = match self.entry(key) {
+                None => OpenAiContinuityLedgerEntry::Issuer(index),
+                Some(OpenAiContinuityLedgerEntry::Issuer(recorded)) if recorded == index => {
+                    OpenAiContinuityLedgerEntry::Issuer(index)
+                }
+                Some(_) => OpenAiContinuityLedgerEntry::Contested,
+            };
+            self.current.insert(*key, entry);
+        }
+        self.current_responses += 1;
+        let pieces =
+            generation.saturating_mul(OPENAI_CONTINUITY_LEDGER_GENERATION_PIECES_PER_RESPONSE);
+        if self.current_responses >= generation || self.current.len() >= pieces {
+            self.previous = std::mem::take(&mut self.current);
+            self.current_responses = 0;
+        }
+    }
+
+    /// Whether every one of `keys` is material `issuer`, and no other
+    /// issuer, returned.
+    fn received_all(&self, issuer: &OpenAiContinuityIssuer, keys: &[[u8; 32]]) -> bool {
+        let Some(index) = self
+            .issuers
+            .iter()
+            .position(|known| known == issuer)
+            .and_then(|index| u32::try_from(index).ok())
+        else {
+            return false;
+        };
+        keys.iter()
+            .all(|key| self.entry(key) == Some(OpenAiContinuityLedgerEntry::Issuer(index)))
     }
 }
 
@@ -182,47 +266,26 @@ impl OpenAiContinuityLedger {
         Arc::clone(PROCESS.get_or_init(|| Arc::new(Self::new())))
     }
 
+    /// The one place the lock is taken. `under_lock` sees the ledger's
+    /// digests and nothing else.
+    fn with_inner<R>(&self, under_lock: impl FnOnce(&mut OpenAiContinuityLedgerInner) -> R) -> R {
+        let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        under_lock(&mut inner)
+    }
+
     /// Record one response this process received from `issuer`: every
-    /// piece of material it carried, as a whole.
+    /// piece of material it carried, as a whole, however much that is.
     pub fn record_response<'a>(
         &self,
         issuer: &OpenAiContinuityIssuer,
         material: impl IntoIterator<Item = OpenAiContinuityMaterial<'a>>,
     ) {
-        let mut keys: Vec<[u8; 32]> = Vec::new();
-        for key in material
-            .into_iter()
-            .filter_map(OpenAiContinuityMaterial::key)
-        {
-            if !keys.contains(&key) {
-                keys.push(key);
-            }
-            if keys.len() > OPENAI_CONTINUITY_LEDGER_RESPONSE_MATERIAL {
-                return;
-            }
-        }
+        let keys = continuity_keys(material);
         if keys.is_empty() {
             return;
         }
-        let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
-        let Some(index) = inner.issuer_index(issuer) else {
-            return;
-        };
-        for key in keys {
-            let entry = match inner.entry(&key) {
-                None => OpenAiContinuityLedgerEntry::Issuer(index),
-                Some(OpenAiContinuityLedgerEntry::Issuer(recorded)) if recorded == index => {
-                    OpenAiContinuityLedgerEntry::Issuer(index)
-                }
-                Some(_) => OpenAiContinuityLedgerEntry::Contested,
-            };
-            inner.current.insert(key, entry);
-        }
-        inner.current_responses += 1;
-        if inner.current_responses >= self.generation {
-            inner.previous = std::mem::take(&mut inner.current);
-            inner.current_responses = 0;
-        }
+        let generation = self.generation;
+        self.with_inner(|inner| inner.record(issuer, &keys, generation));
     }
 
     /// Record the assistant step `step` as one response received from
@@ -245,23 +308,8 @@ impl OpenAiContinuityLedger {
         issuer: &OpenAiContinuityIssuer,
         step: &[AssistantBlock],
     ) -> bool {
-        let inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
-        let Some(index) = inner
-            .issuers
-            .iter()
-            .position(|known| known == issuer)
-            .and_then(|index| u32::try_from(index).ok())
-        else {
-            return false;
-        };
-        let mut material = step
-            .iter()
-            .flat_map(OpenAiContinuityMaterial::of_block)
-            .filter_map(OpenAiContinuityMaterial::key)
-            .peekable();
-        material.peek().is_some()
-            && material
-                .all(|key| inner.entry(&key) == Some(OpenAiContinuityLedgerEntry::Issuer(index)))
+        let keys = continuity_keys(step.iter().flat_map(OpenAiContinuityMaterial::of_block));
+        !keys.is_empty() && self.with_inner(|inner| inner.received_all(issuer, &keys))
     }
 }
 
@@ -1207,6 +1255,13 @@ fn assistant_block_matches_target(
     admission: ReplayStepAdmission,
 ) -> bool {
     if !assistant_payload_eq(source, Some(projected)) {
+        return false;
+    }
+    // A hosted-tool item carries its provider-issued id in its content: in
+    // a step that is not admitted it has no projected form but omission.
+    if matches!(source, AssistantBlock::ServerToolContent { .. })
+        && !admission.admits_provider_items()
+    {
         return false;
     }
     let expected_meta = assistant_meta(source).filter(|metadata| admission.admits(metadata));

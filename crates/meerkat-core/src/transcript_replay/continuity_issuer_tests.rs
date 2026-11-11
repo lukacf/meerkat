@@ -295,18 +295,137 @@ fn a_generation_is_forgotten_whole() {
     assert_eq!(known(&ledger), [false, false, false, false, true, true]);
 }
 
-/// A response with more material than a response may record is not
-/// recorded at all, never in part.
+/// A response is recorded whole, however much material it carries, and is
+/// then known like any other, as a whole and by any of its pieces.
 #[test]
-fn an_oversized_response_is_not_recorded() {
+fn a_large_response_is_recorded_whole() {
     let ledger = OpenAiContinuityLedger::new();
-    let oversized: Vec<_> = (0..65).map(|n| answer(&format!("msg_{n}"))).collect();
-    ledger.record_step(&public_api(), &oversized);
-    assert!(!ledger.received_step_from(&public_api(), &oversized));
-    assert!(!ledger.received_step_from(&public_api(), &oversized[..1]));
-    let largest: Vec<_> = (0..64).map(|n| answer(&format!("other_{n}"))).collect();
-    ledger.record_step(&public_api(), &largest);
-    assert!(ledger.received_step_from(&public_api(), &largest));
+    let large: Vec<_> = (0..500).map(|n| answer(&format!("msg_{n}"))).collect();
+    ledger.record_step(&public_api(), &large);
+    assert!(ledger.received_step_from(&public_api(), &large));
+    assert!(ledger.received_step_from(&public_api(), &large[..1]));
+}
+
+/// A generation is bounded by the pieces it holds as well as by its
+/// responses, so a response that carries very much closes it sooner. With
+/// generations of three responses a generation is full at 192 pieces: a
+/// response of 200 closes its generation alone, and the third response after
+/// it forgets it. (Counted by responses alone it would share a generation
+/// with the next two and still be known.)
+#[test]
+fn a_generation_full_of_pieces_closes() {
+    let ledger = OpenAiContinuityLedger::with_generation(3);
+    let large: Vec<_> = (0..200).map(|n| answer(&format!("msg_{n}"))).collect();
+    ledger.record_step(&public_api(), &large);
+    assert!(ledger.received_step_from(&public_api(), &large));
+    for tag in ["a", "b"] {
+        ledger.record_step(&public_api(), &response(tag));
+    }
+    assert!(ledger.received_step_from(&public_api(), &large));
+    ledger.record_step(&public_api(), &response("c"));
+    assert!(!ledger.received_step_from(&public_api(), &large));
+    for tag in ["a", "b", "c"] {
+        assert!(ledger.received_step_from(&public_api(), &response(tag)));
+    }
+}
+
+/// A stream progress event kept in a step is not material: it is never
+/// replayed, so it is neither recorded nor required of a step.
+#[test]
+fn a_stream_progress_event_is_not_material() {
+    let progress = |sequence: u64| AssistantBlock::ServerToolContent {
+        id: Some("ws_1".to_string()),
+        kind: crate::ServerToolKind::WebSearch,
+        content: json!({
+            "type": "response.web_search_call.searching",
+            "item_id": "ws_1",
+            "sequence_number": sequence,
+        }),
+        meta: None,
+    };
+    let ledger = OpenAiContinuityLedger::new();
+    ledger.record_step(&public_api(), &[progress(1)]);
+    assert!(
+        !ledger.received_step_from(&public_api(), &[progress(1)]),
+        "a step of progress events alone carries no material"
+    );
+    let mut step = response("a");
+    ledger.record_step(&public_api(), &step);
+    step.push(progress(7));
+    assert!(
+        ledger.received_step_from(&public_api(), &step),
+        "a progress event the ledger never saw does not make its step unknown"
+    );
+}
+
+/// The text of the block that opens with `header`, braces matched.
+fn block_of<'a>(source: &'a str, header: &str) -> &'a str {
+    let start = source.find(header).expect("the block exists");
+    let mut depth = 0_usize;
+    for (offset, character) in source[start..].char_indices() {
+        match character {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &source[start..=start + offset];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("the block closes");
+}
+
+/// The process shares one ledger, so its lock covers lookups and inserts of
+/// digests only: a step is serialized and hashed before the lock is taken.
+/// The code keeps that shape: the lock is taken in one place, what runs
+/// under it sees digests and no material, and each use hands the lock one
+/// call on keys that were made before.
+#[test]
+fn nothing_is_hashed_under_the_ledger_lock() {
+    let source = include_str!("../transcript_replay.rs");
+    let source = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
+    assert_eq!(
+        source.matches(".lock()").count(),
+        1,
+        "the ledger's lock is taken in one place"
+    );
+    let under_lock = block_of(source, "impl OpenAiContinuityLedgerInner {");
+    let hashing = [
+        "OpenAiContinuityMaterial",
+        "continuity_keys",
+        "AssistantBlock",
+        "ProviderMeta",
+        "serde_json",
+        "Sha256",
+    ];
+    for name in hashing {
+        assert!(
+            !under_lock.contains(name),
+            "what runs under the lock does not name {name}"
+        );
+    }
+    let uses: Vec<&str> = source
+        .match_indices("self.with_inner(")
+        .map(|(at, _)| {
+            let call = &source[at..];
+            &call[..call.find(';').unwrap_or(call.len())]
+        })
+        .collect();
+    assert_eq!(uses.len(), 2, "record and look up: {uses:?}");
+    for call in uses {
+        assert!(
+            call.starts_with("self.with_inner(|inner| inner."),
+            "the lock is handed one call on the ledger's state: {call}"
+        );
+        for name in hashing.iter().chain(&[".key(", "of_block"]) {
+            assert!(
+                !call.contains(name),
+                "nothing is hashed inside the lock: {call}"
+            );
+        }
+    }
 }
 
 /// Metadata of another provider family is none of the ledger's material: it
@@ -604,6 +723,54 @@ fn a_projection_that_keeps_unadmitted_metadata_is_refused() {
         plan.validate_projected(&messages, &messages, recorded_as_dropped(&plan, &messages))
             .is_err()
     );
+}
+
+/// `message` with the blocks `blocks` in place of its own.
+fn with_blocks(message: &Message, blocks: Vec<AssistantBlock>) -> Message {
+    let Message::BlockAssistant(step) = message else {
+        panic!("an assistant step");
+    };
+    let mut step = step.clone();
+    step.blocks = blocks;
+    Message::BlockAssistant(step)
+}
+
+/// The same holds for a hosted-tool item, whose provider-issued id is in
+/// its content and not in metadata: a projection that keeps the item of a
+/// step the plan did not admit is refused, although every block's metadata
+/// is in the dropped form. The same projection of a step the process
+/// received from the target is accepted.
+#[test]
+fn a_projection_that_keeps_an_unadmitted_hosted_tool_item_is_refused() {
+    let stored = vec![hosted_search("ws_stored"), answer("msg_stored")];
+    let messages = [assistant(stored.clone())];
+    for received in [false, true] {
+        let ledger = Arc::new(OpenAiContinuityLedger::new());
+        if received {
+            ledger.record_step(&public_api(), &stored);
+        }
+        let target = target_of(public_api(), &ledger);
+        let plan =
+            ReplayPlan::build_with_openai_continuity(&messages, openai_target(), Some(&target))
+                .expect("plan");
+        let admission = plan.step_admission(ReplayMessageIndex(0));
+        assert_eq!(admission.admits_provider_items(), received);
+        // Every block in place, its metadata as the plan asks.
+        let kept = [with_blocks(
+            &messages[0],
+            stored
+                .iter()
+                .cloned()
+                .map(|block| admission.strip_foreign_metadata(block))
+                .collect(),
+        )];
+        assert_eq!(
+            plan.validate_projected(&messages, &kept, recorded_as_dropped(&plan, &messages))
+                .is_ok(),
+            received,
+            "received {received}: a kept hosted-tool item passes only in an admitted step"
+        );
+    }
 }
 
 /// An application of `plan` that recorded every entry as the plan asks, so

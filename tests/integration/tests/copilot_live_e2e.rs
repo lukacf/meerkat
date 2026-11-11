@@ -1200,7 +1200,7 @@ mod continuity_live {
     }
 
     pub(super) enum Outcome {
-        Accepted(Message),
+        Accepted(Box<Message>),
         Refused(String),
     }
 
@@ -1253,9 +1253,9 @@ mod continuity_live {
             drop(stream);
             let outcome = match (refusal, blocks) {
                 (Some(error), _) => Outcome::Refused(refusal_class(&error)),
-                (None, Some(blocks)) => Outcome::Accepted(Message::BlockAssistant(
+                (None, Some(blocks)) => Outcome::Accepted(Box::new(Message::BlockAssistant(
                     BlockAssistantMessage::new(blocks, stop_reason),
-                )),
+                ))),
                 (None, None) => Outcome::Refused("no committed output".to_string()),
             };
             let result = match &outcome {
@@ -1290,7 +1290,7 @@ mod continuity_live {
                 .send(row, service, client, history, tool_choice, None)
                 .await
             {
-                Outcome::Accepted(step) => step,
+                Outcome::Accepted(step) => *step,
                 Outcome::Refused(class) => panic!("{row}: {service} refused the request: {class}"),
             }
         }
@@ -1548,7 +1548,7 @@ async fn copilot_live_openai_continuity_across_services() {
             {
                 Outcome::Accepted(step) => {
                     let mut transcript = search;
-                    transcript.push(step);
+                    transcript.push(*step);
                     store("search.json", &transcript);
                 }
                 Outcome::Refused(class) => {

@@ -1358,8 +1358,9 @@ impl meerkat_llm_core::LlmClient for CopilotRoutedClient {
     ) -> Result<meerkat_llm_core::LlmReplayProjection, meerkat_llm_core::LlmError> {
         self.refresh_prepared_route().map_err(Self::client_error)?;
         let prepared = self.prepared_route.read().clone();
-        // The route client's projection carries its own replay decision;
-        // the route witness is added beside it.
+        // The route client's projection (through the capability gate, which
+        // forwards it) carries its own replay decision; the route witness
+        // is added beside it.
         let projection = prepared.client.project_replay_request(messages)?;
         Ok(projection.with_route_witness(meerkat_llm_core::LlmRequestRouteWitness::new(prepared)))
     }
@@ -1386,7 +1387,9 @@ impl meerkat_llm_core::LlmClient for CopilotRoutedClient {
             .route_witness::<PreparedCopilotRoute>()
             .ok_or_else(Self::missing_route_witness)?;
         self.ensure_prepared_route_current(prepared)?;
-        prepared.client.request_pressure(request.request())
+        // The prepared form: the route client measures the body its own
+        // projection decided, not one decided again now.
+        prepared.client.prepared_request_pressure(request)
     }
 
     fn authored_cache_breakpoints(
@@ -1408,7 +1411,7 @@ impl meerkat_llm_core::LlmClient for CopilotRoutedClient {
         self.ensure_prepared_route_current(prepared)?;
         prepared
             .client
-            .authored_cache_breakpoints(request.request(), canonical_messages)
+            .prepared_cache_breakpoints(request, canonical_messages)
     }
 
     fn stream<'a>(
@@ -1511,6 +1514,31 @@ struct CopilotCapabilityGatedClient {
 }
 
 impl CopilotCapabilityGatedClient {
+    /// The account's prompt limit over a measurement of `request`. A prompt
+    /// the provider measured over the account's limit is a context refusal,
+    /// the class the agent compacts on. Copilot's own answer to such a
+    /// prompt is not known, so none is assumed.
+    fn gate_pressure(
+        &self,
+        request: &meerkat_llm_core::LlmRequest,
+        pressure: Option<meerkat_core::ProviderRequestPressure>,
+    ) -> Result<Option<meerkat_core::ProviderRequestPressure>, meerkat_llm_core::LlmError> {
+        let measured = pressure
+            .as_ref()
+            .and_then(|value| value.provider_issued_input_tokens);
+        let prompt_limit =
+            account_prompt_limit(&self.capabilities.limits, request.max_tokens).map(u64::from);
+        if let (Some(measured), Some(limit)) = (measured, prompt_limit)
+            && measured > limit
+        {
+            return Err(meerkat_llm_core::LlmError::ContextLengthExceeded {
+                max: usize::try_from(limit).unwrap_or(usize::MAX),
+                requested: usize::try_from(measured).unwrap_or(usize::MAX),
+            });
+        }
+        Ok(pressure)
+    }
+
     fn validate_request(
         &self,
         request: &meerkat_llm_core::LlmRequest,
@@ -1666,6 +1694,16 @@ impl meerkat_llm_core::LlmClient for CopilotCapabilityGatedClient {
             .or_else(|| self.inner.prompt_token_limit(output_budget))
     }
 
+    /// The route client's own projection, with whatever it decided for the
+    /// request (an OpenAI-wire client's replay decision): the gate adds
+    /// nothing to a projection and must not lose that decision.
+    fn project_replay_request(
+        &self,
+        messages: &[meerkat_core::Message],
+    ) -> Result<meerkat_llm_core::LlmReplayProjection, meerkat_llm_core::LlmError> {
+        self.inner.project_replay_request(messages)
+    }
+
     fn project_replay_messages(
         &self,
         messages: &[meerkat_core::Message],
@@ -1678,27 +1716,20 @@ impl meerkat_llm_core::LlmClient for CopilotCapabilityGatedClient {
         request: &meerkat_llm_core::LlmRequest,
     ) -> Result<Option<meerkat_core::ProviderRequestPressure>, meerkat_llm_core::LlmError> {
         self.validate_request(request)?;
-        let pressure = self.inner.request_pressure(request)?;
-        if let Some(measured) = pressure.as_ref().and_then(|value| {
-            value
-                .provider_issued_input_tokens
-                .map(|tokens| (tokens, value))
-        }) {
-            let prompt_limit =
-                account_prompt_limit(&self.capabilities.limits, request.max_tokens).map(u64::from);
-            // A prompt the provider measured over the account's limit is a
-            // context refusal, the class the agent compacts on. Copilot's own
-            // answer to such a prompt is not known, so none is assumed.
-            if let Some(limit) = prompt_limit
-                && measured.0 > limit
-            {
-                return Err(meerkat_llm_core::LlmError::ContextLengthExceeded {
-                    max: usize::try_from(limit).unwrap_or(usize::MAX),
-                    requested: usize::try_from(measured.0).unwrap_or(usize::MAX),
-                });
-            }
-        }
-        Ok(pressure)
+        self.gate_pressure(request, self.inner.request_pressure(request)?)
+    }
+
+    /// The same gate over the route client's measurement of the prepared
+    /// request, so the measurement is of the body its projection decided.
+    fn prepared_request_pressure(
+        &self,
+        request: &meerkat_llm_core::PreparedLlmRequest,
+    ) -> Result<Option<meerkat_core::ProviderRequestPressure>, meerkat_llm_core::LlmError> {
+        self.validate_request(request.request())?;
+        self.gate_pressure(
+            request.request(),
+            self.inner.prepared_request_pressure(request)?,
+        )
     }
 
     fn authored_cache_breakpoints(
@@ -1708,6 +1739,15 @@ impl meerkat_llm_core::LlmClient for CopilotCapabilityGatedClient {
     ) -> Result<Vec<meerkat_core::ProviderCacheBreakpointClaim>, meerkat_llm_core::LlmError> {
         self.inner
             .authored_cache_breakpoints(request, canonical_messages)
+    }
+
+    fn prepared_cache_breakpoints(
+        &self,
+        request: &meerkat_llm_core::PreparedLlmRequest,
+        canonical_messages: &[meerkat_core::Message],
+    ) -> Result<Vec<meerkat_core::ProviderCacheBreakpointClaim>, meerkat_llm_core::LlmError> {
+        self.inner
+            .prepared_cache_breakpoints(request, canonical_messages)
     }
 
     fn stream<'a>(
@@ -5975,6 +6015,362 @@ mod tests {
             observed.lock().as_slice(),
             ["https://first.example.test", "https://second.example.test"]
         );
+    }
+
+    /// What a route client that decides at projection was asked, and under
+    /// which decision it answered.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct RouteClientCall {
+        what: &'static str,
+        /// The request carried the decision its projection made.
+        carried_decision: bool,
+        /// The step is lowered as the service returned it.
+        native: bool,
+    }
+
+    /// The decision a projection made: whether the step is one this process
+    /// received from the route's service.
+    struct FrozenReplayDecision(bool);
+
+    /// A route client that decides as an OpenAI-wire client does. Its
+    /// projection asks the replay owner whether this process received the
+    /// transcript's step from its service and freezes the answer with the
+    /// projection. Measuring, authoring cache claims and sending use the
+    /// frozen answer when the request carries it and ask the ledger again
+    /// when it does not, and record which of the two happened.
+    struct DecidingRouteClient {
+        target: meerkat_core::OpenAiContinuityTarget,
+        calls: Arc<Mutex<Vec<RouteClientCall>>>,
+    }
+
+    impl DecidingRouteClient {
+        fn received(&self, messages: &[meerkat_core::Message]) -> bool {
+            messages.iter().any(|message| match message {
+                meerkat_core::Message::BlockAssistant(step) => {
+                    meerkat_core::ReplayStepAdmission::of(
+                        meerkat_core::ReplayWireFamily::OpenAi,
+                        Some(&self.target),
+                        &step.blocks,
+                    )
+                    .admits_provider_items()
+                }
+                _ => false,
+            })
+        }
+
+        /// Answer `what` for `messages`, under the decision `prepared`
+        /// carries or, without one, under what the ledger says now.
+        fn answer(
+            &self,
+            what: &'static str,
+            messages: &[meerkat_core::Message],
+            prepared: Option<&meerkat_llm_core::PreparedLlmRequest>,
+        ) -> bool {
+            let frozen = prepared
+                .and_then(|request| request.replay_witness::<FrozenReplayDecision>())
+                .map(|decision| decision.0);
+            let native = frozen.unwrap_or_else(|| self.received(messages));
+            self.calls.lock().push(RouteClientCall {
+                what,
+                carried_decision: frozen.is_some(),
+                native,
+            });
+            native
+        }
+
+        fn pressure(native: bool) -> meerkat_core::ProviderRequestPressure {
+            meerkat_core::ProviderRequestPressure::new(if native { 900 } else { 300 }, None)
+        }
+    }
+
+    #[async_trait]
+    impl meerkat_llm_core::LlmClient for DecidingRouteClient {
+        fn project_replay_request(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<meerkat_llm_core::LlmReplayProjection, meerkat_llm_core::LlmError> {
+            Ok(
+                meerkat_llm_core::LlmReplayProjection::new(messages.to_vec()).with_replay_witness(
+                    meerkat_llm_core::LlmRequestRouteWitness::new(FrozenReplayDecision(
+                        self.received(messages),
+                    )),
+                ),
+            )
+        }
+
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_llm_core::LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn request_pressure(
+            &self,
+            request: &meerkat_llm_core::LlmRequest,
+        ) -> Result<Option<meerkat_core::ProviderRequestPressure>, meerkat_llm_core::LlmError>
+        {
+            Ok(Some(Self::pressure(self.answer(
+                "pressure",
+                &request.messages,
+                None,
+            ))))
+        }
+
+        fn prepared_request_pressure(
+            &self,
+            request: &meerkat_llm_core::PreparedLlmRequest,
+        ) -> Result<Option<meerkat_core::ProviderRequestPressure>, meerkat_llm_core::LlmError>
+        {
+            Ok(Some(Self::pressure(self.answer(
+                "pressure",
+                &request.request().messages,
+                Some(request),
+            ))))
+        }
+
+        fn authored_cache_breakpoints(
+            &self,
+            request: &meerkat_llm_core::LlmRequest,
+            _canonical_messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::ProviderCacheBreakpointClaim>, meerkat_llm_core::LlmError>
+        {
+            self.answer("cache claims", &request.messages, None);
+            Ok(Vec::new())
+        }
+
+        fn prepared_cache_breakpoints(
+            &self,
+            request: &meerkat_llm_core::PreparedLlmRequest,
+            _canonical_messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::ProviderCacheBreakpointClaim>, meerkat_llm_core::LlmError>
+        {
+            self.answer("cache claims", &request.request().messages, Some(request));
+            Ok(Vec::new())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a meerkat_llm_core::LlmRequest,
+        ) -> meerkat_llm_core::LlmStream<'a> {
+            self.answer("send", &request.messages, None);
+            Box::pin(futures::stream::empty())
+        }
+
+        fn stream_prepared<'a>(
+            &'a self,
+            request: &'a meerkat_llm_core::PreparedLlmRequest,
+        ) -> meerkat_llm_core::LlmStream<'a> {
+            self.answer("send", &request.request().messages, Some(request));
+            Box::pin(futures::stream::empty())
+        }
+
+        fn provider(&self) -> Provider {
+            Provider::OpenAI
+        }
+
+        async fn health_check(&self) -> Result<(), meerkat_llm_core::LlmError> {
+            Ok(())
+        }
+    }
+
+    /// One decision per request on the Copilot route. The route client
+    /// decides at projection which steps the process received from its
+    /// service; the routed client and the account's capability gate carry
+    /// that decision with the prepared request, so what is measured, what
+    /// cache claims are authored for and what is sent are one body, whatever
+    /// the process ledger learns or forgets in between. Here, between the
+    /// preparation and the send, the ledger forgets the step (a generation
+    /// rotates) or another service returns the same material (a double
+    /// claim): asked now, the route client would lower the step in the
+    /// dropped form, and the prepared request still goes out as measured.
+    #[tokio::test]
+    async fn a_request_prepared_on_the_routed_client_keeps_its_replay_decision() {
+        for change in [
+            "a generation rotates",
+            "another service returns the same material",
+        ] {
+            let runtime = Arc::new(CopilotRuntime::new());
+            let (auth_binding, binding) = validated_binding();
+            let (env, auth_lease) = resolver_environment(&auth_binding).await;
+            let persistence_id = env
+                .provider_auth_persistence()
+                .expect("test persistence")
+                .authority_id();
+            let state = runtime
+                .account_state(
+                    persistence_id,
+                    binding.credential_identity(),
+                    CopilotBackendConfig::default(),
+                    CopilotCredentialMode::DeviceSignIn,
+                )
+                .expect("account state");
+            let snapshot = CopilotModelSnapshot::from_models(vec![crate::CopilotModel {
+                id: "gpt-test".to_string(),
+                vendor: None,
+                name: None,
+                version: None,
+                model_picker_enabled: None,
+                capabilities: crate::CopilotModelCapabilities {
+                    limits: crate::CopilotModelLimits {
+                        max_context_window_tokens: Some(128_000),
+                        max_output_tokens: Some(16_000),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                policy: None,
+                supported_endpoints: Some(vec![CopilotEndpoint::Responses]),
+            }])
+            .expect("model snapshot");
+            *state.cache.write() = Some(CachedCopilotToken {
+                generation: 1,
+                token: "derived".to_string(),
+                source_generation: 1,
+                source_published_at_millis: stored_record_published_at(&auth_lease),
+                source_expires_at: None,
+                refresh_at: Utc::now() + Duration::hours(1),
+                expires_at: Utc::now() + Duration::hours(2),
+                api_base: "https://first.example.test".to_string(),
+                models: Some(Arc::new(snapshot)),
+                model_discovery_refresh_at: None,
+                identity: None,
+                exchange_unavailable: None,
+            });
+            let authorizer = Arc::new(CopilotAuthorizer {
+                state: Arc::clone(&state),
+                binding: binding.clone(),
+                env,
+                transport: Arc::new(ScriptedTransport::new([])),
+            });
+            let connection = meerkat_llm_core::provider_runtime::ResolvedConnection {
+                provider: Provider::OpenAI,
+                backend: binding.backend(),
+                backend_profile: binding.backend_profile().clone(),
+                credential_identity: binding.credential_identity().clone(),
+                auth_lease: Arc::new(
+                    meerkat_llm_core::provider_runtime::DynamicLease::from_authorizer(
+                        authorizer,
+                        AuthMetadata::default(),
+                        crate::GITHUB_COPILOT_AUTHORIZER_LABEL,
+                    ),
+                ),
+            };
+            runtime.accounts.lock().insert(
+                CopilotAccountCacheKey {
+                    persistence_id,
+                    credential_identity: binding.credential_identity().clone(),
+                },
+                Arc::downgrade(&state),
+            );
+            let ledger = Arc::new(meerkat_core::OpenAiContinuityLedger::with_generation(2));
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let issuer_of = |api_base: &str| {
+                meerkat_core::OpenAiContinuityIssuer::at_base_url(
+                    meerkat_core::OpenAiContinuityService::Copilot,
+                    api_base,
+                )
+            };
+            let factory: CopilotRouteClientFactory = {
+                let ledger = Arc::clone(&ledger);
+                let calls = Arc::clone(&calls);
+                Arc::new(move |route, _| {
+                    Ok(Arc::new(DecidingRouteClient {
+                        target: meerkat_core::OpenAiContinuityTarget::new(
+                            issuer_of(&route.api_base),
+                            Arc::clone(&ledger),
+                        ),
+                        calls: Arc::clone(&calls),
+                    }))
+                })
+            };
+            let client = routed_client(
+                Arc::clone(&runtime),
+                connection,
+                Provider::OpenAI,
+                "gpt-test".to_string(),
+                factory,
+            )
+            .expect("routed client");
+            assert!(
+                client.prompt_token_limit(32_000).is_some(),
+                "the route client is behind the account's capability gate"
+            );
+
+            let reasoning = |id: &str| meerkat_core::AssistantBlock::Reasoning {
+                text: String::new(),
+                meta: Some(Box::new(meerkat_core::ProviderMeta::OpenAi {
+                    id: id.to_string(),
+                    encrypted_content: Some(format!("ciphertext-{id}")),
+                    phase: None,
+                    response_id: Some(format!("resp-{id}")),
+                })),
+            };
+            let route = issuer_of("https://first.example.test");
+            let step = vec![reasoning("rs_step")];
+            ledger.record_step(&route, &step);
+            let transcript = vec![meerkat_core::Message::BlockAssistant(
+                meerkat_core::BlockAssistantMessage::new(
+                    step.clone(),
+                    meerkat_core::StopReason::EndTurn,
+                ),
+            )];
+
+            let projection = client
+                .project_replay_request(&transcript)
+                .expect("route projection");
+            let prepared = meerkat_llm_core::PreparedLlmRequest::from_projection(
+                meerkat_llm_core::LlmRequest::new("gpt-test", Vec::new()),
+                projection,
+            );
+            let measured = client
+                .prepared_request_pressure(&prepared)
+                .expect("pressure")
+                .expect("the route client measures its request")
+                .encoded_bytes;
+
+            if change == "a generation rotates" {
+                ledger.record_step(&route, &[reasoning("rs_later_1")]);
+                ledger.record_step(&route, &[reasoning("rs_later_2")]);
+                ledger.record_step(&route, &[reasoning("rs_later_3")]);
+            } else {
+                ledger.record_step(&issuer_of("https://elsewhere.example.test"), &step);
+            }
+            assert!(
+                !ledger.received_step_from(&route, &step),
+                "{change}: asked now, the ledger no longer knows the step as the route's"
+            );
+
+            client
+                .prepared_cache_breakpoints(&prepared, &transcript)
+                .expect("cache claims");
+            let sent = client.stream_prepared(&prepared).collect::<Vec<_>>().await;
+            assert!(sent.is_empty(), "{change}: the request is sent: {sent:?}");
+            assert_eq!(
+                client
+                    .prepared_request_pressure(&prepared)
+                    .expect("pressure")
+                    .expect("the route client measures its request")
+                    .encoded_bytes,
+                measured,
+                "{change}: the measured request is the sent request"
+            );
+            let native = |what| RouteClientCall {
+                what,
+                carried_decision: true,
+                native: true,
+            };
+            assert_eq!(
+                calls.lock().as_slice(),
+                [
+                    native("pressure"),
+                    native("cache claims"),
+                    native("send"),
+                    native("pressure"),
+                ],
+                "{change}: every use of the prepared request carries the decision of its projection"
+            );
+        }
     }
 
     /// The account model of a resolved Copilot route comes from the model

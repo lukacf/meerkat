@@ -514,12 +514,15 @@ fn two_citations_blocks_for_one_message_replay_none() {
     assert!(!has_input_item(&body, "message_annotations"), "{body}");
 }
 
-/// A search recorded before this change replays as it did: the call
-/// without sources verbatim, and the answer with `annotations: []`, because
-/// its citations block does not say how many text parts the answer had (and
-/// the oldest blocks carry no message id).
+/// A search in the shape an earlier release recorded (a call without
+/// sources, a citations block that does not say how many text parts the
+/// answer had, the oldest without a message id). In the process that
+/// received it, it replays as it always did: the call verbatim and the
+/// answer with `annotations: []`. Read from a store by a new process, which
+/// is how a search an earlier release recorded reaches this one, the call
+/// is omitted and the answer is a plain message.
 #[test]
-fn a_search_recorded_before_this_change_replays_as_it_did() {
+fn an_older_search_shape_replays_in_its_process_and_is_omitted_after_a_cold_load() {
     let client = OpenAiClient::new("test-key".to_string());
     let call = json!({"type": "search", "query": "meerkat runtime"});
     let history = searched_history(vec![

@@ -303,6 +303,16 @@ fn response_stream(response_id: &str, output: &[Value]) -> String {
                 "delta": item["content"][0]["text"],
             }));
         }
+        if item["type"] == "web_search_call" {
+            for progress in ["in_progress", "searching", "completed"] {
+                events.push(json!({
+                    "type": format!("response.web_search_call.{progress}"),
+                    "item_id": item["id"],
+                    "output_index": index,
+                    "sequence_number": events.len(),
+                }));
+            }
+        }
         events.push(
             json!({"type": "response.output_item.done", "output_index": index, "item": item}),
         );
@@ -1306,6 +1316,142 @@ async fn a_hosted_tool_item_is_replayed_only_to_the_service_it_came_from() {
     }
 }
 
+/// A response that searched the web many times carries much material: for
+/// each search a reasoning item and a search item, and three progress
+/// events on the stream. It is recorded whole, and the next request of the
+/// process that received it replays every item of it unchanged, on every
+/// service. (No number of items makes a response too large to be known, and
+/// the progress events are no material: they are never replayed.)
+#[tokio::test]
+async fn a_response_with_many_hosted_searches_is_recorded_whole() {
+    const SEARCHES: usize = 40;
+    let mut output = Vec::new();
+    for search in 0..SEARCHES {
+        let turn = format!("m{search}");
+        output.push(reasoning_item(&turn, 1, None));
+        output.push(web_search_call(&turn));
+    }
+    output.push(message_item("m", "It is 4 C in Oslo."));
+    let response = response_stream("resp_m_1", &output);
+
+    for service in Service::ALL {
+        let process = new_process();
+        let history = vec![user(QUESTION)];
+        let (_, answer) = step(service, &process, &history, &response, StopReason::EndTurn).await;
+        let transcript = vec![user(QUESTION), answer, user(NEXT_QUESTION)];
+        let body = body_on_the_wire(service.client(&process), transcript).await;
+
+        let mut expected = vec![user_item(QUESTION)];
+        for item in &output {
+            if item["type"] == "reasoning" || item["type"] == "web_search_call" {
+                expected.push(item.clone());
+            }
+        }
+        let replayed: Vec<Value> = body["input"]
+            .as_array()
+            .expect("input")
+            .iter()
+            .filter(|item| item["type"] == "reasoning" || item["type"] == "web_search_call")
+            .cloned()
+            .collect();
+        assert_eq!(
+            replayed,
+            expected[1..],
+            "{service:?}: every reasoning item and every search item replays, in order"
+        );
+        let answer = body["input"]
+            .as_array()
+            .expect("input")
+            .iter()
+            .find(|item| item["type"] == "message" && item["role"] == "assistant")
+            .unwrap_or_else(|| panic!("{service:?}: the answer replays"));
+        assert_eq!(
+            answer["id"], "msg_m",
+            "{service:?}: as the service returned it"
+        );
+        assert!(
+            !body.to_string().contains("response.web_search_call"),
+            "{service:?}: no progress event is replayed"
+        );
+    }
+}
+
+/// A response that fails records nothing. The same items, received in a
+/// response that then fails, do not make the step known: the transcript is
+/// the step exactly as another process stored it from the successful
+/// response, and it is sent in the dropped form.
+#[tokio::test]
+async fn a_failed_response_records_nothing() {
+    let failed = {
+        let item = reasoning_item("f", 1, None);
+        let call = call_item("f");
+        let mut payload = String::new();
+        for event in [
+            json!({"type": "response.created", "response": {"id": "resp_f_1"}}),
+            json!({"type": "response.output_item.added", "output_index": 0, "item": item}),
+            json!({"type": "response.output_item.done", "output_index": 0, "item": item}),
+            json!({"type": "response.output_item.added", "output_index": 1, "item": call}),
+            json!({"type": "response.output_item.done", "output_index": 1, "item": call}),
+            json!({"type": "response.failed", "response": {
+                "id": "resp_f_1",
+                "status": "failed",
+                "error": {"code": "server_error", "message": "the response failed"}
+            }}),
+        ] {
+            payload.push_str(&format!("data: {event}\n\n"));
+        }
+        payload.push_str("data: [DONE]\n\n");
+        payload
+    };
+    for service in Service::ALL {
+        let history = vec![user(QUESTION)];
+        let elsewhere = new_process();
+        let (_, blocks) = stored_step(
+            service.client(&elsewhere),
+            &history,
+            &tool_step_response("f"),
+        )
+        .await;
+        let transcript = vec![
+            user(QUESTION),
+            Message::BlockAssistant(BlockAssistantMessage::new(blocks, StopReason::ToolUse)),
+            tool_output("f"),
+        ];
+        let known = body_on_the_wire(service.client(&elsewhere), transcript.clone()).await;
+        assert_eq!(
+            known["input"],
+            input_of([vec![user_item(QUESTION)], native_tool_step("f")]),
+            "{service:?}: the successful response made the step known where it was received"
+        );
+
+        let process = new_process();
+        let client = service.client(&process);
+        answer_with(&failed);
+        let outcome: Vec<_> = client.stream(&request(history.clone())).collect().await;
+        assert!(
+            !outcome.iter().any(|event| matches!(
+                event,
+                Ok(LlmEvent::Done {
+                    outcome: meerkat_llm_core::LlmDoneOutcome::Success { .. }
+                })
+            )),
+            "{service:?}: the response did not succeed: {outcome:?}"
+        );
+        assert!(
+            outcome.iter().any(|event| matches!(
+                event,
+                Err(_)
+                    | Ok(LlmEvent::Done {
+                        outcome: meerkat_llm_core::LlmDoneOutcome::Error { .. }
+                    })
+            )),
+            "{service:?}: the response failed: {outcome:?}"
+        );
+        let body = body_on_the_wire(service.client(&process), transcript).await;
+        assert_wholly_dropped(&format!("{service:?}: a failed response"), &body);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // A fallback target, and another wire protocol
 // ---------------------------------------------------------------------------
@@ -1663,6 +1809,19 @@ async fn lowering_an_unprojected_transcript_asks_the_owner() {
         assert_wholly_dropped(case, &body);
     }
 
+    // A hosted-tool item carries its id in its content: the lowering omits
+    // the item of a step the process did not receive, without a projection
+    // having removed it first.
+    let searched = hosted_search_turn(Service::OpenAiApi, &earlier, "h").await;
+    let body = client
+        .build_request_body(&request(searched))
+        .expect("request body");
+    assert_wholly_dropped("a stored hosted search", &body);
+    assert!(
+        !body.to_string().contains("web_search_call") && !body.to_string().contains("ws_h"),
+        "a stored hosted search is not lowered: {body}"
+    );
+
     let body = client
         .build_request_body(&request(own.clone()))
         .expect("request body");
@@ -1676,6 +1835,59 @@ async fn lowering_an_unprojected_transcript_asks_the_owner() {
         .expect("continuation body");
     assert!(plan.is_some());
     assert_eq!(body["previous_response_id"], "resp_o_2");
+}
+
+/// A self-hosted server that config declares is an issuer by its id: when
+/// its base URL changes (the server moved, or a second address reaches it)
+/// the material the process received from it is still its own. A client
+/// that declares no server is the server at its address, so the same move
+/// makes it another issuer.
+#[tokio::test]
+async fn a_declared_self_hosted_server_keeps_its_material_when_its_address_changes() {
+    let process = new_process();
+    let declared = |address: &str| -> Arc<dyn LlmClient> {
+        Arc::new(
+            self_hosted(endpoint(address))
+                .with_self_hosted_server("local")
+                .with_continuity_ledger(Arc::clone(&process)),
+        )
+    };
+    let history = vec![user(QUESTION)];
+    let (_, blocks) = stored_step(
+        declared("first-address"),
+        &history,
+        &tool_step_response("d"),
+    )
+    .await;
+    let transcript = vec![
+        user(QUESTION),
+        Message::BlockAssistant(BlockAssistantMessage::new(blocks, StopReason::ToolUse)),
+        tool_output("d"),
+    ];
+    let body = body_on_the_wire(declared("second-address"), transcript.clone()).await;
+    assert_eq!(
+        body["input"],
+        input_of([vec![user_item(QUESTION)], native_tool_step("d")]),
+        "the declared server is the same issuer at its new address"
+    );
+
+    let (_, blocks) = stored_step(
+        undeclared_self_hosted("first-address", &process),
+        &history,
+        &tool_step_response("u"),
+    )
+    .await;
+    let transcript = vec![
+        user(QUESTION),
+        Message::BlockAssistant(BlockAssistantMessage::new(blocks, StopReason::ToolUse)),
+        tool_output("u"),
+    ];
+    let body = body_on_the_wire(
+        undeclared_self_hosted("second-address", &process),
+        transcript,
+    )
+    .await;
+    assert_wholly_dropped("an undeclared server at another address", &body);
 }
 
 // ---------------------------------------------------------------------------
@@ -1775,6 +1987,72 @@ async fn every_commit_path_stores_what_was_recorded() {
     }
 }
 
+/// An answer a compatible server streams as events only: the message is
+/// stored from its text events, which carry its item id, and the terminal
+/// response carries no output.
+fn events_only_answer_response(turn: &str) -> String {
+    let message = message_item(turn, "It is 4 C in Oslo.");
+    let events = [
+        json!({"type": "response.created", "response": {"id": format!("resp_{turn}_1")}}),
+        json!({"type": "response.output_item.added", "output_index": 0, "item": message}),
+        json!({"type": "response.output_text.delta", "item_id": message["id"],
+            "output_index": 0, "delta": "It is 4 C in Oslo."}),
+        json!({"type": "response.completed", "response": {
+            "id": format!("resp_{turn}_1"), "status": "completed",
+            "usage": {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5}
+        }}),
+    ];
+    let mut payload = String::new();
+    for event in events {
+        payload.push_str(&format!("data: {event}\n\n"));
+    }
+    payload.push_str("data: [DONE]\n\n");
+    payload
+}
+
+/// A message stored from its stream events alone is known as received: its
+/// item id came with the text events, and the next request replays the
+/// message under that id to its service and without it to another.
+#[tokio::test]
+async fn a_message_assembled_from_events_is_the_recorded_message() {
+    for service in [Service::OpenAiApi, Service::SelfHostedA] {
+        let process = new_process();
+        let history = vec![user(QUESTION)];
+        let (_, blocks) = stored_step(
+            service.client(&process),
+            &history,
+            &events_only_answer_response("e"),
+        )
+        .await;
+        assert!(
+            blocks.iter().any(|block| matches!(
+                block,
+                AssistantBlock::Text { meta: Some(meta), .. }
+                    if matches!(meta.as_ref(), ProviderMeta::OpenAiAssistantMessage { id, .. } if id == "msg_e")
+            )),
+            "{service:?}: the message is stored with the id its events carried: {blocks:?}"
+        );
+        let transcript = vec![
+            user(QUESTION),
+            Message::BlockAssistant(BlockAssistantMessage::new(blocks, StopReason::EndTurn)),
+            user(NEXT_QUESTION),
+        ];
+        let own = body_on_the_wire(service.client(&process), transcript.clone()).await;
+        let answer = own["input"]
+            .as_array()
+            .expect("input")
+            .iter()
+            .find(|item| item["type"] == "message" && item["role"] == "assistant")
+            .unwrap_or_else(|| panic!("{service:?}: the answer replays"));
+        assert_eq!(
+            answer["id"], "msg_e",
+            "{service:?}: the stored message is the recorded message: {answer}"
+        );
+        let other = body_on_the_wire(service.other().client(&process), transcript).await;
+        assert_wholly_dropped(&format!("{service:?}: events-only answer"), &other);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // One decision per request
 // ---------------------------------------------------------------------------
@@ -1847,6 +2125,78 @@ async fn a_prepared_request_keeps_its_decision() {
             "{service:?}: the measured request is the sent request"
         );
     }
+}
+
+/// The cache claims of a prepared request are authored for the body its
+/// projection decided: they do not change when the process forgets the step
+/// afterwards, while claims authored without the decision are those of the
+/// dropped form.
+#[tokio::test]
+async fn a_prepared_request_keeps_its_cache_claims() {
+    use meerkat_core::lifecycle::run_primitive::OpenAiPromptCacheOptions;
+    use meerkat_core::model_profile::capabilities::{OpenAiPromptCacheMode, OpenAiPromptCacheTtl};
+
+    let process: Ledger = Arc::new(OpenAiContinuityLedger::with_generation(1));
+    let history = vec![user(QUESTION)];
+    let (_, blocks) = stored_step(
+        Service::OpenAiApi.client(&process),
+        &history,
+        &tool_step_response("t"),
+    )
+    .await;
+    let transcript = vec![
+        user(QUESTION),
+        Message::BlockAssistant(BlockAssistantMessage::new(blocks, StopReason::ToolUse)),
+        tool_output("t"),
+    ];
+    let client = Service::OpenAiApi.client(&process);
+    let projection = client
+        .project_replay_request(&transcript)
+        .expect("projection");
+    let cached = LlmRequest::new("gpt-5.6-sol", Vec::new()).with_openai_tag_merge(|tag| {
+        tag.prompt_cache_options = Some(OpenAiPromptCacheOptions {
+            mode: Some(OpenAiPromptCacheMode::Explicit),
+            ttl: Some(OpenAiPromptCacheTtl::ThirtyMinutes),
+        });
+    });
+    let prepared = meerkat_llm_core::PreparedLlmRequest::from_projection(cached, projection);
+    let claims = |prepared: &meerkat_llm_core::PreparedLlmRequest| {
+        format!(
+            "{:?}",
+            client
+                .prepared_cache_breakpoints(prepared, &transcript)
+                .expect("cache claims")
+        )
+    };
+    let authored = client
+        .prepared_cache_breakpoints(&prepared, &transcript)
+        .expect("cache claims");
+    assert!(!authored.is_empty(), "explicit mode authors claims");
+    let before = claims(&prepared);
+
+    for later in ["x", "y"] {
+        stored_step(
+            Service::OpenAiApi.client(&process),
+            &history,
+            &tool_step_response(later),
+        )
+        .await;
+    }
+    assert_eq!(
+        claims(&prepared),
+        before,
+        "the claims are those of the body the request was prepared with"
+    );
+    let undecided = format!(
+        "{:?}",
+        client
+            .authored_cache_breakpoints(prepared.request(), &transcript)
+            .expect("cache claims")
+    );
+    assert_ne!(
+        undecided, before,
+        "authored now, without the decision, the claims are those of the dropped form"
+    );
 }
 
 /// Projecting a projected transcript again changes nothing, under the same
@@ -1941,6 +2291,107 @@ mod copilot_route {
 
         fn label(&self) -> &str {
             meerkat_copilot::GITHUB_COPILOT_AUTHORIZER_LABEL
+        }
+    }
+
+    /// The Copilot route puts its client behind the account's capability
+    /// gate. The gate carries the route client's replay decision with the
+    /// prepared request: after the process forgets the step, or another
+    /// service returns the same material, the request is still measured and
+    /// sent as it was prepared.
+    #[tokio::test]
+    async fn the_capability_gate_keeps_the_prepared_decision() {
+        for change in [
+            "a generation rotates",
+            "another service returns the same material",
+        ] {
+            let process: Ledger = Arc::new(OpenAiContinuityLedger::with_generation(2));
+            let history = vec![user(QUESTION)];
+            let (_, blocks) = stored_step(
+                Service::Copilot.client(&process),
+                &history,
+                &tool_step_response("t"),
+            )
+            .await;
+            let transcript = vec![
+                user(QUESTION),
+                Message::BlockAssistant(BlockAssistantMessage::new(
+                    blocks.clone(),
+                    StopReason::ToolUse,
+                )),
+                tool_output("t"),
+            ];
+            let gated = meerkat_copilot::capability_gated_client(
+                Service::Copilot.client(&process),
+                Some(meerkat_copilot::CopilotModelCapabilities {
+                    limits: meerkat_copilot::CopilotModelLimits {
+                        max_context_window_tokens: Some(128_000),
+                        max_output_tokens: Some(16_000),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+            );
+            assert!(
+                gated.prompt_token_limit(1024).is_some(),
+                "the gate is in place"
+            );
+            let projection = gated
+                .project_replay_request(&transcript)
+                .expect("projection");
+            let prepared = meerkat_llm_core::PreparedLlmRequest::from_projection(
+                request(Vec::new()),
+                projection,
+            );
+            let measured = gated
+                .prepared_request_pressure(&prepared)
+                .expect("pressure")
+                .expect("the client measures its request")
+                .encoded_bytes;
+
+            if change == "a generation rotates" {
+                for later in ["x", "y", "z"] {
+                    stored_step(
+                        Service::Copilot.client(&process),
+                        &history,
+                        &tool_step_response(later),
+                    )
+                    .await;
+                }
+            } else {
+                process.record_step(
+                    &meerkat_core::OpenAiContinuityIssuer::at_base_url(
+                        meerkat_core::OpenAiContinuityService::Copilot,
+                        "https://elsewhere.example.test",
+                    ),
+                    &blocks,
+                );
+            }
+            let now = body_on_the_wire(Service::Copilot.client(&process), transcript.clone()).await;
+            assert_wholly_dropped(&format!("{change}: decided now"), &now);
+
+            answer_with(PLAIN_ANSWER_SSE);
+            let mut stream = gated.stream_prepared(&prepared);
+            while let Some(event) = stream.next().await {
+                event.unwrap_or_else(|error| panic!("the prepared request is accepted: {error}"));
+            }
+            drop(stream);
+            let bodies = bodies_on_the_wire();
+            assert_eq!(bodies.len(), 1, "{change}");
+            assert_eq!(
+                bodies[0]["input"],
+                input_of([vec![user_item(QUESTION)], native_tool_step("t")]),
+                "{change}: sent under the decision it was prepared with"
+            );
+            assert_eq!(
+                gated
+                    .prepared_request_pressure(&prepared)
+                    .expect("pressure")
+                    .expect("the client measures its request")
+                    .encoded_bytes,
+                measured,
+                "{change}: the measured request is the sent request"
+            );
         }
     }
 

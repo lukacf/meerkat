@@ -555,12 +555,13 @@ pub(crate) struct OpenAiReplayDecision {
 }
 
 impl OpenAiReplayDecision {
-    /// Freeze the decision of a projection made for `issuer`: `projected`
-    /// keeps continuity material only on the steps that were admitted, so
-    /// those steps are recorded, as received from `issuer`, in a ledger
-    /// that belongs to this request and never forgets.
+    /// Freeze the decision of a projection of `source` made for `issuer`:
+    /// `projected` keeps continuity material only on the steps that were
+    /// admitted, so those steps are recorded, as received from `issuer`, in
+    /// a ledger that belongs to this request and never forgets.
     pub(crate) fn freeze(
         issuer: &meerkat_core::OpenAiContinuityIssuer,
+        source: &[Message],
         projected: &[Message],
     ) -> Self {
         let ledger = meerkat_core::OpenAiContinuityLedger::with_generation(usize::MAX);
@@ -569,6 +570,34 @@ impl OpenAiReplayDecision {
                 ledger.record_step(issuer, &assistant.blocks);
             }
         }
+        // The one trace of a decision that otherwise shows only as missing
+        // reasoning: how many steps carried provider material, and how many
+        // of them go out as the service returned them. The service is named
+        // by its kind; no endpoint and no material is logged.
+        let carrying = |messages: &[Message]| {
+            messages
+                .iter()
+                .filter(|message| {
+                    matches!(message, Message::BlockAssistant(assistant) if assistant
+                    .blocks
+                    .iter()
+                    .any(|block| {
+                        meerkat_core::OpenAiContinuityMaterial::of_block(block)
+                            .next()
+                            .is_some()
+                    }))
+                })
+                .count()
+        };
+        let with_material = carrying(source);
+        let as_received = carrying(projected);
+        tracing::debug!(
+            service = ?issuer.service(),
+            steps_with_provider_material = with_material,
+            replayed_as_received = as_received,
+            sent_in_plain_form = with_material.saturating_sub(as_received),
+            "OpenAI-family replay decision"
+        );
         Self {
             target: meerkat_core::OpenAiContinuityTarget::new(
                 issuer.clone(),
@@ -3956,7 +3985,7 @@ impl LlmClient for OpenAiClient {
     ) -> Result<meerkat_llm_core::LlmReplayProjection, LlmError> {
         let continuity = self.continuity_target();
         let projected = self.project_replay_messages_for(messages, &continuity)?;
-        let decision = OpenAiReplayDecision::freeze(continuity.issuer(), &projected);
+        let decision = OpenAiReplayDecision::freeze(continuity.issuer(), messages, &projected);
         Ok(meerkat_llm_core::LlmReplayProjection::new(projected)
             .with_replay_witness(decision.witness()))
     }

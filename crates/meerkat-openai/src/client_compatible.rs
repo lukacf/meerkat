@@ -1497,8 +1497,11 @@ impl LlmClient for OpenAiCompatibleClient {
         let projected = self.project_replay_messages_for(messages, continuity.as_ref())?;
         let projection = match &continuity {
             Some(continuity) => {
-                let decision =
-                    crate::client::OpenAiReplayDecision::freeze(continuity.issuer(), &projected);
+                let decision = crate::client::OpenAiReplayDecision::freeze(
+                    continuity.issuer(),
+                    messages,
+                    &projected,
+                );
                 meerkat_llm_core::LlmReplayProjection::new(projected)
                     .with_replay_witness(decision.witness())
             }

@@ -415,6 +415,17 @@ impl Drop for DurableSteerWork {
 /// custom impl below.
 pub(crate) type SharedIngressDslAuthority = Arc<Mutex<mm_dsl::MeerkatMachineAuthority>>;
 
+/// What a terminal archive's last audit check found
+/// ([`EphemeralRuntimeDriver::archive_terminal_inputs_with_committed_audit`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommittedAuditArchive {
+    /// Every row's stored row held all its records: the archive ran.
+    Archived,
+    /// A row's live records ran ahead of its stored ones: nothing was
+    /// archived.
+    AuditAhead,
+}
+
 struct DslAuthority(SharedIngressDslAuthority);
 
 impl Clone for DslAuthority {
@@ -4216,13 +4227,74 @@ impl EphemeralRuntimeDriver {
     /// Archive only terminal rows whose durable completion/publication sagas
     /// are already closed. A terminal lifecycle row with a pending completion
     /// or unpublished interaction outbox remains active authority even though
-    /// its terminal phase itself is durable.
+    /// its terminal phase itself is durable. The persistent driver archives
+    /// through [`Self::archive_terminal_inputs_with_committed_audit`] instead,
+    /// once the rows' staged audit records are durable.
+    #[cfg(test)]
     pub(crate) fn archive_archivable_terminal_inputs_after_durable_commit(
         &mut self,
         input_ids: &[InputId],
     ) -> Result<(), RuntimeDriverError> {
         let archivable = self.archivable_terminal_input_ids_in(input_ids)?;
         self.archive_terminal_inputs_after_durable_commit(&archivable)
+    }
+
+    /// Archive the terminal rows of `committed`, which the caller classified
+    /// as archivable, once their stored rows hold every authorization audit
+    /// record. `committed` names each row with the records its stored row
+    /// holds (frozen). In one synchronous
+    /// step, every row's live audit buffer is held under its lock, its
+    /// records are compared with the committed ones, the generated archive
+    /// runs, and the buffer of each row it removed is closed: no record can be
+    /// appended between that last check and the archive, and none after it.
+    /// When a row's live records ran ahead of the committed ones nothing is
+    /// archived, and the caller commits them first. A row the generated
+    /// archive defers keeps its buffer open.
+    pub(crate) fn archive_terminal_inputs_with_committed_audit(
+        &mut self,
+        committed: &[(InputId, crate::input_audit::InputAuthorizationAudit)],
+    ) -> Result<CommittedAuditArchive, RuntimeDriverError> {
+        let audit_corruption = |error: meerkat_core::authorization::OperationObservationError| {
+            RuntimeDriverError::RecoveryCorruption {
+                reason: error.to_string(),
+            }
+        };
+        let live = committed
+            .iter()
+            .map(|(input_id, _)| {
+                self.ledger
+                    .get(input_id)
+                    .map(|state| state.authorization_audit.clone())
+                    .ok_or_else(|| {
+                        RuntimeDriverError::Internal(format!(
+                            "terminal input archive references missing live input {input_id}"
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut held = live
+            .iter()
+            .map(crate::input_audit::InputAuthorizationAudit::hold_for_archive)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(audit_corruption)?;
+        for (held, (_, committed)) in held.iter().zip(committed) {
+            if !held.holds_only(committed).map_err(audit_corruption)? {
+                return Ok(CommittedAuditArchive::AuditAhead);
+            }
+        }
+        let input_ids = committed
+            .iter()
+            .map(|(input_id, _)| input_id.clone())
+            .collect::<Vec<_>>();
+        let archived = self.archive_terminal_inputs_after_durable_commit(&input_ids);
+        // Close exactly the rows the generated archive removed, failure or
+        // not: a deferred row, or one after a failing row, stays live.
+        for (held, input_id) in held.iter_mut().zip(&input_ids) {
+            if self.ledger.get(input_id).is_none() {
+                held.close();
+            }
+        }
+        archived.map(|()| CommittedAuditArchive::Archived)
     }
 
     pub(crate) fn archivable_terminal_input_ids_in(
@@ -10264,6 +10336,90 @@ mod tests {
             }),
             "generated machine projection is the only terminal-outcome owner"
         );
+    }
+
+    /// The archive step holds each row's audit buffer from its last check
+    /// until it closed the buffer. The generated archive needs the machine
+    /// authority, so while the test holds that, the step is past its last
+    /// check and before the row's removal: an append made then waits, and is
+    /// refused once the row is archived.
+    #[tokio::test]
+    async fn an_audit_append_during_the_terminal_archive_waits_and_is_refused() {
+        use crate::input_audit::tests::{audit_buffer_is_held, try_stage_refusal_after_row_write};
+
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("archive-holds-audit"));
+        let input = prompt_input("archive me");
+        let input_id = input.id().clone();
+        driver.accept_input(input).await.unwrap();
+        driver
+            .abandon_all_non_terminal(InputAbandonReason::Stopped)
+            .unwrap();
+        let live = driver
+            .ledger()
+            .get(&input_id)
+            .expect("terminal row")
+            .authorization_audit
+            .clone();
+        assert!(live.is_empty());
+        let committed = [(
+            input_id.clone(),
+            live.freeze_for_persistence().expect("no record"),
+        )];
+        assert_eq!(
+            driver
+                .archivable_terminal_input_ids_in(std::slice::from_ref(&input_id))
+                .expect("terminal row"),
+            vec![input_id.clone()]
+        );
+        let session_id = meerkat_core::types::SessionId::new();
+        let run_id = RunId::new();
+        let authority = driver.shared_dsl_authority();
+        let (answered, answer) = std::sync::mpsc::channel();
+        let archived = std::thread::scope(|threads| {
+            let machine_held = authority.lock().expect("generated owner");
+            let archive =
+                threads.spawn(|| driver.archive_terminal_inputs_with_committed_audit(&committed));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !audit_buffer_is_held(&live) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the archive holds the row's audit buffer while the generated archive runs"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            threads.spawn(|| {
+                answered
+                    .send(try_stage_refusal_after_row_write(
+                        &live,
+                        &input_id,
+                        &session_id,
+                        &run_id,
+                    ))
+                    .expect("the test waits for the answer");
+            });
+            assert_eq!(
+                answer
+                    .recv_timeout(std::time::Duration::from_millis(100))
+                    .map(|appended| appended.is_ok()),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+                "the append waits while the archive holds the buffer"
+            );
+            drop(machine_held);
+            archive.join().expect("archive thread")
+        });
+        assert_eq!(
+            archived.expect("the held archive"),
+            super::CommittedAuditArchive::Archived
+        );
+        assert!(driver.ledger().get(&input_id).is_none());
+        assert!(
+            answer
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("the append returns once the archive released the buffer")
+                .is_err(),
+            "the archived row's audit buffer refuses the record"
+        );
+        assert!(live.is_empty());
     }
 
     #[tokio::test]

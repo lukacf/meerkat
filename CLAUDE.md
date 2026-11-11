@@ -1064,7 +1064,7 @@ Six files must agree on the same version:
 
 Additionally, all internal crate dependencies in `Cargo.toml` (47 path deps) must require the workspace version exactly (`version = "=X.Y.Z"`; cargo-release keeps the `=` when it bumps). 0.x patch releases may break API, so every requirement a release crate publishes on a workspace crate is exact; `make check-rust-release-config` checks the manifests and `make check-rust-release-packaging` the packaged archives.
 
-**`make verify-version-parity`** runs in CI and fails on any drift. After changing versions or wire types:
+**`make verify-version-parity`** runs in CI and fails on any drift. It also refuses an in-repo product pinned below its version in this tree (`scripts/check_inrepo_version_pins.py`; upgrade fixtures and recorded history are allowed with their reasons in `ci/inrepo-version-pins.json`), and the release hook moves the other products' pins on Core's packages with the check's `--write` (see the [release guide](docs/guides/cd-and-distribution.md#in-repo-products)). After changing versions or wire types:
 
 ```bash
 make regen-schemas           # Re-emit schemas + regenerate SDK types
@@ -1224,7 +1224,7 @@ When running tests or demos that involve multiple LLM providers/models, use thes
 | Provider | Model Name |
 |----------|------------|
 | OpenAI | `gpt-5.6-sol` or `gpt-5.6-terra` or `gpt-5.6-luna` or `gpt-5.6` or `gpt-5.5` or `gpt-5.5-pro` or `gpt-5.4` or `gpt-5.4-mini` or `gpt-5.3-codex` |
-| Gemini | `gemini-4-argon` (paid Gemini API tier) or `gemini-3.8-flash` or `gemini-3.6-flash` or `gemini-3.5-flash-lite` or `gemini-3.1-flash-lite` or `gemini-3.5-flash` or `gemini-3.1-pro-preview` or `gemini-3.1-flash-lite-preview` |
+| Gemini | `gemini-4-argon` (paid Gemini API tier) or `gemini-4-carbon` (paid Gemini API tier) or `gemini-3.8-flash` or `gemini-3.6-flash` or `gemini-3.5-flash-lite` or `gemini-3.1-flash-lite` or `gemini-3.5-flash` or `gemini-3.1-pro-preview` or `gemini-3.1-flash-lite-preview` |
 | Anthropic | `claude-opus-5-5` or `claude-opus-5` or `claude-fable-5` or `claude-opus-4-8` or `claude-sonnet-5-5` or `claude-sonnet-4-6` or `claude-sonnet-4-5` or `claude-haiku-5-5` |
 
 These are catalog text-model ids (`meerkat-models` is the source of truth; `rkat models` prints the live list); models outside the catalog require a config `[models.<id>]` entry.

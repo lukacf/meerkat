@@ -277,6 +277,7 @@ impl fmt::Debug for LlmRequestRouteWitness {
 pub struct LlmReplayProjection {
     messages: Vec<Message>,
     route_witness: Option<LlmRequestRouteWitness>,
+    replay_witness: Option<LlmRequestRouteWitness>,
 }
 
 impl LlmReplayProjection {
@@ -284,12 +285,28 @@ impl LlmReplayProjection {
         Self {
             messages,
             route_witness: None,
+            replay_witness: None,
         }
     }
 
     pub fn with_route_witness(mut self, witness: LlmRequestRouteWitness) -> Self {
         self.route_witness = Some(witness);
         self
+    }
+
+    /// Attach the projecting client's own evidence of what it decided for
+    /// this projection, beside any route witness a wrapper adds. It travels
+    /// with the request, so the client that later lowers and sends the
+    /// request applies the decision made here instead of deciding again.
+    #[must_use]
+    pub fn with_replay_witness(mut self, witness: LlmRequestRouteWitness) -> Self {
+        self.replay_witness = Some(witness);
+        self
+    }
+
+    /// The projected messages.
+    pub fn messages(&self) -> &[Message] {
+        &self.messages
     }
 }
 
@@ -299,6 +316,7 @@ impl LlmReplayProjection {
 pub struct PreparedLlmRequest {
     request: Arc<LlmRequest>,
     route_witness: Option<LlmRequestRouteWitness>,
+    replay_witness: Option<LlmRequestRouteWitness>,
     authorization: Option<meerkat_core::LlmRequestAuthorization>,
     authorization_target:
         Option<Arc<crate::request_authorization::ResolvedModelAuthorizationTarget>>,
@@ -313,6 +331,7 @@ impl PreparedLlmRequest {
         Self {
             request: Arc::new(request),
             route_witness: projection.route_witness,
+            replay_witness: projection.replay_witness,
             authorization: None,
             authorization_target: None,
             agent_initiated: false,
@@ -372,6 +391,7 @@ impl PreparedLlmRequest {
         Self {
             request: Arc::new(request),
             route_witness: self.route_witness.clone(),
+            replay_witness: self.replay_witness.clone(),
             authorization: self.authorization.clone(),
             authorization_target: self.authorization_target.clone(),
             agent_initiated: self.agent_initiated,
@@ -415,6 +435,14 @@ impl PreparedLlmRequest {
 
     pub fn route_witness<T: Any>(&self) -> Option<&T> {
         self.route_witness
+            .as_ref()
+            .and_then(LlmRequestRouteWitness::downcast_ref)
+    }
+
+    /// The projecting client's evidence of its replay decision
+    /// ([`LlmReplayProjection::with_replay_witness`]).
+    pub fn replay_witness<T: Any>(&self) -> Option<&T> {
+        self.replay_witness
             .as_ref()
             .and_then(LlmRequestRouteWitness::downcast_ref)
     }

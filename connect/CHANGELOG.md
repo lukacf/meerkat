@@ -7,6 +7,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- `@rkat/toolkit` accepts its optional peers `@rkat/sdk` and `@rkat/meta-sdk`
+  from 0.9.14 below 0.10.0 (`>=0.9.14 <0.10.0`; it accepted them from 0.9.10):
+  the package is built and tested with the SDKs of its own release, and each
+  release moves the floor to its version; a release that reaches the ceiling
+  also moves the ceiling, to the next minor release on the 0.x line (at
+  0.10.0 the peers become `>=0.10.0 <0.11.0`). Its development dependencies link
+  `@rkat/sdk` and `@rkat/meta-sdk` from the same checkout instead of
+  installing the published 0.9.10 packages, so source builds and tests run
+  against the SDKs of the same commit; build the repository's
+  `sdks/typescript` and `meta/sdk/typescript` first (see BUILDING.md).
+
+## [0.9.13] - 2026-11-11
+
+Meerkat Connect 0.9.13 is part of Meerkat 0.9.13 (Core 0.9.13, Meta 0.9.13
+and Connect 0.9.13, released together): GitHub release `connect-v0.9.13`, a
+full release that is never the repository's latest.
+
+Connect 0.9.13 holds every change of Connect 0.9.12, which was not released
+because the `meerkat-meta` 0.9.12 crate it builds against was never
+published.
+
+First-run setup on a Linux prefix packaged from Connect's resources no
+longer ends `owner_refused`, and native services attach under sustained
+heavy CPU load. See Fixed.
+
+The next host settles an access decision a lost host left pending, so a
+fresh approval of the same request is accepted and issues its grant once.
+See Fixed and Upgrade notes.
+
+### Changed
+
 - Connect releases are full GitHub releases, no longer prereleases. A
   Connect release is still never the repository's latest: Core's release
   stays latest. The `connect-v0.9.10` and `connect-v0.9.11` releases were
@@ -23,11 +54,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   lengthens it: the package owner's readback keeps its private files in a
   `readback-` directory beside the setup attempts, where the list does not
   look.
+
 - The shared setup owner names each peer whose close failed: one stderr
   line per peer, `local_setup_connection_diagnostic phase=peer_close
   peer=<n> exception=<class> errno=<code>`, in the closed categories of its
   other peer diagnostics and never with exception text or paths. Before, a
   failed peer close left no trace of the peer or of what failed.
+
 - The shared setup owner removes its private sockets and their directory in
   `/tmp` even when a peer's close fails, still each only while it is the
   socket the owner bound. A removal it refuses or that fails no longer
@@ -51,7 +84,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   a failure's detail; its currentness checks run outside the budget and
   still refuse what they refused before. A member that is ready is seen
   ready even while one currentness check takes longer than the whole
-  budget, so the members after it are attached.
+  budget, so the members after it are attached. The 0.9.11 known limitation
+  no longer applies.
 
 - After a host loss, or a close that ran out of its 30-second join bound, an
   access decision whose native issuance was still pending no longer stays
@@ -61,7 +95,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   issued, so a fresh approval of the same request, or an exact retry of the
   decision, is accepted and issues its grant once even when its evidence,
   approving parent or computed deadline differ, while a request with different
-  content is refused as a conflict.
+  content is refused as a conflict. The 0.9.11 known limitation no longer
+  applies.
+
+### Security
+
+- The bundled SQLite is 3.54.1 (RUSTSEC-2026-0459): Connect builds with
+  rusqlite 0.41.1 and libsqlite3-sys 0.39.1. SQLite before 3.54.0 can
+  return uninitialized page-cache memory to ordinary queries when it opens
+  a database together with a write-ahead log of a different page size.
+  Stored values keep their encoding.
 
 ### Upgrade notes
 
@@ -69,6 +112,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   issuance state `not_issued`. A Connect without this change answers a
   conflict when that decision is applied or read again; other decisions are
   unaffected.
+
+## [0.9.12] - 2026-11-10
+
+Connect 0.9.12 was not released: the tag `connect-v0.9.12` has no GitHub
+release and no packages, because the `meerkat-meta` 0.9.12 crate it is built
+with was never published. Its changes are listed under 0.9.13.
 
 ## [0.9.11] - 2026-11-09
 

@@ -202,6 +202,8 @@ impl PrivateOriginals {
             IdentityRuntimeError::IdentityWakeRetryable { .. } => "IdentityWakeRetryable",
             IdentityRuntimeError::IdentitySessionAbsent { .. } => "IdentitySessionAbsent",
             IdentityRuntimeError::IdentityHostAdopted { .. } => "IdentityHostAdopted",
+            IdentityRuntimeError::IdentityStoreOwned { .. } => "IdentityStoreOwned",
+            IdentityRuntimeError::IdentityArchived { .. } => "IdentityArchived",
             IdentityRuntimeError::WakeHeld { .. } => "WakeHeld",
             IdentityRuntimeError::PeerWiringTimedOut { .. } => "PeerWiringTimedOut",
             IdentityRuntimeError::PeerTopologySuperseded { .. } => "PeerTopologySuperseded",

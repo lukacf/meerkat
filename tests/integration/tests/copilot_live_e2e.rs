@@ -21,6 +21,7 @@ use meerkat::{
 use meerkat_copilot::{
     CopilotModelAccess, CopilotModelCapabilities, CopilotModelSnapshot, CopilotProviderRoute,
     CopilotResolvedAuth, CopilotRuntime, GITHUB_COPILOT_CREDENTIAL_ACCOUNT_ID,
+    same_account_model_id,
 };
 use meerkat_core::auth::{PersistedAuthMode, ProviderAuthPersistence, TokenKey};
 use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
@@ -389,6 +390,29 @@ fn operator_token_routes(integration_id: Option<&str>) -> meerkat_core::RealmCon
         .expect("operator-token Copilot routes")
 }
 
+/// The id under which the account serves the registry model `model` to
+/// `provider`'s family: `model` itself when the account lists it, or else
+/// the only id it serves that names the same model. `None` when it serves
+/// none, or more than one and none exactly.
+fn account_id_for<'a>(
+    snapshot: &'a CopilotModelSnapshot,
+    provider: Provider,
+    model: &str,
+) -> Option<&'a str> {
+    if snapshot.model(model).is_some() {
+        return snapshot
+            .available_model_ids(provider)
+            .find(|listed| *listed == model);
+    }
+    let mut same = snapshot
+        .available_model_ids(provider)
+        .filter(|listed| same_account_model_id(listed, model));
+    match (same.next(), same.next()) {
+        (Some(listed), None) => Some(listed),
+        _ => None,
+    }
+}
+
 fn route_models(config: &Config, snapshot: &CopilotModelSnapshot) -> Vec<RouteModel> {
     let registry = config
         .model_registry(meerkat_models::canonical())
@@ -396,8 +420,16 @@ fn route_models(config: &Config, snapshot: &CopilotModelSnapshot) -> Vec<RouteMo
     let mut models = Vec::new();
     for route in CopilotProviderRoute::ALL {
         let provider = route.provider();
-        for model in snapshot.available_model_ids(provider) {
-            let Some(offering) = snapshot.model(model) else {
+        for entry in registry.entries_for_provider(provider) {
+            // The account's entry for the registry model: the one listed
+            // under the registry id, or else the only one whose id names the
+            // same model (the account lists `claude-opus-5.5` for the
+            // catalog's `claude-opus-5-5`). The session runs the registry id.
+            let model = entry.id.as_str();
+            let Some(account_id) = account_id_for(snapshot, provider, model) else {
+                continue;
+            };
+            let Some(offering) = snapshot.model(account_id) else {
                 continue;
             };
             let Some(profile) = registry.profile_witness_for_provider(provider, model) else {
@@ -629,21 +661,35 @@ async fn copilot_live_account_routes_tools_images_and_switches() {
     let registry = config
         .model_registry(meerkat_models::canonical())
         .expect("effective model registry");
+    // A catalog model the account serves under no spelling of its id is
+    // unavailable on its route. One the account lists under another spelling
+    // (a dot where the catalog writes a hyphen) is served under its catalog
+    // id, as every candidate is.
     if let Some((route, unavailable)) = CopilotProviderRoute::ALL.iter().find_map(|route| {
         registry
             .entries_for_provider(route.provider())
             .find(|entry| {
-                snapshot
-                    .model(&entry.id)
-                    .and_then(|model| model.route_for(route.provider()))
-                    .is_none()
+                !snapshot
+                    .available_model_ids(route.provider())
+                    .any(|listed| same_account_model_id(listed, &entry.id))
             })
             .map(|entry| (*route, entry.id.clone()))
     }) {
         assert_eq!(
             resolved.route_for(route.provider(), &unavailable),
             CopilotModelAccess::Unavailable,
-            "account offering must reject a catalog model absent from the discovered route"
+            "account offering must reject a catalog model the account serves under no spelling"
+        );
+    }
+    for candidate in &candidates {
+        assert!(
+            matches!(
+                resolved.route_for(candidate.provider, &candidate.model),
+                CopilotModelAccess::Available { .. }
+            ),
+            "the account serves catalog model {} on its {} route",
+            candidate.model,
+            candidate.provider.as_str()
         );
     }
 
@@ -977,4 +1023,713 @@ async fn copilot_live_operator_token_routes() {
         mark_provider_covered(&mut covered_providers, target.provider);
     }
     eprintln!("copilot-live operator token PASS providers={covered_providers:?}");
+}
+
+// ---------------------------------------------------------------------------
+// OpenAI-family continuity across services (live differential)
+// ---------------------------------------------------------------------------
+//
+// Encrypted reasoning, item ids and response ids are replayed only to the
+// service the running process received them from. These rows send real
+// requests to the public OpenAI API and to the GitHub Copilot `/responses`
+// route with the clients a session uses, and print only sanitized shapes:
+// row names, block kinds, whether a block still carries provider metadata,
+// and the class of a refusal. No account, token, model list or response
+// body is printed or written.
+//
+// A cold load needs another process, so the rows run as phases of this one
+// test, chosen by `MEERKAT_CONTINUITY_LIVE_PHASE`, and hand their transcripts
+// over as files in `MEERKAT_CONTINUITY_LIVE_DIR` (rows a session store would
+// hold; delete the directory afterwards):
+//
+// - `mint`: one tool step on the public API, sent on to Copilot inside the
+//   tool loop in the same process. Writes `api.json`.
+// - `resume`: a new process. The stored tool loop resumes on the public API
+//   and on Copilot, a further tool turn makes the request mixed, then the
+//   session moves between the two services in both directions. Writes
+//   `copilot.json` and, when the public API offers hosted web search to the
+//   credential, `search.json`.
+// - `resume-copilot`: a new process. The stored Copilot turn resumes on
+//   Copilot (mixed request), and the stored search step on both services.
+//
+// Two phases need no other service than Copilot:
+//
+// - `copilot-mint`: a tool step and its answer on Copilot. Writes
+//   `copilot-loop.json` (the tool loop before its answer) and
+//   `copilot-turn.json` (the whole turn).
+// - `copilot-resume`: a new process. The stored tool loop resumes (a tool
+//   loop cut by a restart), a further tool turn makes the request mixed,
+//   and the stored whole turn takes a new turn (a cold load, then a new
+//   turn).
+//
+// Each phase stops at the first 401 or 429.
+
+mod continuity_live {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use meerkat_client::{LlmClient, LlmClientAdapter, OpenAiClient};
+    use meerkat_core::error::LlmFailureReason;
+    use meerkat_core::lifecycle::run_primitive::{
+        OpaqueProviderBody, OpenAiProviderTag, ProviderParamsOverride, ProviderTag, ToolChoice,
+    };
+    use meerkat_core::{
+        AgentError, AgentLlmClient, AssistantBlock, BlockAssistantMessage, Message,
+        SessionLlmIdentity, UserMessage,
+    };
+    use serde_json::json;
+
+    /// Models tried in this order: the first the Copilot account serves on
+    /// its `/responses` route is used on both services. When it serves none
+    /// of them there, the first OpenAI model it does serve there is used.
+    pub(super) const MODEL_PREFERENCE: &[&str] = &["gpt-5.4-mini", "gpt-5.4", "gpt-5.5"];
+    const MAX_TOKENS: u32 = 2048;
+
+    pub(super) struct Probe {
+        pub(super) model: String,
+        pub(super) api: Arc<dyn LlmClient>,
+        pub(super) copilot: Arc<dyn LlmClient>,
+        pub(super) requests: std::cell::Cell<u32>,
+    }
+
+    pub(super) fn handover(name: &str) -> PathBuf {
+        let dir = std::env::var("MEERKAT_CONTINUITY_LIVE_DIR")
+            .expect("MEERKAT_CONTINUITY_LIVE_DIR names the handover directory");
+        PathBuf::from(dir).join(name)
+    }
+
+    pub(super) fn store(name: &str, transcript: &[Message]) {
+        let rows = serde_json::to_vec(transcript).expect("rows");
+        std::fs::write(handover(name), rows).expect("write the handover rows");
+    }
+
+    pub(super) fn load(name: &str) -> Option<Vec<Message>> {
+        let rows = std::fs::read(handover(name)).ok()?;
+        Some(serde_json::from_slice(&rows).expect("the handover rows decode"))
+    }
+
+    fn weather_tool() -> Arc<meerkat_core::ToolDef> {
+        Arc::new(meerkat_core::ToolDef::new(
+            "get_weather",
+            "Current weather of a city.",
+            json!({
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+                "additionalProperties": false
+            }),
+        ))
+    }
+
+    pub(super) fn user(text: &str) -> Message {
+        Message::User(UserMessage::text(text.to_string()))
+    }
+
+    /// The tool results answering every call of `step`.
+    pub(super) fn tool_outputs(step: &Message) -> Message {
+        let Message::BlockAssistant(assistant) = step else {
+            panic!("a tool step is an assistant message");
+        };
+        let results = assistant
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                AssistantBlock::ToolUse { id, .. } => Some(meerkat_core::ToolResult::new(
+                    id.clone(),
+                    "4 C, light rain".to_string(),
+                    false,
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(!results.is_empty(), "the step called the tool");
+        Message::tool_results(results)
+    }
+
+    /// A transcript as kinds only: for each assistant step its block kinds,
+    /// with `+meta` where a block carries provider metadata.
+    pub(super) fn shape(messages: &[Message]) -> String {
+        messages
+            .iter()
+            .map(|message| match message {
+                Message::User(_) => "user".to_string(),
+                Message::ToolResults { results, .. } => format!("tool_results({})", results.len()),
+                Message::BlockAssistant(assistant) => {
+                    let blocks = assistant
+                        .blocks
+                        .iter()
+                        .map(|block| {
+                            let (kind, meta) = match block {
+                                AssistantBlock::Text { text, meta } if text.is_empty() => {
+                                    ("empty_text", meta.is_some())
+                                }
+                                AssistantBlock::Text { meta, .. } => ("text", meta.is_some()),
+                                AssistantBlock::Reasoning { meta, .. } => {
+                                    ("reasoning", meta.is_some())
+                                }
+                                AssistantBlock::ToolUse { meta, .. } => {
+                                    ("tool_use", meta.is_some())
+                                }
+                                AssistantBlock::ServerToolContent { meta, .. } => {
+                                    ("hosted_tool", meta.is_some())
+                                }
+                                _ => ("other", false),
+                            };
+                            if meta {
+                                format!("{kind}+meta")
+                            } else {
+                                kind.to_string()
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    format!("assistant[{}]", blocks.join(","))
+                }
+                _ => "system".to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// The class of a refusal, without the provider's text beyond its code.
+    fn refusal_class(error: &AgentError) -> String {
+        let text = error.to_string();
+        let class = match error {
+            AgentError::Llm {
+                reason: LlmFailureReason::AuthError,
+                ..
+            } => "authentication_failed",
+            AgentError::Llm {
+                reason: LlmFailureReason::RateLimited { .. },
+                ..
+            } => "rate_limited",
+            AgentError::Llm { .. } if text.contains("Invalid request") => "invalid_request",
+            AgentError::Llm { .. } => "provider_error",
+            _ => "other",
+        };
+        let code = [
+            "invalid_request_body",
+            "invalid_encrypted_content",
+            "invalid_value",
+        ]
+        .into_iter()
+        .find(|code| text.contains(code))
+        .unwrap_or("-");
+        let empty_message = text.contains("\"message\":\"\"");
+        format!("{class} code={code} empty_message={empty_message}")
+    }
+
+    pub(super) enum Outcome {
+        Accepted(Box<Message>),
+        Refused(String),
+    }
+
+    impl Probe {
+        /// One request: `history` to `client`. Prints the row and what the
+        /// client replays, and returns the committed step or the refusal's
+        /// class.
+        pub(super) async fn send(
+            &self,
+            row: &str,
+            service: &str,
+            client: &Arc<dyn LlmClient>,
+            history: &[Message],
+            tool_choice: ToolChoice,
+            provider_params: Option<ProviderTag>,
+        ) -> Outcome {
+            let replayed = client
+                .project_replay_messages(history)
+                .map(|projected| shape(&projected))
+                .unwrap_or_else(|error| format!("projection refused: {error}"));
+            // One provider step the way a session sends it: the adapter
+            // projects the history through the client, prepares the request
+            // with what the projection decided, measures it and sends the
+            // prepared request.
+            let adapter = LlmClientAdapter::new(Arc::clone(client), self.model.clone());
+            let params = ProviderParamsOverride {
+                tool_choice: Some(tool_choice),
+                provider_tag: provider_params,
+                ..Default::default()
+            };
+            self.requests.set(self.requests.get() + 1);
+            let outcome = match adapter
+                .stream_response(history, &[weather_tool()], MAX_TOKENS, None, Some(&params))
+                .await
+            {
+                Ok(step) => Outcome::Accepted(Box::new(Message::BlockAssistant(
+                    BlockAssistantMessage::new(step.blocks().to_vec(), step.stop_reason()),
+                ))),
+                Err(error) => Outcome::Refused(refusal_class(&error)),
+            };
+            let result = match &outcome {
+                Outcome::Accepted(step) => {
+                    format!("accepted committed={}", shape(std::slice::from_ref(step)))
+                }
+                Outcome::Refused(class) => format!("refused {class}"),
+            };
+            eprintln!(
+                "RI-LIVE row={row} service={service} request#{} replayed=[{replayed}] -> {result}",
+                self.requests.get()
+            );
+            if let Outcome::Refused(class) = &outcome {
+                assert!(
+                    !class.starts_with("authentication_failed")
+                        && !class.starts_with("rate_limited"),
+                    "STOP: {service} answered {class}; no further live request is sent"
+                );
+            }
+            outcome
+        }
+
+        pub(super) async fn accepted(
+            &self,
+            row: &str,
+            service: &str,
+            client: &Arc<dyn LlmClient>,
+            history: &[Message],
+            tool_choice: ToolChoice,
+        ) -> Message {
+            match self
+                .send(row, service, client, history, tool_choice, None)
+                .await
+            {
+                Outcome::Accepted(step) => *step,
+                Outcome::Refused(class) => panic!("{row}: {service} refused the request: {class}"),
+            }
+        }
+    }
+
+    pub(super) fn hosted_web_search() -> ProviderTag {
+        ProviderTag::OpenAi(OpenAiProviderTag {
+            web_search: Some(OpaqueProviderBody::from_value(
+                &json!({"type": "web_search"}),
+            )),
+            ..Default::default()
+        })
+    }
+
+    pub(super) fn public_api_client() -> Arc<dyn LlmClient> {
+        let key = std::env::var("OPENAI_API_KEY").expect("OPENAI_API_KEY is set");
+        Arc::new(OpenAiClient::new(key))
+    }
+
+    pub(super) fn copilot_identity(model: &str) -> SessionLlmIdentity {
+        SessionLlmIdentity {
+            model: model.to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: Some(super::auth_binding(super::CopilotProviderRoute::OpenAi)),
+        }
+    }
+}
+
+/// Live differential for OpenAI-family continuity across the public OpenAI
+/// API and the GitHub Copilot `/responses` route; see the notes above
+/// `continuity_live`. Run by hand, one phase per process:
+///
+/// ```text
+/// MEERKAT_CONTINUITY_LIVE_PHASE=mint MEERKAT_CONTINUITY_LIVE_DIR=<dir> \
+/// COPILOT_LIVE_USER_TOKEN=<token> OPENAI_API_KEY=<key> repo-cargo test \
+///     -p meerkat-integration-tests --features integration-real-tests \
+///     --test copilot_live_e2e copilot_live_openai_continuity_across_services \
+///     -- --ignored --nocapture
+/// ```
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "lane:e2e-live; set MEERKAT_CONTINUITY_LIVE_PHASE, MEERKAT_CONTINUITY_LIVE_DIR, COPILOT_LIVE_USER_TOKEN and OPENAI_API_KEY"]
+async fn copilot_live_openai_continuity_across_services() {
+    use continuity_live::{Outcome, Probe, load, store, tool_outputs, user};
+    use meerkat_core::lifecycle::run_primitive::ToolChoice;
+
+    let Ok(phase) = std::env::var("MEERKAT_CONTINUITY_LIVE_PHASE") else {
+        eprintln!("SKIP continuity-live: MEERKAT_CONTINUITY_LIVE_PHASE is not set");
+        return;
+    };
+    let mut config = Config::default();
+    config
+        .realm
+        .insert("global".to_string(), operator_token_routes(None));
+    config.model_fallback.enabled = Some(false);
+    let persistence = ProviderAuthPersistence::new(
+        Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new()),
+        Arc::new(meerkat_providers::auth_store::InMemoryCoordinator::new()),
+    );
+    let resolved = timeout(
+        Duration::from_secs(90),
+        resolve_account(
+            &config,
+            ResolverEnvironment::with_process_env()
+                .with_provider_auth_persistence(persistence.clone()),
+        ),
+    )
+    .await
+    .expect("Copilot identity lookup/model discovery timed out")
+    .expect("GitHub and Copilot accept the operator token");
+    let snapshot = resolved
+        .model_snapshot()
+        .expect("the operator token resolved but listed no models");
+    let candidates = route_models(&config, &snapshot);
+    let serves_responses = |model: &str| {
+        candidates.iter().any(|candidate| {
+            candidate.route == CopilotProviderRoute::OpenAi
+                && candidate.model == model
+                && account_id_for(&snapshot, Provider::OpenAI, model)
+                    .and_then(|id| snapshot.model(id))
+                    .is_some_and(|offering| {
+                        offering
+                            .endpoints()
+                            .any(|endpoint| endpoint == meerkat_copilot::CopilotEndpoint::Responses)
+                    })
+        })
+    };
+    // A preferred model when the account serves one on its `/responses`
+    // route, and otherwise the first OpenAI model it serves there.
+    let model = continuity_live::MODEL_PREFERENCE
+        .iter()
+        .map(|model| (*model).to_string())
+        .chain(
+            candidates
+                .iter()
+                .filter(|candidate| candidate.route == CopilotProviderRoute::OpenAi)
+                .map(|candidate| candidate.model.clone()),
+        )
+        .find(|model| serves_responses(model))
+        .expect("the account serves no OpenAI model on its /responses route");
+
+    let temp = TempDir::new().expect("continuity live temp directory");
+    let factory = AgentFactory::new(temp.path().join("factory-store"))
+        .runtime_root(temp.path().join("runtime"))
+        .with_provider_auth_persistence(persistence);
+    // The Copilot route resolves its credential under an auth lease
+    // authority, as a session's runtime gives it one.
+    let machine = meerkat_runtime::MeerkatMachine::ephemeral();
+    let copilot = factory
+        .build_llm_client_for_identity_with_auth_lease(
+            &config,
+            &continuity_live::copilot_identity(&model),
+            Some(machine.generated_auth_lease_handle()),
+        )
+        .await
+        .expect("the factory builds the Copilot route client");
+    let probe = Probe {
+        model: model.clone(),
+        api: continuity_live::public_api_client(),
+        copilot,
+        requests: std::cell::Cell::new(0),
+    };
+    eprintln!("RI-LIVE phase={phase} model={model}");
+    let question = "Use the get_weather tool for Oslo, then answer in one short sentence.";
+
+    match phase.as_str() {
+        "mint" => {
+            let mut transcript = vec![user(question)];
+            let step = probe
+                .accepted(
+                    "mint-tool-step",
+                    "api",
+                    &probe.api,
+                    &transcript,
+                    ToolChoice::Required,
+                )
+                .await;
+            transcript.push(tool_outputs(&step));
+            transcript.insert(1, step);
+            store("api.json", &transcript);
+            // The session moves to Copilot inside the tool loop, same process.
+            probe
+                .send(
+                    "same-process-api-to-copilot-in-tool-loop",
+                    "copilot",
+                    &probe.copilot,
+                    &transcript,
+                    ToolChoice::Auto,
+                    None,
+                )
+                .await;
+        }
+        "resume" => {
+            let stored = load("api.json").expect("phase mint wrote api.json");
+            // A new process resumes the stored tool loop on both services.
+            let answer = probe
+                .accepted(
+                    "cold-resume-in-tool-loop",
+                    "api",
+                    &probe.api,
+                    &stored,
+                    ToolChoice::Auto,
+                )
+                .await;
+            probe
+                .accepted(
+                    "cold-resume-in-tool-loop",
+                    "copilot",
+                    &probe.copilot,
+                    &stored,
+                    ToolChoice::Auto,
+                )
+                .await;
+            // A further tool turn: stored steps dropped, new steps admitted.
+            let mut transcript = stored;
+            transcript.push(answer);
+            transcript.push(user("Do the same for Bergen."));
+            let step = probe
+                .accepted(
+                    "mixed-new-tool-step",
+                    "api",
+                    &probe.api,
+                    &transcript,
+                    ToolChoice::Required,
+                )
+                .await;
+            transcript.push(step.clone());
+            transcript.push(tool_outputs(&step));
+            let answer = probe
+                .accepted(
+                    "mixed-inside-new-tool-loop",
+                    "api",
+                    &probe.api,
+                    &transcript,
+                    ToolChoice::Auto,
+                )
+                .await;
+            transcript.push(answer);
+            transcript.push(user("Which of the two is colder?"));
+            probe
+                .accepted(
+                    "mixed-further-turn",
+                    "api",
+                    &probe.api,
+                    &transcript,
+                    ToolChoice::Auto,
+                )
+                .await;
+            // The session moves to Copilot: the public API's steps of this
+            // process are another service's.
+            probe
+                .accepted(
+                    "same-process-api-to-copilot",
+                    "copilot",
+                    &probe.copilot,
+                    &transcript,
+                    ToolChoice::Auto,
+                )
+                .await;
+
+            // A turn on Copilot, then the session moves to the public API.
+            let mut transcript = vec![user(question)];
+            let step = probe
+                .accepted(
+                    "mint-tool-step",
+                    "copilot",
+                    &probe.copilot,
+                    &transcript,
+                    ToolChoice::Required,
+                )
+                .await;
+            transcript.push(step.clone());
+            transcript.push(tool_outputs(&step));
+            let answer = probe
+                .accepted(
+                    "same-service-inside-tool-loop",
+                    "copilot",
+                    &probe.copilot,
+                    &transcript,
+                    ToolChoice::Auto,
+                )
+                .await;
+            transcript.push(answer);
+            store("copilot.json", &transcript);
+            transcript.push(user("Which city was that?"));
+            probe
+                .accepted(
+                    "same-process-copilot-to-api",
+                    "api",
+                    &probe.api,
+                    &transcript,
+                    ToolChoice::Auto,
+                )
+                .await;
+
+            // A hosted web search step, when the public API offers the tool.
+            let search = vec![user(
+                "Search the web: what is the capital of Norway? One sentence.",
+            )];
+            match probe
+                .send(
+                    "mint-hosted-search",
+                    "api",
+                    &probe.api,
+                    &search,
+                    ToolChoice::Auto,
+                    Some(continuity_live::hosted_web_search()),
+                )
+                .await
+            {
+                Outcome::Accepted(step) => {
+                    let mut transcript = search;
+                    transcript.push(*step);
+                    store("search.json", &transcript);
+                }
+                Outcome::Refused(class) => {
+                    eprintln!(
+                        "RI-LIVE hosted web search is not offered to this credential: {class}"
+                    );
+                }
+            }
+        }
+        "resume-copilot" => {
+            let stored = load("copilot.json").expect("phase resume wrote copilot.json");
+            let mut transcript = stored;
+            transcript.push(user("Do the same for Bergen."));
+            let step = probe
+                .accepted(
+                    "cold-mixed-new-tool-step",
+                    "copilot",
+                    &probe.copilot,
+                    &transcript,
+                    ToolChoice::Required,
+                )
+                .await;
+            transcript.push(step.clone());
+            transcript.push(tool_outputs(&step));
+            let answer = probe
+                .accepted(
+                    "cold-mixed-inside-new-tool-loop",
+                    "copilot",
+                    &probe.copilot,
+                    &transcript,
+                    ToolChoice::Auto,
+                )
+                .await;
+            transcript.push(answer);
+            transcript.push(user("Which of the two is colder?"));
+            probe
+                .accepted(
+                    "cold-mixed-further-turn",
+                    "copilot",
+                    &probe.copilot,
+                    &transcript,
+                    ToolChoice::Auto,
+                )
+                .await;
+            if let Some(mut search) = load("search.json") {
+                search.push(user("And of Sweden? One sentence, no search."));
+                probe
+                    .accepted(
+                        "cold-dropped-hosted-search",
+                        "api",
+                        &probe.api,
+                        &search,
+                        ToolChoice::Auto,
+                    )
+                    .await;
+                probe
+                    .accepted(
+                        "cold-dropped-hosted-search",
+                        "copilot",
+                        &probe.copilot,
+                        &search,
+                        ToolChoice::Auto,
+                    )
+                    .await;
+            } else {
+                eprintln!("RI-LIVE no stored hosted search step: rows skipped");
+            }
+        }
+        "copilot-mint" => {
+            let mut transcript = vec![user(question)];
+            let step = probe
+                .accepted(
+                    "mint-tool-step",
+                    "copilot",
+                    &probe.copilot,
+                    &transcript,
+                    ToolChoice::Required,
+                )
+                .await;
+            transcript.push(step.clone());
+            transcript.push(tool_outputs(&step));
+            store("copilot-loop.json", &transcript);
+            let answer = probe
+                .accepted(
+                    "same-process-inside-tool-loop",
+                    "copilot",
+                    &probe.copilot,
+                    &transcript,
+                    ToolChoice::Auto,
+                )
+                .await;
+            transcript.push(answer);
+            store("copilot-turn.json", &transcript);
+        }
+        "copilot-resume" => {
+            // A tool loop cut by a restart: the stored call and its output
+            // go out in the plain form and the answer comes back.
+            let stored =
+                load("copilot-loop.json").expect("phase copilot-mint wrote copilot-loop.json");
+            let answer = probe
+                .accepted(
+                    "cold-resume-in-tool-loop",
+                    "copilot",
+                    &probe.copilot,
+                    &stored,
+                    ToolChoice::Auto,
+                )
+                .await;
+            // A further tool turn: the stored step in the plain form, the
+            // steps of this process as the service returned them.
+            let mut transcript = stored;
+            transcript.push(answer);
+            transcript.push(user("Do the same for Bergen."));
+            let step = probe
+                .accepted(
+                    "mixed-new-tool-step",
+                    "copilot",
+                    &probe.copilot,
+                    &transcript,
+                    ToolChoice::Required,
+                )
+                .await;
+            transcript.push(step.clone());
+            transcript.push(tool_outputs(&step));
+            let answer = probe
+                .accepted(
+                    "mixed-inside-new-tool-loop",
+                    "copilot",
+                    &probe.copilot,
+                    &transcript,
+                    ToolChoice::Auto,
+                )
+                .await;
+            transcript.push(answer);
+            transcript.push(user("Which of the two is colder?"));
+            probe
+                .accepted(
+                    "mixed-further-turn",
+                    "copilot",
+                    &probe.copilot,
+                    &transcript,
+                    ToolChoice::Auto,
+                )
+                .await;
+            // A cold load, then a new turn: the whole stored turn in the
+            // plain form, and one new question.
+            let mut stored =
+                load("copilot-turn.json").expect("phase copilot-mint wrote copilot-turn.json");
+            stored.push(user("Which city was that?"));
+            probe
+                .accepted(
+                    "cold-load-then-new-turn",
+                    "copilot",
+                    &probe.copilot,
+                    &stored,
+                    ToolChoice::Auto,
+                )
+                .await;
+        }
+        other => panic!("unknown MEERKAT_CONTINUITY_LIVE_PHASE {other}"),
+    }
+    eprintln!(
+        "RI-LIVE phase={phase} done requests={}",
+        probe.requests.get()
+    );
 }

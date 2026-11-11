@@ -638,6 +638,7 @@ test_suite(
         "//crates/meerkat-cli:cli_auth_flow_test",
         "//crates/meerkat-cli:confinement_report_test",
         "//crates/meerkat-cli:connector_client_fence_test",
+        "//crates/meerkat-cli:file_tools_engine_dir_test",
         "//crates/meerkat-cli:help_mobpack_contract_test",
         "//crates/meerkat-cli:help_without_skills_test",
         "//crates/meerkat-cli:init_admission_fence_test",

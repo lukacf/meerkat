@@ -7,11 +7,12 @@ npm install https://github.com/lukacf/meerkat-connect/releases/download/v0.9.0/r
 ```
 
 This is the Connect release asset, not a Toolkit npm registry selection.
-Current source package metadata declares `0.9.11`; the tagged asset does not
+Current source package metadata declares the checkout's Connect version; the tagged asset does not
 select the current development code. For source development, follow the local
-packaging commands below. The source manifest and lock select published
-`@rkat/sdk` 0.9.10 and `@rkat/meta-sdk` 0.9.10 for development; as optional peers
-the package accepts both from 0.9.10 below 0.10.0 (`>=0.9.10 <0.10.0`).
+packaging commands below. The source manifest links `@rkat/sdk` and
+`@rkat/meta-sdk` from the repository's own checkout for development, so the
+package builds and tests against the SDKs of the same commit; as optional peers
+the package accepts both from its own version below the next minor release.
 Native-host composition also needs
 the matching gateway; see [SDK selection](../../BUILDING.md#sdks) for the
 distinction between package checks and installed qualification.
@@ -145,6 +146,11 @@ signal sends nothing and also uses the conservative `unknown` service taxonomy.
 There is no automatic retry.
 
 ## Local conformance and packaging
+
+The development dependencies link the repository's `sdks/typescript` and
+`meta/sdk/typescript`; build both first (`npm install --ignore-scripts` and
+`npm run build` in the first, `npm ci --ignore-scripts` and `npm run build` in
+the second), then in this directory:
 
 ```sh
 npm install --ignore-scripts

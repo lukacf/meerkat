@@ -126,6 +126,32 @@ struct Reached {
     start: Option<(Instant, usize)>,
 }
 
+/// How long the Finds have to settle: the hold they must outlast, then the
+/// fixture's ordinary deadline (`WAIT`) once for each Find the row makes.
+/// It bounds both the row's whole window and, inside it, the wait for the
+/// original's turn, which the fixture otherwise ends after one `WAIT` of
+/// its own.
+///
+/// A hold is wall time by construction, so it is not part of what the
+/// deadline bounds: the Finds' own work. The refused-work row holds 5 s
+/// (`OWNER_CHANGE_WAIT_BOUND * 2 + 1 s`) and releases its fresh Find 100 ms
+/// after that. Measured alone on an idle host its Finds take 2.1 s of work
+/// around the hold (0.7 s to reach the hold, 1.4 s for the fresh Find and
+/// the turn's end), 7.2 s in all. One fixed `WAIT` of 10 s therefore left
+/// that row 2.8 s of margin, 1.3 times its work, and a 4 vCPU runner under
+/// load ran past it: the row ended at the deadline although nothing was
+/// stuck. A row with a 150 ms hold takes 1.7 s in the same window.
+///
+/// With the hold added and one `WAIT` for each Find, the refused-work row
+/// has 25 s, about 9 times its measured work beyond the hold, and a row
+/// with one Find and a short hold keeps the 10 s it had. Finds that never
+/// settle still end the row here, well inside the lane's kill bound for a
+/// hung test.
+fn settle_deadline(hold: Hold, fresh_finds: usize) -> Duration {
+    let finds = u32::try_from(fresh_finds + 1).expect("a row makes a handful of Finds");
+    hold.duration + WAIT * finds
+}
+
 /// The original's Finds, with `hold` made once, at the `nth` hit (from 1)
 /// of `site`, and `fresh_finds` fresh Finds released once the hold ended.
 /// With `concurrent_change`, another actor begins and ends an owner change
@@ -198,8 +224,9 @@ pub(super) async fn finds_with_hold_at(
     }));
     // The production shape: the source's custody recovery runs.
     start_custody_recovery(&fixture);
+    let deadline = settle_deadline(hold, fresh_finds);
     let checked = std::panic::AssertUnwindSafe(tokio::time::timeout(
-        WAIT,
+        deadline,
         Box::pin(async {
             let before = helper_rows(&fixture).await;
             let first = fixture.submit().await;
@@ -237,7 +264,7 @@ pub(super) async fn finds_with_hold_at(
                 (Some(row), Some(effect))
             };
             let (finished, answered, (first_row, first_effect)) =
-                tokio::join!(fixture.finish(&first), answered, fresh);
+                tokio::join!(fixture.finish_within(&first, deadline), answered, fresh);
             let turn_completed = finished.is_ok();
             let (feedback, _, _) = script.observations();
             let (start, from) = reached

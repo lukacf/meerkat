@@ -386,9 +386,9 @@ rkat storage prune [--apply] [--older-than-days 30] [--json] [--root PATH]...
   -USQLITE_ENABLE_MEMORY_MANAGEMENT -DSQLITE_DISABLE_PAGECACHE_OVERFLOW_STATS"`
   (`meerkat_sqlite::REQUIRED_LIBSQLITE3_FLAGS`) itself. Without it every host
   binary still turns allocator statistics off as the first statement of
-  `main`, but the shared page cache and overflow statistics stay on; the first
-  store connection then logs a warning naming the variable, and
-  `rkat storage doctor` warns `sqlite-lock-profile`. Nothing Meerkat calls
+  `main`, but the overflow statistics stay on; the first store connection
+  then logs a warning naming the variable, and `rkat storage doctor` warns
+  `sqlite-lock-profile`. Nothing Meerkat calls
   reads what the locks provided (SQLite memory statistics, heap limits,
   `sqlite3_release_memory`).
 - Since 0.9.4 a runtime delivery owner on a store other processes share reads

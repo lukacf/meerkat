@@ -325,8 +325,12 @@ fn refuse_hosted_runtime(state_dir: &Path) -> Result<(), StorageLayoutError> {
 #[cfg(target_os = "linux")]
 const LOCK_TABLE_READS: usize = 3;
 
-/// The bytes one read call of the lock table asks for: a page or more on
-/// every Linux configuration, so the kernel decides where a call ends.
+/// The bytes one read call of the lock table asks for: a page or more
+/// where pages are 4, 16 or 64 KiB, so the kernel decides where a call
+/// ends. Each call makes the kernel walk its lock list from the start, so
+/// the cost grows faster than the table: measured on a quiet host, the
+/// probe's three reads took 83 ms on a table of 20,000 lines and about
+/// 430 ms on one of 50,000.
 #[cfg(any(target_os = "linux", test))]
 const LOCK_TABLE_READ_CALL: usize = 64 * 1024;
 
@@ -339,10 +343,14 @@ const LOCK_TABLE_SEAM_SHIFT: usize = 1024;
 /// Whether the kernel's lock table (`/proc/locks`) names a holder of
 /// `lock`'s file other than this process, in any of [`LOCK_TABLE_READS`]
 /// reads; the first read that names one is the last. The kernel names a
-/// `flock` holder by the process that took the lock, and a process this one
-/// cannot see as 0. `false` when no holder can be named: the table cannot
-/// be read, or has no entry for the file, because `stat` reports another
-/// device or inode than the lock's (btrfs subvolumes, overlayfs).
+/// `flock` holder by the process that took the lock. Since Linux 4.9 the
+/// table lists only the locks of processes in the pid namespace of the
+/// `/proc` it is read from (proc_locks(5)), so a holder in another pid
+/// namespace may be absent from the table, and this probe then cannot
+/// name it; a line with any other pid, 0 included, counts as another
+/// holder. `false` when no holder can be named: the table cannot be read,
+/// or has no entry for the file, because `stat` reports another device or
+/// inode than the lock's (btrfs subvolumes, overlayfs).
 #[cfg(target_os = "linux")]
 fn another_holder_named(lock: &std::fs::File) -> bool {
     let Some(file_id) = lock_table_file_id(lock) else {
@@ -371,8 +379,12 @@ fn lock_table_file_id(file: &std::fs::File) -> Option<String> {
 /// The bytes the first read call of the `read`-th read of the lock table
 /// asks for, 0 for a full buffer. The boundaries between the kernel's pages
 /// of the table are where an entry can be skipped, and a first call that
-/// ends early moves every later boundary of that read, so no two reads of
-/// one probe meet the same entry at a boundary.
+/// ends early moves every later boundary of that read. On the tables
+/// measured (up to about 20,000 lines) the boundaries of the second and
+/// third reads fell at other entries than the first read's and than each
+/// other's. On a very large table (seen at about 50,000 lines of varied
+/// length) two of the three reads can fall into step and share their
+/// boundaries from there on, which is why the probe makes three reads.
 #[cfg(target_os = "linux")]
 fn lock_table_first_call(read: usize) -> usize {
     read * LOCK_TABLE_SEAM_SHIFT

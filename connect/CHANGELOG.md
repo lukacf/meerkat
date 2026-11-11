@@ -5,6 +5,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.9.13] - 2026-11-11
+
 Meerkat Connect 0.9.13 is part of Meerkat 0.9.13 (Core 0.9.13, Meta 0.9.13
 and Connect 0.9.13, released together): GitHub release `connect-v0.9.13`, a
 full release that is never the repository's latest.

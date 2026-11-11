@@ -39,8 +39,9 @@ them.
 
 - `meerkat-openai`, `meerkat-llm-core` (every backend of the OpenAI
   Responses client: the OpenAI API, the ChatGPT backend, Azure OpenAI, GitHub
-  Copilot `/responses`): a request the service refuses inside an HTTP 200
-  stream now fails the turn once, with the service's code and message.
+  Copilot `/responses`, a self-hosted server in Responses mode): a request
+  the service refuses inside an HTTP 200 stream now fails the turn once,
+  with the service's code and message.
   A backend can report such a refusal as a `response.failed` event whose
   `error` is null, followed by the cause in an `error` event of its own
   (`code` and `message` at the top level of the event, or under `error`).

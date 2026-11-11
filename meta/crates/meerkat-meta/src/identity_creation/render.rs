@@ -40,29 +40,42 @@
 //! (`internal-only`, `turn-driven`), since an underscore is markup.
 //!
 //! A rendering a decision holds ([`render_held_v1`]) carries, between the
-//! host's consequence lines and the free text, the tool configuration: one
-//! line for each agent the request names (the profile it runs on after the
-//! change and the digest of that profile's declared tool configuration),
-//! then one block for each of those profiles with what it declares. So
-//! what the host says and what the agents may do with tools are read before
-//! anything the requester wrote, and the subject digest covers both. The
-//! tool configuration is what the profile declares: no agent is built to
-//! render it, and no agent's record of the tools a build gave it is read.
-//! An MCP server is shown by its name; its configuration, which can hold a
-//! credential, is never rendered and is inside the digest only.
+//! host's consequence lines and the free text, what the agents of the
+//! request run on: one line for each agent the request names (the profile
+//! it runs on after the change and the digest of what the mob declares for
+//! that profile), then one block for each of those profiles: its model, its
+//! auth binding, the names of its skills and its tool configuration. So
+//! what the host says and what the agents are and may do are read before
+//! anything the requester wrote, and the subject digest covers both.
+//!
+//! The digest of a profile covers the whole of what the mob declares for
+//! it: the profile itself (model, provider, auth binding, skills, tools and
+//! the rest), the wiring rules that name it, and the definitions of the
+//! skills it names. The rendering shows names and switches, never a prompt
+//! or a skill's text. An MCP server the profile configures itself is shown
+//! by its name, and its configuration, which can hold a credential, is
+//! inside the digest only. A server of the host that the profile names is
+//! covered by its name: what the host runs behind the name is the host's.
+//! A profile that names no host server gets every MCP server the host
+//! offers, and the rendering says so in words.
+//!
+//! No agent is built to render a request, and no agent's record of the
+//! tools a build gave it is read.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 
 use meerkat_core::ContentInput;
-use meerkat_mob::{MobBackendKind, MobRuntimeMode, ProfileBinding, ToolConfig};
+use meerkat_mob::{
+    MobBackendKind, MobDefinition, MobRuntimeMode, Profile, ProfileBinding, ToolConfig,
+};
 use serde::Serialize;
 
 use crate::identity_first::{AgentAddressability, DisplayName, DurableAgentSpec};
 
 use super::config::ChangeClass;
 use super::consequences::{ConsequenceHook, ConsequenceLine};
-use super::digest::{Sha256Digest, canonical_digest, canonical_json_pretty};
+use super::digest::{Sha256Digest, canonical_digest, canonical_json, canonical_json_pretty};
 use super::escape::{escaped_line, quoted};
 use super::parts::{CanonicalPart, canonical_parts};
 use super::presentation::{CardError, StructuredCard};
@@ -162,22 +175,31 @@ pub mod labels {
     /// The context, as canonical pretty JSON.
     pub const CONTEXT: &str = "Context";
     /// The agents a held request names, each with the profile it runs on
-    /// and the digest of that profile's declared tool configuration.
-    pub const AGENT_TOOLS: &str = "Agent tools";
-    /// The heading of one profile's declared tool configuration.
-    pub const TOOL_CONFIGURATION: &str = "Tool configuration of profile";
-    /// The digest of a profile's declared tool configuration.
-    pub const TOOL_CONFIGURATION_DIGEST: &str = "Tool configuration digest";
+    /// and the digest of what the mob declares for that profile.
+    pub const AGENT_PROFILES: &str = "Agent profiles";
+    /// The heading of what the mob declares for one profile.
+    pub const PROFILE_DECLARATION: &str = "Declaration of profile";
+    /// The digest of what the mob declares for a profile.
+    pub const PROFILE_DIGEST: &str = "Profile digest";
     /// The realm profile a profile of the mob refers to.
     pub const REALM_PROFILE: &str = "Realm profile";
+    /// A profile's model.
+    pub const MODEL: &str = "Model";
+    /// A profile's auth binding.
+    pub const AUTH_BINDING: &str = "Auth binding";
+    /// The skills a profile names.
+    pub const SKILLS: &str = "Skills";
     /// The tool families a profile turns on.
     pub const TOOL_FAMILIES: &str = "Tool families";
     /// Whether a profile is read-only: `yes` or `no`.
     pub const READ_ONLY: &str = "Read only";
     /// The tools a profile denies.
     pub const DENIED_TOOLS: &str = "Denied tools";
-    /// The MCP servers a profile connects to, by name.
-    pub const MCP_SERVERS: &str = "MCP servers";
+    /// The MCP servers of the host a profile's agents reach: the ones it
+    /// names, or every one the host offers.
+    pub const HOST_MCP_SERVERS: &str = "Host MCP servers";
+    /// The MCP servers a profile configures itself, by name.
+    pub const PROFILE_MCP_SERVERS: &str = "Profile MCP servers";
     /// The tool bundles a profile names.
     pub const TOOL_BUNDLES: &str = "Tool bundles";
     /// The tool bundles a profile opted into.
@@ -354,8 +376,7 @@ fn render(
                 text.block();
                 created_fields(&mut text, position + 1, count, created)?;
             }
-            consequence_blocks(&mut text, &request.consequences, &host_lines);
-            tool_blocks(&mut text, tools);
+            consequence_blocks(&mut text, &request.consequences, &host_lines, tools);
             for (position, created) in identities.iter().enumerate() {
                 text.block();
                 created_text(&mut text, position + 1, count, &created.spec)?;
@@ -365,8 +386,7 @@ fn render(
             update_header(&mut text, update);
             text.block();
             update_fields(&mut text, update);
-            consequence_blocks(&mut text, &request.consequences, &host_lines);
-            tool_blocks(&mut text, tools);
+            consequence_blocks(&mut text, &request.consequences, &host_lines, tools);
             text.block();
             update_text(&mut text, update);
         }
@@ -379,8 +399,7 @@ fn render(
         | RequestAction::Unarchive { identity, .. }
         | RequestAction::Adopt { identity, .. } => {
             text.field(labels::IDENTITY, &quoted(identity));
-            consequence_blocks(&mut text, &request.consequences, &host_lines);
-            tool_blocks(&mut text, tools);
+            consequence_blocks(&mut text, &request.consequences, &host_lines, tools);
         }
     }
     let rendered = text.out;
@@ -685,10 +704,14 @@ fn update_text(text: &mut Text, update: &UpdatedSpec) {
     text.optional_text(labels::CONTEXT, context.as_deref(), labels::UNCHANGED);
 }
 
+/// The consequences the policy states and the host's lines, each in its
+/// block, then, for a held request, what its agents run on
+/// ([`profile_blocks`]): every action renders the three together.
 fn consequence_blocks(
     text: &mut Text,
     consequences: &BTreeSet<Consequence>,
     host_lines: &BTreeSet<ConsequenceLine>,
+    tools: Option<&ToolConfigurations>,
 ) {
     text.block();
     let items: Vec<String> = consequences.iter().map(consequence_item).collect();
@@ -696,6 +719,7 @@ fn consequence_blocks(
     text.block();
     let host_items: Vec<String> = host_lines.iter().map(|line| quoted(line.text())).collect();
     text.list(labels::HOST_CONSEQUENCES, &host_items);
+    profile_blocks(text, tools);
 }
 
 fn consequence_item(consequence: &Consequence) -> String {
@@ -724,63 +748,119 @@ fn consequence_item(consequence: &Consequence) -> String {
     }
 }
 
-const FORMAT_TOOL_CONFIGURATION: &str = "meerkat.identity.tool_configuration.v1";
+const FORMAT_PROFILE_DECLARATION: &str = "meerkat.identity.profile_declaration.v1";
 
-/// What one profile of a mob declares for the tools of its agents, as a
-/// held request's rendering shows it, and the digest of the declaration.
+/// The feature a held change is refused with when one of its agents runs on
+/// a profile bound to a realm profile that the host cannot read: nothing is
+/// held or carried out for a profile nobody can show.
+pub const REALM_PROFILE_UNREADABLE: &str =
+    "a profile bound to a realm profile this host cannot read";
+
+/// What the mob declares for one profile an agent of a held request runs
+/// on, as the rendering shows it, and the digest of the declaration.
 ///
-/// The digest covers the whole declaration, the configuration of each MCP
-/// server included. The rendering shows an MCP server by its name only: a
-/// server's configuration can hold a credential, and a rendering is held,
-/// shown and served whole.
+/// The digest covers the whole declaration: the profile (its model,
+/// provider, auth binding, skills, tools and every other member), the
+/// wiring rules of the mob that name it, and the definitions of the skills
+/// it names. The rendering shows the model, the auth binding, the skills'
+/// names and the tool configuration, never a prompt, a skill's text or the
+/// configuration of an MCP server.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProfileTools {
     digest: Sha256Digest,
-    declared: DeclaredTools,
+    realm_profile: Option<String>,
+    model: String,
+    auth_binding: Option<String>,
+    skills: Vec<String>,
+    families: Vec<&'static str>,
+    read_only: bool,
+    denied: Vec<String>,
+    host_mcp_servers: Vec<String>,
+    profile_mcp_servers: Vec<String>,
+    bundles: Vec<String>,
+    opted_bundles: Vec<String>,
+    grant_gated: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum DeclaredTools {
-    /// The profile is the mob definition's own.
-    Inline {
-        families: Vec<&'static str>,
-        read_only: bool,
-        denied: Vec<String>,
-        mcp_servers: Vec<String>,
-        bundles: Vec<String>,
-        opted_bundles: Vec<String>,
-        grant_gated: Vec<String>,
-    },
-    /// The profile refers to a profile of the realm, whose declaration is
-    /// the realm's: the reference is what the mob declares.
-    Realm { name: String },
+fn sorted(mut names: Vec<String>) -> Vec<String> {
+    names.sort();
+    names.dedup();
+    names
 }
 
 impl ProfileTools {
-    /// What `binding`, a profile of a mob definition, declares.
-    pub fn declared(binding: &ProfileBinding) -> Result<Self, serde_json::Error> {
-        match binding {
-            ProfileBinding::Inline(profile) => Self::of_tools(&profile.tools),
-            ProfileBinding::RealmRef { realm_profile } => Ok(Self {
-                digest: canonical_digest(&serde_json::json!({
-                    "format": FORMAT_TOOL_CONFIGURATION,
-                    "realm_profile": realm_profile,
-                })),
-                declared: DeclaredTools::Realm {
-                    name: realm_profile.clone(),
-                },
-            }),
+    /// What `definition` declares for its profile `name`, bound as
+    /// `binding`. `realm` is the realm profile a binding by reference
+    /// names, as its host reads it now; a reference whose profile the host
+    /// cannot give is refused `unsupported`
+    /// ([`REALM_PROFILE_UNREADABLE`]): a profile nobody can show is never
+    /// held for a decision.
+    pub fn declared(
+        name: &str,
+        binding: &ProfileBinding,
+        definition: &MobDefinition,
+        realm: Option<&Profile>,
+    ) -> Result<Self, IdentityRefusal> {
+        let malformed = |_| {
+            IdentityRefusal::new(IdentityRefusalKind::InvalidRequest {
+                problem: RequestProblem::Malformed,
+            })
+        };
+        match (binding, realm) {
+            (ProfileBinding::Inline(profile), _) => {
+                Self::of_profile(name, profile, definition, None).map_err(malformed)
+            }
+            (ProfileBinding::RealmRef { realm_profile }, Some(profile)) => {
+                Self::of_profile(name, profile, definition, Some(realm_profile)).map_err(malformed)
+            }
+            (ProfileBinding::RealmRef { .. }, None) => {
+                Err(IdentityRefusal::new(IdentityRefusalKind::Unsupported {
+                    feature: REALM_PROFILE_UNREADABLE.to_owned(),
+                }))
+            }
         }
     }
 
-    /// What the tool configuration `tools` declares.
-    pub fn of_tools(tools: &ToolConfig) -> Result<Self, serde_json::Error> {
+    /// What `definition` declares for the profile `name` whose content is
+    /// `profile`, read from the realm profile `realm_profile` when the mob
+    /// binds it by reference.
+    pub fn of_profile(
+        name: &str,
+        profile: &Profile,
+        definition: &MobDefinition,
+        realm_profile: Option<&str>,
+    ) -> Result<Self, serde_json::Error> {
+        let wiring: Vec<&meerkat_mob::definition::RoleWiringRule> = definition
+            .wiring
+            .role_wiring
+            .iter()
+            .filter(|rule| rule.a.as_str() == name || rule.b.as_str() == name)
+            .collect();
+        let skills: BTreeMap<&str, serde_json::Value> = profile
+            .skills
+            .iter()
+            .filter_map(|skill| {
+                let source = definition.skills.get(skill)?;
+                Some(serde_json::to_value(source).map(|source| (skill.as_str(), source)))
+            })
+            .collect::<Result<_, _>>()?;
         let digest = canonical_digest(&serde_json::json!({
-            "format": FORMAT_TOOL_CONFIGURATION,
-            "tools": serde_json::to_value(tools)?,
+            "format": FORMAT_PROFILE_DECLARATION,
+            "realm_profile": realm_profile,
+            "profile": serde_json::to_value(profile)?,
+            "wiring": {
+                "auto_wire_orchestrator": definition.wiring.auto_wire_orchestrator,
+                "role_wiring": serde_json::to_value(wiring)?,
+            },
+            "skills": skills,
         }));
-        // Every member is named: a member the configuration gains stops
-        // this from compiling until the rendering shows it.
+        let auth_binding = profile
+            .auth_binding
+            .as_ref()
+            .map(|binding| serde_json::to_value(binding).map(|binding| canonical_json(&binding)))
+            .transpose()?;
+        // Every member of the tool configuration is named: a member it
+        // gains stops this from compiling until the rendering shows it.
         let ToolConfig {
             builtins,
             shell,
@@ -797,7 +877,7 @@ impl ProfileTools {
             rust_bundles,
             bundles,
             grant_gated,
-        } = tools;
+        } = &profile.tools;
         let families = [
             (*builtins, "builtins"),
             (*shell, "shell"),
@@ -811,22 +891,6 @@ impl ProfileTools {
         .into_iter()
         .filter_map(|(on, family)| on.then_some(family))
         .collect();
-        let sorted = |names: &mut Vec<String>| {
-            names.sort();
-            names.dedup();
-        };
-        let mut denied = deny.clone();
-        sorted(&mut denied);
-        let mut servers: Vec<String> = mcp
-            .iter()
-            .cloned()
-            .chain(mcp_servers.iter().map(|server| server.name.clone()))
-            .collect();
-        sorted(&mut servers);
-        let mut named_bundles = rust_bundles.clone();
-        sorted(&mut named_bundles);
-        let mut opted_bundles = bundles.clone();
-        sorted(&mut opted_bundles);
         let mut gated: Vec<String> = grant_gated
             .families
             .iter()
@@ -848,18 +912,25 @@ impl ProfileTools {
         if grant_gated.unconfigured_mcp_servers {
             gated.push("every-unconfigured-server".to_owned());
         }
-        sorted(&mut gated);
         Ok(Self {
             digest,
-            declared: DeclaredTools::Inline {
-                families,
-                read_only: *read_only,
-                denied,
-                mcp_servers: servers,
-                bundles: named_bundles,
-                opted_bundles,
-                grant_gated: gated,
-            },
+            realm_profile: realm_profile.map(str::to_owned),
+            model: profile.model.clone(),
+            auth_binding,
+            skills: sorted(profile.skills.clone()),
+            families,
+            read_only: *read_only,
+            denied: sorted(deny.clone()),
+            host_mcp_servers: sorted(mcp.clone()),
+            profile_mcp_servers: sorted(
+                mcp_servers
+                    .iter()
+                    .map(|server| server.name.clone())
+                    .collect(),
+            ),
+            bundles: sorted(rust_bundles.clone()),
+            opted_bundles: sorted(bundles.clone()),
+            grant_gated: sorted(gated),
         })
     }
 
@@ -869,8 +940,8 @@ impl ProfileTools {
     }
 }
 
-/// One agent a held request names, as its tool line shows it: its name
-/// and the profile it runs on after the change.
+/// One agent a held request names, as its line shows it: its name and the
+/// profile it runs on after the change.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentTools {
     name: String,
@@ -897,8 +968,8 @@ impl AgentTools {
     }
 }
 
-/// The tool configuration of a held request: each agent it names with the
-/// profile it runs on, and what each of those profiles declares.
+/// What the agents of a held request run on: each agent it names with its
+/// profile, and what the mob declares for each of those profiles.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolConfigurations {
     agents: Vec<AgentTools>,
@@ -906,11 +977,11 @@ pub struct ToolConfigurations {
 }
 
 impl ToolConfigurations {
-    /// The tool configuration of `request`: `agents`, one for each agent
-    /// the request names and in its order, and `profiles`, what each
-    /// profile an agent runs on declares. Refused `invalid_request` when
-    /// the agents are not the request's, and `profile_unknown` for an
-    /// agent's profile with no declaration.
+    /// What the agents of `request` run on: `agents`, one for each agent
+    /// the request names and in its order, and `profiles`, what the mob
+    /// declares for each profile an agent runs on. Refused
+    /// `invalid_request` when the agents are not the request's, and
+    /// `profile_unknown` for an agent's profile with no declaration.
     pub fn of_request(
         request: &IdentityRequest,
         agents: Vec<AgentTools>,
@@ -944,9 +1015,9 @@ impl ToolConfigurations {
     }
 }
 
-/// The tool configuration of a held request, after its consequence blocks:
+/// What the agents of a held request run on, after its consequence blocks:
 /// the agents, then one block for each profile, in byte order.
-fn tool_blocks(text: &mut Text, tools: Option<&ToolConfigurations>) {
+fn profile_blocks(text: &mut Text, tools: Option<&ToolConfigurations>) {
     let Some(tools) = tools else {
         return;
     };
@@ -960,39 +1031,60 @@ fn tool_blocks(text: &mut Text, tools: Option<&ToolConfigurations>) {
                 .get(&agent.profile)
                 .map_or(labels::NONE, |profile| profile.digest.as_str());
             format!(
-                "{} profile {} tools {digest}",
+                "{} profile {} declares {digest}",
                 quoted(&agent.name),
                 quoted(&agent.profile)
             )
         })
         .collect();
-    text.list(labels::AGENT_TOOLS, &agents);
+    text.list(labels::AGENT_PROFILES, &agents);
     for (name, profile) in &tools.profiles {
         text.block();
-        text.field(labels::TOOL_CONFIGURATION, &quoted(name));
-        text.field(labels::TOOL_CONFIGURATION_DIGEST, profile.digest.as_str());
-        match &profile.declared {
-            DeclaredTools::Realm { name } => text.field(labels::REALM_PROFILE, &quoted(name)),
-            DeclaredTools::Inline {
-                families,
-                read_only,
-                denied,
-                mcp_servers,
-                bundles,
-                opted_bundles,
-                grant_gated,
-            } => {
-                let families: Vec<String> =
-                    families.iter().map(|family| (*family).to_owned()).collect();
-                text.list(labels::TOOL_FAMILIES, &families);
-                text.field(labels::READ_ONLY, if *read_only { "yes" } else { "no" });
-                text.list(labels::DENIED_TOOLS, &quoted_names(denied));
-                text.list(labels::MCP_SERVERS, &quoted_names(mcp_servers));
-                text.list(labels::TOOL_BUNDLES, &quoted_names(bundles));
-                text.list(labels::OPTED_TOOL_BUNDLES, &quoted_names(opted_bundles));
-                text.list(labels::GRANT_GATED, grant_gated);
-            }
+        text.field(labels::PROFILE_DECLARATION, &quoted(name));
+        text.field(labels::PROFILE_DIGEST, profile.digest.as_str());
+        if let Some(realm_profile) = &profile.realm_profile {
+            text.field(labels::REALM_PROFILE, &quoted(realm_profile));
         }
+        text.field(labels::MODEL, &quoted(&profile.model));
+        text.field(
+            labels::AUTH_BINDING,
+            &profile
+                .auth_binding
+                .as_deref()
+                .map_or_else(|| labels::NONE.to_owned(), quoted),
+        );
+        text.list(labels::SKILLS, &quoted_names(&profile.skills));
+        let families: Vec<String> = profile
+            .families
+            .iter()
+            .map(|family| (*family).to_owned())
+            .collect();
+        text.list(labels::TOOL_FAMILIES, &families);
+        text.field(
+            labels::READ_ONLY,
+            if profile.read_only { "yes" } else { "no" },
+        );
+        text.list(labels::DENIED_TOOLS, &quoted_names(&profile.denied));
+        // A profile that names no server of the host narrows nothing: its
+        // agents reach every MCP server the host offers.
+        if profile.host_mcp_servers.is_empty() {
+            text.field(labels::HOST_MCP_SERVERS, "every server the host offers");
+        } else {
+            text.list(
+                labels::HOST_MCP_SERVERS,
+                &quoted_names(&profile.host_mcp_servers),
+            );
+        }
+        text.list(
+            labels::PROFILE_MCP_SERVERS,
+            &quoted_names(&profile.profile_mcp_servers),
+        );
+        text.list(labels::TOOL_BUNDLES, &quoted_names(&profile.bundles));
+        text.list(
+            labels::OPTED_TOOL_BUNDLES,
+            &quoted_names(&profile.opted_bundles),
+        );
+        text.list(labels::GRANT_GATED, &profile.grant_gated);
     }
 }
 

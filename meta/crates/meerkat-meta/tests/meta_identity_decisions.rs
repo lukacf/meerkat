@@ -1429,7 +1429,7 @@ async fn host_lines_that_differ_at_execution_refuse_subject_widened() {
         .find("HOST-LINE the new agents may read the ledger")
         .expect("the host's line is rendered");
     let tools = rendering
-        .find("Agent tools (1):")
+        .find("Agent profiles (1):")
         .expect("the tool configuration is rendered");
     let written = rendering
         .find("REQUESTER-WRITTEN brief of scout")
@@ -1923,14 +1923,21 @@ async fn the_driver_is_quiet_on_an_idle_host_and_carries_out_a_decided_change() 
     assert!(rig.exists("scout"));
     assert_eq!(rig.seam.landed(), 1);
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let settled = driver.passes();
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(
-        driver.passes(),
-        settled,
-        "with nothing held the driver passes no more"
-    );
+    // With nothing held the driver falls quiet: its count of passes stops
+    // growing (a loaded host may take a few passes to get there).
+    let deadline = std::time::Instant::now() + BOUND;
+    loop {
+        let settled = driver.passes();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        if driver.passes() == settled {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "with nothing held the driver passes no more: {} passes",
+            driver.passes()
+        );
+    }
     driver.shutdown().await;
     rig.shutdown().await;
 }
@@ -2252,14 +2259,13 @@ async fn a_candidate_launch_holds_nothing_and_drives_nothing() {
     rig.shutdown().await;
 }
 
-/// The rendering shows what the profile declares for tools, and never the
-/// configuration of an MCP server: a credential-shaped value in a server's
-/// environment is absent from the rendering, the server is shown by its
-/// name, and the digest of the declaration still covers the value.
-#[test]
-fn the_rendering_names_an_mcp_server_and_never_shows_its_configuration() {
-    let tools = |secret: &str| -> meerkat_mob::ToolConfig {
-        serde_json::from_value(json!({
+/// A profile as a mob's definition holds one, with `secret` in the
+/// configuration of its own MCP server.
+fn declared_profile(secret: &str) -> meerkat_mob::Profile {
+    serde_json::from_value(json!({
+        "model": "gpt-5.5",
+        "skills": ["ledger-keeping"],
+        "tools": {
             "comms": true,
             "shell": true,
             "read_only": false,
@@ -2271,32 +2277,73 @@ fn the_rendering_names_an_mcp_server_and_never_shows_its_configuration() {
                 "env": {"LEDGER_TOKEN": secret},
             }],
             "grant_gated": {"families": ["shell"]},
-        }))
-        .expect("a tool configuration")
-    };
+        },
+    }))
+    .expect("a profile")
+}
+
+/// The definition the pure rows declare profiles of: the rows' own, with
+/// the text of the skill the profile names.
+fn declaring_definition() -> MobDefinition {
+    let mut definition = definition("declared", TOOLS);
+    definition.skills.insert(
+        "ledger-keeping".to_owned(),
+        meerkat_mob::definition::SkillSource::Inline {
+            content: "SKILL-TEXT keep the ledger balanced".to_owned(),
+        },
+    );
+    definition
+}
+
+/// The rendering shows what the mob declares for a profile: its model, its
+/// auth binding, the names of its skills and its tool configuration. It
+/// never shows the configuration of an MCP server (a credential-shaped
+/// value in a server's environment is absent, the server is shown by its
+/// name) nor a skill's text. A profile that names no server of the host
+/// reaches every server the host offers, and the rendering says so; one
+/// that names servers shows them. The digest covers the whole declaration:
+/// the server's configuration, the model, the text of a skill the profile
+/// names and the wiring rules that name the profile.
+#[test]
+fn the_rendering_names_an_mcp_server_and_never_shows_its_configuration() {
     let secret = "tok-CREDENTIAL-SHAPED-9f3a71";
-    let declared = ProfileTools::of_tools(&tools(secret)).expect("declared");
+    let definition = declaring_definition();
+    let declare = |profile: &meerkat_mob::Profile, definition: &MobDefinition| {
+        ProfileTools::of_profile("worker", profile, definition, None).expect("declared")
+    };
+    let declared = declare(&declared_profile(secret), &definition);
     let request =
         normalized_create(&approval_policy(1000), &host_facts(), &[spec("scout")]).request;
-    let configurations = ToolConfigurations::of_request(
-        &request,
-        vec![AgentTools::new("scout", "worker")],
-        BTreeMap::from([("worker".to_owned(), declared.clone())]),
-    )
-    .expect("the tools of the request");
-    let rendering = render_held_v1(&request, None, &configurations).expect("renders");
+    let rendered = |declared: &ProfileTools| {
+        let configurations = ToolConfigurations::of_request(
+            &request,
+            vec![AgentTools::new("scout", "worker")],
+            BTreeMap::from([("worker".to_owned(), declared.clone())]),
+        )
+        .expect("the profiles of the request");
+        render_held_v1(&request, None, &configurations).expect("renders")
+    };
+    let rendering = rendered(&declared);
     let text = rendering.as_str();
 
     assert!(!text.contains(secret), "no credential is rendered:\n{text}");
     assert!(!text.contains("LEDGER_TOKEN"), "{text}");
     assert!(!text.contains("ledger-server"), "{text}");
+    assert!(
+        !text.contains("SKILL-TEXT"),
+        "no skill text is rendered:\n{text}"
+    );
     for shown in [
-        "Agent tools (1):\n- \"scout\" profile \"worker\" tools sha256:",
-        "Tool configuration of profile: \"worker\"\n",
+        "Agent profiles (1):\n- \"scout\" profile \"worker\" declares sha256:",
+        "Declaration of profile: \"worker\"\n",
+        "Model: \"gpt-5.5\"\n",
+        "Auth binding: none\n",
+        "Skills (1):\n- \"ledger-keeping\"\n",
         "Tool families (2):\n- shell\n- comms\n",
         "Read only: no\n",
         "Denied tools (1):\n- \"mob\\_wire\"\n",
-        "MCP servers (1):\n- \"ledger\"\n",
+        "Host MCP servers: every server the host offers\n",
+        "Profile MCP servers (1):\n- \"ledger\"\n",
         "Grant gated (1):\n- family \"shell\"\n",
     ] {
         assert!(
@@ -2305,19 +2352,117 @@ fn the_rendering_names_an_mcp_server_and_never_shows_its_configuration() {
         );
     }
     assert!(
-        text.contains(&format!(
-            "Tool configuration digest: {}\n",
-            declared.digest().as_str()
-        )),
+        text.contains(&format!("Profile digest: {}\n", declared.digest().as_str())),
         "{text}"
     );
-    assert_ne!(
-        declared.digest(),
-        ProfileTools::of_tools(&tools("tok-ANOTHER-VALUE"))
-            .expect("declared")
-            .digest(),
-        "the digest covers the server's configuration"
+
+    // A profile that names servers of the host shows them, and not "every
+    // server".
+    let mut narrowed = declared_profile(secret);
+    narrowed.tools.mcp = vec!["search".to_owned()];
+    let narrowed = rendered(&declare(&narrowed, &definition));
+    assert!(
+        narrowed
+            .as_str()
+            .contains("Host MCP servers (1):\n- \"search\"\n"),
+        "{}",
+        narrowed.as_str()
     );
+    assert!(!narrowed.as_str().contains("every server the host offers"));
+    narrowed.card().expect("a structured card");
+
+    // The digest covers the whole declaration.
+    let mut other_model = declared_profile(secret);
+    other_model.model = "gpt-5.4".to_owned();
+    let mut other_skill = declaring_definition();
+    other_skill.skills.insert(
+        "ledger-keeping".to_owned(),
+        meerkat_mob::definition::SkillSource::Inline {
+            content: "SKILL-TEXT move the ledger offshore".to_owned(),
+        },
+    );
+    let mut other_wiring = declaring_definition();
+    other_wiring
+        .wiring
+        .role_wiring
+        .push(meerkat_mob::definition::RoleWiringRule {
+            a: ProfileName::from("worker"),
+            b: ProfileName::from("lead"),
+        });
+    let mut unrelated_wiring = declaring_definition();
+    unrelated_wiring
+        .wiring
+        .role_wiring
+        .push(meerkat_mob::definition::RoleWiringRule {
+            a: ProfileName::from("lead"),
+            b: ProfileName::from("lead"),
+        });
+    for (what, other) in [
+        (
+            "the server's configuration",
+            declare(&declared_profile("tok-ANOTHER-VALUE"), &definition),
+        ),
+        ("the model", declare(&other_model, &definition)),
+        (
+            "the text of a skill it names",
+            declare(&declared_profile(secret), &other_skill),
+        ),
+        (
+            "a wiring rule that names it",
+            declare(&declared_profile(secret), &other_wiring),
+        ),
+    ] {
+        assert_ne!(
+            declared.digest(),
+            other.digest(),
+            "the digest covers {what}"
+        );
+    }
+    assert_eq!(
+        declared.digest(),
+        declare(&declared_profile(secret), &unrelated_wiring).digest(),
+        "a wiring rule that names other profiles is not this profile's"
+    );
+
+    // A profile bound to a realm profile is declared by the realm's
+    // profile, read now, and is refused when nobody can read it.
+    let bound = meerkat_mob::ProfileBinding::RealmRef {
+        realm_profile: "shared-keeper".to_owned(),
+    };
+    let resolved = ProfileTools::declared(
+        "worker",
+        &bound,
+        &definition,
+        Some(&declared_profile(secret)),
+    )
+    .expect("a realm profile the host reads");
+    let resolved_text = rendered(&resolved);
+    for shown in [
+        "Realm profile: \"shared-keeper\"\n",
+        "Tool families (2):\n- shell\n- comms\n",
+        "Profile MCP servers (1):\n- \"ledger\"\n",
+    ] {
+        assert!(
+            resolved_text.as_str().contains(shown),
+            "a realm profile shows {shown:?}:\n{}",
+            resolved_text.as_str()
+        );
+    }
+    assert_ne!(
+        resolved.digest(),
+        ProfileTools::declared(
+            "worker",
+            &bound,
+            &definition,
+            Some(&declared_profile("tok-ANOTHER-VALUE")),
+        )
+        .expect("declared")
+        .digest(),
+        "the digest covers the realm profile's content"
+    );
+    let unreadable = ProfileTools::declared("worker", &bound, &definition, None)
+        .expect_err("a realm profile nobody can read");
+    assert_eq!(unreadable.kind_token(), "unsupported");
     rendering
         .card()
         .expect("the rendering parses as a structured card");
@@ -2378,12 +2523,12 @@ fn the_rendering_names_an_mcp_server_and_never_shows_its_configuration() {
             vec![AgentTools::new("keeper", "worker")],
             BTreeMap::from([("worker".to_owned(), declared.clone())]),
         )
-        .expect("the tools of the request");
+        .expect("the profiles of the request");
         let rendering = render_held_v1(&request, None, &configurations).expect("renders");
         assert!(
             rendering
                 .as_str()
-                .contains("Agent tools (1):\n- \"keeper\" profile \"worker\" tools sha256:"),
+                .contains("Agent profiles (1):\n- \"keeper\" profile \"worker\" declares sha256:"),
             "a held {} shows the agent's tools:\n{}",
             request.action.token(),
             rendering.as_str()

@@ -11,9 +11,12 @@
 //!   `{mob id}/{operation id}`. Its body is the normalized request, its
 //!   request digest the request's own ([`IdentityRequest::request_digest`]),
 //!   and its rendering the canonical text of the request
-//!   ([`render_held_v1`]): the host's consequence lines and the declared tool
-//!   configuration of every profile an agent of the request runs on, ahead
-//!   of anything the requester wrote. Nothing else is written: no agent is
+//!   ([`render_held_v1`]): the host's consequence lines and what the mob
+//!   declares for every profile an agent of the request runs on (its model,
+//!   auth binding, skills and tool configuration, under one digest of the
+//!   whole declaration), ahead of anything the requester wrote. A profile
+//!   bound to a realm profile is read from the realm through the family's
+//!   implementation, and refused when it cannot be. Nothing else is written: no agent is
 //!   created, built or woken, and no other agent's record is read. The
 //!   answer is `pending_decision`; the same operation asked again answers
 //!   the decision as it stands, and any other request under its id, of the
@@ -32,9 +35,10 @@
 //!   [`DecisionExecutorLoop`], which alone authorizes, settles and releases.
 //!   The executor renders the request again from what stands now and
 //!   compares the rendering's digest with the one the person was shown: a
-//!   profile whose declared tool configuration changed, or host lines that
-//!   differ, refuse the change `subject_widened` and close the decision
-//!   refused. Otherwise it commits through the executor seam
+//!   profile whose declaration changed in any part (model, auth binding,
+//!   skills, wiring rules, tools), an agent that moved to another profile,
+//!   or host lines that differ, refuse the change `subject_widened` and
+//!   close the decision refused. Otherwise it commits through the executor seam
 //!   ([`IdentityChangeExecutor`]) under the decision's permit, as the
 //!   recorded requester. An agent that changed since the request was made
 //!   is Core's to refuse: the request names the spec digest its requester
@@ -205,6 +209,20 @@ pub trait HeldChangeHost: Send + Sync {
         mob: &MobHandle,
         identity: &str,
     ) -> Result<Option<HeldTarget>, IdentityRefusal>;
+
+    /// The realm profile `name`, which a profile of `mob` is bound to by
+    /// reference, as the realm holds it now. `Ok(None)` when this host
+    /// cannot read it: a change whose agent runs on such a profile is
+    /// refused `unsupported`, and is neither held nor carried out for a
+    /// profile nobody can show. The default reads none.
+    async fn realm_profile(
+        &self,
+        mob: &MobHandle,
+        name: &str,
+    ) -> Result<Option<meerkat_mob::Profile>, IdentityRefusal> {
+        let _ = (mob, name);
+        Ok(None)
+    }
 }
 
 /// The notice a decision that ended owes its requester.
@@ -777,7 +795,14 @@ impl IdentityDecisions {
                     profile: agent.profile().to_owned(),
                 }));
             };
-            let declared = ProfileTools::declared(binding).map_err(|_| malformed("request"))?;
+            let realm = match binding {
+                meerkat_mob::ProfileBinding::RealmRef { realm_profile } => {
+                    self.host.realm_profile(mob, realm_profile).await?
+                }
+                meerkat_mob::ProfileBinding::Inline(_) => None,
+            };
+            let declared =
+                ProfileTools::declared(agent.profile(), binding, definition, realm.as_ref())?;
             profiles.insert(agent.profile().to_owned(), declared);
         }
         let tools = ToolConfigurations::of_request(request, agents, profiles)?;

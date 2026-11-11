@@ -125,6 +125,18 @@ impl OpenAiRealtimeTextAdapter {
             api_key: api_key.into(),
         }
     }
+
+    /// `turn`, the events of a websocket opened with this adapter's API
+    /// key, as the adapter hands it out: the error it ends with (an `Err`
+    /// item, or a `Done` whose outcome is an error) carries neither that key
+    /// nor a credential shape. The endpoint, or a gateway in front of it,
+    /// can repeat the connection's headers in an error event, in an API
+    /// error at connect or in a failed response.
+    fn redacted_stream<'a>(&'a self, turn: LlmStream<'a>) -> LlmStream<'a> {
+        meerkat_llm_core::streaming::redact_stream_errors(turn, move |message: &mut String| {
+            meerkat_core::redact::redact_credentials(message, |visit| visit(&self.api_key));
+        })
+    }
 }
 
 #[async_trait]
@@ -135,7 +147,7 @@ impl LlmClient for OpenAiRealtimeTextAdapter {
 
     fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
         let api_key = self.api_key.clone();
-        Box::pin(try_stream! {
+        self.redacted_stream(Box::pin(try_stream! {
             // The realtime text session is opened without a tool-choice
             // control; a non-Auto choice is refused, never dropped.
             if !request.tool_choice.is_auto() {
@@ -309,7 +321,7 @@ impl LlmClient for OpenAiRealtimeTextAdapter {
                     }
                 }
             }
-        })
+        }))
     }
 
     fn provider(&self) -> meerkat_core::Provider {
@@ -695,8 +707,7 @@ mod tests {
         adapter: &'a OpenAiRealtimeTextAdapter,
         turn: LlmStream<'a>,
     ) -> LlmStream<'a> {
-        let _ = adapter;
-        turn
+        adapter.redacted_stream(turn)
     }
 
     /// A realtime endpoint, or a gateway in front of one, that repeats the

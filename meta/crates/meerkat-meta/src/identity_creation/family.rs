@@ -186,10 +186,10 @@ fn envelope(
     proposer: Option<&String>,
     source_evidence: Option<&SourceEvidence>,
 ) -> RequestEnvelope {
-    let mut envelope = RequestEnvelope::default();
-    envelope.proposer = proposer.cloned();
-    envelope.source_evidence = source_evidence.cloned();
-    envelope
+    RequestEnvelope {
+        proposer: proposer.cloned(),
+        source_evidence: source_evidence.cloned(),
+    }
 }
 
 /// What an update sets. An absent member is unchanged.
@@ -290,13 +290,7 @@ impl UpdateAgent {
             .map(DisplayName::parse)
             .transpose()
             .map_err(|_| malformed("set.display_name"))?;
-        let mut set = UpdateSetSpec::default();
-        set.profile = profile.as_deref().map(ProfileName::from);
-        set.display_name = display_name;
-        set.additional_instructions = instructions.clone();
-        set.context = context.clone();
-        set.peers_add = self.peers_add.clone();
-        set.peers_remove = self.peers_remove.clone();
+        let (mut authority_fields, mut descriptive_labels) = (None, None);
         if labels.is_some() || !labels_remove.is_empty() {
             let mut next = current_labels.clone();
             for key in labels_remove {
@@ -325,16 +319,28 @@ impl UpdateAgent {
             let (authority, descriptive) = split(&next);
             let (authority_now, descriptive_now) = split(current_labels);
             if authority != authority_now {
-                set.authority_fields = Some(authority);
+                authority_fields = Some(authority);
             }
             if descriptive != descriptive_now {
-                set.descriptive_labels = Some(descriptive);
+                descriptive_labels = Some(descriptive);
             }
         }
-        let mut update: UpdateIdentitySpec =
-            UpdateIdentitySpec::new(self.name.clone(), self.expected_spec_digest.clone());
-        update.set = set;
-        Ok(update)
+        Ok(UpdateIdentitySpec {
+            identity: self.name.clone(),
+            expected_spec_digest: self.expected_spec_digest.clone(),
+            set: UpdateSetSpec {
+                profile: profile.as_deref().map(ProfileName::from),
+                addressability: None,
+                runtime_mode_override: None,
+                display_name,
+                additional_instructions: instructions.clone(),
+                context: context.clone(),
+                descriptive_labels,
+                authority_fields,
+                peers_add: self.peers_add.clone(),
+                peers_remove: self.peers_remove.clone(),
+            },
+        })
     }
 
     /// What the host plane adds to the request.
@@ -437,6 +443,11 @@ impl OperationRef {
 
 /// What one change of the family asks, before the host's rules are applied
 /// to it.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "a change is built once per call and moved into the family once; boxing the \
+              update would change a type every surface of the family already builds"
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum IdentityChangeSpec {
@@ -670,7 +681,9 @@ pub enum IdentityReadAnswer {
     Plan(Box<ChangePlan>),
 }
 
-/// A page of the mob's agents, in name order.
+/// A page of the mob's agents, in one stable order that `after` continues.
+/// The order is the mob's own order of its agents, not an alphabetical one
+/// for every name.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
 pub struct AgentPage {

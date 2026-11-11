@@ -658,10 +658,7 @@ fn outcome_of_receipt(
         agent.spec_revision = entry.revision;
         let standing = entry_standing(mob, &entry.identity);
         if let Some(meerkat_mob::EntryStanding::Seated(seated)) = &standing {
-            agent.session_id = seated
-                .session_id
-                .as_ref()
-                .map(|session| session.to_string());
+            agent.session_id = seated.session_id.as_ref().map(ToString::to_string);
         }
         if receipt.change == meerkat_mob::IdentityChangeKind::Create
             && state == AgentChangeState::Committed

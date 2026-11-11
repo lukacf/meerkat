@@ -791,7 +791,7 @@ fn every_action_has_its_rendering() {
             &host,
             RequestEnvelope::default(),
             &target,
-            &AdoptIdentitySpec::new("keeper", expected.clone()),
+            &AdoptIdentitySpec::new("keeper", expected),
         ),
     ];
     let mut digests = BTreeSet::new();

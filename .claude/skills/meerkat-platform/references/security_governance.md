@@ -622,28 +622,43 @@ anything you serialize still contain the values. Rust hosts can reuse
 Since 0.9.9 credential header values are marked sensitive on every OpenAI
 Responses, Chat Completions and Anthropic Messages request: the values a
 dynamic authorizer supplies and a static API key's (`Authorization`,
-`api-key`, `x-api-key`; the Gemini client's are not marked). A value that is
-not a valid header value fails the request as an authentication failure
-before it is sent. Those clients and the Gemini client remove the credential
-that signed a request from what they read from its response (rejection
-bodies, stream errors, unparsable data lines, an OpenAI image request's
-failure, logged provider error fields) before it reaches a caller or a log:
-with an authorizer through `HttpAuthorizer::redact_response_diagnostic`,
-whose default removes every value the authorizer names
-(`visit_signed_credentials`: the static bearer and header, AWS, Azure AD,
-Google and managed OAuth authorizers, a refreshed-out token included);
-without one, the client's own API key or static bearer. Values are replaced
-by `[REDACTED]`, as sent and without a `Bearer`/`Basic` scheme (not a value
-under 8 bytes). A second step replaces credential-looking values (8 or more
+`api-key`, `x-api-key`). The Gemini client marks its `x-goog-api-key` and an
+authorizer's values too. A value that is not a valid header value fails the
+request as an authentication failure before it is sent. Those clients
+remove the credential that signed a request from what they read from its
+response (rejection bodies, stream errors, unparsable data lines, an OpenAI
+or Gemini image request's failure, logged provider error fields) before it
+reaches a caller or a log; an OpenAI realtime session does the same for its
+error text, and the Google Code Assist setup requests for a refusal's body.
+With an authorizer the removal goes through
+`HttpAuthorizer::redact_response_diagnostic`, whose default removes every
+value the authorizer names (`visit_signed_credentials`: the static bearer,
+AWS, Azure AD, Google and managed OAuth authorizers, a refreshed-out token
+included; the static header authorizer names the value of `authorization`,
+`proxy-authorization`, `cookie` and of a header whose name contains `key`,
+`token`, `secret`, `auth`, `password`, `credential`, `signature` or
+`session`, and no other header's); without one, the client's own API key or
+static bearer. Values are replaced by `[REDACTED]`: as sent, without a
+`Bearer`/`Basic` scheme, and as an encoder rewrites them (`/` as `\/`, a
+character as its JSON `\u00XX` escape or percent-encoded); not a value
+under 8 bytes. A second step replaces credential-looking values (8 or more
 credential characters with a digit, or 32 or more) after `Bearer`/`Basic`,
 in an `authorization` header and after a secret-looking key, plus known
-token prefixes, JWTs, URL userinfo and PEM private-key blocks. It is a
-second line only: a credential a route declares is always removed, an
-undeclared all-letter secret under 32 bytes may not be. The GitHub Copilot
-authorizer keeps its own redaction: the last four bearers its account
-signed with (shown as `<redacted>`). Only a verbatim echo is caught: an
-echo a provider or gateway truncated, re-encoded or otherwise transformed
-can keep part of a credential.
+token prefixes, JWTs, URL userinfo and PEM private-key blocks. A rejection
+is classified from the body as received, then redacted, so an error keeps
+its class.
+
+Not removed: a named value in another form (base64 of it, a decoded `Basic`
+pair, a copy cut short or masked); a secret no route names outside the
+second step's positions (that step is a second line only: it also leaves an
+all-letter value under 32 bytes, a quoted header dump without a
+`Bearer`/`Basic` scheme and JSON nested in a JSON string); on SigV4 the
+`Signature=` of a request older than the two most recent; the body of a
+refused request that obtains a credential (token, device-code, cloud
+identity, API-key provisioning). A placeholder key of 8 bytes or more
+(`not-needed`) is replaced wherever an error uses the word. The GitHub
+Copilot authorizer keeps its own redaction: the last four bearers its
+account signed with, by exact value as sent (shown as `<redacted>`).
 
 ## Common questions
 

@@ -847,29 +847,58 @@ A provider, proxy or gateway can repeat a request's headers in an error. The
 OpenAI, OpenAI-compatible, Anthropic and Gemini clients therefore remove the
 credential that signed a request from what they read from its response (a
 rejection body, a stream error event, a data line that does not parse, an
-OpenAI image request's failure, the provider error fields they log) before
-it reaches a caller or a log:
+OpenAI or Gemini image request's failure, the provider error fields they
+log) before it reaches a caller or a log. An OpenAI realtime session does
+the same for the text of its errors, and the Google Code Assist setup
+requests for the body of a refusal.
 
 - With an authorizer, through `HttpAuthorizer::redact_response_diagnostic`.
   Its default removes every value the authorizer names through
-  `visit_signed_credentials`: the static bearer and static header
-  authorizers, the AWS, Azure AD and Google ones and the managed OAuth ones
-  name what they sign with, a token a refresh replaced included.
+  `visit_signed_credentials`: the static bearer authorizer, the AWS, Azure AD
+  and Google ones and the managed OAuth ones name what they sign with, a
+  token a refresh replaced included. The static header authorizer carries
+  the headers of an external resolver, which does not say which of them are
+  secret, so the header's name decides: it names the value of
+  `authorization`, `proxy-authorization` and `cookie`, and of a header whose
+  name contains, in any case, `key`, `token`, `secret`, `auth`, `password`,
+  `credential`, `signature` or `session`. Other header values (a model id, a
+  content type) are not named, so an error that mentions them stays
+  readable.
 - Without one (an API-key route, a self-hosted server's static bearer), the
-  client's own key or bearer.
+  client's own key or bearer. An OpenAI-compatible client built with a bearer
+  and an authorizer sends both and names both.
 
-Each value is replaced by `[REDACTED]`, as sent and without its `Bearer` or
-`Basic` scheme; a value shorter than 8 bytes is not replaced. A second step
-then replaces values that look like credentials (at least 8 credential
-characters with a digit among them, or at least 32) after `Bearer` or
-`Basic`, in an `authorization` header and after a secret-looking key
-(`api_key=`, `x-api-key:`), and well-known token prefixes, JSON web tokens,
-URL userinfo and PEM private-key blocks. That step is a second line only: a
-credential a route declares is always removed, while a secret no route
-declares, made of letters only and shorter than 32 bytes, may not be. Only a
-verbatim echo is caught: one a gateway escaped, encoded or cut can keep part
-of a credential. The GitHub Copilot authorizer keeps its own redaction (the
-bearers it signed with, shown as `<redacted>`).
+Each value is replaced by `[REDACTED]`: as sent, without its `Bearer` or
+`Basic` scheme, and as an encoder rewrites it (`/` as `\/`, a character as
+its JSON `\u00XX` escape or percent-encoded, alone or mixed). A value
+shorter than 8 bytes is not replaced. A second step then replaces values
+that look like credentials (at least 8 credential characters with a digit
+among them, or at least 32) after `Bearer` or `Basic`, in an `authorization`
+header and after a secret-looking key (`api_key=`, `x-api-key:`), and
+well-known token prefixes, JSON web tokens, URL userinfo and PEM private-key
+blocks. A rejection is classified from the body as received and then
+redacted, so an error keeps its class.
+
+What this does not remove:
+
+- A named value in another form: base64 of it, the decoded user and password
+  of a `Basic` pair, a copy cut short or masked.
+- A secret no route names, outside the second step's positions. That step
+  is a second line only: it also leaves a value made of letters only and
+  shorter than 32 bytes, a quoted header dump without a `Bearer` or `Basic`
+  scheme (`{"authorization":"<value>"}`) and JSON nested inside a JSON
+  string.
+- On a SigV4 route, the `Signature=` of a request older than the two most
+  recent ones (the session token is removed; a signature is bound to its
+  request and expires in minutes).
+- The body of a refused request that obtains a credential (a token,
+  device-code, cloud identity or API-key provisioning endpoint), at sign-in
+  and when a route resolves.
+
+A placeholder key of 8 bytes or more (`not-needed`, `lm-studio`) is the
+route's credential, so the word is replaced wherever an error uses it. The
+GitHub Copilot authorizer keeps its own redaction (the bearers it signed
+with, by exact value as sent, shown as `<redacted>`).
 
 `meerkat_core::redact::redact_credentials`, `LlmError::redact_diagnostics`,
 `meerkat_llm_core::streaming::redact_stream_errors` and

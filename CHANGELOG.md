@@ -40,8 +40,9 @@ them.
 - `meerkat-core`, `meerkat-llm-core`: for embedders that sign provider
   requests themselves (see Security).
   `meerkat_core::redact::redact_credentials` removes credentials from text
-  read from a response: the values it is given, by exact match, then values
-  that look like credentials in known positions;
+  read from a response: the values it is given, by exact match (as sent and
+  as an encoder rewrites them), then values that look like credentials in
+  known positions;
   `redact::MIN_REDACTED_CREDENTIAL_BYTES` is the shortest value it replaces
   by exact match. `HttpAuthorizer::visit_signed_credentials` is a provided
   method through which an authorizer names the secret values it signs with;
@@ -55,15 +56,29 @@ them.
 
 ### Changed
 
-- Provider error text (see Security): on every route except GitHub
-  Copilot's, whose error text is as before, a value that looks like a
-  credential (at least 8 credential characters with a digit among them, or
-  at least 32) is now replaced by `[REDACTED]` where it follows `Bearer` or
-  `Basic`, is the value of an `authorization` header, or is assigned to a
-  secret-looking key (`api_key=`, `x-api-key:`, `token:`); so are well-known
-  token prefixes, JSON web tokens, URL userinfo and PEM private-key blocks.
-  Only the value is replaced, never the text around it, and an error without
-  one is unchanged.
+- Provider error text (see Security): in the errors of the OpenAI
+  Responses, OpenAI-compatible, Anthropic and Gemini clients, of OpenAI
+  realtime sessions and of the Google Code Assist setup requests (GitHub
+  Copilot routes keep their error text as before), a value that looks like
+  a credential (at least 8 credential characters with a digit among them,
+  or at least 32) is now replaced by `[REDACTED]` where it follows `Bearer`
+  or `Basic`, is the value of an `authorization` header, or is assigned to
+  a secret-looking key (`api_key=`, `x-api-key:`, `token:`); so are tokens
+  with a well-known prefix (`sk-`, `ghp_`, `AKIA` and similar), JSON web
+  tokens, URL userinfo and PEM private-key blocks.
+  The value is replaced and the text around it is kept, with two
+  exceptions: a private-key block goes with its lines, so a block inside a
+  one-line body takes that line, and in a SigV4 `Authorization` value the
+  scheme word (`AWS4-HMAC-SHA256`) is replaced along with the `Credential=`
+  scope. The rules read positions, not meaning, so a value in such a
+  position that is no secret is replaced too: a cache or idempotency key
+  (`prompt_cache_key: <value>`), a model id written after `key:`, a word
+  that begins with a token prefix (`sk-learn-compatible`). Text outside
+  those positions is unchanged. A rejection is classified from the body as
+  received and then redacted, so the rules do not change an error's class
+  (one exception: when the Anthropic client sends a request again without
+  its thinking blocks, a refusal of that second attempt is redacted
+  first).
 
 ### Security
 
@@ -78,16 +93,55 @@ them.
   ask the route's authorizer to remove it, but only the GitHub Copilot
   authorizers did; a route whose client signs with a key of its own (an API
   key, a self-hosted server's static bearer) asked no one, and the Gemini
-  client had no such step. Now every route removes the credential it signed
-  the request with, by exact value, as sent and bare, a token a refresh
-  replaced included: API-key and static-bearer routes of the OpenAI,
-  OpenAI-compatible (self-hosted), Anthropic and Gemini clients, an OpenAI
-  image request's failure, and the static-header, AWS, Azure AD, Google and
-  managed OAuth authorizers. A second step then removes values that look
-  like credentials in known positions (see Changed). That step is a second
-  line only: a credential a route declares is always removed (a value
-  shorter than 8 bytes is left to the second step), while a secret no route
-  declares, made of letters only and shorter than 32 bytes, may not be.
+  client had no such step.
+
+  What is removed now: the credential a request was signed with, by exact
+  value, from the error text of that request. That covers the API-key and
+  static-bearer routes of the OpenAI, OpenAI-compatible (self-hosted),
+  Anthropic and Gemini clients; routes signed by the static-bearer,
+  static-header, AWS, Azure AD, Google and managed OAuth authorizers (with
+  the last four values of a token that refreshes); the failure of an
+  OpenAI or Gemini image request, the Gemini Files API registration
+  included; the Google Code Assist setup requests; and the errors of an
+  OpenAI realtime session. The value is matched as sent, without its
+  `Bearer` or `Basic` scheme, and as an encoder rewrites it: `/` as `\/`,
+  a character as its JSON `\u00XX` escape, or percent-encoded (`%XX`),
+  alone or mixed. A second step then replaces values that look like
+  credentials in known positions (see Changed).
+
+  What is not removed:
+
+  - A value shorter than 8 bytes (a placeholder such as `none`) is not
+    matched by value. A placeholder of 8 bytes or more (`not-needed`,
+    `lm-studio`) is the route's credential: the word is replaced wherever
+    an error uses it.
+  - A value the response repeats in another form: base64 of it, the
+    decoded user and password of a `Basic` pair, a copy cut short or
+    masked, an HTML entity, a doubly escaped copy.
+  - The second step is a second line only. It leaves a secret no route
+    names when the secret stands outside the positions listed under
+    Changed, is made of letters only and shorter than 32 bytes, stands in a
+    quoted header dump without a `Bearer` or `Basic` scheme
+    (`{"authorization":"<value>"}`, `"authorization":"Token <value>"`), or
+    stands in JSON nested inside a JSON string (`{\"api_key\":\"<value>\"}`).
+  - A static-header route names the value of `authorization`,
+    `proxy-authorization` and `cookie`, and of a header whose name contains
+    `key`, `token`, `secret`, `auth`, `password`, `credential`, `signature`
+    or `session`. A secret under any other header name is left to the
+    second step.
+  - SigV4: the session token and the signed `Authorization` value and
+    signature of the two most recent requests are removed. With more
+    requests in flight, the `Signature=` of an older one can stay; it is
+    bound to its request and expires in minutes.
+  - GitHub Copilot routes keep their own redaction, as before: the last
+    four bearers by exact value as sent, shown as `<redacted>`, without the
+    encoded forms and without the second step.
+  - Requests that obtain a credential are not covered: a refused token,
+    device-code, cloud identity or API-key provisioning request reports the
+    body as received at sign-in and when a route resolves.
+  - The opt-in realtime frame trace (`RKAT_OPENAI_REALTIME_TRACE_JSON`)
+    prints frames as they arrive.
+
   Affects 0.3.0 through 0.9.13.
 
 ## [0.9.13] - 2026-11-11

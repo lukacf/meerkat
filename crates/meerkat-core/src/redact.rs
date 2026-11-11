@@ -148,9 +148,13 @@ pub const MIN_REDACTED_CREDENTIAL_BYTES: usize = 8;
 /// value, not cut short or masked. The shape rules are a second line
 /// only: a secret no caller names is replaced only in the positions they
 /// read, and one made of letters only and shorter than 32 bytes is not.
-/// And URL userinfo whose start reads as a bare host (no `:`, or `:` and
-/// then digits only) and that holds two quoting bytes is read as a quoted
-/// host and stays.
+/// And URL userinfo whose text before its first quoting byte reads as a
+/// bare host (not empty, and no `:` or a `:` followed by one or more
+/// digits and nothing else) and that holds a second quoting byte before
+/// the `@` is read as a quoted host and stays (`o'bri'en:pass@db`,
+/// `app:1234're'st@db`). The other way round costs readability only: a
+/// bare host followed by one quoting byte and a later `@`, and a bracketed
+/// IPv6 host followed by a later `@`, are replaced as userinfo.
 ///
 /// This is the one owner of response redaction:
 /// [`crate::HttpAuthorizer::redact_response_diagnostic`] calls it with the
@@ -666,26 +670,37 @@ fn url_userinfo_at(line: &str, start: usize, rules: ShapeRules) -> Option<(usize
 /// Where `authority` ends when the text that holds the URL closes it: at
 /// its first quoting byte (`"`, `'`, `\`, `<` or `>`), when that byte
 /// closes a bare host and the `@` that follows is not this URL's. A bare
-/// host is what stands before the byte when it holds no `:`, or a `:` and
-/// then digits only (a port). The `@` is another text's when a second
-/// quoting byte stands between the first and the authority's last `@`, as
-/// in `{"docs":"https://host","support":"help@host"}`.
+/// host is what stands before the byte when it is not empty and holds no
+/// `:`, or one `:` followed by one or more digits and nothing else (a
+/// port). The `@` is another text's when a second quoting byte stands
+/// between the first and the authority's last `@`, as in
+/// `{"docs":"https://host","support":"help@host"}`.
 ///
 /// Userinfo can hold a quoting byte (an apostrophe is legal there, and a
 /// malformed connection string is printed as it is). It stays userinfo
-/// when what stands before the byte is no bare host (`app:pa'ss@db`), or
-/// when no second quoting byte follows (`o'brien:pass@db`, `app:12'34@db`).
-/// Missed: userinfo whose start reads as a bare host and that holds two
-/// quoting bytes.
+/// when what stands before the byte is no bare host (`app:pa'ss@db`, a
+/// password in quotes `app:'pass'@db`, a user name in quotes
+/// `'root':'pass'@db`), or when no second quoting byte follows
+/// (`o'brien:pass@db`, `app:12'34@db`).
+///
+/// Two limits. Missed: userinfo whose text before its first quoting byte
+/// reads as a bare host and that holds a second quoting byte before the
+/// `@` (`o'bri'en:pass@db`, `app:1234're'st@db`). Replaced though it is no
+/// userinfo (readability only): a bare host followed by one quoting byte
+/// and a later `@` (`'https://host',help@host`), and a host that is not
+/// bare, such as a bracketed IPv6 address, followed by a later `@`.
 fn quoted_host_end(authority: &[u8]) -> Option<usize> {
     let is_quoting = |byte: &u8| matches!(*byte, b'"' | b'\'' | b'\\' | b'<' | b'>');
     let end = authority.iter().position(is_quoting)?;
     let last_at = authority.iter().rposition(|byte| *byte == b'@')?;
     let host = &authority[..end];
-    let bare_host = match host.iter().position(|byte| *byte == b':') {
-        None => true,
-        Some(colon) => host[colon + 1..].iter().all(u8::is_ascii_digit),
-    };
+    let bare_host = !host.is_empty()
+        && match host.iter().position(|byte| *byte == b':') {
+            None => true,
+            Some(colon) => {
+                colon + 1 < host.len() && host[colon + 1..].iter().all(u8::is_ascii_digit)
+            }
+        };
     (bare_host && end < last_at && authority[end + 1..last_at].iter().any(is_quoting))
         .then_some(end)
 }

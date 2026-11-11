@@ -136,9 +136,16 @@ them.
   - URL userinfo is replaced up to the `@` of its URL. Text that quotes a
     URL closes it, so in a response the second step reads a quoting byte
     (`'`, `"`, `\`, `<` or `>`) as the end of a URL when what stands before
-    it is a bare host (no `:`, or `:` and then digits only) and a second
-    quoting byte follows before the `@`. Userinfo of that shape, such as
-    `app:1234're'st@db`, is left.
+    it is a bare host (not empty, and no `:` or a `:` followed by one or
+    more digits and nothing else) and a second quoting byte follows before
+    the `@`. Userinfo of that shape is left: one that starts like a host
+    with a port (`app:1234're'st@db`), or one with no `:` before its first
+    quoting byte (`o'bri'en:pass@db`). A password or a user name wrapped
+    in quotes (`app:'pass'@db`, `'root':'pass'@db`) is replaced.
+  - The same rule replaces some text that is no userinfo, which costs
+    readability only: a bare host followed by one quoting byte and a later
+    `@` (`'https://host',help@host`), and a bracketed IPv6 host followed
+    by a later `@`.
   - A static-header route names the value of `authorization`,
     `proxy-authorization` and `cookie`, and of a header whose name contains
     `key`, `token`, `secret`, `auth`, `password`, `credential`, `signature`

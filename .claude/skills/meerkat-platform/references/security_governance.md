@@ -656,14 +656,19 @@ second step's positions (that step is a second line only: it also leaves an
 all-letter value under 32 bytes, a JSON web token directly followed by
 `.`, `/`, `+` or `=`, a quoted header dump without a `Bearer`/`Basic`
 scheme and JSON nested in a JSON string); URL userinfo whose text before a
-first quoting byte (`'`, `"`, `\`, `<`, `>`) reads as a bare host and that
-holds a second quoting byte before the `@`; on SigV4 the
+first quoting byte (`'`, `"`, `\`, `<`, `>`) reads as a bare host (not
+empty, and no `:` or a `:` followed by one or more digits and nothing else)
+and that holds a second quoting byte before the `@`
+(`app:1234're'st@db`, `o'bri'en:pass@db`; a password or a user name
+wrapped in quotes is replaced); on SigV4 the
 `Signature=` of a request older than the two most recent; the body of a
 refused request that obtains a credential (token, device-code, cloud
 identity, API-key provisioning). A placeholder key of 8 bytes or more
-(`not-needed`) is replaced wherever an error uses the word. The GitHub
-Copilot authorizer keeps its own redaction: the last four bearers its
-account signed with, by exact value as sent (shown as `<redacted>`).
+(`not-needed`) is replaced wherever an error uses the word. A bare host
+followed by one quoting byte and a later `@`, and a bracketed IPv6 host
+followed by a later `@`, are replaced as userinfo (readability only). The
+GitHub Copilot authorizer keeps its own redaction: the last four bearers
+its account signed with, by exact value as sent (shown as `<redacted>`).
 
 ## Common questions
 

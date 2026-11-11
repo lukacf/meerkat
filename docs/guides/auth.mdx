@@ -891,9 +891,15 @@ What this does not remove:
   (`{"authorization":"<value>"}`) and JSON nested inside a JSON string.
 - URL userinfo that reads as a quoted host: text that quotes a URL closes
   it, so the second step ends a URL at a quoting byte (`'`, `"`, `\`, `<`
-  or `>`) when what stands before it is a bare host (no `:`, or `:` and
-  then digits only) and a second quoting byte follows before the `@`.
-  Userinfo of that shape (`app:1234're'st@db`) is left.
+  or `>`) when what stands before it is a bare host (not empty, and no `:`
+  or a `:` followed by one or more digits and nothing else) and a second
+  quoting byte follows before the `@`. Userinfo of that shape is left: one
+  that starts like a host with a port (`app:1234're'st@db`), or one with
+  no `:` before its first quoting byte (`o'bri'en:pass@db`). A password or
+  a user name wrapped in quotes (`app:'pass'@db`) is replaced.
+- The other way round, which costs readability only: a bare host followed
+  by one quoting byte and a later `@` (`'https://host',help@host`), and a
+  bracketed IPv6 host followed by a later `@`, are replaced as userinfo.
 - On a SigV4 route, the `Signature=` of a request older than the two most
   recent ones (the session token is removed; a signature is bound to its
   request and expires in minutes).

@@ -929,29 +929,25 @@ function rust(name: string): string {
   );
 }
 
-/** The tokens of `impl <typeName> { pub fn token(..) }`: the string of every match arm. */
-function tokenArms(source: string, typeName: string): string[] {
-  const impl = source.split(`impl ${typeName} {`);
-  assert.equal(impl.length, 2, `impl ${typeName} not found`);
-  const body = impl[1].split(/pub fn token\(&?self\) -> &'static str \{/);
-  assert.equal(body.length >= 2, true, `${typeName}::token not found`);
-  const fn = body[1].split("\n    }\n")[0];
-  return [...fn.matchAll(/=> "([a-z_]+)"/g)].map((match) => match[1]);
-}
-
-/** The serde tokens of a `rename_all = "snake_case"` unit enum. */
-function snakeVariants(source: string, enumName: string): string[] {
-  const declared = source.split(`pub enum ${enumName} {`);
-  assert.equal(declared.length, 2, `enum ${enumName} not found`);
-  const body = declared[1].split("\n}\n")[0];
-  return [...body.matchAll(/^ {4}([A-Z][A-Za-z]+),$/gm)].map((match) =>
-    match[1].replace(/(?<!^)(?=[A-Z])/g, "_").toLowerCase(),
+/**
+ * The wire tokens of a closed vocabulary, as the family lists them once:
+ * `closed_tokens!(<typeName> { Variant => "token", ... });`.
+ */
+function closedTokens(source: string, typeName: string): string[] {
+  const listed = source.split(`closed_tokens!(${typeName} {`);
+  assert.equal(listed.length, 2, `closed_tokens!(${typeName}) is not listed exactly once`);
+  const body = listed[1].split("});")[0];
+  const tokens = [...body.matchAll(/^\s*[A-Z][A-Za-z]+ => "([a-z_]+)",$/gm)].map(
+    (match) => match[1],
   );
+  assert.ok(tokens.length > 0, `closed_tokens!(${typeName}) lists no token`);
+  assert.equal(new Set(tokens).size, tokens.length, `${typeName}: a token is listed twice`);
+  return tokens;
 }
 
 describe("identity family: the closed vocabularies are the gateway's", () => {
   it("the refusal kinds are the gateway's closed vocabulary", () => {
-    const tokens = tokenArms(rust("refusal.rs"), "IdentityRefusalKind");
+    const tokens = closedTokens(rust("refusal.rs"), "IdentityRefusalKind");
     assert.equal(tokens.length, 57);
     assert.equal(new Set(tokens).size, 57);
     assert.ok(tokens.includes("owner_read_only"));
@@ -965,22 +961,25 @@ describe("identity family: the closed vocabularies are the gateway's", () => {
 
   it("the outcome, instruction and seat vocabularies are the gateway's", () => {
     const outcome = rust("outcome.rs");
-    assert.deepEqual([...IDENTITY_OUTCOMES].sort(), tokenArms(outcome, "IdentityOutcome").sort());
+    assert.deepEqual(
+      [...IDENTITY_OUTCOMES].sort(),
+      closedTokens(outcome, "IdentityOutcome").sort(),
+    );
     assert.deepEqual(
       [...IDENTITY_OUTCOMES].sort(),
       ["done", "pending_decision", "pending_preparation", "refused"],
     );
     assert.deepEqual(
       [...INSTRUCTION_OUTCOME_KINDS].sort(),
-      tokenArms(outcome, "InstructionOutcome").sort(),
+      closedTokens(outcome, "InstructionOutcome").sort(),
     );
     assert.equal(INSTRUCTION_OUTCOME_KINDS.length, 4);
     assert.deepEqual(
       [...INSTRUCTION_NEXT_SESSION_REASONS].sort(),
-      tokenArms(outcome, "InstructionNextSessionReason").sort(),
+      closedTokens(outcome, "InstructionNextSessionReason").sort(),
     );
     assert.equal(INSTRUCTION_NEXT_SESSION_REASONS.length, 6);
-    assert.deepEqual([...AGENT_SEATS].sort(), snakeVariants(outcome, "AgentSeat").sort());
+    assert.deepEqual([...AGENT_SEATS].sort(), closedTokens(outcome, "AgentSeat").sort());
     assert.deepEqual([...AGENT_SEATS].sort(), ["owed", "seated"]);
   });
 });

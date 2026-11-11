@@ -1056,30 +1056,22 @@ def _rust(name):
     return (_IDENTITY_CREATION / name).read_text(encoding="utf-8")
 
 
-def _token_arms(source, type_name):
-    """The tokens of ``impl <type_name> { pub fn token(..) }``: the string of
-    every match arm."""
-    impl = source.split(f"impl {type_name} {{", 1)
-    assert len(impl) == 2, f"impl {type_name} not found"
-    body = re.split(r"pub fn token\(&?self\) -> &'static str \{", impl[1], maxsplit=1)
-    assert len(body) == 2, f"{type_name}::token not found"
-    function = body[1].split("\n    }\n", 1)[0]
-    return re.findall(r'=> "([a-z_]+)"', function)
-
-
-def _snake_variants(source, enum_name):
-    """The serde tokens of a ``rename_all = "snake_case"`` unit enum."""
-    declared = source.split(f"pub enum {enum_name} {{", 1)
-    assert len(declared) == 2, f"enum {enum_name} not found"
-    body = declared[1].split("\n}\n", 1)[0]
-    names = re.findall(r"^    ([A-Z][A-Za-z]+),$", body, flags=re.MULTILINE)
-    return [re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower() for name in names]
+def _closed_tokens(source, type_name):
+    """The wire tokens of a closed vocabulary, as the family lists them once:
+    ``closed_tokens!(<type_name> { Variant => "token", ... });``."""
+    listed = source.split(f"closed_tokens!({type_name} {{")
+    assert len(listed) == 2, f"closed_tokens!({type_name}) is not listed exactly once"
+    body = listed[1].split("});", 1)[0]
+    tokens = re.findall(r'^\s*[A-Z][A-Za-z]+ => "([a-z_]+)",$', body, flags=re.MULTILINE)
+    assert tokens, f"closed_tokens!({type_name}) lists no token"
+    assert len(tokens) == len(set(tokens)), f"{type_name}: a token is listed twice"
+    return tokens
 
 
 def test_the_refusal_kinds_are_the_gateways_closed_vocabulary():
     from meerkat_meta import IDENTITY_REFUSAL_KINDS
 
-    tokens = _token_arms(_rust("refusal.rs"), "IdentityRefusalKind")
+    tokens = _closed_tokens(_rust("refusal.rs"), "IdentityRefusalKind")
     assert len(tokens) == len(set(tokens)) == 57
     assert "owner_read_only" in tokens
     assert IDENTITY_REFUSAL_KINDS == frozenset(tokens), (
@@ -1097,7 +1089,7 @@ def test_the_outcome_instruction_and_seat_vocabularies_are_the_gateways():
     )
 
     outcome = _rust("outcome.rs")
-    assert IDENTITY_OUTCOMES == frozenset(_token_arms(outcome, "IdentityOutcome"))
+    assert IDENTITY_OUTCOMES == frozenset(_closed_tokens(outcome, "IdentityOutcome"))
     assert IDENTITY_OUTCOMES == {
         "done",
         "pending_decision",
@@ -1105,7 +1097,7 @@ def test_the_outcome_instruction_and_seat_vocabularies_are_the_gateways():
         "refused",
     }
     assert INSTRUCTION_OUTCOME_KINDS == frozenset(
-        _token_arms(outcome, "InstructionOutcome")
+        _closed_tokens(outcome, "InstructionOutcome")
     )
     assert INSTRUCTION_OUTCOME_KINDS == {
         "applies_at_next_run",
@@ -1114,10 +1106,10 @@ def test_the_outcome_instruction_and_seat_vocabularies_are_the_gateways():
         "unchanged",
     }
     assert INSTRUCTION_NEXT_SESSION_REASONS == frozenset(
-        _token_arms(outcome, "InstructionNextSessionReason")
+        _closed_tokens(outcome, "InstructionNextSessionReason")
     )
     assert len(INSTRUCTION_NEXT_SESSION_REASONS) == 6
-    assert AGENT_SEATS == frozenset(_snake_variants(outcome, "AgentSeat"))
+    assert AGENT_SEATS == frozenset(_closed_tokens(outcome, "AgentSeat"))
     assert AGENT_SEATS == {"seated", "owed"}
 
 

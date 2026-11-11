@@ -10911,15 +10911,34 @@ impl AgentFactory {
         // Per-session MCP attachment intents and their revision counter are
         // session-owned durable state, not build config: a rebuilt or resumed
         // session keeps the ones it recorded.
-        let (recorded_mcp_attachment_intents, mcp_attachment_intent_revision) = session
+        let (
+            recorded_mcp_attachment_intents,
+            mcp_attachment_intent_revision,
+            recorded_instruction_sections,
+        ) = session
             .build_state()
             .map(|state| {
                 (
                     state.mcp_attachment_intents,
                     state.mcp_attachment_intent_revision,
+                    state.additional_instructions,
                 )
             })
             .unwrap_or_default();
+        // The instruction sections are session-owned too. A build that names
+        // sections records those (an empty list clears them). A build that
+        // names none keeps what the session records: a resume authors
+        // nothing, so it names none, and writing that absence would erase
+        // what the first build recorded. A first build that names none
+        // records an empty list, so an absent record only ever means that
+        // the sections are not known (a session built before this record
+        // was kept across resumes, or one whose record such a resume
+        // erased).
+        let recorded_instruction_sections = build_config
+            .additional_instructions
+            .clone()
+            .or(recorded_instruction_sections)
+            .or_else(|| fresh_build.then(Vec::new));
         let persisted_build_state = meerkat_core::SessionBuildState {
             output_schema: build_config.output_schema.clone(),
             hooks_override: build_config.hooks_override.clone(),
@@ -10931,7 +10950,7 @@ impl AgentFactory {
             silent_comms_intents: build_config.silent_comms_intents.clone(),
             max_inline_peer_notifications: build_config.max_inline_peer_notifications,
             app_context: build_config.app_context.clone(),
-            additional_instructions: build_config.additional_instructions.clone(),
+            additional_instructions: recorded_instruction_sections,
             shell_env: build_config.shell_env.clone(),
             shell_timeout_secs: build_config.shell_timeout_secs,
             mob_tool_authority_context: build_config.mob_tool_authority_context.clone(),

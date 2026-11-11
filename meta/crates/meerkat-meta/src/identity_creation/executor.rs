@@ -559,8 +559,14 @@ pub const ADOPT_NOT_BUILT: &str = "an adoption of an agent";
 /// `executor.after_update(commit.mob, &change)` after the commit and record
 /// its answer on the agent ([`IdentityOutcome::with_instruction_outcome`]);
 /// otherwise record `InstructionOutcome::Unchanged`.
-/// A refusal of Core's goes through [`refusal_of_error`], which answers the
-/// retryable `admission_unsettled` for a member step in flight.
+/// An error of Core's call is answered through
+/// [`CoreChangeExecutor::after_core_error`], never through
+/// [`refusal_of_error`] directly: it answers Core's own refusal typed, and
+/// for any other error reads Core's receipt first, so an update Core
+/// committed is answered as committed. It runs the instruction step for a
+/// removal only: an update it answers as committed has still changed the
+/// agent's instructions, so the body runs `executor.after_update` for that
+/// answer as it does after a commit that did not err.
 async fn commit_update(
     _executor: &CoreChangeExecutor,
     _commit: &ChangeCommit<'_>,
@@ -604,9 +610,20 @@ pub async fn committed_outcome(
     mob: &MobHandle,
     operation_id: &OperationId,
 ) -> Result<Option<IdentityOutcome>, ExecutorError> {
+    match committed_receipt(mob, operation_id).await? {
+        Some(receipt) => outcome_of_receipt(mob, operation_id, &receipt).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// Core's receipt of the change that committed as `operation_id` in `mob`,
+/// `None` when none did.
+pub(super) async fn committed_receipt(
+    mob: &MobHandle,
+    operation_id: &OperationId,
+) -> Result<Option<IdentityChangeReceipt>, ExecutorError> {
     match mob.identity_operation(operation_id.as_str()).await {
-        Ok(Some(receipt)) => outcome_of_receipt(mob, operation_id, &receipt).map(Some),
-        Ok(None) => Ok(None),
+        Ok(receipt) => Ok(receipt),
         // A storage composition that commits no change holds no receipt.
         Err(MobError::IdentityChangeRefused {
             refusal: IdentityChangeRefusal::StorageUnsupported,
@@ -631,7 +648,7 @@ pub(super) fn outcome_of_change(
 /// change did to it, `pending_preparation` when one of them waits for its
 /// preparation and `done` otherwise. An agent's session is read from
 /// Core's published entry, which wakes nothing.
-fn outcome_of_receipt(
+pub(super) fn outcome_of_receipt(
     mob: &MobHandle,
     operation_id: &OperationId,
     receipt: &IdentityChangeReceipt,

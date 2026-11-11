@@ -19,7 +19,8 @@ use super::super::refusal::{IdentityRefusal, IdentityRefusalKind, RequestProblem
 use super::super::request::{CreatedSpec, EdgeBasis, core_member_name};
 use super::{
     AgentAdmission, ChangeCommit, ChangeCommitted, ChangeRequester, CoreChangeExecutor,
-    ExecutorError, committed_outcome, core_name, outcome_of_change, refusal_of_error,
+    ExecutorError, committed_receipt, core_name, outcome_of_change, outcome_of_receipt,
+    refusal_of_error,
 };
 
 /// A change of one agent as a whole.
@@ -50,11 +51,14 @@ impl CoreChangeExecutor {
     /// is the typed refusal, with the request field it concerns. Any other
     /// error may follow Core's commit (Core commits a removal, an archive
     /// and an unarchive, then retires or seats the member, which can fail
-    /// on its own), so Core's receipt is read first: a receipt means the
-    /// change committed, and it is answered as committed, with what the
-    /// receipt says is still to end (`retiring`, `archiving`); the
-    /// instruction step is told of a removal that committed this way.
-    /// Without a receipt a member step in flight is the retryable
+    /// on its own), so Core's receipt is read first: a receipt of this
+    /// request means the change committed, and it is answered as
+    /// committed, with what the receipt says is still to end (`retiring`,
+    /// `archiving`); the instruction step is told of a removal that
+    /// committed this way. A receipt of another request under the
+    /// operation id is `operation_reused`, as Core answers this request at
+    /// its commit: this request committed nothing, and the step is told
+    /// nothing. Without a receipt a member step in flight is the retryable
     /// `admission_unsettled`, and anything else is the error it was. A
     /// receipt that cannot be read leaves the commit with no outcome.
     pub async fn after_core_error(
@@ -66,19 +70,27 @@ impl CoreChangeExecutor {
             let refusal = refusal_of_error(error)?;
             return Ok(ChangeCommitted::refused(at_request_field(commit, refusal)));
         }
-        match committed_outcome(commit.mob, commit.operation_id).await {
-            Ok(Some(outcome)) => {
-                if let super::RequestAction::Remove { identity, .. } = &commit.request.action {
-                    self.after_removal(commit.mob, identity).await;
-                }
-                Ok(ChangeCommitted::new(outcome, false))
-            }
-            Ok(None) => {
-                let refusal = refusal_of_error(error)?;
-                Ok(ChangeCommitted::refused(at_request_field(commit, refusal)))
-            }
-            Err(_) => Err(ExecutorError::Core(Box::new(error))),
+        let Ok(receipt) = committed_receipt(commit.mob, commit.operation_id).await else {
+            return Err(ExecutorError::Core(Box::new(error)));
+        };
+        let Some(receipt) = receipt else {
+            let refusal = refusal_of_error(error)?;
+            return Ok(ChangeCommitted::refused(at_request_field(commit, refusal)));
+        };
+        let digest = commit
+            .request
+            .request_digest()
+            .map_err(ExecutorError::Request)?;
+        if receipt.request_digest != digest.as_str() {
+            return Ok(ChangeCommitted::refused(IdentityRefusal::new(
+                IdentityRefusalKind::OperationReused,
+            )));
         }
+        let outcome = outcome_of_receipt(commit.mob, commit.operation_id, &receipt)?;
+        if let super::RequestAction::Remove { identity, .. } = &commit.request.action {
+            self.after_removal(commit.mob, identity).await;
+        }
+        Ok(ChangeCommitted::new(outcome, false))
     }
 }
 

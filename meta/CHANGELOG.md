@@ -27,7 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Behaviour of `identity_creation::normalize_create`, `normalize_update` and
   `normalize_remove`: a refusal's `field` is a path into the request as every
   surface writes it. `identities[i].spec.identity` is `agents[i].name`,
-  `identities[i].spec.<member>` is `agents[i].<member>`,
+  `identities[i].spec.profile`, `.labels` and `.context` are
+  `agents[i].profile`, `agents[i].labels` and `agents[i].context`,
+  `identities[i].spec.binding` (a bootstrap token, which no request as
+  written can carry) is the agent itself, `agents[i]`,
   `identities[i].peers[j]` is `agents[i].peers[j]`, `identities` is `agents`,
   `identity` is `name`, `set.descriptive_labels` and `set.authority_fields`
   are `set.labels`, and `set.peers_add[j]` is `peers_add[j]`.

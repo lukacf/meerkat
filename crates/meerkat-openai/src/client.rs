@@ -2870,6 +2870,10 @@ impl OpenAiClient {
             let mut streamed_web_search_ids: HashSet<String> = HashSet::new();
             let mut done_emitted = false;
             let mut saw_terminal_fallback_output = false;
+            // A `response.failed` that named no cause was read. The response
+            // failed, and what ends it is its cause (an `error` event) or
+            // the end of the stream, whichever comes first.
+            let mut failed_without_cause = false;
             // The output_index of every item the stream added: one ended by
             // `[DONE]` without a terminal response must have completed.
             let mut announced_items: std::collections::BTreeSet<u64> =
@@ -2899,6 +2903,17 @@ impl OpenAiClient {
                         continue;
                     };
                     if data == "[DONE]" {
+                        if failed_without_cause && !done_emitted {
+                            // The stream ended and no cause came.
+                            done_emitted = true;
+                            chunk_yielded.set(true);
+                            yield LlmEvent::Done {
+                                outcome: LlmDoneOutcome::Error {
+                                    error: response_failed_without_cause(),
+                                },
+                            };
+                            continue;
+                        }
                         if !done_emitted && saw_terminal_fallback_output {
                             // Without a terminal response only what completed
                             // is committed: an item the stream announced and
@@ -2979,6 +2994,16 @@ impl OpenAiClient {
                     })?;
 
                     if let Some(mut event) = parsed_event {
+                        // A failed response has no output. After a
+                        // `response.failed` that named no cause only its
+                        // cause is read: an `error` event, or a
+                        // `response.failed` that carries one.
+                        if failed_without_cause
+                            && event.event_type != "error"
+                            && event.event_type != "response.failed"
+                        {
+                            continue;
+                        }
                         let terminal_event = event.event_type == "response.completed"
                             || event.event_type == "response.incomplete"
                             || event.event_type == "response.done";
@@ -3483,24 +3508,21 @@ impl OpenAiClient {
                             };
                         }
                         else if event.event_type == "response.failed" {
-                            let error_msg = event.response
-                                .as_ref()
-                                .and_then(responses_error_object)
-                                .and_then(|e| e.get("message"))
-                                .and_then(|m| m.as_str())
-                                .or_else(|| event.response
-                                    .as_ref()
-                                    .and_then(|r| r.get("status_details"))
-                                    .and_then(|d| d.get("error"))
-                                    .and_then(|e| e.get("message"))
-                                    .and_then(|m| m.as_str()))
-                                .unwrap_or("response failed");
-                            let error_code = event.response
-                                .as_ref()
-                                .and_then(responses_error_object)
-                                .and_then(|e| e.get("code"))
-                                .and_then(|c| c.as_str())
-                                .unwrap_or("server_error");
+                            let Some(cause) = responses_stream_cause(&event) else {
+                                // No error object: this event decides
+                                // nothing by itself. A backend that reports
+                                // a refused request this way sends the cause
+                                // in an `error` event after it, so the
+                                // stream is read on, under the same stream
+                                // timeouts as any other event.
+                                tracing::warn!(
+                                    "OpenAI response failed without an error object; reading on for its cause"
+                                );
+                                failed_without_cause = true;
+                                continue;
+                            };
+                            let error_msg = cause.message.unwrap_or("response failed");
+                            let error_code = cause.code.unwrap_or("server_error");
 
                             let logged_code = self.redacted(error_code);
                             let logged_message = self.redacted(error_msg);
@@ -3520,18 +3542,9 @@ impl OpenAiClient {
                         }
                         else if event.event_type == "error" {
                             // Streaming error event from OpenAI
-                            let error_msg = event.error
-                                .as_ref()
-                                .and_then(|e| e.get("message"))
-                                .and_then(|m| m.as_str())
-                                .or(event.message.as_deref())
-                                .unwrap_or("unknown streaming error");
-                            let error_code = event.error
-                                .as_ref()
-                                .and_then(|e| e.get("code"))
-                                .and_then(|c| c.as_str())
-                                .or(event.code.as_deref())
-                                .unwrap_or("unknown");
+                            let cause = responses_stream_cause(&event).unwrap_or_default();
+                            let error_msg = cause.message.unwrap_or("unknown streaming error");
+                            let error_code = cause.code.unwrap_or("unknown");
 
                             let logged_code = self.redacted(error_code);
                             let logged_message = self.redacted(error_msg);
@@ -3550,6 +3563,16 @@ impl OpenAiClient {
                             };
                         }
                     }
+                }
+                // The body ended after a `response.failed` that named no
+                // cause, and no `error` event brought one.
+                if body_ended && failed_without_cause && !done_emitted {
+                    chunk_yielded.set(true);
+                    yield LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Error {
+                            error: response_failed_without_cause(),
+                        },
+                    };
                 }
                 // A chunk whose lines produced no semantic event is still wire
                 // liveness (keepalive comments, lifecycle bookkeeping); surface
@@ -3845,10 +3868,79 @@ fn map_responses_stream_error(error_code: &str, error_message: &str) -> LlmError
             max: 0,
             requested: 1,
         },
-        "invalid_request_error" => LlmError::from_http_status(400, error_message.to_string(), None),
+        // A request the service will never accept: over HTTP a 400, in a
+        // stream one of these codes (`invalid_request_error` is also the
+        // `type` of such an error object). It is classified as that 400 is,
+        // so the turn fails once, with the service's code and message,
+        // instead of being sent again. `invalid_request_body` is a general
+        // code, used for more than one request fault: the class is the
+        // invalid request, and the message says which fault.
+        "invalid_request_error"
+        | "invalid_request_body"
+        | "invalid_encrypted_content"
+        | "invalid_prompt"
+        | "invalid_value"
+        | "invalid_argument"
+        | "unsupported_value"
+        | "unsupported_parameter"
+        | "model_not_found" => {
+            LlmError::from_http_status(400, format!("{error_code}: {error_message}"), None)
+        }
         _ => LlmError::Unknown {
             message: format!("{error_code}: {error_message}"),
         },
+    }
+}
+
+/// The cause a Responses stream gives for a failed response.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ResponsesStreamCause<'a> {
+    /// The error's `code`, or its `type` when it names no code.
+    code: Option<&'a str>,
+    message: Option<&'a str>,
+}
+
+/// The cause `event` gives for a failed response, read from every place a
+/// backend puts it, into one shape: the error object of the event's response
+/// (`response.failed`), the event's own `error` object (the nested form of
+/// an `error` event), or `code` and `message` at the top level of the event
+/// (the flat form). `None` when the event names neither a code nor a
+/// message: a `response.failed` whose `error` is null.
+fn responses_stream_cause(event: &ResponsesStreamEvent) -> Option<ResponsesStreamCause<'_>> {
+    let object = event
+        .response
+        .as_ref()
+        .and_then(responses_error_object)
+        .filter(|error| error.is_object())
+        .or_else(|| event.error.as_ref().filter(|error| error.is_object()));
+    let field = |name: &str| {
+        object
+            .and_then(|error| error.get(name))
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+    };
+    let flat_code = event.code.as_deref().filter(|code| !code.is_empty());
+    let flat_message = event
+        .message
+        .as_deref()
+        .filter(|message| !message.is_empty());
+    let cause = ResponsesStreamCause {
+        code: field("code").or(flat_code).or_else(|| field("type")),
+        message: field("message").or(flat_message),
+    };
+    (cause != ResponsesStreamCause::default()).then_some(cause)
+}
+
+/// How a response ends whose `response.failed` named no cause and whose
+/// stream then ended without the `error` event that carries one. Retryable,
+/// as a failure without a cause was before: nothing says the service
+/// refused the request itself.
+fn response_failed_without_cause() -> LlmError {
+    LlmError::ServerError {
+        status: 500,
+        message: "response failed with no cause: `response.failed` carried no error and the \
+                  stream ended without an `error` event"
+            .to_string(),
     }
 }
 

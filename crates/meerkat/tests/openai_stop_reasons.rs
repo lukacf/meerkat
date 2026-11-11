@@ -13,8 +13,8 @@
 //! The same loop pins the other refusal a Responses stream can carry, the
 //! service refusing the request itself inside an HTTP 200 stream (a
 //! `response.failed` with a null error, then the cause in an `error`
-//! event): the run fails after one request with the typed invalid-request
-//! reason, the service's code and message in it.
+//! event): the run fails after one request on the LLM failure itself, the
+//! service's code and message in what the caller sees.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -24,8 +24,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use axum::{Json, Router, extract::State, response::IntoResponse, routing::post};
 use meerkat::{AgentBuilder, AgentFactory, AgentToolDispatcher, OpenAiClient, ToolDef, ToolError};
-use meerkat_core::error::{LlmFailureReason, LlmProviderErrorKind, LlmProviderErrorRetryability};
 use meerkat_core::event::{AgentErrorClass, AgentErrorReason};
+use meerkat_core::turn_execution_authority::{TurnTerminalCauseKind, TurnTerminalOutcome};
 use meerkat_core::{
     AgentError, AgentEvent, ContentFilteredStop, Message, ProviderStopDetail, RetryPolicy,
     ToolCallView, ToolDispatchOutcome,
@@ -193,8 +193,9 @@ async fn openai_refusal_fails_the_run_content_filtered_with_its_text() {
 /// `response.failed` whose error is null, then the cause in a flat `error`
 /// event. The retry loop sends the request once (the refusal is the
 /// terminal invalid-request class, not a server error to retry), nothing is
-/// committed, and the run's durable failure is the refusal: the typed
-/// non-retryable invalid-request reason with the service's code and message.
+/// committed, and the run fails on the LLM failure itself (not on used-up
+/// retries) with the service's code and message in the error and in the
+/// run's failure report.
 #[tokio::test]
 async fn a_request_refused_in_the_stream_fails_the_run_after_one_request_with_its_cause() {
     const CODE: &str = "invalid_request_body";
@@ -244,20 +245,17 @@ async fn a_request_refused_in_the_stream_fails_the_run_after_one_request_with_it
         1,
         "a request the service refused is not sent again: {result:?}"
     );
+    // The turn ends on the LLM failure itself, not on used-up retries.
     match &result {
-        Err(AgentError::Llm {
-            reason: LlmFailureReason::ProviderError(provider_error),
+        Err(AgentError::TerminalFailure {
+            outcome: TurnTerminalOutcome::Failed,
+            cause_kind: TurnTerminalCauseKind::LlmFailure,
             message,
-            ..
-        }) => {
-            assert_eq!(provider_error.kind, LlmProviderErrorKind::InvalidRequest);
-            assert!(!provider_error.is_retryable());
-            assert!(
-                message.contains(CODE) && message.contains(CAUSE),
-                "the caller sees the code and the message: {message}"
-            );
-        }
-        other => panic!("expected the typed invalid-request failure, got {other:?}"),
+        }) => assert!(
+            message.contains(CODE) && message.contains(CAUSE),
+            "the caller sees the code and the message: {message}"
+        ),
+        other => panic!("expected the turn to fail on the LLM failure, got {other:?}"),
     }
     assert!(
         !agent
@@ -281,20 +279,14 @@ async fn a_request_refused_in_the_stream_fails_the_run_after_one_request_with_it
         })
         .expect("run failed event");
     assert_eq!(report.class, AgentErrorClass::Llm);
-    match &report.reason {
-        Some(AgentErrorReason::LlmProviderError {
-            provider_error_kind: LlmProviderErrorKind::InvalidRequest,
-            provider_error_retryability: LlmProviderErrorRetryability::NonRetryable,
-            provider_error,
-        }) => {
-            let detail = provider_error.to_string();
-            assert!(
-                detail.contains(CODE) && detail.contains(CAUSE),
-                "the durable reason is the refusal: {detail}"
-            );
-        }
-        other => panic!("expected the non-retryable invalid-request reason, got {other:?}"),
-    }
+    assert_eq!(
+        report.reason,
+        Some(AgentErrorReason::TurnTerminalCause {
+            outcome: TurnTerminalOutcome::Failed,
+            cause_kind: TurnTerminalCauseKind::LlmFailure,
+        }),
+        "the run's reason is the LLM failure, not used-up retries"
+    );
     assert!(
         report.message.contains(CODE) && report.message.contains(CAUSE),
         "the failure message names the cause: {}",

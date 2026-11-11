@@ -153,6 +153,10 @@ pub struct OpenAiClient {
     /// The GitHub Copilot Responses route identifies output items by their
     /// `output_index` slot; see [`Self::with_copilot_responses_item_identity`].
     copilot_responses_item_identity: bool,
+    /// A model this client's backend lists under another id than the
+    /// request's: the request's model and the id the wire names for it. Set
+    /// by the GitHub Copilot route (`with_wire_model`).
+    wire_model: Option<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -948,6 +952,7 @@ impl OpenAiClient {
             authorizer: None,
             supports_image_input: true,
             copilot_responses_item_identity: false,
+            wire_model: None,
         }
     }
 
@@ -983,6 +988,27 @@ impl OpenAiClient {
     pub fn with_copilot_responses_item_identity(mut self) -> Self {
         self.copilot_responses_item_identity = true;
         self
+    }
+
+    /// Name `wire_model` on the wire for requests whose model is `model`.
+    /// For a backend that lists the model under an id of its own (a GitHub
+    /// Copilot account). Only the Responses request's `model` field
+    /// changes: the request's own model keeps selecting the catalog row.
+    #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
+    pub(crate) fn with_wire_model(mut self, model: &str, wire_model: &str) -> Self {
+        self.wire_model =
+            (model != wire_model).then(|| (model.to_string(), wire_model.to_string()));
+        self
+    }
+
+    /// The id the wire names for a request whose model is `model`, when the
+    /// client was built with one (`with_wire_model`); `model` itself
+    /// otherwise.
+    fn wire_model_for<'a>(&'a self, model: &'a str) -> &'a str {
+        match self.wire_model.as_ref() {
+            Some((requested, wire)) if requested == model => wire,
+            _ => model,
+        }
     }
 
     pub fn with_chatgpt_backend_wire(self) -> Self {
@@ -1303,7 +1329,7 @@ impl OpenAiClient {
         }
 
         let mut body = serde_json::json!({
-            "model": request.model,
+            "model": self.wire_model_for(&request.model),
             "input": input,
             "max_output_tokens": request.max_tokens,
             "stream": true,
@@ -3561,7 +3587,10 @@ impl LlmClient for OpenAiClient {
     ) -> Result<meerkat_llm_core::PlainModelRoute, meerkat_core::ControllerFactsUnavailable> {
         http::validate_authorization_base_url(&self.base_url)
             .map_err(|_| meerkat_core::ControllerFactsUnavailable)?;
-        meerkat_llm_core::PlainModelRoute::new(&self.responses_endpoint(), logical_model)
+        meerkat_llm_core::PlainModelRoute::new(
+            &self.responses_endpoint(),
+            self.wire_model_for(logical_model),
+        )
     }
 
     fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {

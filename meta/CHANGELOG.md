@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Security
+
+- A console whose visibility policy includes nested members listed the
+  participants of a running temporary council as members and read their
+  history into the timeline. The `ConsoleVisibilityPolicy` trait default and
+  `AllowAllConsoleVisibilityPolicy` include nested members; the stock
+  console, which hides them, was not affected. A participant is a fork of
+  its source member, so its history begins with a copy of the source's
+  earlier turns, and nothing linked it to its source: it was decided on its
+  own name, its council role and the labels it inherits. A caller the access
+  rules deny the source by identity, by role or through the member that
+  spawned it could therefore read the source's earlier turns in the
+  participant's frames, while the council ran and, in a timeline read by the
+  participant's name, after it ended; such a caller could also send to,
+  inspect and retire the participant by name. A rule on a label the
+  participant inherits still applied, so a source private to a person stayed
+  private. A council participant is now a console member on no policy: it is
+  not listed, every member action by its name (send, inspect, retire, blobs,
+  timeline) answers as for an agent that does not exist, the console reads
+  none of its history, and a frame a console stored for one is served to
+  nobody. A council's mob is known from the council's own record; a stored
+  frame whose mob id has a council mob's form (`council--...`) and names no
+  mob the runtime holds is treated the same, so those frames stay unserved
+  on a host that does not keep council records across a restart. Other
+  nested members are listed and served as before. Frames a console stored
+  for participants before this release stay in its console store, unserved.
+  Affected: 0.8.27 through 0.9.12.
+
+## [0.9.12] - 2026-11-10
+
+Meta 0.9.12 is part of Meerkat 0.9.12 (Core 0.9.12, Meta 0.9.12 and Connect
+0.9.12, released together) and pins Core `=0.9.12`.
+
+Meta serves identities created at runtime: a send by name, a dispatch, a
+member mutation or a schedule fire to one goes through the identity's door
+instead of answering `-32001`. See Breaking, Fixed and Known limitations.
+
+`meta_gateway` with persistent sessions keeps its metadata and its console
+log across a restart, and a retirement's harvest and distillation wait out a
+busy agent memory budget instead of ending failed. See Fixed.
+
+Forge runs the Meerkat release it is built from. An existing Forge folder
+starts a fresh setup team on its first start. See Upgrade and Changed.
+
 ### Breaking
 
 - Rust: `ErrorEvent::LifecycleEffectFailed` gains `cause`
@@ -35,43 +79,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   host's own wrapper of a session bridge forwards them to the bridge it
   wraps.
 
+- Rust: `meta_extension_state::SqliteExtensionDocumentStore::from_connection`
+  and `meerkat_meta::mob_announcements::SqliteAnnouncementStore::from_connection`
+  take a rusqlite 0.41 `Connection`, no longer a rusqlite 0.37 one. A host
+  that opens that connection with its own rusqlite moves to rusqlite 0.41
+  with Meta (see Upgrade). The semver gate does not measure which version of
+  a dependency's type a signature names.
+
 ### Security
 
-- A console whose visibility policy includes nested members listed the
-  participants of a running temporary council as members and read their
-  history into the timeline. The `ConsoleVisibilityPolicy` trait default and
-  `AllowAllConsoleVisibilityPolicy` include nested members; the stock
-  console, which hides them, was not affected. A participant is a fork of
-  its source member, so its history begins with a copy of the source's
-  earlier turns, and nothing linked it to its source: it was decided on its
-  own name, its council role and the labels it inherits. A caller the access
-  rules deny the source by identity, by role or through the member that
-  spawned it could therefore read the source's earlier turns in the
-  participant's frames, while the council ran and, in a timeline read by the
-  participant's name, after it ended; such a caller could also send to,
-  inspect and retire the participant by name. A rule on a label the
-  participant inherits still applied, so a source private to a person stayed
-  private. A council participant is now a console member on no policy: it is
-  not listed, every member action by its name (send, inspect, retire, blobs,
-  timeline) answers as for an agent that does not exist, the console reads
-  none of its history, and a frame a console stored for one is served to
-  nobody. A council's mob is known from the council's own record; a stored
-  frame whose mob id has a council mob's form (`council--...`) and names no
-  mob the runtime holds is treated the same, so those frames stay unserved
-  on a host that does not keep council records across a restart. Other
-  nested members are listed and served as before. Frames a console stored
-  for participants before this release stay in its console store, unserved.
-  Affected: 0.8.27 through 0.9.11.
+- RUSTSEC-2026-0462 (rmcp before 3.9.0, unbounded response bodies in rmcp's
+  built-in Streamable HTTP clients) does not affect Meta: Meta reaches rmcp
+  only through Meerkat Core's MCP client, which no longer builds rmcp's
+  reqwest client and bounds every response body and SSE event at 64 MiB
+  itself. cargo-deny matches rmcp 1.8 by version alone, so `meta/deny.toml`
+  ignores the advisory until Core moves to rmcp 3.9 or later.
+
+- The bundled SQLite is 3.54.1 (RUSTSEC-2026-0459): `meerkat-meta` and
+  `meta-extension-state` require rusqlite 0.41.1 (libsqlite3-sys 0.39.1).
+  SQLite before 3.54.0 can return uninitialized page-cache memory to
+  ordinary queries when it opens a database together with a write-ahead log
+  of a different page size. Stored values keep their encoding: rusqlite's
+  `fallible_uint` feature keeps the u64 and usize conversions that rusqlite
+  0.37 had.
+
+- A member's file tools (`apply_patch`, `blob_save_file`) can no longer
+  write `<workspace>/.rkat/`, which holds the gateway's Meerkat host config
+  (`meerkat_config_path` defaults to `<workspace>/.rkat/config.toml`) and the
+  comms identity keys: Meerkat's in-process file tools now refuse a `.rkat`
+  directory at the project root and in any directory under it, so a member's
+  patch cannot rewrite the config every agent of its gateway starts from.
+  The call returns an invalid-arguments tool error and writes nothing. Every
+  other workspace file is written as before, the gateway's state directory
+  included, and a member that has the shell tool is not restricted by this.
+  The gateway declares no further paths, so a symbolic link inside `.rkat`
+  that leads elsewhere is not covered. Change the gateway's config yourself,
+  not through a member.
 
 ### Upgrade
 
 - Forge: the Guide moves from Meta 0.9.3 to the Meta release Forge is built
-  from (0.9.11), so an existing Forge folder starts a fresh setup team in its
+  from, so an existing Forge folder starts a fresh setup team in its
   state directory on its first start. Saved setups, proposals, provider
   settings and installed applications stay, and the previous setup team's
   state is kept unchanged, but the new team does not recall earlier
   conversations. To carry them over, follow the installer README's "Work with
   the setup team" before that first start.
+
+- A Rust host that depends on rusqlite (or libsqlite3-sys) itself moves to
+  rusqlite 0.41 (libsqlite3-sys 0.39) together with Meta: libsqlite3-sys
+  links one SQLite per build (`links = "sqlite3"`), so Cargo refuses a
+  graph that holds rusqlite 0.37 next to rusqlite 0.41.
 
 ### Added
 
@@ -132,9 +190,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   timeout.
 
 - Forge runs the Meerkat release it is built from instead of older pinned
-  releases. Its Guide runs that release's Meta and Core (0.9.11; until now
+  releases. Its Guide runs that release's Meta and Core (until now
   Meta 0.9.3 with Core 0.9.3), compiled agent teams install that release's
-  published Meta from the monorepo's `meta-v` release (0.9.11; until now the
+  published Meta from the monorepo's `meta-v` release (until now the
   standalone repository's 0.9.6), and the protected application receiver
   selects that release (until now Meta 0.9.7 with Core 0.9.8). A source
   checkout installs its own `sdk/python` for the Guide, and a packaged Forge
@@ -212,7 +270,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   persistent. A store that does not open refuses `meta/init` with `-32014`.
   The first start after the upgrade begins with both stores empty, as every
   start of an earlier release did. A launch without persistent sessions
-  keeps both in memory, as before.
+  keeps both in memory, as before. With persistent sessions, the two 0.9.11
+  known limitations on `meta_gateway`'s metadata and console log no longer
+  apply.
 
 - Forge: **Rebuild with updated runtime** on an application built without a
   selected product runtime (an ordinary application an earlier Forge built)
@@ -327,6 +387,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   Meta's build preparer before it wakes or restores a member, not before
   the member it starts at a create, and Meta attaches its tool dispatcher
   to the builds of a registered identity's member only.
+
+- The realm's agent memory background budget still admits at most
+  `runtime_options.agent_memory.distiller.runs_per_hour` runs an hour (12
+  by default): in a burst of retirements past it, the harvests and
+  distillations that no run frees up for within their wait end unrun
+  (`budget_busy`), and their discards stay in the session's memory scope.
+  Raise `runs_per_hour`, or spread the retirements out.
+
+- On a console whose visibility policy includes nested mob members (the policy
+  trait's default; the stock gateway policy does not), a temporary council's
+  participants are listed as members, and their stored history holds a copy of
+  the source member's earlier turns: a caller denied the source can read them
+  through a participant. Affects 0.8.27 through 0.9.12. Keep the stock policy,
+  or deny the participants by name (`council-p0`, ...). The next release no
+  longer lists them.
+
+- A mob that a member private to one person created with the agent mob
+  tools is recorded as private to no one once the process restarts. A host
+  whose console visibility policy lists nested mobs can then show that
+  mob's members to people the private member itself is hidden from. The
+  stock console lists no nested mob, so it does not show them.
 
 ## [0.9.11] - 2026-11-09
 

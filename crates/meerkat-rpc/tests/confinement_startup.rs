@@ -895,3 +895,264 @@ async fn a_governed_reviewer_credential_command_under_confinement_is_refused() {
         run.stderr
     );
 }
+
+// ---- The in-process file tools and the server's own documents ----
+
+/// A scripted OpenAI-compatible chat-completions server on loopback: each
+/// new conversation is answered with one `apply_patch` call for the next
+/// queued patch, and the request carrying a tool result with text. Returns
+/// its port and the tool results it was sent.
+fn scripted_file_tool_model(
+    patches: Vec<String>,
+) -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    use std::sync::{Arc, Mutex};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind scripted model");
+    let port = listener
+        .local_addr()
+        .expect("scripted model address")
+        .port();
+    let queue = Arc::new(Mutex::new(patches));
+    let results = Arc::new(Mutex::new(Vec::new()));
+    let served_results = Arc::clone(&results);
+    std::thread::spawn(move || {
+        for socket in listener.incoming().flatten() {
+            let queue = Arc::clone(&queue);
+            let results = Arc::clone(&served_results);
+            std::thread::spawn(move || {
+                let mut socket = socket;
+                let mut buffer = Vec::new();
+                let mut chunk = [0u8; 8192];
+                let header_end = loop {
+                    if let Some(position) =
+                        buffer.windows(4).position(|window| window == b"\r\n\r\n")
+                    {
+                        break position + 4;
+                    }
+                    match socket.read(&mut chunk) {
+                        Ok(0) | Err(_) => return,
+                        Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+                    }
+                };
+                let headers = String::from_utf8_lossy(&buffer[..header_end]).to_ascii_lowercase();
+                let length = headers
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                while buffer.len() < header_end + length {
+                    match socket.read(&mut chunk) {
+                        Ok(0) | Err(_) => return,
+                        Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+                    }
+                }
+                let request: serde_json::Value =
+                    serde_json::from_slice(&buffer[header_end..header_end + length])
+                        .unwrap_or_default();
+                let last = request["messages"]
+                    .as_array()
+                    .and_then(|messages| messages.last())
+                    .cloned()
+                    .unwrap_or_default();
+                let chunk_of = |value: serde_json::Value| format!("data: {value}\n\n");
+                let mut body = String::new();
+                let patch = if last["role"].as_str() == Some("tool") {
+                    results.lock().unwrap().push(match &last["content"] {
+                        serde_json::Value::String(text) => text.clone(),
+                        other => other.to_string(),
+                    });
+                    None
+                } else {
+                    queue.lock().unwrap().pop()
+                };
+                match patch {
+                    Some(patch) => {
+                        let arguments = serde_json::json!({ "patch": patch }).to_string();
+                        body.push_str(&chunk_of(serde_json::json!({
+                            "choices": [{
+                                "delta": { "tool_calls": [{
+                                    "index": 0,
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": { "name": "apply_patch", "arguments": arguments }
+                                }] },
+                                "finish_reason": null
+                            }]
+                        })));
+                        body.push_str(&chunk_of(serde_json::json!({
+                            "choices": [{ "delta": {}, "finish_reason": "tool_calls" }]
+                        })));
+                    }
+                    None => {
+                        body.push_str(&chunk_of(serde_json::json!({
+                            "choices": [{ "delta": { "content": "done" }, "finish_reason": null }]
+                        })));
+                        body.push_str(&chunk_of(serde_json::json!({
+                            "choices": [{ "delta": {}, "finish_reason": "stop" }]
+                        })));
+                    }
+                }
+                body.push_str(&chunk_of(serde_json::json!({
+                    "choices": [],
+                    "usage": { "prompt_tokens": 10, "completion_tokens": 2 }
+                })));
+                body.push_str("data: [DONE]\n\n");
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes());
+                let _ = socket.shutdown(std::net::Shutdown::Both);
+            });
+        }
+    });
+    (port, results)
+}
+
+/// The stock server declares its own inputs to its agents' in-process file
+/// tools. Started without `--context-root`, the tools are rooted in the
+/// realm directory: the realm's config document is refused there, and so is
+/// the skills directory the server reads from that root (`.rkat/skills`),
+/// here a link to a directory beside it. An ordinary file is still written.
+#[cfg(unix)]
+#[test]
+fn rkat_rpc_file_tools_never_write_the_servers_own_documents() {
+    const REALM: &str = "file-tools";
+    const MODEL: &str = "scripted-file-tools";
+    let binary = rkat_rpc_binary();
+    let temp = TempDir::new().expect("temp dir");
+    let base = temp.path().canonicalize().expect("canonical temp dir");
+    let home = base.join("home");
+    let state = base.join("realms");
+    let user_root = base.join("user");
+    let realm_dir = state.join(REALM);
+    for dir in [
+        &home,
+        &user_root,
+        &realm_dir.join(".rkat"),
+        &realm_dir.join("shared-skills"),
+    ] {
+        std::fs::create_dir_all(dir).expect("fixture dir");
+    }
+    std::os::unix::fs::symlink("../shared-skills", realm_dir.join(".rkat/skills"))
+        .expect("link the skills directory");
+
+    let add = |path: &str| {
+        format!("*** Begin Patch\n*** Add File: {path}\n+written by the model\n*** End Patch")
+    };
+    let (port, tool_results) = scripted_file_tool_model(vec![
+        "*** Begin Patch\n*** Update File: config.toml\n@@\n+# appended by the model\n*** End Patch"
+            .to_string(),
+        add("shared-skills/planted/SKILL.md"),
+        add("out.txt"),
+    ]);
+    let document = format!(
+        r#"[self_hosted.servers.scripted]
+base_url = "http://127.0.0.1:{port}/v1"
+
+[self_hosted.models."{MODEL}"]
+server = "scripted"
+remote_model = "{MODEL}"
+
+[realm."{REALM}"]
+default_binding = "scripted"
+
+[realm."{REALM}".backend.scripted]
+provider = "self_hosted"
+backend_kind = "self_hosted"
+server = "scripted"
+
+[realm."{REALM}".auth.scripted]
+provider = "self_hosted"
+auth_method = "none"
+source = {{ kind = "platform_default" }}
+
+[realm."{REALM}".binding.scripted]
+backend_profile = "scripted"
+auth_profile = "scripted"
+"#
+    );
+    let realm_document = realm_dir.join("config.toml");
+    std::fs::write(&realm_document, &document).expect("realm document");
+
+    let mut command = Command::new(&binary);
+    for name in [
+        "RKAT_ANTHROPIC_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "RKAT_OPENAI_API_KEY",
+        "OPENAI_API_KEY",
+        "RKAT_GEMINI_API_KEY",
+        "GEMINI_API_KEY",
+        "RKAT_TEST_CLIENT",
+    ] {
+        command.env_remove(name);
+    }
+    command
+        .current_dir(&base)
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", home.join(".data"))
+        .args([
+            "--realm",
+            REALM,
+            "--state-root",
+            state.to_str().expect("utf-8 state root"),
+            "--user-config-root",
+            user_root.to_str().expect("utf-8 user root"),
+        ]);
+    let create = serde_json::json!({
+        "prompt": "Apply the patch.",
+        "model": MODEL,
+        "provider": "self_hosted",
+        "enable_shell": false,
+    });
+    let (run, responses) = run_rpc_command(
+        command,
+        &[
+            ("session/create", create.clone()),
+            ("session/create", create.clone()),
+            ("session/create", create),
+        ],
+    );
+    assert!(
+        run.answered && run.status.success(),
+        "rkat-rpc serves and shuts down; exit={:?} stderr:\n{}",
+        run.status,
+        run.stderr
+    );
+    for id in 2..=4 {
+        assert!(
+            responses[&id].get("result").is_some(),
+            "session/create {id} ran its turn: {}",
+            responses[&id]
+        );
+    }
+    let tool_results = tool_results.lock().unwrap().clone();
+    assert_eq!(
+        tool_results.len(),
+        3,
+        "three apply_patch calls: {tool_results:#?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&realm_document).expect("realm document"),
+        document,
+        "the file tool changed the realm config document: {tool_results:#?}"
+    );
+    assert!(
+        !realm_dir.join("shared-skills/planted").exists(),
+        "the file tool wrote a skill through the linked skills directory: {tool_results:#?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(realm_dir.join("out.txt")).expect("the ordinary file"),
+        "written by the model\n",
+        "{tool_results:#?}"
+    );
+    assert_eq!(
+        tool_results
+            .iter()
+            .filter(|result| result.contains("engine's own directory"))
+            .count(),
+        2,
+        "two calls were refused as writes into the server's own files: {tool_results:#?}"
+    );
+}

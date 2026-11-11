@@ -1,17 +1,18 @@
 //! The process-wide lock profile of the bundled SQLite.
 //!
-//! Three build-time defaults of the bundled SQLite put one process-wide mutex
-//! in front of every connection in the process, so many sessions in one host
-//! process queue on each other:
+//! Three build-time settings of the bundled SQLite each put one process-wide
+//! mutex in front of every connection in the process, so many sessions in one
+//! host process queue on each other:
 //!
 //! - allocator statistics (`SQLITE_DEFAULT_MEMSTATUS` defaults to 1): every
 //!   `sqlite3_malloc` and `sqlite3_free` takes `SQLITE_MUTEX_STATIC_MEM`.
 //!   Opening a connection and parsing its schema is the heavy case: thousands
 //!   of allocations per open.
-//! - the shared page cache: `libsqlite3-sys` builds with
-//!   `-DSQLITE_ENABLE_MEMORY_MANAGEMENT` (SQLite itself leaves it off), which
-//!   puts every connection's pages in one cache group behind
-//!   `SQLITE_MUTEX_STATIC_LRU`, taken on every page fetch, unpin and release.
+//! - the shared page cache: `-DSQLITE_ENABLE_MEMORY_MANAGEMENT` puts every
+//!   connection's pages in one cache group behind `SQLITE_MUTEX_STATIC_LRU`,
+//!   taken on every page fetch, unpin and release. SQLite itself leaves it
+//!   off, and so does `libsqlite3-sys` 0.39; earlier `libsqlite3-sys`
+//!   releases built with it.
 //! - page-cache overflow statistics: every page buffer allocated or freed on
 //!   the heap takes `SQLITE_MUTEX_STATIC_PMEM` unless
 //!   `-DSQLITE_DISABLE_PAGECACHE_OVERFLOW_STATS` is set.

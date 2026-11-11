@@ -19,8 +19,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (`IdentityRecordFacts`), so a struct literal of it needs the member
   (`record: Default::default()`). The status as written on the wire is
   unchanged while the record's members are unset.
+- `runtime_options.identity_creation` (and the Rust form a native host
+  returns): a policy that names the approval outcome `notify` or `review`, or
+  a `preparation` other than `none`, is refused at init, with the policy path
+  and what to write instead. Before, such a policy was accepted and nothing
+  acted on it. No notice reaches an approver for `notify` yet, no reviewer
+  decides for `review` yet, and no method settles a preparation yet: write
+  `allow` or `require_approval`, and leave `preparation` out.
+
+### Added
+
+- `meta/identity/*`: host methods that change a mob's long-term agents while
+  it runs, on the stdio gateway and on `POST /console/rpc`: `create` (1 to
+  256 agents, all or nothing), `update`, `archive`, `unarchive`, `remove`,
+  `adopt` (release a configured agent from configuration: it keeps its
+  member, session and history, and is changed at run time from then on),
+  `withdraw` and `changes_hold`, and the reads `list`, `get`, `operation`,
+  `directory` and `plan`. An agent created this way is the same kind of
+  agent as a configured one; who asked for it is recorded and grants or
+  limits nothing. A create seats its agents dormant and wakes nothing, and a
+  read never wakes an agent. See "Agent changes" in the RPC reference.
+- Every launch whose mob has long-term agents serves the methods and lists
+  them in `meta/capabilities`. Their changes need the launch's identity
+  policy (`runtime_options.identity_creation`, which until now was checked
+  and then dropped). The policy is default deny: each change class of a
+  request is judged by its own rules and the strictest outcome applies. A
+  launch without a policy, or with one whose `enabled` is false, serves the
+  reads and refuses every change and every `plan` `change_denied`, with a
+  sentence that says the launch gives no identity creation policy; its
+  agents are unchanged. See the new policy reference,
+  `docs/reference/identity-policy.mdx`.
+- Every refusal of the family is one JSON-RPC error, code `-32058`
+  (`meerkat_meta::rpc::IDENTITY_REFUSED_CODE`), whose `data` is `{kind,
+  field?, retryable, detail}` and the kind's own members; `kind` is a closed
+  vocabulary. Params that are not what a method takes are that error too
+  (`invalid_request`).
+- A change names its operation with `request_id`: the same requester and
+  request answer the same state again and write nothing twice, another
+  request under the id is `operation_reused`, and two requesters that choose
+  the same id name two operations.
+- One spec digest names an agent on every surface: `list`, `get`, an outcome
+  and `stale_spec.current_digest` agree, before and after an adoption.
+- A create whose first message did not start answers `seat: "owed"` for
+  that agent; the mob seats it at the next change of the family or at its
+  next start, without a restart, and its first message runs once then. A mob
+  whose runtime is governed refuses a create that gives a first message
+  (`unsupported`, `first_message_in_governed_realm`) before anything is
+  written.
+- Console access actions `agent.identity.create`, `agent.identity.manage`
+  (update, archive, unarchive and adopt, on the named agent) and
+  `agent.identity.remove` (on the named agent). `GET /console/experience`
+  carries `identity_changes: {available, can_create, can_change,
+  can_remove}` and, per listed agent, `affordances.can_change_identity` and
+  `affordances.can_remove_identity`.
+- Rust: `UnifiedRuntime::attach_identity_policy` attaches a launch's
+  policy; `UnifiedRuntime::identity_family` reads the family, attached
+  whenever the runtime has an identity runtime, and
+  `UnifiedRuntime::identity_changes_enabled` says whether its policy is
+  present and enabled; `identity_creation::{IdentityFamilyOptions,
+  IdentityFamilySlot, IdentityHostHooks}`;
+  `IdentityCreationPolicy::check_served`;
+  `IdentityRuntime::{attach_identity_family, attach_identity_reads,
+  identity_family, identity_changes_enabled}`.
 
 ### Changed
+
+- An access rule with the pattern `agent.*` or `*` covers the three new
+  `agent.identity.*` actions, as it covers every action a release adds to a
+  family. They only open the methods: the identity policy still judges every
+  change, and without a policy every change is refused.
 
 - `runtime_options.identity_creation`: an approval rule may name the change
   classes `archive` (an archive and an unarchive) and `adopt`, and

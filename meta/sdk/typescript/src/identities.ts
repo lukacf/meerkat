@@ -466,7 +466,8 @@ export interface IdentityPendingDecision {
 
 /**
  * The change committed, and at least one of its agents is not usable yet:
- * something is still being prepared for it.
+ * something is still being prepared for it. No launch of this release
+ * answers it: a policy that asks for host preparation is refused at init.
  */
 export interface IdentityPendingPreparation {
   readonly outcome: "pending_preparation";

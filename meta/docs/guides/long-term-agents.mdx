@@ -53,7 +53,7 @@ const runtime = await Meta.builder()
   .gateway(gatewayBin)
   .mob("mob.toml")
   .persistentState(stateDir)
-  .roster(roster)
+  .rosterProvider(roster)
   .identityCreation({
     enabled: true,
     approval: { rules: [{
@@ -209,7 +209,7 @@ A change answers one of three outcomes, or is refused:
 | --- | --- |
 | `done` | The change committed. `agents` lists each agent with its `spec_digest` afterwards. |
 | `pending_decision` | A person must decide. Nothing but the decision is written. This is a normal answer, not an error. |
-| `pending_preparation` | The change committed, and an agent is not usable yet. |
+| `pending_preparation` | The change committed, and an agent is not usable yet. No launch of this release answers it: a policy that asks for host preparation is refused at init. |
 
 `pending_decision` carries the `operation_id`, the `decision_id` and the
 decision's `deadline_ms`. Do not repeat the change under a new `request_id`.
@@ -329,7 +329,9 @@ await identities.remove("editor", { expectedSpecDigest: digest, requestId: "remo
   wakes until its first delivery or its first message. Each agent's outcome
   carries its `seat`: `owed` means the agent is committed and durable and its
   first message did not start; it is seated at its next delivery, without a
-  restart.
+  restart. On a governed runtime a create that gives a first message is
+  refused before anything is written (`unsupported` at
+  `agents[i].first_message`): create the agent without one.
 - **Update.** `set` names what changes; a member left out is unchanged.
   `instructions` and `context` are replaced whole. `labels` sets the keys it
   names, and `labels_remove` removes keys. A `profile` change moves the agent
@@ -419,6 +421,10 @@ in both SDKs). It still answers the reads.
 Advisory values are open. An agent's `readiness`, a change's `state`, a
 provenance's `entered` and a directory verdict may take values your SDK does
 not know: they are kept as the gateway sent them.
+
+`get` and `list` answer each agent's `provenance`: how it came to exist, who
+asked, when, and the consent the change committed under. It is recorded and
+shown; nothing reads it for a decision.
 
 ## See also
 

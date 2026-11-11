@@ -512,7 +512,9 @@ class IdentityPendingDecision:
 @dataclass(frozen=True)
 class IdentityPendingPreparation:
     """The change committed, and at least one of its agents is not usable
-    yet: something is still being prepared for it."""
+    yet: something is still being prepared for it. No launch of this release
+    answers it: a policy that asks for host preparation is refused at
+    init."""
 
     operation_id: str
     agents: tuple[AgentOutcome, ...] = ()

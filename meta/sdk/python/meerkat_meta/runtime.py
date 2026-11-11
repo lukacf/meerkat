@@ -780,7 +780,10 @@ class IdentitiesHandle:
         agent's outcome carries its ``spec_digest`` and its ``seat``
         (``owed`` when its first message did not start: the agent exists and
         is seated without a restart at its next delivery). A removed
-        agent's name is never available again (``name_taken``).
+        agent's name is never available again (``name_taken``). On a
+        governed runtime a create that gives a ``first_message`` is refused
+        before anything is written (``unsupported`` at
+        ``agents[i].first_message``).
         """
         request = CreateAgents(
             agents=agents,

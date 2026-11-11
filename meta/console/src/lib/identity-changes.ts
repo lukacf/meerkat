@@ -147,7 +147,8 @@ export interface AgentProvenance {
   /** An agent's name, a host surface, or a person's principal key. */
   requester: string;
   atMs: number;
-  /** `allowed`, `notified`, `decided` or `imported`. Advisory. */
+  /** The consent's form (`allowed`, `decided`, `imported`). Advisory: a
+   * form the console has no words for reads as it is. */
   consentForm: string;
 }
 
@@ -729,7 +730,6 @@ export function verdictWords(entry: DirectoryVerdict): VerdictWords {
 
 const CONSENT_WORDS: Readonly<Record<string, string>> = {
   allowed: "Allowed by the host's rules",
-  notified: "Allowed by the host's rules, and an approver was told",
   decided: "Decided by a person",
   imported: "Decided outside this team and carried in by its host",
 };

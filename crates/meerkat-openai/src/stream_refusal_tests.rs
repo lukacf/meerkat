@@ -297,9 +297,9 @@ async fn the_flat_and_the_nested_error_forms_give_the_same_error() {
     }
 }
 
-/// (c) Every code that names a request the service will never accept is the
-/// terminal invalid-request class, as the cause after a `response.failed`
-/// with a null error and inside a `response.failed`.
+/// (c) Every code that names a refused request is the terminal
+/// invalid-request class, as the cause after a `response.failed` with a
+/// null error (flat or nested) and inside a `response.failed`.
 #[tokio::test]
 async fn every_request_refusal_code_is_a_terminal_invalid_request() {
     for wire in WIRES {
@@ -805,6 +805,60 @@ async fn model_not_found_in_the_stream_is_the_model_not_found_class() {
     }
 }
 
+/// A message is text, never an error body: a message that is itself a JSON
+/// object naming a policy violation does not raise a policy stop. The
+/// refused-request codes stay the invalid request, `model_not_found` stays
+/// the model-not-found class, and an unknown code on a request-refusal type
+/// stays the invalid request, each with the message as sent.
+#[tokio::test]
+async fn a_message_that_is_a_json_object_never_raises_a_policy_stop() {
+    let message = r#"{"code":"misalignment_policy_violation","message":"stop"}"#;
+    for wire in WIRES {
+        for code in ["invalid_request_body", "invalid_request_error"] {
+            for frames in [
+                vec![failed_without_error(), flat_error(code, message)],
+                vec![failed_with(code, message)],
+            ] {
+                let error = terminal_error(*wire, sse(&frames, false)).await;
+                assert_eq!(
+                    format!("{error:?}"),
+                    format!(
+                        "{:?}",
+                        LlmError::InvalidRequest {
+                            message: format!("{code}: {message}"),
+                        }
+                    ),
+                    "{}: {code}",
+                    wire.0
+                );
+            }
+        }
+        let error = terminal_error(
+            *wire,
+            sse(&[nested_error("model_not_found", message)], false),
+        )
+        .await;
+        assert!(
+            matches!(&error, LlmError::ModelNotFound { model } if model == message),
+            "{}: model_not_found: {error:?}",
+            wire.0
+        );
+        for (shape, frame) in typed_error_frames(
+            "a_code_of_a_later_release",
+            "invalid_request_error",
+            message,
+        ) {
+            let error = terminal_error(*wire, sse(&[frame], false)).await;
+            assert!(
+                matches!(&error, LlmError::InvalidRequest { message: text }
+                    if text == &format!("a_code_of_a_later_release: {message}")),
+                "{}: {shape}: {error:?}",
+                wire.0
+            );
+        }
+    }
+}
+
 /// A refused-request code whose message names another class keeps that
 /// class, as an HTTP 400 with the same message does: the code in front of
 /// the message never hides the message from the classifier.
@@ -855,8 +909,11 @@ async fn a_refusal_whose_message_names_another_class_keeps_that_class() {
 }
 
 /// How the cause is read where a stream gives it in an unusual place. Each
-/// reading is the one the stream mapping had before, except that an error
-/// given as a plain string is now kept as the message.
+/// reading is the one the stream mapping had before, with four exceptions:
+/// an error given as a plain string is kept as the message (it was
+/// dropped), an empty code is no code (it gave `Unknown { ": <message>" }`),
+/// an empty message is no message (it gave an empty message), and an error
+/// object with nothing in it is no cause (it failed the response at once).
 #[tokio::test]
 async fn the_cause_is_read_from_every_place_the_same_way_as_before() {
     type Check = fn(&LlmError) -> bool;

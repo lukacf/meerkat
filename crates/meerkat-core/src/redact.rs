@@ -137,14 +137,20 @@ pub const MIN_REDACTED_CREDENTIAL_BYTES: usize = 8;
 /// replaced (at least eight credential bytes with a digit among them, or at
 /// least 32), and only that value, never the rest of the line. So "an
 /// Authorization header using Bearer auth (i.e. Authorization: Bearer
-/// YOUR_KEY)" stays as it is. Well-known token prefixes, JSON web tokens,
-/// URL userinfo and PEM private-key blocks are replaced as there.
+/// YOUR_KEY)" stays as it is. Well-known token prefixes, JSON web tokens and
+/// PEM private-key blocks are replaced as there. So is URL userinfo, with
+/// one difference: text that quotes a URL closes it, so the authority of a
+/// URL also ends at a quoting byte (`"`, `'`, `\`, `<`, `>`) that closes a
+/// bare host when a second such byte stands before the `@` that follows.
 ///
-/// Two limits. A named value is found in the spellings above and in no
+/// Three limits. A named value is found in the spellings above and in no
 /// other form: not as base64 of it, not as the decoded pair of a `Basic`
-/// value, not cut short or masked. And the shape rules are a second line
+/// value, not cut short or masked. The shape rules are a second line
 /// only: a secret no caller names is replaced only in the positions they
 /// read, and one made of letters only and shorter than 32 bytes is not.
+/// And URL userinfo whose start reads as a bare host (no `:`, or `:` and
+/// then digits only) and that holds two quoting bytes is read as a quoted
+/// host and stays.
 ///
 /// This is the one owner of response redaction:
 /// [`crate::HttpAuthorizer::redact_response_diagnostic`] calls it with the
@@ -385,7 +391,7 @@ fn redact_line(line: &str, output: &mut String, rules: ShapeRules) {
                 continue;
             }
         }
-        if let Some((userinfo_start, userinfo_end)) = url_userinfo_at(line, cursor) {
+        if let Some((userinfo_start, userinfo_end)) = url_userinfo_at(line, cursor, rules) {
             output.push_str(&line[cursor..userinfo_start]);
             output.push_str(SECRET_REDACTION_MARKER);
             cursor = userinfo_end;
@@ -633,11 +639,11 @@ fn is_json_web_token(token: &[u8]) -> bool {
 
 /// At `://`, the userinfo of the URL's authority (`user:pass` in
 /// `scheme://user:pass@host`): its start and the index of its `@`. The
-/// authority ends at whitespace, at `/`, `?` or `#`, and where the text
-/// that holds the URL closes it: a quote, a backslash, `<` or `>`. A URL
-/// without a path inside a JSON string therefore never reaches a later `@`
-/// of the body.
-fn url_userinfo_at(line: &str, start: usize) -> Option<(usize, usize)> {
+/// authority ends at whitespace, at `/`, `?` or `#`. In response text it
+/// also ends where the text that holds the URL closes it
+/// ([`quoted_host_end`]), so a URL without a path inside a JSON string
+/// does not reach a later `@` of the body.
+fn url_userinfo_at(line: &str, start: usize, rules: ShapeRules) -> Option<(usize, usize)> {
     let bytes = line.as_bytes();
     if !bytes[start..].starts_with(b"://") {
         return None;
@@ -645,17 +651,43 @@ fn url_userinfo_at(line: &str, start: usize) -> Option<(usize, usize)> {
     let authority_start = start + 3;
     let authority_len = bytes[authority_start..]
         .iter()
-        .take_while(|byte| {
-            !byte.is_ascii_whitespace()
-                && !matches!(
-                    **byte,
-                    b'/' | b'?' | b'#' | b'"' | b'\'' | b'\\' | b'<' | b'>'
-                )
-        })
+        .take_while(|byte| !byte.is_ascii_whitespace() && !matches!(**byte, b'/' | b'?' | b'#'))
         .count();
-    let authority = &bytes[authority_start..authority_start + authority_len];
+    let mut authority = &bytes[authority_start..authority_start + authority_len];
+    if rules == ShapeRules::ResponseText
+        && let Some(end) = quoted_host_end(authority)
+    {
+        authority = &authority[..end];
+    }
     let at = authority.iter().rposition(|byte| *byte == b'@')?;
     (at > 0).then_some((authority_start, authority_start + at))
+}
+
+/// Where `authority` ends when the text that holds the URL closes it: at
+/// its first quoting byte (`"`, `'`, `\`, `<` or `>`), when that byte
+/// closes a bare host and the `@` that follows is not this URL's. A bare
+/// host is what stands before the byte when it holds no `:`, or a `:` and
+/// then digits only (a port). The `@` is another text's when a second
+/// quoting byte stands between the first and the authority's last `@`, as
+/// in `{"docs":"https://host","support":"help@host"}`.
+///
+/// Userinfo can hold a quoting byte (an apostrophe is legal there, and a
+/// malformed connection string is printed as it is). It stays userinfo
+/// when what stands before the byte is no bare host (`app:pa'ss@db`), or
+/// when no second quoting byte follows (`o'brien:pass@db`, `app:12'34@db`).
+/// Missed: userinfo whose start reads as a bare host and that holds two
+/// quoting bytes.
+fn quoted_host_end(authority: &[u8]) -> Option<usize> {
+    let is_quoting = |byte: &u8| matches!(*byte, b'"' | b'\'' | b'\\' | b'<' | b'>');
+    let end = authority.iter().position(is_quoting)?;
+    let last_at = authority.iter().rposition(|byte| *byte == b'@')?;
+    let host = &authority[..end];
+    let bare_host = match host.iter().position(|byte| *byte == b':') {
+        None => true,
+        Some(colon) => host[colon + 1..].iter().all(u8::is_ascii_digit),
+    };
+    (bare_host && end < last_at && authority[end + 1..last_at].iter().any(is_quoting))
+        .then_some(end)
 }
 
 #[cfg(test)]

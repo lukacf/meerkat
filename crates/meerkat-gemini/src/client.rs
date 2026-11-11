@@ -1451,7 +1451,16 @@ impl ImageGenerationExecutor for GeminiClient {
                     .map_err(|err| LlmError::InvalidRequest {
                         message: format!("invalid Gemini image plan: {err}"),
                     })?;
-                self.execute_native_image(request, provider_plan).await
+                // What a failed image request reports can come from a
+                // response (the Files API's refusal to register a referenced
+                // video): it is redacted as every other response diagnostic
+                // is.
+                self.execute_native_image(request, provider_plan)
+                    .await
+                    .map_err(|mut error| {
+                        error.redact_diagnostics(|message| self.redact_diagnostic(message));
+                        error
+                    })
             }
             other => Err(LlmError::InvalidRequest {
                 message: format!("Gemini image executor cannot run plan {other:?}"),

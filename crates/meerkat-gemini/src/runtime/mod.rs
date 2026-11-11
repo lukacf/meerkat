@@ -659,8 +659,11 @@ async fn post_code_assist_json<T: serde::de::DeserializeOwned>(
             status.as_u16(),
         )));
     }
-    let text = response.text().await.unwrap_or_default();
+    let mut text = response.text().await.unwrap_or_default();
     if !status.is_success() {
+        // The endpoint, or a gateway in front of it, can repeat the
+        // request's bearer in its refusal.
+        meerkat_core::redact::redact_credentials(&mut text, |visit| visit(access_token));
         return Err(ProviderAuthError::SourceResolutionFailed(format!(
             "Google Code Assist setup request failed: status={} body={}",
             status.as_u16(),
@@ -694,8 +697,11 @@ async fn get_code_assist_json<T: serde::de::DeserializeOwned>(
             status.as_u16(),
         )));
     }
-    let text = response.text().await.unwrap_or_default();
+    let mut text = response.text().await.unwrap_or_default();
     if !status.is_success() {
+        // The endpoint, or a gateway in front of it, can repeat the
+        // request's bearer in its refusal.
+        meerkat_core::redact::redact_credentials(&mut text, |visit| visit(access_token));
         return Err(ProviderAuthError::SourceResolutionFailed(format!(
             "Google Code Assist operation request failed: status={} body={}",
             status.as_u16(),

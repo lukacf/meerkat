@@ -1358,6 +1358,152 @@ async fn a_removal_revokes_the_record_and_an_archive_keeps_it() {
     rig.shutdown().await;
 }
 
+/// A removal that committed in Core while the step after it never ran (the
+/// process stopped in between, and a replayed removal is answered from
+/// Core's receipt without repeating the step): the next start revokes the
+/// removed agent's record, once, from what the mob holds. A second start
+/// writes nothing, and an archived agent's record stays as it is.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_start_revokes_the_record_of_an_agent_removed_without_its_step() {
+    const REMOVED: &str = "removed-one";
+    const ARCHIVED: &str = "archived-one";
+    let spec = |name: &str, instructions: &str| {
+        meerkat_mob::CreatedIdentitySpec::new(name, "worker")
+            .with_additional_instructions(vec![instructions.to_string()])
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let mob = fresh_mob_id();
+    let mut rig = boot(temp.path(), &mob, vec![configured_spec(&[])]).await;
+    let created = rig
+        .mob()
+        .create_store_owned_identities(
+            meerkat_mob::StoreOwnedIdentityCreate::new(
+                operation("create-two"),
+                host(),
+                [REMOVED, ARCHIVED]
+                    .iter()
+                    .map(|name| {
+                        meerkat_mob::CreatedIdentityRequest::new(spec(name, "Keep ALPHA records."))
+                    })
+                    .collect(),
+            ),
+            allow(),
+        )
+        .await
+        .map(|created| created.change);
+    assert!(
+        matches!(
+            created,
+            Ok(meerkat_mob::IdentityChangeOutcome::Committed { .. })
+        ),
+        "Core creates the agents: {created:?}"
+    );
+    let identities = rig
+        .runtime
+        .identity_runtime()
+        .expect("identity runtime installed");
+    for name in [REMOVED, ARCHIVED] {
+        rig.turn(name, &format!("FIRST-TURN-OF-{name}")).await;
+        rig.update_spec(
+            &format!("update-{name}"),
+            spec(name, "Keep ALPHA records."),
+            spec(name, "Keep BETA records."),
+        )
+        .await;
+        assert_eq!(
+            identities
+                .after_update(
+                    &rig.mob(),
+                    &InstructionsChanged {
+                        identity: name.to_string(),
+                        previous: text(&["Keep ALPHA records."]),
+                        current: text(&["Keep BETA records."]),
+                    },
+                )
+                .await,
+            InstructionOutcome::AppliesAtNextRun,
+            "{name}'s change is recorded"
+        );
+        rig.recorded(name).await;
+    }
+    drop(identities);
+
+    // The removal commits in Core; the step after it does not run.
+    let removed = rig
+        .mob()
+        .remove_identity(
+            meerkat_mob::IdentityRemoval::new(operation("remove"), host(), REMOVED),
+            allow(),
+        )
+        .await;
+    assert!(
+        matches!(
+            removed,
+            Ok(meerkat_mob::IdentityChangeOutcome::Committed { .. })
+        ),
+        "{removed:?}"
+    );
+    let archived = rig
+        .mob()
+        .archive_identity(
+            meerkat_mob::IdentityArchiveChange::new(operation("archive"), host(), ARCHIVED),
+            allow(),
+        )
+        .await;
+    assert!(
+        matches!(
+            archived,
+            Ok(meerkat_mob::IdentityChangeOutcome::Committed { .. })
+        ),
+        "{archived:?}"
+    );
+    let record = rig.record(REMOVED).await.expect("the record");
+    assert_eq!(
+        (record["revision"].clone(), record["effect"].clone()),
+        (json!(1), json!("active")),
+        "the removal's step did not run: {record:#?}"
+    );
+    rig.shutdown_for_reopen().await;
+
+    let rig = boot(temp.path(), &mob, vec![configured_spec(&[])]).await;
+    let record = rig
+        .record(REMOVED)
+        .await
+        .expect("the removed agent's record");
+    assert_eq!(
+        (record["revision"].clone(), record["effect"].clone()),
+        (json!(2), json!("absent")),
+        "the start revoked the removed agent's record: {record:#?}"
+    );
+    let record = rig
+        .record(ARCHIVED)
+        .await
+        .expect("the archived agent's record");
+    assert_eq!(
+        (record["revision"].clone(), record["effect"].clone()),
+        (json!(1), json!("active")),
+        "an archived agent keeps its record: {record:#?}"
+    );
+    rig.shutdown_for_reopen().await;
+
+    let rig = boot(temp.path(), &mob, vec![configured_spec(&[])]).await;
+    assert_eq!(
+        rig.record(REMOVED).await.expect("the revoked record")["revision"],
+        json!(2),
+        "a second start revokes nothing again"
+    );
+    let record = rig
+        .record(ARCHIVED)
+        .await
+        .expect("the archived agent's record");
+    assert_eq!(
+        (record["revision"].clone(), record["effect"].clone()),
+        (json!(1), json!("active")),
+        "an archived agent keeps its record: {record:#?}"
+    );
+    rig.shutdown().await;
+}
+
 /// A host cannot write or revoke in the namespaces the platform keeps for
 /// agents' own instructions, typed, and still reads the records there.
 #[tokio::test(flavor = "multi_thread")]

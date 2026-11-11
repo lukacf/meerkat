@@ -256,8 +256,9 @@ impl MobHandle {
     ///
     /// # Errors
     ///
-    /// [`MobError::SessionError`] when the session service cannot read the
-    /// committed state or its record is corrupt.
+    /// [`MobError::SessionError`](crate::error::MobError::SessionError) when
+    /// the session service cannot read the committed state or its record is
+    /// corrupt.
     pub async fn member_build_instructions(
         &self,
         identity: &AgentIdentity,

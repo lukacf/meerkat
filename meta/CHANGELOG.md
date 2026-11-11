@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Fixed
+### Security
 
 - A mob that a member private to a person creates with its own `mob_create`
   stays private to that person after a restart, so every member spawned into

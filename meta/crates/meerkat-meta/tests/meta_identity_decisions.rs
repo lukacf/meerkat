@@ -34,16 +34,15 @@ use meerkat_core::types::StopReason;
 use meerkat_core::{Message, PrincipalKind, PrincipalRef, TrustDomainId};
 use meerkat_meta::identity_creation::{
     AdoptIdentitySpec, AgentTools, ArchiveIdentitySpec, ChangeCommit, ChangeCommitted,
-    ChangeConsent, ChangeRequester, ConsequenceLine, CreateIdentitySpec, ExecutorError,
-    HeldChangeHost, HeldIdentityChange, HeldTarget, HookRefusal, IDENTITY_DECISION_KINDS,
-    IdentityChangeExecutor, IdentityCreationPolicy, IdentityDecisionNotice,
-    IdentityDecisionNotices, IdentityDecisions, IdentityEntryFacts, IdentityOutcome,
-    IdentityRefusal, IdentityRequest, KeyedSendNotices, NormalizedRequest, OperationId,
-    ProfileTools, RemoveIdentitySpec, RequestAction, RequestContext, RequestEnvelope, Requester,
+    ChangeConsent, ChangeRequester, ConsequenceLine, CoreChangeExecutor, CreateIdentitySpec,
+    ExecutorError, HeldChangeHost, HeldIdentityChange, HeldTarget, HookRefusal,
+    IDENTITY_DECISION_KINDS, IdentityChangeExecutor, IdentityCreationPolicy,
+    IdentityDecisionNotice, IdentityDecisionNotices, IdentityDecisions, IdentityEntryFacts,
+    IdentityOutcome, IdentityRefusal, IdentityRequest, KeyedSendNotices, NormalizedRequest,
+    OperationId, ProfileTools, RemoveIdentitySpec, RequestContext, RequestEnvelope, Requester,
     RequesterFacts, Sha256Digest, ToolConfigurations, UnarchiveIdentitySpec, WithdrawRequest,
-    committed_outcome, consent_of_plan, core_member_name, host_consequences_of, normalize_adopt,
-    normalize_archive, normalize_create, normalize_remove, normalize_unarchive, refusal_of_error,
-    render_held_v1,
+    consent_of_plan, core_member_name, host_consequences_of, normalize_adopt, normalize_archive,
+    normalize_create, normalize_remove, normalize_unarchive, render_held_v1,
 };
 use meerkat_meta::identity_first::contracts::RosterProvider;
 use meerkat_meta::identity_first::{
@@ -232,84 +231,6 @@ impl meerkat_client::LlmClient for RecordingClient {
     }
 }
 
-/// The seam's commit of a create and of a removal, over Core's handle.
-struct CoreSeam;
-
-#[async_trait]
-impl IdentityChangeExecutor for CoreSeam {
-    async fn commit(&self, commit: ChangeCommit<'_>) -> Result<ChangeCommitted, ExecutorError> {
-        let digest = commit
-            .request
-            .request_digest()
-            .map_err(ExecutorError::Request)?;
-        let operation =
-            meerkat_mob::IdentityOperation::new(commit.operation_id.as_str(), digest.as_str());
-        let requester = match commit.requester {
-            ChangeRequester::Host { surface, .. } => {
-                meerkat_mob::IdentityChangeRequesterInput::host(surface.as_str())
-            }
-            ChangeRequester::Human { principal } => {
-                meerkat_mob::IdentityChangeRequesterInput::Human {
-                    principal: principal.clone(),
-                }
-            }
-            other => panic!("the rows commit as the host or a person: {other:?}"),
-        };
-        let answered = match &commit.request.action {
-            RequestAction::Create { identities } => {
-                let requests = identities
-                    .iter()
-                    .map(|created| {
-                        meerkat_mob::CreatedIdentityRequest::new(
-                            meerkat_mob::CreatedIdentitySpec::new(
-                                core_member_name(created.spec.identity.as_str()).unwrap(),
-                                created.spec.profile.clone(),
-                            )
-                            .with_additional_instructions(
-                                created.spec.additional_instructions.clone(),
-                            ),
-                        )
-                    })
-                    .collect();
-                commit
-                    .mob
-                    .create_store_owned_identities(
-                        meerkat_mob::StoreOwnedIdentityCreate::new(operation, requester, requests),
-                        commit.consent,
-                    )
-                    .await
-                    .map(|_| ())
-            }
-            RequestAction::Remove {
-                identity,
-                expected_spec_digest,
-            } => commit
-                .mob
-                .remove_identity(
-                    meerkat_mob::IdentityRemoval::new(
-                        operation,
-                        requester,
-                        core_member_name(identity).unwrap(),
-                    )
-                    .with_expected_spec_digest(expected_spec_digest.as_str()),
-                    commit.consent,
-                )
-                .await
-                .map(|_| ()),
-            other => panic!("the rows create and remove: {other:?}"),
-        };
-        match answered {
-            Ok(()) => {
-                let outcome = committed_outcome(commit.mob, commit.operation_id)
-                    .await?
-                    .expect("a committed change has a receipt");
-                Ok(ChangeCommitted::new(outcome, false))
-            }
-            Err(error) => Ok(ChangeCommitted::refused(refusal_of_error(error)?)),
-        }
-    }
-}
-
 /// What the seam was asked with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Asked {
@@ -332,9 +253,9 @@ struct ObservedSeam {
 }
 
 impl ObservedSeam {
-    /// The seam over Core.
+    /// The seam's own executor over Core.
     fn over_core() -> Arc<Self> {
-        Self::new(Some(Arc::new(CoreSeam)))
+        Self::new(Some(Arc::new(CoreChangeExecutor::new())))
     }
 
     /// A seam that commits nothing and answers a committed change.
@@ -831,7 +752,7 @@ impl Rig {
         let normalized = normalized_create(&allow_policy(), &facts, &[spec(name)]);
         let operation_id = operation(&facts, &format!("allowed-create-{name}"));
         let mob = self.mob();
-        let committed = CoreSeam
+        let committed = CoreChangeExecutor::new()
             .commit(ChangeCommit::new(
                 &mob,
                 &operation_id,

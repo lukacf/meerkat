@@ -407,9 +407,17 @@ impl IdentityRuntime {
         // from its host's configuration) has the one its retirement kept.
         let conversation = conversation_of(mob, &member).await;
         match held {
-            // The mob holds the current text.
+            // The mob holds the current text: nothing is written. A caller
+            // that observed the change (an update's step, also when a
+            // delivery door recorded the change first, and a replay of the
+            // step) is still told when it applies.
             Some(held) if held.content_sha256.as_ref() == Some(&digest) => {
-                return InstructionOutcome::Unchanged;
+                return if matches!(check, InstructionCheck::Changed { .. }) && check.text_changed()
+                {
+                    self.applies_when(conversation.as_ref()).await
+                } else {
+                    InstructionOutcome::Unchanged
+                };
             }
             // The mob holds another text: the record is brought up to date.
             Some(_) => {}

@@ -32,7 +32,8 @@ The policy is one object in `runtime_options.identity_creation` of
 `GatewayHostComposition::identity_creation_policy`). It needs a persistent
 state root. Unknown keys are refused at every level, and the default outcome
 of every change is `deny`, so each change an agent may ask is opted in by a
-rule.
+rule. [Identity policy](/reference/identity-policy) is the policy's reference;
+this section is what an agent's tools need of it.
 
 ```json
 {

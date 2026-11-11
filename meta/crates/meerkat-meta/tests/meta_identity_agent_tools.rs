@@ -37,11 +37,12 @@ use meerkat_meta::identity_creation::{
     ConsentSummary, CreateAgents, DirectoryPage, DirectoryPeer, DirectoryProfile, DirectoryVerdict,
     IDENTITY_ARCHIVE, IDENTITY_CREATE, IDENTITY_DIRECTORY, IDENTITY_LIST, IDENTITY_REMOVE,
     IDENTITY_TOOLS, IDENTITY_UNARCHIVE, IDENTITY_UPDATE, IdentityAgentTools, IdentityChangeCall,
-    IdentityChangeSpec, IdentityFamily, IdentityOutcome, IdentityRead, IdentityReadAnswer,
-    IdentityRefusal, IdentityRefusalKind, IdentityToolAnswer, IdentityToolCallSite,
-    IdentityToolCaller, InstructionOutcome, ListAgents, OperationId, ReadDirectory, Requester,
-    RequesterKind, Sha256Digest, UpdateAgent, WithdrawRequest, Withdrawn, core_member_name,
-    identity_tool_catalog, identity_tool_defs, is_identity_tool,
+    IdentityChangeSpec, IdentityCreationPolicy, IdentityFamily, IdentityFamilyOptions,
+    IdentityOutcome, IdentityRead, IdentityReadAnswer, IdentityRefusal, IdentityRefusalKind,
+    IdentityToolAnswer, IdentityToolCallSite, IdentityToolCaller, InstructionOutcome, ListAgents,
+    OperationId, ReadDirectory, Requester, RequesterKind, Sha256Digest, UpdateAgent,
+    WithdrawRequest, Withdrawn, core_member_name, identity_tool_catalog, identity_tool_defs,
+    is_identity_tool,
 };
 use meerkat_meta::identity_first::contracts::RosterProvider;
 use meerkat_meta::identity_first::{
@@ -1966,3 +1967,251 @@ fn every_identity_tool_text_is_pinned() {
 
 #[path = "support/identity_tool_goldens.rs"]
 mod goldens;
+
+/// The identity policy of the end-to-end row: agents of the profile with
+/// mob tools may create, change, archive and remove agents of the worker
+/// profile, and wire them to any agent.
+fn policy() -> Arc<IdentityCreationPolicy> {
+    Arc::new(
+        IdentityCreationPolicy::parse(&json!({
+            "enabled": true,
+            "peers": {"default": "allow"},
+            "approval": {"rules": [{
+                "change": ["create", "descriptive", "peers", "archive", "remove"],
+                "requester": {"kind": "agent", "profile": [MAKER]},
+                "target": {"profile": [WORKER]},
+                "outcome": {"kind": "allow"},
+            }]},
+        }))
+        .expect("the policy parses")
+        .expect("the policy is enabled"),
+    )
+}
+
+/// End to end, on the real identity family under a host's policy: an agent
+/// looks up what it may name, creates a long-term agent, lists it, changes
+/// it, is refused a stale digest and a change of itself, archives it (a
+/// message to it is then refused), brings it back and removes it (its name
+/// is then never available again). Each step is one tool call the agent's
+/// model makes in a real turn, and each answer is the family's own.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_creates_changes_archives_and_removes_an_agent_under_the_hosts_policy() {
+    let state = tempfile::tempdir().unwrap();
+    let rig = boot(state.path(), &fresh_mob_id()).await;
+    assert!(
+        rig.runtime
+            .attach_identity_policy(policy(), IdentityFamilyOptions::new()),
+        "the launch attaches its identity policy"
+    );
+    let done = |answer: &ToolAnswer, what: &str| {
+        assert_eq!(
+            answer.content["outcome"], "done",
+            "{what}: {}",
+            answer.content
+        );
+        assert!(!answer.is_error, "{what}");
+        answer.content["agents"][0].clone()
+    };
+    let refused = |answer: &ToolAnswer, kind: &str, what: &str| {
+        assert_eq!(
+            (
+                answer.content["outcome"].as_str(),
+                answer.content["kind"].as_str()
+            ),
+            (Some("refused"), Some(kind)),
+            "{what}: {}",
+            answer.content
+        );
+        assert!(answer.is_error, "{what}");
+    };
+
+    // What the agent may name.
+    let directory = rig
+        .tool(LEAD, "e2e-directory", IDENTITY_DIRECTORY, json!({}))
+        .await;
+    assert!(!directory.is_error, "{directory:?}");
+    let verdict_of = |profile: &str| {
+        directory.content["profiles"]
+            .as_array()
+            .expect("the profiles")
+            .iter()
+            .find(|entry| entry["profile"] == profile)
+            .unwrap_or_else(|| panic!("{profile} is in the directory: {}", directory.content))["verdict"]
+            .clone()
+    };
+    assert_eq!(
+        verdict_of(WORKER),
+        "allowed",
+        "the policy allows the worker profile"
+    );
+    assert_eq!(verdict_of(MAKER), "not_allowed", "and no other");
+
+    // Create: the agent exists, dormant, with nothing built.
+    let created = rig
+        .tool(
+            LEAD,
+            "e2e-create",
+            IDENTITY_CREATE,
+            json!({
+                "request_id": "scout-1",
+                "agents": [{
+                    "name": "scout",
+                    "profile": WORKER,
+                    "display_name": "Scout",
+                    "instructions": ["Find the open questions."],
+                }],
+            }),
+        )
+        .await;
+    let agent = done(&created, "the create");
+    assert_eq!(agent["name"], "scout");
+    let first_digest = agent["spec_digest"]
+        .as_str()
+        .expect("a spec digest")
+        .to_owned();
+    let scout = rig.session_of("scout").await;
+    assert!(
+        rig.runtime.mob_handle().session_unborn(&scout),
+        "the new agent is seated dormant: nothing is built"
+    );
+
+    // The same request again reads the same state and creates nothing.
+    let again = rig
+        .tool(
+            LEAD,
+            "e2e-create-again",
+            IDENTITY_CREATE,
+            json!({
+                "request_id": "scout-1",
+                "agents": [{
+                    "name": "scout",
+                    "profile": WORKER,
+                    "display_name": "Scout",
+                    "instructions": ["Find the open questions."],
+                }],
+            }),
+        )
+        .await;
+    assert_eq!(
+        done(&again, "the same request again")["spec_digest"],
+        first_digest.as_str()
+    );
+
+    // List: the agent, with the digest a change sends, and no provenance.
+    let listed = rig.tool(LEAD, "e2e-list", IDENTITY_LIST, json!({})).await;
+    let entry = listed.content["agents"]
+        .as_array()
+        .expect("the agents")
+        .iter()
+        .find(|entry| entry["name"] == "scout")
+        .unwrap_or_else(|| panic!("the new agent is listed: {}", listed.content))
+        .clone();
+    assert_eq!(entry["spec_digest"], first_digest.as_str());
+    assert_eq!(entry["profile"], WORKER);
+    // The agent that asked is itself listed, as any agent: what the list
+    // never says is that it asked for this one.
+    let said = listed.content.to_string();
+    assert!(
+        entry.get("provenance").is_none()
+            && ["provenance", "requester", "consent", "at_ms"]
+                .iter()
+                .all(|hidden| !said.contains(hidden)),
+        "the list does not say who asked for the agent: {said}"
+    );
+
+    // Update: a new digest; the earlier one is then stale.
+    let update = |digest: &str| {
+        json!({
+            "name": "scout",
+            "expected_spec_digest": digest,
+            "set": {"display_name": "Scout II", "instructions": ["Find and rank the open questions."]},
+        })
+    };
+    let updated = rig
+        .tool(LEAD, "e2e-update", IDENTITY_UPDATE, update(&first_digest))
+        .await;
+    let second_digest = done(&updated, "the update")["spec_digest"]
+        .as_str()
+        .expect("a spec digest")
+        .to_owned();
+    assert_ne!(second_digest, first_digest, "the update moved the spec");
+    let stale = rig
+        .tool(LEAD, "e2e-stale", IDENTITY_UPDATE, update(&first_digest))
+        .await;
+    refused(
+        &stale,
+        "stale_spec",
+        "an update that names the earlier digest",
+    );
+    assert_eq!(stale.content["current_digest"], second_digest.as_str());
+
+    // An agent never changes itself.
+    let own = rig
+        .tool(
+            LEAD,
+            "e2e-self",
+            IDENTITY_ARCHIVE,
+            json!({"name": LEAD, "expected_spec_digest": second_digest}),
+        )
+        .await;
+    refused(
+        &own,
+        "self_change_refused",
+        "an archive of the calling agent",
+    );
+
+    // Archive: the agent is kept, and a message to it is refused.
+    let one = |digest: &str| json!({"name": "scout", "expected_spec_digest": digest});
+    let archived = rig
+        .tool(LEAD, "e2e-archive", IDENTITY_ARCHIVE, one(&second_digest))
+        .await;
+    let state_of = |agent: &Value| agent["state"].as_str().unwrap_or_default().to_owned();
+    assert!(
+        ["archived", "archiving"].contains(&state_of(&done(&archived, "the archive")).as_str()),
+        "{}",
+        archived.content
+    );
+    let sent = rig
+        .rpc(
+            "meta/send",
+            json!({"identity": "scout", "content": "are you there"}),
+        )
+        .await;
+    assert!(
+        !sent["error"].is_null(),
+        "a message to an archived agent is refused: {sent:#}"
+    );
+
+    // Unarchive, then remove: the name is never available again.
+    let restored = rig
+        .tool(
+            LEAD,
+            "e2e-unarchive",
+            IDENTITY_UNARCHIVE,
+            one(&second_digest),
+        )
+        .await;
+    assert_eq!(state_of(&done(&restored, "the unarchive")), "restored");
+    let removed = rig
+        .tool(LEAD, "e2e-remove", IDENTITY_REMOVE, one(&second_digest))
+        .await;
+    assert!(
+        ["removed", "retiring"].contains(&state_of(&done(&removed, "the removal")).as_str()),
+        "{}",
+        removed.content
+    );
+    let reused = rig
+        .tool(
+            LEAD,
+            "e2e-reuse",
+            IDENTITY_CREATE,
+            json!({"agents": [{"name": "scout", "profile": WORKER}]}),
+        )
+        .await;
+    refused(
+        &reused,
+        "name_taken",
+        "a create of the removed agent's name",
+    );
+    rig.shutdown().await;
+}

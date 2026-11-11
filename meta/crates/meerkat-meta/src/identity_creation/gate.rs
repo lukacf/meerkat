@@ -98,7 +98,7 @@ use super::family::{
 use super::operation::OperationId;
 use super::outcome::{IdentityOutcome, InstructionOutcome};
 use super::policy::IdentityCreationPolicy;
-use super::refusal::{IdentityRefusal, IdentityRefusalKind, ValidationRefusal};
+use super::refusal::{IdentityRefusal, IdentityRefusalKind, RequestProblem, ValidationRefusal};
 use super::render::render_v1;
 use super::request::{
     IdentityEntryFacts, IdentityRequest, NormalizedRequest, PeerFacts, PeerVerdict, RequestAction,
@@ -869,6 +869,31 @@ impl IdentityGate {
         }
     }
 
+    /// `proposer` and `source_evidence` are the host plane's: what a host
+    /// attests of a request it relays. A person and an agent state
+    /// neither; a request of theirs that carries one is refused at the
+    /// member, and nothing of it is recorded or shown to an approver.
+    fn refuse_host_plane_members(
+        requester: &ChangeRequester,
+        change: &IdentityChangeSpec,
+    ) -> Result<(), IdentityRefusal> {
+        if matches!(requester, ChangeRequester::Host { .. }) {
+            return Ok(());
+        }
+        let envelope = change.envelope();
+        let member = if envelope.proposer.is_some() {
+            "proposer"
+        } else if envelope.source_evidence.is_some() {
+            "source_evidence"
+        } else {
+            return Ok(());
+        };
+        Err(IdentityRefusal::new(IdentityRefusalKind::InvalidRequest {
+            problem: RequestProblem::Conflicting,
+        })
+        .at(member))
+    }
+
     /// Normalize `change`, asked by `requester`, against `policy`.
     async fn judge(
         &self,
@@ -877,6 +902,7 @@ impl IdentityGate {
         requester: &ChangeRequester,
         change: &IdentityChangeSpec,
     ) -> Result<Judged, IdentityRefusal> {
+        Self::refuse_host_plane_members(requester, change)?;
         self.refuse_ungovernable_first_message(change)?;
         let facts = self.requester_facts(mob, policy, requester).await?;
         let envelope = change.envelope();

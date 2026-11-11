@@ -35,6 +35,20 @@ them.
 
 ## [Unreleased]
 
+### Added
+
+- Mob: `MemberRespawn::with_compaction_floor` (and the public field
+  `MemberRespawn::compaction_floor`) seats a member's same-session
+  successor (`MobHandle::respawn_member`) with an auto-compact floor.
+  `Some(floor)` sets the threshold on the profile the successor builds
+  with (the member's own profile override, or its role's profile), which
+  the successor then carries as its override; `None` removes a floor
+  again, and an override that then equals the role's profile is dropped,
+  so the member follows its role as before. A host that rebuilds a member
+  for a maintenance compaction names the floor first and removes it
+  afterwards. A request that names no floor keeps what the member builds
+  with. Additive: `MemberRespawn` is non-exhaustive.
+
 ### Fixed
 
 - Mob: Core asks the host's member build preparer

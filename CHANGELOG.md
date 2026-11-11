@@ -88,7 +88,16 @@ them.
   line only: a credential a route declares is always removed (a value
   shorter than 8 bytes is left to the second step), while a secret no route
   declares, made of letters only and shorter than 32 bytes, may not be.
-  Affects 0.3.0 through 0.9.12.
+  Affects 0.3.0 through 0.9.13.
+
+## [0.9.13] - 2026-11-11
+
+### Changed
+
+- No code changes. Core 0.9.13 is released so that Core, Meta and Connect keep
+  one version: the `meerkat-meta` 0.9.12 crate was larger than the crates.io
+  upload limit and was never published, so Meta and Connect are released
+  again as 0.9.13.
 
 ## [0.9.12] - 2026-11-10
 
@@ -47917,7 +47926,8 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.12...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.13...HEAD
+[0.9.13]: https://github.com/lukacf/meerkat/compare/v0.9.12...v0.9.13
 [0.9.12]: https://github.com/lukacf/meerkat/compare/v0.9.11...v0.9.12
 [0.9.11]: https://github.com/lukacf/meerkat/compare/v0.9.10...v0.9.11
 [0.9.10]: https://github.com/lukacf/meerkat/compare/v0.9.9...v0.9.10

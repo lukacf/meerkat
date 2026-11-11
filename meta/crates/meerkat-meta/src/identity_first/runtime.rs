@@ -10005,7 +10005,7 @@ impl IdentityRuntime {
     /// Returns a broadcast receiver that yields `IdentityEvent` items for
     /// state changes, lease updates, lease loss, and checkpoint completions.
     /// An identity created at runtime that this runtime has not registered
-    /// yet is registered from its row first ([`Self::ensure_registered`]).
+    /// yet is registered from its row first (`ensure_registered`).
     pub async fn subscribe(
         &self,
         identity: &AgentIdentity,
@@ -13752,7 +13752,7 @@ impl IdentityRuntime {
     /// any of them, the held member's included, is typed history
     /// unavailable, never a guess. An identity created at runtime that this
     /// runtime has not registered yet is registered from its row first
-    /// ([`Self::ensure_registered`]).
+    /// (`ensure_registered`).
     pub async fn status(
         &self,
         identity: &AgentIdentity,
@@ -14615,7 +14615,7 @@ impl IdentityRuntime {
     /// this never touches the mob actor, so it answers while the loop is
     /// stalled, which is exactly when an operator needs it. An identity
     /// created at runtime that this runtime has not registered yet is
-    /// registered from its row first ([`Self::ensure_registered`]).
+    /// registered from its row first (`ensure_registered`).
     pub async fn member_health(
         &self,
         identity: &AgentIdentity,

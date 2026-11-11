@@ -2207,6 +2207,24 @@ class MetaReleaseJobGraphTests(unittest.TestCase):
         self.assertIn("--no-build", step_block("Re-resolve the packaged Meta crates against crates.io without building",
                                                "floor_check", META_RELEASE_WORKFLOW))
 
+    def test_no_checksum_is_taken_of_a_crate_the_registry_would_refuse(self):
+        """crates.io refuses a crate file above 10 MiB. Each step that takes
+        the Meta crates' checksums first weighs the archives its job just
+        packaged (no second packaging), so a promotion reuses no floor record
+        for such a crate and no candidate or publisher is handed its
+        checksum. The floor build weighs its own archives in the script."""
+        weigh = ('python3 scripts/published_crates_standalone.py package-size --product meta '
+                 '--package-dir "${CARGO_TARGET_DIR}/package"')
+        for step, job in (("Package the Meta crates without a patch", "floor_check"),
+                          ("Record the crate checksums", "verify_crate_packages")):
+            with self.subTest(step=step):
+                block = step_block(step, job, META_RELEASE_WORKFLOW)
+                self.assertEqual(block.count(weigh), 1)
+                self.assertLess(block.index("set -euo pipefail"), block.index(weigh))
+                self.assertLess(block.index(weigh), block.index("sha256sum"))
+                self.assertLess(block.index(weigh), block.index("GITHUB_OUTPUT"))
+                self.assertEqual(job_block(job, META_RELEASE_WORKFLOW).count("repo-cargo package"), 1)
+
     def test_the_ci_gate_needs_only_the_resolver_and_runs_in_every_mode(self):
         """A candidate's legs no longer precede the gate: it polls beside them."""
         self.assertEqual(self.needs("require_ci_green"), ["resolve_release"])

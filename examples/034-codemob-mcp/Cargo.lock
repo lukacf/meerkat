@@ -835,6 +835,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
+name = "foldhash"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
+
+[[package]]
 name = "form_urlencoded"
 version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1063,7 +1069,7 @@ checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
 dependencies = [
  "allocator-api2",
  "equivalent",
- "foldhash",
+ "foldhash 0.1.5",
 ]
 
 [[package]]
@@ -1071,14 +1077,17 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+dependencies = [
+ "foldhash 0.2.0",
+]
 
 [[package]]
 name = "hashlink"
-version = "0.10.0"
+version = "0.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7382cf6263419f2d8df38c55d7da83da5c18aef87fc7a7fc1fb1e344edfe14c1"
+checksum = "a596f1b20ed2cc5ecac41a164aaebc7258057060f06c0cf7a2ba3991ee7990fb"
 dependencies = [
- "hashbrown 0.15.5",
+ "hashbrown 0.17.1",
 ]
 
 [[package]]
@@ -1564,9 +1573,9 @@ dependencies = [
 
 [[package]]
 name = "libsqlite3-sys"
-version = "0.35.0"
+version = "0.39.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "133c182a6a2c87864fe97778797e46c7e999672690dc9fa3ee8e241aa4a9c13f"
+checksum = "14a5f01b87b92705d07b433c06f96cbc764637d81a0bffb5734ce17cf0f9a2b3"
 dependencies = [
  "cc",
  "pkg-config",
@@ -1638,7 +1647,7 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
 name = "meerkat"
-version = "0.9.11"
+version = "0.9.13"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1682,7 +1691,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-anthropic"
-version = "0.9.11"
+version = "0.9.13"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1705,7 +1714,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-auth-core"
-version = "0.9.11"
+version = "0.9.13"
 dependencies = [
  "async-trait",
  "axum",
@@ -1735,7 +1744,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-authorization-contracts"
-version = "0.9.11"
+version = "0.9.13"
 dependencies = [
  "meerkat-core",
  "serde",
@@ -1747,7 +1756,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-capabilities"
-version = "0.9.11"
+version = "0.9.13"
 dependencies = [
  "inventory",
  "meerkat-core",
@@ -1758,7 +1767,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-client"
-version = "0.9.11"
+version = "0.9.13"
 dependencies = [
  "meerkat-anthropic",
  "meerkat-core",
@@ -1769,7 +1778,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-comms"
-version = "0.9.11"
+version = "0.9.13"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1803,7 +1812,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-contracts"
-version = "0.9.11"
+version = "0.9.13"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -1823,7 +1832,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-copilot"
-version = "0.9.11"
+version = "0.9.13"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1844,7 +1853,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-core"
-version = "0.9.11"
+version = "0.9.13"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1878,7 +1887,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-gemini"
-version = "0.9.11"
+version = "0.9.13"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1902,7 +1911,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-hooks"
-version = "0.9.11"
+version = "0.9.13"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1924,7 +1933,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-jobs"
-version = "0.9.11"
+version = "0.9.13"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1942,7 +1951,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-llm-core"
-version = "0.9.11"
+version = "0.9.13"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1966,7 +1975,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-machine-derive"
-version = "0.9.11"
+version = "0.9.13"
 dependencies = [
  "quote",
  "syn 2.0.119",
@@ -1974,14 +1983,14 @@ dependencies = [
 
 [[package]]
 name = "meerkat-machine-dsl"
-version = "0.9.11"
+version = "0.9.13"
 dependencies = [
  "meerkat-machine-dsl-core",
 ]
 
 [[package]]
 name = "meerkat-machine-dsl-core"
-version = "0.9.11"
+version = "0.9.13"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1990,7 +1999,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-machine-kernels"
-version = "0.9.11"
+version = "0.9.13"
 dependencies = [
  "indexmap",
  "meerkat-authorization-contracts",
@@ -2002,7 +2011,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-machine-schema"
-version = "0.9.11"
+version = "0.9.13"
 dependencies = [
  "indexmap",
  "meerkat-authorization-contracts",
@@ -2015,7 +2024,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-memory"
-version = "0.9.11"
+version = "0.9.13"
 dependencies = [
  "async-trait",
  "hnsw_rs",
@@ -2036,7 +2045,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-mob"
-version = "0.9.11"
+version = "0.9.13"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2074,7 +2083,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-mob-mcp"
-version = "0.9.11"
+version = "0.9.13"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2103,14 +2112,14 @@ dependencies = [
 
 [[package]]
 name = "meerkat-models"
-version = "0.9.11"
+version = "0.9.13"
 dependencies = [
  "meerkat-core",
 ]
 
 [[package]]
 name = "meerkat-openai"
-version = "0.9.11"
+version = "0.9.13"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2136,7 +2145,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-providers"
-version = "0.9.11"
+version = "0.9.13"
 dependencies = [
  "meerkat-auth-core",
  "meerkat-llm-core",
@@ -2144,7 +2153,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-runtime"
-version = "0.9.11"
+version = "0.9.13"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2171,7 +2180,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-sandbox"
-version = "0.9.11"
+version = "0.9.13"
 dependencies = [
  "meerkat-core",
  "nix 0.29.0",
@@ -2180,7 +2189,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-schedule"
-version = "0.9.11"
+version = "0.9.13"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2204,7 +2213,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-session"
-version = "0.9.11"
+version = "0.9.13"
 dependencies = [
  "async-trait",
  "futures",
@@ -2228,7 +2237,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-skills"
-version = "0.9.11"
+version = "0.9.13"
 dependencies = [
  "async-trait",
  "indexmap",
@@ -2249,7 +2258,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-sqlite"
-version = "0.9.11"
+version = "0.9.13"
 dependencies = [
  "notify",
  "rusqlite",
@@ -2259,7 +2268,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-store"
-version = "0.9.11"
+version = "0.9.13"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2282,7 +2291,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-tools"
-version = "0.9.11"
+version = "0.9.13"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2319,7 +2328,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-workgraph"
-version = "0.9.11"
+version = "0.9.13"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3012,10 +3021,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "rusqlite"
-version = "0.37.0"
+name = "rsqlite-vfs"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "165ca6e57b20e1351573e3729b958bc62f0e48025386970b6e4d29e7a7e71f3f"
+checksum = "353b74f9810d5b085b6c42c9d86a5f0fdb795553235cdd48753b32e3809d18a7"
+dependencies = [
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "rusqlite"
+version = "0.41.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "da9bba6f3506135e120a6586df05be18b48d18896600646a4bec8f993d91a594"
 dependencies = [
  "bitflags 2.13.2",
  "fallible-iterator",
@@ -3023,6 +3041,7 @@ dependencies = [
  "hashlink",
  "libsqlite3-sys",
  "smallvec",
+ "sqlite-wasm-rs",
 ]
 
 [[package]]
@@ -3384,6 +3403,16 @@ checksum = "d91ed6c858b01f942cd56b37a94b3e0a1798290327d1236e4d9cf4eaca44d29d"
 dependencies = [
  "base64ct",
  "der",
+]
+
+[[package]]
+name = "sqlite-wasm-rs"
+version = "0.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6cd504cecbfe7eef649988840f9a6cb768d11085efec138f8e99f160632d867"
+dependencies = [
+ "cc",
+ "rsqlite-vfs",
 ]
 
 [[package]]

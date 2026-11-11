@@ -160,7 +160,7 @@ their registry tarballs and integrity hashes; `npm ci --ignore-scripts` installs
 that exact selection before Toolkit's build and tests. The native-host control
 module imports Meta directly and does not skip when it is absent.
 
-Toolkit's own package version is 0.9.11. This source update does not replace
+Toolkit's own package version is 0.9.13. This source update does not replace
 an existing release asset or qualify an installed application. Other native
 development compositions must record their matching SDK source and actual
 staged bytes as described in [BUILDING.md](../../BUILDING.md#sdks).

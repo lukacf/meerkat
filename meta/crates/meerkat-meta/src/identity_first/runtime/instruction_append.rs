@@ -964,7 +964,30 @@ mod tests {
             }
             .text_changed()
         );
-        assert!(!InstructionCheck::Reconcile { current: &other }.text_changed());
+        assert!(
+            !InstructionCheck::Reconcile {
+                current: &other,
+                locked: false
+            }
+            .text_changed()
+        );
+    }
+
+    /// The baseline for an agent with no record: the sections a build
+    /// recorded are other sections when they do not start with the current
+    /// ones. What a host's customizer or the agent's memory added after
+    /// them is no change, and empty sections do not count. The documented
+    /// limit follows from it: a text that only drops sections from the end
+    /// reads as no change.
+    #[test]
+    fn recorded_sections_that_start_with_the_current_ones_are_no_change() {
+        let recorded = text(&["a", "b", "added by the host"]);
+        assert!(!other_sections(&recorded, &text(&["a", "b"])));
+        assert!(!other_sections(&recorded, &text(&["a", "", "b"])));
+        assert!(other_sections(&recorded, &text(&["a", "c"])));
+        assert!(other_sections(&recorded, &text(&["b"])));
+        assert!(!other_sections(&recorded, &text(&["a"])));
+        assert!(!other_sections(&recorded, &text(&[])));
     }
 
     /// Each refusal of the mob has its own reason; anything else is the

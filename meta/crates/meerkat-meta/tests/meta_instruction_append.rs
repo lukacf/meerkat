@@ -1853,6 +1853,80 @@ async fn an_edit_of_an_archived_agent_reaches_it_after_its_unarchive() {
     rig.shutdown().await;
 }
 
+/// A change of an archived agent's row that nothing reported before the
+/// gateway stopped: the next start compares the agent against the
+/// conversation its archive kept, records the change, and the agent runs on
+/// it after its unarchive.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_archived_agents_change_made_before_a_stop_is_recorded_at_start() {
+    let temp = tempfile::tempdir().unwrap();
+    let mob = fresh_mob_id();
+    let mut rig = boot(temp.path(), &mob, vec![configured_spec(&[])]).await;
+    rig.create(&["Keep ALPHA records."]).await;
+    rig.turn(CREATED, "FIRST-TURN").await;
+    let archived = rig
+        .mob()
+        .archive_identity(
+            meerkat_mob::IdentityArchiveChange::new(operation("archive"), host(), CREATED),
+            allow(),
+        )
+        .await;
+    assert!(
+        matches!(
+            archived,
+            Ok(meerkat_mob::IdentityChangeOutcome::Committed { .. })
+        ),
+        "{archived:?}"
+    );
+    rig.update(
+        "update-one",
+        &["Keep ALPHA records."],
+        &["Keep BETA records."],
+    )
+    .await;
+    assert_eq!(
+        rig.record(CREATED).await,
+        None,
+        "nothing reported the change"
+    );
+    rig.shutdown_for_reopen().await;
+
+    let mut rig = boot(temp.path(), &mob, vec![configured_spec(&[])]).await;
+    let record = rig.record(CREATED).await;
+    assert_eq!(
+        record
+            .as_ref()
+            .map(|record| (record["revision"].clone(), record["effect"].clone())),
+        Some((json!(1), json!("active"))),
+        "the start recorded the archived agent's change: {record:#?}"
+    );
+    let unarchived = rig
+        .mob()
+        .unarchive_identity(
+            meerkat_mob::IdentityArchiveChange::new(operation("unarchive"), host(), CREATED),
+            allow(),
+        )
+        .await;
+    assert!(
+        matches!(
+            unarchived,
+            Ok(meerkat_mob::IdentityChangeOutcome::Committed { .. })
+        ),
+        "{unarchived:?}"
+    );
+    rig.turn(CREATED, "FIRST-AFTER-UNARCHIVE").await;
+    rig.recorded(CREATED).await;
+    rig.turn(CREATED, "SECOND-AFTER-UNARCHIVE").await;
+    let request = entries(&rig.request_messages("SECOND-AFTER-UNARCHIVE"));
+    assert_eq!(request.len(), 1, "{request:#?}");
+    assert!(
+        carries(&request[0], &["Keep BETA records."]),
+        "the unarchived agent runs on the change: {}",
+        request[0]
+    );
+    rig.shutdown().await;
+}
+
 /// An update whose change a delivery door recorded first (the door read the
 /// changed row between the update's commit and its step): the step still
 /// answers when the change applies, and writes nothing again.

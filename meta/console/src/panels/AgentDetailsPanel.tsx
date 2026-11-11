@@ -228,10 +228,13 @@ export function AgentDetailsPanel({
   const nowMs = now ? now() : ledger.nowMs;
   const [showIds, setShowIds] = useShowTechnicalIds("agent-details");
   const [confirming, setConfirming] = React.useState<ConfirmedLifecycleAction | null>(null);
-  // The change of the agent's record that is open, with the name the agent
-  // had when it opened: an archived or removed agent leaves the roster, and
-  // its outcome still names it as it was asked for.
-  const [changing, setChangingState] = React.useState<{ change: OpenAgentChange; displayName: string } | null>(null);
+  // The change of an agent's record that is open. It carries its agent:
+  // the agent it was opened for is the one it names, reads and changes,
+  // whatever the pane shows by then, and it shows only while the pane still
+  // shows that agent. The name is the one the agent had when it opened: an
+  // archived or removed agent leaves the roster, and its outcome still
+  // names it as it was asked for.
+  const [changing, setChangingState] = React.useState<{ change: OpenAgentChange; identity: string; displayName: string } | null>(null);
   const view = inspect as ConsoleInspectView | undefined | null;
   // Named the way the sidebar names the agent.
   const name = agent
@@ -292,7 +295,9 @@ export function AgentDetailsPanel({
   if (menuItems.length) menuItems.push({ kind: "separator", id: "lifecycle" });
   const identityControls = identityChanges?.controls;
   const setChanging = (change: OpenAgentChange) =>
-    setChangingState((current) => ({ change, displayName: current?.displayName ?? name }));
+    setChangingState((current) => (current && current.identity === identity
+      ? { ...current, change }
+      : { change, identity, displayName: name }));
   if (identityControls?.edit) {
     menuItems.push({ kind: "item", id: "edit", label: "Edit…", textValue: "Edit", onSelect: () => setChanging("edit"), testId: `inspect-action:${identity}:edit` });
   }
@@ -361,12 +366,13 @@ export function AgentDetailsPanel({
           />
         </div>
       ) : null}
-      {changing && identityChanges ? (
+      {changing && changing.identity === identity && identityChanges ? (
         <div className="agent-details__confirm agent-details__change" data-testid={`inspect-change:${identity}`}>
           <AgentChangePanel
+            key={changing.identity}
             api={identityChanges.api}
             change={changing.change}
-            name={identity}
+            name={changing.identity}
             displayName={changing.displayName}
             controls={identityChanges.controls}
             onClose={() => setChangingState(null)}

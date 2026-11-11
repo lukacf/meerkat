@@ -673,6 +673,48 @@ describe("long-term agents in the console", () => {
     }
   }, 60_000);
 
+  it("a_confirmation_never_acts_on_another_agent_than_the_one_it_names", async () => {
+    // The roster beside an agent's details: opening another agent's
+    // details from the roster shows them in the same pane, in place.
+    const family = createScriptedIdentityFamily();
+    family.seed({ name: "courier", display_name: "The courier", profile: "worker" });
+    window.localStorage.setItem(`meta-console-dock-state:${JSON.stringify(["", SCOPE])}`, JSON.stringify({
+      tabs: [{
+        id: "tab-1", presetId: "single",
+        layout: { kind: "split", id: "split-1", direction: "horizontal", ratio: 0.5, first: { kind: "panel", panelId: "panel-1" }, second: { kind: "panel", panelId: "panel-2" } },
+      }],
+      panels: [
+        { id: "panel-1", mode: "console", target: ROSTER },
+        { id: "panel-2", mode: "console", target: { id: "inspect:warden", kind: "identity-inspect", title: "The warden details", identity: "warden", memberId: "warden" } },
+      ],
+      activeTabId: "tab-1",
+      focusedPanelId: "panel-1",
+    }));
+    const view = render(<ConsoleApp baseUrl="" transport={transport(family)} />);
+    await find(view, "inspect-record:warden");
+
+    // Remove is opened for the warden.
+    fireEvent.click(view.getByTestId("inspect-menu:warden"));
+    fireEvent.click(view.getByTestId("inspect-action:warden:remove"));
+    expect((await find(view, "identity-confirm:warden:remove")).textContent).toContain("Remove The warden for good?");
+
+    // The pane is then shown the courier's details, from the roster.
+    const roster = view.getByTestId("roster-panel");
+    fireEvent.mouseDown(roster);
+    fireEvent.click(view.getByTestId("roster-row:courier").querySelector(".cc-entity__hit") as HTMLElement);
+    fireEvent.click(within(await find(view, "roster-detail:courier")).getByRole("button", { name: "Details" }));
+    await find(view, "inspect-panel:courier");
+    await gone(view, "inspect-panel:warden");
+
+    // No confirmation is left that could act on the courier: neither the
+    // warden's question over the courier's pane, nor any other.
+    expect(view.container.querySelectorAll("[data-testid^='identity-confirm:']").length).toBe(0);
+    expect(calls(family, "meta/identity/remove")).toEqual([]);
+    expect(family.agents.has("courier")).toBe(true);
+    expect(family.agents.has("warden")).toBe(true);
+    view.unmount();
+  }, 60_000);
+
   it("a_pending_decision_is_shown_and_can_be_withdrawn", async () => {
     const family = createScriptedIdentityFamily({ now: () => Date.UTC(2030, 0, 1, 9, 0, 0) });
     const { view } = await openRoster(family);

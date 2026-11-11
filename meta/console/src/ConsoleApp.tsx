@@ -6437,6 +6437,10 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       restartOffered(agent);
     return (
       <AgentDetailsPanel
+        // One panel per agent: a pane that is shown another agent's
+        // details starts over, so nothing opened for the agent before (a
+        // confirmation, a form) is left over the agent shown now.
+        key={target.identity}
         identity={target.identity}
         inspect={inspect}
         agent={agent}

@@ -1069,7 +1069,8 @@ mod continuity_live {
     use serde_json::json;
 
     /// Models tried in this order: the first the Copilot account serves on
-    /// its `/responses` route is used on both services.
+    /// its `/responses` route is used on both services. When it serves none
+    /// of them there, the first OpenAI model it does serve there is used.
     pub(super) const MODEL_PREFERENCE: &[&str] = &["gpt-5.4-mini", "gpt-5.4", "gpt-5.5"];
     const MAX_TOKENS: u32 = 2048;
 
@@ -1366,30 +1367,46 @@ async fn copilot_live_openai_continuity_across_services() {
         .model_snapshot()
         .expect("the operator token resolved but listed no models");
     let candidates = route_models(&config, &snapshot);
+    let serves_responses = |model: &str| {
+        candidates.iter().any(|candidate| {
+            candidate.route == CopilotProviderRoute::OpenAi
+                && candidate.model == model
+                && account_id_for(&snapshot, Provider::OpenAI, model)
+                    .and_then(|id| snapshot.model(id))
+                    .is_some_and(|offering| {
+                        offering
+                            .endpoints()
+                            .any(|endpoint| endpoint == meerkat_copilot::CopilotEndpoint::Responses)
+                    })
+        })
+    };
+    // A preferred model when the account serves one on its `/responses`
+    // route, and otherwise the first OpenAI model it serves there.
     let model = continuity_live::MODEL_PREFERENCE
         .iter()
-        .find(|model| {
-            candidates.iter().any(|candidate| {
-                candidate.route == CopilotProviderRoute::OpenAi
-                    && candidate.model == **model
-                    && account_id_for(&snapshot, Provider::OpenAI, model)
-                        .and_then(|id| snapshot.model(id))
-                        .is_some_and(|offering| {
-                            offering.endpoints().any(|endpoint| {
-                                endpoint == meerkat_copilot::CopilotEndpoint::Responses
-                            })
-                        })
-            })
-        })
-        .expect("the account serves none of the probe models on its /responses route")
-        .to_string();
+        .map(|model| (*model).to_string())
+        .chain(
+            candidates
+                .iter()
+                .filter(|candidate| candidate.route == CopilotProviderRoute::OpenAi)
+                .map(|candidate| candidate.model.clone()),
+        )
+        .find(|model| serves_responses(model))
+        .expect("the account serves no OpenAI model on its /responses route");
 
     let temp = TempDir::new().expect("continuity live temp directory");
     let factory = AgentFactory::new(temp.path().join("factory-store"))
         .runtime_root(temp.path().join("runtime"))
         .with_provider_auth_persistence(persistence);
+    // The Copilot route resolves its credential under an auth lease
+    // authority, as a session's runtime gives it one.
+    let machine = meerkat_runtime::MeerkatMachine::ephemeral();
     let copilot = factory
-        .build_llm_client_for_identity(&config, &continuity_live::copilot_identity(&model))
+        .build_llm_client_for_identity_with_auth_lease(
+            &config,
+            &continuity_live::copilot_identity(&model),
+            Some(machine.generated_auth_lease_handle()),
+        )
         .await
         .expect("the factory builds the Copilot route client");
     let probe = Probe {

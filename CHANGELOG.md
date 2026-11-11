@@ -46,7 +46,7 @@ them.
   quota, a full filesystem that allocates at write time, or an I/O error
   went unreported: the sync of the empty temporary file succeeded and the
   rename published it. A payload above 2 MiB could instead end short. The
-  files, through 0.9.12:
+  files, through 0.9.13:
   - a credential file of the file credential store
     (`<credentials>/<realm>/<slot>.json`, since 0.6.0): a login, a token
     refresh or a secret save returned success, and the stored credential was
@@ -82,6 +82,15 @@ them.
   which such a write left empty without effect, now fail the same way and are
   removed, so neither stays behind to be waited on. A file an earlier release
   already emptied is not restored.
+
+## [0.9.13] - 2026-11-11
+
+### Changed
+
+- No code changes. Core 0.9.13 is released so that Core, Meta and Connect keep
+  one version: the `meerkat-meta` 0.9.12 crate was larger than the crates.io
+  upload limit and was never published, so Meta and Connect are released
+  again as 0.9.13.
 
 ## [0.9.12] - 2026-11-10
 
@@ -47910,7 +47919,8 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.12...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.13...HEAD
+[0.9.13]: https://github.com/lukacf/meerkat/compare/v0.9.12...v0.9.13
 [0.9.12]: https://github.com/lukacf/meerkat/compare/v0.9.11...v0.9.12
 [0.9.11]: https://github.com/lukacf/meerkat/compare/v0.9.10...v0.9.11
 [0.9.10]: https://github.com/lukacf/meerkat/compare/v0.9.9...v0.9.10

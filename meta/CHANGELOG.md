@@ -20,6 +20,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (`record: Default::default()`). The status as written on the wire is
   unchanged while the record's members are unset.
 
+### Added
+
+- Agents can create and change long-term agents. On a launch that has an
+  identity policy (`runtime_options.identity_creation` with `enabled: true`),
+  an agent whose profile has mob tools (`tools.mob = true`, its spawn grant)
+  gets seven tools: `identity_create`, `identity_update`, `identity_archive`,
+  `identity_unarchive`, `identity_remove`, and the reads `identity_list` and
+  `identity_directory`. They take the same requests as `meta/identity/*`
+  (`agents: [{name, profile, display_name?, instructions?, context?, labels?,
+  first_message?, peers?}]` for a create; `name` and `expected_spec_digest`
+  for a change of one agent) and answer the same typed outcome (`done`,
+  `pending_decision`, `pending_preparation`, `refused` with `kind`, `field`,
+  `retryable` and `detail`). An agent created this way is an ordinary agent
+  of its profile: the agent that asked is recorded and owns nothing. See
+  [Agents that create agents](docs/guides/agents-create-agents.mdx).
+  - Without a policy, or for an agent without mob tools, the tools are absent
+    from the tool list. A member private to a person (a console side chat, a
+    member it created, a fork of one) is offered none, and a call of one is
+    refused `private_requester`.
+  - Who asks is the member whose session made the call, never an argument: a
+    tool's arguments are closed, and a member a tool does not name is refused
+    `invalid_request` with the member as `field`.
+  - A call with no `request_id` is keyed by where it ran (session, run, round
+    and call id), so a call the runtime dispatches again reads the state of
+    the first. A call dispatched outside a run must give a `request_id`.
+  - `identity_list` shows an agent no provenance: who asked for another
+    agent, when and under which consent stay with the host's read.
+  - The seven tools may wait behind the deferred tool catalog: in a session
+    whose catalog is exact, their definitions are loaded on demand.
+  - Rust API: `identity_creation::{IdentityAgentTools, IdentityToolCaller,
+    IdentityToolCallSite, IdentityToolAnswer, IdentityToolFault,
+    identity_tool_defs, identity_tool_catalog, identity_tool_provenance,
+    is_identity_tool, IDENTITY_TOOLS}` and the seven tool name constants.
+
 ### Changed
 
 - `runtime_options.identity_creation`: an approval rule may name the change

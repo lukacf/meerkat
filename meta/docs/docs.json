@@ -65,6 +65,7 @@
             "group": "Guides",
             "pages": [
               "guides/unified-runtime",
+              "guides/agents-create-agents",
               "guides/module-system",
               "guides/console",
               "guides/flow-editor",

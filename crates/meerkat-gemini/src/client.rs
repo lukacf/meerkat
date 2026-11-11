@@ -3358,6 +3358,61 @@ mod tests {
         }
     }
 
+    /// An image request that refers to a `gs://` video registers it through
+    /// the Files API first. A refusal of that registration that repeats the
+    /// request's credential (its header as sent, the bare value) reports
+    /// the refusal without the credential.
+    #[tokio::test]
+    async fn echoed_credential_stays_out_of_an_image_request_failure() {
+        let credential = format!("gemini-{}", "madeupcredential".repeat(3));
+        for echo in [CredentialEcho::HeaderLine, CredentialEcho::Bare] {
+            let (base_url, server) = spawn_credential_echo_server(echo).await;
+            let client = credential_signed_client(
+                CredentialSigner::StaticBearerAuthorizer,
+                base_url,
+                &credential,
+            )
+            .with_google_backend_kind(GoogleBackendKind::GoogleGenAi);
+            let mut request = gemini_image_executor_request_json();
+            request.projected_messages = vec![Message::User(UserMessage::with_blocks(vec![
+                ContentBlock::Video {
+                    media_type: "video/mp4".to_string(),
+                    duration_ms: 12_000,
+                    data: meerkat_core::VideoData::Uri {
+                        uri: "gs://bucket/camera-timeline.mp4".to_string(),
+                    },
+                },
+                ContentBlock::Text {
+                    text: "Use this video as context.".to_string(),
+                },
+            ]))];
+            let error = match client.execute_image_generation(request).await {
+                Err(error) => error,
+                Ok(output) => panic!(
+                    "{echo:?}: a refused registration is an error: {:?}",
+                    output.terminal_observation
+                ),
+            };
+            server.abort();
+            assert!(
+                matches!(error, LlmError::InvalidRequest { .. }),
+                "{echo:?}: the refusal keeps its class: {error:?}"
+            );
+            let rendered = format!(
+                "{error} {error:?} {}",
+                serde_json::to_string(&error).expect("error JSON")
+            );
+            assert!(
+                !rendered.contains(&credential),
+                "{echo:?}: the error leaked the credential: {rendered}"
+            );
+            assert!(
+                rendered.contains("upstream echo"),
+                "{echo:?}: the server's answer reached the error: {rendered}"
+            );
+        }
+    }
+
     /// An ordinary provider error that carries no credential (a message, a
     /// type, a request id, a URL without credentials) reaches the caller
     /// byte for byte, whoever signed the request.

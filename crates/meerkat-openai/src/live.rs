@@ -7001,6 +7001,106 @@ mod tests {
         }
     }
 
+    /// The session `client` hands out over `connection`, a scripted stand-in
+    /// for the websocket it opened with its API key.
+    fn client_session_over(
+        client: &OpenAiLiveClient,
+        connection: FakeOpenAiLiveSession,
+    ) -> Box<dyn OpenAiLiveSession> {
+        let _ = client;
+        Box::new(connection)
+    }
+
+    /// A realtime endpoint, or a gateway in front of one, that repeats the
+    /// connection's API key (in an `error` event, in the error of a failed
+    /// response, or in a transport error) never puts it in what the session
+    /// reports: the typed error of the event, the failed response's
+    /// details, the transport error. The server's answer still arrives, and
+    /// each error keeps its class.
+    #[tokio::test]
+    async fn echoed_api_key_stays_out_of_realtime_errors() {
+        let key = format!("realtime-{}", "madeupcredential".repeat(3));
+        let echo = format!(
+            "upstream echo: rejected request with header authorization: Bearer {key}; \
+             credential {key} was refused"
+        );
+        let server_error = |error_type| ServerError {
+            error_type,
+            code: None,
+            message: echo.clone(),
+            param: None,
+            event_id: None,
+        };
+        let mut failed = fake_response("resp_echo", ResponseStatus::Failed);
+        failed.status_details = Some(oai_rt_rs::protocol::models::ResponseStatusDetails {
+            reason: None,
+            error: Some(server_error(ApiErrorType::ServerError)),
+        });
+        let next_events: FakeEventQueue = Arc::new(Mutex::new(VecDeque::from([
+            Ok(Some(ServerEvent::Error {
+                event_id: "evt_echo".to_string(),
+                error: server_error(ApiErrorType::InvalidRequestError),
+            })),
+            Ok(Some(ServerEvent::ResponseDone {
+                event_id: "evt_done".to_string(),
+                response: failed,
+            })),
+            Err(LlmError::Unknown {
+                message: echo.clone(),
+            }),
+        ])));
+        let client = OpenAiLiveClient::new(key.clone());
+        let mut session = client_session_over(
+            &client,
+            FakeOpenAiLiveSession {
+                seen: Arc::new(Mutex::new(Vec::new())),
+                next_events,
+            },
+        );
+
+        let event_error = next_openai_session_event(session.as_mut())
+            .await
+            .expect_err("an error event fails the wait");
+        assert!(
+            matches!(event_error, LlmError::InvalidRequest { .. }),
+            "the error event keeps its class: {event_error:?}"
+        );
+        let done = session
+            .next_event()
+            .await
+            .expect("the failed response arrives");
+        let Some(ServerEvent::ResponseDone { response, .. }) = done else {
+            panic!("the failed response arrives: {done:?}");
+        };
+        let failure = openai_response_failure(&response, LiveResponseFailureStatus::Failed);
+        let transport_error = session
+            .next_event()
+            .await
+            .expect_err("the transport error arrives");
+        assert!(
+            matches!(transport_error, LlmError::Unknown { .. }),
+            "the transport error keeps its class: {transport_error:?}"
+        );
+
+        for (surface, rendered) in [
+            ("error event", format!("{event_error} {event_error:?}")),
+            ("failed response", format!("{failure:?}")),
+            (
+                "transport error",
+                format!("{transport_error} {transport_error:?}"),
+            ),
+        ] {
+            assert!(
+                !rendered.contains(&key),
+                "the {surface} leaked the API key: {rendered}"
+            );
+            assert!(
+                rendered.contains("upstream echo"),
+                "the server's answer reached the {surface}: {rendered}"
+            );
+        }
+    }
+
     async fn completed_last_image_item(seen: &Arc<Mutex<Vec<ClientEvent>>>) -> (String, Item) {
         let seen = seen.lock().await;
         let item = seen

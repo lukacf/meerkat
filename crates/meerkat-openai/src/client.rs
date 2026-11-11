@@ -5861,6 +5861,146 @@ mod tests {
         }
     }
 
+    /// An image request whose streamed answer cannot be read fails with the
+    /// parse error. The parser quotes the value it could not read, so a
+    /// data line that repeats the request's credential there would put it
+    /// in the error: the error carries the answer without the credential.
+    #[tokio::test]
+    async fn echoed_credential_stays_out_of_an_image_request_error() {
+        let credential = format!("responses-{}", "madeupcredential".repeat(3));
+        let app = Router::new().fallback(|headers: HeaderMap| async move {
+            let authorization = headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default();
+            // `output_index` is a number: the parser reports the text it
+            // finds in its place.
+            let event = serde_json::json!({
+                "type": "response.created",
+                "output_index": format!("upstream echo: header authorization: {authorization}"),
+            });
+            (
+                [("content-type", "text/event-stream")],
+                format!("data: {event}\n\n"),
+            )
+                .into_response()
+        });
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind echoing stream server");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve echoing stream server");
+        });
+        for signer in [
+            CredentialSigner::ClientApiKey,
+            CredentialSigner::StaticBearerAuthorizer,
+        ] {
+            let client = credential_signed_client(signer, format!("http://{addr}"), &credential)
+                .with_chatgpt_backend_wire();
+            let error = match client
+                .execute_image_generation(image_executor_request_json(hosted_openai_plan_json()))
+                .await
+            {
+                Err(error) => error,
+                Ok(output) => panic!(
+                    "{signer:?}: an unreadable stream is an error: {:?}",
+                    output.warnings
+                ),
+            };
+            assert!(
+                matches!(error, LlmError::StreamParseError { .. }),
+                "{signer:?}: {error:?}"
+            );
+            let rendered = format!("{error} {error:?}");
+            assert!(
+                !rendered.contains(&credential),
+                "{signer:?}: the error leaked the credential: {rendered}"
+            );
+            assert!(
+                rendered.contains("upstream echo"),
+                "{signer:?}: the server's answer reached the error: {rendered}"
+            );
+        }
+        server.abort();
+    }
+
+    /// A refusal for exhausted quota stays one whatever the redaction
+    /// removes from its body. This body repeats the request's credential
+    /// and holds the begin marker of a private-key block, which the shape
+    /// rules replace together with its whole line: the error is classified
+    /// from the body as received, and carries no credential.
+    #[tokio::test]
+    async fn a_quota_refusal_keeps_its_class_whatever_the_redaction_removes() {
+        let credential = format!("responses-{}", "madeupcredential".repeat(3));
+        let app = Router::new().fallback(|headers: HeaderMap| async move {
+            let authorization = headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default();
+            // (The marker is assembled here so no scanner reads the source
+            // as a secret.)
+            let marker = format!("-----BEGIN {}-----", "PRIVATE KEY");
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({
+                    "error": {
+                        "message": format!(
+                            "You exceeded your current quota. Request header \
+                             authorization: {authorization} {marker}"
+                        ),
+                        "type": "insufficient_quota",
+                        "code": "insufficient_quota",
+                    },
+                })),
+            )
+                .into_response()
+        });
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind quota refusal server");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve quota refusal server");
+        });
+        for signer in [
+            CredentialSigner::ClientApiKey,
+            CredentialSigner::StaticBearerAuthorizer,
+        ] {
+            let client = credential_signed_client(signer, format!("http://{addr}"), &credential);
+            let request =
+                LlmRequest::new("gpt-5.4", vec![Message::User(UserMessage::text("hello"))]);
+            let events = client.stream(&request).collect::<Vec<_>>().await;
+            let error = events
+                .into_iter()
+                .find_map(|event| match event {
+                    Err(error)
+                    | Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Error { error },
+                    }) => Some(error),
+                    Ok(_) => None,
+                })
+                .unwrap_or_else(|| panic!("{signer:?}: the stream ends in an error"));
+            assert!(
+                matches!(error, LlmError::QuotaExhausted { .. }),
+                "{signer:?}: an exhausted quota stays one: {error:?}"
+            );
+            let rendered = format!(
+                "{error} {error:?} {}",
+                serde_json::to_string(&error).expect("error JSON")
+            );
+            assert!(
+                !rendered.contains(&credential),
+                "{signer:?}: the error leaked the credential: {rendered}"
+            );
+        }
+        server.abort();
+    }
+
     /// An ordinary provider error that carries no credential (a message, a
     /// type, a code, a request id, a URL without credentials) reaches the
     /// caller byte for byte, whoever signed the request.

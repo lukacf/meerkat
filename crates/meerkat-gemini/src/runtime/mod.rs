@@ -1989,6 +1989,70 @@ mod tests {
         assert!(!rendered.contains("bearer-secret"));
         assert_eq!(target_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
+
+    /// A Code Assist setup endpoint, or a gateway in front of it, that
+    /// refuses a request with a body repeating the request's access token
+    /// (the bare value, the header as sent) is reported by status and body
+    /// without the token, for the setup request and for the operation poll.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+    #[tokio::test]
+    #[allow(clippy::unwrap_used, clippy::panic)]
+    async fn code_assist_setup_refusal_carries_no_access_token() {
+        let token = format!("codeassist-{}", "madeupaccesstoken".repeat(3));
+        let app = axum::Router::new().fallback(|headers: axum::http::HeaderMap| async move {
+            let authorization = headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default();
+            let bare = authorization
+                .strip_prefix("Bearer ")
+                .unwrap_or(authorization);
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                axum::Json(serde_json::json!({
+                    "error": {
+                        "code": 400,
+                        "message": format!(
+                            "upstream echo: credential {bare} was refused; header \
+                             authorization: {authorization}"
+                        ),
+                        "status": "INVALID_ARGUMENT",
+                    },
+                })),
+            )
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let http = meerkat_auth_core::auth_oauth::credential_http_client().unwrap();
+        let url = format!("http://{addr}/v1internal:loadCodeAssist");
+        let posted = post_code_assist_json::<serde_json::Value>(
+            &http,
+            &token,
+            url.clone(),
+            serde_json::json!({}),
+        )
+        .await;
+        let polled = get_code_assist_json::<serde_json::Value>(&http, &token, url).await;
+        server.abort();
+        for (request, result) in [("setup request", posted), ("operation poll", polled)] {
+            let error = match result {
+                Err(error) => error,
+                Ok(_) => panic!("{request}: a refusal is an error"),
+            };
+            let rendered = format!("{error} {error:?}");
+            assert!(
+                !rendered.contains(&token),
+                "{request}: the error leaked the access token: {rendered}"
+            );
+            assert!(
+                rendered.contains("status=400") && rendered.contains("upstream echo"),
+                "{request}: the refusal is reported by status and body: {rendered}"
+            );
+        }
+    }
     #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
     use std::sync::Mutex;
 

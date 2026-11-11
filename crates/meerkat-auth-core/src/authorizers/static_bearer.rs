@@ -152,6 +152,60 @@ mod tests {
         assert_redacts_what_it_signed(&authorizer, &[&bearer, &basic, &key]).await;
     }
 
+    /// Static headers that carry no credential (a model id, a content
+    /// type, a deployment name) are not named: an error that mentions
+    /// their values stays readable. The value of a header whose name says
+    /// it is a secret is removed, whatever the case of the name.
+    #[tokio::test]
+    async fn static_headers_name_only_the_values_of_credential_headers() {
+        let key = format!("resolver-{}", "madeupkey".repeat(3));
+        let authorizer = crate::resolver::StaticHeadersAuthorizer::new(
+            vec![
+                ("x-model".to_string(), "gpt-5.4-mini".to_string()),
+                ("content-type".to_string(), "application/json".to_string()),
+                ("x-deployment".to_string(), "production-east".to_string()),
+                ("x-acme-api-key".to_string(), key.clone()),
+            ],
+            "external:static_headers",
+        );
+        let mut diagnostic = format!(
+            "The model `gpt-5.4-mini` does not exist; content type application/json refused \
+             for deployment production-east (value {key})"
+        );
+        authorizer.redact_response_diagnostic(&mut diagnostic);
+        assert_eq!(
+            diagnostic,
+            "The model `gpt-5.4-mini` does not exist; content type application/json refused \
+             for deployment production-east (value [REDACTED])"
+        );
+
+        for name in [
+            "Authorization",
+            "Proxy-Authorization",
+            "Cookie",
+            "X-Acme-API-Key",
+            "x-upstream-token",
+            "x-client-secret",
+            "x-upstream-auth",
+            "x-store-password",
+            "x-credential",
+            "x-request-signature",
+            "x-session-id",
+        ] {
+            let value = format!("resolver-{}", "madeupvalue".repeat(3));
+            let authorizer = crate::resolver::StaticHeadersAuthorizer::new(
+                vec![(name.to_string(), value.clone())],
+                "external:static_headers",
+            );
+            let mut diagnostic = format!("upstream echo: value {value} was refused");
+            authorizer.redact_response_diagnostic(&mut diagnostic);
+            assert_eq!(
+                diagnostic, "upstream echo: value [REDACTED] was refused",
+                "{name}"
+            );
+        }
+    }
+
     /// Text that carries no credential is returned as it was, short words
     /// and a short header value included: a value too short to be a
     /// credential is never replaced.

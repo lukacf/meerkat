@@ -2973,6 +2973,132 @@ mod tests {
         }
     }
 
+    /// A client built with a static bearer and an authorizer sends both.
+    /// The bearer is the client's own: a server that repeats it (alone, or
+    /// in a URL) never puts it in the error, like the values the authorizer
+    /// names.
+    #[tokio::test]
+    async fn echoed_client_bearer_is_removed_when_an_authorizer_signs_too() {
+        let bearer = format!("selfhosted-{}", "madeupcredential".repeat(3));
+        let header_key = format!("resolver-{}", "madeupkey".repeat(3));
+        for echo in [CredentialEcho::Bare, CredentialEcho::Url] {
+            let (base_url, server) = spawn_credential_echo_chat_server(echo).await;
+            let client =
+                credential_signed_chat_client(CredentialSigner::ClientBearer, base_url, &bearer)
+                    .with_authorizer(Arc::new(
+                        meerkat_auth_core::resolver::StaticHeadersAuthorizer::new(
+                            vec![("x-api-key".to_string(), header_key.clone())],
+                            "external:static_headers",
+                        ),
+                    ));
+            let request = LlmRequest::new(
+                "catalog-model",
+                vec![Message::User(UserMessage::text("hello"))],
+            );
+            let events = client.stream(&request).collect::<Vec<_>>().await;
+            let error = events
+                .into_iter()
+                .find_map(|event| match event {
+                    Err(error)
+                    | Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Error { error },
+                    }) => Some(error),
+                    Ok(_) => None,
+                })
+                .unwrap_or_else(|| panic!("{echo:?}: the stream ends in an error"));
+            let rendered = rendered_forms(&error);
+            let agent_forms = agent_failure_forms(Arc::new(client)).await;
+            server.abort();
+            for (surface, text) in [("client error", &rendered), ("agent", &agent_forms)] {
+                assert!(
+                    !text.contains(&bearer),
+                    "{echo:?}: the {surface} leaked the client's bearer: {text}"
+                );
+                assert!(
+                    text.contains("upstream echo"),
+                    "{echo:?}: the server's answer reached the {surface}: {text}"
+                );
+            }
+        }
+    }
+
+    /// A refusal for exhausted quota stays one whatever the redaction
+    /// removes from its body. This body repeats the request's credential
+    /// and holds the begin marker of a private-key block, which the shape
+    /// rules replace together with its whole line: the error is classified
+    /// from the body as received, and carries no credential.
+    #[tokio::test]
+    async fn a_quota_refusal_keeps_its_class_whatever_the_redaction_removes() {
+        let credential = format!("selfhosted-{}", "madeupcredential".repeat(3));
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|headers: axum::http::HeaderMap| async move {
+                let authorization = headers
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default();
+                // (The marker is assembled here so no scanner reads the
+                // source as a secret.)
+                let marker = format!("-----BEGIN {}-----", "PRIVATE KEY");
+                (
+                    axum::http::StatusCode::TOO_MANY_REQUESTS,
+                    Json(serde_json::json!({
+                        "error": {
+                            "message": format!(
+                                "You exceeded your current quota. Request header \
+                                 authorization: {authorization} {marker}"
+                            ),
+                            "type": "insufficient_quota",
+                            "code": "insufficient_quota",
+                        },
+                    })),
+                )
+                    .into_response()
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind quota refusal server");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve quota refusal server");
+        });
+        for signer in [
+            CredentialSigner::ClientBearer,
+            CredentialSigner::StaticBearerAuthorizer,
+        ] {
+            let client =
+                credential_signed_chat_client(signer, format!("http://{addr}"), &credential);
+            let request = LlmRequest::new(
+                "catalog-model",
+                vec![Message::User(UserMessage::text("hello"))],
+            );
+            let events = client.stream(&request).collect::<Vec<_>>().await;
+            let error = events
+                .into_iter()
+                .find_map(|event| match event {
+                    Err(error)
+                    | Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Error { error },
+                    }) => Some(error),
+                    Ok(_) => None,
+                })
+                .unwrap_or_else(|| panic!("{signer:?}: the stream ends in an error"));
+            assert!(
+                matches!(error, LlmError::QuotaExhausted { .. }),
+                "{signer:?}: an exhausted quota stays one: {error:?}"
+            );
+            let rendered = rendered_forms(&error);
+            assert!(
+                !rendered.contains(&credential),
+                "{signer:?}: the error leaked the credential: {rendered}"
+            );
+        }
+        server.abort();
+    }
+
     /// An ordinary provider error that carries no credential (a message, a
     /// type, a code, a request id, a URL without credentials) reaches the
     /// caller byte for byte, whoever signed the request.

@@ -6743,6 +6743,86 @@ mod tests {
         }
     }
 
+    /// A refusal for a reached spend limit stays an exhausted quota
+    /// whatever the redaction removes from its body. This body repeats the
+    /// request's credential and holds the begin marker of a private-key
+    /// block, which the shape rules replace together with its whole line:
+    /// the error is classified from the body as received, and carries no
+    /// credential.
+    #[tokio::test]
+    async fn a_quota_refusal_keeps_its_class_whatever_the_redaction_removes() {
+        let credential = format!("messages-{}", "madeupcredential".repeat(3));
+        let app = Router::new().fallback(|headers: axum::http::HeaderMap| async move {
+            let (name, value) = ["x-api-key", "authorization"]
+                .into_iter()
+                .find_map(|name| {
+                    let value = headers.get(name)?.to_str().ok()?;
+                    Some((name, value.to_string()))
+                })
+                .unwrap_or(("authorization", String::new()));
+            // (The marker is assembled here so no scanner reads the source
+            // as a secret.)
+            let marker = format!("-----BEGIN {}-----", "PRIVATE KEY");
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": format!(
+                            "You have reached your specified API usage limits. Request \
+                             header {name}: {value} {marker}"
+                        ),
+                    },
+                })),
+            )
+                .into_response()
+        });
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind quota refusal server");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve quota refusal server");
+        });
+        for signer in [
+            CredentialSigner::ClientApiKey,
+            CredentialSigner::StaticBearerAuthorizer,
+        ] {
+            let client = credential_signed_client(signer, format!("http://{addr}"), &credential);
+            let request = LlmRequest::new(
+                "claude-sonnet-4-5",
+                vec![Message::User(UserMessage::text("hello"))],
+            );
+            let events = client.stream(&request).collect::<Vec<_>>().await;
+            let error = events
+                .into_iter()
+                .find_map(|event| match event {
+                    Err(error)
+                    | Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Error { error },
+                    }) => Some(error),
+                    Ok(_) => None,
+                })
+                .unwrap_or_else(|| panic!("{signer:?}: the stream ends in an error"));
+            assert!(
+                matches!(error, LlmError::QuotaExhausted { .. }),
+                "{signer:?}: an exhausted quota stays one: {error:?}"
+            );
+            let rendered = format!(
+                "{error} {error:?} {}",
+                serde_json::to_string(&error).expect("error JSON")
+            );
+            assert!(
+                !rendered.contains(&credential),
+                "{signer:?}: the error leaked the credential: {rendered}"
+            );
+        }
+        server.abort();
+    }
+
     /// An ordinary provider error that carries no credential (a message, a
     /// type, a request id, a URL without credentials) reaches the caller
     /// byte for byte, whoever signed the request.

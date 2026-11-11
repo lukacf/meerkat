@@ -479,6 +479,8 @@ fn secret_token_at(line: &str, start: usize) -> Option<usize> {
         .iter()
         .take_while(|byte| is_token_byte(**byte) || matches!(**byte, b'/' | b'+' | b'='))
         .count();
+    #[cfg(test)]
+    tests::note_measured_token_run(token_len);
     let token = &bytes[start..start + token_len];
     let prefixed = SECRET_TOKEN_PREFIXES.iter().any(|prefix| {
         token.starts_with(prefix.as_bytes()) && token.len() >= prefix.len() + MIN_TOKEN_BODY_BYTES
@@ -798,6 +800,339 @@ mod tests {
             "Authorization: [REDACTED]"
         );
         assert_eq!(redact_secret_shapes("token: expected"), "token: [REDACTED]");
+    }
+
+    thread_local! {
+        /// The bytes of token runs the shape step measured on this thread,
+        /// and the most a row allows it to measure.
+        static MEASURED_TOKEN_RUNS: std::cell::Cell<(usize, usize)> =
+            const { std::cell::Cell::new((0, usize::MAX)) };
+    }
+
+    /// Count a token run the shape step measured, and fail the row that set
+    /// a budget once the count passes it (so a scan that is quadratic in the
+    /// line's length fails at once instead of running for minutes).
+    pub(super) fn note_measured_token_run(len: usize) {
+        MEASURED_TOKEN_RUNS.with(|measured| {
+            let (total, budget) = measured.get();
+            let total = total.saturating_add(len);
+            measured.set((total, budget));
+            assert!(
+                total <= budget,
+                "the shape step measured {total} bytes of token runs, over the budget of {budget}"
+            );
+        });
+    }
+
+    /// One line of `len` bytes drawn from the base64 alphabet by a fixed
+    /// generator: about 2 bytes in 64 are `+` or `/`.
+    fn base64_like_line(len: usize) -> String {
+        let alphabet: Vec<u8> = (b'A'..=b'Z')
+            .chain(b'a'..=b'z')
+            .chain(b'0'..=b'9')
+            .chain([b'+', b'/'])
+            .collect();
+        let mut state: u64 = 0x2545_f491_4f6c_dd1d;
+        (0..len)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                char::from(alphabet[(state >> 33) as usize % alphabet.len()])
+            })
+            .collect()
+    }
+
+    /// The shape step reads one long line in time proportional to its
+    /// length: the token runs it measures add up to a small multiple of the
+    /// line, whatever the line holds. A rejection body is read whole, and a
+    /// request with an inline image is a megabyte of base64 on one line.
+    #[test]
+    fn redact_credentials_reads_a_long_line_in_linear_time() {
+        const LEN: usize = 512 * 1024;
+        for (name, line) in [
+            ("a/ repeated", "a/".repeat(LEN / 2)),
+            ("base64-like text", base64_like_line(LEN)),
+        ] {
+            let budget = 4 * line.len();
+            MEASURED_TOKEN_RUNS.with(|measured| measured.set((0, budget)));
+            let mut redacted = line.clone();
+            redact_credentials(&mut redacted, |_| {});
+            let (measured, _) =
+                MEASURED_TOKEN_RUNS.with(|measured| measured.replace((0, usize::MAX)));
+            assert!(
+                measured <= budget,
+                "{name}: measured {measured} bytes of token runs in a {LEN}-byte line"
+            );
+            assert!(redacted == line, "{name}: a line without a credential");
+        }
+    }
+
+    /// A named credential is removed when the response repeats it as an
+    /// encoder wrote it: `/` as `\/`, a byte as its JSON unicode escape
+    /// (hex in either case) or percent-encoded, alone or mixed, wherever it
+    /// stands. The text around it is kept.
+    #[test]
+    fn redact_credentials_replaces_a_value_an_encoder_rewrote() {
+        // (Assembled here so no scanner reads the source as a secret.)
+        let credential = ["madeUP0", "/slash", "+plusTail99", "=="].concat();
+        let rewrite = |pairs: &[(&str, &str)]| {
+            pairs.iter().fold(credential.clone(), |value, (from, to)| {
+                value.replace(from, to)
+            })
+        };
+        let forms = [
+            ("as sent", credential.clone()),
+            ("slash as backslash-slash", rewrite(&[("/", "\\/")])),
+            ("plus as a unicode escape", rewrite(&[("+", "\\u002B")])),
+            ("equals as a unicode escape", rewrite(&[("=", "\\u003d")])),
+            ("slash as a unicode escape", rewrite(&[("/", "\\u002f")])),
+            (
+                "percent-encoded",
+                rewrite(&[("/", "%2F"), ("+", "%2B"), ("=", "%3D")]),
+            ),
+            (
+                "percent-encoded, lower-case hex",
+                rewrite(&[("/", "%2f"), ("+", "%2b"), ("=", "%3d")]),
+            ),
+            (
+                "mixed",
+                rewrite(&[("/", "\\/"), ("+", "\\u002b"), ("=", "%3D")]),
+            ),
+        ];
+        let mut left = Vec::new();
+        for (form, echoed) in &forms {
+            for (position, text) in [
+                ("bare", format!("credential {echoed} was refused")),
+                (
+                    "header",
+                    format!(r#"{{"message":"header authorization: Bearer {echoed}","code":400}}"#),
+                ),
+                (
+                    "URL query",
+                    format!("GET http://upstream.invalid/v1/models?session={echoed}&page=2 failed"),
+                ),
+            ] {
+                for scheme in ["", "Bearer "] {
+                    // The value named with its scheme goes with the scheme
+                    // where the response repeats both.
+                    let with_scheme = format!("{scheme}{echoed}");
+                    let expected = if text.contains(&with_scheme) {
+                        text.replace(&with_scheme, SECRET_REDACTION_MARKER)
+                    } else {
+                        text.replace(echoed.as_str(), SECRET_REDACTION_MARKER)
+                    };
+                    let named = format!("{scheme}{credential}");
+                    let mut redacted = text.clone();
+                    redact_credentials(&mut redacted, |visit| visit(&named));
+                    if redacted != expected {
+                        left.push(format!("{form}, {position}, named {scheme:?}: {redacted}"));
+                    }
+                }
+            }
+        }
+        assert!(
+            left.is_empty(),
+            "an echo kept part of the credential:\n{}",
+            left.join("\n")
+        );
+        // A value no encoder rewrites has one spelling: text that only
+        // resembles an escape of it is left alone.
+        let plain = format!("madeup-{}", "plainvalue".repeat(2));
+        let mut redacted = format!("id {} and {plain}", plain.replace('-', "%2D"));
+        redact_credentials(&mut redacted, |visit| visit(&plain));
+        assert_eq!(
+            redacted,
+            format!("id {} and [REDACTED]", plain.replace('-', "%2D"))
+        );
+    }
+
+    /// A URL without a path ends where its quoting ends: a JSON body that
+    /// holds a URL and, later, an address with an `@` stays as it was, and
+    /// stays JSON. Userinfo inside a quoted URL is still replaced.
+    #[test]
+    fn redact_credentials_keeps_text_between_a_bare_host_and_a_later_at_sign() {
+        for text in [
+            r#"{"docs":"https://platform.upstream.invalid","support":"help@upstream.invalid"}"#,
+            r#"{\"docs\":\"https://platform.upstream.invalid\",\"support\":\"help@upstream.invalid\"}"#,
+            "see 'https://platform.upstream.invalid','help@upstream.invalid'",
+            "see <https://platform.upstream.invalid>,<help@upstream.invalid>",
+        ] {
+            let mut redacted = text.to_string();
+            redact_credentials(&mut redacted, |_| {});
+            assert_eq!(redacted, text);
+        }
+        let mut body =
+            r#"{"docs":"https://platform.upstream.invalid","support":"help@upstream.invalid"}"#
+                .to_string();
+        redact_credentials(&mut body, |_| {});
+        assert!(
+            body.starts_with('{') && body.ends_with('}') && body.matches('"').count() == 8,
+            "the body is still the JSON object the server sent: {body}"
+        );
+        let mut quoted = r#"{"proxy":"https://user:pa55word@example.com","next":1}"#.to_string();
+        redact_credentials(&mut quoted, |_| {});
+        assert_eq!(
+            quoted,
+            r#"{"proxy":"https://[REDACTED]@example.com","next":1}"#
+        );
+    }
+
+    /// What a second application shows, the first one showed: it never
+    /// brings a value back, and it adds no text. It can replace more (an
+    /// identifier left of a replaced value can itself look like a token).
+    #[test]
+    fn redact_credentials_applied_again_never_reveals() {
+        // What `text` shows: its parts between markers, kept apart.
+        fn shown(text: &str) -> String {
+            text.split(SECRET_REDACTION_MARKER)
+                .collect::<Vec<_>>()
+                .join("\u{1}")
+        }
+        // Every part `twice` shows is, in order, inside a part `once` shows.
+        fn reveals_nothing(once: &str, twice: &str) -> bool {
+            let once = shown(once);
+            let mut cursor = 0;
+            twice.split(SECRET_REDACTION_MARKER).all(|part| {
+                once[cursor..].find(part).is_some_and(|found| {
+                    cursor += found + part.len();
+                    true
+                })
+            })
+        }
+        // (The key block markers are assembled here so no scanner reads the
+        // source as a secret.)
+        let begin = format!("-----BEGIN {}-----", "PRIVATE KEY");
+        let end = format!("-----END {}-----", "PRIVATE KEY");
+        let named = format!("madeup{}", "namedvalue".repeat(2));
+        let atoms = [
+            "authorization",
+            "proxy-authorization",
+            "Bearer",
+            "Basic",
+            "Token",
+            "token",
+            "api_key",
+            "x-api-key",
+            "password",
+            "secret",
+            "key",
+            "sk_",
+            "sk-",
+            "ghp_",
+            "AKIA",
+            "eyJ",
+            "live",
+            "abc12345678",
+            "abcdefghijklmnopqrstuvwxyzabcdefgh",
+            "0123456789",
+            "user",
+            "host.invalid",
+            "https://",
+            "@",
+            ":",
+            "=",
+            " ",
+            ".",
+            "/",
+            "+",
+            "_",
+            "-",
+            "\"",
+            "'",
+            ",",
+            "\n",
+            "é",
+            "[REDACTED]",
+            begin.as_str(),
+            end.as_str(),
+            named.as_str(),
+        ];
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = |bound: usize| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as usize % bound
+        };
+        let mut changed = 0;
+        for _ in 0..40_000 {
+            let text: String = (0..1 + next(12))
+                .map(|_| atoms[next(atoms.len())])
+                .collect();
+            let mut once = text.clone();
+            redact_credentials(&mut once, |visit| visit(&named));
+            assert!(!once.contains(&named), "{text:?} -> {once:?}");
+            let mut twice = once.clone();
+            redact_credentials(&mut twice, |visit| visit(&named));
+            assert!(
+                reveals_nothing(&once, &twice),
+                "{text:?} -> {once:?} -> {twice:?}"
+            );
+            changed += usize::from(twice != once);
+        }
+        // The second application is not a no-op for every text. The
+        // smallest form: the value goes first and its identifier stays;
+        // once the value is the marker, the identifier (with its `=`) reads
+        // as a token.
+        assert!(changed > 0, "no generated text changed a second time");
+        let mut once = ["sk_", "live_key=abc12345678"].concat();
+        redact_credentials(&mut once, |_| {});
+        assert_eq!(once, ["sk_", "live_key=[REDACTED]"].concat());
+        let mut twice = once.clone();
+        redact_credentials(&mut twice, |_| {});
+        assert_eq!(twice, "[REDACTED][REDACTED]");
+    }
+
+    /// A value of letters only is a credential from 32 bytes up; below
+    /// that it reads as a word and stays.
+    #[test]
+    fn redact_credentials_replaces_a_letters_only_value_from_32_bytes_up() {
+        let letters = "abcdefgh".repeat(4);
+        for (len, replaced) in [(20, false), (31, false), (32, true)] {
+            let value = &letters[..len];
+            for (text, expected) in [
+                (
+                    format!("header authorization: Bearer {value} was sent"),
+                    "header authorization: Bearer [REDACTED] was sent",
+                ),
+                (
+                    format!("retry with Bearer {value} failed"),
+                    "retry with Bearer [REDACTED] failed",
+                ),
+                (
+                    format!("query api_key={value}&page=2"),
+                    "query api_key=[REDACTED]&page=2",
+                ),
+            ] {
+                let mut redacted = text.clone();
+                redact_credentials(&mut redacted, |_| {});
+                if replaced {
+                    assert_eq!(redacted, expected, "{len} letters");
+                } else {
+                    assert_eq!(redacted, text, "{len} letters");
+                }
+            }
+        }
+    }
+
+    /// A Basic pair is replaced after its scheme wherever the scheme
+    /// stands, not only in an `authorization` header; "basic" as a word
+    /// stays.
+    #[test]
+    fn redact_credentials_replaces_a_basic_pair_outside_a_header() {
+        // (Assembled here so no scanner reads the source as a secret.)
+        let pair = ["dXNlcjpwYXNz", "d29yZDEyMw=="].concat();
+        let mut redacted = format!("the proxy refused Basic {pair} for this route");
+        redact_credentials(&mut redacted, |_| {});
+        assert_eq!(
+            redacted,
+            "the proxy refused Basic [REDACTED] for this route"
+        );
+        let text = "the proxy accepts basic authentication only";
+        let mut redacted = text.to_string();
+        redact_credentials(&mut redacted, |_| {});
+        assert_eq!(redacted, text);
     }
 
     #[test]

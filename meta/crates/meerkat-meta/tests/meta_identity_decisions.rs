@@ -40,9 +40,10 @@ use meerkat_meta::identity_creation::{
     IdentityDecisionNotice, IdentityDecisionNotices, IdentityDecisions, IdentityEntryFacts,
     IdentityOutcome, IdentityRefusal, IdentityRequest, KeyedSendNotices, NormalizedRequest,
     OperationId, ProfileTools, RemoveIdentitySpec, RequestContext, RequestEnvelope, Requester,
-    RequesterFacts, Sha256Digest, ToolConfigurations, UnarchiveIdentitySpec, WithdrawRequest,
-    consent_of_plan, core_member_name, host_consequences_of, normalize_adopt, normalize_archive,
-    normalize_create, normalize_remove, normalize_unarchive, render_held_v1,
+    RequesterFacts, Sha256Digest, ToolConfigurations, UnarchiveIdentitySpec, UpdateIdentitySpec,
+    WithdrawRequest, consent_of_plan, core_member_name, host_consequences_of, normalize_adopt,
+    normalize_archive, normalize_create, normalize_remove, normalize_unarchive, normalize_update,
+    render_held_v1,
 };
 use meerkat_meta::identity_first::contracts::RosterProvider;
 use meerkat_meta::identity_first::{
@@ -102,6 +103,15 @@ runtime_mode = "turn_driven"
 
 [profiles.worker.tools]
 {tools}
+
+[profiles.lead]
+model = "gpt-5.5"
+external_addressable = true
+runtime_mode = "turn_driven"
+
+[profiles.lead.tools]
+comms = true
+mob = true
 "#
     ))
     .expect("parse the definition")
@@ -404,7 +414,7 @@ fn approval_policy(timeout_ms: u64) -> IdentityCreationPolicy {
     IdentityCreationPolicy::parse(&json!({
         "enabled": true,
         "approval": {"rules": [{
-            "change": ["create", "descriptive", "remove", "archive", "adopt"],
+            "change": ["create", "descriptive", "profile", "remove", "archive", "adopt"],
             "outcome": {
                 "kind": "require_approval",
                 "approver": {"id": APPROVERS},
@@ -570,7 +580,48 @@ fn normalized_create(
     requester: &RequesterFacts,
     specs: &[DurableAgentSpec],
 ) -> NormalizedRequest {
-    let profiles = BTreeSet::from(["worker".to_owned()]);
+    normalized_create_with(policy, requester, specs, RequestEnvelope::default())
+}
+
+/// The mob's profiles, as normalization is given them.
+fn mob_profiles() -> BTreeSet<String> {
+    BTreeSet::from(["worker".to_owned(), "lead".to_owned()])
+}
+
+/// A normalized update of `entry`: its instructions change, and with
+/// `profile` it moves to that profile.
+fn normalized_update(
+    policy: &IdentityCreationPolicy,
+    requester: &RequesterFacts,
+    entry: &IdentityEntryFacts,
+    profile: Option<&str>,
+) -> NormalizedRequest {
+    let profiles = mob_profiles();
+    let peers = BTreeMap::new();
+    let mut update = UpdateIdentitySpec::new(entry.identity.as_str(), entry.spec_digest.clone());
+    update.set.additional_instructions = Some(vec!["A new brief.".to_owned()]);
+    update.set.profile = profile.map(ProfileName::from);
+    normalize_update(
+        policy,
+        &RequestContext {
+            requester,
+            profiles: &profiles,
+            peers: &peers,
+        },
+        RequestEnvelope::default(),
+        entry,
+        &update,
+    )
+    .expect("the update normalizes")
+}
+
+fn normalized_create_with(
+    policy: &IdentityCreationPolicy,
+    requester: &RequesterFacts,
+    specs: &[DurableAgentSpec],
+    envelope: RequestEnvelope,
+) -> NormalizedRequest {
+    let profiles = mob_profiles();
     let peers = BTreeMap::new();
     let specs: Vec<CreateIdentitySpec> =
         specs.iter().cloned().map(CreateIdentitySpec::new).collect();
@@ -581,7 +632,7 @@ fn normalized_create(
             profiles: &profiles,
             peers: &peers,
         },
-        RequestEnvelope::default(),
+        envelope,
         &specs,
     )
     .expect("the create normalizes")
@@ -1378,7 +1429,7 @@ async fn host_lines_that_differ_at_execution_refuse_subject_widened() {
         .find("HOST-LINE the new agents may read the ledger")
         .expect("the host's line is rendered");
     let tools = rendering
-        .find("Agent tools (1):")
+        .find("Agent profiles (1):")
         .expect("the tool configuration is rendered");
     let written = rendering
         .find("REQUESTER-WRITTEN brief of scout")
@@ -1584,6 +1635,25 @@ async fn a_person_cannot_approve_their_own_request() {
         .ask_create(&human_facts("someone"), "own-2", &["scribe"])
         .await;
     let refusal = unnamed.refusal().expect("refused");
+    assert_eq!(
+        (refusal.kind_token(), refusal.field.as_deref()),
+        ("invalid_request", Some("requester"))
+    );
+    // The key of a principal that is no person does not name a person.
+    let host_key = DecisionPrincipalKey::of(
+        &PrincipalRef::in_domain(
+            PrincipalKind::RuntimeHost,
+            "ops",
+            TrustDomainId::new("example.org").expect("domain"),
+        )
+        .expect("principal"),
+    )
+    .expect("key")
+    .to_string();
+    let not_a_person = rig
+        .ask_create(&human_facts(&host_key), "own-3", &["scribe"])
+        .await;
+    let refusal = not_a_person.refusal().expect("refused");
     assert_eq!(
         (refusal.kind_token(), refusal.field.as_deref()),
         ("invalid_request", Some("requester"))
@@ -1872,14 +1942,21 @@ async fn the_driver_is_quiet_on_an_idle_host_and_carries_out_a_decided_change() 
     assert!(rig.exists("scout"));
     assert_eq!(rig.seam.landed(), 1);
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let settled = driver.passes();
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(
-        driver.passes(),
-        settled,
-        "with nothing held the driver passes no more"
-    );
+    // With nothing held the driver falls quiet: its count of passes stops
+    // growing (a loaded host may take a few passes to get there).
+    let deadline = std::time::Instant::now() + BOUND;
+    loop {
+        let settled = driver.passes();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        if driver.passes() == settled {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "with nothing held the driver passes no more: {} passes",
+            driver.passes()
+        );
+    }
     driver.shutdown().await;
     rig.shutdown().await;
 }
@@ -1947,6 +2024,216 @@ async fn a_decision_whose_body_is_not_the_request_it_binds_is_never_carried_out(
     rig.shutdown().await;
 }
 
+/// One request id names one change. A create is held under a request id;
+/// an update and a removal asked under the same id are another request and
+/// are refused `operation_reused`, and one decision exists.
+///
+/// RED before the holder looked a held operation up across its kinds: the
+/// update was held as a second decision.
+#[tokio::test(flavor = "multi_thread")]
+async fn another_change_under_a_held_request_id_is_operation_reused() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), &fresh_mob_id()).await;
+    let facts = host_facts();
+    let held = rig.ask_create(&facts, "one-1", &["scout"]).await;
+    pending(&held);
+    let digest = Sha256Digest::of(b"the spec the requester read");
+    let entry =
+        IdentityEntryFacts::new("keeper", digest.clone(), Some(1), "worker", BTreeMap::new());
+    rig.host
+        .targets
+        .lock()
+        .unwrap()
+        .insert("keeper".to_owned(), HeldTarget::new(entry.clone(), false));
+    let operation_id = operation(&facts, "one-1");
+
+    let update = normalized_update(&rig.policy, &facts, &entry, None);
+    let updated = rig.decisions.hold(&rig.mob(), &operation_id, &update).await;
+    assert_eq!(refused(&updated), "operation_reused");
+    let removal = normalize_remove(
+        &rig.policy,
+        &facts,
+        RequestEnvelope::default(),
+        &entry,
+        &RemoveIdentitySpec::new("keeper", digest),
+    )
+    .expect("the removal normalizes");
+    let removed = rig
+        .decisions
+        .hold(&rig.mob(), &operation_id, &removal)
+        .await;
+    assert_eq!(refused(&removed), "operation_reused");
+
+    assert_eq!(
+        rig.count(DecisionPhase::Open),
+        1,
+        "one decision holds the id"
+    );
+    assert_eq!(
+        rig.decisions.held(&rig.mob(), &operation_id).await.unwrap(),
+        Some(held),
+        "the id still answers the create"
+    );
+    rig.shutdown().await;
+}
+
+/// A person a host names as the proposer of a request cannot approve it.
+/// The host asks on its own surface and names the chat person as proposer
+/// by their principal key: the decision records that person as its
+/// requester, their decide is refused `self_approval`, and another person
+/// of the map approves. A request with no proposer is the host's: the same
+/// person approves it.
+///
+/// RED before the holder read the proposer: the decision recorded the host,
+/// and the proposer approved their own request.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_person_a_host_names_as_proposer_cannot_approve_the_request() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), &fresh_mob_id()).await;
+    let facts = host_facts();
+    let mut envelope = RequestEnvelope::default();
+    envelope.proposer = Some(chat_person_key(OWNER));
+    let proposed = normalized_create_with(&rig.policy, &facts, &[spec("scout")], envelope);
+    let held = rig
+        .decisions
+        .hold(&rig.mob(), &operation(&facts, "proposed-1"), &proposed)
+        .await;
+    let (decision_id, _) = pending(&held);
+    assert_eq!(
+        rig.row(&decision_id).descriptor.requester.as_str(),
+        chat_person_key(OWNER),
+        "the decision names the person the host named"
+    );
+    rig.present(&decision_id);
+    let own = rig.chat_decides(&decision_id, OWNER, true).await;
+    assert_eq!(
+        own["error"]["data"]["decision_refusal"]["kind"],
+        json!("self_approval"),
+        "{own:#?}"
+    );
+    assert_eq!(rig.row(&decision_id).state.phase, DecisionPhase::Open);
+    let other = rig.chat_decides(&decision_id, SECOND_OWNER, true).await;
+    assert!(other["error"].is_null(), "{other:#?}");
+
+    let (hosts, _) = pending(&rig.ask_create(&facts, "hosts-1", &["scribe"]).await);
+    assert_ne!(
+        rig.row(&hosts).descriptor.requester.as_str(),
+        chat_person_key(OWNER),
+        "a request with no proposer is the host's"
+    );
+    rig.present(&hosts);
+    let approved = rig.chat_decides(&hosts, OWNER, true).await;
+    assert!(approved["error"].is_null(), "{approved:#?}");
+    rig.shutdown().await;
+}
+
+/// A held role change shows the tools of the profile the agent moves TO,
+/// and an update that keeps the profile shows the agent's own.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_held_role_change_shows_the_new_profiles_tools() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), &fresh_mob_id()).await;
+    let facts = host_facts();
+    let digest = Sha256Digest::of(b"the spec the requester read");
+    let entry = IdentityEntryFacts::new("keeper", digest, Some(1), "worker", BTreeMap::new());
+    rig.host
+        .targets
+        .lock()
+        .unwrap()
+        .insert("keeper".to_owned(), HeldTarget::new(entry.clone(), false));
+
+    let moved = normalized_update(&rig.policy, &facts, &entry, Some("lead"));
+    let held = rig
+        .decisions
+        .hold(&rig.mob(), &operation(&facts, "role-1"), &moved)
+        .await;
+    let (decision_id, _) = pending(&held);
+    let row = rig.row(&decision_id);
+    assert_eq!(row.descriptor.kind.as_str(), "identity.update");
+    let rendering = row.descriptor.rendering.to_string();
+    assert!(
+        rendering.contains("\"keeper\" profile \"lead\""),
+        "the agent is shown on the profile it moves to:\n{rendering}"
+    );
+    assert!(
+        rendering.contains("Tool families (2):\n- comms\n- mob\n"),
+        "with that profile's tools:\n{rendering}"
+    );
+    assert!(
+        !rendering.contains("profile: \"worker\"\n"),
+        "and no block of the profile it leaves:\n{rendering}"
+    );
+
+    let kept = normalized_update(&rig.policy, &facts, &entry, None);
+    let held = rig
+        .decisions
+        .hold(&rig.mob(), &operation(&facts, "brief-1"), &kept)
+        .await;
+    let (decision_id, _) = pending(&held);
+    let rendering = rig.row(&decision_id).descriptor.rendering.to_string();
+    assert!(
+        rendering.contains("\"keeper\" profile \"worker\""),
+        "an update that keeps the profile shows the agent's own:\n{rendering}"
+    );
+    rig.shutdown().await;
+}
+
+/// The agent a held change names moved to another profile after the
+/// approval: its tools are no longer the ones the person was shown, and the
+/// change is refused `subject_widened` without asking the seam.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_target_whose_profile_moved_since_the_hold_is_refused_subject_widened() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), &fresh_mob_id()).await;
+    let facts = host_facts();
+    let digest = Sha256Digest::of(b"the spec the requester read");
+    let entry =
+        IdentityEntryFacts::new("keeper", digest.clone(), Some(1), "worker", BTreeMap::new());
+    rig.host
+        .targets
+        .lock()
+        .unwrap()
+        .insert("keeper".to_owned(), HeldTarget::new(entry.clone(), false));
+    let removal = normalize_remove(
+        &rig.policy,
+        &facts,
+        RequestEnvelope::default(),
+        &entry,
+        &RemoveIdentitySpec::new("keeper", digest.clone()),
+    )
+    .expect("the removal normalizes");
+    let held = rig
+        .decisions
+        .hold(&rig.mob(), &operation(&facts, "moved-1"), &removal)
+        .await;
+    let (decision_id, _) = pending(&held);
+    rig.approve(&decision_id).await;
+
+    let moved = IdentityEntryFacts::new("keeper", digest, Some(2), "lead", BTreeMap::new());
+    rig.host
+        .targets
+        .lock()
+        .unwrap()
+        .insert("keeper".to_owned(), HeldTarget::new(moved, false));
+    let mut executors = rig.executor_loop();
+    assert_eq!(
+        drive(&mut executors).await,
+        vec![
+            DecisionPassOutcome::ExecutionRefused,
+            DecisionPassOutcome::NoticeSettled
+        ]
+    );
+    assert_eq!(
+        rig.row(&decision_id)
+            .execution_refusal
+            .as_ref()
+            .map(DecisionReference::as_str),
+        Some("subject_widened")
+    );
+    assert_eq!(rig.seam.asked(), Vec::new(), "the seam was not asked");
+    rig.shutdown().await;
+}
+
 /// A candidate launch holds nothing and carries nothing out: its holder
 /// refuses a change that needs approval `candidate_launch`, and starts no
 /// driver. A decision held by a host that acts is carried out by a host
@@ -1991,14 +2278,13 @@ async fn a_candidate_launch_holds_nothing_and_drives_nothing() {
     rig.shutdown().await;
 }
 
-/// The rendering shows what the profile declares for tools, and never the
-/// configuration of an MCP server: a credential-shaped value in a server's
-/// environment is absent from the rendering, the server is shown by its
-/// name, and the digest of the declaration still covers the value.
-#[test]
-fn the_rendering_names_an_mcp_server_and_never_shows_its_configuration() {
-    let tools = |secret: &str| -> meerkat_mob::ToolConfig {
-        serde_json::from_value(json!({
+/// A profile as a mob's definition holds one, with `secret` in the
+/// configuration of its own MCP server.
+fn declared_profile(secret: &str) -> meerkat_mob::Profile {
+    serde_json::from_value(json!({
+        "model": "gpt-5.5",
+        "skills": ["ledger-keeping"],
+        "tools": {
             "comms": true,
             "shell": true,
             "read_only": false,
@@ -2010,32 +2296,73 @@ fn the_rendering_names_an_mcp_server_and_never_shows_its_configuration() {
                 "env": {"LEDGER_TOKEN": secret},
             }],
             "grant_gated": {"families": ["shell"]},
-        }))
-        .expect("a tool configuration")
-    };
+        },
+    }))
+    .expect("a profile")
+}
+
+/// The definition the pure rows declare profiles of: the rows' own, with
+/// the text of the skill the profile names.
+fn declaring_definition() -> MobDefinition {
+    let mut definition = definition("declared", TOOLS);
+    definition.skills.insert(
+        "ledger-keeping".to_owned(),
+        meerkat_mob::definition::SkillSource::Inline {
+            content: "SKILL-TEXT keep the ledger balanced".to_owned(),
+        },
+    );
+    definition
+}
+
+/// The rendering shows what the mob declares for a profile: its model, its
+/// auth binding, the names of its skills and its tool configuration. It
+/// never shows the configuration of an MCP server (a credential-shaped
+/// value in a server's environment is absent, the server is shown by its
+/// name) nor a skill's text. A profile that names no server of the host
+/// reaches every server the host offers, and the rendering says so; one
+/// that names servers shows them. The digest covers the whole declaration:
+/// the server's configuration, the model, the text of a skill the profile
+/// names and the wiring rules that name the profile.
+#[test]
+fn the_rendering_names_an_mcp_server_and_never_shows_its_configuration() {
     let secret = "tok-CREDENTIAL-SHAPED-9f3a71";
-    let declared = ProfileTools::of_tools(&tools(secret)).expect("declared");
+    let definition = declaring_definition();
+    let declare = |profile: &meerkat_mob::Profile, definition: &MobDefinition| {
+        ProfileTools::of_profile("worker", profile, definition, None).expect("declared")
+    };
+    let declared = declare(&declared_profile(secret), &definition);
     let request =
         normalized_create(&approval_policy(1000), &host_facts(), &[spec("scout")]).request;
-    let configurations = ToolConfigurations::of_request(
-        &request,
-        vec![AgentTools::new("scout", "worker")],
-        BTreeMap::from([("worker".to_owned(), declared.clone())]),
-    )
-    .expect("the tools of the request");
-    let rendering = render_held_v1(&request, None, &configurations).expect("renders");
+    let rendered = |declared: &ProfileTools| {
+        let configurations = ToolConfigurations::of_request(
+            &request,
+            vec![AgentTools::new("scout", "worker")],
+            BTreeMap::from([("worker".to_owned(), declared.clone())]),
+        )
+        .expect("the profiles of the request");
+        render_held_v1(&request, None, &configurations).expect("renders")
+    };
+    let rendering = rendered(&declared);
     let text = rendering.as_str();
 
     assert!(!text.contains(secret), "no credential is rendered:\n{text}");
     assert!(!text.contains("LEDGER_TOKEN"), "{text}");
     assert!(!text.contains("ledger-server"), "{text}");
+    assert!(
+        !text.contains("SKILL-TEXT"),
+        "no skill text is rendered:\n{text}"
+    );
     for shown in [
-        "Agent tools (1):\n- \"scout\" profile \"worker\" tools sha256:",
-        "Tool configuration of profile: \"worker\"\n",
+        "Agent profiles (1):\n- \"scout\" profile \"worker\" declares sha256:",
+        "Declaration of profile: \"worker\"\n",
+        "Model: \"gpt-5.5\"\n",
+        "Auth binding: none\n",
+        "Skills (1):\n- \"ledger-keeping\"\n",
         "Tool families (2):\n- shell\n- comms\n",
         "Read only: no\n",
         "Denied tools (1):\n- \"mob\\_wire\"\n",
-        "MCP servers (1):\n- \"ledger\"\n",
+        "Host MCP servers: every server the host offers\n",
+        "Profile MCP servers (1):\n- \"ledger\"\n",
         "Grant gated (1):\n- family \"shell\"\n",
     ] {
         assert!(
@@ -2044,19 +2371,117 @@ fn the_rendering_names_an_mcp_server_and_never_shows_its_configuration() {
         );
     }
     assert!(
-        text.contains(&format!(
-            "Tool configuration digest: {}\n",
-            declared.digest().as_str()
-        )),
+        text.contains(&format!("Profile digest: {}\n", declared.digest().as_str())),
         "{text}"
     );
-    assert_ne!(
-        declared.digest(),
-        ProfileTools::of_tools(&tools("tok-ANOTHER-VALUE"))
-            .expect("declared")
-            .digest(),
-        "the digest covers the server's configuration"
+
+    // A profile that names servers of the host shows them, and not "every
+    // server".
+    let mut narrowed = declared_profile(secret);
+    narrowed.tools.mcp = vec!["search".to_owned()];
+    let narrowed = rendered(&declare(&narrowed, &definition));
+    assert!(
+        narrowed
+            .as_str()
+            .contains("Host MCP servers (1):\n- \"search\"\n"),
+        "{}",
+        narrowed.as_str()
     );
+    assert!(!narrowed.as_str().contains("every server the host offers"));
+    narrowed.card().expect("a structured card");
+
+    // The digest covers the whole declaration.
+    let mut other_model = declared_profile(secret);
+    other_model.model = "gpt-5.4".to_owned();
+    let mut other_skill = declaring_definition();
+    other_skill.skills.insert(
+        "ledger-keeping".to_owned(),
+        meerkat_mob::definition::SkillSource::Inline {
+            content: "SKILL-TEXT move the ledger offshore".to_owned(),
+        },
+    );
+    let mut other_wiring = declaring_definition();
+    other_wiring
+        .wiring
+        .role_wiring
+        .push(meerkat_mob::definition::RoleWiringRule {
+            a: ProfileName::from("worker"),
+            b: ProfileName::from("lead"),
+        });
+    let mut unrelated_wiring = declaring_definition();
+    unrelated_wiring
+        .wiring
+        .role_wiring
+        .push(meerkat_mob::definition::RoleWiringRule {
+            a: ProfileName::from("lead"),
+            b: ProfileName::from("lead"),
+        });
+    for (what, other) in [
+        (
+            "the server's configuration",
+            declare(&declared_profile("tok-ANOTHER-VALUE"), &definition),
+        ),
+        ("the model", declare(&other_model, &definition)),
+        (
+            "the text of a skill it names",
+            declare(&declared_profile(secret), &other_skill),
+        ),
+        (
+            "a wiring rule that names it",
+            declare(&declared_profile(secret), &other_wiring),
+        ),
+    ] {
+        assert_ne!(
+            declared.digest(),
+            other.digest(),
+            "the digest covers {what}"
+        );
+    }
+    assert_eq!(
+        declared.digest(),
+        declare(&declared_profile(secret), &unrelated_wiring).digest(),
+        "a wiring rule that names other profiles is not this profile's"
+    );
+
+    // A profile bound to a realm profile is declared by the realm's
+    // profile, read now, and is refused when nobody can read it.
+    let bound = meerkat_mob::ProfileBinding::RealmRef {
+        realm_profile: "shared-keeper".to_owned(),
+    };
+    let resolved = ProfileTools::declared(
+        "worker",
+        &bound,
+        &definition,
+        Some(&declared_profile(secret)),
+    )
+    .expect("a realm profile the host reads");
+    let resolved_text = rendered(&resolved);
+    for shown in [
+        "Realm profile: \"shared-keeper\"\n",
+        "Tool families (2):\n- shell\n- comms\n",
+        "Profile MCP servers (1):\n- \"ledger\"\n",
+    ] {
+        assert!(
+            resolved_text.as_str().contains(shown),
+            "a realm profile shows {shown:?}:\n{}",
+            resolved_text.as_str()
+        );
+    }
+    assert_ne!(
+        resolved.digest(),
+        ProfileTools::declared(
+            "worker",
+            &bound,
+            &definition,
+            Some(&declared_profile("tok-ANOTHER-VALUE")),
+        )
+        .expect("declared")
+        .digest(),
+        "the digest covers the realm profile's content"
+    );
+    let unreadable = ProfileTools::declared("worker", &bound, &definition, None)
+        .expect_err("a realm profile nobody can read");
+    assert_eq!(unreadable.kind_token(), "unsupported");
     rendering
         .card()
         .expect("the rendering parses as a structured card");
@@ -2106,19 +2531,23 @@ fn the_rendering_names_an_mcp_server_and_never_shows_its_configuration() {
             &AdoptIdentitySpec::new("keeper", digest),
         ),
     ];
-    for normalized in whole {
+    let updates = [
+        normalized_update(&policy, &facts, &entry, None),
+        normalized_update(&policy, &facts, &entry, Some("lead")),
+    ];
+    for normalized in whole.into_iter().chain(updates.into_iter().map(Ok)) {
         let request = normalized.expect("the change normalizes").request;
         let configurations = ToolConfigurations::of_request(
             &request,
             vec![AgentTools::new("keeper", "worker")],
             BTreeMap::from([("worker".to_owned(), declared.clone())]),
         )
-        .expect("the tools of the request");
+        .expect("the profiles of the request");
         let rendering = render_held_v1(&request, None, &configurations).expect("renders");
         assert!(
             rendering
                 .as_str()
-                .contains("Agent tools (1):\n- \"keeper\" profile \"worker\" tools sha256:"),
+                .contains("Agent profiles (1):\n- \"keeper\" profile \"worker\" declares sha256:"),
             "a held {} shows the agent's tools:\n{}",
             request.action.token(),
             rendering.as_str()

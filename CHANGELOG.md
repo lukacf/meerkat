@@ -45,6 +45,15 @@ them.
   carries out what the rows keep owed besides: the retirement of a removed
   or archived identity whose member is not retiring yet.
 
+### Changed
+
+- Durable decisions of the kinds `identity.create`, `identity.update`,
+  `identity.archive`, `identity.unarchive`, `identity.remove` and
+  `identity.adopt` (a change of an agent) are decided by people only
+  (`DECIDED_BY_PEOPLE_ONLY`): a hold of one that names a reviewer is refused
+  `ReviewStageNotAllowed`, so an agent never approves a change of an agent.
+  No released surface held a decision of these kinds.
+
 ## [0.9.13] - 2026-11-11
 
 ### Changed

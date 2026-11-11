@@ -1921,6 +1921,224 @@ async fn every_agent_of_a_mob_takes_a_record_of_its_own() {
     );
 }
 
+/// The body a session's committed target holds pending for `key`.
+async fn pending_body(
+    service: &MockSessionService,
+    session: &SessionId,
+    key: &str,
+) -> Option<String> {
+    service
+        .committed_instruction_target(session)
+        .await
+        .and_then(|state| {
+            state
+                .slots()
+                .iter()
+                .find(|slot| slot.key.as_str() == key)
+                .and_then(|slot| slot.pending_body.clone())
+        })
+}
+
+/// A member-targeted record's body stays in its journal row: after a
+/// restart the mob holds none of them in memory, and a later delivery to
+/// the record's member and the birth of a member seated later each read
+/// the member's own body from its row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restart_delivers_and_births_a_members_own_record_from_the_journal() {
+    let mob = InstructionMob::new("oi-journal", &[("oi-journal-a", "worker")]).await;
+    let (a, a_session) = mob.member(0);
+    let late = AgentIdentity::from("oi-journal-late");
+    mob.handle
+        .set_operator_instruction(write("own-a", 1, BRIEF, member_target(&a)))
+        .await
+        .expect("member a's first record commits");
+    mob.handle
+        .set_operator_instruction(write("own-a", 2, FORMAL, member_target(&a)))
+        .await
+        .expect("member a's second revision commits");
+    mob.handle
+        .set_operator_instruction(write("own-late", 1, BRIEF, member_target(&late)))
+        .await
+        .expect("the later member's record commits");
+    current(&mob.handle, &a).await;
+
+    let crashed = mob.crash().await;
+    let handle = crashed.resume().await;
+    // A shared write owes member a its whole snapshot again.
+    handle
+        .set_operator_instruction(write("tone", 1, BRIEF, OperatorInstructionTarget::Mob))
+        .await
+        .expect("the shared write commits");
+    current(&handle, &a).await;
+    assert_eq!(
+        active_slots(&crashed.service, &a_session).await,
+        vec![("own-a".to_string(), 2), ("tone".to_string(), 1)]
+    );
+    assert_eq!(
+        pending_body(&crashed.service, &a_session, "own-a")
+            .await
+            .as_deref(),
+        Some(FORMAL),
+        "member a's snapshot carries its record's current body, read from the journal"
+    );
+
+    // A member seated after the restart is born with its own record.
+    handle
+        .spawn_spec(turn_driven("worker", &late))
+        .await
+        .expect("spawn the later member");
+    let late_session = handle
+        .resolve_bridge_session_id(&late)
+        .await
+        .expect("a session-backed member");
+    current(&handle, &late).await;
+    assert_eq!(
+        active_slots(&crashed.service, &late_session).await,
+        vec![("own-late".to_string(), 1), ("tone".to_string(), 1)]
+    );
+    assert_eq!(
+        named_slots(&crashed.service, &late_session).await,
+        vec!["own-late".to_string(), "tone".to_string()],
+        "the later member's target never names member a's record"
+    );
+    // A new revision after the restart is delivered from its own row too.
+    handle
+        .set_operator_instruction(write("own-a", 3, BRIEF, member_target(&a)))
+        .await
+        .expect("member a's third revision commits");
+    current(&handle, &a).await;
+    assert_eq!(
+        active_slots(&crashed.service, &a_session).await,
+        vec![("own-a".to_string(), 3), ("tone".to_string(), 1)]
+    );
+    assert_eq!(
+        pending_body(&crashed.service, &a_session, "own-a")
+            .await
+            .as_deref(),
+        Some(BRIEF)
+    );
+}
+
+/// Wait until `session`'s committed target holds `generation`.
+async fn recorded_at(service: &MockSessionService, session: &SessionId, generation: u64) {
+    let deadline = tokio::time::Instant::now() + STEP;
+    while target_generation(service, session).await != Some(generation) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the session never recorded generation {generation}"
+        );
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+}
+
+/// Measurement, not a check: what a mob pays for one member-targeted
+/// record per agent at 1,000 and 10,000 agents (4 KiB bodies), two of them
+/// seated. Run it in a release build (`--release -- --ignored --nocapture`):
+/// a debug build validates every machine invariant after every step. It
+/// prints, per size: a write before any record and the writes at the full
+/// size, the time from a write to the seated member's recorded snapshot, the
+/// size of that member's recorded target and the time of its run start
+/// application, and the mob's load from its journal with the first delivery
+/// after it (which reads the member's body from its journal row).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "measurement: prints mob costs at 1,000 and 10,000 member records"]
+async fn measure_member_record_costs_in_a_mob() {
+    use std::time::Instant;
+    let body = "x".repeat(4096);
+    for records in [1_000_usize, 10_000] {
+        let seated_a = format!("oi-scale-{records}-00000");
+        let seated_b = format!("oi-scale-{records}-00001");
+        let mob = InstructionMob::new(
+            &format!("oi-scale-{records}"),
+            &[(seated_a.as_str(), "worker"), (seated_b.as_str(), "worker")],
+        )
+        .await;
+        let (a, a_session) = mob.member(0);
+        let started = Instant::now();
+        mob.handle
+            .set_operator_instruction(write("tone", 1, FORMAL, OperatorInstructionTarget::Mob))
+            .await
+            .expect("the shared write commits");
+        let first_write = started.elapsed();
+        let mut last_hundred = std::time::Duration::ZERO;
+        let started = Instant::now();
+        for index in 0..records {
+            let identity = AgentIdentity::from(format!("oi-scale-{records}-{index:05}"));
+            let write_started = Instant::now();
+            mob.handle
+                .set_operator_instruction(write(
+                    &format!("agent-{index:05}"),
+                    1,
+                    &body,
+                    member_target(&identity),
+                ))
+                .await
+                .unwrap_or_else(|error| panic!("the record of agent {index} commits: {error}"));
+            if index + 100 >= records {
+                last_hundred += write_started.elapsed();
+            }
+        }
+        let writes = started.elapsed();
+        let started = Instant::now();
+        let receipt = mob
+            .handle
+            .set_operator_instruction(write("agent-00000", 2, &body, member_target(&a)))
+            .await
+            .expect("member a's new revision commits");
+        let write_at_size = started.elapsed();
+        recorded_at(&mob.service, &a_session, receipt.generation).await;
+        let write_to_recorded = started.elapsed();
+        let target = mob
+            .service
+            .committed_instruction_target(&a_session)
+            .await
+            .expect("member a's target");
+        let target_slots = target.slots().len();
+        let target_bytes = serde_json::to_vec(&target).expect("target json").len();
+        let mut document = mob
+            .service
+            .persisted_sessions
+            .read()
+            .await
+            .get(&a_session)
+            .expect("member a's durable session")
+            .clone();
+        let started = Instant::now();
+        let outcome = document
+            .apply_run_start_instructions(
+                meerkat_core::InstructionRunStart::FreshRun,
+                meerkat_core::InstructionLowering::MidConversation,
+                None,
+            )
+            .expect("the run start applies");
+        let run_start = started.elapsed();
+        assert!(matches!(
+            outcome,
+            meerkat_core::RunStartInstructionOutcome::Applied { .. }
+        ));
+
+        let crashed = mob.crash().await;
+        let started = Instant::now();
+        let handle = crashed.resume().await;
+        let load = started.elapsed();
+        let started = Instant::now();
+        let receipt = handle
+            .set_operator_instruction(write("agent-00000", 3, &body, member_target(&a)))
+            .await
+            .expect("member a's revision after the load commits");
+        recorded_at(&crashed.service, &a_session, receipt.generation).await;
+        let write_to_recorded_after_load = started.elapsed();
+        println!(
+            "records={records} first_write={first_write:?} writes_total={writes:?} \
+             write_avg_last_100={:?} write_at_size={write_at_size:?} \
+             write_to_recorded={write_to_recorded:?} member_target_slots={target_slots} \
+             member_target_bytes={target_bytes} run_start_apply={run_start:?} \
+             mob_load={load:?} write_to_recorded_after_load={write_to_recorded_after_load:?}",
+            last_hundred / 100,
+        );
+    }
+}
+
 /// On a governed runtime (a native work authorization host is installed) a
 /// mob's operator-instruction write needs prepared authorization, which this
 /// release does not mint: the write and the revoke are refused typed, a

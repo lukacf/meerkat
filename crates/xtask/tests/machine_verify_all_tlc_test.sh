@@ -1203,7 +1203,8 @@ fi
 # reachable space under a mob generation bound and a VIEW without the step
 # and topology counters: the write run (two bound Dormant members under two
 # profiles; every write, revoke, preparation, record and refusal arm its
-# domains reach for a mob, a profile and a member target) and the seat run
+# domains reach for a mob, a profile and each of the two members as a member
+# target, so a record also moves from one member to the other) and the seat run
 # (two identities seated, bound, made unborn seats, born, retired by a
 # releasing retire and unseated around writes, with the release verdict of
 # their sessions). Beside every generated invariant it checks that a
@@ -1213,9 +1214,10 @@ fi
 # born member (a placed member as a local one), and no region step touches
 # residency or wakes. It
 # first checks that the generated model defines every arm it drives,
-# requires each run's covered arms to fire and its eleven witnesses reached
-# (among them a retiring member's release, after its retire unbound it), one
-# run each, and with --mutants refuses four seeded defects, each by the
+# requires each run's covered arms to fire and its twelve witnesses reached
+# (among them a retiring member's release, after its retire unbound it, and
+# a member-to-member retarget that owes both members), one
+# run each, and with --mutants refuses five seeded defects, each by the
 # property it targets run as the only property, and requires a live-only
 # delivery and a bound-only release verdict to leave their witnesses
 # unreachable. No run uses -continue. Not yet measured; it joins this shard

@@ -74,12 +74,28 @@ const SCAN_DEBOUNCE: Duration = Duration::from_millis(20);
 // Bodies
 // ---------------------------------------------------------------------------
 
-/// The bodies of the mob's Active records, by digest: content the journal
-/// keeps for replay and delivery. MobMachine holds every record's digest;
-/// this store holds no lifecycle fact.
+/// Where the Active body of one record is.
+#[derive(Debug, Clone)]
+enum RecordBody {
+    /// In memory: the body of a shared record (targeted at every member or
+    /// at a profile), which many members' snapshots carry.
+    Held(Arc<str>),
+    /// In the journal row at this cursor: the body of a member-targeted
+    /// record, read when the one member it names gets its snapshot. The mob
+    /// holds one such record per member that has one, so it keeps where
+    /// each body is, never the bodies.
+    Journaled(u64),
+}
+
+/// The bodies of the mob's Active records, by record slot: content the
+/// journal keeps for replay and delivery. A shared record's body is held; a
+/// member-targeted record's body stays in its journal row and is read for
+/// its member's snapshot. MobMachine holds every record's digest; this store
+/// holds no lifecycle fact, and a body is used only at the digest the
+/// machine holds for its slot.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct OperatorInstructionBodies {
-    by_digest: BTreeMap<String, Arc<str>>,
+    by_slot: BTreeMap<String, (String, RecordBody)>,
 }
 
 impl OperatorInstructionBodies {
@@ -92,30 +108,191 @@ impl OperatorInstructionBodies {
             .map_or(0, |position| position + 1);
         let mut bodies = Self::default();
         for event in &events[epoch_start..] {
-            if let MobEventKind::OperatorInstructionCommitted(committed) = &event.kind
-                && let (Some(digest), Some(body)) = (&committed.content_sha256, committed.body())
-            {
-                bodies.insert(digest, body);
+            if let MobEventKind::OperatorInstructionCommitted(committed) = &event.kind {
+                match (&committed.content_sha256, committed.body()) {
+                    (Some(digest), Some(body))
+                        if committed.effect == meerkat_core::InstructionEffect::Active =>
+                    {
+                        bodies.record_active(
+                            &committed.slot.machine_key(),
+                            digest,
+                            body,
+                            &committed.target,
+                            event.cursor,
+                        );
+                    }
+                    _ => bodies.record_revoked(&committed.slot.machine_key()),
+                }
             }
         }
         bodies
     }
 
-    pub(crate) fn insert(&mut self, digest: &InstructionContentDigest, body: &str) {
-        self.by_digest
-            .insert(digest.as_str().to_owned(), Arc::from(body));
+    /// Follow a committed Active record of `key`, journaled at `cursor`: a
+    /// shared record's body is held, a member-targeted record's located.
+    pub(crate) fn record_active(
+        &mut self,
+        key: &str,
+        digest: &InstructionContentDigest,
+        body: &str,
+        target: &OperatorInstructionTarget,
+        cursor: u64,
+    ) {
+        let body = match target {
+            OperatorInstructionTarget::Member { .. } => RecordBody::Journaled(cursor),
+            OperatorInstructionTarget::Mob | OperatorInstructionTarget::Profile { .. } => {
+                RecordBody::Held(Arc::from(body))
+            }
+        };
+        self.by_slot
+            .insert(key.to_owned(), (digest.as_str().to_owned(), body));
     }
 
-    pub(crate) fn get(&self, digest: &str) -> Option<&str> {
-        self.by_digest.get(digest).map(|body| &**body)
+    /// Follow a committed revoke of `key`: an Absent record keeps no body.
+    pub(crate) fn record_revoked(&mut self, key: &str) {
+        self.by_slot.remove(key);
     }
 
-    /// Keep only the bodies a record of `state` names.
-    pub(crate) fn retain_referenced(&mut self, state: &mob_dsl::MobMachineState) {
-        let referenced: BTreeSet<&String> = state.operator_instruction_digest.values().collect();
-        self.by_digest
-            .retain(|digest, _| referenced.contains(digest));
+    /// Drop what a slot `state` no longer records left behind (a reset
+    /// clears the records). It scans only when something is left over.
+    pub(crate) fn retain_recorded(&mut self, state: &mob_dsl::MobMachineState) {
+        if self.by_slot.len() > state.operator_instruction_revision.len() {
+            self.by_slot
+                .retain(|key, _| state.operator_instruction_revision.contains_key(key));
+        }
     }
+
+    /// The body of the record of `key` at `digest`: a held body, or a
+    /// located one read from `journal`, the mob's events in cursor order
+    /// (a restore at a start has them; a delivery resolves its member's
+    /// bodies first, see [`Self::member_journal_reads`]).
+    fn body<'a>(
+        &'a self,
+        key: &str,
+        digest: &str,
+        journal: Option<&'a [MobEvent]>,
+    ) -> Option<&'a str> {
+        let (recorded_digest, body) = self.by_slot.get(key)?;
+        if recorded_digest != digest {
+            return None;
+        }
+        match body {
+            RecordBody::Held(body) => Some(body.as_ref()),
+            RecordBody::Journaled(cursor) => {
+                let journal = journal?;
+                let event = journal
+                    .binary_search_by_key(cursor, |event| event.cursor)
+                    .ok()
+                    .and_then(|index| journal.get(index))
+                    .or_else(|| journal.iter().find(|event| event.cursor == *cursor))?;
+                journaled_body(event, key, digest)
+            }
+        }
+    }
+
+    /// The journal rows `agent_identity`'s snapshot needs read: for each
+    /// Active member-targeted record that names it and whose body this
+    /// store locates, the slot key, the digest and the row's cursor. A
+    /// member holds few records of its own, whatever the mob holds.
+    pub(crate) fn member_journal_reads(
+        &self,
+        state: &mob_dsl::MobMachineState,
+        agent_identity: &AgentIdentity,
+    ) -> Vec<(String, String, u64)> {
+        let mut reads = Vec::new();
+        for (key, member) in &state.operator_instruction_target_member {
+            if member.0.as_str() != agent_identity.as_str()
+                || state.operator_instruction_effect.get(key)
+                    != Some(&mob_dsl::InstructionEffect::Active)
+            {
+                continue;
+            }
+            if let (Some(digest), Some((recorded_digest, RecordBody::Journaled(cursor)))) = (
+                state.operator_instruction_digest.get(key),
+                self.by_slot.get(key),
+            ) && digest == recorded_digest
+            {
+                reads.push((key.clone(), digest.clone(), *cursor));
+            }
+        }
+        reads
+    }
+
+    /// The bodies one member's snapshot reads: the held bodies of the shared
+    /// records, and `read`, the member's own bodies as its journal rows
+    /// hold them (slot key, digest, body). What a snapshot built off the
+    /// mob's actor is handed, so it carries no other member's body.
+    pub(crate) fn for_member(&self, read: Vec<(String, String, Arc<str>)>) -> Self {
+        let mut by_slot: BTreeMap<String, (String, RecordBody)> = self
+            .by_slot
+            .iter()
+            .filter(|(_, (_, body))| matches!(body, RecordBody::Held(_)))
+            .map(|(key, entry)| (key.clone(), entry.clone()))
+            .collect();
+        for (key, digest, body) in read {
+            by_slot.insert(key, (digest, RecordBody::Held(body)));
+        }
+        Self { by_slot }
+    }
+
+    /// How many bytes of bodies this store holds in memory.
+    #[cfg(test)]
+    pub(crate) fn held_body_bytes(&self) -> usize {
+        self.by_slot
+            .values()
+            .map(|(_, body)| match body {
+                RecordBody::Held(body) => body.len(),
+                RecordBody::Journaled(_) => 0,
+            })
+            .sum()
+    }
+}
+
+/// The body `event` journals for the record of `key` at `digest`, when it is
+/// that record's committed row.
+fn journaled_body<'a>(event: &'a MobEvent, key: &str, digest: &str) -> Option<&'a str> {
+    match &event.kind {
+        MobEventKind::OperatorInstructionCommitted(committed)
+            if committed.slot.machine_key() == key
+                && committed
+                    .content_sha256
+                    .as_ref()
+                    .is_some_and(|recorded| recorded.as_str() == digest) =>
+        {
+            committed.body()
+        }
+        _ => None,
+    }
+}
+
+/// Read from the mob's journal the member-targeted bodies a snapshot needs
+/// ([`OperatorInstructionBodies::member_journal_reads`]): one row per
+/// record, by its cursor. A row that is not the record's committed row at
+/// its digest fails the read, typed, so a snapshot never carries another
+/// body.
+pub(crate) async fn read_journaled_bodies(
+    events: &dyn crate::store::MobEventStore,
+    reads: Vec<(String, String, u64)>,
+) -> Result<Vec<(String, String, Arc<str>)>, MobError> {
+    let mut read = Vec::with_capacity(reads.len());
+    for (key, digest, cursor) in reads {
+        let rows = events
+            .poll(cursor.saturating_sub(1), 1)
+            .await
+            .map_err(MobError::from)?;
+        let body = rows
+            .first()
+            .filter(|event| event.cursor == cursor)
+            .and_then(|event| journaled_body(event, &key, &digest))
+            .ok_or_else(|| {
+                MobError::Internal(format!(
+                    "the body of operator instruction {key} (digest {digest}) is not in the \
+                     mob's journal at row {cursor}"
+                ))
+            })?;
+        read.push((key, digest, Arc::from(body)));
+    }
+    Ok(read)
 }
 
 /// The actor's operator-instruction shell: the bodies, and the delivery
@@ -310,9 +487,15 @@ fn record_targets_another_member(
 /// member's snapshot, and its session revokes a slot its target no longer
 /// names. So a snapshot's size follows the shared records and the member's
 /// own, never the number of other members that hold a record.
+///
+/// `bodies` holds the shared records' bodies. The member's own bodies come
+/// from it too when the caller resolved them
+/// ([`OperatorInstructionBodies::for_member`]), or from `journal`, the mob's
+/// events in cursor order, at a start that has them in hand.
 pub(crate) fn member_instruction_record(
     state: &mob_dsl::MobMachineState,
     bodies: &OperatorInstructionBodies,
+    journal: Option<&[MobEvent]>,
     mob_id: &MobId,
     agent_identity: &AgentIdentity,
     member_profile: &str,
@@ -333,7 +516,7 @@ pub(crate) fn member_instruction_record(
                 .get(key)
                 .map(String::as_str)
                 .unwrap_or_default();
-            let body = bodies.get(digest).ok_or_else(|| {
+            let body = bodies.body(key, digest, journal).ok_or_else(|| {
                 MobError::Internal(format!(
                     "the body of operator instruction {slot} (digest {digest}) is not in the \
                      mob's journal"
@@ -369,8 +552,19 @@ pub(crate) fn member_profile(
         .unwrap_or_default()
 }
 
-/// How many current members the record of `key` selects.
+/// How many current members the record of `key` selects. A member-targeted
+/// record selects its one member when it is seated: it is looked up, not
+/// searched for among the seats.
 pub(crate) fn matched_members(state: &mob_dsl::MobMachineState, key: &str) -> u64 {
+    if state.operator_instruction_target_kind.get(key)
+        == Some(&mob_dsl::InstructionTargetKind::Member)
+    {
+        return state
+            .operator_instruction_target_member
+            .get(key)
+            .is_some_and(|member| state.identity_to_runtime.contains_key(member))
+            .into();
+    }
     state
         .identity_to_runtime
         .keys()
@@ -389,33 +583,55 @@ pub(crate) fn matched_members(state: &mob_dsl::MobMachineState, key: &str) -> u6
         .count() as u64
 }
 
+/// Whether a member's build carries its snapshot at birth: the mob has
+/// recorded a generation and the build mints its session. A build that
+/// continues an existing session carries nothing (that member receives its
+/// snapshot by delivery).
+pub(crate) fn birth_carries_member_instructions(
+    request: &meerkat_core::service::CreateSessionRequest,
+    state: &mob_dsl::MobMachineState,
+) -> bool {
+    state.operator_instruction_generation != 0
+        && request.build.as_ref().is_some_and(|build| {
+            build.session_build_intent() == meerkat_core::SessionBuildIntent::Mint
+                && build.resume_session.is_some()
+        })
+}
+
 /// Carry a member's snapshot in the session its build mints: the new session
 /// is born with its target, so its first run applies it, and the member's
 /// owed delivery then answers "already recorded" without a write. A build
 /// that continues an existing session carries nothing (that member receives
 /// its snapshot by delivery), nor does a mob that never recorded a
-/// generation.
+/// generation. `bodies` and `journal` are as
+/// [`member_instruction_record`] reads them.
 pub(crate) fn carry_member_instruction_birth(
     request: &mut meerkat_core::service::CreateSessionRequest,
     state: &mob_dsl::MobMachineState,
     bodies: &OperatorInstructionBodies,
+    journal: Option<&[MobEvent]>,
     mob_id: &MobId,
     agent_identity: &AgentIdentity,
     member_profile: &str,
 ) -> Result<(), MobError> {
-    if state.operator_instruction_generation == 0 {
+    if !birth_carries_member_instructions(request, state) {
         return Ok(());
     }
-    let Some(build) = request.build.as_mut() else {
+    let Some(carrier) = request
+        .build
+        .as_mut()
+        .and_then(|build| build.resume_session.as_mut())
+    else {
         return Ok(());
     };
-    if build.session_build_intent() != meerkat_core::SessionBuildIntent::Mint {
-        return Ok(());
-    }
-    let Some(carrier) = build.resume_session.as_mut() else {
-        return Ok(());
-    };
-    let record = member_instruction_record(state, bodies, mob_id, agent_identity, member_profile)?;
+    let record = member_instruction_record(
+        state,
+        bodies,
+        journal,
+        mob_id,
+        agent_identity,
+        member_profile,
+    )?;
     carrier
         .record_instruction_target(record)
         .map(|_| ())
@@ -998,7 +1214,8 @@ impl MobHandle {
     ///
     /// [`OperatorInstructionError::Refused`] for a typed refusal (a body
     /// digest that is not the body's, a stale or conflicting revision, the
-    /// slot limit, the per-slot body limit, the mob's active budget),
+    /// per-slot body limit, the slot limit and the active budget of a
+    /// member's snapshot),
     /// [`OperatorInstructionError::MobTerminal`] for a completed or destroyed
     /// mob, and [`OperatorInstructionError::Mob`] when the mob cannot answer.
     pub async fn set_operator_instruction(
@@ -1633,6 +1850,199 @@ mod tests {
             namespace: InstructionNamespace::new("app.example").unwrap(),
             key: InstructionKey::new("tone").unwrap(),
         }
+    }
+
+    fn committed_row(
+        cursor: u64,
+        key: &str,
+        revision: u64,
+        body: Option<&str>,
+        target: OperatorInstructionTarget,
+        generation: u64,
+    ) -> MobEvent {
+        let slot = InstructionSlot {
+            namespace: InstructionNamespace::new("app.example").unwrap(),
+            key: InstructionKey::new(key).unwrap(),
+        };
+        MobEvent {
+            cursor,
+            timestamp: chrono::Utc::now(),
+            mob_id: MobId::from("mob"),
+            kind: MobEventKind::OperatorInstructionCommitted(
+                crate::operator_instruction::OperatorInstructionCommittedEvent {
+                    slot,
+                    revision: InstructionRevision::new(revision).unwrap(),
+                    effect: if body.is_some() {
+                        meerkat_core::InstructionEffect::Active
+                    } else {
+                        meerkat_core::InstructionEffect::Absent
+                    },
+                    content_sha256: body.map(InstructionContentDigest::for_body),
+                    body_bytes: body.map_or(0, |body| body.len() as u64),
+                    target,
+                    generation,
+                    body: body.map(str::to_owned),
+                },
+            ),
+        }
+    }
+
+    fn member(name: &str) -> OperatorInstructionTarget {
+        OperatorInstructionTarget::Member {
+            agent_identity: AgentIdentity::from(name),
+        }
+    }
+
+    fn slot_key(key: &str) -> String {
+        InstructionSlot {
+            namespace: InstructionNamespace::new("app.example").unwrap(),
+            key: InstructionKey::new(key).unwrap(),
+        }
+        .machine_key()
+    }
+
+    /// The body store holds the shared records' bodies and only locates the
+    /// member-targeted ones: a member's body is read from its journal row
+    /// for that member's snapshot, a revoked or superseded body is gone, a
+    /// record that becomes shared is held, and a body is never served at
+    /// another digest than the one asked for.
+    #[test]
+    fn the_body_store_holds_shared_bodies_and_locates_member_bodies() {
+        let shared = "Answer formally.";
+        let own_a = "You are agent a. ".repeat(64);
+        let own_b_first = "You are agent b.";
+        let own_b = "You are agent b, revised.";
+        let journal = vec![
+            committed_row(
+                3,
+                "tone",
+                1,
+                Some(shared),
+                OperatorInstructionTarget::Mob,
+                1,
+            ),
+            committed_row(5, "agent-a", 1, Some(&own_a), member("a"), 2),
+            committed_row(6, "agent-b", 1, Some(own_b_first), member("b"), 3),
+            committed_row(9, "agent-b", 2, Some(own_b), member("b"), 4),
+            committed_row(11, "agent-c", 1, Some("You are agent c."), member("c"), 5),
+            committed_row(12, "agent-c", 2, None, member("c"), 6),
+        ];
+        let bodies = OperatorInstructionBodies::from_events(&journal);
+        assert_eq!(
+            bodies.held_body_bytes(),
+            shared.len(),
+            "only the shared record's body is in memory"
+        );
+        let digest = |body: &str| InstructionContentDigest::for_body(body).as_str().to_owned();
+        // The shared body is served without a journal.
+        assert_eq!(
+            bodies.body(&slot_key("tone"), &digest(shared), None),
+            Some(shared)
+        );
+        // A member's body needs its journal row, and is served at its
+        // current digest only.
+        assert_eq!(
+            bodies.body(&slot_key("agent-a"), &digest(&own_a), None),
+            None
+        );
+        assert_eq!(
+            bodies.body(&slot_key("agent-a"), &digest(&own_a), Some(&journal)),
+            Some(own_a.as_str())
+        );
+        assert_eq!(
+            bodies.body(&slot_key("agent-b"), &digest(own_b), Some(&journal)),
+            Some(own_b)
+        );
+        assert_eq!(
+            bodies.body(&slot_key("agent-b"), &digest(own_b_first), Some(&journal)),
+            None,
+            "a superseded body is not served"
+        );
+        assert_eq!(
+            bodies.body(
+                &slot_key("agent-c"),
+                &digest("You are agent c."),
+                Some(&journal)
+            ),
+            None,
+            "a revoked record keeps no body"
+        );
+
+        // The rows one member's snapshot reads are its own Active records'.
+        let mut state = mob_dsl::MobMachineState::default();
+        for (key, body, target) in [("agent-a", own_a.as_str(), "a"), ("agent-b", own_b, "b")] {
+            let key = slot_key(key);
+            state.operator_instruction_revision.insert(key.clone(), 1);
+            state
+                .operator_instruction_effect
+                .insert(key.clone(), mob_dsl::InstructionEffect::Active);
+            state
+                .operator_instruction_digest
+                .insert(key.clone(), digest(body));
+            state
+                .operator_instruction_target_kind
+                .insert(key.clone(), mob_dsl::InstructionTargetKind::Member);
+            state.operator_instruction_target_member.insert(
+                key,
+                mob_dsl::AgentIdentity::from_domain(&AgentIdentity::from(target)),
+            );
+        }
+        let reads = bodies.member_journal_reads(&state, &AgentIdentity::from("b"));
+        assert_eq!(
+            reads,
+            vec![(slot_key("agent-b"), digest(own_b), 9)],
+            "member b reads its own row, at the cursor of its current revision"
+        );
+        assert!(
+            bodies
+                .member_journal_reads(&state, &AgentIdentity::from("z"))
+                .is_empty(),
+            "a member without a record of its own reads no row"
+        );
+        let for_b = bodies.for_member(vec![(slot_key("agent-b"), digest(own_b), Arc::from(own_b))]);
+        assert_eq!(
+            for_b.body(&slot_key("agent-b"), &digest(own_b), None),
+            Some(own_b)
+        );
+        assert_eq!(
+            for_b.body(&slot_key("tone"), &digest(shared), None),
+            Some(shared)
+        );
+        assert_eq!(
+            for_b.body(&slot_key("agent-a"), &digest(&own_a), Some(&journal)),
+            None,
+            "member b's bodies carry no other member's"
+        );
+        assert_eq!(for_b.held_body_bytes(), shared.len() + own_b.len());
+
+        // A member's record that becomes a shared record is held; a reset
+        // epoch starts empty.
+        let mut retargeted = journal.clone();
+        retargeted.push(committed_row(
+            13,
+            "agent-a",
+            2,
+            Some(&own_a),
+            OperatorInstructionTarget::Mob,
+            7,
+        ));
+        assert_eq!(
+            OperatorInstructionBodies::from_events(&retargeted).held_body_bytes(),
+            shared.len() + own_a.len()
+        );
+        let mut reset = journal;
+        reset.push(MobEvent {
+            cursor: 20,
+            timestamp: chrono::Utc::now(),
+            mob_id: MobId::from("mob"),
+            kind: MobEventKind::MobReset,
+        });
+        let after_reset = OperatorInstructionBodies::from_events(&reset);
+        assert_eq!(after_reset.held_body_bytes(), 0);
+        assert_eq!(
+            after_reset.body(&slot_key("tone"), &digest(shared), Some(&reset)),
+            None
+        );
     }
 
     /// A placed member's host answer reads like a local session's: a record

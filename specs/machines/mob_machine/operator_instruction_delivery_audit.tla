@@ -14,7 +14,10 @@
 \*   write (AuditWriteSpec): two members seated and bound (Dormant) under two
 \*     profiles, then every write arm the domain reaches on one slot (a new
 \*     record, a higher revision, an exact repeat, a stale revision, a
-\*     conflict) for a mob, a profile and a member target, every revoke arm
+\*     conflict) for a mob, a profile and each of the two members as a
+\*     member target (so a record moves from one member to the other, the
+\*     arms that look the owed members up instead of searching the seats),
+\*     every revoke arm
 \*     (an unknown slot, stale, repeated, conflicting, committed), the
 \*     delivery's preparation (not owed, prepared), and every record and
 \*     refusal arm for both sessions and every generation. A write is taken
@@ -55,7 +58,8 @@
 \* AuditWitness* operators are reachability goals the runner checks as
 \* expected violations (a state goal as an invariant, a step goal as an
 \* action property), so the properties are not vacuous:
-\*   write: ProfileWriteOwesOne, RetargetOwesLeaver, RecordedReowed,
+\*   write: ProfileWriteOwesOne, RetargetOwesLeaver, MemberRetargetOwesBoth,
+\*     RecordedReowed,
 \*     BlockedThenUnblocked, RecordCloses (step goals), DormantDeliverable
 \*     (state goal);
 \*   seat: SeatAfterWriteOwed, UnseatDropsFacts (step goals),
@@ -90,8 +94,9 @@ AuditRevisions == {1, 2}
 AuditBlock == "OwnedByOtherMob"
 AuditMob == [kind |-> "Mob", profile |-> "", member |-> None]
 AuditProfileOne == [kind |-> "Profile", profile |-> "profile_1", member |-> None]
+AuditMemberOne == [kind |-> "Member", profile |-> "", member |-> Some("agentidentity_1")]
 AuditMemberTwo == [kind |-> "Member", profile |-> "", member |-> Some("agentidentity_2")]
-AuditWriteTargets == {AuditMob, AuditProfileOne, AuditMemberTwo}
+AuditWriteTargets == {AuditMob, AuditProfileOne, AuditMemberOne, AuditMemberTwo}
 AuditSeatTargets == {AuditMob, AuditProfileOne}
 AuditMobId == "mobid_1"
 AuditDisposals == {"RuntimeReleasedOnlyHostOwned", "Archived"}
@@ -408,6 +413,21 @@ AuditWitnessRetargetOwesLeaverStep ==
            /\ ~AuditSelectedAfter(s, id)
            /\ AuditFactAt(member_instruction_owed', id, operator_instruction_generation')
 
+\* Write run: a member-targeted record retargeted to the other member owes
+\* both (the first member's snapshot loses the record, the second gains it).
+\* The machine looks both members up instead of searching the seats.
+AuditWitnessMemberRetargetOwesBothStep ==
+    /\ AuditCommittedWrite
+    /\ \E s \in AuditChangedSlots :
+           /\ s \in DOMAIN operator_instruction_target_kind
+           /\ operator_instruction_target_kind[s] = "Member"
+           /\ operator_instruction_target_kind'[s] = "Member"
+           /\ operator_instruction_target_member[s] # operator_instruction_target_member'[s]
+           /\ AuditFactAt(member_instruction_owed', operator_instruction_target_member[s],
+                          operator_instruction_generation')
+           /\ AuditFactAt(member_instruction_owed', operator_instruction_target_member'[s],
+                          operator_instruction_generation')
+
 \* Write run: a member whose session recorded a snapshot is owed again by a
 \* later write, and keeps what its session recorded.
 AuditWitnessRecordedReowedStep ==
@@ -482,6 +502,7 @@ AuditWitnessRetiringReleasable ==
 
 NotAuditWitnessProfileWriteOwesOne == [][~AuditWitnessProfileWriteOwesOneStep]_vars
 NotAuditWitnessRetargetOwesLeaver == [][~AuditWitnessRetargetOwesLeaverStep]_vars
+NotAuditWitnessMemberRetargetOwesBoth == [][~AuditWitnessMemberRetargetOwesBothStep]_vars
 NotAuditWitnessRecordedReowed == [][~AuditWitnessRecordedReowedStep]_vars
 NotAuditWitnessBlockedThenUnblocked == [][~AuditWitnessBlockedThenUnblockedStep]_vars
 NotAuditWitnessRecordCloses == [][~AuditWitnessRecordClosesStep]_vars

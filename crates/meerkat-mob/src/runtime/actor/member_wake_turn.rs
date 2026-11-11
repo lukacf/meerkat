@@ -565,6 +565,24 @@ impl MobActor {
             return;
         }
         let continuity = self.member_wakes.continuity.slice_for(&identity);
+        // The bodies the member's snapshot reads, should this wake mint its
+        // session: the shared records' and the member's own, read from the
+        // journal here so the restore carries no other member's body.
+        let operator_instruction_bodies = match self.member_instruction_bodies(&identity).await {
+            Ok(bodies) => bodies,
+            Err(error) => {
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    agent_identity = %identity,
+                    %error,
+                    "the member's operator instruction bodies could not be read; its wake is \
+                     retried later"
+                );
+                self.abandon_member_wake(&run, mob_dsl::MemberWakeAbandonKind::Unsettled, None)
+                    .await;
+                return;
+            }
+        };
         let fork_rule = self.fork_overlay_rule(&entry).await;
         // The overlay this process last built the member with, which the
         // member keeps (a released member, or a revival through its wake), as
@@ -615,7 +633,7 @@ impl MobActor {
             followed,
             durable_endpoint,
             member_bound_sessions,
-            operator_instruction_bodies: self.operator_instructions.bodies.clone(),
+            operator_instruction_bodies,
         };
         #[cfg(test)]
         let (probe_mob, probe_member) = (self.definition.id.clone(), identity.clone());
@@ -983,6 +1001,11 @@ impl MobActor {
     ) -> Result<(), MobError> {
         let tool_handle = self.mob_handle_for_tools();
         let no_active_ids = HashSet::new();
+        // The shared records' bodies and the member's own, as the wake that
+        // planned this restore read them.
+        let operator_instruction_bodies = self
+            .member_instruction_bodies(&entry.agent_identity)
+            .await?;
         let continuity = self
             .member_wakes
             .continuity
@@ -1010,7 +1033,8 @@ impl MobActor {
             member_build_preparer: None,
             host_read_handle: &self.member_wakes.host_read_handle,
             unreadable_view_is_retryable: false,
-            operator_instruction_bodies: &self.operator_instructions.bodies,
+            operator_instruction_bodies: &operator_instruction_bodies,
+            operator_instruction_journal: None,
         };
         let mut commit = MemberRestoreCommit {
             authority: &mut self.dsl_authority,
@@ -1802,6 +1826,7 @@ async fn plan_member_wake(input: WakeRestoreInput) -> Result<WakePlan, MobError>
         // A view the store cannot serve now ends this wake retryable.
         unreadable_view_is_retryable: true,
         operator_instruction_bodies: &operator_instruction_bodies,
+        operator_instruction_journal: None,
     };
     // The overlay the followed source holds in this process, or the one its
     // rebuild would compose, computed here, off the actor, without waking it.

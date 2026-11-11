@@ -46,9 +46,10 @@ pub const KERNEL_NATIVE_HELPERS: &[(&str, usize)] = &[
     ("mob_machine_fresh_rotation_sessions", 2),
     ("mob_machine_placed_cleanup_absent_for_identity", 2),
     ("mob_machine_placed_cleanup_obligation", 7),
-    ("mob_machine_instruction_target_members_after_write", 3),
     ("mob_machine_instruction_widest_snapshot_slots", 2),
     ("mob_machine_instruction_widest_snapshot_active_bytes", 4),
+    ("mob_machine_instruction_write_snapshot_slots", 5),
+    ("mob_machine_instruction_write_snapshot_active_bytes", 8),
     ("session_document_instruction_slot_after_set", 3),
     ("session_document_instruction_active_bytes", 2),
     ("session_document_instruction_active_slots", 2),
@@ -1721,14 +1722,17 @@ impl GeneratedMachineKernel {
             "mob_machine_placed_cleanup_obligation" => {
                 self.eval_mob_machine_placed_cleanup_obligation(args, transition_name)
             }
-            "mob_machine_instruction_target_members_after_write" => {
-                self.eval_mob_machine_instruction_target_members_after_write(args, transition_name)
-            }
             "mob_machine_instruction_widest_snapshot_slots" => {
                 self.eval_mob_machine_instruction_widest_snapshot_slots(args, transition_name)
             }
             "mob_machine_instruction_widest_snapshot_active_bytes" => self
                 .eval_mob_machine_instruction_widest_snapshot_active_bytes(args, transition_name),
+            "mob_machine_instruction_write_snapshot_slots" => {
+                self.eval_mob_machine_instruction_write_snapshot_slots(args, transition_name)
+            }
+            "mob_machine_instruction_write_snapshot_active_bytes" => {
+                self.eval_mob_machine_instruction_write_snapshot_active_bytes(args, transition_name)
+            }
             "session_document_instruction_slot_after_set" => {
                 self.eval_session_document_instruction_slot_after_set(args, transition_name)
             }
@@ -1745,25 +1749,34 @@ impl GeneratedMachineKernel {
         }
     }
 
-    /// The member targets of the records as a write leaves them: `slot`
-    /// names the write's member, or no member when the write has none.
-    fn eval_mob_machine_instruction_target_members_after_write(
+    /// The kinds and the member targets of the records as a write leaves
+    /// them: `slot` takes the write's kind and names the write's member, or
+    /// no member when the write has none.
+    fn instruction_targets_after_write(
         &self,
-        args: Vec<KernelValue>,
+        target_kind: KernelValue,
+        target_member: KernelValue,
+        slot: &KernelValue,
+        kind: KernelValue,
+        member: KernelValue,
         transition_name: &TransitionId,
-    ) -> Result<KernelValue, TransitionRefusal> {
-        let [current, slot, member]: [KernelValue; 3] = args.try_into().map_err(|_| {
-            self.eval_error(
-                transition_name,
-                "mob_machine_instruction_target_members_after_write expects three args",
-            )
-        })?;
-        let mut current = current
+    ) -> Result<
+        (
+            BTreeMap<KernelValue, KernelValue>,
+            BTreeMap<KernelValue, KernelValue>,
+        ),
+        TransitionRefusal,
+    > {
+        let mut kinds = target_kind
             .into_map()
             .map_err(|error| self.eval_error(transition_name, error))?;
+        let mut members = target_member
+            .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        kinds.insert(slot.clone(), kind);
         match member {
             KernelValue::None => {
-                current.remove(&slot);
+                members.remove(slot);
             }
             KernelValue::Map(mut some) => {
                 let Some(member) = some.remove(&KernelValue::String("value".to_string())) else {
@@ -1772,7 +1785,7 @@ impl GeneratedMachineKernel {
                         "expected an optional member, found a map without a value",
                     ));
                 };
-                current.insert(slot, member);
+                members.insert(slot.clone(), member);
             }
             other => {
                 return Err(self.eval_error(
@@ -1781,7 +1794,132 @@ impl GeneratedMachineKernel {
                 ));
             }
         }
-        Ok(KernelValue::Map(current))
+        Ok((kinds, members))
+    }
+
+    /// The records of the widest snapshot that holds the written slot once
+    /// the write is applied: the written member's snapshot for a
+    /// member-targeted write, the widest of all for a shared one.
+    fn eval_mob_machine_instruction_write_snapshot_slots(
+        &self,
+        args: Vec<KernelValue>,
+        transition_name: &TransitionId,
+    ) -> Result<KernelValue, TransitionRefusal> {
+        let [target_kind, target_member, slot, kind, member]: [KernelValue; 5] =
+            args.try_into().map_err(|_| {
+                self.eval_error(
+                    transition_name,
+                    "mob_machine_instruction_write_snapshot_slots expects five args",
+                )
+            })?;
+        let (kinds, members) = self.instruction_targets_after_write(
+            target_kind,
+            target_member,
+            &slot,
+            kind,
+            member,
+            transition_name,
+        )?;
+        let written = self
+            .instruction_slot_member(&slot, &kinds, &members, transition_name)?
+            .cloned();
+        let Some(written) = written else {
+            return self.eval_mob_machine_instruction_widest_snapshot_slots(
+                vec![KernelValue::Map(kinds), KernelValue::Map(members)],
+                transition_name,
+            );
+        };
+        let mut records = 0_u64;
+        for other in kinds.keys() {
+            let other_member =
+                self.instruction_slot_member(other, &kinds, &members, transition_name)?;
+            if other_member.is_none_or(|other_member| *other_member == written) {
+                records = records.saturating_add(1);
+            }
+        }
+        Ok(KernelValue::U64(records))
+    }
+
+    /// The Active body bytes of the same snapshot, with the written slot
+    /// Active at its body bytes.
+    fn eval_mob_machine_instruction_write_snapshot_active_bytes(
+        &self,
+        args: Vec<KernelValue>,
+        transition_name: &TransitionId,
+    ) -> Result<KernelValue, TransitionRefusal> {
+        let [
+            effect,
+            bytes,
+            target_kind,
+            target_member,
+            slot,
+            body_bytes,
+            kind,
+            member,
+        ]: [KernelValue; 8] = args.try_into().map_err(|_| {
+            self.eval_error(
+                transition_name,
+                "mob_machine_instruction_write_snapshot_active_bytes expects eight args",
+            )
+        })?;
+        let mut effects = effect
+            .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let mut slot_bytes = bytes
+            .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let (kinds, members) = self.instruction_targets_after_write(
+            target_kind,
+            target_member,
+            &slot,
+            kind,
+            member,
+            transition_name,
+        )?;
+        let active = KernelValue::NamedVariant {
+            enum_name: EnumTypeId::parse("InstructionEffect")
+                .map_err(|error| self.eval_error(transition_name, error.to_string()))?,
+            variant: EnumVariantId::parse("Active")
+                .map_err(|error| self.eval_error(transition_name, error.to_string()))?,
+        };
+        effects.insert(slot.clone(), active);
+        slot_bytes.insert(slot.clone(), body_bytes);
+        let written = self
+            .instruction_slot_member(&slot, &kinds, &members, transition_name)?
+            .cloned();
+        let Some(written) = written else {
+            return self.eval_mob_machine_instruction_widest_snapshot_active_bytes(
+                vec![
+                    KernelValue::Map(effects),
+                    KernelValue::Map(slot_bytes),
+                    KernelValue::Map(kinds),
+                    KernelValue::Map(members),
+                ],
+                transition_name,
+            );
+        };
+        let mut total = 0_u64;
+        for (other, other_effect) in &effects {
+            let active = other_effect
+                .as_named_variant("InstructionEffect")
+                .map_err(|error| self.eval_error(transition_name, error))?
+                == "Active";
+            if !active {
+                continue;
+            }
+            let other_member =
+                self.instruction_slot_member(other, &kinds, &members, transition_name)?;
+            if other_member.is_none_or(|other_member| *other_member == written) {
+                let other_bytes = match slot_bytes.get(other) {
+                    Some(value) => value
+                        .as_u64()
+                        .map_err(|error| self.eval_error(transition_name, error))?,
+                    None => 0,
+                };
+                total = total.saturating_add(other_bytes);
+            }
+        }
+        Ok(KernelValue::U64(total))
     }
 
     /// Whether `slot` is a member-targeted record: its kind is Member and the
@@ -5798,45 +5936,108 @@ mod tests {
             kernel
                 .eval_native_helper(
                     "mob_machine_instruction_widest_snapshot_active_bytes",
-                    vec![effects, bytes, kinds, members],
+                    vec![
+                        effects.clone(),
+                        bytes.clone(),
+                        kinds.clone(),
+                        members.clone()
+                    ],
                     &transition,
                 )
                 .expect("widest snapshot active bytes"),
             KernelValue::U64(1130)
         );
         let empty = || KernelValue::Map(BTreeMap::new());
-        // A write with a member names it for the slot; one without a member
-        // leaves the slot unnamed.
-        let two_members = KernelValue::Map(BTreeMap::from([
-            (slot("a1"), agent("agent.a")),
-            (slot("b1"), agent("agent.b")),
-        ]));
-        assert_eq!(
+        // With a write applied: the written member's snapshot for a
+        // member-targeted write, the widest of all for a shared one.
+        let write_slots = |written: &str, kind_after: &str, member: KernelValue| {
             kernel
                 .eval_native_helper(
-                    "mob_machine_instruction_target_members_after_write",
+                    "mob_machine_instruction_write_snapshot_slots",
                     vec![
-                        two_members.clone(),
-                        slot("a1"),
-                        option_some(agent("agent.b"))
+                        kinds.clone(),
+                        members.clone(),
+                        slot(written),
+                        kind(kind_after),
+                        member,
                     ],
                     &transition,
                 )
-                .expect("a member write"),
-            KernelValue::Map(BTreeMap::from([
-                (slot("a1"), agent("agent.b")),
-                (slot("b1"), agent("agent.b")),
-            ]))
-        );
+                .expect("write snapshot slots")
+        };
+        let to = |name: &str| option_some(agent(name));
+        // A new record of agent b: three shared and agent b's two.
         assert_eq!(
+            write_slots("b2", "Member", to("agent.b")),
+            KernelValue::U64(5)
+        );
+        // A first record of agent c: three shared and its one.
+        assert_eq!(
+            write_slots("c1", "Member", to("agent.c")),
+            KernelValue::U64(4)
+        );
+        // Agent a's record moves to agent b: agent b's snapshot, not agent a's.
+        assert_eq!(
+            write_slots("a1", "Member", to("agent.b")),
+            KernelValue::U64(5)
+        );
+        // A new shared record: four shared and agent a's two, the widest.
+        assert_eq!(
+            write_slots("s2", "Mob", KernelValue::None),
+            KernelValue::U64(6)
+        );
+        // Agent a's record becomes shared: four shared and one own at most.
+        assert_eq!(
+            write_slots("a1", "Profile", KernelValue::None),
+            KernelValue::U64(5)
+        );
+        // The slot that was a member's becomes agent b's again.
+        assert_eq!(
+            write_slots("was-member", "Member", to("agent.b")),
+            KernelValue::U64(4)
+        );
+        let write_bytes = |written: &str, body: u64, kind_after: &str, member: KernelValue| {
             kernel
                 .eval_native_helper(
-                    "mob_machine_instruction_target_members_after_write",
-                    vec![two_members, slot("a1"), KernelValue::None],
+                    "mob_machine_instruction_write_snapshot_active_bytes",
+                    vec![
+                        effects.clone(),
+                        bytes.clone(),
+                        kinds.clone(),
+                        members.clone(),
+                        slot(written),
+                        KernelValue::U64(body),
+                        kind(kind_after),
+                        member,
+                    ],
                     &transition,
                 )
-                .expect("a shared write"),
-            KernelValue::Map(BTreeMap::from([(slot("b1"), agent("agent.b"))]))
+                .expect("write snapshot active bytes")
+        };
+        // 1100 shared Active bytes, agent b's 30 and the new 50.
+        assert_eq!(
+            write_bytes("b2", 50, "Member", to("agent.b")),
+            KernelValue::U64(1180)
+        );
+        // A new revision of agent a's Active record: its other one is Absent.
+        assert_eq!(
+            write_bytes("a1", 9, "Member", to("agent.a")),
+            KernelValue::U64(1109)
+        );
+        // A revoked record written again counts at its new body.
+        assert_eq!(
+            write_bytes("a2", 5, "Member", to("agent.a")),
+            KernelValue::U64(1112)
+        );
+        // A new shared body: 1600 shared and agent b's 30, the widest.
+        assert_eq!(
+            write_bytes("s2", 500, "Mob", KernelValue::None),
+            KernelValue::U64(1630)
+        );
+        // Agent a's record moves to agent b.
+        assert_eq!(
+            write_bytes("a1", 9, "Member", to("agent.b")),
+            KernelValue::U64(1139)
         );
         assert_eq!(
             kernel

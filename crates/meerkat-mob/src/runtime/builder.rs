@@ -10782,6 +10782,7 @@ impl MobBuilder {
             host_read_handle: &host_read_handle,
             unreadable_view_is_retryable: false,
             operator_instruction_bodies: &operator_instruction_bodies,
+            operator_instruction_journal: Some(epoch_events),
         };
         restore_resumed_members(
             &restore_context,
@@ -12365,9 +12366,16 @@ pub(super) struct ResumeMemberRestoreContext<'a> {
     /// with the read failure as its diagnostic (the boot rule).
     pub(super) unreadable_view_is_retryable: bool,
     /// The bodies of the mob's Active operator-instruction records: a member
-    /// whose restore mints its session carries its snapshot in it.
+    /// whose restore mints its session carries its snapshot in it. A wake
+    /// hands the shared records' bodies and the woken member's own; a start
+    /// hands what its journal holds in memory and where each member's own
+    /// body is in `operator_instruction_journal`.
     pub(super) operator_instruction_bodies:
         &'a super::operator_instruction_delivery::OperatorInstructionBodies,
+    /// The mob's events of the epoch a start replays, in cursor order: a
+    /// member-targeted record's body is read from its row there. None for a
+    /// wake, whose bodies are resolved for its member.
+    pub(super) operator_instruction_journal: Option<&'a [crate::event::MobEvent]>,
 }
 
 /// Everything a member's restore writes, applied in the member's turn.
@@ -14292,6 +14300,7 @@ async fn provision_fresh_member_session(
         &mut provision_request.create_session,
         base.state(),
         ctx.operator_instruction_bodies,
+        ctx.operator_instruction_journal,
         &definition.id,
         &entry.agent_identity,
         entry.role.as_str(),

@@ -37,7 +37,7 @@ const OTHER_SLOT: &str = "[\"app.example\",\"style\"]";
 const BODY_LIMIT: u64 = 256 * 1024;
 const ACTIVE_BUDGET: u64 = 1024 * 1024;
 
-const ARMS: [&str; 30] = [
+const ARMS: [&str; 31] = [
     "SetOperatorInstructionBodyTooLarge",
     "SetOperatorInstructionSlotLimitExceeded",
     "SetOperatorInstructionNewOverBudget",
@@ -45,6 +45,7 @@ const ARMS: [&str; 30] = [
     "SetOperatorInstructionStale",
     "SetOperatorInstructionDuplicate",
     "SetOperatorInstructionConflict",
+    "SetOperatorInstructionAdvanceSlotLimitExceeded",
     "SetOperatorInstructionAdvanceOverBudget",
     "SetOperatorInstructionAdvance",
     "SetOperatorInstructionTerminal",
@@ -567,6 +568,468 @@ fn limits_and_the_active_budget_are_refused_typed() {
         set(SLOT, 1, DIGEST_A, 1, Target::Mob),
         &refused(SLOT, OperatorInstructionRefusal::SlotLimitExceeded, None),
     );
+}
+
+fn member_slot(index: usize) -> String {
+    format!("[\"agents\",\"m{index:03}\"]")
+}
+
+fn member_name(index: usize) -> &'static str {
+    Box::leak(format!("agent-{index:03}").into_boxed_str())
+}
+
+fn shared_slot(index: usize) -> String {
+    format!("[\"shared\",\"k{index:02}\"]")
+}
+
+fn commits(authority: &mut Authority, input: Signal) -> bool {
+    signal(authority, input)
+        .effects()
+        .iter()
+        .any(|effect| matches!(effect, Effect::OperatorInstructionCommitted { .. }))
+}
+
+/// The slot limit bounds one member's snapshot (the shared records plus the
+/// member's own), not the mob: every agent of a mob can hold its own
+/// member-targeted record, however many agents the mob has.
+#[test]
+fn each_of_many_members_holds_its_own_record() {
+    let mut authority = Authority::new();
+    for index in 0..200 {
+        assert!(
+            commits(
+                &mut authority,
+                set(
+                    &member_slot(index),
+                    1,
+                    DIGEST_A,
+                    10,
+                    Target::Member(member_name(index)),
+                ),
+            ),
+            "the record of member {index} commits"
+        );
+    }
+    assert_eq!(authority.state().operator_instruction_revision.len(), 200);
+    // A revoked record of one member takes no room from another member.
+    signal(&mut authority, revoke(&member_slot(0), 2));
+    assert!(commits(
+        &mut authority,
+        set(
+            &member_slot(200),
+            1,
+            DIGEST_A,
+            10,
+            Target::Member(member_name(200)),
+        ),
+    ));
+}
+
+/// One member's snapshot holds at most 64 records: a member-targeted write
+/// that would be its 65th is refused, while another member still takes its
+/// own, and a shared write that would overfill the fullest member's snapshot
+/// is refused.
+#[test]
+fn a_members_snapshot_holds_at_most_64_records() {
+    let mut authority = Authority::new();
+    for index in 0..60 {
+        signal(
+            &mut authority,
+            set(&shared_slot(index), 1, DIGEST_A, 1, Target::Mob),
+        );
+    }
+    for index in 0..4 {
+        assert!(commits(
+            &mut authority,
+            set(
+                &format!("[\"own\",\"a{index}\"]"),
+                1,
+                DIGEST_A,
+                1,
+                Target::Member("agent-a"),
+            ),
+        ));
+    }
+    assert_verdict_only(
+        &mut authority,
+        set(
+            "[\"own\",\"a4\"]",
+            1,
+            DIGEST_A,
+            1,
+            Target::Member("agent-a"),
+        ),
+        &refused(
+            "[\"own\",\"a4\"]",
+            OperatorInstructionRefusal::SlotLimitExceeded,
+            None,
+        ),
+    );
+    // Another member's snapshot has room for its own four.
+    for index in 0..4 {
+        assert!(
+            commits(
+                &mut authority,
+                set(
+                    &format!("[\"own\",\"b{index}\"]"),
+                    1,
+                    DIGEST_A,
+                    1,
+                    Target::Member("agent-b"),
+                ),
+            ),
+            "member b's own record {index} commits"
+        );
+    }
+    // A shared record would be the 65th of both members' snapshots.
+    assert_verdict_only(
+        &mut authority,
+        set(&shared_slot(60), 1, DIGEST_A, 1, Target::Profile("alpha")),
+        &refused(
+            &shared_slot(60),
+            OperatorInstructionRefusal::SlotLimitExceeded,
+            None,
+        ),
+    );
+    // A new revision of a record already in the snapshot takes no room.
+    assert!(commits(
+        &mut authority,
+        set(
+            "[\"own\",\"a0\"]",
+            2,
+            DIGEST_B,
+            1,
+            Target::Member("agent-a")
+        ),
+    ));
+}
+
+/// A new revision that moves a record into a full snapshot is refused: a
+/// member-targeted record retargeted to every member, and one retargeted to
+/// a member whose snapshot is full.
+#[test]
+fn a_retarget_into_a_full_snapshot_is_refused() {
+    let mut authority = Authority::new();
+    for index in 0..63 {
+        signal(
+            &mut authority,
+            set(&shared_slot(index), 1, DIGEST_A, 1, Target::Mob),
+        );
+    }
+    signal(
+        &mut authority,
+        set("[\"own\",\"a\"]", 1, DIGEST_A, 1, Target::Member("agent-a")),
+    );
+    assert!(commits(
+        &mut authority,
+        set("[\"own\",\"b\"]", 1, DIGEST_A, 1, Target::Member("agent-b")),
+    ));
+    // Member b's record as a shared record: the 65th of member a's snapshot.
+    assert_verdict_only(
+        &mut authority,
+        set("[\"own\",\"b\"]", 2, DIGEST_A, 1, Target::Mob),
+        &refused(
+            "[\"own\",\"b\"]",
+            OperatorInstructionRefusal::SlotLimitExceeded,
+            Some(1),
+        ),
+    );
+    // Member b's record as member a's: the 65th of member a's snapshot.
+    assert_verdict_only(
+        &mut authority,
+        set("[\"own\",\"b\"]", 2, DIGEST_A, 1, Target::Member("agent-a")),
+        &refused(
+            "[\"own\",\"b\"]",
+            OperatorInstructionRefusal::SlotLimitExceeded,
+            Some(1),
+        ),
+    );
+    // To a member whose snapshot has room it moves.
+    assert!(commits(
+        &mut authority,
+        set("[\"own\",\"b\"]", 2, DIGEST_A, 1, Target::Member("agent-c")),
+    ));
+    // A shared record retargeted to one member leaves every snapshot.
+    assert!(commits(
+        &mut authority,
+        set(&shared_slot(0), 2, DIGEST_A, 1, Target::Member("agent-c")),
+    ));
+}
+
+/// The active budget bounds one member's snapshot too: five members each
+/// hold a full body of their own, and the shared bodies plus a member's own
+/// stay within 1 MiB.
+#[test]
+fn the_active_budget_bounds_a_members_snapshot() {
+    let mut authority = Authority::new();
+    for index in 0..5 {
+        assert!(
+            commits(
+                &mut authority,
+                set(
+                    &member_slot(index),
+                    1,
+                    DIGEST_A,
+                    BODY_LIMIT,
+                    Target::Member(member_name(index)),
+                ),
+            ),
+            "member {index}'s full body commits"
+        );
+    }
+    // Three full shared bodies fill every such member's snapshot exactly.
+    for index in 0..3 {
+        assert!(commits(
+            &mut authority,
+            set(&shared_slot(index), 1, DIGEST_A, BODY_LIMIT, Target::Mob),
+        ));
+    }
+    assert_verdict_only(
+        &mut authority,
+        set(&shared_slot(3), 1, DIGEST_A, 1, Target::Mob),
+        &refused(
+            &shared_slot(3),
+            OperatorInstructionRefusal::ActiveSetBudgetExceeded,
+            None,
+        ),
+    );
+    assert_verdict_only(
+        &mut authority,
+        set(
+            "[\"own\",\"extra\"]",
+            1,
+            DIGEST_A,
+            1,
+            Target::Member(member_name(0)),
+        ),
+        &refused(
+            "[\"own\",\"extra\"]",
+            OperatorInstructionRefusal::ActiveSetBudgetExceeded,
+            None,
+        ),
+    );
+    // A member without a record of its own still has a full body's room.
+    assert!(commits(
+        &mut authority,
+        set(
+            &member_slot(5),
+            1,
+            DIGEST_A,
+            BODY_LIMIT,
+            Target::Member(member_name(5)),
+        ),
+    ));
+    // A new revision that grows a shared body past a member's room is
+    // refused; one that moves a member's body to another full member is too.
+    assert_verdict_only(
+        &mut authority,
+        set(&member_slot(5), 2, DIGEST_A, BODY_LIMIT, Target::Mob),
+        &refused(
+            &member_slot(5),
+            OperatorInstructionRefusal::ActiveSetBudgetExceeded,
+            Some(1),
+        ),
+    );
+    assert_verdict_only(
+        &mut authority,
+        set(
+            &member_slot(5),
+            2,
+            DIGEST_A,
+            BODY_LIMIT,
+            Target::Member(member_name(0)),
+        ),
+        &refused(
+            &member_slot(5),
+            OperatorInstructionRefusal::ActiveSetBudgetExceeded,
+            Some(1),
+        ),
+    );
+}
+
+/// Every write's verdict against an independent count: over a long mixed
+/// sequence of writes, retargets and revokes for a few members, a write is
+/// refused `slot_limit_exceeded` exactly when the snapshot of some member
+/// would hold more than 64 records after it, `active_set_budget_exceeded`
+/// exactly when some member's Active bodies would pass 1 MiB (and the slot
+/// limit holds), and commits otherwise. The count here is made per member
+/// from the record maps, without the machine's helpers.
+#[test]
+fn every_write_verdict_agrees_with_an_independent_snapshot_count() {
+    const MEMBERS: [&str; 4] = ["agent-a", "agent-b", "agent-c", "agent-d"];
+    // The widest snapshot (records, Active bytes) of `state` with `slot`
+    // written as `target` with `bytes` Active bytes.
+    fn widest_after(
+        state: &MobMachineState,
+        slot: &str,
+        target: &Target,
+        bytes: u64,
+    ) -> (u64, u64) {
+        let (kind, _, member) = target.parts();
+        let mut records: Vec<(Option<AgentIdentity>, u64)> = state
+            .operator_instruction_revision
+            .keys()
+            .filter(|other| other.as_str() != slot)
+            .map(|other| {
+                let own = (state.operator_instruction_target_kind.get(other)
+                    == Some(&InstructionTargetKind::Member))
+                .then(|| state.operator_instruction_target_member.get(other).cloned())
+                .flatten();
+                let active = state.operator_instruction_effect.get(other)
+                    == Some(&InstructionEffect::Active);
+                let bytes = if active {
+                    state
+                        .operator_instruction_body_bytes
+                        .get(other)
+                        .copied()
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
+                (own, bytes)
+            })
+            .collect();
+        records.push((
+            (kind == InstructionTargetKind::Member)
+                .then_some(member)
+                .flatten(),
+            bytes,
+        ));
+        let shared_count = records.iter().filter(|(own, _)| own.is_none()).count() as u64;
+        let shared_bytes: u64 = records
+            .iter()
+            .filter(|(own, _)| own.is_none())
+            .map(|(_, bytes)| bytes)
+            .sum();
+        let mut widest = (shared_count, shared_bytes);
+        for member in MEMBERS {
+            let own = records
+                .iter()
+                .filter(|(own, _)| own.as_ref() == Some(&identity(member)));
+            let count = shared_count + own.clone().count() as u64;
+            let bytes = shared_bytes + own.map(|(_, bytes)| bytes).sum::<u64>();
+            widest = (widest.0.max(count), widest.1.max(bytes));
+        }
+        widest
+    }
+
+    let mut authority = Authority::new();
+    let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+    let mut next = |bound: u64| {
+        seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (seed >> 33) % bound
+    };
+    let (mut slot_refusals, mut budget_refusals, mut commits_seen) = (0, 0, 0);
+    for _ in 0..4000 {
+        let slot = format!("[\"walk\",\"k{:03}\"]", next(140));
+        let current = authority
+            .state()
+            .operator_instruction_revision
+            .get(&slot)
+            .copied();
+        if current.is_some() && next(10) == 0 {
+            signal(&mut authority, revoke(&slot, current.unwrap_or(0) + 1));
+            continue;
+        }
+        let target = match next(8) {
+            0 => Target::Mob,
+            1 => Target::Profile("alpha"),
+            other => Target::Member(MEMBERS[(other % 4) as usize]),
+        };
+        // Mostly small bodies, sometimes a large one.
+        let bytes = if next(6) == 0 {
+            BODY_LIMIT / (1 + next(4))
+        } else {
+            1 + next(64)
+        };
+        let (slots_after, bytes_after) = widest_after(authority.state(), &slot, &target, bytes);
+        let revision = current.unwrap_or(0) + 1;
+        let transition = signal(
+            &mut authority,
+            set(&slot, revision, DIGEST_A, bytes, target.clone()),
+        );
+        let expected = if slots_after > 64 {
+            refused(
+                &slot,
+                OperatorInstructionRefusal::SlotLimitExceeded,
+                current,
+            )
+        } else if bytes_after > ACTIVE_BUDGET {
+            refused(
+                &slot,
+                OperatorInstructionRefusal::ActiveSetBudgetExceeded,
+                current,
+            )
+        } else {
+            committed(
+                &slot,
+                revision,
+                InstructionEffect::Active,
+                generation(&authority),
+            )
+        };
+        assert_eq!(
+            transition.effects(),
+            expected.as_slice(),
+            "{slot} at revision {revision} for {target:?} with {bytes} bytes: the widest \
+             snapshot after it holds {slots_after} records and {bytes_after} Active bytes"
+        );
+        match transition.effects() {
+            [
+                Effect::OperatorInstructionRefused {
+                    refusal: OperatorInstructionRefusal::SlotLimitExceeded,
+                    ..
+                },
+            ] => slot_refusals += 1,
+            [Effect::OperatorInstructionRefused { .. }] => budget_refusals += 1,
+            _ => commits_seen += 1,
+        }
+    }
+    assert!(
+        slot_refusals > 20 && budget_refusals > 20 && commits_seen > 200,
+        "the walk reaches both limits: {slot_refusals} slot refusals, {budget_refusals} budget \
+         refusals, {commits_seen} commits"
+    );
+    assert!(
+        authority.state().operator_instruction_revision.len() > 64,
+        "the mob holds more records than one snapshot's limit"
+    );
+    Authority::recover_from_state(authority.state().clone())
+        .unwrap_or_else(|error| panic!("the reached state recovers: {error}"));
+}
+
+/// The replay of a journal that holds more records than one snapshot's
+/// limit restores them all: the bound is per member snapshot.
+#[test]
+fn the_replay_restores_more_records_than_one_snapshot_holds() {
+    let mut live = Authority::new();
+    seat(&mut live, member_name(7), "alpha");
+    for index in 0..100 {
+        signal(
+            &mut live,
+            Signal::RecoverOperatorInstruction {
+                slot: member_slot(index),
+                revision: 1,
+                effect: InstructionEffect::Active,
+                digest: DIGEST_A.to_string(),
+                body_bytes: BODY_LIMIT,
+                target_kind: InstructionTargetKind::Member,
+                target_profile: String::new(),
+                target_member: Some(identity(member_name(index))),
+                generation: index as u64 + 1,
+            },
+        );
+    }
+    let state = live.state().clone();
+    assert_eq!(state.operator_instruction_revision.len(), 100);
+    assert_eq!(generation(&live), 100);
+    // Only the record's own member is owed, at its record's generation.
+    assert_eq!(owed(&live, member_name(7)), Some(8));
+    let recovered = Authority::recover_from_state(state.clone())
+        .unwrap_or_else(|error| panic!("a reached state recovers: {error}"));
+    assert_eq!(recovered.state(), &state);
 }
 
 // ---------------------------------------------------------------------------
@@ -1281,6 +1744,60 @@ fn recovered_state_rejects_records_over_the_active_budget() {
     assert_eq!(
         rejected_invariant(state),
         "operator_instruction_active_bytes_bounded"
+    );
+}
+
+/// A state whose snapshot for some member holds more than 64 records does
+/// not recover: 65 shared records, and 64 shared records plus one member's
+/// own.
+#[test]
+fn recovered_state_rejects_a_snapshot_over_the_slot_limit() {
+    fn with_records(shared: usize, own: Option<&str>) -> MobMachineState {
+        let mut state = Authority::new().state().clone();
+        let mut insert = |slot: String, member: Option<&str>| {
+            state.operator_instruction_revision.insert(slot.clone(), 1);
+            state
+                .operator_instruction_effect
+                .insert(slot.clone(), InstructionEffect::Active);
+            state
+                .operator_instruction_digest
+                .insert(slot.clone(), DIGEST_A.to_string());
+            state
+                .operator_instruction_body_bytes
+                .insert(slot.clone(), 1);
+            state.operator_instruction_target_kind.insert(
+                slot.clone(),
+                if member.is_some() {
+                    InstructionTargetKind::Member
+                } else {
+                    InstructionTargetKind::Mob
+                },
+            );
+            state
+                .operator_instruction_target_profile
+                .insert(slot.clone(), String::new());
+            if let Some(member) = member {
+                state
+                    .operator_instruction_target_member
+                    .insert(slot, identity(member));
+            }
+        };
+        for index in 0..shared {
+            insert(shared_slot(index), None);
+        }
+        if let Some(member) = own {
+            insert("[\"own\",\"a\"]".to_string(), Some(member));
+        }
+        state.operator_instruction_generation = 100;
+        state
+    }
+    assert_eq!(
+        rejected_invariant(with_records(65, None)),
+        "operator_instruction_slot_count_bounded"
+    );
+    assert_eq!(
+        rejected_invariant(with_records(64, Some("agent-a"))),
+        "operator_instruction_slot_count_bounded"
     );
 }
 

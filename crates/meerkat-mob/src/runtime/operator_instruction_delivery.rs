@@ -6,8 +6,9 @@
 //! authorizes and reads what it holds:
 //!
 //! - the bodies of the Active records, by digest, rebuilt from the journal;
-//! - a member's snapshot at the machine's generation (every record, Active
-//!   for the member when its target selects the member);
+//! - a member's snapshot at the machine's generation (the shared records and
+//!   the member-targeted records that name the member, each Active for the
+//!   member when its target selects the member);
 //! - the snapshot a member's new session carries at birth;
 //! - the delivery owner, which asks the machine to prepare each owed
 //!   member's delivery and records it in the member's session: through the
@@ -285,10 +286,30 @@ fn machine_revision(key: &str, revision: u64) -> Result<InstructionRevision, Mob
     })
 }
 
-/// One member's whole snapshot at the machine's generation: every record of
-/// the mob, with its body when the record is Active and its target selects
-/// the member (Absent otherwise, so a member that left a selector revokes
-/// the slot).
+/// Whether the record of `key` in `state` is member-targeted at a member
+/// other than `agent_identity`: such a record is in that member's snapshot
+/// only.
+fn record_targets_another_member(
+    state: &mob_dsl::MobMachineState,
+    key: &str,
+    agent_identity: &AgentIdentity,
+) -> bool {
+    state.operator_instruction_target_kind.get(key) == Some(&mob_dsl::InstructionTargetKind::Member)
+        && state
+            .operator_instruction_target_member
+            .get(key)
+            .is_some_and(|member| member.0.as_str() != agent_identity.as_str())
+}
+
+/// One member's whole snapshot at the machine's generation: the shared
+/// records (every member's, or a profile's) and the member-targeted records
+/// that name this member, each with its body when it is Active and its
+/// target selects the member (Absent otherwise, so a member that left a
+/// profile's selector revokes the slot). Another member's member-targeted
+/// record is not in it: a record that moves to another member leaves this
+/// member's snapshot, and its session revokes a slot its target no longer
+/// names. So a snapshot's size follows the shared records and the member's
+/// own, never the number of other members that hold a record.
 pub(crate) fn member_instruction_record(
     state: &mob_dsl::MobMachineState,
     bodies: &OperatorInstructionBodies,
@@ -296,8 +317,11 @@ pub(crate) fn member_instruction_record(
     agent_identity: &AgentIdentity,
     member_profile: &str,
 ) -> Result<InstructionTargetRecord, MobError> {
-    let mut slots = Vec::with_capacity(state.operator_instruction_revision.len());
+    let mut slots = Vec::new();
     for (key, revision) in &state.operator_instruction_revision {
+        if record_targets_another_member(state, key, agent_identity) {
+            continue;
+        }
         let slot = machine_slot(key)?;
         let revision = machine_revision(key, *revision)?;
         let selected = state.operator_instruction_effect.get(key)
@@ -1250,8 +1274,27 @@ impl MobHandle {
                 }
             }
         };
+        // The records of the member's snapshot: the shared records and its
+        // own. Another member's member-targeted record is listed only while
+        // this member's session still records it or has it in effect (a
+        // record that moved away, until the session revokes it).
         let slots = desired
             .iter()
+            .filter(|record| match &record.target {
+                OperatorInstructionTarget::Member { agent_identity }
+                    if agent_identity != identity =>
+                {
+                    read.as_ref().is_some_and(|read| {
+                        read.target
+                            .as_ref()
+                            .is_some_and(|target| target.slot(&record.slot).is_some())
+                            || read.effective.slot(&record.slot).is_some_and(|slot| {
+                                slot.effect() == meerkat_core::InstructionEffect::Active
+                            })
+                    })
+                }
+                _ => true,
+            })
             .map(|record| {
                 member_slot_status(
                     record,
@@ -1465,7 +1508,14 @@ fn member_slot_status(
         MemberInstructionSlotState::Pending {
             reason: MemberInstructionPendingReason::SessionUnborn,
         }
-    } else if recorded != Some(desired) {
+    } else if recorded.is_some_and(|view| view != desired)
+        || (recorded.is_none()
+            && (desired.effect == meerkat_core::InstructionEffect::Active
+                || matches!(delivery, MemberInstructionDeliveryState::Owed { .. })))
+    {
+        // A slot the session's target does not name is recorded as Absent
+        // for this member once its delivery landed: a snapshot leaves out a
+        // record that does not concern its member.
         MemberInstructionSlotState::Pending {
             reason: MemberInstructionPendingReason::DeliveryOwed,
         }

@@ -5481,6 +5481,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SetOperatorInstructionConflictStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `SetOperatorInstructionAdvanceSlotLimitExceededRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SetOperatorInstructionAdvanceSlotLimitExceededStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SetOperatorInstructionAdvanceOverBudgetRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)

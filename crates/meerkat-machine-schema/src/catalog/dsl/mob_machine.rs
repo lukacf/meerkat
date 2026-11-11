@@ -4809,6 +4809,14 @@ macro_rules! mob_catalog_machine_dsl {
                     || (kind == InstructionTargetKind::Member && profile == "" && member != None))
         }
 
+        // The slot limit and the active budget of a write bound one member's
+        // snapshot: the shared records (every member's, or a profile's) plus
+        // the member-targeted records that name the member. The write arms
+        // ask the snapshot natives for the widest snapshot the write leaves,
+        // over every member a record names, from the record maps with the
+        // written slot set (its kind, and its member: none for a write to
+        // every member or to a profile).
+
         disposition DefinitionEpochAdvanced => local seam SurfaceResultAlignment,
         disposition RequestRuntimeBinding => routed [MeerkatMachine] seam NoOwnerRealization,
         disposition SpawnProfileAuthorized => local seam NoOwnerRealization,
@@ -6398,16 +6406,22 @@ macro_rules! mob_catalog_machine_dsl {
                         && self.operator_instruction_target_member.contains_key(slot) == true)))
         }
 
-        // At most 64 records.
+        // At most 64 records in any member's snapshot: the shared records
+        // plus the member-targeted records that name one member. The mob
+        // holds any number of member-targeted records over all its members.
         invariant operator_instruction_slot_count_bounded {
-            self.operator_instruction_revision.len() <= 64
+            mob_machine_instruction_widest_snapshot_slots(
+                self.operator_instruction_target_kind,
+                self.operator_instruction_target_member) <= 64
         }
 
-        // The Active bodies of the records sum to at most 1 MiB.
+        // The Active bodies of any member's snapshot sum to at most 1 MiB.
         invariant operator_instruction_active_bytes_bounded {
-            session_document_instruction_active_bytes(
+            mob_machine_instruction_widest_snapshot_active_bytes(
                 self.operator_instruction_effect,
-                self.operator_instruction_body_bytes) <= 1048576
+                self.operator_instruction_body_bytes,
+                self.operator_instruction_target_kind,
+                self.operator_instruction_target_member) <= 1048576
         }
 
         // Delivery facts name seated members only, and an owed member is
@@ -35626,7 +35640,11 @@ macro_rules! mob_catalog_machine_dsl {
         //
         // A write commits a record (a new slot, or a higher revision) within
         // the slot limit, the per-slot body limit and the active budget, and
-        // advances the generation. Every seated member whose snapshot it
+        // advances the generation. The slot limit and the active budget
+        // bound one member's snapshot (the shared records plus the
+        // member-targeted records that name the member), so a mob holds a
+        // member-targeted record for each of any number of members. Every
+        // seated member whose snapshot it
         // changes (the record's old or new target selects the member) is
         // owed the new generation and unblocked. A repeat of the current
         // revision with the same content is a duplicate, the same revision
@@ -35656,7 +35674,11 @@ macro_rules! mob_catalog_machine_dsl {
             }
             guard "body_within_limit" { body_bytes <= 262144 }
             guard "slot_new" { self.operator_instruction_revision.contains_key(slot) == false }
-            guard "slot_limit_reached" { self.operator_instruction_revision.len() >= 64 }
+            guard "slot_limit_reached" {
+                mob_machine_instruction_widest_snapshot_slots(
+                    session_document_instruction_slot_after_set(self.operator_instruction_target_kind, slot, target_kind),
+                    mob_machine_instruction_target_members_after_write(self.operator_instruction_target_member, slot, target_member)) > 64
+            }
             update {}
             to Running
             emit OperatorInstructionRefused { slot: slot, refusal: OperatorInstructionRefusal::SlotLimitExceeded, current_revision: None }
@@ -35670,11 +35692,17 @@ macro_rules! mob_catalog_machine_dsl {
             }
             guard "body_within_limit" { body_bytes <= 262144 }
             guard "slot_new" { self.operator_instruction_revision.contains_key(slot) == false }
-            guard "slot_room" { 64 > self.operator_instruction_revision.len() }
+            guard "slot_room" {
+                64 >= mob_machine_instruction_widest_snapshot_slots(
+                    session_document_instruction_slot_after_set(self.operator_instruction_target_kind, slot, target_kind),
+                    mob_machine_instruction_target_members_after_write(self.operator_instruction_target_member, slot, target_member))
+            }
             guard "over_budget" {
-                session_document_instruction_active_bytes(
+                mob_machine_instruction_widest_snapshot_active_bytes(
                     session_document_instruction_slot_after_set(self.operator_instruction_effect, slot, InstructionEffect::Active),
-                    session_document_instruction_slot_after_set(self.operator_instruction_body_bytes, slot, body_bytes))
+                    session_document_instruction_slot_after_set(self.operator_instruction_body_bytes, slot, body_bytes),
+                    session_document_instruction_slot_after_set(self.operator_instruction_target_kind, slot, target_kind),
+                    mob_machine_instruction_target_members_after_write(self.operator_instruction_target_member, slot, target_member))
                     > 1048576
             }
             update {}
@@ -35690,12 +35718,18 @@ macro_rules! mob_catalog_machine_dsl {
             }
             guard "body_within_limit" { body_bytes <= 262144 }
             guard "slot_new" { self.operator_instruction_revision.contains_key(slot) == false }
-            guard "slot_room" { 64 > self.operator_instruction_revision.len() }
+            guard "slot_room" {
+                64 >= mob_machine_instruction_widest_snapshot_slots(
+                    session_document_instruction_slot_after_set(self.operator_instruction_target_kind, slot, target_kind),
+                    mob_machine_instruction_target_members_after_write(self.operator_instruction_target_member, slot, target_member))
+            }
             guard "within_budget" {
                 1048576
-                    >= session_document_instruction_active_bytes(
+                    >= mob_machine_instruction_widest_snapshot_active_bytes(
                         session_document_instruction_slot_after_set(self.operator_instruction_effect, slot, InstructionEffect::Active),
-                        session_document_instruction_slot_after_set(self.operator_instruction_body_bytes, slot, body_bytes))
+                        session_document_instruction_slot_after_set(self.operator_instruction_body_bytes, slot, body_bytes),
+                        session_document_instruction_slot_after_set(self.operator_instruction_target_kind, slot, target_kind),
+                        mob_machine_instruction_target_members_after_write(self.operator_instruction_target_member, slot, target_member))
             }
             update {
                 // Every seated member the new record selects is owed it.
@@ -35793,6 +35827,32 @@ macro_rules! mob_catalog_machine_dsl {
             emit OperatorInstructionRefused { slot: slot, refusal: OperatorInstructionRefusal::RevisionConflict, current_revision: self.operator_instruction_revision.get_copied(slot) }
         }
 
+        // A higher revision may move a record into another snapshot (another
+        // member's, or every member's): one that would be a snapshot's 65th
+        // record is refused, as a new slot is.
+        transition SetOperatorInstructionAdvanceSlotLimitExceeded {
+            per_phase [Running, Stopped]
+            on signal SetOperatorInstruction { slot, revision, digest, body_bytes, target_kind, target_profile, target_member }
+            guard "write_well_formed" {
+                operator_instruction_write_well_formed(revision, digest, target_kind, target_profile, target_member) == true
+            }
+            guard "body_within_limit" { body_bytes <= 262144 }
+            guard "revision_not_below_current" {
+                self.operator_instruction_revision.get_cloned(slot).get("value") <= revision
+            }
+            guard "revision_advances" {
+                revision != self.operator_instruction_revision.get_cloned(slot).get("value")
+            }
+            guard "slot_limit_reached" {
+                mob_machine_instruction_widest_snapshot_slots(
+                    session_document_instruction_slot_after_set(self.operator_instruction_target_kind, slot, target_kind),
+                    mob_machine_instruction_target_members_after_write(self.operator_instruction_target_member, slot, target_member)) > 64
+            }
+            update {}
+            to Running
+            emit OperatorInstructionRefused { slot: slot, refusal: OperatorInstructionRefusal::SlotLimitExceeded, current_revision: self.operator_instruction_revision.get_copied(slot) }
+        }
+
         transition SetOperatorInstructionAdvanceOverBudget {
             per_phase [Running, Stopped]
             on signal SetOperatorInstruction { slot, revision, digest, body_bytes, target_kind, target_profile, target_member }
@@ -35806,10 +35866,17 @@ macro_rules! mob_catalog_machine_dsl {
             guard "revision_advances" {
                 revision != self.operator_instruction_revision.get_cloned(slot).get("value")
             }
+            guard "slot_room" {
+                64 >= mob_machine_instruction_widest_snapshot_slots(
+                    session_document_instruction_slot_after_set(self.operator_instruction_target_kind, slot, target_kind),
+                    mob_machine_instruction_target_members_after_write(self.operator_instruction_target_member, slot, target_member))
+            }
             guard "over_budget" {
-                session_document_instruction_active_bytes(
+                mob_machine_instruction_widest_snapshot_active_bytes(
                     session_document_instruction_slot_after_set(self.operator_instruction_effect, slot, InstructionEffect::Active),
-                    session_document_instruction_slot_after_set(self.operator_instruction_body_bytes, slot, body_bytes))
+                    session_document_instruction_slot_after_set(self.operator_instruction_body_bytes, slot, body_bytes),
+                    session_document_instruction_slot_after_set(self.operator_instruction_target_kind, slot, target_kind),
+                    mob_machine_instruction_target_members_after_write(self.operator_instruction_target_member, slot, target_member))
                     > 1048576
             }
             update {}
@@ -35830,11 +35897,18 @@ macro_rules! mob_catalog_machine_dsl {
             guard "revision_advances" {
                 revision != self.operator_instruction_revision.get_cloned(slot).get("value")
             }
+            guard "slot_room" {
+                64 >= mob_machine_instruction_widest_snapshot_slots(
+                    session_document_instruction_slot_after_set(self.operator_instruction_target_kind, slot, target_kind),
+                    mob_machine_instruction_target_members_after_write(self.operator_instruction_target_member, slot, target_member))
+            }
             guard "within_budget" {
                 1048576
-                    >= session_document_instruction_active_bytes(
+                    >= mob_machine_instruction_widest_snapshot_active_bytes(
                         session_document_instruction_slot_after_set(self.operator_instruction_effect, slot, InstructionEffect::Active),
-                        session_document_instruction_slot_after_set(self.operator_instruction_body_bytes, slot, body_bytes))
+                        session_document_instruction_slot_after_set(self.operator_instruction_body_bytes, slot, body_bytes),
+                        session_document_instruction_slot_after_set(self.operator_instruction_target_kind, slot, target_kind),
+                        mob_machine_instruction_target_members_after_write(self.operator_instruction_target_member, slot, target_member))
             }
             update {
                 // Every seated member the old or the new target selects is
@@ -38500,6 +38574,80 @@ macro_rules! mob_catalog_machine_dsl {
                 .fold(0_u64, |total, (slot, _)| {
                     total.saturating_add(bytes.get(slot).copied().unwrap_or(0))
                 })
+        }
+
+        // Operator instructions: the member targets of the records as a
+        // write leaves them. The written slot names the write's member, or
+        // no member when the write targets every member or a profile.
+        fn mob_machine_instruction_target_members_after_write(
+            current: &std::collections::BTreeMap<String, AgentIdentity>,
+            slot: &str,
+            member: &Option<AgentIdentity>,
+        ) -> std::collections::BTreeMap<String, AgentIdentity> {
+            let mut updated = current.clone();
+            match member {
+                Some(member) => {
+                    updated.insert(slot.to_owned(), member.clone());
+                }
+                None => {
+                    updated.remove(slot);
+                }
+            }
+            updated
+        }
+
+        // Operator instructions: a member's snapshot holds the shared
+        // records (every record that is not member-targeted) and the
+        // member-targeted records that name the member. These two natives
+        // answer the widest such snapshot over every member a record names:
+        // the shared records plus the most any one member holds of its own.
+        // A member-targeted record is a slot whose kind is Member and that
+        // the member map names; any other slot counts as shared.
+        fn mob_machine_instruction_widest_snapshot_slots(
+            target_kind: &std::collections::BTreeMap<String, InstructionTargetKind>,
+            target_member: &std::collections::BTreeMap<String, AgentIdentity>,
+        ) -> u64 {
+            let mut shared = 0_u64;
+            let mut own = std::collections::BTreeMap::<&AgentIdentity, u64>::new();
+            for (slot, kind) in target_kind {
+                match target_member.get(slot) {
+                    Some(member) if *kind == InstructionTargetKind::Member => {
+                        let count = own.entry(member).or_insert(0);
+                        *count = count.saturating_add(1);
+                    }
+                    _ => shared = shared.saturating_add(1),
+                }
+            }
+            shared.saturating_add(own.values().copied().max().unwrap_or(0))
+        }
+
+        // The Active body bytes of the widest member snapshot: the shared
+        // records' Active bytes plus the most any one member's own records
+        // hold. A slot the bytes map does not name counts nothing.
+        fn mob_machine_instruction_widest_snapshot_active_bytes(
+            effect: &std::collections::BTreeMap<String, InstructionEffect>,
+            bytes: &std::collections::BTreeMap<String, u64>,
+            target_kind: &std::collections::BTreeMap<String, InstructionTargetKind>,
+            target_member: &std::collections::BTreeMap<String, AgentIdentity>,
+        ) -> u64 {
+            let mut shared = 0_u64;
+            let mut own = std::collections::BTreeMap::<&AgentIdentity, u64>::new();
+            for (slot, slot_effect) in effect {
+                if *slot_effect != InstructionEffect::Active {
+                    continue;
+                }
+                let slot_bytes = bytes.get(slot).copied().unwrap_or(0);
+                match target_member.get(slot) {
+                    Some(member)
+                        if target_kind.get(slot) == Some(&InstructionTargetKind::Member) =>
+                    {
+                        let total = own.entry(member).or_insert(0);
+                        *total = total.saturating_add(slot_bytes);
+                    }
+                    _ => shared = shared.saturating_add(slot_bytes),
+                }
+            }
+            shared.saturating_add(own.values().copied().max().unwrap_or(0))
         }
 
         fn mob_machine_remote_turn_custody_admits(

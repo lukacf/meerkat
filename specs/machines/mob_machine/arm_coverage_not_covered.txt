@@ -204,8 +204,9 @@ FinishExplicitResumeCancelledStopped explicit resume cancellation; the resume ru
 # domains reach; the meerkat-machine-schema region rows
 # (mob_machine_operator_instruction_region.rs) pin the rest.
 SetOperatorInstructionBodyTooLarge* the per-slot body limit refusal; the audit's bodies are one byte, and the region rows pin the refusal
-SetOperatorInstructionSlotLimitExceeded* the slot limit refusal (64 slots); the audit writes one slot, and the region rows pin the refusal
-SetOperatorInstructionNewOverBudget* the active budget refusal of a new slot (1 MiB of Active bodies); the audit's bodies are one byte, and the region rows pin the refusal
+SetOperatorInstructionSlotLimitExceeded* the slot limit refusal of a new slot (64 records in one member's snapshot: the shared records plus the member's own); the audit writes one slot, and the region rows pin the refusal
+SetOperatorInstructionNewOverBudget* the active budget refusal of a new slot (1 MiB of Active bodies in one member's snapshot); the audit's bodies are one byte, and the region rows pin the refusal
+SetOperatorInstructionAdvanceSlotLimitExceeded* the slot limit refusal of a higher revision that moves a record into a full snapshot; the audit writes one slot, and the region rows pin the refusal
 SetOperatorInstructionAdvanceOverBudget* the active budget refusal of a higher revision; the audit's bodies are one byte, and the region rows pin the refusal
 SetOperatorInstructionTerminal* writes to a completed or destroyed mob, refused MobTerminal; the audit keeps the mob Running, and the region rows pin the refusal
 RevokeOperatorInstructionTerminal* revokes on a completed or destroyed mob, refused MobTerminal; the audit keeps the mob Running, and the region rows pin the refusal

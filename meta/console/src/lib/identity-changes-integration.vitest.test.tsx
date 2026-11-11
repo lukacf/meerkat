@@ -29,7 +29,7 @@ interface Harness extends MetaConsoleTransport {
  * carries its agents, its section and their affordances, and each command
  * of the family is answered as the console RPC answers it. With
  * `serveFamily` false the gateway serves no method of the family. */
-function transport(family: Family, { serveFamily = true }: { serveFamily?: boolean } = {}): Harness {
+function transport(family: Family, { serveFamily = true, readOnly = false }: { serveFamily?: boolean; readOnly?: boolean } = {}): Harness {
   const harness: Harness = {
     commands: [],
     loadExperience: async () => ({
@@ -37,7 +37,7 @@ function transport(family: Family, { serveFamily = true }: { serveFamily?: boole
       runtime_id: "identity-changes-runtime",
       storage_scope: SCOPE,
       console_config: {},
-      console_policy: {},
+      console_policy: readOnly ? { read_only: true } : {},
       runtime_capabilities: { can_spawn_members: false, can_send_messages: true, can_retire_members: true },
       agent_sidebar: { live_snapshot: { agents: family.experienceAgents() } },
       identity_changes: family.experienceSection(),
@@ -84,7 +84,7 @@ function seedDock(target: Record<string, unknown>): void {
 
 const ROSTER = { id: "roster", kind: "roster", title: "Roster" };
 
-async function openRoster(family: Family, options?: { serveFamily?: boolean }): Promise<{ view: View; harness: Harness }> {
+async function openRoster(family: Family, options?: { serveFamily?: boolean; readOnly?: boolean }): Promise<{ view: View; harness: Harness }> {
   seedDock(ROSTER);
   const harness = transport(family, options);
   const view = render(<ConsoleApp baseUrl="" transport={harness} />);
@@ -391,6 +391,18 @@ describe("long-term agents in the console", () => {
       view.unmount();
       cleanup();
     }
+
+    // A read-only console offers no change, whatever the section says; the
+    // archived agents are still listed.
+    window.localStorage.clear();
+    const fixed = createScriptedIdentityFamily();
+    fixed.seed({ name: "oldhand", display_name: "Old hand", archived: true });
+    const readOnly = await openRoster(fixed, { readOnly: true });
+    await selectAgent(readOnly.view, "warden");
+    await find(readOnly.view, "roster-archived:oldhand");
+    expect(all.filter((control) => present(readOnly.view, CONTROLS[control]))).toEqual([]);
+    readOnly.view.unmount();
+    cleanup();
 
     // A gateway that serves no method of the family: the console reads
     // nothing of it and shows nothing of it, whatever the section says.

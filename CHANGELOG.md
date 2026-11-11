@@ -35,6 +35,17 @@ them.
 
 ## [Unreleased]
 
+### Changed
+
+- `meerkat-mob-mcp`: the text of the agent mob tools `delegate` and
+  `mob_create` no longer sends a model to `mob_create` and `mob_spawn_member`
+  for "long-lived collaborators" and "long-lived teams". They say that those
+  tools make workers the calling agent manages and retires, and that a
+  long-term agent (a durable, named member with its own conversation and
+  memory) is made with `identity_create` when the agent's tool list has it.
+  Meerkat Meta mounts that tool where the host's identity policy enables it.
+  No tool's behavior or schema changes.
+
 ## [0.9.13] - 2026-11-11
 
 ### Changed

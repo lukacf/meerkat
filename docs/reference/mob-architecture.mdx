@@ -681,7 +681,13 @@ composition without the built-in identity and member store commits no change
   kickoff is spawned once the change committed and runs its kickoff once,
   and the create answers each such spawn (`IdentityCreateOutcome::embodied`):
   embodied, or failed, the change still committed and the identity owed its
-  seat, which the mob's next start embodies once. A placed or externally
+  seat, which the mob's next start embodies once. A host that prepares its
+  members' builds (`MobBuilder::with_member_build_preparer`) is asked
+  before that spawn's provision, as before a wake: when it refuses, for now
+  or for good, the create is still committed, nothing is built, the spawn
+  is answered failed with the host's reason and the identity is owed its
+  seat; the mob's next start asks the host again and embodies the identity
+  once it prepares. A placed or externally
   bound identity is hosted on its first use,
   one whose creation its host holds (`CreatedIdentityRequest::held_creation`)
   awaits it, and one whose host prepares it first waits unseated; their

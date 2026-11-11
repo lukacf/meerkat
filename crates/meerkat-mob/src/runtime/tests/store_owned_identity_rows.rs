@@ -858,6 +858,82 @@ async fn a_creates_kickoff_spawn_asks_the_hosts_build_preparer_before_its_build(
     );
 }
 
+/// Row: a kickoff spawn the host refused to prepare is owed again at the
+/// mob's next start. The start asks the host's build preparer again about
+/// that identity, and once the host prepares, the identity is embodied and
+/// its kickoff runs once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_start_asks_the_host_again_about_a_kickoff_spawn_it_refused_to_prepare() {
+    use crate::runtime::{MemberBuildPreparationRefusal, MemberBuildPrepared};
+    let preparer = ScriptedPreparer::new();
+    let mut mob = StoreOwnedMob::build(
+        store_owned_definition("kickoff-refused-then-prepared"),
+        MobStorage::in_memory(),
+        {
+            let preparer = preparer.clone();
+            move |builder| builder.with_member_build_preparer(preparer)
+        },
+    )
+    .await;
+    mob.service.set_keep_alive_turns_complete_immediately(true);
+    preparer.answer(Err(MemberBuildPreparationRefusal::Retryable {
+        reason: "the host is not ready for this member yet".to_string(),
+    }));
+    let created = mob
+        .create_outcome(
+            StoreOwnedIdentityCreate::new(
+                operation("create-waiter"),
+                IdentityChangeRequesterInput::host("console"),
+                vec![CreatedIdentityRequest::new(
+                    spec("waiter", "worker")
+                        .with_runtime_mode_override(crate::MobRuntimeMode::AutonomousHost)
+                        .with_initial_message(meerkat_core::types::ContentInput::from("Wait.")),
+                )],
+            ),
+            ALLOW,
+        )
+        .await
+        .expect("the create commits");
+    assert!(matches!(
+        created.change,
+        IdentityChangeOutcome::Committed { .. }
+    ));
+    assert!(
+        matches!(
+            created.embodied.get(&id("waiter")),
+            Some(crate::runtime::DeclaredEntryOutcome::Failed { .. })
+        ),
+        "{:?}",
+        created.embodied
+    );
+    mob.unseated_for("waiter", UnseatedEntryCause::SeatOwed)
+        .await;
+    let asked_at_the_create = preparer.asked().len();
+    assert_eq!(
+        asked_at_the_create, 1,
+        "the host was asked once at the create"
+    );
+
+    preparer.answer(Ok(MemberBuildPrepared::Prepared));
+    mob.restart_configured(MobCompositionAuthority::Authoritative, {
+        let preparer = preparer.clone();
+        move |builder| builder.with_member_build_preparer(preparer)
+    })
+    .await;
+    mob.service.set_keep_alive_turns_complete_immediately(true);
+    let session = kicked_off(&mob, "waiter", "Wait.").await;
+    assert_eq!(
+        turns_with_prompt(&mob, &session, "Wait.").await,
+        1,
+        "the next start embodies it once it is prepared"
+    );
+    let asked = preparer.asked();
+    assert!(
+        asked.len() > asked_at_the_create && asked.last() == Some(&(id("waiter"), session)),
+        "the start asked the host again about the identity's spawn: {asked:?}"
+    );
+}
+
 /// Row: a create of more identities than one change commits is refused
 /// `batch_too_large`, and nothing is written.
 #[tokio::test]

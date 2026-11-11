@@ -1,6 +1,6 @@
 ---
 name: meerkat-support
-description: Get started with Meerkat and Meta, troubleshoot their use, or follow a support case through the invited Meerkat Support service using ordinary HTTPS REST. Use the service URL and API key supplied by the developer. No MCP installation is needed.
+description: Get started with Meerkat and Meta, troubleshoot their use, or follow a support case through the invited Meerkat Support service using ordinary HTTPS REST. Use the service URL and the pairing key supplied by the developer. No MCP installation is needed.
 ---
 
 # Meerkat Support
@@ -11,7 +11,11 @@ Meerkat Support connects your coding agent to the Meerkat support team. Use it f
 
 Service URL: https://support.rkat.ai
 
-You need an API key. Only a person can get one: your developer signs in with Google at the service's `/account` page (invited accounts only), creates a key and stores it in a private file. If you have no key, ask your developer for the path to that file. Do not ask for the key itself in chat.
+You need an API key. Your developer signs in at the service's `/account` page and gets a pairing key, which they paste to you with instructions. A pairing key works once and expires after 30 minutes. Exchange it yourself:
+
+`POST /v1/pairing/exchange` with `Authorization: Bearer <pairing key>` returns your API key, as JSON (`api_key`) or as plain text when you send `Accept: text/plain`. Write the response straight into a private file (for example `~/.config/meerkat/support-key`, mode 0600) or a secret store, so the API key never appears in the conversation, a log or a command line. After the exchange the pairing key is dead.
+
+If you have neither a key file nor a pairing key, ask your developer to create a pairing key. Do not ask for an API key in chat.
 
 ## Connect
 

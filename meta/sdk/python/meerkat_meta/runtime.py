@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import hashlib
 import hmac
 import itertools
@@ -1570,6 +1571,10 @@ class MetaRuntime:
             runtime_options["decisions"] = {
                 "ingresses": [dict(entry) for entry in self._config.decision_ingresses]
             }
+        if self._config.identity_creation is not None:
+            runtime_options["identity_creation"] = copy.deepcopy(
+                self._config.identity_creation
+            )
         if self._config.routing_config_path:
             runtime_options["routing_config_path"] = self._config.routing_config_path
         if self._config.host_runnables:

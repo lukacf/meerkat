@@ -1762,6 +1762,9 @@ export class MetaRuntime {
     if (this._config.forkInstructionPolicy !== null) {
       runtimeOptions.fork_instruction_policy = this._config.forkInstructionPolicy;
     }
+    if (this._config.identityCreation != null) {
+      runtimeOptions.identity_creation = structuredClone(this._config.identityCreation);
+    }
     if (this._config.decisionIngresses != null) {
       runtimeOptions.decisions = decisionIngressesOption(this._config.decisionIngresses);
     }

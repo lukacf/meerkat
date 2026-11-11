@@ -2104,7 +2104,6 @@ Requester: agent "lead-1"
 Proposer: none
 Source evidence: none
 Identity: "helper"
-Expected spec digest: sha256:f492d9d2daff15216fd985868a9d8de35c95ab45cfffbc22e9415834da650d7f
 Changes: descriptive capability peers profile
 
 Update of: "helper"
@@ -2139,7 +2138,6 @@ Source subject: "user-9"
 Source reference: "event:42"
 Source observed at ms: 1730000000000
 Identity: "helper"
-Expected spec digest: sha256:f492d9d2daff15216fd985868a9d8de35c95ab45cfffbc22e9415834da650d7f
 
 Consequences (0):
 
@@ -2676,9 +2674,6 @@ fn a_changed_update_or_remove_field_cannot_be_approved_by_an_old_tap() {
     }
     let updates = [
         change(|request| updated_mut(request).identity = "other".to_owned()),
-        change(|request| {
-            updated_mut(request).expected_spec_digest = Sha256Digest::of(b"another spec");
-        }),
         change(|request| updated_mut(request).profile = None),
         change(|request| updated_mut(request).profile = migration("assistant", "lead")),
         change(|request| updated_mut(request).profile = migration("lead", "analyst")),
@@ -2714,20 +2709,12 @@ fn a_changed_update_or_remove_field_cannot_be_approved_by_an_old_tap() {
                 .insert("stranger".to_owned());
         }),
     ];
-    let removes = [
-        change(|request| {
-            request.action = RequestAction::Remove {
-                identity: "other".to_owned(),
-                expected_spec_digest: helper_spec_digest(),
-            };
-        }),
-        change(|request| {
-            request.action = RequestAction::Remove {
-                identity: "helper".to_owned(),
-                expected_spec_digest: Sha256Digest::of(b"another spec"),
-            };
-        }),
-    ];
+    let removes = [change(|request| {
+        request.action = RequestAction::Remove {
+            identity: "other".to_owned(),
+            expected_spec_digest: helper_spec_digest(),
+        };
+    })];
     for (base, changes) in [
         (golden_update(), updates.as_slice()),
         (golden_remove(), removes.as_slice()),

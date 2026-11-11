@@ -2627,6 +2627,314 @@
               ]
             }
           ]
+        },
+        "meta/identity/create": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied",
+            "#/surfaces/rpc/policy_errors/candidate_launch"
+          ],
+          "request": {
+            "required_fields": [
+              "request_id",
+              "agents"
+            ],
+            "optional_fields": [],
+            "note": "Creates the agents (1 to 256, all or nothing), each {name, profile, display_name?, instructions? (an array of sections), context?, labels?, first_message?, peers?}. The requester is the signed-in person, or the host on its console surface. Gated on a writable console and agent.identity.create. An unknown member is refused."
+          },
+          "success": {
+            "required_fields": [
+              "outcome",
+              "operation_id"
+            ],
+            "note": "The change's typed outcome, tagged by outcome: done {operation_id, agents: [{name, state, spec_digest?, spec_revision?, session_id?, seat?, instructions?}]}, pending_decision {operation_id, decision_id, deadline_ms} (nothing is written but the decision) or pending_preparation {operation_id, agents}. The same caller, request_id and request answer the same state again and write nothing."
+          },
+          "errors": [
+            {
+              "codes": [
+                -32058,
+                -32601
+              ],
+              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. -32601 on a console whose launch has no identity creation policy: it does not serve the family."
+            }
+          ]
+        },
+        "meta/identity/update": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied",
+            "#/surfaces/rpc/policy_errors/candidate_launch"
+          ],
+          "request": {
+            "required_fields": [
+              "request_id",
+              "name",
+              "expected_spec_digest"
+            ],
+            "optional_fields": [
+              "set",
+              "peers_add",
+              "peers_remove"
+            ],
+            "note": "Updates one agent at the spec digest the caller read (a moved spec answers stale_spec with the current one). set {display_name?, instructions?, context?, labels?, labels_remove?, profile?}: an absent member is unchanged. An agent's entry of the outcome says what became of an instructions change. Gated on a writable console and agent.identity.manage for the agent. An unknown member is refused."
+          },
+          "success": {
+            "required_fields": [
+              "outcome",
+              "operation_id"
+            ],
+            "note": "The change's typed outcome, tagged by outcome: done {operation_id, agents: [{name, state, spec_digest?, spec_revision?, session_id?, seat?, instructions?}]}, pending_decision {operation_id, decision_id, deadline_ms} (nothing is written but the decision) or pending_preparation {operation_id, agents}. The same caller, request_id and request answer the same state again and write nothing."
+          },
+          "errors": [
+            {
+              "codes": [
+                -32058,
+                -32601
+              ],
+              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. -32601 on a console whose launch has no identity creation policy: it does not serve the family."
+            }
+          ]
+        },
+        "meta/identity/archive": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied",
+            "#/surfaces/rpc/policy_errors/candidate_launch"
+          ],
+          "request": {
+            "required_fields": [
+              "request_id",
+              "name",
+              "expected_spec_digest"
+            ],
+            "optional_fields": [],
+            "note": "Archives one agent: it stops and keeps its name, record, conversation and memory. Gated on a writable console and agent.identity.manage for the agent. An unknown member is refused."
+          },
+          "success": {
+            "required_fields": [
+              "outcome",
+              "operation_id"
+            ],
+            "note": "The change's typed outcome, tagged by outcome: done {operation_id, agents: [{name, state, spec_digest?, spec_revision?, session_id?, seat?, instructions?}]}, pending_decision {operation_id, decision_id, deadline_ms} (nothing is written but the decision) or pending_preparation {operation_id, agents}. The same caller, request_id and request answer the same state again and write nothing."
+          },
+          "errors": [
+            {
+              "codes": [
+                -32058,
+                -32601
+              ],
+              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. -32601 on a console whose launch has no identity creation policy: it does not serve the family."
+            }
+          ]
+        },
+        "meta/identity/unarchive": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied",
+            "#/surfaces/rpc/policy_errors/candidate_launch"
+          ],
+          "request": {
+            "required_fields": [
+              "request_id",
+              "name",
+              "expected_spec_digest"
+            ],
+            "optional_fields": [],
+            "note": "Brings one archived agent back on its archived session. Gated on a writable console and agent.identity.manage for the agent. An unknown member is refused."
+          },
+          "success": {
+            "required_fields": [
+              "outcome",
+              "operation_id"
+            ],
+            "note": "The change's typed outcome, tagged by outcome: done {operation_id, agents: [{name, state, spec_digest?, spec_revision?, session_id?, seat?, instructions?}]}, pending_decision {operation_id, decision_id, deadline_ms} (nothing is written but the decision) or pending_preparation {operation_id, agents}. The same caller, request_id and request answer the same state again and write nothing."
+          },
+          "errors": [
+            {
+              "codes": [
+                -32058,
+                -32601
+              ],
+              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. -32601 on a console whose launch has no identity creation policy: it does not serve the family."
+            }
+          ]
+        },
+        "meta/identity/remove": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied",
+            "#/surfaces/rpc/policy_errors/candidate_launch"
+          ],
+          "request": {
+            "required_fields": [
+              "request_id",
+              "name",
+              "expected_spec_digest"
+            ],
+            "optional_fields": [],
+            "note": "Removes one agent for good: its name is never available again. Gated on a writable console and agent.identity.remove for the agent. An unknown member is refused."
+          },
+          "success": {
+            "required_fields": [
+              "outcome",
+              "operation_id"
+            ],
+            "note": "The change's typed outcome, tagged by outcome: done {operation_id, agents: [{name, state, spec_digest?, spec_revision?, session_id?, seat?, instructions?}]}, pending_decision {operation_id, decision_id, deadline_ms} (nothing is written but the decision) or pending_preparation {operation_id, agents}. The same caller, request_id and request answer the same state again and write nothing."
+          },
+          "errors": [
+            {
+              "codes": [
+                -32058,
+                -32601
+              ],
+              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. -32601 on a console whose launch has no identity creation policy: it does not serve the family."
+            }
+          ]
+        },
+        "meta/identity/withdraw": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied",
+            "#/surfaces/rpc/policy_errors/candidate_launch"
+          ],
+          "request": {
+            "optional_fields": [
+              "request_id",
+              "operation_id"
+            ],
+            "note": "Withdraws a change whose decision is still held, named by the caller's own request_id or by the operation_id an outcome named (exactly one). Gated on a writable console and agent.view."
+          },
+          "success": {
+            "required_fields": [
+              "operation_id",
+              "decision_id"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32058,
+                -32601
+              ],
+              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. -32601 on a console whose launch has no identity creation policy: it does not serve the family."
+            }
+          ]
+        },
+        "meta/identity/get": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "required_fields": [
+              "name"
+            ],
+            "note": "Gated on agent.view for the agent."
+          },
+          "success": {
+            "required_fields": [
+              "name",
+              "profile",
+              "spec_digest",
+              "archived",
+              "readiness",
+              "instructions",
+              "labels",
+              "peers"
+            ],
+            "note": "One agent in full. display_name, spec_revision, provenance {entered, requester_kind, requester, at_ms, consent} (when its record says), open_operations and context are present when set. The read never wakes the agent."
+          },
+          "errors": [
+            {
+              "codes": [
+                -32058,
+                -32601
+              ],
+              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. -32601 on a console whose launch has no identity creation policy: it does not serve the family."
+            }
+          ]
+        },
+        "meta/identity/list": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "optional_fields": [
+              "profile",
+              "include_archived",
+              "after"
+            ],
+            "note": "Gated on agent.view."
+          },
+          "success": {
+            "required_fields": [
+              "agents"
+            ],
+            "note": "A page of the mob's agents in name order, each as get names it without instructions, context, labels and peers; next names the agent to read the next page after. An agent the caller may not view is left out."
+          },
+          "errors": [
+            {
+              "codes": [
+                -32058,
+                -32601
+              ],
+              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. -32601 on a console whose launch has no identity creation policy: it does not serve the family."
+            }
+          ]
+        },
+        "meta/identity/operation": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "optional_fields": [
+              "request_id",
+              "operation_id"
+            ],
+            "note": "Names the caller's own request by request_id, or an operation by the operation_id an outcome named (exactly one). Gated on agent.view."
+          },
+          "success": {
+            "required_fields": [
+              "outcome"
+            ],
+            "note": "The operation's typed outcome as its change answered it (a refused one as a result, outcome refused), or {outcome: unknown, operation_id} for an operation nothing committed under and no decision is held for."
+          },
+          "errors": [
+            {
+              "codes": [
+                -32058,
+                -32601
+              ],
+              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. -32601 on a console whose launch has no identity creation policy: it does not serve the family."
+            }
+          ]
+        },
+        "meta/identity/directory": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "optional_fields": [
+              "query",
+              "after"
+            ],
+            "note": "Gated on agent.view."
+          },
+          "success": {
+            "required_fields": [
+              "profiles",
+              "peers"
+            ],
+            "note": "What the caller may name in a create or an update: profiles [{profile, verdict, lines?, reason?}] and peers [{name, display_name?, profile, verdict, lines?, reason?}], verdict allowed, needs_decision (with the lines a decision shows) or not_allowed (with the rule's reason); next names the entry to read the next page after. A peer the caller may not view is left out."
+          },
+          "errors": [
+            {
+              "codes": [
+                -32058,
+                -32601
+              ],
+              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. -32601 on a console whose launch has no identity creation policy: it does not serve the family."
+            }
+          ]
         }
       }
     },

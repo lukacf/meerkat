@@ -216,7 +216,7 @@ import {
 import { TimelinePanel } from "./panels/TimelinePanel";
 import { OperatorPanel } from "./panels/OperatorPanel";
 import { GatingInboxPanel } from "./panels/GatingInboxPanel";
-import { decisionCardsOf, decisionPageCursor, decisionPageParams, mergeDecisionCards, renderingOf, wholeDecisionIds, type DecisionCardView } from "./panels/decision-cards";
+import { decisionCardsOf, decisionPageCursor, decisionPageParams, mergeDecisionCards, renderingOf, wholeDecisionIds, type DecisionCardView, type OwnDecisionWithdrawal } from "./panels/decision-cards";
 import { AccessPanel, type AccessPreviewResult } from "./panels/AccessPanel";
 import {
   MemoryPanel,
@@ -228,6 +228,9 @@ import {
   type MemoryRecordDetail,
 } from "./panels/MemoryPanel";
 import { RosterPanel } from "./panels/RosterPanel";
+import { agentIdentityControls, identityChangeFlags, parseAgentRecord, refusalSentence } from "./lib/identity-changes";
+import { useIdentityChanges, type IdentityCommand } from "./lib/use-identity-changes";
+import { AgentRecordFacts } from "./panels/IdentityChangePanels";
 import { AgentDetailsPanel, type AgentWorkItem } from "./panels/AgentDetailsPanel";
 import { HealthPanel } from "./panels/HealthPanel";
 import type { ConsoleHealthSnapshot, WorkGraphWireItem } from "./types";
@@ -1430,6 +1433,11 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   // Console schedules: whether this gateway lists them and lets this
   // console change them (`meta/schedule/*` in `meta/capabilities`).
   const [scheduleOffer, setScheduleOffer] = React.useState<ConsoleScheduleOffer>(NO_CONSOLE_SCHEDULES);
+  // Whether the gateway serves the reads of the agents' records: the
+  // details pane then shows who asked for an agent and when, and the roster
+  // lists the archived agents, whether or not any change is offered.
+  const [agentRecordOffered, setAgentRecordOffered] = React.useState(false);
+  const [agentListOffered, setAgentListOffered] = React.useState(false);
   const [transportState, setTransportState] = React.useState<ConsoleTransportState>({
     phase: "connecting", stale: true, freshness: "unknown",
   });
@@ -3164,16 +3172,74 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
             capabilities.methods.includes(consoleCommandMethod(CONSOLE_COMMAND_NAMES.forkMember)),
         );
         setScheduleOffer(consoleScheduleOffer(capabilities.methods));
+        setAgentRecordOffered(
+          capabilities.methods.includes(consoleCommandMethod(CONSOLE_COMMAND_NAMES.getAgentRecord)),
+        );
+        setAgentListOffered(
+          capabilities.methods.includes(consoleCommandMethod(CONSOLE_COMMAND_NAMES.listAgentRecords)),
+        );
       })
       .catch(() => {
         if (!active) return;
         setSideChatsOffered(false);
         setScheduleOffer(NO_CONSOLE_SCHEDULES);
+        setAgentRecordOffered(false);
+        setAgentListOffered(false);
       });
     return () => {
       active = false;
     };
   }, [consoleTransport, canSpawnMembers, sendScope]);
+  // Changes of the team's long-term agents (New agent, Edit, Archive,
+  // Unarchive, Remove): offered as the gateway's experience read says, and
+  // never while this console is read-only. The gateway judges every change
+  // again when it is sent. The archived agents are listed wherever the
+  // gateway serves the read, with or without a control.
+  const identityChanges = useIdentityChanges({
+    flags: identityChangeFlags(consoleReadOnly ? null : experience),
+    readable: agentListOffered,
+    run: (command: IdentityCommand, params) =>
+      executeHeadlessCommand(CONSOLE_COMMAND_NAMES[command], requireWorkbenchTarget(buildControlTarget("roster")), params),
+    onChanged: () => {
+      void loadExperience().catch(() => {});
+    },
+  });
+  // A request that waited for a decision is read again with the roster.
+  const refreshPendingIdentityRequests = identityChanges?.refreshPending;
+  React.useEffect(() => {
+    void refreshPendingIdentityRequests?.();
+  }, [experience, refreshPendingIdentityRequests]);
+  async function loadAgentRecord(name: string) {
+    const record = parseAgentRecord(await executeHeadlessCommand(
+      CONSOLE_COMMAND_NAMES.getAgentRecord,
+      identityWorkbenchTarget(name, "inspect"),
+      { name },
+    ));
+    if (!record) throw new Error("The gateway's answer was not an agent's record.");
+    return record;
+  }
+  // The decision cards of this page's own requests offer their withdrawal:
+  // the gateway answered each request with its decision, so the console
+  // knows the card to be the requester's own from that answer alone.
+  const pendingIdentityRequests = identityChanges?.pending;
+  const withdrawIdentityRequest = identityChanges?.withdraw;
+  const ownIdentityDecisions = React.useMemo<OwnDecisionWithdrawal | undefined>(() => {
+    if (!pendingIdentityRequests?.length || !withdrawIdentityRequest) return undefined;
+    const requests = new Map(pendingIdentityRequests.map((entry) => [entry.decisionId, entry.requestId]));
+    return {
+      decisionIds: new Set(requests.keys()),
+      withdraw: async (decisionId) => {
+        const requestId = requests.get(decisionId);
+        if (!requestId) return null;
+        const answer = await withdrawIdentityRequest(requestId);
+        if (answer.kind === "refused") return refusalSentence(answer.refusal);
+        if (answer.kind === "failed") return answer.message;
+        // The withdrawn decision leaves the cards with their next read.
+        void refreshDecisions().catch(() => {});
+        return null;
+      },
+    };
+  }, [pendingIdentityRequests, withdrawIdentityRequest]);
   // Same-key resend of an uncertain send is safe only against a durable
   // dedupe store; older gateways (field absent) and in-memory stores are not.
   const resendUncertain = experience?.send_dedupe?.durable === true;
@@ -6390,7 +6456,18 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           reset: canReset ? { label: configuredActionLabels.reset, onClick: () => void onLifecycleAction(target.identity, "meta/reset") } : undefined,
           retire: canRetire ? { label: configuredActionLabels.retire, onClick: () => void onLifecycleAction(target.identity, "meta/retire") } : undefined,
         }}
+        identityChanges={identityChanges
+          ? { api: identityChanges, controls: agentIdentityControls(identityChanges.flags, agent?.affordances) }
+          : null}
       >
+        {agentRecordOffered ? (
+          <AgentRecordFacts
+            key={`record:${target.identity}`}
+            load={loadAgentRecord}
+            name={target.identity}
+            refreshToken={identityChanges?.revision ?? 0}
+          />
+        ) : null}
         {scheduleOffer.list ? (
           <SchedulesSection
             key={target.identity}
@@ -6560,6 +6637,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           decisionsNextAfter={decisionNextAfter}
           onLoadMoreDecisions={loadMoreDecisions}
           decisionsLoadingMore={decisionLoadingMore}
+          ownDecisions={ownIdentityDecisions}
           signedIn={Boolean(experience?.access?.subject)}
         />
       );
@@ -6651,6 +6729,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
             retire: !consoleReadOnly && configuredActionVisibility.retire,
             reset: !consoleReadOnly && configuredActionVisibility.reset,
           }}
+          identityChanges={identityChanges}
         />
       );
     if (target.kind === "gates")
@@ -6680,6 +6759,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           decisionsNextAfter={decisionNextAfter}
           onLoadMoreDecisions={loadMoreDecisions}
           decisionsLoadingMore={decisionLoadingMore}
+          ownDecisions={ownIdentityDecisions}
           signedIn={Boolean(experience?.access?.subject)}
         />
       );

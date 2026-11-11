@@ -1,14 +1,20 @@
 import React from "react";
 import { DeadlineChip, useApprovalClock } from "../../../packages/console-components/src/conversation/approval-card";
 import {
+  Button,
   Chip,
   KeyValueList,
   TechnicalDetails,
   formatAbsoluteTime,
-  humanizeEnum,
 } from "../../../packages/console-components/src/panel-kit";
 import type { Tone } from "../../../packages/console-components/src/panel-kit";
-import { phaseWords, type DecisionCardView } from "./decision-cards";
+import {
+  decisionKindWords,
+  isIdentityChangeDecision,
+  phaseWords,
+  type DecisionCardView,
+  type OwnDecisionWithdrawal,
+} from "./decision-cards";
 
 /** The tone of a wire phase. A phase this console does not know reads
  *  neutral. */
@@ -27,13 +33,32 @@ function phaseTone(phase: string): Tone {
   }
 }
 
-/** One durable decision, read only. A whole card shows who approves it,
- *  who asked, its rendering and where it was presented; the decision is
- *  decided there, never here. A status card shows the phase and the times
- *  only, none of what the decision holds. */
-export function DecisionCard({ card, now }: { card: DecisionCardView; now: number }): React.JSX.Element {
+/** One durable decision. A whole card shows who approves it, who asked, its
+ *  rendering and where it was presented; the decision is decided there,
+ *  never here, so no card holds a control for approving. A status card
+ *  shows the phase and the times only, none of what the decision holds. A
+ *  decision on a change of a long-term agent says that a person cannot
+ *  approve their own request, and the card of a request this page made
+ *  offers its withdrawal. */
+export function DecisionCard({ card, now, own }: {
+  card: DecisionCardView;
+  now: number;
+  own?: OwnDecisionWithdrawal;
+}): React.JSX.Element {
   const open = card.phase === "open";
   const presentations = card.presentations ?? [];
+  const identityChange = isIdentityChangeDecision(card.kind);
+  const withdrawable = open && identityChange && own?.decisionIds.has(card.decisionId) === true;
+  const [busy, setBusy] = React.useState(false);
+  const [refusal, setRefusal] = React.useState("");
+  const withdraw = async () => {
+    if (!own) return;
+    setBusy(true);
+    setRefusal("");
+    const refused = await own.withdraw(card.decisionId);
+    setBusy(false);
+    if (refused) setRefusal(refused);
+  };
   return (
     <article
       className="cc-approval cc-decision"
@@ -44,7 +69,7 @@ export function DecisionCard({ card, now }: { card: DecisionCardView; now: numbe
     >
       <header className="cc-approval__header">
         <div className="cc-approval__heading">
-          <strong className="cc-approval__title">{humanizeEnum(card.kind)}</strong>
+          <strong className="cc-approval__title">{decisionKindWords(card.kind)}</strong>
           <Chip tone={phaseTone(card.phase)} mark testId="decision-card-status">{phaseWords(card.phase)}</Chip>
         </div>
         {open && card.deadlineAtMs !== undefined ? (
@@ -52,7 +77,11 @@ export function DecisionCard({ card, now }: { card: DecisionCardView; now: numbe
         ) : null}
       </header>
       {card.statusOnly ? (
-        <p className="cc-decision__note">You asked for this decision. Only its approvers see what it holds.</p>
+        <p className="cc-decision__note">
+          {identityChange
+            ? "You asked for this change. Only its approvers see what it holds, and a person cannot approve their own request."
+            : "You asked for this decision. Only its approvers see what it holds."}
+        </p>
       ) : (
         <>
           <p className="cc-approval__asked">
@@ -84,9 +113,25 @@ export function DecisionCard({ card, now }: { card: DecisionCardView; now: numbe
               }))}
             />
           ) : null}
-          {open ? <p className="cc-approval__hint cc-decision__hint">Decide where it was presented.</p> : null}
+          {open ? (
+            <p className="cc-approval__hint cc-decision__hint">
+              {identityChange
+                ? "Decide where it was presented. A person cannot approve their own request."
+                : "Decide where it was presented."}
+            </p>
+          ) : null}
         </>
       )}
+      {withdrawable ? (
+        <div className="cc-btn-row cc-decision__own">
+          <Button size="sm" disabled={busy} onClick={() => void withdraw()} data-testid="decision-card-withdraw">
+            Withdraw request
+          </Button>
+        </div>
+      ) : null}
+      {refusal ? (
+        <p className="cc-decision__note cc-decision__refusal" role="alert" data-testid="decision-card-withdraw-refused">{refusal}</p>
+      ) : null}
       <TechnicalDetails
         className="cc-approval__details"
         items={[
@@ -107,7 +152,7 @@ export function DecisionCard({ card, now }: { card: DecisionCardView; now: numbe
  *  offers a decision, whether or not a person is signed in. While the last
  *  page read names a cursor, "Load more" asks for the page after it; no
  *  page is read by itself. */
-export function DecisionCardList({ cards, signedIn = false, nextAfter, onLoadMore, loadingMore = false }: {
+export function DecisionCardList({ cards, signedIn = false, nextAfter, onLoadMore, loadingMore = false, own }: {
   cards: readonly DecisionCardView[];
   signedIn?: boolean;
   /** The cursor of the last page read, while more may follow. */
@@ -116,6 +161,8 @@ export function DecisionCardList({ cards, signedIn = false, nextAfter, onLoadMor
   onLoadMore?: (after: string) => void;
   /** Whether that page is being read. */
   loadingMore?: boolean;
+  /** The withdrawal of this page's own requests. */
+  own?: OwnDecisionWithdrawal;
 }): React.JSX.Element | null {
   const deadlines = cards.map((card) => (card.phase === "open" ? card.deadlineAtMs : undefined));
   const now = useApprovalClock(deadlines);
@@ -128,7 +175,7 @@ export function DecisionCardList({ cards, signedIn = false, nextAfter, onLoadMor
       data-signed-in={signedIn ? "true" : "false"}
       data-testid="decision-card-list"
     >
-      {cards.map((card) => <DecisionCard key={card.decisionId} card={card} now={now} />)}
+      {cards.map((card) => <DecisionCard key={card.decisionId} card={card} now={now} own={own} />)}
       {more ? (
         <button
           type="button"

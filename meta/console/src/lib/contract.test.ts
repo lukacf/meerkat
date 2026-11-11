@@ -347,6 +347,19 @@ test("console contract route and method names stay synchronized with Rust http c
       dispatchedRpcMethods.add(method);
     }
   }
+  // The changes and reads of long-term agents dispatch through one guard
+  // (`identity_methods::is_identity_family_method(method)`) to the family's
+  // own handler, which serves the methods of its registry. Resolve the
+  // registry's constants while the HTTP dispatcher routes through the guard.
+  if (/identity_methods::is_identity_family_method\(/.test(rustSource)) {
+    const identitySource = readFileSync(
+      resolve(process.cwd(), "../crates/meerkat-meta/src/rpc/identity_methods.rs"),
+      "utf8",
+    );
+    for (const method of parseIdentityFamilyMethods(identitySource)) {
+      dispatchedRpcMethods.add(method);
+    }
+  }
   // Console-only methods dispatch through named constants of rpc.rs
   // (`request_method == crate::rpc::CONSOLE_WHOAMI_METHOD`); resolve the ones
   // the HTTP dispatcher compares the request method with.
@@ -467,6 +480,22 @@ function parseWorkGraphMethodLists(source: string): Set<string> {
     for (const entry of list[1]!.matchAll(/"([^"]+)"/g)) {
       methods.add(entry[1]!);
     }
+  }
+  return methods;
+}
+
+/** The methods of the long-term agent family: the constants its registry
+ *  (`IDENTITY_FAMILY_METHODS`) lists, resolved in the same module. */
+function parseIdentityFamilyMethods(source: string): Set<string> {
+  const values = new Map<string, string>();
+  for (const match of source.matchAll(/const (IDENTITY_[A-Z_]+): &str = "([^"]+)"/g)) {
+    values.set(match[1]!, match[2]!);
+  }
+  const methods = new Set<string>();
+  const registry = /const IDENTITY_FAMILY_METHODS: &\[&str\] = &\[([^\]]*)\]/.exec(source);
+  for (const name of (registry?.[1] ?? "").matchAll(/IDENTITY_[A-Z_]+/g)) {
+    const value = values.get(name[0]);
+    if (value) methods.add(value);
   }
   return methods;
 }

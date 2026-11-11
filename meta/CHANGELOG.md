@@ -20,6 +20,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (`record: Default::default()`). The status as written on the wire is
   unchanged while the record's members are unset.
 
+### Added
+
+- Console: a person creates, edits, archives, unarchives and removes a
+  long-term agent from the Roster, where the launch has an identity creation
+  policy. New agent takes a profile (each shown with what the host's rules
+  give it: allowed, needs a decision with the decision's lines, or not allowed
+  with the rule's reason), a name, a display name, instructions, peers and a
+  first message. An agent's drawer and its details pane offer Edit (display
+  name, instructions, context, labels, profile, peers), Archive and Remove;
+  archived agents are listed under the roster with Unarchive and Remove.
+  Remove asks first and says that the name can never be used again and that
+  archive is the reversible choice. An outcome reads in words (for an
+  instructions change: when it reaches the agent), a refusal shows the
+  gateway's sentence at the field it names, and a change that waits for a
+  person's decision shows until when and offers its withdrawal. The requester
+  sees that withdrawal for the life of the page; after a reload the request
+  stays visible to its approvers in the decisions view. Each action is sent
+  under one request id, so trying again after a lost answer makes nothing
+  twice. The controls follow the experience read's `identity_changes` section
+  (`available`, `can_create`, `can_change`, `can_remove`) and each agent's
+  `affordances.can_change_identity` and `can_remove_identity`; the details
+  pane shows who asked for an agent and when, as its record says. Every agent
+  looks the same in the roster, whoever asked for it.
+- Console access: the permissions `agent.identity.create`,
+  `agent.identity.manage` and `agent.identity.remove` read in words and sit
+  with the lifecycle permissions in the Access panel.
+- Console command surface (`@console-core` and the stock console): the
+  commands `createAgent`, `updateAgent`, `archiveAgent`, `unarchiveAgent`,
+  `removeAgent`, `withdrawAgentChange`, `getAgentRecord`, `listAgentRecords`,
+  `getAgentChange` and `listAgentDirectory` carry the `meta/identity/*`
+  methods of the same names from the roster and an agent's panes. The console
+  contract (`docs/rct/console-rest-sse-contract-v0.5.0.json`) documents the
+  ten methods.
+
 ### Changed
 
 - `runtime_options.identity_creation`: an approval rule may name the change

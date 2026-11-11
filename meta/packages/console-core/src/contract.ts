@@ -86,6 +86,16 @@ export const CONSOLE_RPC_METHODS = {
   topologyOperationGet: "meta/topology/operation/get",
   topologyAuditQuery: "meta/topology/audit/query",
   mobEventsQuery: "meta/mob_events/query",
+  identityCreate: "meta/identity/create",
+  identityUpdate: "meta/identity/update",
+  identityArchive: "meta/identity/archive",
+  identityUnarchive: "meta/identity/unarchive",
+  identityRemove: "meta/identity/remove",
+  identityWithdraw: "meta/identity/withdraw",
+  identityGet: "meta/identity/get",
+  identityList: "meta/identity/list",
+  identityOperation: "meta/identity/operation",
+  identityDirectory: "meta/identity/directory",
 } as const;
 
 export const CONSOLE_BLOB_PATH_PREFIX = "/blobs/";

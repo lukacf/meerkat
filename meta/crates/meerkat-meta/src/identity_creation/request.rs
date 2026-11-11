@@ -2,6 +2,10 @@
 //! policy makes of it. The normalized request is what a decision holds,
 //! what `render_v1` renders and what the executor runs.
 //!
+//! A refusal names the request field it concerns as a path into the request
+//! as every surface writes it (`agents[1].labels`, `name`, `set.profile`,
+//! `peers_add[0]`; see `family`), never into a type of this module.
+//!
 //! A request creates identities, or changes, archives, unarchives, removes
 //! or adopts one. A create takes the declared spec a host's roster declares
 //! an identity with (`DurableAgentSpec`) and its peers; an update changes
@@ -386,6 +390,18 @@ pub struct UpdateIdentitySpec {
     /// What changes.
     #[serde(default)]
     pub set: UpdateSetSpec,
+}
+
+impl UpdateIdentitySpec {
+    /// An update of `identity`, at the spec whose digest the requester
+    /// read, that changes nothing yet.
+    pub fn new(identity: impl Into<String>, expected_spec_digest: Sha256Digest) -> Self {
+        Self {
+            identity: identity.into(),
+            expected_spec_digest,
+            set: UpdateSetSpec::default(),
+        }
+    }
 }
 
 /// A removal of one identity.
@@ -1066,7 +1082,7 @@ fn normalized_spec(
             IdentityRefusalKind::Unsupported {
                 feature: BOOTSTRAP_TOKEN_FEATURE.to_owned(),
             },
-            format!("{path}.binding"),
+            path,
         ));
     }
     let context = given_context(context.as_ref(), &format!("{path}.context"))?;
@@ -1172,7 +1188,7 @@ pub fn normalize_create(
             IdentityRefusalKind::InvalidRequest {
                 problem: RequestProblem::Empty,
             },
-            "identities",
+            "agents",
         ));
     }
     if specs.len() as u64 > CORE_BATCH_MAX {
@@ -1180,22 +1196,22 @@ pub fn normalize_create(
             IdentityRefusalKind::BatchTooLarge {
                 max: CORE_BATCH_MAX,
             },
-            "identities",
+            "agents",
         ));
     }
     let mut checked: BTreeMap<&str, Checked<'_>> = BTreeMap::new();
     let mut batch: BTreeMap<String, PeerFacts> = BTreeMap::new();
     for (index, request) in specs.iter().enumerate() {
-        let path = format!("identities[{index}].spec");
+        let path = format!("agents[{index}]");
         let spec = &request.spec;
         let identity = spec.identity.as_str();
-        check_name(identity, &format!("{path}.identity"))?;
+        check_name(identity, &format!("{path}.name"))?;
         if checked.contains_key(identity) {
             return Err(refused(
                 IdentityRefusalKind::NameTaken {
                     by: NameTakenBy::Identity,
                 },
-                format!("{path}.identity"),
+                format!("{path}.name"),
             ));
         }
         mob_profile(context, &spec.profile, &format!("{path}.profile"))?;
@@ -1221,8 +1237,8 @@ pub fn normalize_create(
     let mut raise = false;
     let mut identities = Vec::with_capacity(checked.len());
     for (identity, entry) in &checked {
-        let path = format!("identities[{}]", entry.index);
-        let spec = normalized_spec(&entry.request.spec, &format!("{path}.spec"))?;
+        let path = format!("agents[{}]", entry.index);
+        let spec = normalized_spec(&entry.request.spec, &path)?;
         for (key, value) in &entry.authority {
             consequences.insert(Consequence::new(
                 identity,
@@ -1292,7 +1308,7 @@ fn check_entry(
             IdentityRefusalKind::InvalidRequest {
                 problem: RequestProblem::Conflicting,
             },
-            "identity",
+            "name",
         ));
     }
     if requester.agent_identity() == Some(entry.identity.as_str()) {
@@ -1360,7 +1376,7 @@ pub fn normalize_update(
     let new_context = given_context(new_context.as_ref(), "set.context")?;
     if let Some(labels) = descriptive_labels {
         for (key, value) in labels {
-            descriptive_label(policy, key, value, "set.descriptive_labels")?;
+            descriptive_label(policy, key, value, "set.labels")?;
         }
     }
     let mut consequences = BTreeSet::new();
@@ -1369,7 +1385,7 @@ pub fn normalize_update(
             if is_meta_label(key) {
                 return Err(refused(
                     IdentityRefusalKind::ReservedKey { key: key.clone() },
-                    "set.authority_fields",
+                    "set.labels",
                 ));
             }
             if !policy
@@ -1378,7 +1394,7 @@ pub fn normalize_update(
             {
                 return Err(refused(
                     IdentityRefusalKind::AuthorityFieldInvalid { key: key.clone() },
-                    "set.authority_fields",
+                    "set.labels",
                 ));
             }
             consequences.insert(Consequence::new(
@@ -1399,7 +1415,7 @@ pub fn normalize_update(
             IdentityRefusalKind::InvalidRequest {
                 problem: RequestProblem::Conflicting,
             },
-            format!("set.peers_add[{index}]"),
+            format!("peers_add[{index}]"),
         ));
     }
     let no_batch = BTreeMap::new();
@@ -1412,7 +1428,7 @@ pub fn normalize_update(
         &scope,
         &entry.identity,
         peers_add,
-        "set.peers_add",
+        "peers_add",
         &mut consequences,
     )?;
     let updated = UpdatedSpec {

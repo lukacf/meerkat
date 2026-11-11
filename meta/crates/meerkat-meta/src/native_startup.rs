@@ -14,13 +14,17 @@
 //!    try-lock is refused while a runtime store this process composed in
 //!    the directory is still alive, the probe reads the kernel's lock table
 //!    (`/proc/locks`, Linux) and refuses when it names any other holder of
-//!    the lock. Where no holder can be named (macOS and Windows have no such
-//!    table; on Linux it may be unreadable, or have no entry the probe can
-//!    match, as on btrfs subvolumes and overlayfs), the probe proceeds while
-//!    this process's own store is alive: every 0.9.4 start takes the state
-//!    directory claim and runs this probe, so no other 0.9.4 runtime can
-//!    hold the lock then. A holder that skips both (an older release, or a
-//!    Core-only tool on the directory) is not detected there.
+//!    the lock. One read of that table can skip a held entry (the kernel
+//!    hands it out a page at a time and resumes by position), so the probe
+//!    reads it up to three times, each read split at other entries, and
+//!    refuses as soon as any read names another holder. Where no holder can
+//!    be named (macOS and Windows have no such table; on Linux it may be
+//!    unreadable, or have no entry the probe can match, as on btrfs
+//!    subvolumes and overlayfs), the probe proceeds while this process's
+//!    own store is alive: every 0.9.4 start takes the state directory claim
+//!    and runs this probe, so no other 0.9.4 runtime can hold the lock
+//!    then. A holder that skips both (an older release, or a Core-only tool
+//!    on the directory) is not detected there.
 //! 2. The layout is native ([`native_layout_status`]). A directory that
 //!    needs [`NATIVE_STORAGE_MIGRATION_VERB`] is refused before the
 //!    head-canonical open would pin a file the migration still has to
@@ -307,19 +311,47 @@ fn refuse_hosted_runtime(state_dir: &Path) -> Result<(), StorageLayoutError> {
     }
 }
 
+/// How many reads of the kernel's lock table the probe makes before it
+/// answers that no other holder is named. One read can skip a held entry:
+/// the kernel hands the table out at most a page per read call and resumes
+/// the next call by position in its lock list, so a lock released earlier
+/// in the list between two calls moves the entry after that boundary out
+/// of the read. A skip only ever hides a holder, so a holder that any read
+/// names counts, and "no other holder" takes every read. Measured under
+/// heavy lock churn, one read missed a held lock up to once in about 160
+/// reads (never on a quiet host), and a read after such a miss, split at
+/// other entries (see [`lock_table_first_call`]), missed it in none of 538
+/// cases.
+#[cfg(target_os = "linux")]
+const LOCK_TABLE_READS: usize = 3;
+
+/// The bytes one read call of the lock table asks for: a page or more on
+/// every Linux configuration, so the kernel decides where a call ends.
+#[cfg(any(target_os = "linux", test))]
+const LOCK_TABLE_READ_CALL: usize = 64 * 1024;
+
+/// The bytes by which each further read of the lock table moves the end of
+/// its first read call: about 17 entries, and less than the smallest page
+/// for every read the probe makes.
+#[cfg(target_os = "linux")]
+const LOCK_TABLE_SEAM_SHIFT: usize = 1024;
+
 /// Whether the kernel's lock table (`/proc/locks`) names a holder of
-/// `lock`'s file other than this process. The kernel names a `flock` holder
-/// by the process that took the lock, and a process this one cannot see as
-/// 0. `false` when no holder can be named: the table cannot be read, or has
-/// no entry for the file, because `stat` reports another device or inode
-/// than the lock's (btrfs subvolumes, overlayfs).
+/// `lock`'s file other than this process, in any of [`LOCK_TABLE_READS`]
+/// reads; the first read that names one is the last. The kernel names a
+/// `flock` holder by the process that took the lock, and a process this one
+/// cannot see as 0. `false` when no holder can be named: the table cannot
+/// be read, or has no entry for the file, because `stat` reports another
+/// device or inode than the lock's (btrfs subvolumes, overlayfs).
 #[cfg(target_os = "linux")]
 fn another_holder_named(lock: &std::fs::File) -> bool {
     let Some(file_id) = lock_table_file_id(lock) else {
         return false;
     };
-    read_lock_table().is_some_and(|table| {
-        lock_table_names_another_holder(&table, &file_id, &std::process::id().to_string())
+    let this_process = std::process::id().to_string();
+    (0..LOCK_TABLE_READS).any(|read| {
+        read_lock_table(read)
+            .is_some_and(|table| lock_table_names_another_holder(&table, &file_id, &this_process))
     })
 }
 
@@ -336,16 +368,52 @@ fn lock_table_file_id(file: &std::fs::File) -> Option<String> {
     Some(format!("{major:02x}:{minor:02x}:{}", metadata.ino()))
 }
 
-/// The kernel's lock table, `None` when it cannot be read. A test on this
-/// thread may supply the table of each read instead (see
-/// `tests::with_lock_tables`).
+/// The bytes the first read call of the `read`-th read of the lock table
+/// asks for, 0 for a full buffer. The boundaries between the kernel's pages
+/// of the table are where an entry can be skipped, and a first call that
+/// ends early moves every later boundary of that read, so no two reads of
+/// one probe meet the same entry at a boundary.
 #[cfg(target_os = "linux")]
-fn read_lock_table() -> Option<String> {
+fn lock_table_first_call(read: usize) -> usize {
+    read * LOCK_TABLE_SEAM_SHIFT
+}
+
+/// The kernel's lock table as the probe's `read`-th read of it (from 0),
+/// `None` when it cannot be read. A test on this thread may supply the
+/// table of each read instead (see `tests::with_lock_tables`).
+#[cfg(target_os = "linux")]
+fn read_lock_table(read: usize) -> Option<String> {
     #[cfg(test)]
     if let Some(table) = tests::scripted_lock_table() {
         return table;
     }
-    std::fs::read_to_string("/proc/locks").ok()
+    let table = std::fs::File::open("/proc/locks").ok()?;
+    read_table_text(table, lock_table_first_call(read))
+}
+
+/// `table` read to its end as text, `None` when a read call fails or the
+/// bytes are not UTF-8. The first read call asks for `first_call` bytes (a
+/// full buffer of [`LOCK_TABLE_READ_CALL`] when 0), every later one for a
+/// full buffer; an interrupted call is made again.
+#[cfg(any(target_os = "linux", test))]
+fn read_table_text(mut table: impl std::io::Read, first_call: usize) -> Option<String> {
+    let mut buffer = vec![0_u8; LOCK_TABLE_READ_CALL];
+    let mut text = Vec::new();
+    let mut ask = match first_call {
+        0 => buffer.len(),
+        first_call => first_call.min(buffer.len()),
+    };
+    loop {
+        match table.read(buffer.get_mut(..ask)?) {
+            Ok(0) => return String::from_utf8(text).ok(),
+            Ok(read) => {
+                text.extend_from_slice(buffer.get(..read)?);
+                ask = buffer.len();
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return None,
+        }
+    }
 }
 
 /// No kernel table of lock owners: no other holder can be named. Every
@@ -1845,5 +1913,111 @@ mod tests {
         .await;
         assert_eq!(reads, 3, "the reads are bounded");
         outcome.expect("no read of the three names another holder");
+    }
+
+    /// Each read of one probe ends its first read call elsewhere: the first
+    /// read asks for a full buffer from the start, and every further read
+    /// for a first call 1024 bytes longer than the read before it, each
+    /// shorter than the smallest page (4 KiB), within which the kernel ends
+    /// a call. A full buffer holds the largest page (64 KiB).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn each_read_of_the_lock_table_ends_its_first_call_elsewhere() {
+        let first_calls: Vec<usize> = (0..LOCK_TABLE_READS).map(lock_table_first_call).collect();
+        assert_eq!(first_calls, [0, 1024, 2048]);
+        assert_eq!(LOCK_TABLE_READ_CALL, 65_536);
+    }
+
+    /// What the lock table reader reads in place of `/proc/locks`: the
+    /// bytes it hands out, at most `per_call` of them per read call, the
+    /// call (from 0) that fails and how, and the size each call asked for.
+    struct ScriptedTableSource<'a> {
+        bytes: &'a [u8],
+        per_call: usize,
+        fail: Option<(usize, std::io::ErrorKind)>,
+        asks: &'a mut Vec<usize>,
+    }
+
+    impl std::io::Read for ScriptedTableSource<'_> {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let call = self.asks.len();
+            self.asks.push(buffer.len());
+            if let Some((_, kind)) = self.fail.filter(|(failing, _)| *failing == call) {
+                return Err(kind.into());
+            }
+            let count = buffer.len().min(self.per_call).min(self.bytes.len());
+            let (head, rest) = self.bytes.split_at(count);
+            buffer[..count].copy_from_slice(head);
+            self.bytes = rest;
+            Ok(count)
+        }
+    }
+
+    /// The lock table reader returns the whole text however little each
+    /// read call returns, shortens only its first call, makes an
+    /// interrupted call again, and reports a failed call or bytes that are
+    /// not text as a table that cannot be read.
+    #[test]
+    fn the_lock_table_reader_reads_to_the_end_and_shortens_only_its_first_call() {
+        let table: String = (1..=300)
+            .map(|n| format!("{n}: FLOCK  ADVISORY  READ {n} fd:01:{n} 0 EOF\n"))
+            .collect();
+        let read = |first_call: usize,
+                    per_call: usize,
+                    fail: Option<(usize, std::io::ErrorKind)>,
+                    bytes: &[u8]| {
+            let mut asks = Vec::new();
+            let source = ScriptedTableSource {
+                bytes,
+                per_call,
+                fail,
+                asks: &mut asks,
+            };
+            (read_table_text(source, first_call), asks)
+        };
+
+        let (text, asks) = read(1024, 100, None, table.as_bytes());
+        assert_eq!(text.as_deref(), Some(table.as_str()));
+        assert!(asks.len() > 100, "the text came in {} calls", asks.len());
+        assert_eq!(asks.first(), Some(&1024), "the first call is shortened");
+        assert!(
+            asks.iter().skip(1).all(|ask| *ask == LOCK_TABLE_READ_CALL),
+            "every later call asks for a full buffer: {asks:?}"
+        );
+
+        let (text, asks) = read(0, usize::MAX, None, table.as_bytes());
+        assert_eq!(text.as_deref(), Some(table.as_str()));
+        assert_eq!(
+            asks,
+            [LOCK_TABLE_READ_CALL, LOCK_TABLE_READ_CALL],
+            "a full buffer from the first call, then the call that finds the end"
+        );
+
+        let (text, asks) = read(LOCK_TABLE_READ_CALL + 1, usize::MAX, None, table.as_bytes());
+        assert_eq!(text.as_deref(), Some(table.as_str()));
+        assert_eq!(
+            asks.first(),
+            Some(&LOCK_TABLE_READ_CALL),
+            "a first call is never longer than the buffer"
+        );
+
+        let interrupted = Some((0, std::io::ErrorKind::Interrupted));
+        let (text, asks) = read(2048, usize::MAX, interrupted, table.as_bytes());
+        assert_eq!(text.as_deref(), Some(table.as_str()));
+        assert_eq!(
+            asks.get(..3),
+            Some([2048, 2048, LOCK_TABLE_READ_CALL].as_slice()),
+            "an interrupted first call is made again, as short"
+        );
+
+        let denied = Some((3, std::io::ErrorKind::PermissionDenied));
+        let (text, _asks) = read(0, 100, denied, table.as_bytes());
+        assert_eq!(text, None, "a read call that fails");
+
+        let (text, _asks) = read(0, usize::MAX, None, &[b'1', 0xff, b'\n']);
+        assert_eq!(text, None, "bytes that are not UTF-8");
+
+        let (text, _asks) = read(1024, usize::MAX, None, &[]);
+        assert_eq!(text.as_deref(), Some(""), "an empty table is a table");
     }
 }

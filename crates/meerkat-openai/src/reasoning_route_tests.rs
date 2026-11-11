@@ -436,3 +436,64 @@ fn the_marker_alone_changes_no_body() {
         .expect("the request builds"),
     );
 }
+
+/// A level that was resolved for the request's route is sent or refused,
+/// never dropped. A Chat Completions client built for a model without
+/// reasoning support has no place to write one, so it refuses the request
+/// before anything is sent and names the level. A caller's raw level on the
+/// same client is dropped as it always was, and the marker without a level
+/// refuses nothing.
+#[test]
+fn a_resolved_level_is_never_dropped_on_the_chat_completions_wire() {
+    let client = OpenAiCompatibleClient::new_with_options(
+        OpenAiCompatibleMode::ChatCompletions,
+        "remote-model".to_string(),
+        "http://localhost:8000/v1".to_string(),
+        None,
+        OpenAiCompatibleClientOptions {
+            supports_temperature: true,
+            supports_thinking: false,
+            supports_reasoning: false,
+            supports_image_tool_results: false,
+        },
+    );
+    let baseline = client
+        .build_chat_completions_body(&request(UNCATALOGUED_MODEL).with_openai_tag_merge(|_| {}))
+        .expect("the request without a level builds");
+    assert!(baseline.get("reasoning").is_none());
+    assert!(baseline.get("reasoning_effort").is_none());
+
+    for level in EVERY_OPENAI_LEVEL {
+        match client.build_chat_completions_body(&marked(UNCATALOGUED_MODEL, level)) {
+            Err(LlmError::InvalidRequest { message }) => assert_eq!(
+                message,
+                format!(
+                    "reasoning effort '{}' was resolved for this request, but this client \
+                     was built for a model without reasoning support and cannot send it",
+                    level.as_legacy_str()
+                )
+            ),
+            other => panic!(
+                "a resolved level {} must be refused, not dropped: {other:?}",
+                level.as_legacy_str()
+            ),
+        }
+        assert_eq!(
+            client
+                .build_chat_completions_body(&raw(UNCATALOGUED_MODEL, level))
+                .expect("a raw level builds"),
+            baseline,
+            "a raw level {} is dropped as before",
+            level.as_legacy_str()
+        );
+    }
+    assert_eq!(
+        client
+            .build_chat_completions_body(
+                &request(UNCATALOGUED_MODEL)
+                    .with_openai_tag_merge(|tag| tag.reasoning_effort_resolved = true)
+            )
+            .expect("the marker without a level builds"),
+        baseline
+    );
+}

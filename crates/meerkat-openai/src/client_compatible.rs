@@ -5135,6 +5135,55 @@ mod tests {
         assert_eq!(tag.supports_reasoning_override, Some(true));
     }
 
+    /// A level resolved for the route of a self-hosted Responses server
+    /// keeps its marker on the way to the Responses delegate, so the
+    /// delegate writes it and does not judge it by the direct-API catalog
+    /// row of a model whose id the server's remote model happens to share.
+    /// The same level without the marker is still judged by that row.
+    #[test]
+    fn a_resolved_level_keeps_its_marker_for_the_responses_delegate() {
+        use meerkat_core::lifecycle::run_primitive::ReasoningEffort;
+
+        // A remote model named like a catalog model whose row has no `max`.
+        let client = OpenAiCompatibleClient::new_with_options(
+            OpenAiCompatibleMode::Responses,
+            "gpt-5.5".to_string(),
+            "http://localhost:11434/v1".to_string(),
+            None,
+            options(true, true, true, true),
+        );
+        let delegate = client
+            .responses_delegate
+            .as_ref()
+            .expect("a Responses-mode client has its delegate");
+        let request = || {
+            LlmRequest::new(
+                "local-model",
+                vec![Message::User(UserMessage::text("hello".to_string()))],
+            )
+        };
+
+        let resolved = request().with_openai_tag_merge(|tag| {
+            tag.reasoning_effort = Some(ReasoningEffort::Max);
+            tag.reasoning_effort_resolved = true;
+        });
+        let body = delegate
+            .build_request_body(&client.request_with_remote_model(&resolved))
+            .expect("a resolved level is not refused by the catalog row");
+        assert_eq!(body["reasoning"]["effort"], "max");
+
+        let raw = request().with_openai_tag_merge(|tag| {
+            tag.reasoning_effort = Some(ReasoningEffort::Max);
+        });
+        assert!(
+            matches!(
+                delegate.build_request_body(&client.request_with_remote_model(&raw)),
+                Err(LlmError::InvalidRequest { .. })
+            ),
+            "a raw level is judged by the catalog row as before"
+        );
+    }
+
     #[test]
     fn responses_mode_replay_preserves_tool_result_images_for_delegate() {
         let client = OpenAiCompatibleClient::new_with_options(

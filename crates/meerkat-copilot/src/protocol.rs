@@ -1803,6 +1803,41 @@ mod tests {
             assert_ne!(stated_by(serde_json::json!([])), None);
         }
 
+        /// A statement is stored in one form: each word once, the words that
+        /// name a level first, in the order of [`EffortLevel`], then the
+        /// other words in ascending order. Two lists that state the same
+        /// words store the same statement, whatever order they write the
+        /// words in and however often, so the two entries compare equal.
+        #[test]
+        fn a_statement_is_stored_once_in_one_order() {
+            let stored = |statement: serde_json::Value| -> CopilotModelSupports {
+                serde_json::from_value(serde_json::json!({
+                    "streaming": true,
+                    "reasoning_effort": statement
+                }))
+                .expect("a supports block")
+            };
+            let one_form = Some(
+                ["none", "low", "high", "max", "alpha", "ultra"]
+                    .map(str::to_string)
+                    .to_vec(),
+            );
+            let as_first_listed = stored(serde_json::json!([
+                "max", "ultra", "low", "none", "alpha", "high"
+            ]));
+            let reordered_and_repeated = stored(serde_json::json!([
+                "high", "low", "low", "alpha", "max", "ultra", "none", "ultra", 3
+            ]));
+            assert_eq!(as_first_listed.reasoning_effort, one_form);
+            assert_eq!(reordered_and_repeated.reasoning_effort, one_form);
+            assert_eq!(as_first_listed, reordered_and_repeated);
+            assert_eq!(
+                stored(serde_json::json!(["low", "medium", "high"])).reasoning_effort,
+                Some(["low", "medium", "high"].map(str::to_string).to_vec()),
+                "a statement already in that form is stored as the list words it"
+            );
+        }
+
         /// The statement is kept as the list words it, so it serializes as
         /// it was read: words that name no level and repeated words stay.
         #[test]

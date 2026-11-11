@@ -14351,6 +14351,63 @@ mod tests {
             );
         }
 
+        /// A refreshed list that states the same levels for a model in
+        /// another order, or states one of them twice, states nothing new:
+        /// the model keeps its route and a session's prepared route stands.
+        #[tokio::test]
+        async fn a_list_that_reorders_a_models_levels_keeps_its_route() {
+            let clock = TestClock::new();
+            let transport = Arc::new(ScriptedTransport::new([
+                token_response("derived-one"),
+                listing_stating_levels(&["low", "medium", "high"]),
+                listing_stating_levels(&["high", "low", "medium", "low"]),
+            ]));
+            let account = RouteAccount::new(transport.clone(), &clock).await;
+            let client = concrete_routed_client(&account).await;
+            assert_eq!(transport.request_count(), 2, "one mint and one listing");
+            let state = account
+                .runtime
+                .connection_state(&client.connection)
+                .expect("the account's state");
+            let loaded_list = || {
+                state
+                    .cache
+                    .read()
+                    .as_ref()
+                    .and_then(|cached| cached.models.clone())
+                    .expect("a loaded model list")
+            };
+            let fingerprint = |model: &str| {
+                CopilotRouteFingerprint::from(
+                    &resolve_route_for_state(&state, Provider::OpenAI, model)
+                        .expect("a cached route"),
+                )
+            };
+            let first_list = loaded_list();
+            let first = fingerprint("gpt-test");
+
+            // Model discovery is due again (300 s); the token is still fresh.
+            clock.set(301);
+            client
+                .connection
+                .resolved_authorizer()
+                .expect("the route's authorizer")
+                .prepare_request()
+                .await
+                .expect("the token is fresh");
+            settle(|| !Arc::ptr_eq(&first_list, &loaded_list())).await;
+            assert_eq!(transport.request_count(), 3, "one more listing");
+
+            assert!(
+                fingerprint("gpt-test") == first,
+                "the same levels in another order, one of them twice, are the same route"
+            );
+            assert!(
+                !client.refresh_prepared_route().expect("the route resolves"),
+                "the prepared route stands: the list states nothing new for the model"
+            );
+        }
+
         /// A model listing 403 that asks for no account action (a policy, an
         /// integration the account does not allow) is a discovery failure:
         /// the token keeps serving, the sign-in stays valid, and the list is

@@ -39588,6 +39588,63 @@ supports_reasoning = true
         );
     }
 
+    /// An EMPTY lease record is the mark of a holder that is alive but
+    /// could not write its heartbeat (a full disk): the holder empties its
+    /// own record so that it never comes to look gone. Delete and prune must
+    /// keep such a realm without `--force`, and must not clean the record up.
+    #[tokio::test]
+    async fn realm_delete_and_prune_refuse_while_a_lease_record_is_empty() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let state_root = temp.path().join("realms");
+        let realm_id = "holder-on-a-full-disk";
+
+        let _manifest = meerkat_store::ensure_realm_manifest_in(
+            &state_root,
+            realm_id,
+            Some(meerkat_store::RealmBackend::Sqlite),
+            Some(meerkat_store::RealmOrigin::Generated),
+        )
+        .await
+        .expect("create manifest");
+        let paths = meerkat_store::realm_paths_in(&state_root, realm_id);
+        let lease_dir = meerkat_store::realm_lease_dir(&paths);
+        tokio::fs::create_dir_all(&lease_dir)
+            .await
+            .expect("create lease dir");
+        let record = lease_dir.join("holder.json");
+        tokio::fs::write(&record, b"")
+            .await
+            .expect("the emptied lease record");
+
+        let refused = delete_realm(&state_root, realm_id, false)
+            .await
+            .expect_err("delete refuses without --force");
+        assert!(
+            refused.to_string().contains("1 unreadable lease file(s)"),
+            "the refusal names the lease: {refused}"
+        );
+        let outcome = prune_realms_inner(&state_root, true, 0, false)
+            .await
+            .expect("prune outcome");
+        assert_eq!(outcome.skipped_active, 1, "prune keeps the realm");
+        assert_eq!(outcome.removed, 0);
+        assert!(
+            tokio::fs::try_exists(&paths.root).await.unwrap(),
+            "the realm survives delete and prune without --force"
+        );
+        assert_eq!(
+            tokio::fs::read(&record).await.expect("the lease record"),
+            b"",
+            "the emptied record is neither cleaned up nor rewritten"
+        );
+
+        // `--force` stays the way out for a holder that is known to be gone.
+        delete_realm(&state_root, realm_id, true)
+            .await
+            .expect("delete with --force");
+        assert!(!tokio::fs::try_exists(&paths.root).await.unwrap());
+    }
+
     #[test]
     fn test_resolve_scoped_session_id_accepts_session_ref_in_active_realm() {
         let sid = SessionId::new();

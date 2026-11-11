@@ -122,6 +122,77 @@ impl OpenAiLiveClient {
             api_key: api_key.into(),
         }
     }
+
+    /// Remove from `diagnostic`, text the realtime endpoint sent, the API
+    /// key the connection was opened with, and credential shapes. The
+    /// endpoint, or a gateway in front of it, can repeat the connection's
+    /// headers in an error.
+    fn redact_diagnostic(&self, diagnostic: &mut String) {
+        meerkat_core::redact::redact_credentials(diagnostic, |visit| visit(&self.api_key));
+    }
+
+    /// `error` with every field that can carry provider text redacted as
+    /// [`Self::redact_diagnostic`] does; its class is kept.
+    fn redacted_error(&self, mut error: LlmError) -> LlmError {
+        error.redact_diagnostics(|message| self.redact_diagnostic(message));
+        error
+    }
+
+    /// `connection`, opened with this client's API key, as the client hands
+    /// it out: what it reports about a failure carries no API key.
+    fn session_over<S: OpenAiLiveSession>(&self, connection: S) -> KeyRedactingLiveSession<S> {
+        KeyRedactingLiveSession {
+            connection,
+            client: self.clone(),
+        }
+    }
+}
+
+/// A realtime connection whose provider error text has lost the API key the
+/// connection was opened with: the message of an `error` event, the error
+/// of a failed response, and every error the connection itself returns.
+/// Everything a session derives from those (its typed errors, a failed
+/// response's details) is built from the redacted text; events that carry
+/// no error pass through as they are.
+struct KeyRedactingLiveSession<S> {
+    connection: S,
+    /// Holds the API key the connection sent.
+    client: OpenAiLiveClient,
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+impl<S: OpenAiLiveSession> OpenAiLiveSession for KeyRedactingLiveSession<S> {
+    async fn send_raw(&mut self, event: ClientEvent) -> Result<(), LlmError> {
+        self.connection
+            .send_raw(event)
+            .await
+            .map_err(|error| self.client.redacted_error(error))
+    }
+
+    async fn next_event(&mut self) -> Result<Option<ServerEvent>, LlmError> {
+        let mut event = self
+            .connection
+            .next_event()
+            .await
+            .map_err(|error| self.client.redacted_error(error))?;
+        match &mut event {
+            Some(ServerEvent::Error { error, .. }) => {
+                self.client.redact_diagnostic(&mut error.message);
+            }
+            Some(ServerEvent::ResponseDone { response, .. }) => {
+                if let Some(error) = response
+                    .status_details
+                    .as_mut()
+                    .and_then(|details| details.error.as_mut())
+                {
+                    self.client.redact_diagnostic(&mut error.message);
+                }
+            }
+            _ => {}
+        }
+        Ok(event)
+    }
 }
 
 /// Split-half wrapper around `RealtimeClient`.
@@ -451,8 +522,8 @@ impl OpenAiLiveSessionFactory for OpenAiLiveClient {
             None,
         )
         .await
-        .map_err(map_openai_live_error)?;
-        let mut session = RealtimeOpenAiLiveSession::from_client(client);
+        .map_err(|error| self.redacted_error(map_openai_live_error(error)))?;
+        let mut session = self.session_over(RealtimeOpenAiLiveSession::from_client(client));
         configure_openai_live_session(&mut session, open_config).await?;
         Ok(Box::new(session))
     }
@@ -463,8 +534,8 @@ impl OpenAiLiveSessionFactory for OpenAiLiveClient {
     ) -> Result<Box<dyn OpenAiLiveSession>, LlmError> {
         let client = RealtimeClient::connect(&self.api_key, None, Some(target.call_id.as_str()))
             .await
-            .map_err(map_openai_live_error)?;
-        let mut session = RealtimeOpenAiLiveSession::from_client(client);
+            .map_err(|error| self.redacted_error(map_openai_live_error(error)))?;
+        let mut session = self.session_over(RealtimeOpenAiLiveSession::from_client(client));
         wait_for_openai_session_created(&mut session).await?;
         Ok(Box::new(session))
     }
@@ -7007,8 +7078,7 @@ mod tests {
         client: &OpenAiLiveClient,
         connection: FakeOpenAiLiveSession,
     ) -> Box<dyn OpenAiLiveSession> {
-        let _ = client;
-        Box::new(connection)
+        Box::new(client.session_over(connection))
     }
 
     /// A realtime endpoint, or a gateway in front of one, that repeats the

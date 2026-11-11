@@ -62,9 +62,15 @@ them.
   - a blob object (since 0.7.27): the put itself failed at its read-back,
     but the empty or short object stayed at the content address, where reads
     report it as corrupt, until an identical put rewrote it;
-  - the builtin task tools' task file (`.rkat/tasks.json`, since 0.3.0):
+  - the builtin task tools' JSON task file (`.rkat/tasks.json`, since 0.3.0):
     creating, updating or deleting a task returned success, and every stored
-    task was lost;
+    task was lost. Only the file task store writes this file: a Rust
+    embedding that builds the `meerkat` facade without its `session-store`
+    feature, or that builds its tools with the SDK helpers
+    `create_dispatcher_with_builtins_persisted` or
+    `create_dispatcher_with_builtins_in_project`. The shipped `rkat`,
+    `rkat-rpc`, `rkat-rest` and `rkat-mcp` binaries are built with
+    `session-store` and keep tasks in SQLite;
   - an ATIF trajectory export (`rkat session export-atif`, `rkat run
     --export-atif`, since 0.8.22): reported as written, and empty or short.
 
@@ -72,16 +78,22 @@ them.
   returns for a failed open or rename, publishes nothing and removes its
   temporary file: the file it would have replaced stays as it was, and a
   file that did not exist is not created. A realm whose first open fails
-  this way opens normally once writes work again. A refused lease write no
-  longer leaves an unreadable record, which blocked `rkat realm delete` and
-  `rkat realm prune` by accident: the last good record stays, and a holder
-  whose heartbeat writes keep failing is counted stale 30 seconds after its
-  last good heartbeat, as it already was when the heartbeat failed to create
-  or rename its temporary file, so delete and prune no longer refuse on its
-  lease. The realm manifest lock and the first-start marker (since 0.8.4),
-  which such a write left empty without effect, now fail the same way and are
-  removed, so neither stays behind to be waited on. A file an earlier release
-  already emptied is not restored.
+  this way opens normally once writes work again. A lease record is the one
+  file that is still emptied, now on purpose and only at a heartbeat: a
+  holder whose heartbeat cannot replace its record (the write is refused, or
+  the temporary file cannot be created or renamed) empties its own record,
+  which needs no free space. An empty record is counted as unreadable, so
+  `rkat realm delete` and `rkat realm prune` keep refusing without `--force`
+  while the holder is alive on a full disk. Left as it was, the last good
+  record would go stale 30 seconds later and both commands would remove the
+  realm under the running holder, as they could through 0.9.13 when a
+  heartbeat failed to create or rename its temporary file. The next
+  heartbeat that succeeds restores the record; a refused write at a
+  surface's start still fails the start and writes nothing. The realm
+  manifest lock and the first-start marker (since 0.8.4), which such a write
+  left empty without effect, now fail the same way and are removed, so
+  neither stays behind to be waited on. A file an earlier release already
+  emptied is not restored.
 
 ## [0.9.13] - 2026-11-11
 

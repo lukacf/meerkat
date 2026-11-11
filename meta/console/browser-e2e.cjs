@@ -5077,9 +5077,12 @@ async function runIdentityChangesStoryProof() {
     await page.getByTestId("identity-confirm:scout:archive").getByTestId("identity-confirm-yes").click();
     await notice.getByText("Chief scout is archived").waitFor();
     await gone(agent("scout"), "the archived agent in the roster");
+    await page.getByTestId("identity-confirm-cancel").click();
+    // The archived agents are read when they are opened.
+    assert.equal(await page.getByTestId("roster-archived").count(), 0);
+    await page.getByTestId("roster-archived-open").click();
     await page.getByTestId("roster-archived:scout").waitFor();
     await page.screenshot({ path: path.join(evidenceDir, "identity-changes-archived.png"), fullPage: true });
-    await page.getByTestId("identity-confirm-cancel").click();
     await page.getByTestId("roster-archived-action:scout:unarchive").click();
     await page.getByTestId("identity-confirm:scout:unarchive").getByTestId("identity-confirm-yes").click();
     await notice.getByText("Chief scout is back").waitFor();

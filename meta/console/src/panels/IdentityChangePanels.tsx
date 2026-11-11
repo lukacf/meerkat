@@ -937,54 +937,89 @@ export function AgentChangeButtons({
  * The archived agents: each by its name as people know it, with Unarchive
  * and Remove where the gateway offers them. An archived agent has no
  * member, so the roster's own rows do not hold it.
+ *
+ * They are read when the person opens them: the roster shows the control
+ * alone, without a count, and reads nothing for it. An open list is read
+ * again after a change this page made, and when it is closed and opened
+ * again; the roster's own reads do not read it.
  */
 export function ArchivedAgents({
   api,
-  roster,
   onOpen,
 }: {
   api: IdentityChangesApi;
-  /** The roster as last read: the archived agents are read again with it,
-   * so a change somebody else made shows without a change of this page. */
-  roster?: unknown;
   /** Opens the change of an archived agent. */
   onOpen: (agent: AgentSummary, change: "unarchive" | "remove") => void;
-}): React.JSX.Element | null {
-  const [agents, setAgents] = React.useState<AgentSummary[]>([]);
+}): React.JSX.Element {
+  const [open, setOpen] = React.useState(false);
+  const [agents, setAgents] = React.useState<AgentSummary[] | null>(null);
+  const [error, setError] = React.useState("");
   const load = React.useRef(api.loadArchived);
   load.current = api.loadArchived;
+  const listId = React.useId();
   React.useEffect(() => {
+    if (!open) return undefined;
     let active = true;
-    // A list that cannot be read shows nothing: the roster stays usable.
-    load.current().then((value) => { if (active) setAgents(value); }, () => {});
+    load.current().then(
+      (value) => {
+        if (!active) return;
+        setAgents(value);
+        setError("");
+      },
+      (failure) => { if (active) setError(errorMessage(failure)); },
+    );
     return () => { active = false; };
-  }, [api.revision, roster]);
+  }, [open, api.revision]);
   const controls = archivedAgentControls(api.flags);
-  if (agents.length === 0) return null;
+  const toggle = () => {
+    // A closed list keeps nothing: opening it reads it.
+    if (open) {
+      setAgents(null);
+      setError("");
+    }
+    setOpen(!open);
+  };
   return (
-    <section className="identity-archived" aria-label="Archived agents" data-testid="roster-archived">
-      <div className="roster__group-head">Archived <span className="cc-count">{agents.length}</span></div>
-      <ul className="identity-archived__list">
-        {agents.map((agent) => (
-          <li key={agent.name} className="identity-archived__row" data-testid={`roster-archived:${agent.name}`}>
-            <span className="identity-archived__name" title={agent.name}>{agentShownName(agent)}</span>
-            <span className="identity-archived__meta">{humanizeEnum(agent.profile)}</span>
-            <span className="cc-btn-row identity-archived__actions">
-              {controls.unarchive ? (
-                <Button size="sm" onClick={() => onOpen(agent, "unarchive")} data-testid={`roster-archived-action:${agent.name}:unarchive`}>
-                  Unarchive
-                </Button>
-              ) : null}
-              {controls.remove ? (
-                <Button size="sm" variant="danger" onClick={() => onOpen(agent, "remove")} data-testid={`roster-archived-action:${agent.name}:remove`}>
-                  Remove
-                </Button>
-              ) : null}
-            </span>
-          </li>
-        ))}
-      </ul>
-    </section>
+    <div className="identity-archived">
+      <Button size="sm" variant="ghost" aria-expanded={open} aria-controls={open ? listId : undefined} onClick={toggle} data-testid="roster-archived-open">
+        Archived agents
+      </Button>
+      {open ? (
+        <section className="identity-archived__section" id={listId} aria-label="Archived agents" data-testid="roster-archived">
+          {error ? (
+            <Notice tone="crit" role="alert" testId="roster-archived-error">The archived agents could not be read: {error}</Notice>
+          ) : agents === null ? (
+            <LoadingState label="Loading the archived agents" rows={2} />
+          ) : agents.length === 0 ? (
+            <span className="identity-form__hint">No archived agents.</span>
+          ) : (
+            <>
+              <div className="roster__group-head">Archived <span className="cc-count">{agents.length}</span></div>
+              <ul className="identity-archived__list">
+                {agents.map((agent) => (
+                  <li key={agent.name} className="identity-archived__row" data-testid={`roster-archived:${agent.name}`}>
+                    <span className="identity-archived__name" title={agent.name}>{agentShownName(agent)}</span>
+                    <span className="identity-archived__meta">{humanizeEnum(agent.profile)}</span>
+                    <span className="cc-btn-row identity-archived__actions">
+                      {controls.unarchive ? (
+                        <Button size="sm" onClick={() => onOpen(agent, "unarchive")} data-testid={`roster-archived-action:${agent.name}:unarchive`}>
+                          Unarchive
+                        </Button>
+                      ) : null}
+                      {controls.remove ? (
+                        <Button size="sm" variant="danger" onClick={() => onOpen(agent, "remove")} data-testid={`roster-archived-action:${agent.name}:remove`}>
+                          Remove
+                        </Button>
+                      ) : null}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+        </section>
+      ) : null}
+    </div>
   );
 }
 

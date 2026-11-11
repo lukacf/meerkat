@@ -111,6 +111,7 @@
   padding: var(--_cc-sp-4, 8px) var(--_cc-panel-pad-x) 0;
 }
 .identity-archived { padding: var(--_cc-sp-6, 16px) var(--_cc-panel-pad-x) var(--_cc-sp-6, 16px); }
+.identity-archived__section { margin-top: var(--_cc-sp-4, 8px); }
 .identity-archived__list {
   display: flex;
   flex-direction: column;

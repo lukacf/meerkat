@@ -121,10 +121,11 @@ function setField(scope: HTMLElement, testId: string, value: string): void {
   fireEvent.change(within(scope).getByTestId(testId), { target: { value } });
 }
 
-/** Show the roster's archived agents, where it keeps them behind a control. */
+/** Show the roster's archived agents: they are read when the person opens
+ * them. An open list stays open. */
 async function openArchived(view: View): Promise<void> {
-  const open = view.queryByTestId("roster-archived-open");
-  if (open) fireEvent.click(open);
+  const open = await find(view, "roster-archived-open");
+  if (open.getAttribute("aria-expanded") !== "true") fireEvent.click(open);
 }
 
 /** Open New agent and wait for the team's profiles. */
@@ -222,6 +223,7 @@ describe("long-term agents in the console", () => {
     notice = await find(view, "identity-notice");
     expect(noticeWords(notice)).toContain("Chief scout is archived");
     await gone(view, "roster-row:scout");
+    await openArchived(view);
     expect((await find(view, "roster-archived:scout")).textContent).toContain("Chief scout");
     fireEvent.click(view.getByTestId("identity-confirm-cancel"));
 
@@ -318,6 +320,7 @@ describe("long-term agents in the console", () => {
     const peer = within(form).getByTestId("identity-peer:night-desk").closest("label");
     expect(peer?.querySelector(".identity-form__option-name")?.textContent).toBe("Night desk");
     expect(peer?.querySelector("[title='night-desk']")).not.toBeNull();
+    await openArchived(view);
     expect((await find(view, "roster-archived:old-desk")).querySelector(".identity-archived__name")?.textContent).toBe("Old desk");
     fireEvent.click(within(form).getByTestId("identity-profile:worker"));
     setField(form, "identity-field:name", "scout");
@@ -401,6 +404,7 @@ describe("long-term agents in the console", () => {
       entry.apply(family);
       const { view } = await openRoster(family);
       await selectAgent(view, "warden");
+      await openArchived(view);
       await find(view, "roster-archived:oldhand");
       const shown = all.filter((control) => present(view, CONTROLS[control]));
       expect({ off: entry.off, shown }).toEqual({ off: entry.off, shown: all.filter((control) => !entry.hidden.includes(control)) });
@@ -429,6 +433,7 @@ describe("long-term agents in the console", () => {
     fixed.seed({ name: "oldhand", display_name: "Old hand", archived: true });
     const readOnly = await openRoster(fixed, { readOnly: true });
     await selectAgent(readOnly.view, "warden");
+    await openArchived(readOnly.view);
     await find(readOnly.view, "roster-archived:oldhand");
     expect(all.filter((control) => present(readOnly.view, CONTROLS[control]))).toEqual([]);
     readOnly.view.unmount();
@@ -445,6 +450,7 @@ describe("long-term agents in the console", () => {
     await settle(300);
     expect(all.filter((control) => present(view, CONTROLS[control]))).toEqual([]);
     expect(present(view, "roster-archived")).toBe(false);
+    expect(present(view, "roster-archived-open")).toBe(false);
     expect(unserved.calls).toEqual([]);
     view.unmount();
   }, 120_000);
@@ -872,17 +878,42 @@ describe("long-term agents in the console", () => {
     view.unmount();
   }, 60_000);
 
-  it("the_archived_agents_follow_the_roster", async () => {
+  it("the_archived_agents_are_read_when_the_person_opens_them", async () => {
     // The console reads the roster again on its own clock; that clock is
     // the row's to turn.
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     try {
       const family = createScriptedIdentityFamily();
       family.seed({ name: "oldhand", display_name: "Old hand", archived: true });
+      family.seed({ name: "relic", display_name: "The relic", archived: true });
+      const lists = () => calls(family, "meta/identity/list").length;
       const { view } = await openRoster(family);
+      // The roster offers the archived agents behind a control, without a
+      // count: it has read none of them.
+      const open = await find(view, "roster-archived-open");
+      expect(open.getAttribute("aria-expanded")).toBe("false");
+      expect(open.textContent).toBe("Archived agents");
+      expect(present(view, "roster-archived")).toBe(false);
+      await selectAgent(view, "warden");
+      await settle(100);
+      expect(lists()).toBe(0);
+      // Nor does the roster's own next read read them.
+      await act(async () => {
+        vi.advanceTimersByTime(15_000);
+      });
+      await settle(100);
+      expect(lists()).toBe(0);
+
+      // Opening them reads them, once.
+      fireEvent.click(open);
       await find(view, "roster-archived:oldhand");
-      // Somebody else unarchives the agent: the roster's next read lists
-      // it, and the archived agents are read again with it.
+      await find(view, "roster-archived:relic");
+      expect(open.getAttribute("aria-expanded")).toBe("true");
+      expect(view.getByTestId("roster-archived").textContent).toContain("2");
+      expect(lists()).toBe(1);
+
+      // Somebody else unarchives an agent: the roster's next read lists it,
+      // and the open list is not read again for that.
       const oldhand = family.agents.get("oldhand");
       oldhand.archived = false;
       oldhand.readiness = "dormant";
@@ -890,7 +921,26 @@ describe("long-term agents in the console", () => {
         vi.advanceTimersByTime(15_000);
       });
       await find(view, "roster-row:oldhand");
+      await settle(100);
+      expect(lists()).toBe(1);
+      // Closing the list and opening it again reads it again.
+      fireEvent.click(open);
+      await gone(view, "roster-archived");
+      expect(lists()).toBe(1);
+      fireEvent.click(open);
+      await find(view, "roster-archived:relic");
       await gone(view, "roster-archived:oldhand");
+      expect(lists()).toBe(2);
+
+      // A change this page makes reads an open list again: the relic leaves
+      // it when it is unarchived here.
+      fireEvent.click(view.getByTestId("roster-archived-action:relic:unarchive"));
+      fireEvent.click(within(await find(view, "identity-confirm:relic:unarchive")).getByTestId("identity-confirm-yes"));
+      await find(view, "roster-row:relic");
+      await gone(view, "roster-archived:relic");
+      expect(lists()).toBe(3);
+      // An open list without an archived agent says so.
+      expect(view.getByTestId("roster-archived").textContent).toContain("No archived agents");
       view.unmount();
     } finally {
       vi.useRealTimers();

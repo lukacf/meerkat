@@ -718,7 +718,6 @@ export function RosterPanel({
             {identityChanges ? (
               <ArchivedAgents
                 api={identityChanges}
-                roster={agents}
                 onOpen={(agent, change) => {
                   setCreating(false);
                   setAgentChange({ name: agent.name, displayName: agentShownName(agent), change, controls: { archive: false } });

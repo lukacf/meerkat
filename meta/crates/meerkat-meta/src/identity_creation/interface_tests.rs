@@ -761,8 +761,10 @@ fn a_refusal_of_cores_keeps_its_token_and_whether_it_is_retryable() {
 }
 
 /// The rendering of an archive, an unarchive and an adoption names the
-/// action and the identity, and parses to a structured card. It shows no
-/// spec digest: a target that moved is refused `stale_spec` at the commit.
+/// action and the identity, and parses to a structured card. No rendering
+/// shows the spec digest the requester read, an update's and a removal's
+/// included: a target that moved is refused `stale_spec` at the commit,
+/// and the request digest still tells two expected digests apart.
 #[test]
 fn every_action_has_its_rendering() {
     let host = RequesterFacts::host("ops");
@@ -1384,4 +1386,146 @@ fn a_directory_entry_writes_its_verdict_flat() {
             "next": "warden",
         })
     );
+}
+
+/// No action's rendering shows the spec digest the requester read, so two
+/// requests that differ in it alone render alike; their request digests,
+/// which a decision's permit binds, differ.
+#[test]
+fn no_rendering_shows_the_expected_spec_digest() {
+    let host = RequesterFacts::host("ops");
+    let every = policy(allow(&["remove", "descriptive"]));
+    let profiles = BTreeSet::from(["worker".to_owned()]);
+    let peers = BTreeMap::new();
+    let removal = |expected: &str| {
+        let expected = digest(expected);
+        let mut target = entry("keeper");
+        target.spec_digest = expected.clone();
+        normalize_remove(
+            &every,
+            &host,
+            RequestEnvelope::default(),
+            &target,
+            &RemoveIdentitySpec::new("keeper", expected),
+        )
+        .expect("the removal is planned")
+        .request
+    };
+    let update = |expected: &str| {
+        let expected = digest(expected);
+        let mut target = entry("keeper");
+        target.spec_digest = expected.clone();
+        let mut update = UpdateAgent::new("keeper", expected);
+        update.set.instructions = Some(vec!["Keep them in order.".to_owned()]);
+        let spec = update
+            .to_update_spec(&every, &BTreeMap::new())
+            .expect("the update is well formed");
+        normalize_update(
+            &every,
+            &RequestContext {
+                requester: &host,
+                profiles: &profiles,
+                peers: &peers,
+            },
+            RequestEnvelope::default(),
+            &target,
+            &spec,
+        )
+        .expect("the update is planned")
+        .request
+    };
+    for (one, other) in [
+        (removal("one spec"), removal("another spec")),
+        (update("one spec"), update("another spec")),
+    ] {
+        let action = one.action.token();
+        let shown = render_v1(&one, None).expect("a rendering");
+        assert!(
+            !shown.as_str().contains(labels::EXPECTED_SPEC_DIGEST),
+            "{action}: {}",
+            shown.as_str()
+        );
+        assert_eq!(
+            shown.subject_digest(),
+            render_v1(&other, None)
+                .expect("a rendering")
+                .subject_digest(),
+            "{action}: the expected digest is no part of what is shown"
+        );
+        assert_ne!(
+            one.request_digest().expect("a request digest"),
+            other.request_digest().expect("a request digest"),
+            "{action}: the request digest covers the expected digest"
+        );
+    }
+}
+
+/// The read types can be built outside this module: a list entry, its
+/// provenance, a record, a directory entry and a plan each have their
+/// constructor.
+#[test]
+fn the_read_types_have_constructors() {
+    let mut agent = AgentSummary::new(
+        "keeper",
+        "worker",
+        digest("keeper"),
+        AgentReadiness::Dormant,
+    );
+    agent.provenance = Some(AgentProvenance::new(
+        AgentEntered::Created,
+        RequesterKind::Host,
+        "ops",
+        7,
+        ConsentSummary::Allowed,
+    ));
+    let mut record = AgentRecord::new(agent.clone());
+    record.instructions = vec!["Keep the records.".to_owned()];
+    assert_eq!(
+        serde_json::to_value(&record).expect("a record"),
+        json!({
+            "name": "keeper",
+            "profile": "worker",
+            "spec_digest": digest("keeper").as_str(),
+            "archived": false,
+            "readiness": "dormant",
+            "provenance": {
+                "entered": "created",
+                "requester_kind": "host",
+                "requester": "ops",
+                "at_ms": 7,
+                "consent": {"form": "allowed"},
+            },
+            "instructions": ["Keep the records."],
+            "labels": {},
+            "peers": [],
+        })
+    );
+    let mut page = AgentPage::default();
+    page.agents.push(agent);
+    assert_eq!(page.agents.len(), 1);
+    let mut directory = DirectoryPage::default();
+    directory
+        .profiles
+        .push(DirectoryProfile::new("worker", DirectoryVerdict::Allowed));
+    directory.peers.push(DirectoryPeer::new(
+        "keeper",
+        "worker",
+        DirectoryVerdict::Allowed,
+    ));
+    assert_eq!(
+        serde_json::to_value(&directory).expect("a directory"),
+        json!({
+            "profiles": [{"profile": "worker", "verdict": "allowed"}],
+            "peers": [{"name": "keeper", "profile": "worker", "verdict": "allowed"}],
+        })
+    );
+    let plan = ChangePlan::new(
+        ApprovalKind::Allow,
+        ChangeClass::Create,
+        1,
+        digest("request"),
+        digest("rendering"),
+        "Identity request: render-v1",
+    );
+    assert_eq!(plan.approver_id, None);
 }

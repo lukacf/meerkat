@@ -57,6 +57,8 @@ use super::request::{
     identity_name_of_member,
 };
 
+mod core_commit;
+
 /// The consent a change commits under, as Core's commit takes it: the
 /// host's rule committed it without a decision (`Policy`, `allow` or
 /// `notify`), a decision's execution permit (`Decided`: Core refuses a
@@ -415,6 +417,10 @@ impl CoreChangeExecutor {
     /// The instruction outcome of a committed update in `mob` that changed
     /// an agent's instructions text: the step's answer, or `None` when the
     /// executor has no step.
+    #[allow(
+        dead_code,
+        reason = "called by the update's body, which is not written yet"
+    )]
     pub(super) async fn after_update(
         &self,
         mob: &MobHandle,
@@ -455,17 +461,51 @@ impl IdentityChangeExecutor for CoreChangeExecutor {
             .map_err(ExecutorError::Request)?;
         let operation = IdentityOperation::new(commit.operation_id.as_str(), digest.as_str());
         match &commit.request.action {
-            RequestAction::Create { .. }
-            | RequestAction::Archive { .. }
-            | RequestAction::Unarchive { .. }
-            | RequestAction::Remove { .. } => Ok(ChangeCommitted::refused(IdentityRefusal::new(
-                IdentityRefusalKind::Unsupported {
-                    feature: format!(
-                        "{} of an agent through the executor",
-                        commit.request.action.token()
-                    ),
-                },
-            ))),
+            RequestAction::Create { identities } => {
+                core_commit::create(&commit, operation, identities).await
+            }
+            RequestAction::Archive {
+                identity,
+                expected_spec_digest,
+            } => {
+                core_commit::entry_change(
+                    self,
+                    &commit,
+                    operation,
+                    core_commit::EntryChange::Archive,
+                    identity,
+                    expected_spec_digest,
+                )
+                .await
+            }
+            RequestAction::Unarchive {
+                identity,
+                expected_spec_digest,
+            } => {
+                core_commit::entry_change(
+                    self,
+                    &commit,
+                    operation,
+                    core_commit::EntryChange::Unarchive,
+                    identity,
+                    expected_spec_digest,
+                )
+                .await
+            }
+            RequestAction::Remove {
+                identity,
+                expected_spec_digest,
+            } => {
+                core_commit::entry_change(
+                    self,
+                    &commit,
+                    operation,
+                    core_commit::EntryChange::Remove,
+                    identity,
+                    expected_spec_digest,
+                )
+                .await
+            }
             RequestAction::Update(update) => commit_update(self, &commit, operation, update).await,
             RequestAction::Adopt {
                 identity,

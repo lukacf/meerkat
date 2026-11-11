@@ -608,6 +608,19 @@ session_document_activation_retired_after(activation_rows, activation_retired) =
         LET retired_count == IF activation_key \in DOMAIN activation_retired THEN activation_retired[activation_key] ELSE 0
             superseded_count == IF activation_rows[activation_key] > 0 THEN activation_rows[activation_key] - 1 ELSE 0
         IN IF retired_count >= superseded_count THEN retired_count ELSE superseded_count]
+mob_machine_instruction_target_members_after_write(current, slot, member) ==
+    IF member = None THEN [other_slot \in DOMAIN current \ {slot} |-> current[other_slot]] ELSE MapSet(current, slot, member.value)
+mob_machine_instruction_widest_snapshot_slots(target_kind, target_member) ==
+    LET member_slots == {candidate_slot \in DOMAIN target_kind : target_kind[candidate_slot] = "Member" /\ candidate_slot \in DOMAIN target_member}
+        own_counts == {Cardinality({own_slot \in member_slots : target_member[own_slot] = target_member[named_slot]}) : named_slot \in member_slots}
+        widest_own == IF own_counts = {} THEN 0 ELSE CHOOSE own_count \in own_counts : \A other_count \in own_counts : own_count >= other_count
+    IN Cardinality(DOMAIN target_kind \ member_slots) + widest_own
+mob_machine_instruction_widest_snapshot_active_bytes(slot_effect, slot_bytes, target_kind, target_member) ==
+    LET member_slots == {candidate_slot \in DOMAIN slot_effect : candidate_slot \in DOMAIN target_kind /\ target_kind[candidate_slot] = "Member" /\ candidate_slot \in DOMAIN target_member}
+        ActiveBytesOf(instruction_slots) == session_document_instruction_active_bytes([instruction_slot \in instruction_slots |-> slot_effect[instruction_slot]], slot_bytes)
+        own_bytes == {ActiveBytesOf({own_slot \in member_slots : target_member[own_slot] = target_member[named_slot]}) : named_slot \in member_slots}
+        widest_own == IF own_bytes = {} THEN 0 ELSE CHOOSE own_total \in own_bytes : \A other_total \in own_bytes : own_total >= other_total
+    IN ActiveBytesOf(DOMAIN slot_effect \ member_slots) + widest_own
 
 Init ==
     /\ phase = "Running"
@@ -25762,7 +25775,7 @@ SetOperatorInstructionSlotLimitExceededRunning(slot, revision, digest, body_byte
     /\ (operator_instruction_write_well_formed(revision, digest, target_kind, target_profile, target_member) = TRUE)
     /\ (body_bytes <= 262144)
     /\ ((slot \in DOMAIN operator_instruction_revision) = FALSE)
-    /\ (Cardinality(DOMAIN operator_instruction_revision) >= 64)
+    /\ (mob_machine_instruction_widest_snapshot_slots(session_document_instruction_slot_after_set(operator_instruction_target_kind, slot, target_kind), mob_machine_instruction_target_members_after_write(operator_instruction_target_member, slot, target_member)) > 64)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_ab743efccb6e9bcf
@@ -25773,7 +25786,7 @@ SetOperatorInstructionSlotLimitExceededStopped(slot, revision, digest, body_byte
     /\ (operator_instruction_write_well_formed(revision, digest, target_kind, target_profile, target_member) = TRUE)
     /\ (body_bytes <= 262144)
     /\ ((slot \in DOMAIN operator_instruction_revision) = FALSE)
-    /\ (Cardinality(DOMAIN operator_instruction_revision) >= 64)
+    /\ (mob_machine_instruction_widest_snapshot_slots(session_document_instruction_slot_after_set(operator_instruction_target_kind, slot, target_kind), mob_machine_instruction_target_members_after_write(operator_instruction_target_member, slot, target_member)) > 64)
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_ab743efccb6e9bcf
@@ -25784,8 +25797,8 @@ SetOperatorInstructionNewOverBudgetRunning(slot, revision, digest, body_bytes, t
     /\ (operator_instruction_write_well_formed(revision, digest, target_kind, target_profile, target_member) = TRUE)
     /\ (body_bytes <= 262144)
     /\ ((slot \in DOMAIN operator_instruction_revision) = FALSE)
-    /\ (64 > Cardinality(DOMAIN operator_instruction_revision))
-    /\ (session_document_instruction_active_bytes(session_document_instruction_slot_after_set(operator_instruction_effect, slot, "Active"), session_document_instruction_slot_after_set(operator_instruction_body_bytes, slot, body_bytes)) > 1048576)
+    /\ (64 >= mob_machine_instruction_widest_snapshot_slots(session_document_instruction_slot_after_set(operator_instruction_target_kind, slot, target_kind), mob_machine_instruction_target_members_after_write(operator_instruction_target_member, slot, target_member)))
+    /\ (mob_machine_instruction_widest_snapshot_active_bytes(session_document_instruction_slot_after_set(operator_instruction_effect, slot, "Active"), session_document_instruction_slot_after_set(operator_instruction_body_bytes, slot, body_bytes), session_document_instruction_slot_after_set(operator_instruction_target_kind, slot, target_kind), mob_machine_instruction_target_members_after_write(operator_instruction_target_member, slot, target_member)) > 1048576)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_ab743efccb6e9bcf
@@ -25796,8 +25809,8 @@ SetOperatorInstructionNewOverBudgetStopped(slot, revision, digest, body_bytes, t
     /\ (operator_instruction_write_well_formed(revision, digest, target_kind, target_profile, target_member) = TRUE)
     /\ (body_bytes <= 262144)
     /\ ((slot \in DOMAIN operator_instruction_revision) = FALSE)
-    /\ (64 > Cardinality(DOMAIN operator_instruction_revision))
-    /\ (session_document_instruction_active_bytes(session_document_instruction_slot_after_set(operator_instruction_effect, slot, "Active"), session_document_instruction_slot_after_set(operator_instruction_body_bytes, slot, body_bytes)) > 1048576)
+    /\ (64 >= mob_machine_instruction_widest_snapshot_slots(session_document_instruction_slot_after_set(operator_instruction_target_kind, slot, target_kind), mob_machine_instruction_target_members_after_write(operator_instruction_target_member, slot, target_member)))
+    /\ (mob_machine_instruction_widest_snapshot_active_bytes(session_document_instruction_slot_after_set(operator_instruction_effect, slot, "Active"), session_document_instruction_slot_after_set(operator_instruction_body_bytes, slot, body_bytes), session_document_instruction_slot_after_set(operator_instruction_target_kind, slot, target_kind), mob_machine_instruction_target_members_after_write(operator_instruction_target_member, slot, target_member)) > 1048576)
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_ab743efccb6e9bcf
@@ -25808,8 +25821,8 @@ SetOperatorInstructionNewRunning(slot, revision, digest, body_bytes, target_kind
     /\ (operator_instruction_write_well_formed(revision, digest, target_kind, target_profile, target_member) = TRUE)
     /\ (body_bytes <= 262144)
     /\ ((slot \in DOMAIN operator_instruction_revision) = FALSE)
-    /\ (64 > Cardinality(DOMAIN operator_instruction_revision))
-    /\ (1048576 >= session_document_instruction_active_bytes(session_document_instruction_slot_after_set(operator_instruction_effect, slot, "Active"), session_document_instruction_slot_after_set(operator_instruction_body_bytes, slot, body_bytes)))
+    /\ (64 >= mob_machine_instruction_widest_snapshot_slots(session_document_instruction_slot_after_set(operator_instruction_target_kind, slot, target_kind), mob_machine_instruction_target_members_after_write(operator_instruction_target_member, slot, target_member)))
+    /\ (1048576 >= mob_machine_instruction_widest_snapshot_active_bytes(session_document_instruction_slot_after_set(operator_instruction_effect, slot, "Active"), session_document_instruction_slot_after_set(operator_instruction_body_bytes, slot, body_bytes), session_document_instruction_slot_after_set(operator_instruction_target_kind, slot, target_kind), mob_machine_instruction_target_members_after_write(operator_instruction_target_member, slot, target_member)))
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ operator_instruction_revision' = MapSet(operator_instruction_revision, slot, revision)
@@ -25830,8 +25843,8 @@ SetOperatorInstructionNewStopped(slot, revision, digest, body_bytes, target_kind
     /\ (operator_instruction_write_well_formed(revision, digest, target_kind, target_profile, target_member) = TRUE)
     /\ (body_bytes <= 262144)
     /\ ((slot \in DOMAIN operator_instruction_revision) = FALSE)
-    /\ (64 > Cardinality(DOMAIN operator_instruction_revision))
-    /\ (1048576 >= session_document_instruction_active_bytes(session_document_instruction_slot_after_set(operator_instruction_effect, slot, "Active"), session_document_instruction_slot_after_set(operator_instruction_body_bytes, slot, body_bytes)))
+    /\ (64 >= mob_machine_instruction_widest_snapshot_slots(session_document_instruction_slot_after_set(operator_instruction_target_kind, slot, target_kind), mob_machine_instruction_target_members_after_write(operator_instruction_target_member, slot, target_member)))
+    /\ (1048576 >= mob_machine_instruction_widest_snapshot_active_bytes(session_document_instruction_slot_after_set(operator_instruction_effect, slot, "Active"), session_document_instruction_slot_after_set(operator_instruction_body_bytes, slot, body_bytes), session_document_instruction_slot_after_set(operator_instruction_target_kind, slot, target_kind), mob_machine_instruction_target_members_after_write(operator_instruction_target_member, slot, target_member)))
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ operator_instruction_revision' = MapSet(operator_instruction_revision, slot, revision)
@@ -25915,13 +25928,38 @@ SetOperatorInstructionConflictStopped(slot, revision, digest, body_bytes, target
     /\ UnchangedFrame_ab743efccb6e9bcf
 
 
+SetOperatorInstructionAdvanceSlotLimitExceededRunning(slot, revision, digest, body_bytes, target_kind, target_profile, target_member) ==
+    /\ phase = "Running"
+    /\ (operator_instruction_write_well_formed(revision, digest, target_kind, target_profile, target_member) = TRUE)
+    /\ (body_bytes <= 262144)
+    /\ ((slot \in DOMAIN operator_instruction_revision) /\ ((operator_instruction_revision)[slot] <= revision))
+    /\ ((slot \in DOMAIN operator_instruction_revision) /\ (revision # (operator_instruction_revision)[slot]))
+    /\ (mob_machine_instruction_widest_snapshot_slots(session_document_instruction_slot_after_set(operator_instruction_target_kind, slot, target_kind), mob_machine_instruction_target_members_after_write(operator_instruction_target_member, slot, target_member)) > 64)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_ab743efccb6e9bcf
+
+
+SetOperatorInstructionAdvanceSlotLimitExceededStopped(slot, revision, digest, body_bytes, target_kind, target_profile, target_member) ==
+    /\ phase = "Stopped"
+    /\ (operator_instruction_write_well_formed(revision, digest, target_kind, target_profile, target_member) = TRUE)
+    /\ (body_bytes <= 262144)
+    /\ ((slot \in DOMAIN operator_instruction_revision) /\ ((operator_instruction_revision)[slot] <= revision))
+    /\ ((slot \in DOMAIN operator_instruction_revision) /\ (revision # (operator_instruction_revision)[slot]))
+    /\ (mob_machine_instruction_widest_snapshot_slots(session_document_instruction_slot_after_set(operator_instruction_target_kind, slot, target_kind), mob_machine_instruction_target_members_after_write(operator_instruction_target_member, slot, target_member)) > 64)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_ab743efccb6e9bcf
+
+
 SetOperatorInstructionAdvanceOverBudgetRunning(slot, revision, digest, body_bytes, target_kind, target_profile, target_member) ==
     /\ phase = "Running"
     /\ (operator_instruction_write_well_formed(revision, digest, target_kind, target_profile, target_member) = TRUE)
     /\ (body_bytes <= 262144)
     /\ ((slot \in DOMAIN operator_instruction_revision) /\ ((operator_instruction_revision)[slot] <= revision))
     /\ ((slot \in DOMAIN operator_instruction_revision) /\ (revision # (operator_instruction_revision)[slot]))
-    /\ (session_document_instruction_active_bytes(session_document_instruction_slot_after_set(operator_instruction_effect, slot, "Active"), session_document_instruction_slot_after_set(operator_instruction_body_bytes, slot, body_bytes)) > 1048576)
+    /\ (64 >= mob_machine_instruction_widest_snapshot_slots(session_document_instruction_slot_after_set(operator_instruction_target_kind, slot, target_kind), mob_machine_instruction_target_members_after_write(operator_instruction_target_member, slot, target_member)))
+    /\ (mob_machine_instruction_widest_snapshot_active_bytes(session_document_instruction_slot_after_set(operator_instruction_effect, slot, "Active"), session_document_instruction_slot_after_set(operator_instruction_body_bytes, slot, body_bytes), session_document_instruction_slot_after_set(operator_instruction_target_kind, slot, target_kind), mob_machine_instruction_target_members_after_write(operator_instruction_target_member, slot, target_member)) > 1048576)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_ab743efccb6e9bcf
@@ -25933,7 +25971,8 @@ SetOperatorInstructionAdvanceOverBudgetStopped(slot, revision, digest, body_byte
     /\ (body_bytes <= 262144)
     /\ ((slot \in DOMAIN operator_instruction_revision) /\ ((operator_instruction_revision)[slot] <= revision))
     /\ ((slot \in DOMAIN operator_instruction_revision) /\ (revision # (operator_instruction_revision)[slot]))
-    /\ (session_document_instruction_active_bytes(session_document_instruction_slot_after_set(operator_instruction_effect, slot, "Active"), session_document_instruction_slot_after_set(operator_instruction_body_bytes, slot, body_bytes)) > 1048576)
+    /\ (64 >= mob_machine_instruction_widest_snapshot_slots(session_document_instruction_slot_after_set(operator_instruction_target_kind, slot, target_kind), mob_machine_instruction_target_members_after_write(operator_instruction_target_member, slot, target_member)))
+    /\ (mob_machine_instruction_widest_snapshot_active_bytes(session_document_instruction_slot_after_set(operator_instruction_effect, slot, "Active"), session_document_instruction_slot_after_set(operator_instruction_body_bytes, slot, body_bytes), session_document_instruction_slot_after_set(operator_instruction_target_kind, slot, target_kind), mob_machine_instruction_target_members_after_write(operator_instruction_target_member, slot, target_member)) > 1048576)
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_ab743efccb6e9bcf
@@ -25945,7 +25984,8 @@ SetOperatorInstructionAdvanceRunning(slot, revision, digest, body_bytes, target_
     /\ (body_bytes <= 262144)
     /\ ((slot \in DOMAIN operator_instruction_revision) /\ ((operator_instruction_revision)[slot] <= revision))
     /\ ((slot \in DOMAIN operator_instruction_revision) /\ (revision # (operator_instruction_revision)[slot]))
-    /\ (1048576 >= session_document_instruction_active_bytes(session_document_instruction_slot_after_set(operator_instruction_effect, slot, "Active"), session_document_instruction_slot_after_set(operator_instruction_body_bytes, slot, body_bytes)))
+    /\ (64 >= mob_machine_instruction_widest_snapshot_slots(session_document_instruction_slot_after_set(operator_instruction_target_kind, slot, target_kind), mob_machine_instruction_target_members_after_write(operator_instruction_target_member, slot, target_member)))
+    /\ (1048576 >= mob_machine_instruction_widest_snapshot_active_bytes(session_document_instruction_slot_after_set(operator_instruction_effect, slot, "Active"), session_document_instruction_slot_after_set(operator_instruction_body_bytes, slot, body_bytes), session_document_instruction_slot_after_set(operator_instruction_target_kind, slot, target_kind), mob_machine_instruction_target_members_after_write(operator_instruction_target_member, slot, target_member)))
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ operator_instruction_revision' = MapSet(operator_instruction_revision, slot, revision)
@@ -25967,7 +26007,8 @@ SetOperatorInstructionAdvanceStopped(slot, revision, digest, body_bytes, target_
     /\ (body_bytes <= 262144)
     /\ ((slot \in DOMAIN operator_instruction_revision) /\ ((operator_instruction_revision)[slot] <= revision))
     /\ ((slot \in DOMAIN operator_instruction_revision) /\ (revision # (operator_instruction_revision)[slot]))
-    /\ (1048576 >= session_document_instruction_active_bytes(session_document_instruction_slot_after_set(operator_instruction_effect, slot, "Active"), session_document_instruction_slot_after_set(operator_instruction_body_bytes, slot, body_bytes)))
+    /\ (64 >= mob_machine_instruction_widest_snapshot_slots(session_document_instruction_slot_after_set(operator_instruction_target_kind, slot, target_kind), mob_machine_instruction_target_members_after_write(operator_instruction_target_member, slot, target_member)))
+    /\ (1048576 >= mob_machine_instruction_widest_snapshot_active_bytes(session_document_instruction_slot_after_set(operator_instruction_effect, slot, "Active"), session_document_instruction_slot_after_set(operator_instruction_body_bytes, slot, body_bytes), session_document_instruction_slot_after_set(operator_instruction_target_kind, slot, target_kind), mob_machine_instruction_target_members_after_write(operator_instruction_target_member, slot, target_member)))
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ operator_instruction_revision' = MapSet(operator_instruction_revision, slot, revision)
@@ -29951,6 +29992,8 @@ Next ==
     \/ (phase = "Stopped") /\ \E slot \in StringValues : \E revision \in 0..2 : \E digest \in StringValues : \E body_bytes \in 0..2 : \E target_kind \in InstructionTargetKindValues : \E target_profile \in StringValues : \E target_member \in OptionAgentIdentityValues : SetOperatorInstructionDuplicateStopped(slot, revision, digest, body_bytes, target_kind, target_profile, target_member)
     \/ (phase = "Running") /\ \E slot \in StringValues : \E revision \in 0..2 : \E digest \in StringValues : \E body_bytes \in 0..2 : \E target_kind \in InstructionTargetKindValues : \E target_profile \in StringValues : \E target_member \in OptionAgentIdentityValues : SetOperatorInstructionConflictRunning(slot, revision, digest, body_bytes, target_kind, target_profile, target_member)
     \/ (phase = "Stopped") /\ \E slot \in StringValues : \E revision \in 0..2 : \E digest \in StringValues : \E body_bytes \in 0..2 : \E target_kind \in InstructionTargetKindValues : \E target_profile \in StringValues : \E target_member \in OptionAgentIdentityValues : SetOperatorInstructionConflictStopped(slot, revision, digest, body_bytes, target_kind, target_profile, target_member)
+    \/ (phase = "Running") /\ \E slot \in StringValues : \E revision \in 0..2 : \E digest \in StringValues : \E body_bytes \in 0..2 : \E target_kind \in InstructionTargetKindValues : \E target_profile \in StringValues : \E target_member \in OptionAgentIdentityValues : SetOperatorInstructionAdvanceSlotLimitExceededRunning(slot, revision, digest, body_bytes, target_kind, target_profile, target_member)
+    \/ (phase = "Stopped") /\ \E slot \in StringValues : \E revision \in 0..2 : \E digest \in StringValues : \E body_bytes \in 0..2 : \E target_kind \in InstructionTargetKindValues : \E target_profile \in StringValues : \E target_member \in OptionAgentIdentityValues : SetOperatorInstructionAdvanceSlotLimitExceededStopped(slot, revision, digest, body_bytes, target_kind, target_profile, target_member)
     \/ (phase = "Running") /\ \E slot \in StringValues : \E revision \in 0..2 : \E digest \in StringValues : \E body_bytes \in 0..2 : \E target_kind \in InstructionTargetKindValues : \E target_profile \in StringValues : \E target_member \in OptionAgentIdentityValues : SetOperatorInstructionAdvanceOverBudgetRunning(slot, revision, digest, body_bytes, target_kind, target_profile, target_member)
     \/ (phase = "Stopped") /\ \E slot \in StringValues : \E revision \in 0..2 : \E digest \in StringValues : \E body_bytes \in 0..2 : \E target_kind \in InstructionTargetKindValues : \E target_profile \in StringValues : \E target_member \in OptionAgentIdentityValues : SetOperatorInstructionAdvanceOverBudgetStopped(slot, revision, digest, body_bytes, target_kind, target_profile, target_member)
     \/ (phase = "Running") /\ \E slot \in StringValues : \E revision \in 0..2 : \E digest \in StringValues : \E body_bytes \in 0..2 : \E target_kind \in InstructionTargetKindValues : \E target_profile \in StringValues : \E target_member \in OptionAgentIdentityValues : SetOperatorInstructionAdvanceRunning(slot, revision, digest, body_bytes, target_kind, target_profile, target_member)
@@ -30280,8 +30323,8 @@ destroyed_mob_holds_no_member_lifecycle == (IF (phase # "Destroyed") THEN TRUE E
 custody_unrestored_members_are_seated == ((\A id \in DOMAIN member_custody_unrestored : ((id \in DOMAIN identity_to_runtime) /\ (id \in DOMAIN member_custody_unrestored_causes))) /\ (\A id \in DOMAIN member_custody_unrestored_causes : (id \in DOMAIN member_custody_unrestored)))
 operator_instruction_records_lockstep == ((\A slot \in DOMAIN operator_instruction_revision : ((slot \in DOMAIN operator_instruction_effect) /\ (slot \in DOMAIN operator_instruction_digest) /\ (slot \in DOMAIN operator_instruction_body_bytes) /\ (slot \in DOMAIN operator_instruction_target_kind) /\ (slot \in DOMAIN operator_instruction_target_profile))) /\ (\A slot \in DOMAIN operator_instruction_effect : (slot \in DOMAIN operator_instruction_revision)) /\ (\A slot \in DOMAIN operator_instruction_digest : (slot \in DOMAIN operator_instruction_revision)) /\ (\A slot \in DOMAIN operator_instruction_body_bytes : (slot \in DOMAIN operator_instruction_revision)) /\ (\A slot \in DOMAIN operator_instruction_target_kind : (slot \in DOMAIN operator_instruction_revision)) /\ (\A slot \in DOMAIN operator_instruction_target_profile : (slot \in DOMAIN operator_instruction_revision)) /\ (\A slot \in DOMAIN operator_instruction_target_member : ((IF (slot \in DOMAIN operator_instruction_target_kind) THEN Some((IF slot \in DOMAIN operator_instruction_target_kind THEN operator_instruction_target_kind[slot] ELSE "None")) ELSE None) = Some("Member"))))
 operator_instruction_records_well_formed == (\A slot \in DOMAIN operator_instruction_revision : (((IF "value" \in DOMAIN (IF (slot \in DOMAIN operator_instruction_revision) THEN Some((IF slot \in DOMAIN operator_instruction_revision THEN operator_instruction_revision[slot] ELSE 0)) ELSE None) THEN (IF (slot \in DOMAIN operator_instruction_revision) THEN Some((IF slot \in DOMAIN operator_instruction_revision THEN operator_instruction_revision[slot] ELSE 0)) ELSE None)["value"] ELSE None) >= 1) /\ ((IF "value" \in DOMAIN (IF (slot \in DOMAIN operator_instruction_body_bytes) THEN Some((IF slot \in DOMAIN operator_instruction_body_bytes THEN operator_instruction_body_bytes[slot] ELSE 0)) ELSE None) THEN (IF (slot \in DOMAIN operator_instruction_body_bytes) THEN Some((IF slot \in DOMAIN operator_instruction_body_bytes THEN operator_instruction_body_bytes[slot] ELSE 0)) ELSE None)["value"] ELSE None) <= 262144) /\ (IF (((IF (slot \in DOMAIN operator_instruction_effect) THEN Some((IF slot \in DOMAIN operator_instruction_effect THEN operator_instruction_effect[slot] ELSE "None")) ELSE None) = Some("Active")) /\ ((IF (slot \in DOMAIN operator_instruction_digest) THEN Some((IF slot \in DOMAIN operator_instruction_digest THEN operator_instruction_digest[slot] ELSE "None")) ELSE None) # Some(""))) THEN TRUE ELSE (((IF (slot \in DOMAIN operator_instruction_effect) THEN Some((IF slot \in DOMAIN operator_instruction_effect THEN operator_instruction_effect[slot] ELSE "None")) ELSE None) = Some("Absent")) /\ ((IF (slot \in DOMAIN operator_instruction_digest) THEN Some((IF slot \in DOMAIN operator_instruction_digest THEN operator_instruction_digest[slot] ELSE "None")) ELSE None) = Some("")) /\ ((IF (slot \in DOMAIN operator_instruction_body_bytes) THEN Some((IF slot \in DOMAIN operator_instruction_body_bytes THEN operator_instruction_body_bytes[slot] ELSE 0)) ELSE None) = Some(0)))) /\ (IF (((IF (slot \in DOMAIN operator_instruction_target_kind) THEN Some((IF slot \in DOMAIN operator_instruction_target_kind THEN operator_instruction_target_kind[slot] ELSE "None")) ELSE None) = Some("Mob")) /\ ((IF (slot \in DOMAIN operator_instruction_target_profile) THEN Some((IF slot \in DOMAIN operator_instruction_target_profile THEN operator_instruction_target_profile[slot] ELSE "None")) ELSE None) = Some("")) /\ ((slot \in DOMAIN operator_instruction_target_member) = FALSE)) THEN TRUE ELSE (IF (((IF (slot \in DOMAIN operator_instruction_target_kind) THEN Some((IF slot \in DOMAIN operator_instruction_target_kind THEN operator_instruction_target_kind[slot] ELSE "None")) ELSE None) = Some("Profile")) /\ ((IF (slot \in DOMAIN operator_instruction_target_profile) THEN Some((IF slot \in DOMAIN operator_instruction_target_profile THEN operator_instruction_target_profile[slot] ELSE "None")) ELSE None) # Some("")) /\ ((slot \in DOMAIN operator_instruction_target_member) = FALSE)) THEN TRUE ELSE (((IF (slot \in DOMAIN operator_instruction_target_kind) THEN Some((IF slot \in DOMAIN operator_instruction_target_kind THEN operator_instruction_target_kind[slot] ELSE "None")) ELSE None) = Some("Member")) /\ ((IF (slot \in DOMAIN operator_instruction_target_profile) THEN Some((IF slot \in DOMAIN operator_instruction_target_profile THEN operator_instruction_target_profile[slot] ELSE "None")) ELSE None) = Some("")) /\ ((slot \in DOMAIN operator_instruction_target_member) = TRUE))))))
-operator_instruction_slot_count_bounded == (Cardinality(DOMAIN operator_instruction_revision) <= 64)
-operator_instruction_active_bytes_bounded == (session_document_instruction_active_bytes(operator_instruction_effect, operator_instruction_body_bytes) <= 1048576)
+operator_instruction_slot_count_bounded == (mob_machine_instruction_widest_snapshot_slots(operator_instruction_target_kind, operator_instruction_target_member) <= 64)
+operator_instruction_active_bytes_bounded == (mob_machine_instruction_widest_snapshot_active_bytes(operator_instruction_effect, operator_instruction_body_bytes, operator_instruction_target_kind, operator_instruction_target_member) <= 1048576)
 member_instruction_facts_only_for_members == ((\A id \in DOMAIN member_instruction_owed : ((id \in DOMAIN identity_to_runtime) /\ ((id \in DOMAIN member_instruction_blocked) = FALSE))) /\ (\A id \in DOMAIN member_instruction_recorded : (id \in DOMAIN identity_to_runtime)) /\ (\A id \in DOMAIN member_instruction_blocked : (id \in DOMAIN identity_to_runtime)))
 member_instruction_generations_bounded == ((\A id \in DOMAIN member_instruction_owed : (((IF "value" \in DOMAIN (IF (id \in DOMAIN member_instruction_owed) THEN Some((IF id \in DOMAIN member_instruction_owed THEN member_instruction_owed[id] ELSE 0)) ELSE None) THEN (IF (id \in DOMAIN member_instruction_owed) THEN Some((IF id \in DOMAIN member_instruction_owed THEN member_instruction_owed[id] ELSE 0)) ELSE None)["value"] ELSE None) >= 1) /\ ((IF "value" \in DOMAIN (IF (id \in DOMAIN member_instruction_owed) THEN Some((IF id \in DOMAIN member_instruction_owed THEN member_instruction_owed[id] ELSE 0)) ELSE None) THEN (IF (id \in DOMAIN member_instruction_owed) THEN Some((IF id \in DOMAIN member_instruction_owed THEN member_instruction_owed[id] ELSE 0)) ELSE None)["value"] ELSE None) <= operator_instruction_generation) /\ (IF ((id \in DOMAIN member_instruction_recorded) = FALSE) THEN TRUE ELSE ((IF "value" \in DOMAIN (IF (id \in DOMAIN member_instruction_recorded) THEN Some((IF id \in DOMAIN member_instruction_recorded THEN member_instruction_recorded[id] ELSE 0)) ELSE None) THEN (IF (id \in DOMAIN member_instruction_recorded) THEN Some((IF id \in DOMAIN member_instruction_recorded THEN member_instruction_recorded[id] ELSE 0)) ELSE None)["value"] ELSE None) < (IF "value" \in DOMAIN (IF (id \in DOMAIN member_instruction_owed) THEN Some((IF id \in DOMAIN member_instruction_owed THEN member_instruction_owed[id] ELSE 0)) ELSE None) THEN (IF (id \in DOMAIN member_instruction_owed) THEN Some((IF id \in DOMAIN member_instruction_owed THEN member_instruction_owed[id] ELSE 0)) ELSE None)["value"] ELSE None))))) /\ (\A id \in DOMAIN member_instruction_recorded : (((IF "value" \in DOMAIN (IF (id \in DOMAIN member_instruction_recorded) THEN Some((IF id \in DOMAIN member_instruction_recorded THEN member_instruction_recorded[id] ELSE 0)) ELSE None) THEN (IF (id \in DOMAIN member_instruction_recorded) THEN Some((IF id \in DOMAIN member_instruction_recorded THEN member_instruction_recorded[id] ELSE 0)) ELSE None)["value"] ELSE None) >= 1) /\ ((IF "value" \in DOMAIN (IF (id \in DOMAIN member_instruction_recorded) THEN Some((IF id \in DOMAIN member_instruction_recorded THEN member_instruction_recorded[id] ELSE 0)) ELSE None) THEN (IF (id \in DOMAIN member_instruction_recorded) THEN Some((IF id \in DOMAIN member_instruction_recorded THEN member_instruction_recorded[id] ELSE 0)) ELSE None)["value"] ELSE None) <= operator_instruction_generation))))
 destroyed_mob_holds_no_operator_instructions == (IF (phase # "Destroyed") THEN TRUE ELSE ((operator_instruction_revision = [x \in {} |-> None]) /\ (operator_instruction_effect = [x \in {} |-> None]) /\ (operator_instruction_digest = [x \in {} |-> None]) /\ (operator_instruction_body_bytes = [x \in {} |-> None]) /\ (operator_instruction_target_kind = [x \in {} |-> None]) /\ (operator_instruction_target_profile = [x \in {} |-> None]) /\ (operator_instruction_target_member = [x \in {} |-> None]) /\ (member_instruction_owed = [x \in {} |-> None]) /\ (member_instruction_recorded = [x \in {} |-> None]) /\ (member_instruction_blocked = [x \in {} |-> None])))

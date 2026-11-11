@@ -19399,6 +19399,30 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `OperatorInstructionRefused`
 - To: `Stopped`
 
+### `SetOperatorInstructionAdvanceSlotLimitExceededRunning`
+- From: `Running`
+- On: `SetOperatorInstruction`(slot, revision, digest, body_bytes, target_kind, target_profile, target_member)
+- Guards:
+  - `write_well_formed`
+  - `body_within_limit`
+  - `revision_not_below_current`
+  - `revision_advances`
+  - `slot_limit_reached`
+- Emits: `OperatorInstructionRefused`
+- To: `Running`
+
+### `SetOperatorInstructionAdvanceSlotLimitExceededStopped`
+- From: `Stopped`
+- On: `SetOperatorInstruction`(slot, revision, digest, body_bytes, target_kind, target_profile, target_member)
+- Guards:
+  - `write_well_formed`
+  - `body_within_limit`
+  - `revision_not_below_current`
+  - `revision_advances`
+  - `slot_limit_reached`
+- Emits: `OperatorInstructionRefused`
+- To: `Stopped`
+
 ### `SetOperatorInstructionAdvanceOverBudgetRunning`
 - From: `Running`
 - On: `SetOperatorInstruction`(slot, revision, digest, body_bytes, target_kind, target_profile, target_member)
@@ -19407,6 +19431,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `body_within_limit`
   - `revision_not_below_current`
   - `revision_advances`
+  - `slot_room`
   - `over_budget`
 - Emits: `OperatorInstructionRefused`
 - To: `Running`
@@ -19419,6 +19444,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `body_within_limit`
   - `revision_not_below_current`
   - `revision_advances`
+  - `slot_room`
   - `over_budget`
 - Emits: `OperatorInstructionRefused`
 - To: `Stopped`
@@ -19431,6 +19457,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `body_within_limit`
   - `revision_not_below_current`
   - `revision_advances`
+  - `slot_room`
   - `within_budget`
 - Emits: `OperatorInstructionCommitted`
 - To: `Running`
@@ -19443,6 +19470,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `body_within_limit`
   - `revision_not_below_current`
   - `revision_advances`
+  - `slot_room`
   - `within_budget`
 - Emits: `OperatorInstructionCommitted`
 - To: `Stopped`

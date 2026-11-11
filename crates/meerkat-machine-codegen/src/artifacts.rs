@@ -4503,6 +4503,22 @@ fn infer_expr_type(
         Expr::Call { helper, .. } if helper == "session_document_instruction_active_bytes" => {
             Some(TypeRef::U64)
         }
+        // The member targets with one slot written: the type of the map.
+        Expr::Call { helper, args }
+            if helper == "mob_machine_instruction_target_members_after_write" =>
+        {
+            args.first().and_then(|current| {
+                infer_expr_type(current, field_types, helper_returns, binding_types)
+            })
+        }
+        // The widest member snapshot of a mob's operator instruction
+        // records, in records and in Active body bytes.
+        Expr::Call { helper, .. }
+            if helper == "mob_machine_instruction_widest_snapshot_slots"
+                || helper == "mob_machine_instruction_widest_snapshot_active_bytes" =>
+        {
+            Some(TypeRef::U64)
+        }
         // The Active entries of a slot map: the type of the map it filters.
         Expr::Call { helper, args } if helper == "session_document_instruction_active_slots" => {
             args.get(1).and_then(|values| {
@@ -6555,6 +6571,57 @@ mod tests {
             ("session_document_instruction_active_bytes", active_bytes),
             ("session_document_instruction_active_slots", active_slots),
             ("session_document_activation_retired_after", retired_after),
+        ] {
+            assert!(
+                model.contains(definition),
+                "the generated model must define {native} with its Rust semantics"
+            );
+            assert!(
+                model.matches(&format!("{native}(")).count() > 1,
+                "the generated arms must call the formally defined {native}"
+            );
+        }
+    }
+
+    #[test]
+    fn mob_machine_instruction_snapshot_natives_have_the_rust_semantics_in_tla() {
+        // The DSL authority, the kernel oracle and the generated TLA give
+        // the operator-instruction natives one meaning: the member targets
+        // with one slot written (named for a member write, unnamed
+        // otherwise), and the widest member snapshot, the shared records
+        // (every slot that is not member-targeted) plus the most any one
+        // member holds of its own, in records and in Active body bytes.
+        let schema = meerkat_machine_schema::catalog::dsl::dsl_mob_machine();
+        let model = render_machine_semantic_model(&schema).expect("render model");
+        let widest_slots = r#"mob_machine_instruction_widest_snapshot_slots(target_kind, target_member) ==
+    LET member_slots == {candidate_slot \in DOMAIN target_kind : target_kind[candidate_slot] = "Member" /\ candidate_slot \in DOMAIN target_member}
+        own_counts == {Cardinality({own_slot \in member_slots : target_member[own_slot] = target_member[named_slot]}) : named_slot \in member_slots}
+        widest_own == IF own_counts = {} THEN 0 ELSE CHOOSE own_count \in own_counts : \A other_count \in own_counts : own_count >= other_count
+    IN Cardinality(DOMAIN target_kind \ member_slots) + widest_own
+"#;
+        let widest_bytes = r#"mob_machine_instruction_widest_snapshot_active_bytes(slot_effect, slot_bytes, target_kind, target_member) ==
+    LET member_slots == {candidate_slot \in DOMAIN slot_effect : candidate_slot \in DOMAIN target_kind /\ target_kind[candidate_slot] = "Member" /\ candidate_slot \in DOMAIN target_member}
+        ActiveBytesOf(instruction_slots) == session_document_instruction_active_bytes([instruction_slot \in instruction_slots |-> slot_effect[instruction_slot]], slot_bytes)
+        own_bytes == {ActiveBytesOf({own_slot \in member_slots : target_member[own_slot] = target_member[named_slot]}) : named_slot \in member_slots}
+        widest_own == IF own_bytes = {} THEN 0 ELSE CHOOSE own_total \in own_bytes : \A other_total \in own_bytes : own_total >= other_total
+    IN ActiveBytesOf(DOMAIN slot_effect \ member_slots) + widest_own
+"#;
+        let members_after_write = r"mob_machine_instruction_target_members_after_write(current, slot, member) ==
+    IF member = None THEN [other_slot \in DOMAIN current \ {slot} |-> current[other_slot]] ELSE MapSet(current, slot, member.value)
+";
+        for (native, definition) in [
+            (
+                "mob_machine_instruction_target_members_after_write",
+                members_after_write,
+            ),
+            (
+                "mob_machine_instruction_widest_snapshot_slots",
+                widest_slots,
+            ),
+            (
+                "mob_machine_instruction_widest_snapshot_active_bytes",
+                widest_bytes,
+            ),
         ] {
             assert!(
                 model.contains(definition),
@@ -12611,6 +12678,76 @@ impl<'a> MachineTlaCompiler<'a> {
         // document's slot-set natives (one slot set, and the body bytes of
         // the Active slots).
         self.render_session_document_native_helpers(out);
+        // The member targets of the records as a write leaves them: the
+        // written slot names the write's member, or no member when the write
+        // targets every member or a profile (the Rust authorities agree).
+        writeln!(
+            out,
+            "{}(current, slot, member) ==",
+            prefix("mob_machine_instruction_target_members_after_write")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    IF member = None THEN [other_slot \\in DOMAIN current \\ {{slot}} |-> current[other_slot]] ELSE MapSet(current, slot, member.value)"
+        );
+        // The widest member snapshot of the records: the shared records
+        // (every slot that is not member-targeted) plus the most any one
+        // member holds of its own. A slot is member-targeted while its kind
+        // is Member and the member map names it (the Rust authorities
+        // agree).
+        writeln!(
+            out,
+            "{}(target_kind, target_member) ==",
+            prefix("mob_machine_instruction_widest_snapshot_slots")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    LET member_slots == {{candidate_slot \\in DOMAIN target_kind : target_kind[candidate_slot] = \"Member\" /\\ candidate_slot \\in DOMAIN target_member}}"
+        );
+        pushln!(
+            out,
+            "        own_counts == {{Cardinality({{own_slot \\in member_slots : target_member[own_slot] = target_member[named_slot]}}) : named_slot \\in member_slots}}"
+        );
+        pushln!(
+            out,
+            "        widest_own == IF own_counts = {{}} THEN 0 ELSE CHOOSE own_count \\in own_counts : \\A other_count \\in own_counts : own_count >= other_count"
+        );
+        pushln!(
+            out,
+            "    IN Cardinality(DOMAIN target_kind \\ member_slots) + widest_own"
+        );
+        // The same snapshot's Active body bytes; a slot the bytes map does
+        // not name counts nothing.
+        writeln!(
+            out,
+            "{}(slot_effect, slot_bytes, target_kind, target_member) ==",
+            prefix("mob_machine_instruction_widest_snapshot_active_bytes")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    LET member_slots == {{candidate_slot \\in DOMAIN slot_effect : candidate_slot \\in DOMAIN target_kind /\\ target_kind[candidate_slot] = \"Member\" /\\ candidate_slot \\in DOMAIN target_member}}"
+        );
+        writeln!(
+            out,
+            "        ActiveBytesOf(instruction_slots) == {}([instruction_slot \\in instruction_slots |-> slot_effect[instruction_slot]], slot_bytes)",
+            prefix("session_document_instruction_active_bytes")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "        own_bytes == {{ActiveBytesOf({{own_slot \\in member_slots : target_member[own_slot] = target_member[named_slot]}}) : named_slot \\in member_slots}}"
+        );
+        pushln!(
+            out,
+            "        widest_own == IF own_bytes = {{}} THEN 0 ELSE CHOOSE own_total \\in own_bytes : \\A other_total \\in own_bytes : own_total >= other_total"
+        );
+        pushln!(
+            out,
+            "    IN ActiveBytesOf(DOMAIN slot_effect \\ member_slots) + widest_own"
+        );
     }
 
     fn render_transition(&mut self, out: &mut String, transition: &TransitionSchema) {

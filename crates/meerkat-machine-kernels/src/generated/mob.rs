@@ -17995,6 +17995,8 @@ pub enum TransitionId {
     ResolveExternalEdgeRealizationStaleStopped,
     ResolveExternalEdgeRealizationStaleCompleted,
     ResolveExternalEdgeRealizationStaleDestroyed,
+    SetOperatorInstructionAdvanceSlotLimitExceededRunning,
+    SetOperatorInstructionAdvanceSlotLimitExceededStopped,
     RecordMemberCustodyUnrestoredSeatedRunning,
     RecordMemberCustodyUnrestoredSeatedStopped,
     RecordMemberCustodyUnrestoredSeatedCompleted,

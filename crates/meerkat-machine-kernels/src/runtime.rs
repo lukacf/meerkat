@@ -46,6 +46,9 @@ pub const KERNEL_NATIVE_HELPERS: &[(&str, usize)] = &[
     ("mob_machine_fresh_rotation_sessions", 2),
     ("mob_machine_placed_cleanup_absent_for_identity", 2),
     ("mob_machine_placed_cleanup_obligation", 7),
+    ("mob_machine_instruction_target_members_after_write", 3),
+    ("mob_machine_instruction_widest_snapshot_slots", 2),
+    ("mob_machine_instruction_widest_snapshot_active_bytes", 4),
     ("session_document_instruction_slot_after_set", 3),
     ("session_document_instruction_active_bytes", 2),
     ("session_document_instruction_active_slots", 2),
@@ -1718,6 +1721,14 @@ impl GeneratedMachineKernel {
             "mob_machine_placed_cleanup_obligation" => {
                 self.eval_mob_machine_placed_cleanup_obligation(args, transition_name)
             }
+            "mob_machine_instruction_target_members_after_write" => {
+                self.eval_mob_machine_instruction_target_members_after_write(args, transition_name)
+            }
+            "mob_machine_instruction_widest_snapshot_slots" => {
+                self.eval_mob_machine_instruction_widest_snapshot_slots(args, transition_name)
+            }
+            "mob_machine_instruction_widest_snapshot_active_bytes" => self
+                .eval_mob_machine_instruction_widest_snapshot_active_bytes(args, transition_name),
             "session_document_instruction_slot_after_set" => {
                 self.eval_session_document_instruction_slot_after_set(args, transition_name)
             }
@@ -1732,6 +1743,167 @@ impl GeneratedMachineKernel {
             }
             _ => Err(self.eval_error(transition_name, format!("unknown helper `{helper}`"))),
         }
+    }
+
+    /// The member targets of the records as a write leaves them: `slot`
+    /// names the write's member, or no member when the write has none.
+    fn eval_mob_machine_instruction_target_members_after_write(
+        &self,
+        args: Vec<KernelValue>,
+        transition_name: &TransitionId,
+    ) -> Result<KernelValue, TransitionRefusal> {
+        let [current, slot, member]: [KernelValue; 3] = args.try_into().map_err(|_| {
+            self.eval_error(
+                transition_name,
+                "mob_machine_instruction_target_members_after_write expects three args",
+            )
+        })?;
+        let mut current = current
+            .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        match member {
+            KernelValue::None => {
+                current.remove(&slot);
+            }
+            KernelValue::Map(mut some) => {
+                let Some(member) = some.remove(&KernelValue::String("value".to_string())) else {
+                    return Err(self.eval_error(
+                        transition_name,
+                        "expected an optional member, found a map without a value",
+                    ));
+                };
+                current.insert(slot, member);
+            }
+            other => {
+                return Err(self.eval_error(
+                    transition_name,
+                    format!("expected an optional member, found {other:?}"),
+                ));
+            }
+        }
+        Ok(KernelValue::Map(current))
+    }
+
+    /// Whether `slot` is a member-targeted record: its kind is Member and the
+    /// member map names it. Answers that member.
+    fn instruction_slot_member<'a>(
+        &self,
+        slot: &KernelValue,
+        target_kind: &BTreeMap<KernelValue, KernelValue>,
+        target_member: &'a BTreeMap<KernelValue, KernelValue>,
+        transition_name: &TransitionId,
+    ) -> Result<Option<&'a KernelValue>, TransitionRefusal> {
+        let member_kind = match target_kind.get(slot) {
+            Some(kind) => {
+                kind.as_named_variant("InstructionTargetKind")
+                    .map_err(|error| self.eval_error(transition_name, error))?
+                    == "Member"
+            }
+            None => false,
+        };
+        Ok(target_member.get(slot).filter(|_| member_kind))
+    }
+
+    /// The records of the widest member snapshot: the shared records (every
+    /// slot that is not member-targeted) plus the most member-targeted
+    /// records any one member holds.
+    fn eval_mob_machine_instruction_widest_snapshot_slots(
+        &self,
+        args: Vec<KernelValue>,
+        transition_name: &TransitionId,
+    ) -> Result<KernelValue, TransitionRefusal> {
+        let [target_kind, target_member]: [KernelValue; 2] = args.try_into().map_err(|_| {
+            self.eval_error(
+                transition_name,
+                "mob_machine_instruction_widest_snapshot_slots expects two args",
+            )
+        })?;
+        let target_kind = target_kind
+            .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let target_member = target_member
+            .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let mut shared = 0_u64;
+        let mut own = BTreeMap::<&KernelValue, u64>::new();
+        for slot in target_kind.keys() {
+            match self.instruction_slot_member(
+                slot,
+                &target_kind,
+                &target_member,
+                transition_name,
+            )? {
+                Some(member) => {
+                    let count = own.entry(member).or_insert(0);
+                    *count = count.saturating_add(1);
+                }
+                None => shared = shared.saturating_add(1),
+            }
+        }
+        Ok(KernelValue::U64(
+            shared.saturating_add(own.values().copied().max().unwrap_or(0)),
+        ))
+    }
+
+    /// The Active body bytes of the widest member snapshot: the shared
+    /// records' Active bytes plus the most any one member's own records
+    /// hold; a slot `bytes` does not name counts nothing.
+    fn eval_mob_machine_instruction_widest_snapshot_active_bytes(
+        &self,
+        args: Vec<KernelValue>,
+        transition_name: &TransitionId,
+    ) -> Result<KernelValue, TransitionRefusal> {
+        let [effect, bytes, target_kind, target_member]: [KernelValue; 4] =
+            args.try_into().map_err(|_| {
+                self.eval_error(
+                    transition_name,
+                    "mob_machine_instruction_widest_snapshot_active_bytes expects four args",
+                )
+            })?;
+        let effect = effect
+            .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let bytes = bytes
+            .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let target_kind = target_kind
+            .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let target_member = target_member
+            .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let mut shared = 0_u64;
+        let mut own = BTreeMap::<&KernelValue, u64>::new();
+        for (slot, slot_effect) in &effect {
+            let active = slot_effect
+                .as_named_variant("InstructionEffect")
+                .map_err(|error| self.eval_error(transition_name, error))?
+                == "Active";
+            if !active {
+                continue;
+            }
+            let slot_bytes = match bytes.get(slot) {
+                Some(value) => value
+                    .as_u64()
+                    .map_err(|error| self.eval_error(transition_name, error))?,
+                None => 0,
+            };
+            match self.instruction_slot_member(
+                slot,
+                &target_kind,
+                &target_member,
+                transition_name,
+            )? {
+                Some(member) => {
+                    let total = own.entry(member).or_insert(0);
+                    *total = total.saturating_add(slot_bytes);
+                }
+                None => shared = shared.saturating_add(slot_bytes),
+            }
+        }
+        Ok(KernelValue::U64(
+            shared.saturating_add(own.values().copied().max().unwrap_or(0)),
+        ))
     }
 
     /// One session's slot map with one slot set: `current` with `slot`
@@ -5558,6 +5730,124 @@ mod tests {
             ),
             Err(TransitionRefusal::EvaluationError { .. })
         ));
+    }
+
+    /// The widest member snapshot of a mob's operator instruction records:
+    /// the shared records plus the most any one member holds of its own, in
+    /// records and in Active body bytes, as the machine-schema authority
+    /// counts them. A slot whose kind is no longer Member counts as shared
+    /// even while the member map still names it.
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn mob_instruction_widest_snapshot_counts_shared_plus_one_members_own() {
+        let kernel = GeneratedMachineKernel::new(mob_machine());
+        let transition = transition_id("SetOperatorInstructionNew");
+        let slot = |name: &str| KernelValue::String(name.to_owned());
+        let kind = |variant: &str| KernelValue::NamedVariant {
+            enum_name: enum_type_id("InstructionTargetKind"),
+            variant: enum_variant_id(variant),
+        };
+        let effect = |variant: &str| KernelValue::NamedVariant {
+            enum_name: enum_type_id("InstructionEffect"),
+            variant: enum_variant_id(variant),
+        };
+        let agent = |name: &str| named_string("AgentIdentity", name);
+        let kinds = KernelValue::Map(BTreeMap::from([
+            (slot("mob"), kind("Mob")),
+            (slot("profile"), kind("Profile")),
+            (slot("a1"), kind("Member")),
+            (slot("a2"), kind("Member")),
+            (slot("b1"), kind("Member")),
+            (slot("was-member"), kind("Mob")),
+        ]));
+        let members = KernelValue::Map(BTreeMap::from([
+            (slot("a1"), agent("agent.a")),
+            (slot("a2"), agent("agent.a")),
+            (slot("b1"), agent("agent.b")),
+            (slot("was-member"), agent("agent.b")),
+        ]));
+        let effects = KernelValue::Map(BTreeMap::from([
+            (slot("mob"), effect("Active")),
+            (slot("profile"), effect("Absent")),
+            (slot("a1"), effect("Active")),
+            (slot("a2"), effect("Absent")),
+            (slot("b1"), effect("Active")),
+            (slot("was-member"), effect("Active")),
+        ]));
+        let bytes = KernelValue::Map(BTreeMap::from([
+            (slot("mob"), KernelValue::U64(100)),
+            (slot("profile"), KernelValue::U64(0)),
+            (slot("a1"), KernelValue::U64(7)),
+            (slot("a2"), KernelValue::U64(0)),
+            (slot("b1"), KernelValue::U64(30)),
+            (slot("was-member"), KernelValue::U64(1000)),
+        ]));
+        // Three shared records (mob, profile, was-member) and two of agent a.
+        assert_eq!(
+            kernel
+                .eval_native_helper(
+                    "mob_machine_instruction_widest_snapshot_slots",
+                    vec![kinds.clone(), members.clone()],
+                    &transition,
+                )
+                .expect("widest snapshot slots"),
+            KernelValue::U64(5)
+        );
+        // 1100 shared Active bytes and agent b's 30.
+        assert_eq!(
+            kernel
+                .eval_native_helper(
+                    "mob_machine_instruction_widest_snapshot_active_bytes",
+                    vec![effects, bytes, kinds, members],
+                    &transition,
+                )
+                .expect("widest snapshot active bytes"),
+            KernelValue::U64(1130)
+        );
+        let empty = || KernelValue::Map(BTreeMap::new());
+        // A write with a member names it for the slot; one without a member
+        // leaves the slot unnamed.
+        let two_members = KernelValue::Map(BTreeMap::from([
+            (slot("a1"), agent("agent.a")),
+            (slot("b1"), agent("agent.b")),
+        ]));
+        assert_eq!(
+            kernel
+                .eval_native_helper(
+                    "mob_machine_instruction_target_members_after_write",
+                    vec![
+                        two_members.clone(),
+                        slot("a1"),
+                        option_some(agent("agent.b"))
+                    ],
+                    &transition,
+                )
+                .expect("a member write"),
+            KernelValue::Map(BTreeMap::from([
+                (slot("a1"), agent("agent.b")),
+                (slot("b1"), agent("agent.b")),
+            ]))
+        );
+        assert_eq!(
+            kernel
+                .eval_native_helper(
+                    "mob_machine_instruction_target_members_after_write",
+                    vec![two_members, slot("a1"), KernelValue::None],
+                    &transition,
+                )
+                .expect("a shared write"),
+            KernelValue::Map(BTreeMap::from([(slot("b1"), agent("agent.b"))]))
+        );
+        assert_eq!(
+            kernel
+                .eval_native_helper(
+                    "mob_machine_instruction_widest_snapshot_slots",
+                    vec![empty(), empty()],
+                    &transition,
+                )
+                .expect("no record"),
+            KernelValue::U64(0)
+        );
     }
 
     #[allow(clippy::expect_used)]

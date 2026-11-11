@@ -37,7 +37,7 @@ const OTHER_SLOT: &str = "[\"app.example\",\"style\"]";
 const BODY_LIMIT: u64 = 256 * 1024;
 const ACTIVE_BUDGET: u64 = 1024 * 1024;
 
-const ARMS: [&str; 30] = [
+const ARMS: [&str; 31] = [
     "SetOperatorInstructionBodyTooLarge",
     "SetOperatorInstructionSlotLimitExceeded",
     "SetOperatorInstructionNewOverBudget",
@@ -45,6 +45,7 @@ const ARMS: [&str; 30] = [
     "SetOperatorInstructionStale",
     "SetOperatorInstructionDuplicate",
     "SetOperatorInstructionConflict",
+    "SetOperatorInstructionAdvanceSlotLimitExceeded",
     "SetOperatorInstructionAdvanceOverBudget",
     "SetOperatorInstructionAdvance",
     "SetOperatorInstructionTerminal",
@@ -844,6 +845,159 @@ fn the_active_budget_bounds_a_members_snapshot() {
             Some(1),
         ),
     );
+}
+
+/// Every write's verdict against an independent count: over a long mixed
+/// sequence of writes, retargets and revokes for a few members, a write is
+/// refused `slot_limit_exceeded` exactly when the snapshot of some member
+/// would hold more than 64 records after it, `active_set_budget_exceeded`
+/// exactly when some member's Active bodies would pass 1 MiB (and the slot
+/// limit holds), and commits otherwise. The count here is made per member
+/// from the record maps, without the machine's helpers.
+#[test]
+fn every_write_verdict_agrees_with_an_independent_snapshot_count() {
+    const MEMBERS: [&str; 4] = ["agent-a", "agent-b", "agent-c", "agent-d"];
+    // The widest snapshot (records, Active bytes) of `state` with `slot`
+    // written as `target` with `bytes` Active bytes.
+    fn widest_after(
+        state: &MobMachineState,
+        slot: &str,
+        target: &Target,
+        bytes: u64,
+    ) -> (u64, u64) {
+        let (kind, _, member) = target.parts();
+        let mut records: Vec<(Option<AgentIdentity>, u64)> = state
+            .operator_instruction_revision
+            .keys()
+            .filter(|other| other.as_str() != slot)
+            .map(|other| {
+                let own = (state.operator_instruction_target_kind.get(other)
+                    == Some(&InstructionTargetKind::Member))
+                .then(|| state.operator_instruction_target_member.get(other).cloned())
+                .flatten();
+                let active = state.operator_instruction_effect.get(other)
+                    == Some(&InstructionEffect::Active);
+                let bytes = if active {
+                    state
+                        .operator_instruction_body_bytes
+                        .get(other)
+                        .copied()
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
+                (own, bytes)
+            })
+            .collect();
+        records.push((
+            (kind == InstructionTargetKind::Member)
+                .then_some(member)
+                .flatten(),
+            bytes,
+        ));
+        let shared_count = records.iter().filter(|(own, _)| own.is_none()).count() as u64;
+        let shared_bytes: u64 = records
+            .iter()
+            .filter(|(own, _)| own.is_none())
+            .map(|(_, bytes)| bytes)
+            .sum();
+        let mut widest = (shared_count, shared_bytes);
+        for member in MEMBERS {
+            let own = records
+                .iter()
+                .filter(|(own, _)| own.as_ref() == Some(&identity(member)));
+            let count = shared_count + own.clone().count() as u64;
+            let bytes = shared_bytes + own.map(|(_, bytes)| bytes).sum::<u64>();
+            widest = (widest.0.max(count), widest.1.max(bytes));
+        }
+        widest
+    }
+
+    let mut authority = Authority::new();
+    let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+    let mut next = |bound: u64| {
+        seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (seed >> 33) % bound
+    };
+    let (mut slot_refusals, mut budget_refusals, mut commits_seen) = (0, 0, 0);
+    for _ in 0..4000 {
+        let slot = format!("[\"walk\",\"k{:03}\"]", next(140));
+        let current = authority
+            .state()
+            .operator_instruction_revision
+            .get(&slot)
+            .copied();
+        if current.is_some() && next(10) == 0 {
+            signal(&mut authority, revoke(&slot, current.unwrap_or(0) + 1));
+            continue;
+        }
+        let target = match next(8) {
+            0 => Target::Mob,
+            1 => Target::Profile("alpha"),
+            other => Target::Member(MEMBERS[(other % 4) as usize]),
+        };
+        // Mostly small bodies, sometimes a large one.
+        let bytes = if next(6) == 0 {
+            BODY_LIMIT / (1 + next(4))
+        } else {
+            1 + next(64)
+        };
+        let (slots_after, bytes_after) = widest_after(authority.state(), &slot, &target, bytes);
+        let revision = current.unwrap_or(0) + 1;
+        let transition = signal(
+            &mut authority,
+            set(&slot, revision, DIGEST_A, bytes, target.clone()),
+        );
+        let expected = if slots_after > 64 {
+            refused(
+                &slot,
+                OperatorInstructionRefusal::SlotLimitExceeded,
+                current,
+            )
+        } else if bytes_after > ACTIVE_BUDGET {
+            refused(
+                &slot,
+                OperatorInstructionRefusal::ActiveSetBudgetExceeded,
+                current,
+            )
+        } else {
+            committed(
+                &slot,
+                revision,
+                InstructionEffect::Active,
+                generation(&authority),
+            )
+        };
+        assert_eq!(
+            transition.effects(),
+            expected.as_slice(),
+            "{slot} at revision {revision} for {target:?} with {bytes} bytes: the widest \
+             snapshot after it holds {slots_after} records and {bytes_after} Active bytes"
+        );
+        match transition.effects() {
+            [
+                Effect::OperatorInstructionRefused {
+                    refusal: OperatorInstructionRefusal::SlotLimitExceeded,
+                    ..
+                },
+            ] => slot_refusals += 1,
+            [Effect::OperatorInstructionRefused { .. }] => budget_refusals += 1,
+            _ => commits_seen += 1,
+        }
+    }
+    assert!(
+        slot_refusals > 20 && budget_refusals > 20 && commits_seen > 200,
+        "the walk reaches both limits: {slot_refusals} slot refusals, {budget_refusals} budget \
+         refusals, {commits_seen} commits"
+    );
+    assert!(
+        authority.state().operator_instruction_revision.len() > 64,
+        "the mob holds more records than one snapshot's limit"
+    );
+    Authority::recover_from_state(authority.state().clone())
+        .unwrap_or_else(|error| panic!("the reached state recovers: {error}"));
 }
 
 /// The replay of a journal that holds more records than one snapshot's

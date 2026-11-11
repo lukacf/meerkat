@@ -1376,22 +1376,22 @@ async fn a_response_with_many_hosted_searches_is_recorded_whole() {
     }
 }
 
-/// A response that fails records nothing. The same items, received in a
-/// response that then fails, do not make the step known: the transcript is
-/// the step exactly as another process stored it from the successful
-/// response, and it is sent in the dropped form.
+/// A response that fails records nothing. Here the failed response
+/// delivers, event by event, exactly the material of a step (its reasoning
+/// item and its call, as a server that streams events only delivers them)
+/// and then fails. The transcript is that step exactly as another process
+/// stored it from the same events of a response that completed: it stays
+/// of unknown issuer and is sent in the dropped form.
 #[tokio::test]
 async fn a_failed_response_records_nothing() {
     let failed = {
-        let item = reasoning_item("f", 1, None);
-        let call = call_item("f");
+        let reasoning = reasoning_item("f", 1, None);
         let mut payload = String::new();
         for event in [
             json!({"type": "response.created", "response": {"id": "resp_f_1"}}),
-            json!({"type": "response.output_item.added", "output_index": 0, "item": item}),
-            json!({"type": "response.output_item.done", "output_index": 0, "item": item}),
-            json!({"type": "response.output_item.added", "output_index": 1, "item": call}),
-            json!({"type": "response.output_item.done", "output_index": 1, "item": call}),
+            json!({"type": "response.reasoning.done", "item": reasoning}),
+            json!({"type": "response.function_call_arguments.done", "call_id": "call_f",
+                "name": "get_weather", "arguments": "{\"city\":\"Oslo\"}"}),
             json!({"type": "response.failed", "response": {
                 "id": "resp_f_1",
                 "status": "failed",
@@ -1403,13 +1403,14 @@ async fn a_failed_response_records_nothing() {
         payload.push_str("data: [DONE]\n\n");
         payload
     };
-    for service in Service::ALL {
+    // The services whose servers may stream events only.
+    for service in [Service::OpenAiApi, Service::SelfHostedA] {
         let history = vec![user(QUESTION)];
         let elsewhere = new_process();
         let (_, blocks) = stored_step(
             service.client(&elsewhere),
             &history,
-            &tool_step_response("f"),
+            &events_only_response("f"),
         )
         .await;
         let transcript = vec![
@@ -1421,7 +1422,7 @@ async fn a_failed_response_records_nothing() {
         assert_eq!(
             known["input"],
             input_of([vec![user_item(QUESTION)], native_tool_step("f")]),
-            "{service:?}: the successful response made the step known where it was received"
+            "{service:?}: the completed response made the step known where it was received"
         );
 
         let process = new_process();
@@ -1429,16 +1430,21 @@ async fn a_failed_response_records_nothing() {
         answer_with(&failed);
         let outcome: Vec<_> = client.stream(&request(history.clone())).collect().await;
         assert!(
+            outcome.iter().any(|event| matches!(
+                event,
+                Ok(LlmEvent::ReasoningComplete { meta: Some(_), .. })
+            )) && outcome
+                .iter()
+                .any(|event| matches!(event, Ok(LlmEvent::ToolCallComplete { .. }))),
+            "{service:?}: the failed response delivered the step's material first: {outcome:?}"
+        );
+        assert!(
             !outcome.iter().any(|event| matches!(
                 event,
                 Ok(LlmEvent::Done {
                     outcome: meerkat_llm_core::LlmDoneOutcome::Success { .. }
                 })
-            )),
-            "{service:?}: the response did not succeed: {outcome:?}"
-        );
-        assert!(
-            outcome.iter().any(|event| matches!(
+            )) && outcome.iter().any(|event| matches!(
                 event,
                 Err(_)
                     | Ok(LlmEvent::Done {
@@ -2196,6 +2202,134 @@ async fn a_prepared_request_keeps_its_cache_claims() {
     assert_ne!(
         undecided, before,
         "authored now, without the decision, the claims are those of the dropped form"
+    );
+}
+
+/// A cache claim maps a breakpoint to a prefix of the lowered input, and
+/// the count behind it comes from the same lowering as the request body,
+/// under the same decision. That holds in every form of a transcript whose
+/// steps carry reasoning items and a hosted-tool item before later
+/// breakpoints: every step received by this process, none (a cold load),
+/// and both in one request. (A count taken from the steps as stored would
+/// overrun the lowered input of a dropped step, and the claim would fail
+/// with "OpenAI cache breakpoint did not map to lowered input items".) The
+/// request is an explicit-cache one on the public API wire, the only wire
+/// that authors cache claims; the Copilot route authors none.
+#[tokio::test]
+async fn cache_claims_count_the_lowered_items_in_every_form() {
+    use meerkat_core::lifecycle::run_primitive::OpenAiPromptCacheOptions;
+    use meerkat_core::model_profile::capabilities::{OpenAiPromptCacheMode, OpenAiPromptCacheTtl};
+
+    let explicit = |messages: Vec<Message>| {
+        LlmRequest::new("gpt-5.6-sol", messages).with_openai_tag_merge(|tag| {
+            tag.prompt_cache_options = Some(OpenAiPromptCacheOptions {
+                mode: Some(OpenAiPromptCacheMode::Explicit),
+                ttl: Some(OpenAiPromptCacheTtl::ThirtyMinutes),
+            });
+        })
+    };
+    let public_api = |ledger: &Ledger| {
+        OpenAiClient::new_with_base_url("test-key".to_string(), endpoint("OpenAiApi"))
+            .with_continuity_ledger(Arc::clone(ledger))
+    };
+
+    // A step that searched the web on the service's side (a reasoning item,
+    // a hosted-tool item, the answer), then a tool turn (a reasoning item
+    // and a call, the output, a reasoning item and the answer).
+    let earlier = new_process();
+    let mut searched = hosted_search_turn(Service::OpenAiApi, &earlier, "h").await;
+    searched.pop();
+    let (stored, _) = tool_turn(Service::OpenAiApi, &earlier, searched, "old", NEXT_QUESTION).await;
+    let restarted = new_process();
+    let resumed = new_process();
+    let (mixed, _) = tool_turn(
+        Service::OpenAiApi,
+        &resumed,
+        stored.clone(),
+        "new",
+        "And in Bergen?",
+    )
+    .await;
+
+    let mut lowered = Vec::new();
+    for (form, ledger, transcript) in [
+        ("every step received", &earlier, stored.clone()),
+        ("a cold load", &restarted, stored.clone()),
+        ("stored and received steps", &resumed, mixed),
+    ] {
+        let client = public_api(ledger);
+        // As a session does: the projection, then the prepared request.
+        let projection = client
+            .project_replay_request(&transcript)
+            .expect("projection");
+        let prepared =
+            meerkat_llm_core::PreparedLlmRequest::from_projection(explicit(Vec::new()), projection);
+        let body = client
+            .build_request_body(prepared.request())
+            .unwrap_or_else(|error| panic!("{form}: the request body: {error}"));
+        let input = body["input"].as_array().expect("input");
+        assert!(
+            body.to_string().contains("prompt_cache_breakpoint"),
+            "{form}: explicit mode authors breakpoints"
+        );
+        let claims = client
+            .prepared_cache_breakpoints(&prepared, &transcript)
+            .unwrap_or_else(|error| panic!("{form}: the prepared claims: {error}"));
+        assert!(!claims.is_empty(), "{form}: claims are authored");
+        // And handed the transcript as stored, never projected.
+        let unprojected = client
+            .authored_cache_breakpoints(&explicit(transcript.clone()), &transcript)
+            .unwrap_or_else(|error| panic!("{form}: the claims of the stored transcript: {error}"));
+        assert_eq!(
+            format!("{unprojected:?}"),
+            format!("{claims:?}"),
+            "{form}: one lowering, projected first or not"
+        );
+        let count = |kind: &str| input.iter().filter(|item| item["type"] == kind).count();
+        lowered.push((
+            form,
+            input.len(),
+            count("reasoning"),
+            count("web_search_call"),
+            claims.len(),
+        ));
+    }
+    let [received, cold, mixed] = [lowered[0], lowered[1], lowered[2]];
+    assert_eq!(
+        (received.2, received.3),
+        (3, 1),
+        "every step received: three reasoning items and the hosted-tool item are lowered"
+    );
+    assert_eq!(
+        (cold.2, cold.3),
+        (0, 0),
+        "a cold load lowers no reasoning item and no hosted-tool item"
+    );
+    assert!(
+        cold.1 < received.1,
+        "a cold load lowers fewer input items than the steps as stored: {cold:?} {received:?}"
+    );
+    assert_eq!(
+        (mixed.2, mixed.3),
+        (2, 0),
+        "mixed: only the new turn's reasoning items are lowered"
+    );
+    assert_eq!(
+        cold.4, received.4,
+        "the same breakpoints are claimed whatever the form"
+    );
+
+    // The Copilot route's wire admits no prompt-cache fields: no claims.
+    let copilot = Service::Copilot.client(&earlier);
+    let projection = copilot.project_replay_request(&stored).expect("projection");
+    let prepared =
+        meerkat_llm_core::PreparedLlmRequest::from_projection(explicit(Vec::new()), projection);
+    assert!(
+        copilot
+            .prepared_cache_breakpoints(&prepared, &stored)
+            .expect("claims")
+            .is_empty(),
+        "the Copilot route authors no cache claims"
     );
 }
 

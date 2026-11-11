@@ -14967,6 +14967,72 @@ mod tests {
             assert_eq!(transport.request_count(), 4);
         }
 
+        /// A model list states what the sign-in whose token fetched it may
+        /// use. After a new sign-in whose token exchange is down, the account
+        /// holds no list until that sign-in's own token fetches one: its
+        /// routes resolve as they do before a first listing, never from the
+        /// earlier sign-in's statement.
+        #[tokio::test]
+        async fn an_outage_after_a_new_sign_in_holds_no_model_list() {
+            let clock = TestClock::new();
+            let transport = Arc::new(ScriptedTransport::new([
+                token_at("derived-one", clock.at(3600), 200),
+                listing_stating_levels(&["low", "medium", "high"]),
+                json_response(503, serde_json::json!({"message": "unavailable"})),
+            ]));
+            let account = RouteAccount::admitting_pending_limits(transport.clone(), &clock).await;
+            let _first = account.session([]).await;
+            let state = account
+                .runtime
+                .accounts
+                .lock()
+                .values()
+                .find_map(Weak::upgrade)
+                .expect("the account's state");
+            let route = || {
+                resolve_route_for_state(&state, Provider::OpenAI, "gpt-test")
+                    .expect("the account's route")
+            };
+            assert!(account.lists_model("gpt-test"));
+            assert_eq!(
+                route()
+                    .capabilities
+                    .expect("the first sign-in's list states the model")
+                    .supports
+                    .stated_effort_levels()
+                    .map(|levels| levels.len()),
+                Some(3)
+            );
+
+            // A new sign-in while the exchange is down: the list the account
+            // holds was fetched with the earlier sign-in's token.
+            let new_expiry =
+                DateTime::from_timestamp(clock.at(86_400).timestamp(), 0).expect("a whole second");
+            account.sign_in_again("github-new-token", new_expiry).await;
+            account
+                .runtime
+                .resolve(&account.binding, &account.env)
+                .await
+                .expect("a build that knows its output budget is admitted during the outage");
+            assert_eq!(transport.request_count(), 3);
+            assert!(account.recorded_outage().is_some());
+
+            assert!(
+                !account.lists_model("gpt-test"),
+                "the earlier sign-in's model list must not stay under the new sign-in"
+            );
+            let route = route();
+            assert_eq!(
+                route.access,
+                CopilotModelAccess::Unknown,
+                "the route resolves as it does before a first listing"
+            );
+            assert_eq!(
+                route.capabilities, None,
+                "nothing the earlier sign-in's list stated is the new sign-in's"
+            );
+        }
+
         #[tokio::test]
         async fn a_session_restored_after_expiry_recovers_once_the_exchange_answers() {
             let clock = TestClock::new();

@@ -337,12 +337,13 @@ fn lock_table_file_id(file: &std::fs::File) -> Option<String> {
 }
 
 /// The kernel's lock table, `None` when it cannot be read. A test on this
-/// thread may supply the table instead (see `tests::with_lock_table`).
+/// thread may supply the table of each read instead (see
+/// `tests::with_lock_tables`).
 #[cfg(target_os = "linux")]
 fn read_lock_table() -> Option<String> {
     #[cfg(test)]
-    if let Some(table) = tests::LOCK_TABLE.with(|table| table.borrow().clone()) {
-        return Some(table);
+    if let Some(table) = tests::scripted_lock_table() {
+        return table;
     }
     std::fs::read_to_string("/proc/locks").ok()
 }
@@ -1591,21 +1592,67 @@ mod tests {
         assert!(!lock_table_names_another_holder("", file, own));
     }
 
+    /// The lock tables a test supplies instead of `/proc/locks`, and how
+    /// many reads they have answered.
+    #[cfg(target_os = "linux")]
+    struct ScriptedLockTables {
+        /// One table per read, in order; the last one answers every read
+        /// after it. `None` is a table that cannot be read.
+        tables: Vec<Option<String>>,
+        reads: usize,
+    }
+
     #[cfg(target_os = "linux")]
     thread_local! {
-        /// The lock table `read_lock_table` returns on this thread, when set.
-        pub(super) static LOCK_TABLE: std::cell::RefCell<Option<String>> =
+        /// The lock tables `read_lock_table` returns on this thread, when
+        /// set.
+        static LOCK_TABLES: std::cell::RefCell<Option<ScriptedLockTables>> =
             const { std::cell::RefCell::new(None) };
     }
 
-    /// Run the probe on this thread against `table` instead of
-    /// `/proc/locks`.
+    /// The answer to this thread's next read of the lock table when a test
+    /// supplies the tables (`Some(None)`: that read fails), `None` when
+    /// none does.
+    #[cfg(target_os = "linux")]
+    pub(super) fn scripted_lock_table() -> Option<Option<String>> {
+        LOCK_TABLES.with(|script| {
+            let mut script = script.borrow_mut();
+            let script = script.as_mut()?;
+            let table = script
+                .tables
+                .get(script.reads)
+                .or_else(|| script.tables.last())
+                .cloned();
+            script.reads += 1;
+            table
+        })
+    }
+
+    /// Run the probe on this thread against `tables` instead of
+    /// `/proc/locks`: one table per read of the lock table, in order, the
+    /// last one for every read after it (`None`: that read fails). Returns
+    /// the probe's outcome and how many reads of the table it made.
+    #[cfg(target_os = "linux")]
+    async fn with_lock_tables<T>(
+        tables: Vec<Option<String>>,
+        probe: impl std::future::Future<Output = T>,
+    ) -> (T, usize) {
+        assert!(!tables.is_empty(), "a scripted lock table needs a table");
+        LOCK_TABLES.with(|current| {
+            *current.borrow_mut() = Some(ScriptedLockTables { tables, reads: 0 });
+        });
+        let outcome = probe.await;
+        let reads = LOCK_TABLES
+            .with(|current| current.borrow_mut().take())
+            .map_or(0, |script| script.reads);
+        (outcome, reads)
+    }
+
+    /// Run the probe on this thread against `table`, for every read,
+    /// instead of `/proc/locks`.
     #[cfg(target_os = "linux")]
     async fn with_lock_table<T>(table: String, probe: impl std::future::Future<Output = T>) -> T {
-        LOCK_TABLE.with(|current| *current.borrow_mut() = Some(table));
-        let outcome = probe.await;
-        LOCK_TABLE.with(|current| *current.borrow_mut() = None);
-        outcome
+        with_lock_tables(vec![Some(table)], probe).await.0
     }
 
     /// Where the kernel's lock table names no holder of the custody file
@@ -1644,5 +1691,159 @@ mod tests {
             ),
             "an entry for the custody file naming another process refuses"
         );
+    }
+
+    /// A state directory whose custody lock this process holds through its
+    /// own live runtime store, as a same-process predecessor does: the
+    /// directory, what keeps the store and its claim alive, a lock table
+    /// that names only this process's lock on the custody file, and one
+    /// that names another process's lock beside it.
+    #[cfg(target_os = "linux")]
+    fn predecessor_held_custody() -> (tempfile::TempDir, impl Sized, String, String) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let realm = meerkat_core::RealmId::parse("custody-probe").expect("realm");
+        let (sessions, runtime_store) =
+            crate::mob_handle_runtime::open_native_session_pair(dir.path(), &realm)
+                .expect("open the native session pair");
+        let claim = runtime_store
+            .execution_custody()
+            .expect("the SQLite runtime store has execution custody")
+            .try_acquire_shared()
+            .expect("hold Core's shared custody, as a hosted runtime does");
+        let custody = std::fs::File::open(custody_file(dir.path())).expect("custody file");
+        let file_id = lock_table_file_id(&custody).expect("custody file id");
+        let own = std::process::id();
+        let own_only = format!("1: FLOCK  ADVISORY  READ {own} {file_id} 0 EOF");
+        let another_too = format!(
+            "{own_only}\n2: FLOCK  ADVISORY  READ {} {file_id} 0 EOF",
+            own + 1
+        );
+        (dir, (sessions, runtime_store, claim), own_only, another_too)
+    }
+
+    /// One read of the kernel's lock table can skip an entry (the kernel
+    /// hands the table out a page at a time and resumes by position, so a
+    /// lock released earlier in its list between two pages shifts the rest).
+    /// A holder that any read names is a holder: the successor is refused
+    /// when a later read names another process, whatever the reads before
+    /// it held.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_holder_named_only_by_a_later_read_of_the_lock_table_is_refused() {
+        let (dir, _held, own_only, another_too) = predecessor_held_custody();
+
+        let (outcome, reads) = with_lock_tables(
+            vec![Some(own_only.clone()), Some(another_too.clone())],
+            refuse_unready_state_dir(dir.path(), None),
+        )
+        .await;
+        assert!(
+            matches!(outcome, Err(StorageLayoutError::RuntimeInUse { .. })),
+            "the second read names another holder: {outcome:?}"
+        );
+        assert_eq!(reads, 2, "the read that names a holder is the last");
+
+        let (outcome, reads) = with_lock_tables(
+            vec![
+                Some(own_only.clone()),
+                Some(own_only),
+                Some(another_too.clone()),
+            ],
+            refuse_unready_state_dir(dir.path(), None),
+        )
+        .await;
+        assert!(
+            matches!(outcome, Err(StorageLayoutError::RuntimeInUse { .. })),
+            "the third read names another holder: {outcome:?}"
+        );
+        assert_eq!(reads, 3);
+
+        let (outcome, reads) = with_lock_tables(
+            vec![None, Some(another_too)],
+            refuse_unready_state_dir(dir.path(), None),
+        )
+        .await;
+        assert!(
+            matches!(outcome, Err(StorageLayoutError::RuntimeInUse { .. })),
+            "a read that names another holder after one that failed: {outcome:?}"
+        );
+        assert_eq!(reads, 2);
+    }
+
+    /// A lock table that names no other holder in any read admits the
+    /// same-process successor, as one such read did.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_holder_named_by_no_read_of_the_lock_table_admits_the_successor() {
+        let (dir, _held, own_only, _another_too) = predecessor_held_custody();
+
+        let (outcome, _reads) = with_lock_tables(
+            vec![Some(own_only)],
+            refuse_unready_state_dir(dir.path(), None),
+        )
+        .await;
+        outcome.expect("only this process holds custody in every read");
+    }
+
+    /// The refusing path costs one read: a first read that names another
+    /// holder is the only one.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_holder_named_by_the_first_read_of_the_lock_table_is_refused_after_one_read() {
+        let (dir, _held, own_only, another_too) = predecessor_held_custody();
+
+        let (outcome, reads) = with_lock_tables(
+            vec![Some(another_too), Some(own_only)],
+            refuse_unready_state_dir(dir.path(), None),
+        )
+        .await;
+        assert!(
+            matches!(outcome, Err(StorageLayoutError::RuntimeInUse { .. })),
+            "the first read names another holder: {outcome:?}"
+        );
+        assert_eq!(reads, 1, "nothing is read after a read names a holder");
+    }
+
+    /// Where no read can name a holder, the probe proceeds on this
+    /// process's own live store as before: the table cannot be read, or has
+    /// no entry for the custody file (btrfs subvolumes and overlayfs).
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_lock_table_no_read_can_attribute_admits_the_successor_as_before() {
+        let (dir, _held, _own_only, _another_too) = predecessor_held_custody();
+
+        let (outcome, _reads) =
+            with_lock_tables(vec![None], refuse_unready_state_dir(dir.path(), None)).await;
+        outcome.expect("an unreadable lock table admits the same-process successor");
+
+        let unmatched = "1: FLOCK  ADVISORY  READ 0 00:00:0 0 EOF".to_string();
+        let (outcome, _reads) = with_lock_tables(
+            vec![Some(unmatched)],
+            refuse_unready_state_dir(dir.path(), None),
+        )
+        .await;
+        outcome.expect("a table with no entry for the custody file admits the successor");
+    }
+
+    /// The probe reads the lock table a fixed number of times before it
+    /// answers that no other holder is named: three, and a table that would
+    /// name one in a fourth read is not read a fourth time.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn the_lock_table_is_read_three_times_before_no_other_holder_is_the_answer() {
+        let (dir, _held, own_only, another_too) = predecessor_held_custody();
+
+        let (outcome, reads) = with_lock_tables(
+            vec![
+                Some(own_only.clone()),
+                Some(own_only.clone()),
+                Some(own_only),
+                Some(another_too),
+            ],
+            refuse_unready_state_dir(dir.path(), None),
+        )
+        .await;
+        assert_eq!(reads, 3, "the reads are bounded");
+        outcome.expect("no read of the three names another holder");
     }
 }

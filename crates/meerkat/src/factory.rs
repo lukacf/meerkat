@@ -26566,6 +26566,84 @@ mod prompt_tests {
         );
     }
 
+    /// An exact session whose deferrable tools are under the byte budget
+    /// starts inline. Its stored system prompt is, byte for byte, the prompt
+    /// of the same tools without an exact catalog, and the tools it shows
+    /// are theirs in the same order: the catalog control tools are mounted
+    /// for the deferrable tools and left out of the request.
+    #[tokio::test]
+    async fn an_exact_session_under_the_budget_has_the_prompt_and_tools_of_an_inexact_one() {
+        async fn build(exact_catalog: bool) -> (String, Vec<String>, Vec<String>) {
+            let temp = tempfile::tempdir().unwrap();
+            let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+            let tool = |name: &str, description: &str| {
+                Arc::new(ToolDef {
+                    name: name.into(),
+                    description: description.to_string(),
+                    input_schema: serde_json::json!({"type":"object"}),
+                    provenance: None,
+                    audience: Default::default(),
+                })
+            };
+            let dispatcher = UsageTestDispatcher {
+                tools: vec![
+                    tool("secret_lookup", "Look up a secret value"),
+                    tool("visible", "Always-inline tool"),
+                    tool("secret_audit", "Audit a secret value"),
+                ]
+                .into(),
+                exact_catalog,
+                may_require_control_plane: false,
+                pending_sources: Arc::from([]),
+            };
+            let mut build_config = AgentBuildConfig::new("claude-sonnet-4-5");
+            build_config.llm_client_override = Some(Arc::new(PromptTestClient));
+            build_config.override_builtins = ToolCategoryOverride::Disable;
+            build_config.external_tools = Some(Arc::new(dispatcher));
+            let agent = factory
+                .build_agent(build_config, &Config::default())
+                .await
+                .unwrap();
+            let Some(Message::System(message)) = agent.session().messages().first() else {
+                unreachable!("expected system prompt");
+            };
+            let shown = agent
+                .tool_scope()
+                .visible_tools()
+                .iter()
+                .map(|tool| tool.name.to_string())
+                .collect();
+            let mounted = agent
+                .tool_catalog_view()
+                .map(|view| {
+                    view.entries
+                        .iter()
+                        .map(|entry| entry.name.to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
+            (message.content.to_string(), shown, mounted)
+        }
+
+        let (exact_prompt, exact_shown, exact_mounted) = build(true).await;
+        let (inexact_prompt, inexact_shown, _) = build(false).await;
+        assert_eq!(
+            exact_prompt, inexact_prompt,
+            "an inline exact session stores the prompt it would store without an exact catalog"
+        );
+        assert_eq!(
+            exact_shown, inexact_shown,
+            "and shows the same tools in the same order"
+        );
+        assert_eq!(exact_shown, ["secret_lookup", "visible", "secret_audit"]);
+        for name in ["tool_catalog_search", "tool_catalog_load"] {
+            assert!(
+                exact_mounted.iter().any(|tool| tool == name),
+                "{name} is mounted for the deferrable tools and left out: {exact_mounted:?}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn dynamic_exact_sessions_precompose_deferred_catalog_surface_before_threshold() {
         let temp = tempfile::tempdir().unwrap();

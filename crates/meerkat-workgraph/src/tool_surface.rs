@@ -1035,6 +1035,18 @@ mod tests {
         assert!(matches!(err, crate::WorkGraphError::InvalidInput(_)));
     }
 
+    /// The two deferrable WorkGraph tools need no catalog control tool while
+    /// they are in the request, so the surface reports an exact catalog and
+    /// does not ask for the control tools to be shown whatever the mode.
+    #[test]
+    fn the_tool_surface_does_not_declare_the_control_plane() {
+        let surface =
+            WorkGraphToolSurface::new(WorkGraphService::new(Arc::new(MemoryWorkGraphStore::new())));
+        let capabilities = surface.tool_catalog_capabilities();
+        assert!(capabilities.exact_catalog);
+        assert!(!capabilities.may_require_catalog_control_plane);
+    }
+
     #[test]
     fn workgraph_tool_defs_have_workgraph_provenance() {
         let surface =

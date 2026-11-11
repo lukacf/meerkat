@@ -2689,6 +2689,21 @@ mod tests {
         assert!(result.is_err() || result.unwrap().is_err());
     }
 
+    /// Registered tools need no catalog control tool while they are all in
+    /// the request, so the dispatcher does not ask for the control tools to
+    /// be shown whatever the mode. They are mounted with the first
+    /// deferrable tool and shown while one waits behind the catalog.
+    #[test]
+    fn registered_tools_do_not_declare_the_control_plane() {
+        let (callback_tx, _callback_rx) = mpsc::channel(10);
+        let tools = Arc::new(StdRwLock::new(vec![make_tool_def("lookup")]));
+        let dispatcher =
+            CallbackToolDispatcher::new(tools, callback_tx, Arc::new(AtomicU64::new(0)), vec![]);
+        let capabilities = dispatcher.tool_catalog_capabilities();
+        assert!(capabilities.exact_catalog);
+        assert!(!capabilities.may_require_catalog_control_plane);
+    }
+
     #[test]
     fn callback_catalog_and_resolver_declare_actual_internal_timeout() {
         let (callback_tx, _callback_rx) = mpsc::channel(10);

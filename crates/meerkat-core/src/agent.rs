@@ -11,6 +11,8 @@ mod brain_swap_promotion_tests;
 #[cfg(all(test, feature = "workspace-tests"))]
 mod budget_warning_tests;
 mod builder;
+#[cfg(all(test, feature = "workspace-tests"))]
+mod catalog_control_visibility_tests;
 pub mod comms_impl;
 pub mod compact;
 #[cfg(all(test, feature = "workspace-tests"))]

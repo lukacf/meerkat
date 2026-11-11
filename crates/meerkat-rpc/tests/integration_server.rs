@@ -658,7 +658,7 @@ async fn pipelined_tools_register_commits_before_session_create() {
 }
 
 #[tokio::test]
-async fn late_registered_deferred_callbacks_keep_control_plane_after_inline_build() {
+async fn late_registered_callbacks_defer_with_the_control_tools_after_an_inline_start() {
     let client = Arc::new(RecordingToolClient::default());
     let (mut writer, mut reader, server_handle) = spawn_test_server_with_client(client.clone());
 
@@ -761,17 +761,13 @@ async fn late_registered_deferred_callbacks_keep_control_plane_after_inline_buil
     let initial_call = &seen[0];
     assert!(
         initial_call.iter().any(|name| name == "secret_lookup"),
-        "the session should start inline before the adaptive deferred threshold is crossed, got {initial_call:?}"
+        "the session should start inline before the byte budget is crossed, got {initial_call:?}"
     );
     assert!(
-        initial_call
+        !initial_call
             .iter()
-            .any(|name| name == "tool_catalog_search"),
-        "dynamically defer-capable sessions should still precompose tool_catalog_search, got {initial_call:?}"
-    );
-    assert!(
-        initial_call.iter().any(|name| name == "tool_catalog_load"),
-        "dynamically defer-capable sessions should still precompose tool_catalog_load, got {initial_call:?}"
+            .any(|name| name == "tool_catalog_search" || name == "tool_catalog_load"),
+        "an inline session with a small registered tool sends no catalog control tool, got {initial_call:?}"
     );
 
     send_request(
@@ -839,6 +835,108 @@ async fn late_registered_deferred_callbacks_keep_control_plane_after_inline_buil
     assert!(
         !first_call.iter().any(|name| name == "secret_audit"),
         "late-added deferred tools should remain hidden until loaded, got {first_call:?}"
+    );
+
+    drop(writer);
+    server_handle.await.unwrap().unwrap();
+}
+
+/// A session created before any tool is registered has nothing to defer and
+/// mounts no catalog control tool. Tools registered later, whatever their
+/// size, are offered directly for its lifetime: nothing is hidden and
+/// nothing has to be loaded.
+#[tokio::test]
+async fn a_session_created_before_any_registration_keeps_later_tools_in_the_request() {
+    let client = Arc::new(RecordingToolClient::default());
+    let (mut writer, mut reader, server_handle) = spawn_test_server_with_client(client.clone());
+
+    async fn call(
+        writer: &mut tokio::io::DuplexStream,
+        reader: &mut BufReader<tokio::io::DuplexStream>,
+        id: u64,
+        method: &str,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        send_request(
+            writer,
+            &serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}),
+        )
+        .await;
+        let response = read_response(reader).await;
+        assert!(response["error"].is_null(), "{method} failed: {response}");
+        response
+    }
+
+    call(
+        &mut writer,
+        &mut reader,
+        1,
+        "initialize",
+        serde_json::json!({}),
+    )
+    .await;
+    let created = call(
+        &mut writer,
+        &mut reader,
+        2,
+        "session/create",
+        serde_json::json!({
+            "prompt": "Bootstrap a session with no registered tool",
+            "initial_turn": "deferred",
+            "enable_builtins": false,
+            "enable_shell": false,
+            "enable_memory": false,
+            "enable_mob": false
+        }),
+    )
+    .await;
+    let session_id = created["result"]["session_id"]
+        .as_str()
+        .expect("session_id missing")
+        .to_string();
+    call(
+        &mut writer,
+        &mut reader,
+        3,
+        "tools/register",
+        serde_json::json!({"tools": [{
+            "name": "secret_lookup",
+            "description": "Look up a secret value.",
+            "input_schema": {"type": "object"}
+        }, {
+            "name": "secret_audit",
+            "description": over_catalog_budget("Audit a secret value."),
+            "input_schema": {"type": "object"}
+        }]}),
+    )
+    .await;
+    call(
+        &mut writer,
+        &mut reader,
+        4,
+        "turn/start",
+        serde_json::json!({
+            "session_id": session_id,
+            "prompt": "Inspect the tools registered after the session was created."
+        }),
+    )
+    .await;
+
+    let seen = client.seen_tools();
+    assert_eq!(seen.len(), 1, "expected exactly one LLM call, got {seen:?}");
+    for name in ["secret_lookup", "secret_audit"] {
+        assert!(
+            seen[0].iter().any(|tool| tool == name),
+            "{name} is offered directly, got {:?}",
+            seen[0]
+        );
+    }
+    assert!(
+        !seen[0]
+            .iter()
+            .any(|name| name == "tool_catalog_search" || name == "tool_catalog_load"),
+        "a session that started with nothing to defer has no catalog control tool, got {:?}",
+        seen[0]
     );
 
     drop(writer);

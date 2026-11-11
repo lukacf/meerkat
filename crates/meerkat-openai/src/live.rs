@@ -139,11 +139,11 @@ impl OpenAiLiveClient {
     }
 
     /// The line the opt-in frame trace (`RKAT_OPENAI_REALTIME_TRACE_JSON`)
-    /// prints for a received `frame`: the frame as JSON, redacted as
-    /// [`Self::redact_diagnostic`] does, so a frame that repeats the
-    /// connection's API key anywhere is traced without it.
-    fn traced_frame(&self, frame: &ServerEvent) -> Option<String> {
-        let mut line = trace_server_event_json(frame)?;
+    /// prints for a frame, sent or received: `frame`, the frame as JSON,
+    /// redacted as [`Self::redact_diagnostic`] does, so a frame that holds
+    /// the connection's API key anywhere is traced without it.
+    fn traced_frame(&self, frame: Option<String>) -> Option<String> {
+        let mut line = frame?;
         self.redact_diagnostic(&mut line);
         Some(line)
     }
@@ -174,6 +174,15 @@ struct KeyRedactingLiveSession<S> {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl<S: OpenAiLiveSession> OpenAiLiveSession for KeyRedactingLiveSession<S> {
     async fn send_raw(&mut self, event: ClientEvent) -> Result<(), LlmError> {
+        if std::env::var_os("RKAT_OPENAI_REALTIME_TRACE_JSON").is_some()
+            && let Some(line) = self.client.traced_frame(trace_client_event_json(&event))
+        {
+            // Trace output must stay mechanically safe. Dumping full base64
+            // audio payloads into the sideband host's stderr pipe can
+            // introduce backpressure and perturb realtime timing, which makes
+            // the trace itself untrustworthy during smoke debugging.
+            eprintln!("[openai-realtime-send] {line}");
+        }
         self.connection
             .send_raw(event)
             .await
@@ -203,7 +212,7 @@ impl<S: OpenAiLiveSession> OpenAiLiveSession for KeyRedactingLiveSession<S> {
         }
         if std::env::var_os("RKAT_OPENAI_REALTIME_TRACE_JSON").is_some()
             && let Some(event) = event.as_ref()
-            && let Some(line) = self.client.traced_frame(event)
+            && let Some(line) = self.client.traced_frame(trace_server_event_json(event))
         {
             eprintln!("[openai-realtime-recv] {line}");
         }
@@ -492,15 +501,8 @@ fn decode_and_validate_openai_realtime_image(
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl OpenAiLiveSession for RealtimeOpenAiLiveSession {
     async fn send_raw(&mut self, event: ClientEvent) -> Result<(), LlmError> {
-        if std::env::var_os("RKAT_OPENAI_REALTIME_TRACE_JSON").is_some()
-            && let Some(serialized) = trace_client_event_json(&event)
-        {
-            // Trace output must stay mechanically safe. Dumping full base64
-            // audio payloads into the sideband host's stderr pipe can
-            // introduce backpressure and perturb realtime timing, which makes
-            // the trace itself untrustworthy during smoke debugging.
-            eprintln!("[openai-realtime-send] {serialized}");
-        }
+        // A sent frame is traced by the session the client hands out
+        // (`KeyRedactingLiveSession`), through its redaction.
         self.sender.send(event).await.map_err(map_openai_live_error)
     }
 
@@ -7096,7 +7098,7 @@ mod tests {
     /// The line the opt-in frame trace prints for `frame` on a connection
     /// of `client`.
     fn traced_frame_line(client: &OpenAiLiveClient, frame: &ServerEvent) -> Option<String> {
-        client.traced_frame(frame)
+        client.traced_frame(trace_server_event_json(frame))
     }
 
     /// The opt-in frame trace prints a frame without the connection's API
@@ -7132,8 +7134,7 @@ mod tests {
     /// The line the opt-in frame trace prints for a `frame` this process
     /// sends on a connection of `client`.
     fn traced_sent_frame_line(client: &OpenAiLiveClient, frame: &ClientEvent) -> Option<String> {
-        let _ = client;
-        trace_client_event_json(frame)
+        client.traced_frame(trace_client_event_json(frame))
     }
 
     /// A sent frame is traced through the same redaction as a received

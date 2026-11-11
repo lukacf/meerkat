@@ -1639,6 +1639,25 @@ async fn a_person_cannot_approve_their_own_request() {
         (refusal.kind_token(), refusal.field.as_deref()),
         ("invalid_request", Some("requester"))
     );
+    // The key of a principal that is no person does not name a person.
+    let host_key = DecisionPrincipalKey::of(
+        &PrincipalRef::in_domain(
+            PrincipalKind::RuntimeHost,
+            "ops",
+            TrustDomainId::new("example.org").expect("domain"),
+        )
+        .expect("principal"),
+    )
+    .expect("key")
+    .to_string();
+    let not_a_person = rig
+        .ask_create(&human_facts(&host_key), "own-3", &["scribe"])
+        .await;
+    let refusal = not_a_person.refusal().expect("refused");
+    assert_eq!(
+        (refusal.kind_token(), refusal.field.as_deref()),
+        ("invalid_request", Some("requester"))
+    );
     assert_eq!(rig.count(DecisionPhase::Open), 0, "nothing more was held");
     rig.shutdown().await;
 }

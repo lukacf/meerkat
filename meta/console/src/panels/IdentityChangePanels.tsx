@@ -879,9 +879,13 @@ export function AgentChangeButtons({
  */
 export function ArchivedAgents({
   api,
+  roster,
   onOpen,
 }: {
   api: IdentityChangesApi;
+  /** The roster as last read: the archived agents are read again with it,
+   * so a change somebody else made shows without a change of this page. */
+  roster?: unknown;
   /** Opens the change of an archived agent. */
   onOpen: (agent: AgentSummary, change: "unarchive" | "remove") => void;
 }): React.JSX.Element | null {
@@ -893,7 +897,7 @@ export function ArchivedAgents({
     // A list that cannot be read shows nothing: the roster stays usable.
     load.current().then((value) => { if (active) setAgents(value); }, () => {});
     return () => { active = false; };
-  }, [api.revision]);
+  }, [api.revision, roster]);
   const controls = archivedAgentControls(api.flags);
   if (agents.length === 0) return null;
   return (

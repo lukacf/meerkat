@@ -14,6 +14,7 @@ import runpy
 import shutil
 import stat
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unicodedata
@@ -24,6 +25,20 @@ PREPARE = ROOT / "sdk/consumer-setup/product/prepare.py"
 # Packaging consumes local pinned bytes; it never fetches or executes pip.
 PIP = ("pip.pyz", "91d5fd9f6f25549fd839c60536c6f1b945316ce3588d34a605635b6071c91526", 1759056)
 PIP_LICENSE = "634300a669d49aeae65b12c6c48c924c51a4cdf3d1ff086dc3456dc8bcaa2104"
+# The pip zipapp's file name at its publisher, which gives no checksum for it:
+# the sha256 in PIP is our own hash of the bytes served under this name.
+PIP_SOURCE = "pip-26.2.1.pyz"
+# npm 12.2.0 for acquisitions: name, sha256, size, sha512. The registry
+# publishes the sha512 (dist.integrity) and no sha256; the sha256 and the
+# size are our own, of the bytes with that sha512.
+NPM_ACQUISITION = ("npm-12.2.0.tgz", "6666b48816b39b86c3febac7b51a4ee4de6c5ca589c382ad8004b6b113f86677", 3054025,
+                   "66c2632a94e796649738b2d7894d710c2cc2e1696893823066687f6b0d8a52e5f2"
+                   "b54eeaeaa32ffdc513ecca1e49ff794a5c2ec3f9515d879f1b3182b291cf35")
+# Targets whose public inputs can come from a committed pin file and the
+# directory a separate fetch step filled (--pins with --pinned-inputs). Such
+# a target's acquisition Node is its runtime Node archive: one file, two uses.
+PINNED_TARGETS = ("macos-arm64",)
+PIN_SCHEMA = "connect-library-pins/1"
 TARGETS = {
     "macos-arm64": {
         "python": ("cpython-3.11.16+20260901-aarch64-apple-darwin-pgo+lto-full.tar.zst",
@@ -182,6 +197,63 @@ def unique_object(pairs):
             raise ValueError("duplicate selected metadata key")
         result[key] = value
     return result
+
+
+def pinned_rows(target):
+    """This target's public inputs as pin rows: (kind, file, sha256, size, sha512)."""
+    if target not in PINNED_TARGETS:
+        raise ValueError("pinned inputs are not defined for this packaging target")
+    selected = TARGETS[target]
+    return {"python": ("release-download", *selected["python"], None),
+            "node": ("release-download", *selected["node"], None),
+            "pip": ("release-download", PIP_SOURCE, PIP[1], PIP[2], None),
+            "npm": ("npm-tarball", *NPM_ACQUISITION)}
+
+
+def checked_pin_file(target, pins):
+    """Require the committed pin file's rows to equal the packager's own pins."""
+    expected = pinned_rows(target)
+    if not isinstance(pins, Path) or not pins.is_absolute():
+        raise ValueError("pinned inputs need an absolute pin file")
+    limit = 8 * 1024 * 1024
+    with os.fdopen(os.open(pins, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as source:
+        info = os.fstat(source.fileno())
+        if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= limit:
+            raise ValueError("invalid pin file")
+        raw = source.read(limit + 1)
+    if len(raw) != info.st_size:
+        raise ValueError("pin file changed while it was read")
+    value = json.loads(raw, object_pairs_hook=unique_object)
+    if (not isinstance(value, dict) or value.get("schema") != PIN_SCHEMA or value.get("target") != target
+            or not isinstance(value.get("pins"), list) or len(value["pins"]) > 4096
+            or any(not isinstance(row, dict) for row in value["pins"])):
+        raise ValueError("unsupported pin file")
+    for kind, name, sha256, _, sha512 in expected.values():
+        rows = [row for row in value["pins"] if row.get("kind") == kind and row.get("file") == name]
+        if len(rows) != 1:
+            raise ValueError("pin file needs exactly one row for each pinned input")
+        # The publisher's digest binds: the registry's sha512 where it gives
+        # no sha256 (a sha256 beside it must then be ours), else the sha256.
+        equal = (rows[0].get("sha256") == sha256 if sha512 is None
+                 else rows[0].get("sha512") == sha512 and rows[0].get("sha256") in (None, sha256))
+        if not equal:
+            raise ValueError("pin file row differs from the packager pin")
+    return {"path": str(pins), "sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw)}
+
+
+def pinned_resource_inputs(target, pins, directory):
+    """Locate one target's fetched public inputs; their bytes are checked at use."""
+    rows = pinned_rows(target)
+    if (not isinstance(directory, Path) or not directory.is_absolute()
+            or directory.is_symlink() or not directory.is_dir()):
+        raise ValueError("pinned inputs need an absolute real fetched directory")
+    record = checked_pin_file(target, pins)
+    return {"paths": {role: directory / kind / name for role, (kind, name, *_) in rows.items()},
+            "npm_sha512": rows["npm"][4],
+            "record": {"pins": record, "directory": str(directory),
+                       "files": {role: {"kind": kind, "file": name, "sha256": sha256, "bytes": size}
+                                 for role, (kind, name, sha256, size, _) in rows.items()},
+                       "scope": "pin_file_rows_equal_packager_pins_and_fetched_bytes_checked_at_use"}}
 
 
 def selected_resource_inputs(target, library, library_sha256, library_bytes, starter,
@@ -507,13 +579,32 @@ def materialize_library(archive, resources, target):
     return "library/" + name
 
 
+def set_link_modes(resources, target):
+    """Give every link of a macOS closure mode 0755 where a link has a mode.
+
+    macOS keeps a mode per link, a new link follows the caller's umask, and
+    the installed verifier compares every link's mode with the inventory.
+    0755 is the mode a new link gets under the usual umask 022. Linux links
+    are always 0777 (extract() pins that); such a host has no lchmod, and a
+    macOS closure staged there is not an installable one.
+    """
+    change = getattr(os, "lchmod", None)
+    if target != "macos-arm64" or change is None:
+        return
+    for directory, subdirs, files in os.walk(resources, followlinks=False):
+        for name in subdirs + files:
+            path = Path(directory) / name
+            if path.is_symlink():
+                change(path, 0o755)
+
+
 def build(destination, upstream, zstd, target="macos-arm64", *, library=None,
           library_sha256=None, library_bytes=None, starter=None, release_manifest_sha256=None,
           acquisition_node_archive=None, acquisition_node_sha256=None, acquisition_node_bytes=None,
           npm_archive=None, npm_archive_sha256=None, npm_archive_bytes=None,
           node_prebuilt_policy=None, node_prebuilt_policy_sha256=None,
           node_build_profile=None, node_build_profile_sha256=None, families=None,
-          immutable_library_release=False):
+          immutable_library_release=False, pins=None, pinned_inputs=None):
     if target not in TARGETS:
         raise ValueError("unsupported packaging target")
     fields = (library, library_sha256, library_bytes, starter, release_manifest_sha256)
@@ -527,10 +618,29 @@ def build(destination, upstream, zstd, target="macos-arm64", *, library=None,
             raise ValueError("invalid library families selection")
         if not explicit:
             raise ValueError("family selection requires explicit current starter and library selection")
+    pinned = None
+    if pins is not None or pinned_inputs is not None:
+        if target not in PINNED_TARGETS:
+            raise ValueError("pinned inputs are not defined for this packaging target")
+        if (pins is None or pinned_inputs is None or upstream is not None or not explicit
+                or any(value is not None for value in (
+                    acquisition_node_archive, acquisition_node_sha256, acquisition_node_bytes,
+                    npm_archive, npm_archive_sha256, npm_archive_bytes))):
+            raise ValueError("pinned inputs need the pin file with its fetched directory and the explicit "
+                             "library and starter; they replace the upstream directory and the acquisition archives")
+        pinned = pinned_resource_inputs(target, pins, pinned_inputs)
+        # One fetched Node archive is the runtime and the acquisition Node.
+        acquisition_node_archive, npm_archive = pinned["paths"]["node"], pinned["paths"]["npm"]
+        acquisition_node_sha256, acquisition_node_bytes = TARGETS[target]["node"][1:]
+        npm_archive_sha256, npm_archive_bytes = NPM_ACQUISITION[1:3]
+    elif upstream is None:
+        raise ValueError("upstream directory required")
     acquisition = selected_npm_inputs(target, acquisition_node_archive, acquisition_node_sha256,
         acquisition_node_bytes, npm_archive, npm_archive_sha256, npm_archive_bytes)
     if acquisition is not None and not explicit:
         raise ValueError("npm resources require explicit current starter and library selection")
+    if pinned is not None and hashlib.sha512(acquisition["npm_raw"]).hexdigest() != pinned["npm_sha512"]:
+        raise ValueError("pinned npm archive differs from its registry sha512")
     node_build_raw = captured_node_build_profile(node_build_profile, node_build_profile_sha256,
                                                selected_node=acquisition is not None)
     prebuilt_policy_raw = None
@@ -553,8 +663,10 @@ def build(destination, upstream, zstd, target="macos-arm64", *, library=None,
         raise ValueError("fresh destination required")
     if target == "linux-x86_64":
         require_case_sensitive(destination.parent)
-    for name, sha, size in (python, node, PIP):
-        pin(upstream / name, sha, size)
+    inputs = (pinned["paths"] if pinned is not None else
+              {"python": upstream / python[0], "node": upstream / node[0], "pip": upstream / PIP[0]})
+    for role, (_, sha, size) in (("python", python), ("node", node), ("pip", PIP)):
+        pin(inputs[role], sha, size)
     input_selection = None
     if explicit:
         archive, library, starter, starter_files, input_selection = selected_resource_inputs(
@@ -581,13 +693,13 @@ def build(destination, upstream, zstd, target="macos-arm64", *, library=None,
     (package / "bin").mkdir()
     with tempfile.TemporaryDirectory(prefix="connect-resource-unpack-") as scratch:
         unpacked = Path(scratch) / "python.tar"
-        with captured_archive(upstream / python[0], python[1], python[2]) as selected_python, \
+        with captured_archive(inputs["python"], python[1], python[2]) as selected_python, \
                 unpacked.open("xb") as python_tar:
             subprocess.run([str(zstd), "-d", "-c", str(selected_python)], stdout=python_tar,
                            stderr=subprocess.PIPE, check=True, timeout=60)
         extract(unpacked, resources, python_mapping, target=target)
     prefix = node[0].removesuffix(".tar.gz") + "/"
-    with captured_archive(upstream / node[0], node[1], node[2]) as selected_node:
+    with captured_archive(inputs["node"], node[1], node[2]) as selected_node:
         extract(selected_node, resources,
                 lambda name: "runtime/node/" + name.removeprefix(prefix) if name.startswith(prefix) else None,
                 target=target)
@@ -630,7 +742,7 @@ def build(destination, upstream, zstd, target="macos-arm64", *, library=None,
         pin(resources / "archives" / library[0], library[1], library[2])
         if immutable_library_release:
             library_release = materialize_library(selected_archive, resources, target)
-    shutil.copyfile(upstream / PIP[0], resources / "runtime/pip.pyz")
+    shutil.copyfile(inputs["pip"], resources / "runtime/pip.pyz")
     pin(resources / "runtime/pip.pyz", PIP[1], PIP[2])
     shutil.copyfile(pip_license, resources / "notices/pip-LICENSE.txt")
     pin(resources / "notices/pip-LICENSE.txt", PIP_LICENSE)
@@ -661,6 +773,7 @@ def build(destination, upstream, zstd, target="macos-arm64", *, library=None,
     # -I ignores PYTHONDONTWRITEBYTECODE. A read-only installation lets CPython
     # skip cache writes without adding mutable exceptions to the resource pin.
     # This is an operational layout, not a same-user security boundary.
+    set_link_modes(resources, target)
     for directory, subdirs, files in os.walk(resources, followlinks=False):
         for name in files:
             path = Path(directory) / name
@@ -720,6 +833,8 @@ def build(destination, upstream, zstd, target="macos-arm64", *, library=None,
                        "packager_source_sha256": source_packager_sha, "input_selection": input_selection})
     if acquisition is not None:
         result["npm_acquisition_inputs"] = acquisition["evidence"]
+    if pinned is not None:
+        result["pinned_inputs"] = pinned["record"]
     if prebuilt_policy_raw is not None:
         result["node_prebuilt_policy_input"] = {"path": str(node_prebuilt_policy),
             "sha256": node_prebuilt_policy_sha256, "bytes": len(prebuilt_policy_raw),
@@ -735,9 +850,16 @@ def build(destination, upstream, zstd, target="macos-arm64", *, library=None,
 def main():
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--destination", type=Path, required=True)
-    parser.add_argument("--upstream", type=Path, required=True)
+    # The pinned pair replaces the upstream directory; without it the
+    # argument is required exactly as before.
+    pinned = any(value.split("=", 1)[0] in ("--pins", "--pinned-inputs") for value in sys.argv[1:])
+    parser.add_argument("--upstream", type=Path, required=not pinned)
     parser.add_argument("--zstd", type=Path, required=True)
     parser.add_argument("--target", choices=tuple(TARGETS), default="macos-arm64")
+    parser.add_argument("--pins", type=Path,
+        help="committed pin file whose rows for this target's public inputs must equal the packager's pins; requires --pinned-inputs and explicit library and starter inputs")
+    parser.add_argument("--pinned-inputs", type=Path,
+        help="directory a separate fetch step filled as KIND/FILE; replaces --upstream and the acquisition archive arguments")
     parser.add_argument("--library", type=Path)
     parser.add_argument("--library-sha256")
     parser.add_argument("--library-bytes", type=int)
@@ -776,6 +898,8 @@ def main():
     if args.node_build_profile is not None or args.node_build_profile_sha256 is not None:
         selected.update(node_build_profile=args.node_build_profile,
                         node_build_profile_sha256=args.node_build_profile_sha256)
+    if args.pins is not None or args.pinned_inputs is not None:
+        selected.update(pins=args.pins, pinned_inputs=args.pinned_inputs)
     print(json.dumps(build(args.destination, args.upstream, args.zstd, target=args.target, **selected), sort_keys=True))
 
 

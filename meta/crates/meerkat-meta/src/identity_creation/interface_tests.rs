@@ -36,6 +36,7 @@ fn entry(identity: &str) -> IdentityEntryFacts {
         revision: Some(1),
         profile: "worker".to_owned(),
         authority_labels: BTreeMap::new(),
+        labels: BTreeMap::new(),
     }
 }
 

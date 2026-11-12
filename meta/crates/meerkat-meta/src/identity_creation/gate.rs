@@ -368,6 +368,7 @@ impl AgentFacts {
             self.spec.profile.as_str(),
             self.authority_labels(policy),
         )
+        .with_labels(self.spec.labels.clone())
     }
 
     fn peer(&self, policy: &IdentityCreationPolicy) -> PeerFacts {

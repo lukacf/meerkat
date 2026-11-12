@@ -84,16 +84,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   when a runtime is stopped and built again over its state, with no second
   wire: a peer message to a member that is not built is handed to that
   member's own mob, which builds it and delivers, or refuses with its own
-  typed answer (a stopped mob refuses, and builds nobody). The route to
+  typed answer (a mob stopped through its handle refuses, and builds
+  nobody; a mob its runtime stopped for teardown holds no edge any more,
+  and the send is answered `peer_not_found_or_not_trusted`). The route to
   the member's inbox is installed once its mob answered ready. A wake is
   forwarded only for an edge BOTH mobs hold in their state, each naming
   the other member by its key, and only for a send of the member that
   holds it. An edge only one mob holds, an edge one side unwired, another
   sender or another key wake nobody, and the sender gets
-  `peer_not_found_or_not_trusted`. The in-process form with the member's
-  key (`remote_pubkey_b64` from `peer_info`) wires a member that is not
-  built; that wire builds nobody. A runtime that shuts down takes the
-  routes between its members and the other mobs' members with it; through
+  `peer_not_found_or_not_trusted`. Only ordinary peer messages and
+  requests wake a member this way: a silent lifecycle notice to a member
+  of another mob that is not built is answered as before (not found). An
+  edge of the bilateral same-process wire (`meta/cross_mob/wire`) is held
+  the same way from the wire on, and no longer after its unwire. The
+  in-process form with the member's key (`remote_pubkey_b64` from
+  `peer_info`) wires a member that is not built; that wire builds nobody.
+  A runtime that shuts down takes the routes of its edges to the other
+  mobs' members, and theirs to its members, with it; through
   0.9.14 they stayed and led to inboxes that were gone (a send was
   answered `peer_admission_dropped ... classification_rejected`). What a
   runtime holds is read from its mob's state once when it starts (one

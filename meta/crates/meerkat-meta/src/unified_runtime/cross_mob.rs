@@ -497,12 +497,38 @@ async fn mutate_member_unchecked(
     wire: bool,
 ) -> Result<(), CrossMobError> {
     let member = local_roster_member(member_id);
-    let result = if wire {
-        handle.wire(member, peer).await
-    } else {
-        handle.unwire(member, peer).await
+    // Every wire and unwire of this body changes a member's row, so it keeps
+    // the mob's part of the link table equal to the row
+    // (`cross_mob_routes`), exactly as `wire_local_edge` and
+    // `unwire_local_edge` do: a link is held once the wire is committed,
+    // and goes before the unwire commits.
+    if wire {
+        let wired = handle
+            .wire(member.clone(), peer)
+            .await
+            .map_err(CrossMobError::Mob);
+        if wired.is_ok() {
+            super::cross_mob_routes::sync_member_links(&handle, &member).await;
+        }
+        return wired;
+    }
+    let peer_name = match &peer {
+        PeerTarget::External(spec) => Some(spec.name.as_str().to_string()),
+        PeerTarget::ExternalName(name) => Some(name.as_str().to_string()),
+        _ => None,
     };
-    result.map_err(CrossMobError::Mob)
+    if let Some(peer_name) = &peer_name {
+        super::cross_mob_routes::drop_member_link(&handle.mob_id().to_string(), &member, peer_name);
+    }
+    let unwired = handle
+        .unwire(member.clone(), peer)
+        .await
+        .map_err(CrossMobError::Mob);
+    if unwired.is_err() {
+        // The edge is still in the row, so the link is still held.
+        super::cross_mob_routes::sync_member_links(&handle, &member).await;
+    }
+    unwired
 }
 
 /// The roster id of the local member a (resolved) alias names.

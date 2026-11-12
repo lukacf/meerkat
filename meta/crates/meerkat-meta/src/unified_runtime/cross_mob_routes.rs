@@ -5,24 +5,26 @@
 //! wake routes live in the other namespace, which a namespace-scoped send
 //! never looks at. This module is the host composition between the two: for
 //! every link a mob holds to a member of another mob of this process, the
-//! mob's namespace gets a wake route under the remote member's key whose
-//! owner is this module (a forwarder). Asked to wake, it forwards the
-//! request to the remote member's own mob, and once that mob answered ready
-//! it installs the route to the member's inbox of now.
+//! mob's namespace gets a forwarder's wake route under the remote member's
+//! key whose owner is this module. Asked to wake, it forwards the request to
+//! the remote member's own mob, and once that mob answered ready it installs
+//! the route to the member's inbox of now.
 //!
 //! **The link table.** Process-wide, in memory, keyed by namespace: each mob
 //! of this process has its own part. A link is one committed edge of a local
 //! member's row to an in-process member of another mob. A part is a
 //! projection of its mob's rows, and is written from them only:
-//! - after a wire committed, and before an unwire commits
-//!   ([`sync_member_links`], [`drop_member_link`]);
+//! - by every wire and unwire of this runtime that changes such an edge:
+//!   after a wire committed, and before an unwire commits, with the row read
+//!   again when the unwire fails ([`sync_member_links`],
+//!   [`drop_member_link`]; called by `wire_local_edge` / `unwire_local_edge`
+//!   and by `mutate_member_unchecked`, the one body of the bilateral wires);
 //! - once when the runtime starts ([`restore_from_roster`]): one member
 //!   listing, then one row read for each member that names a member of
 //!   another mob. Nobody is built and no store is read.
 //! - a runtime's whole part goes when the runtime begins to shut down or
-//!   stops its mob ([`close_part`]); the routes between its members and the
-//!   other mobs' members go when its shutdown ran to its end
-//!   ([`clear_part`]).
+//!   stops its mob ([`close_part`]); when its shutdown ran to its end the
+//!   inbox routes of its links go too ([`clear_part`]).
 //!
 //! A part belongs to the runtime whose start-time read created it. Nothing
 //! else creates one: a wire on a runtime that never ran the read (a launch
@@ -30,33 +32,41 @@
 //! runtime closes a part, so the late teardown of a runtime that was
 //! dropped cannot clear the part of the runtime built after it.
 //!
-//! **What is forwarded.** Only a wake for a link BOTH mobs hold: the
-//! sender's mob names the recipient, and the recipient's mob names the
-//! sender, each by the other's key. The local member is resolved from the
-//! sender's key, the remote member from the recipient's key, and the
+//! **What is forwarded.** Only a content send, and only for a link BOTH mobs
+//! hold: the sender's mob names the recipient, and the recipient's mob names
+//! the sender, each by the other's key. The local member is resolved from
+//! the sender's key, the remote member from the recipient's key, and the
 //! remote namespace from the link, never from the request's text. Anything
 //! else is answered as a key that is no member
 //! ([`PeerWakeDenial::NotAMember`]): nothing is asked of the other mob and
-//! nothing is installed. The forwarded request is the same request, under
-//! the name the remote member's own mob published for the member, which
-//! must be the linked member's; the remote mob's machine decides, and its
-//! answer is passed on unchanged. The owner is read for each wake and never
-//! kept. This module never reads or changes the other mob's state, and
-//! never publishes or retracts a route in the other mob's namespace or
-//! over a route another owner holds.
+//! nothing is installed. A silent lifecycle notice is never forwarded: it is
+//! answered as a key that is no member, as before there was a forwarder (the
+//! other mob's machine could not carry another mob's notice to the member's
+//! next wake). The forwarded request is the same request, under the name
+//! the remote member's own mob published for the member, which must be the
+//! linked member's; the remote mob's machine decides, and its answer is
+//! passed on unchanged. The owner is read for each wake and never kept.
+//!
+//! **What this module writes.** In its own namespace: its forwarder's wake
+//! routes (never over a route another owner holds, and it retracts only its
+//! own) and the inbox routes of its links. In another mob's namespace:
+//! nothing. When a runtime's shutdown ran to its end, each OTHER part drops
+//! the inbox routes of its own links to that runtime's members, in its own
+//! namespace (they lead to inboxes that are gone). A route no link names is
+//! never touched. This module never reads or changes another mob's state.
 //!
 //! **Pending wakes.** Content sends from senders that are not themselves
 //! being built share one pending wake per remote member and observation
-//! (at most two per link): every waiting send gets that wake's answer, one
-//! waiter leaving does not end it, and it is forgotten when it is answered
-//! or when its last waiter left. A silent lifecycle notice and a send from
-//! a member that is being built are asked for themselves, of the remote
-//! machine.
+//! (at most two per linked key): every waiting send gets that wake's
+//! answer for its own link (a link that left while the wake was pending is
+//! answered as no member), one waiter leaving does not end it, and it is
+//! forgotten when it is answered or when its last waiter left. A send from
+//! a member that is being built is asked for itself, of the remote machine.
 //!
 //! **Locks.** `state` is taken by the methods the registry calls (`wake`,
-//! `member_is_waking`), so no registry call is made while it is held and it
-//! is never held across an await. `writing` orders the writers of one part
-//! and is taken by nothing the registry calls.
+//! `member_is_waking`). Nothing is called while it is held: no registry
+//! call, no owner, and it is never held across an await. `writing` orders
+//! the writers of one part and is taken by nothing the registry calls.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError, Weak};
@@ -97,6 +107,17 @@ struct Link {
     remote_key: PubKey,
 }
 
+/// What the registry's request says about the send, as far as forwarding
+/// depends on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WakeShape {
+    input_class: PeerWakeInputClass,
+    /// The sender is itself being built.
+    sender_waking: bool,
+    /// The send observed the member missing.
+    observed_missing: bool,
+}
+
 /// One pending forwarded wake and the sends waiting on it.
 struct PendingWake {
     wake: SharedWake,
@@ -107,6 +128,11 @@ struct PendingWake {
 struct RoutesState {
     links: HashSet<Link>,
     pending: HashMap<WakeSlot, PendingWake>,
+    /// The links the part held when its runtime closed it, kept for the
+    /// sweep of their inbox routes at the end of the shutdown. `None` while
+    /// the part is open, and for a part that was no longer its namespace's
+    /// when it was closed.
+    closed_links: Option<Vec<Link>>,
 }
 
 /// One mob's part of the link table, and the owner of the wake routes its
@@ -131,8 +157,7 @@ fn routes_of(namespace: &str) -> Option<Arc<CrossMobWakeRoutes>> {
 }
 
 /// A new, empty part for `namespace`, in place of whatever part an earlier
-/// runtime of the mob left there (that part's links and wake routes go, and
-/// the routes between the mob's members and other mobs' members with them).
+/// runtime of the mob left there (that part's links and wake routes go).
 fn start_part(namespace: &str) -> Arc<CrossMobWakeRoutes> {
     let part = Arc::new_cyclic(|this| CrossMobWakeRoutes {
         namespace: namespace.to_string(),
@@ -144,7 +169,6 @@ fn start_part(namespace: &str) -> Arc<CrossMobWakeRoutes> {
     if let Some(earlier) = earlier {
         earlier.clear();
     }
-    sweep_inbox_routes(namespace);
     part
 }
 
@@ -170,6 +194,26 @@ fn member_namespace(comms_name: &str) -> Option<String> {
 
 fn denied(denial: PeerWakeDenial) -> PeerWakeFuture {
     Box::pin(std::future::ready(Err(denial)))
+}
+
+/// Whether the link from `local` (under `local_key`) to `remote` (under
+/// `remote_key`) is held by BOTH mobs now: by `part`, and by the part of the
+/// remote member's mob, each naming the other by its key.
+fn whole_link(
+    part: &CrossMobWakeRoutes,
+    local: &str,
+    local_key: &PubKey,
+    remote: &str,
+    remote_key: &PubKey,
+) -> bool {
+    if !part.holds(local, remote, remote_key) {
+        return false;
+    }
+    let Some(remote_namespace) = member_namespace(remote) else {
+        return false;
+    };
+    remote_namespace != part.namespace
+        && routes_of(&remote_namespace).is_some_and(|theirs| theirs.holds(remote, local, local_key))
 }
 
 /// A send waiting on a pending wake. When it leaves (answered, timed out or
@@ -246,6 +290,10 @@ impl CrossMobWakeRoutes {
             .collect();
         let (retract, publish) = {
             let mut state = locked(&self.state);
+            if state.closed_links.is_some() {
+                // The runtime closed this part: it holds no link any more.
+                return;
+            }
             let before: HashSet<PubKey> = state.links.iter().map(|link| link.remote_key).collect();
             state.links.retain(|link| link.member != member);
             state.links.extend(routable);
@@ -282,7 +330,12 @@ impl CrossMobWakeRoutes {
             // Never over another owner's route: it was free when this
             // write began, and is looked at again here.
             let published = self.may_route(&key)
-                && registry.publish_wake_route(&self.namespace, key, remote, self.waker());
+                && registry.publish_forwarder_wake_route(
+                    &self.namespace,
+                    key,
+                    remote,
+                    self.waker(),
+                );
             if !published {
                 locked(&self.state)
                     .links
@@ -306,47 +359,70 @@ impl CrossMobWakeRoutes {
         self.set_member_links(member, kept);
     }
 
-    /// Drop every link, wake route and pending wake of this part.
-    fn clear(&self) {
+    /// Drop every link, wake route and pending wake of this part. Returns
+    /// the links it held.
+    fn clear(&self) -> Vec<Link> {
         let registry = InprocRegistry::global();
         let _writing = locked(&self.writing);
-        let keys: HashSet<PubKey> = {
+        let links: Vec<Link> = {
             let mut state = locked(&self.state);
             state.pending.clear();
-            state.links.drain().map(|link| link.remote_key).collect()
+            state.links.drain().collect()
         };
+        let keys: HashSet<PubKey> = links.iter().map(|link| link.remote_key).collect();
         for key in keys {
             registry.retract_wake_route(&self.namespace, &key, &self.waker());
         }
+        links
     }
 
-    /// The members of `gone` are gone with their runtime: the routes THIS
-    /// namespace holds to their inboxes go. This part's links stay (its
-    /// mob's rows still name them).
-    fn forget_inboxes_of(&self, gone: &str) {
+    /// Drop the inbox route this namespace holds for each of `links`: the
+    /// route under the link's key, while it is still under the link's name.
+    fn forget_inbox_routes(&self, links: &[Link]) {
         let registry = InprocRegistry::global();
-        for peer in registry.peers_in_namespace(&self.namespace) {
-            if member_namespace(&peer.name).as_deref() == Some(gone) {
-                registry.unregister_in_namespace(&self.namespace, &peer.pubkey);
+        for link in links {
+            let routed =
+                registry.get_name_by_pubkey_in_namespace(&self.namespace, &link.remote_key);
+            if routed.as_deref() == Some(link.remote.as_str()) {
+                registry.unregister_in_namespace(&self.namespace, &link.remote_key);
             }
         }
+    }
+
+    /// The members of `gone` are gone with their runtime: the inbox routes
+    /// of THIS part's links to them go, in this part's own namespace. The
+    /// links stay (this mob's rows still name them).
+    fn forget_inboxes_of(&self, gone: &str) {
+        let links: Vec<Link> = locked(&self.state)
+            .links
+            .iter()
+            .filter(|link| member_namespace(&link.remote).as_deref() == Some(gone))
+            .cloned()
+            .collect();
+        self.forget_inbox_routes(&links);
     }
 
     /// Forward a wake of the member under `recipient`, published by this
     /// part as `member` (its comms name), for a send from `sender`.
     ///
     /// `ask` hands the request to the remote member's own owner, under that
-    /// owner's name for the member. `slot` is the pending wake the send may
-    /// share; `None` asks for this send alone.
+    /// owner's name for the member.
     fn forward(
         &self,
         sender: PubKey,
         recipient: PubKey,
         member: &str,
-        slot: Option<WakeSlot>,
+        shape: WakeShape,
         ask: impl FnOnce(&dyn InprocPeerWaker, String) -> PeerWakeFuture + Send + 'static,
     ) -> PeerWakeFuture {
         let registry = InprocRegistry::global();
+        // A silent lifecycle notice is never forwarded: the other mob's
+        // machine could not carry another mob's notice to the member's next
+        // wake, so the answer is the one such a notice had without a
+        // forwarder.
+        if shape.input_class != PeerWakeInputClass::Content {
+            return denied(PeerWakeDenial::NotAMember);
+        }
         // The link, as BOTH mobs hold it. The local member is the one this
         // namespace routes under the sender's key; the remote member is the
         // one its row names under the recipient's key.
@@ -363,12 +439,7 @@ impl CrossMobWakeRoutes {
         let Some((remote_namespace, remote_member)) = member_of(&link.remote) else {
             return denied(PeerWakeDenial::NotAMember);
         };
-        if remote_namespace == self.namespace {
-            return denied(PeerWakeDenial::NotAMember);
-        }
-        let remote_holds = routes_of(&remote_namespace)
-            .is_some_and(|remote| remote.holds(&link.remote, &sender_name, &sender));
-        if !remote_holds {
+        if !whole_link(self, &sender_name, &sender, &link.remote, &recipient) {
             return denied(PeerWakeDenial::NotAMember);
         }
         // The member's own owner, as its mob published it: read for this
@@ -385,66 +456,86 @@ impl CrossMobWakeRoutes {
             return denied(PeerWakeDenial::Refused(PeerWakeRefusal::MobUnavailable));
         };
 
+        // One wake of the remote member: ask its owner, and once it answered
+        // ready point this namespace's route at the member's inbox of now,
+        // before any waiting send hears "ready". The route is installed for
+        // the key while some link of this part to it is still whole.
         let this = Weak::clone(&self.this);
         let namespace = self.namespace.clone();
+        let remote_name = link.remote.clone();
         let asking = move || -> SharedWake {
             // The owner is asked and let go: only its answer is kept.
             let asked = ask(owner.as_ref(), owner_member);
             drop(owner);
             async move {
                 let answer = asked.await;
-                if matches!(answer, Ok(PeerWakeAnswer::Ready)) {
-                    // The member is ready in its own namespace: this
-                    // namespace's route is pointed at its inbox of now
-                    // before the send hears "ready", unless the link left
-                    // while the wake was pending.
-                    let still_linked = this
+                if matches!(answer, Ok(PeerWakeAnswer::Ready))
+                    && this
                         .upgrade()
-                        .is_some_and(|this| this.holds(&sender_name, &link.remote, &recipient));
-                    if !still_linked {
-                        return Err(PeerWakeDenial::NotAMember);
-                    }
-                    if let Err(error) = install_route_alias(
+                        .is_some_and(|this| this.some_whole_link_to(&remote_name, &recipient))
+                    && let Err(error) = install_route_alias(
                         &namespace,
                         &remote_namespace,
-                        &link.remote,
+                        &remote_name,
                         recipient,
                         "remote",
-                    ) {
-                        // The send resolves the route again and answers a
-                        // miss itself.
-                        tracing::debug!(
-                            member = %link.remote,
-                            %error,
-                            "cross-mob wake: the member answered ready and its route was not installed"
-                        );
-                    }
+                    )
+                {
+                    // The send resolves the route again and answers a miss
+                    // itself.
+                    tracing::debug!(
+                        member = %remote_name,
+                        %error,
+                        "cross-mob wake: the member answered ready and its route was not installed"
+                    );
                 }
                 answer
             }
             .boxed()
             .shared()
         };
-        let Some(slot) = slot else {
-            return Box::pin(asking());
-        };
-        let waiter = {
-            let mut state = locked(&self.state);
-            let pending = state.pending.entry(slot).or_insert_with(|| PendingWake {
-                wake: asking(),
-                waiters: 0,
-            });
-            pending.waiters += 1;
-            Waiter {
-                routes: Weak::clone(&self.this),
-                slot,
-                wake: pending.wake.clone(),
+        // A send from a member that is itself being built shares no wake:
+        // the remote machine answers it for itself.
+        let slot = (!shape.sender_waking).then_some((recipient, shape.observed_missing));
+        let (wake, waiter) = match slot {
+            None => (asking(), None),
+            Some(slot) => {
+                let joined = {
+                    let mut state = locked(&self.state);
+                    state.pending.get_mut(&slot).map(|pending| {
+                        pending.waiters += 1;
+                        pending.wake.clone()
+                    })
+                };
+                let wake = match joined {
+                    Some(wake) => wake,
+                    None => {
+                        // The owner is asked with no lock of this part held.
+                        let mine = asking();
+                        let mut state = locked(&self.state);
+                        let pending = state.pending.entry(slot).or_insert_with(|| PendingWake {
+                            wake: mine,
+                            waiters: 0,
+                        });
+                        pending.waiters += 1;
+                        pending.wake.clone()
+                    }
+                };
+                let waiter = Waiter {
+                    routes: Weak::clone(&self.this),
+                    slot,
+                    wake: wake.clone(),
+                };
+                (wake, Some(waiter))
             }
         };
+        let this = Weak::clone(&self.this);
         Box::pin(async move {
-            let answer = waiter.wake.clone().await;
+            let answer = wake.await;
             // An answered wake is not joined by a later send.
-            if let Some(routes) = waiter.routes.upgrade() {
+            if let Some(waiter) = &waiter
+                && let Some(routes) = waiter.routes.upgrade()
+            {
                 let mut state = locked(&routes.state);
                 if state
                     .pending
@@ -454,22 +545,57 @@ impl CrossMobWakeRoutes {
                     state.pending.remove(&waiter.slot);
                 }
             }
+            // "Ready" is this send's answer only while ITS link is still
+            // whole: a link that left on either side while the wake was
+            // pending is no member.
+            if matches!(answer, Ok(PeerWakeAnswer::Ready)) {
+                let still_whole = this.upgrade().is_some_and(|this| {
+                    whole_link(&this, &sender_name, &sender, &link.remote, &recipient)
+                });
+                if !still_whole {
+                    return Err(PeerWakeDenial::NotAMember);
+                }
+            }
             answer
+        })
+    }
+
+    /// Whether some link of this part to the member `remote` under
+    /// `remote_key` is held by both mobs now.
+    fn some_whole_link_to(&self, remote: &str, remote_key: &PubKey) -> bool {
+        let registry = InprocRegistry::global();
+        let locals: Vec<String> = locked(&self.state)
+            .links
+            .iter()
+            .filter(|link| link.remote == remote && link.remote_key == *remote_key)
+            .map(|link| link.local.clone())
+            .collect();
+        locals.into_iter().any(|local| {
+            // The local member's key is the one this namespace routes its
+            // name under, when it is built.
+            registry
+                .peers_in_namespace(&self.namespace)
+                .into_iter()
+                .find(|peer| peer.name == local)
+                .is_some_and(|peer| whole_link(self, &local, &peer.pubkey, remote, remote_key))
         })
     }
 }
 
 impl InprocPeerWaker for CrossMobWakeRoutes {
     fn wake(&self, request: PeerWakeRequest) -> PeerWakeFuture {
-        let shared = request.input_class == PeerWakeInputClass::Content && !request.sender_waking;
-        let slot = shared.then_some((request.recipient, request.observed_missing));
+        let shape = WakeShape {
+            input_class: request.input_class,
+            sender_waking: request.sender_waking,
+            observed_missing: request.observed_missing,
+        };
         let (sender, recipient, member) =
             (request.sender, request.recipient, request.member.clone());
         self.forward(
             sender,
             recipient,
             &member,
-            slot,
+            shape,
             move |owner, owner_member| {
                 // The same request, under the owner's own name for the member.
                 let mut forwarded = request;
@@ -665,48 +791,45 @@ pub(super) async fn restore_from_roster(handle: &MobHandle) -> Option<Arc<CrossM
 /// part of the link table goes, with its wake routes and pending wakes.
 /// From here on no wake is forwarded for a link of this mob, in either
 /// direction. The namespace's entry is taken only while it is still this
-/// part (a later runtime of the mob has its own).
+/// part (a later runtime of the mob has its own); the links such a part
+/// held are kept for [`clear_part`].
 pub(super) fn close_part(part: &Arc<CrossMobWakeRoutes>) {
-    {
+    let was_current = {
         let mut namespaces = locked(&NAMESPACES);
-        if namespaces
+        let current = namespaces
             .get(&part.namespace)
-            .is_some_and(|current| Arc::ptr_eq(current, part))
-        {
+            .is_some_and(|current| Arc::ptr_eq(current, part));
+        if current {
             namespaces.remove(&part.namespace);
         }
+        current
+    };
+    let links = part.clear();
+    let mut state = locked(&part.state);
+    if was_current && state.closed_links.is_none() {
+        state.closed_links = Some(links);
     }
-    part.clear();
 }
 
-/// The shutdown of the runtime of `part` ran to its end: besides the part,
-/// the routes its own namespace holds to other mobs' members go, and every
-/// other part drops the routes ITS namespace holds to this mob's members
-/// (they lead to inboxes that are gone). Nothing is swept when a later
-/// runtime of the mob already holds the namespace: its start swept.
+/// The shutdown of the runtime of `part` ran to its end, so its members'
+/// inboxes are gone: the inbox routes of the links it held go, in its own
+/// namespace, and every other part drops the inbox routes of ITS links to
+/// this mob's members, in its own namespace. A part that was no longer its
+/// namespace's when it was closed sweeps nothing (a later runtime of the
+/// mob runs there), and a route no link names is never touched.
 pub(super) fn clear_part(part: &Arc<CrossMobWakeRoutes>) {
     close_part(part);
-    if routes_of(&part.namespace).is_none() {
-        sweep_inbox_routes(&part.namespace);
+    let Some(links) = locked(&part.state).closed_links.replace(Vec::new()) else {
+        return;
+    };
+    if routes_of(&part.namespace).is_some() {
+        // A later runtime of the mob already started in this namespace.
+        return;
     }
-}
-
-/// Drop the routes `namespace` holds to other mobs' members, and have every
-/// other part drop the routes its namespace holds to `namespace`'s members.
-fn sweep_inbox_routes(namespace: &str) {
-    let registry = InprocRegistry::global();
-    for peer in registry.peers_in_namespace(namespace) {
-        if member_namespace(&peer.name).is_some_and(|theirs| theirs != namespace) {
-            registry.unregister_in_namespace(namespace, &peer.pubkey);
-        }
-    }
-    let others: Vec<Arc<CrossMobWakeRoutes>> = locked(&NAMESPACES)
-        .values()
-        .filter(|other| other.namespace != namespace)
-        .cloned()
-        .collect();
+    part.forget_inbox_routes(&links);
+    let others: Vec<Arc<CrossMobWakeRoutes>> = locked(&NAMESPACES).values().cloned().collect();
     for other in others {
-        other.forget_inboxes_of(namespace);
+        other.forget_inboxes_of(&part.namespace);
     }
 }
 

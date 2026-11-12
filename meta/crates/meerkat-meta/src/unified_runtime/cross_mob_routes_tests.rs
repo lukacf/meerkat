@@ -11,6 +11,26 @@ use tokio::sync::Notify;
 
 use super::*;
 
+/// A content send that observed the member missing, from a sender that is
+/// not being built.
+const CONTENT: WakeShape = WakeShape {
+    input_class: PeerWakeInputClass::Content,
+    sender_waking: false,
+    observed_missing: true,
+};
+
+/// A content send from a member that is itself being built.
+const FROM_A_MEMBER_BEING_BUILT: WakeShape = WakeShape {
+    sender_waking: true,
+    ..CONTENT
+};
+
+/// A silent lifecycle notice.
+const LIFECYCLE_NOTICE: WakeShape = WakeShape {
+    input_class: PeerWakeInputClass::Lifecycle,
+    ..CONTENT
+};
+
 /// A mob's own owner of its wake routes. These rows never wake through it:
 /// the scripted `ask` stands for its answer.
 struct MobOwner {
@@ -137,13 +157,7 @@ impl Pair {
         &self,
         ask: impl FnOnce(&dyn InprocPeerWaker, String) -> PeerWakeFuture + Send + 'static,
     ) -> PeerWakeFuture {
-        part_of(&self.ns_a).forward(
-            self.alice,
-            self.bob,
-            &self.bob_name,
-            Some((self.bob, true)),
-            ask,
-        )
+        part_of(&self.ns_a).forward(self.alice, self.bob, &self.bob_name, CONTENT, ask)
     }
 
     fn route_to_bob(&self) -> Option<PubKey> {
@@ -323,7 +337,7 @@ async fn the_link_is_held_for_the_sender_and_the_keys_the_rows_name() {
         carol,
         pair.bob,
         &pair.bob_name,
-        Some((pair.bob, true)),
+        CONTENT,
         never_asked(&asked),
     );
     assert_eq!(from_carol.await, Err(PeerWakeDenial::NotAMember));
@@ -334,7 +348,7 @@ async fn the_link_is_held_for_the_sender_and_the_keys_the_rows_name() {
         stranger,
         pair.bob,
         &pair.bob_name,
-        Some((pair.bob, true)),
+        CONTENT,
         never_asked(&asked),
     );
     assert_eq!(from_stranger.await, Err(PeerWakeDenial::NotAMember));
@@ -345,7 +359,7 @@ async fn the_link_is_held_for_the_sender_and_the_keys_the_rows_name() {
         pair.alice,
         other_key,
         &pair.bob_name,
-        Some((other_key, true)),
+        CONTENT,
         never_asked(&asked),
     );
     assert_eq!(to_other_key.await, Err(PeerWakeDenial::NotAMember));
@@ -637,7 +651,7 @@ async fn a_wake_under_another_name_than_the_links_is_not_forwarded() {
         pair.alice,
         pair.bob,
         &other_name,
-        Some((pair.bob, true)),
+        CONTENT,
         never_asked(&asked),
     );
     assert_eq!(renamed.await, Err(PeerWakeDenial::NotAMember));
@@ -660,8 +674,20 @@ async fn a_send_that_shares_no_wake_is_asked_for_itself() {
             )))
         }
     };
-    let first = routes.forward(pair.alice, pair.bob, &pair.bob_name, None, consumed(&asked));
-    let second = routes.forward(pair.alice, pair.bob, &pair.bob_name, None, consumed(&asked));
+    let first = routes.forward(
+        pair.alice,
+        pair.bob,
+        &pair.bob_name,
+        FROM_A_MEMBER_BEING_BUILT,
+        consumed(&asked),
+    );
+    let second = routes.forward(
+        pair.alice,
+        pair.bob,
+        &pair.bob_name,
+        FROM_A_MEMBER_BEING_BUILT,
+        consumed(&asked),
+    );
     assert_eq!(asked.load(Ordering::SeqCst), 2);
     assert!(locked(&routes.state).pending.is_empty());
     assert_eq!(first.await, Ok(PeerWakeAnswer::ControlNoticeConsumed));
@@ -751,4 +777,176 @@ async fn the_remote_members_residency_is_read_from_its_own_mob_for_a_whole_link(
     assert!(routes.member_is_waking(&pair.bob_name));
     pair.bob_owner.waking.store(false, Ordering::SeqCst);
     assert!(!routes.member_is_waking(&pair.bob_name));
+}
+
+#[tokio::test]
+async fn a_silent_lifecycle_notice_is_not_forwarded() {
+    let pair = Pair::new("notice");
+    pair.a_holds();
+    pair.b_holds();
+    let asked = Arc::new(AtomicUsize::new(0));
+    let _bob_inbox = pair.build_bob();
+
+    // A whole link, and a notice instead of a content send: answered as a
+    // key that is no member, with nothing asked of bob's mob.
+    let notice = part_of(&pair.ns_a).forward(
+        pair.alice,
+        pair.bob,
+        &pair.bob_name,
+        LIFECYCLE_NOTICE,
+        never_asked(&asked),
+    );
+    assert_eq!(notice.await, Err(PeerWakeDenial::NotAMember));
+    assert_eq!(asked.load(Ordering::SeqCst), 0);
+    assert_eq!(pair.route_to_bob(), None);
+    assert!(locked(&part_of(&pair.ns_a).state).pending.is_empty());
+
+    // The content send over the same link is forwarded.
+    assert_eq!(
+        pair.forward(never_asked(&asked)).await,
+        Ok(PeerWakeAnswer::Ready)
+    );
+    assert_eq!(asked.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_link_the_other_mob_dropped_while_the_wake_was_pending_gets_no_route() {
+    let pair = Pair::new("dropped-remote");
+    pair.a_holds();
+    pair.b_holds();
+    let release = Arc::new(Notify::new());
+    let waiting = {
+        let release = Arc::clone(&release);
+        pair.forward(move |_owner, _member| {
+            Box::pin(async move {
+                release.notified().await;
+                Ok(PeerWakeAnswer::Ready)
+            })
+        })
+    };
+    // Bob is unwired from alice by his own mob while he is being built.
+    drop_member_link(&pair.mob_b, &AgentIdentity::from("bob"), &pair.alice_name);
+    let _bob_inbox = pair.build_bob();
+    release.notify_one();
+    assert_eq!(waiting.await, Err(PeerWakeDenial::NotAMember));
+    assert_eq!(
+        pair.route_to_bob(),
+        None,
+        "no route for a link that is gone"
+    );
+}
+
+#[tokio::test]
+async fn senders_that_share_a_wake_are_each_answered_for_their_own_link() {
+    let pair = Pair::new("own-link");
+    let registry = InprocRegistry::global();
+    let asked = Arc::new(AtomicUsize::new(0));
+    let release = Arc::new(Notify::new());
+    // Alice and carol of mob A are both wired to bob, and bob to both.
+    let carol = Keypair::generate().public_key();
+    let carol_name = comms_name(&pair.mob_a, "carol");
+    let (_carol_inbox, carol_sender) = Inbox::new_transport_only();
+    assert!(
+        !registry
+            .register_with_meta_in_namespace(
+                &pair.ns_a,
+                carol_name.clone(),
+                carol,
+                carol_sender,
+                PeerMeta::default(),
+            )
+            .is_rejected()
+    );
+    pair.a_holds();
+    part_of(&pair.ns_a).set_member_links(
+        "carol",
+        vec![link("carol", &carol_name, &pair.bob_name, pair.bob)],
+    );
+    part_of(&pair.ns_b).set_member_links(
+        "bob",
+        vec![
+            link("bob", &pair.bob_name, &pair.alice_name, pair.alice),
+            link("bob", &pair.bob_name, &carol_name, carol),
+        ],
+    );
+    let hanging = |asked: &Arc<AtomicUsize>, release: &Arc<Notify>| {
+        let asked = Arc::clone(asked);
+        let release = Arc::clone(release);
+        move |_owner: &dyn InprocPeerWaker, _member: String| -> PeerWakeFuture {
+            asked.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                release.notified().await;
+                Ok(PeerWakeAnswer::Ready)
+            })
+        }
+    };
+    let from_alice = pair.forward(hanging(&asked, &release));
+    let from_carol = part_of(&pair.ns_a).forward(
+        carol,
+        pair.bob,
+        &pair.bob_name,
+        CONTENT,
+        hanging(&asked, &release),
+    );
+    assert_eq!(asked.load(Ordering::SeqCst), 1, "one wake for both senders");
+
+    // Alice is unwired from bob while the wake is pending. Carol's link is
+    // whole: she is answered ready and the route is installed. Alice is
+    // answered as no member.
+    drop_member_link(&pair.mob_a, &AgentIdentity::from("alice"), &pair.bob_name);
+    let _bob_inbox = pair.build_bob();
+    release.notify_one();
+    assert_eq!(from_carol.await, Ok(PeerWakeAnswer::Ready));
+    assert_eq!(from_alice.await, Err(PeerWakeDenial::NotAMember));
+    assert_eq!(pair.route_to_bob(), Some(pair.bob));
+    assert_eq!(asked.load(Ordering::SeqCst), 1);
+    registry.unregister_in_namespace(&pair.ns_a, &carol);
+}
+
+#[tokio::test]
+async fn a_runtime_that_shut_down_takes_only_the_inbox_routes_links_name() {
+    let pair = Pair::new("swept");
+    pair.a_holds();
+    pair.b_holds();
+    let registry = InprocRegistry::global();
+    let asked = Arc::new(AtomicUsize::new(0));
+    let _bob_inbox = pair.build_bob();
+    assert_eq!(
+        pair.forward(never_asked(&asked)).await,
+        Ok(PeerWakeAnswer::Ready)
+    );
+    assert_eq!(pair.route_to_bob(), Some(pair.bob));
+
+    // A route in mob A's namespace under a name of mob B that no link of
+    // mob A names (somebody else's route).
+    let foreign = Keypair::generate().public_key();
+    let foreign_name = comms_name(&pair.mob_b, "dave");
+    let (_foreign_inbox, foreign_sender) = Inbox::new_transport_only();
+    assert!(
+        !registry
+            .register_with_meta_in_namespace(
+                &pair.ns_a,
+                foreign_name.clone(),
+                foreign,
+                foreign_sender,
+                PeerMeta::default(),
+            )
+            .is_rejected()
+    );
+
+    // A third mob's runtime starts and shuts down: nothing of the two
+    // others moves.
+    let third = start_part("mob.xmr-swept-c");
+    clear_part(&third);
+    assert_eq!(pair.route_to_bob(), Some(pair.bob));
+
+    // Mob B's runtime shuts down: mob A drops the inbox route of its link
+    // to bob, and leaves the route no link names.
+    shut_down(&pair.ns_b);
+    assert_eq!(pair.route_to_bob(), None);
+    assert_eq!(
+        registry.get_name_by_pubkey_in_namespace(&pair.ns_a, &foreign),
+        Some(foreign_name)
+    );
+    registry.unregister_in_namespace(&pair.ns_a, &foreign);
 }

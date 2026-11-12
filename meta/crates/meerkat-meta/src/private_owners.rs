@@ -1208,7 +1208,7 @@ mod tests {
         );
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            owners.first_attempts_settled(std::time::Duration::from_secs(3600)),
+            owners.first_attempts_settled(std::time::Duration::from_hours(1)),
         )
         .await
         .expect("nothing to wait for");
@@ -1221,7 +1221,7 @@ mod tests {
         );
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            owners.first_attempts_settled(std::time::Duration::from_secs(3600)),
+            owners.first_attempts_settled(std::time::Duration::from_hours(1)),
         )
         .await
         .expect("nobody waits for a read that failed");
@@ -1279,7 +1279,7 @@ mod tests {
                 let owners = owners.clone();
                 tokio::spawn(async move {
                     owners
-                        .first_attempts_settled(std::time::Duration::from_secs(3600))
+                        .first_attempts_settled(std::time::Duration::from_hours(1))
                         .await;
                     owners.first_read_pending()
                 })
@@ -1306,7 +1306,7 @@ mod tests {
         assert!(owners.first_read_pending(), "the read is still owed");
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            owners.first_attempts_settled(std::time::Duration::from_secs(3600)),
+            owners.first_attempts_settled(std::time::Duration::from_hours(1)),
         )
         .await
         .expect("nobody waits for an overdue read");

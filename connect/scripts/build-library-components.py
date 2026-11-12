@@ -229,7 +229,8 @@ class Builder:
 def build(args: argparse.Namespace) -> dict:
     root = Path(args.root).resolve(strict=True)
     python, node, npm_cli = absolute_file(args.python), absolute_file(args.node), absolute_file(args.npm_cli)
-    pins = absolute_file(args.pins)
+    # The pin file is a checkout file and may be named relative to the current directory.
+    pins = absolute_file(os.path.abspath(args.pins) if isinstance(args.pins, str) and args.pins else None)
     if not isinstance(args.pinned_inputs, str) or not Path(args.pinned_inputs).is_absolute():
         raise BuildError("the fetched directory needs an absolute path")
     directory = Path(args.pinned_inputs).resolve(strict=True)

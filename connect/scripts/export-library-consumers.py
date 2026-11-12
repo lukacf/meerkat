@@ -1223,7 +1223,8 @@ def pinned_arguments(args: argparse.Namespace) -> PinnedInputs | None:
             raise ExportError("profile captures are FAMILY=FILE, one per family")
         captures[family] = Path(path)
     return PinnedInputs(
-        pins=Path(args.pins), pinned_inputs=Path(args.pinned_inputs),
+        # The pin file is a checkout file and may be named relative to the current directory.
+        pins=Path(os.path.abspath(args.pins)), pinned_inputs=Path(args.pinned_inputs),
         components={"agno": (Path(args.agno_wheel), args.agno_sha256),
                     "services": (Path(args.services_wheel), args.services_sha256),
                     "activepieces": (Path(args.activepieces_archive), args.activepieces_sha256)},

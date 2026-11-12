@@ -2,15 +2,18 @@
 """Focused archive construction and input-boundary tests, with small fixtures."""
 
 import copy
+import gzip
 import hashlib
 import importlib.util
 import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import signal
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -21,6 +24,42 @@ from unittest.mock import patch
 SPEC = importlib.util.spec_from_file_location("package_library_release", Path(__file__).with_name("package-library-release.py"))
 release = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(release)
+
+
+def load(name, file):
+    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(file))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# The macOS run route packages what the kit packager wrote: its tests' inert run fixture is shared.
+kit_fixture = load("agent_install_kit_fixture", "test_agent_install_kit.py")
+REAL_ROUTE_BINDINGS = copy.deepcopy(release.OFFICIAL_ROUTE_BINDINGS)
+RUN_TEXTS = "release/library-macos-arm64"
+PLAYWRIGHT = {"@playwright/mcp": ("0.0.83", "mcp-0.0.83.tgz"),
+              "playwright": ("1.64.0-alpha-1790635538000", "playwright-1.64.0-alpha-1790635538000.tgz"),
+              "playwright-core": ("1.64.0-alpha-1790635538000", "playwright-core-1.64.0-alpha-1790635538000.tgz")}
+GUIDE_TEMPLATE = """# Fixture guide for {{EDITION}}
+--contents-sha256 {{CONSUMERS_CONTENTS_SHA256}}
+"--contents-sha256", "{{CONSUMERS_CONTENTS_SHA256}}",
+"--official-contents-sha256", "{{OFFICIAL_CONTENTS_SHA256}}",
+"--official-installer-sha256", "{{OFFICIAL_INSTALLER_SHA256}}",
+"--verifier-sha256", "{{VERIFIER_SHA256}}",
+--config-sha256 {{HACKERNEWS_CONFIG_SHA256}}
+GitHub MCP server v{{GITHUB_VERSION}} at {{GITHUB_SOURCE_REVISION}}, executable {{GITHUB_EXECUTABLE_SHA256}}.
+"""
+
+
+def gzip_tar(members, *, prefix=""):
+    raw = io.BytesIO()
+    with gzip.GzipFile(fileobj=raw, mode="wb", mtime=0) as zipped:
+        with tarfile.open(fileobj=zipped, mode="w") as archive:
+            for name, (data, mode) in sorted(members.items()):
+                item = tarfile.TarInfo(prefix + name)
+                item.mode, item.size = mode, len(data)
+                archive.addfile(item, io.BytesIO(data))
+    return raw.getvalue()
 
 
 def sha(data):
@@ -1294,6 +1333,448 @@ class ReleaseTests(unittest.TestCase):
         self.assertFalse((output / "SHA256SUMS").exists())
         with self.assertRaisesRegex(release.PackageError, "output_exists"):
             self.package()
+
+    # The macOS run route: every input is this run's or the checkout's; no retained file, no donor.
+
+    COMPONENTS = {
+        "schema_version": 1,
+        "github": {"catalog_id": "github", "version": "2.0.3", "asset": "github-mcp-server_Darwin_arm64.tar.gz",
+                   "source_revision": "b98d115bbb080e9555466a96656ec4df605aea21", "profile": "selected-reads",
+                   "selected_operations": ["get_me", "list_commits", "get_file_contents"],
+                   "required_secret_environment": ["GITHUB_PERSONAL_ACCESS_TOKEN"]},
+        "playwright": {"catalog_id": "playwright", "profile": "isolated-chrome",
+                       "source_revision": "f183dad4a52965583e3cc1d59b88cdc279e2e57d",
+                       "selected_operations": ["browser_navigate", "browser_snapshot", "browser_fill_form",
+                                               "browser_click", "browser_close"],
+                       "packages": {name: version for name, (version, _) in PLAYWRIGHT.items()}},
+    }
+
+    def write_bundle_manifest(self, directory, closure_raw, **changes):
+        rows = {}
+        for path in sorted(directory.rglob("*")):
+            if path.is_file() and path.name not in {"CONTENTS.json", "SHA256SUMS"}:
+                data = path.read_bytes()
+                rows[path.relative_to(directory).as_posix()] = {"sha256": sha(data), "bytes": len(data)}
+        contents = {"schema_version": 1, "scope": "consumer_export_only_no_installation_or_activation",
+                    "files": rows, "accepted_inputs": {"dependency-closure": sha(closure_raw)}}
+        contents.update(changes)
+        raw = (json.dumps(contents, indent=2, sort_keys=True) + "\n").encode()
+        write(directory / "CONTENTS.json", raw)
+        sums = {name: row["sha256"] for name, row in rows.items()}
+        sums["CONTENTS.json"] = sha(raw)
+        write(directory / "SHA256SUMS", "".join(f"{value}  {name}\n" for name, value in sorted(sums.items())).encode())
+        return sha(raw)
+
+    def macos_run(self, *, texts=None):
+        """Lay out an inert run: kit (built by the kit packager), consumer bundle, pinned official files."""
+        work = self.base / "work"
+        run = kit_fixture.run_fixture(self.base, checkout=self.root)
+        # Official inputs as their publishers package them: one release archive, three registry tarballs.
+        binary = kit_fixture.MACHO_ARM64 + b"inert upstream server; never executed\n"
+        asset = gzip_tar({"LICENSE": (b"Upstream MIT licence\n", 0o644), "README.md": (b"upstream readme\n", 0o644),
+                          "github-mcp-server": (binary, 0o755)})
+        write(run["pinned"] / "release-download/github-mcp-server_Darwin_arm64.tar.gz", asset)
+        rows = [{"kind": "release-download", "name": "github-mcp-server", "version": "2.0.3",
+                 "file": "github-mcp-server_Darwin_arm64.tar.gz",
+                 "url": "https://github.com/github/github-mcp-server/releases/download/v2.0.3/github-mcp-server_Darwin_arm64.tar.gz",
+                 "sha256": sha(asset), "sha512": None, "digest_source": "publisher checksum file", "use": "official github"}]
+        versions = {name: version for name, (version, _) in PLAYWRIGHT.items()}
+        for name, (version, file) in PLAYWRIGHT.items():
+            dependencies = {"@playwright/mcp": {"playwright": versions["playwright"], "playwright-core": versions["playwright-core"]},
+                            "playwright": {"playwright-core": versions["playwright-core"]}, "playwright-core": {}}[name]
+            members = {"package.json": (json.dumps({"name": name, "version": version, "license": "Apache-2.0",
+                                                    **({"dependencies": dependencies} if dependencies else {})}).encode(), 0o644),
+                       "cli.js": (b"// inert; never executed\n", 0o644), "LICENSE": ((name + " licence\n").encode(), 0o644)}
+            if name != "@playwright/mcp":
+                members["NOTICE"] = ((name + " notice\n").encode(), 0o644)
+                members["ThirdPartyNotices.txt"] = ((name + " third party\n").encode(), 0o644)
+            raw = gzip_tar(members, prefix="package/")
+            write(run["pinned"] / "npm-tarball" / file, raw)
+            rows.append({"kind": "npm-tarball", "name": name, "version": version, "file": file,
+                         "url": "https://registry.npmjs.org/" + name + "/-/" + file, "sha256": None,
+                         "sha512": hashlib.sha512(raw).hexdigest(), "digest_source": "dist.integrity",
+                         "use": "official playwright"})
+        run["extra_pins"] = rows
+        kit_fixture.write_pins(run)
+        kit = kit_fixture.package_run(run, work / "kit")
+        # The texts the checkout carries for this route.
+        if texts is None:
+            for name, data in {"README.md": GUIDE_TEMPLATE.encode(), "official/README.md": b"Official bundle guide.\n",
+                               "official/github/UPSTREAM-PROFILE.md": b"GitHub selected reads.\n",
+                               "official/playwright/UPSTREAM-PROFILE.md": b"Playwright isolated Chrome.\n",
+                               "official/components.json": json.dumps(self.COMPONENTS).encode(),
+                               "selected/contracts/COMPOSE-CONTRACT.md": b"Compose contract.\n",
+                               "selected/contracts/COMPOSE-request.example.json": b"{}\n"}.items():
+                write(self.root / RUN_TEXTS / name, data)
+        else:
+            shutil.copytree(texts, self.root / RUN_TEXTS)
+        # The consumer bundle as the exporter leaves it: uncomposed routes, schema 1, no runtime target.
+        bundle = work / "consumers"
+        components = ("agno/runtime-constraints.txt", "services/runtime-constraints.txt",
+                      "activepieces/package.json", "activepieces/package-lock.json",
+                      "agno/meerkat_toolkit_agno-0.1.5-py3-none-any.whl",
+                      "services/meerkat_toolkit_services-0.1.23-py3-none-any.whl",
+                      "activepieces/rkat-toolkit-activepieces-0.1.0.tgz")
+        for name in components:
+            write(bundle / name, ("inert " + name).encode())
+        write(bundle / "README.md", b"Consumer guide.\n")
+        write(bundle / "agno/hackernews.json", b'{"profile": "hackernews"}\n')
+        catalog = (json.dumps([{"identity": row["identity"], "strategies": [{"id": row["strategy_id"], "kind": "local_mcp"}]}
+                               for row in REAL_ROUTE_BINDINGS["macos-arm64"]]) + "\n").encode()
+        write(bundle / "catalog.json", catalog)
+        write(bundle / "routes.json", (json.dumps({"schema_version": 1, "catalog_sha256": sha(catalog),
+                                                   "components": {"agno": {"path": "agno"}}, "routes": []}) + "\n").encode())
+        closure = work / "consumers-closure.json"
+        closure_raw = json.dumps({"schema_version": 1, "scope": "dependency_bytes_for_existing_consumer_selection",
+                                  "python_platform": {"implementation": "cpython", "version": "3.11", "system": "Darwin", "machine": "arm64"},
+                                  "accepted_inputs": {name: sha((bundle / name).read_bytes()) for name in components}}).encode()
+        write(closure, closure_raw)
+        contents = self.write_bundle_manifest(bundle, closure_raw)
+        # Nothing retained may be needed: remove every legacy input location of the fixture checkout.
+        shutil.rmtree(self.root / "dist")
+        shutil.rmtree(self.root / "docs")
+        manager = patch.object(release, "OFFICIAL_ROUTE_BINDINGS", copy.deepcopy(REAL_ROUTE_BINDINGS))
+        manager.start(); self.addCleanup(manager.stop)
+        run.update(bundle=bundle, closure=closure, closure_raw=closure_raw, kit_result=kit, asset=asset, binary=binary,
+                   arguments={"edition": "20261112-connect-0a1b2c3d", "pins": run["pins"], "pinned_inputs": run["pinned"],
+                              "consumers": bundle, "consumers_contents_sha256": contents, "consumer_closure": closure,
+                              "kit": work / "kit" / kit["archive"], "kit_sha256": kit["sha256"]})
+        return run
+
+    def run_package(self, run, name="library", **changes):
+        return release.package_run(self.root, "macos-arm64", self.base / name, **{**run["arguments"], **changes})
+
+    def run_refused(self, run, code, name="run-refused", **changes):
+        with self.assertRaisesRegex(release.PackageError, "^" + code + "$"):
+            self.run_package(run, name, **changes)
+        self.assertFalse((self.base / name).exists())
+
+    def run_members(self, result):
+        prefix = Path(result["archive"]).name.removesuffix(".tar.gz") + "/"
+        with tarfile.open(result["archive"]) as archive:
+            return {member.name.removeprefix(prefix): (archive.extractfile(member).read(), member.mode)
+                    for member in archive.getmembers() if member.isfile()}
+
+    def test_macos_run_library_holds_only_run_and_checkout_inputs(self):
+        run = self.macos_run()
+        with patch("subprocess.Popen", side_effect=AssertionError("must not execute")):
+            result = self.run_package(run)
+            again = self.run_package(run, "library-again")
+        archive = Path(result["archive"])
+        self.assertEqual(archive.name, "toolkit-library-20261112-connect-0a1b2c3d-macos-arm64.tar.gz")
+        self.assertEqual(archive.read_bytes(), Path(again["archive"]).read_bytes())
+        self.assertEqual(result["sha256"], sha(archive.read_bytes()))
+        self.assertEqual((archive.parent / "SHA256SUMS").read_text(), f"{result['sha256']}  {archive.name}\n")
+        self.assertEqual(json.loads((archive.parent / "build.json").read_text()), result)
+        self.assertEqual((result["schema_version"], result["target"], result["edition"], result["scope"]),
+                         (2, "macos-arm64", "20261112-connect-0a1b2c3d", "run_built_library_packaging_not_execution_qualification"))
+        self.assertEqual(result["packager_source_sha256"], sha(Path(release.__file__).read_bytes()))
+        self.assertEqual(result["inputs"]["kit"], {"sha256": run["kit_result"]["sha256"], "bytes": run["kit_result"]["bytes"]})
+        self.assertEqual(result["inputs"]["pins"]["sha256"], sha(run["pins"].read_bytes()))
+        self.assertEqual(result["inputs"]["consumer_closure"], {"sha256": sha(run["closure_raw"])})
+        files = self.run_members(result)
+        self.assertEqual(result["files"], len(files))
+        tools = set(kit_fixture.RUN_TOOL_FEATURES)
+        self.assertEqual({name for name in files if name.startswith("selected/bin/")},
+                         {"selected/bin/" + tool for tool in tools} | {"selected/bin/install-library-consumer.py"})
+        self.assertEqual({name for name in files if name.startswith("selected/provenance/")}, {
+            "selected/provenance/crates/alpha-1.0.0.crate", "selected/provenance/crates/beta-macro-0.2.1.crate",
+            "selected/provenance/dependencies.json", "selected/provenance/kit.json", "selected/provenance/selection.json",
+            "selected/provenance/document-sources.json", "selected/provenance/consumer-dependency-closure.json",
+            "selected/provenance/run-inputs.json", *("selected/provenance/tools/" + tool + ".build.json" for tool in tools)})
+        self.assertEqual({name for name in files if name.startswith("selected/licenses/")}, {
+            "selected/licenses/crates/alpha-1.0.0/LICENSE-APACHE", "selected/licenses/crates/alpha-1.0.0/LICENSE-MIT",
+            "selected/licenses/crates/beta-macro-0.2.1/NOTICE", "selected/licenses/rust/COPYRIGHT-library.html",
+            "selected/licenses/toolkit/LICENSE-APACHE", "selected/licenses/toolkit/LICENSE-MIT"})
+        contracts = {name for name in files if name.startswith("selected/contracts/")}
+        self.assertEqual(contracts, {"selected/contracts/" + leaf for leaf in (
+            "INSPECT.md", "PYTHON-INSTALL.md", "NODE-INSTALL.md", "MCPB-INSTALL.md", "LOCAL-RECIPES.md",
+            "HOSTED-METADATA.md", "SETUP-RECIPES.md", "HOSTED-RECIPES.md")}
+            | {name for name in self.python_sources if name.startswith("selected/contracts/")})
+        self.assertIn("selected/contracts/COMPOSE-CONTRACT.md", contracts)
+        self.assertEqual(files["selected/contracts/COMPOSE-CONTRACT.md"][0], b"Compose contract.\n")
+        self.assertEqual({name for name in files if name.startswith("setup/")},
+                         {"setup/backend.py", "setup/mcp_adapter.py", "setup/install-library-consumer.py",
+                          "setup/static/index.html", "setup/static/app.js", "setup/static/form.js", "setup/static/style.css"}
+                         | {name for name in self.python_sources if name.startswith("setup/")})
+        installer = (self.root / "scripts/install-library-consumer.py").read_bytes()
+        self.assertEqual(files["setup/install-library-consumer.py"], (installer, 0o644))
+        self.assertEqual(files["selected/bin/install-library-consumer.py"], (installer, 0o755))
+        for name in ("LICENSE-MIT", "LICENSE-APACHE", "README.md", "selected/agent/instructions.md",
+                     "consumers/CONTENTS.json", "consumers/README.md", "official/CONTENTS.json"):
+            self.assertIn(name, files)
+        self.assertEqual(files["selected/provenance/consumer-dependency-closure.json"][0], run["closure_raw"])
+        # M1 and M4: no history row, no donor record, no MCP check tool.
+        for forbidden in ("selected/bin/toolkit-mcp-check.py", "selected/contracts/MCP-EXECUTION-CHECK.md",
+                          "selected/provenance/donor-kit.json", "selected/provenance/current-input-selection.json"):
+            self.assertNotIn(forbidden, files)
+        for name, (_, mode) in files.items():
+            executable = name.startswith("selected/bin/") or name == "official/github/github-mcp-server"
+            self.assertEqual(mode, 0o755 if executable else 0o644, name)
+        selection = json.loads(files["selected/provenance/selection.json"][0])
+        self.assertEqual((selection["scope"], selection["platform"]), ("retained_selected_tools", "macos-arm64"))
+        self.assertEqual(selection["capabilities"], ["agent-plugin-files", "mcpb-archive-inspection", "compose-local-execution"])
+        self.assertEqual(selection["kit"], {"sha256": run["kit_result"]["sha256"], "scope": "run-built-selected-tools-kit"})
+        self.assertNotIn("donor", selection)
+        for tool in tools:
+            self.assertEqual(selection["files"]["bin/" + tool], sha((run["tools"] / tool).read_bytes()))
+        inputs = json.loads(files["selected/provenance/run-inputs.json"][0])
+        self.assertEqual(inputs["sources"]["setup/backend.py"],
+                         {"path": "sdk/consumer-setup/backend.py", "sha256": sha(files["setup/backend.py"][0])})
+        self.assertEqual(inputs["sources"]["README.md"]["path"], RUN_TEXTS + "/README.md")
+        self.assertEqual(inputs["inputs"], result["inputs"])
+        # Records written here name no path of this machine.
+        for name in ("selected/provenance/selection.json", "selected/provenance/run-inputs.json",
+                     "selected/provenance/document-sources.json", "official/delivery.json", "README.md"):
+            self.assertNotIn(str(self.base).encode(), files[name][0], name)
+        self.assertNotIn(str(self.base), json.dumps({key: value for key, value in result.items() if key != "archive"}))
+
+    def test_macos_run_checkout_rows_follow_the_release_commit_not_a_stale_pin(self):
+        run = self.macos_run()
+        path = self.targets["macos-arm64"]["setup_backend"][0]
+        changed = b"backend at the release commit; its table pin is stale\n"
+        write(self.root / path, changed)
+        files = self.run_members(self.run_package(run))
+        self.assertEqual(files["setup/backend.py"][0], changed)
+        inputs = json.loads(files["selected/provenance/run-inputs.json"][0])
+        self.assertEqual(inputs["sources"]["setup/backend.py"], {"path": path, "sha256": sha(changed)})
+        (self.root / path).unlink()
+        with self.assertRaises((OSError, release.PackageError)):
+            self.run_package(run, "missing-row")
+        self.assertFalse((self.base / "missing-row").exists())
+        write(self.root / path, changed)
+        write(self.root / "sdk/consumer-setup/static/new.js", b"unindexed asset")
+        self.run_refused(run, "setup_file_set_mismatch")
+
+    def test_macos_run_official_bundle_is_the_upstream_asset_with_generated_records(self):
+        run = self.macos_run()
+        files = self.run_members(self.run_package(run))
+        official = {name.removeprefix("official/"): value for name, value in files.items() if name.startswith("official/")}
+        archives = {"playwright/archives/" + file for _, file in PLAYWRIGHT.values()}
+        notices = {"playwright/notices/playwright-mcp/LICENSE",
+                   *("playwright/notices/" + package + "/" + leaf for package in ("playwright", "playwright-core")
+                     for leaf in ("LICENSE", "NOTICE", "ThirdPartyNotices.txt"))}
+        self.assertEqual(set(official), {
+            "README.md", "delivery.json", "CONTENTS.json", "SHA256SUMS", "github/github-mcp-server",
+            "github/notices/upstream-LICENSE", "github/UPSTREAM-PROFILE.md", "github/mcp.template.json",
+            "playwright/package.json", "playwright/package-lock.json", "playwright/closure.json",
+            "playwright/mcp.template.json", "playwright/UPSTREAM-PROFILE.md", *archives, *notices})
+        self.assertEqual(official["github/github-mcp-server"], (run["binary"], 0o755))
+        self.assertEqual(official["github/notices/upstream-LICENSE"][0], b"Upstream MIT licence\n")
+        self.assertEqual(official["github/UPSTREAM-PROFILE.md"][0], b"GitHub selected reads.\n")
+        for _, file in PLAYWRIGHT.values():
+            self.assertEqual(official["playwright/archives/" + file][0], (run["pinned"] / "npm-tarball" / file).read_bytes())
+        contents = json.loads(official["CONTENTS.json"][0])
+        self.assertEqual(set(contents), {"format", "files"})
+        self.assertEqual(contents["format"], 1)
+        self.assertEqual(contents["files"], {name: {"sha256": sha(data), "bytes": len(data)}
+                                             for name, (data, _) in official.items() if name not in ("CONTENTS.json", "SHA256SUMS")})
+        sums = dict(reversed(line.split("  ")) for line in official["SHA256SUMS"][0].decode().splitlines())
+        self.assertEqual(sums, {**{name: row["sha256"] for name, row in contents["files"].items()},
+                                "CONTENTS.json": sha(official["CONTENTS.json"][0])})
+        delivery = json.loads(official["delivery.json"][0])
+        self.assertEqual((delivery["format"], delivery["role"], delivery["catalog_ids"]),
+                         ("meerkat-toolkit.official-consumers.v1", "service_connector", ["github", "playwright"]))
+        github, playwright = delivery["components"]
+        self.assertEqual(github, {
+            "artifact": "github/github-mcp-server", "artifact_sha256": sha(run["binary"]), "catalog_id": "github",
+            "configuration_template": "github/mcp.template.json", "notices": "github/notices", "profile": "selected-reads",
+            "required_secret_environment": ["GITHUB_PERSONAL_ACCESS_TOKEN"],
+            "runtime_profile": "GitHub MCP server v2.0.3 macOS arm64; upstream release asset, unexecuted input",
+            "selected_operations": ["get_me", "list_commits", "get_file_contents"],
+            "source_archive": {"bytes": len(run["asset"]), "sha256": sha(run["asset"])},
+            "source_revision": "b98d115bbb080e9555466a96656ec4df605aea21", "target": "macos-arm64"})
+        self.assertEqual({key: playwright[key] for key in ("catalog_id", "profile", "target", "source_revision", "whole_endpoint_exposed",
+                                                           "browser_distributed", "package_json", "package_lock", "closure",
+                                                           "configuration_template", "notices")},
+                         {"catalog_id": "playwright", "profile": "isolated-chrome", "target": "macos-arm64",
+                          "source_revision": "f183dad4a52965583e3cc1d59b88cdc279e2e57d", "whole_endpoint_exposed": True,
+                          "browser_distributed": False, "package_json": "playwright/package.json",
+                          "package_lock": "playwright/package-lock.json", "closure": "playwright/closure.json",
+                          "configuration_template": "playwright/mcp.template.json", "notices": "playwright/notices"})
+        # The release composes both official families into the bundle's routes with this run's digests.
+        routes = json.loads(files["consumers/routes.json"][0])
+        self.assertEqual(routes["schema_version"], 2)
+        installer_sha = sha(files["setup/install-library-consumer.py"][0])
+        self.assertEqual(routes["components"]["official-github"], {
+            "path": "github/github-mcp-server", "sha256": sha(run["binary"]), "profiles": ["selected-reads"],
+            "contents_sha256": sha(official["CONTENTS.json"][0]), "installer_sha256": installer_sha})
+        self.assertEqual(routes["components"]["official-playwright"]["sha256"], sha(official["playwright/package-lock.json"][0]))
+        self.assertEqual([row["family"] for row in routes["routes"]], ["official-github", "official-playwright"])
+        consumers = json.loads(files["consumers/CONTENTS.json"][0])
+        self.assertEqual((consumers["schema_version"], "runtime_target" in consumers), (1, False))
+        self.assertEqual(consumers["files"]["routes.json"]["sha256"], sha(files["consumers/routes.json"][0]))
+
+    def test_macos_run_official_bundle_meets_the_shipped_installer(self):
+        """The installer that ships in this library must admit what the packager composed."""
+        installer = load("library_consumer_installer", "install-library-consumer.py")
+        run = self.macos_run()
+        files = self.run_members(self.run_package(run))
+        bundle = self.base / "extracted-official"
+        for name, (data, mode) in files.items():
+            if name.startswith("official/"):
+                write(bundle / name.removeprefix("official/"), data, mode)
+        contents = sha(files["official/CONTENTS.json"][0])
+        payloads, closure, component = installer.playwright_inputs(bundle, contents)
+        self.assertEqual(component["catalog_id"], "playwright")
+        self.assertEqual(len(closure["rows"]), 3)
+        delivery = json.loads(files["official/delivery.json"][0])
+        github = delivery["components"][0]
+        self.assertEqual(installer.official_profile(github), installer.OFFICIAL_PROFILE)
+        self.assertEqual(installer.official_target(github), "macos-arm64")
+        self.assertEqual(json.loads(files["official/github/mcp.template.json"][0]),
+                         installer.official_template(installer.OFFICIAL_PROFILE))
+        installer.check_official_executable(files["official/github/github-mcp-server"][0], "macos-arm64")
+        self.assertEqual(github["selected_operations"], installer.OFFICIAL_TOOLS)
+        self.assertEqual(github["required_secret_environment"], [installer.OFFICIAL_ENV])
+        # One rule is the installer's to change (assigned outside this file set): a selected-reads component
+        # taken from an upstream release archive carries that archive's licence only. Until the installer
+        # accepts that shape it refuses here with exactly this reason and no other.
+        try:
+            admitted, selected = installer.official_inputs(bundle, contents, "github")
+        except installer.InstallError as error:
+            self.assertEqual(str(error), "incomplete official notices")
+        else:
+            self.assertEqual(selected, github)
+            self.assertEqual([name for name in admitted if name.startswith("github/notices/")],
+                             ["github/notices/upstream-LICENSE"])
+
+    def test_macos_run_guide_pins_are_rendered_from_the_payload_never_kept(self):
+        run = self.macos_run()
+        files = self.run_members(self.run_package(run))
+        guide = files["README.md"][0].decode()
+        installer_sha = sha(files["setup/install-library-consumer.py"][0])
+        expected = GUIDE_TEMPLATE
+        for name, value in {"EDITION": "20261112-connect-0a1b2c3d",
+                            "CONSUMERS_CONTENTS_SHA256": sha(files["consumers/CONTENTS.json"][0]),
+                            "OFFICIAL_CONTENTS_SHA256": sha(files["official/CONTENTS.json"][0]),
+                            "OFFICIAL_INSTALLER_SHA256": installer_sha, "VERIFIER_SHA256": installer_sha,
+                            "HACKERNEWS_CONFIG_SHA256": sha(files["consumers/agno/hackernews.json"][0]),
+                            "GITHUB_VERSION": "2.0.3", "GITHUB_SOURCE_REVISION": "b98d115bbb080e9555466a96656ec4df605aea21",
+                            "GITHUB_EXECUTABLE_SHA256": sha(run["binary"])}.items():
+            expected = expected.replace("{{" + name + "}}", value)
+        self.assertEqual(guide, expected)
+        self.assertNotIn("{{", guide)
+        template = self.root / RUN_TEXTS / "README.md"
+        for index, (text, code) in enumerate((
+                (GUIDE_TEMPLATE + "{{UNKNOWN_PIN}}\n", "guide_placeholder_unknown"),
+                (GUIDE_TEMPLATE + "--contents-sha256 " + "0" * 64 + "\n", "guide_command_digest_mismatch"),
+                (GUIDE_TEMPLATE + '"--verifier-sha256", "' + "0" * 64 + '"\n', "guide_command_digest_mismatch"),
+                (GUIDE_TEMPLATE + "--official-installer-sha256 " + "0" * 64 + "\n", "guide_command_digest_mismatch"),
+                (GUIDE_TEMPLATE.replace('"--official-contents-sha256", "{{OFFICIAL_CONTENTS_SHA256}}",\n', ""), "guide_pin_missing"))):
+            with self.subTest(code=code, index=index):
+                write(template, text.encode())
+                self.run_refused(run, code, "guide-" + str(index))
+        write(template, GUIDE_TEMPLATE.encode())
+        (run["bundle"] / "agno/hackernews.json").unlink()
+        contents = self.write_bundle_manifest(run["bundle"], run["closure_raw"])
+        self.run_refused(run, "guide_input_missing", "guide-no-example", consumers_contents_sha256=contents)
+
+    def test_macos_run_refuses_changed_foreign_or_retained_shaped_inputs(self):
+        run = self.macos_run()
+        self.run_refused(run, "kit_digest_mismatch", "kit-digest", kit_sha256="0" * 64)
+        self.run_refused(run, "selected_manifest_digest_mismatch", "contents-digest", consumers_contents_sha256="0" * 64)
+        self.run_refused(run, "invalid_edition", "edition", edition="../x")
+        self.run_refused(run, "output_inside_input", name="work/consumers/out")
+        with self.assertRaisesRegex(release.PackageError, "^run_route_is_macos_only$"):
+            release.package_run(self.root, "linux-x86_64", self.base / "linux-run", **run["arguments"])
+        # A bundle for another runtime contract, a closure the manifest does not bind, composed routes.
+        for index, (changes, code) in enumerate((
+                ({"schema_version": 2, "runtime_target": {"python": {}, "node": {}}}, "selected_consumer_target_mismatch"),
+                ({"accepted_inputs": {"dependency-closure": "0" * 64}}, "selected_consumer_closure_binding_mismatch"))):
+            contents = self.write_bundle_manifest(run["bundle"], run["closure_raw"], **changes)
+            self.run_refused(run, code, "bundle-" + str(index), consumers_contents_sha256=contents)
+        routes = json.loads((run["bundle"] / "routes.json").read_bytes())
+        routes["components"]["official-github"] = {"path": "github/github-mcp-server"}
+        write(run["bundle"] / "routes.json", json.dumps(routes).encode())
+        contents = self.write_bundle_manifest(run["bundle"], run["closure_raw"])
+        self.run_refused(run, "invalid_official_route_binding", "composed-routes", consumers_contents_sha256=contents)
+
+    def test_macos_run_official_pins_must_be_the_declared_upstream_files(self):
+        run = self.macos_run()
+        document = json.loads(run["pins"].read_text())
+        def repin(change):
+            pins = copy.deepcopy(document)
+            change(pins["pins"])
+            run["pins"].write_text(json.dumps(pins))
+        cases = (
+            (lambda pins: [row.update(version="2.0.4") for row in pins if row["use"] == "official github"], "official_pin_mismatch"),
+            (lambda pins: pins.remove(next(row for row in pins if row["name"] == "playwright-core")), "official_pin_mismatch"),
+            (lambda pins: [row.update(version="0.0.84") for row in pins if row["name"] == "@playwright/mcp"], "official_pin_mismatch"),
+            (lambda pins: [row.update(sha256="0" * 64) for row in pins if row["use"] == "official github"], "pinned_input_digest_mismatch"),
+            (lambda pins: [row.update(sha512="0" * 128) for row in pins if row["name"] == "playwright"], "pinned_input_digest_mismatch"),
+            (lambda pins: [row.update(sha512=None) for row in pins if row["name"] == "playwright"], "invalid_pin_file"),
+        )
+        for index, (change, code) in enumerate(cases):
+            with self.subTest(index=index):
+                repin(change)
+                self.run_refused(run, code, "pins-" + str(index))
+        run["pins"].write_text(json.dumps(document))
+        asset = gzip_tar({"LICENSE": (b"Upstream MIT licence\n", 0o644), "github-mcp-server": (b"\x7fELF not a Mach-O file", 0o755)})
+        write(run["pinned"] / "release-download/github-mcp-server_Darwin_arm64.tar.gz", asset)
+        repin(lambda pins: [row.update(sha256=sha(asset)) for row in pins if row["use"] == "official github"])
+        self.run_refused(run, "official_executable_mismatch", "elf-asset")
+
+    def test_macos_run_kit_must_be_the_run_built_scope_with_bound_records(self):
+        run = self.macos_run()
+        # The kit of another scope (for example a donor-shaped archive) is not this route's input.
+        raw = gzip_tar({"provenance/kit.json": (json.dumps({"schema_version": 1, "platform": "macos-arm64",
+                        "scope": "selected-python-node-mcpb-installation-kit", "files": {}}).encode(), 0o644)},
+                       prefix="agent-install-kit-macos-arm64/")
+        other = self.base / "work/other-kit.tar.gz"
+        write(other, raw)
+        self.run_refused(run, "kit_scope_mismatch", "other-kit", kit=other, kit_sha256=sha(raw))
+        linked = self.base / "work/linked-kit.tar.gz"; linked.symlink_to(run["arguments"]["kit"])
+        with self.assertRaises((OSError, release.PackageError)):
+            self.run_package(run, "linked-kit", kit=linked)
+        self.assertFalse((self.base / "linked-kit").exists())
+
+    def test_macos_run_cli_never_mixes_the_run_route_with_a_selection(self):
+        script = Path(release.__file__)
+        base = [sys.executable, "-I", "-B", str(script), "--target", "macos-arm64"]
+        for index, arguments in enumerate((
+                ["--pins", str(self.base / "pins.json")],
+                ["--pins", str(self.base / "pins.json"), "--input-selection", str(self.base / "selection.json"),
+                 "--input-selection-sha256", "0" * 64],
+                ["--edition", "20261112-connect-0a1b2c3d"])):
+            output = self.base / ("cli-" + str(index))
+            result = subprocess.run(base + arguments + ["--output", str(output)],
+                                    capture_output=True, text=True, timeout=30)
+            self.assertEqual((result.returncode, result.stdout), (1, ""), arguments)
+            self.assertEqual(result.stderr, "Packaging refused: incomplete_run_selection. Inputs and earlier outputs were not replaced.\n")
+            self.assertFalse(output.exists())
+
+    def test_macos_run_committed_texts_render_bind_and_carry_no_kept_digest(self):
+        texts = release.ROOT / RUN_TEXTS
+        self.assertEqual(sorted(path.relative_to(texts).as_posix() for path in texts.rglob("*") if path.is_file()), [
+            "README.md", "official/README.md", "official/components.json", "official/github/UPSTREAM-PROFILE.md",
+            "official/playwright/UPSTREAM-PROFILE.md", "selected/contracts/COMPOSE-CONTRACT.md",
+            "selected/contracts/COMPOSE-request.example.json"])
+        self.assertEqual(json.loads((texts / "official/components.json").read_bytes()), self.COMPONENTS)
+        installer = load("library_consumer_installer_constants", "install-library-consumer.py")
+        self.assertEqual(self.COMPONENTS["github"]["selected_operations"], installer.OFFICIAL_TOOLS)
+        self.assertEqual(self.COMPONENTS["playwright"]["selected_operations"], installer.PLAYWRIGHT_OPERATIONS)
+        # The two contract files are the public bytes of the Linux library.
+        self.assertEqual(sha((texts / "selected/contracts/COMPOSE-CONTRACT.md").read_bytes()),
+                         "04f9e674dfe8180e3c7f53d9686a3d6e17cb58d894a2b6bec5098965e201e00d")
+        self.assertEqual(sha((texts / "selected/contracts/COMPOSE-request.example.json").read_bytes()),
+                         "616d22d7318f903643d09e3ec58868b57cc48638ab812b139007432a4afbe6b3")
+        template = (texts / "README.md").read_text(encoding="utf-8")
+        for flag, name in (("--contents-sha256", "CONSUMERS_CONTENTS_SHA256"), ("--official-contents-sha256", "OFFICIAL_CONTENTS_SHA256"),
+                           ("--official-installer-sha256", "OFFICIAL_INSTALLER_SHA256"), ("--verifier-sha256", "VERIFIER_SHA256")):
+            self.assertRegex(template, re.escape(flag) + r"(?:\"\s*,\s*\"|\s+)\{\{" + name + r"\}\}")
+        for path in (texts / "README.md", texts / "official/README.md", texts / "official/github/UPSTREAM-PROFILE.md",
+                     texts / "official/playwright/UPSTREAM-PROFILE.md"):
+            text = path.read_text(encoding="utf-8")
+            self.assertIsNone(re.search(r"[0-9a-f]{64}", text), path.name)   # no hand-kept digest
+            self.assertIsNone(re.search("[" + chr(0x2013) + chr(0x2014) + "]", text), path.name)
+        run = self.macos_run(texts=texts)
+        files = self.run_members(self.run_package(run))
+        guide = files["README.md"][0].decode()
+        self.assertNotIn("{{", guide)
+        self.assertEqual(guide.count(sha(files["consumers/CONTENTS.json"][0])), template.count("{{CONSUMERS_CONTENTS_SHA256}}"))
+        self.assertIn(sha(files["official/CONTENTS.json"][0]), guide)
+        self.assertEqual(files["official/github/UPSTREAM-PROFILE.md"][0], (texts / "official/github/UPSTREAM-PROFILE.md").read_bytes())
 
 
 class PackagedSelectedContractTests(unittest.TestCase):

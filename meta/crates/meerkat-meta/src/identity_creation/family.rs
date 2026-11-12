@@ -1083,6 +1083,15 @@ impl ChangePlan {
             schedules: None,
         }
     }
+
+    /// The plan for a caller that is told what the change would do to the
+    /// agent's schedules and how many they are, and is not given their
+    /// list ([`SchedulesFollowed::without_list`]).
+    #[must_use]
+    pub(crate) fn without_schedule_list(mut self) -> Self {
+        self.schedules = self.schedules.take().map(SchedulesFollowed::without_list);
+        self
+    }
 }
 
 /// The family: what every surface calls. Each method takes the mob as a

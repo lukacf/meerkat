@@ -105,11 +105,11 @@ use super::refusal::{IdentityRefusal, IdentityRefusalKind, RequestProblem, Valid
 use super::render::render_v1;
 use super::request::{
     IdentityEntryFacts, IdentityRequest, NormalizedRequest, PeerFacts, PeerVerdict, RequestAction,
-    RequestContext, RequesterFacts, core_member_name, evaluate_peer, identity_name_of_member,
-    normalize_adopt, normalize_archive, normalize_create, normalize_remove, normalize_unarchive,
-    normalize_update,
+    RequestContext, Requester, RequesterFacts, core_member_name, evaluate_peer,
+    identity_name_of_member, normalize_adopt, normalize_archive, normalize_create,
+    normalize_remove, normalize_unarchive, normalize_update,
 };
-use super::schedules::{AgentSchedules, ScheduleEffect};
+use super::schedules::{AgentSchedules, ScheduleEffect, SchedulesFollowed};
 
 /// The most agents one page of a list or of the directory names.
 const PAGE_MAX: usize = 100;
@@ -1764,11 +1764,12 @@ impl IdentityGate {
         })?;
         // The schedules the change would take with it, as they are now.
         let schedules = match (&self.schedules, ScheduleEffect::of_action(&request.action)) {
-            (Some(schedules), Some((effect, agent))) => Some(
+            (Some(schedules), Some((effect, agent))) => Some(schedules_shown_to(
+                &request.requester,
                 schedules
                     .planned(mob.mob_id().as_str(), agent, effect)
                     .await,
-            ),
+            )),
             _ => None,
         };
         Ok(ChangePlan {
@@ -2040,9 +2041,24 @@ impl IdentityChangeExecutor for LaunchExecutor {
             && let Some((effect, agent)) = ScheduleEffect::of_action(&request.action)
         {
             let followed = schedules.follow(mob.mob_id().as_str(), agent, effect).await;
-            committed.outcome = committed.outcome.with_schedules(agent, followed);
+            committed.outcome = committed
+                .outcome
+                .with_schedules(agent, schedules_shown_to(&request.requester, followed));
         }
         Ok(committed)
+    }
+}
+
+/// What `requester` is answered about an agent's schedules: an agent that
+/// asks for a change is told what became of them and how many they are,
+/// and is not given their list (a schedule that targets an agent may be
+/// anybody's). A surface whose caller is no agent scopes the list itself,
+/// by what it knows of its caller.
+fn schedules_shown_to(requester: &Requester, followed: SchedulesFollowed) -> SchedulesFollowed {
+    if requester.kind() == RequesterKind::Agent {
+        followed.without_list()
+    } else {
+        followed
     }
 }
 

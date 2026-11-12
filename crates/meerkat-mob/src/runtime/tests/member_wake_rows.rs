@@ -4148,7 +4148,7 @@ async fn kickoffs_resolving_together_notify_waking_peers_once_without_holding_th
 }
 
 /// How many captured records say `member`'s started notice to `peer`, a peer
-/// that was not live, was not delivered, with `refusal` in its error.
+/// that was not live, was not confirmed, with `refusal` in its error.
 fn undelivered_started_notices(
     warnings: &CapturedWarnings,
     member: &AgentIdentity,
@@ -4161,7 +4161,7 @@ fn undelivered_started_notices(
         .iter()
         .filter(|fields| {
             field(fields, "message")
-                == Some("a kickoff notice to a peer that was not materialized was not delivered")
+                == Some("a kickoff notice to a peer that was not materialized was not confirmed")
                 && field(fields, "from") == Some(member.as_str())
                 && field(fields, "to") == Some(peer.as_str())
                 && field(fields, "intent") == Some("mob.kickoff_started")
@@ -4903,7 +4903,7 @@ async fn a_kickoff_notice_whose_send_to_a_live_peer_fails_is_recorded_and_the_ot
         records.len() == 2
             && records.iter().all(|record| {
                 field(record, "message")
-                    == Some("a kickoff notice to a live peer was not delivered")
+                    == Some("a kickoff notice to a live peer was not confirmed")
                     && field(record, "class") == Some("send_failed")
                     && field(record, "error").is_some_and(|error| error.contains("peer offline"))
             }),

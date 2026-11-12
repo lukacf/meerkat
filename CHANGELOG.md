@@ -64,20 +64,20 @@ them.
     (a failure or a cancellation included) reaches the peer and the notices
     that stay keep their order. There is no bound across peers or members:
     the lane holds at most eight notices for every wired pair of members.
-  - A notice the lane does not deliver is logged at WARN with the member
+  - A notice the lane cannot confirm is logged at WARN with the member
     (`from`), the peer (`to`), the notice's kind (`intent`) and a `class`
     (`preparation_failed`, `send_failed`, `pending_bound` or `cancelled`),
     and is not sent again. The messages are `a kickoff notice to a peer that
-    was not materialized was not delivered`, `a kickoff notice to a live peer
-    was not delivered` (before: `failed to emit kickoff lifecycle notice`,
+    was not materialized was not confirmed`, `a kickoff notice to a live peer
+    was not confirmed` (before: `failed to emit kickoff lifecycle notice`,
     without the peer) and `a kickoff notice could not be prepared for a peer
-    and was not delivered`. A notice whose preparation or send fails for one
-    peer no longer skips the member's remaining peers. "Not delivered" means
-    not confirmed: a notice whose send budget ended, or that was cancelled,
-    after its recipient had admitted it can still arrive, once. Three cases
-    have no such record: a sending member with no comms runtime (nothing is
-    prepared), a placed sending member (logged without the peer and the
-    class), and notices still pending when the mob's actor exits.
+    and was not sent`. A notice whose preparation or send fails for one peer
+    no longer skips the member's remaining peers. Not confirmed is not the
+    same as not delivered: a notice whose send budget ended, or that was
+    cancelled, after its recipient had admitted it can still arrive, once.
+    Three cases have no such record: a sending member with no comms runtime
+    (nothing is prepared), a placed sending member (logged without the peer
+    and the class), and notices still pending when the mob's actor exits.
   - Cancel: a stop, a complete, a reset, a destroy or a shutdown of the mob,
     an unwire of the edge, a retirement of either member and the rollback of
     a failed spawn cancel the notices that are pending when they start, as

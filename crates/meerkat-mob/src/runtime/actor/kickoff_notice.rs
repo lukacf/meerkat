@@ -73,7 +73,7 @@ pub(super) struct KickoffNoticeDelivery {
     pub(super) command: CommsCommand,
 }
 
-/// Why a kickoff notice was not delivered: the `class` of its record.
+/// Why a kickoff notice was not confirmed, or not sent: the `class` of its record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum KickoffNoticeLoss {
     /// Its preparation on the actor failed (MobMachine's verdict, the
@@ -322,8 +322,10 @@ async fn deliver_kickoff_notices(
     }
 }
 
-/// Record a kickoff notice that was not delivered. A notice is presentation:
-/// the record is its whole failure handling.
+/// Record a kickoff notice whose delivery was not confirmed. A notice is
+/// presentation: the record is its whole failure handling. "Not confirmed",
+/// not "not delivered": a send whose budget ended, or that was cancelled,
+/// after its recipient had admitted it can still arrive, once.
 fn record_undelivered_kickoff_notice(
     mob_id: &MobId,
     notice: &KickoffNoticeDelivery,
@@ -338,7 +340,7 @@ fn record_undelivered_kickoff_notice(
             intent = notice.intent,
             class = class.as_str(),
             error = %error,
-            "a kickoff notice to a peer that was not materialized was not delivered"
+            "a kickoff notice to a peer that was not materialized was not confirmed"
         );
     } else {
         tracing::warn!(
@@ -348,7 +350,7 @@ fn record_undelivered_kickoff_notice(
             intent = notice.intent,
             class = class.as_str(),
             error = %error,
-            "a kickoff notice to a live peer was not delivered"
+            "a kickoff notice to a live peer was not confirmed"
         );
     }
 }
@@ -369,7 +371,7 @@ pub(super) fn record_unprepared_kickoff_notice(
         intent,
         class = KickoffNoticeLoss::PreparationFailed.as_str(),
         error = %error,
-        "a kickoff notice could not be prepared for a peer and was not delivered"
+        "a kickoff notice could not be prepared for a peer and was not sent"
     );
 }
 

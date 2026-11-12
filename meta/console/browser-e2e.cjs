@@ -5107,13 +5107,15 @@ async function runIdentityChangesStoryProof() {
     await page.getByTestId("identity-cancel").click();
 
     // Archive, then unarchive from the archived agents. The question says
-    // that the last conversation is harvested; the answer says what became
-    // of the agent's schedules, by name.
+    // that the last conversation is harvested and distilled, and so does
+    // the answer, which also says what became of the agent's schedules, by
+    // name.
     await openAgent("scout");
     await page.getByTestId("roster-action:scout:archive").click();
-    await page.getByTestId("identity-confirm:scout:archive").getByText(/Its last conversation is harvested, as for any agent that leaves the team\./).waitFor();
+    await page.getByTestId("identity-confirm:scout:archive").getByText(/Its last conversation is harvested and distilled, as for any agent that leaves the team\./).waitFor();
     await page.getByTestId("identity-confirm:scout:archive").getByTestId("identity-confirm-yes").click();
     await notice.getByText("Chief scout is archived").waitFor();
+    await notice.getByText("Its last conversation is harvested and distilled, as for any agent that leaves the team.").waitFor();
     await notice.getByText("Its 2 schedules are paused until it is unarchived: Morning report, Weekly digest.").waitFor();
     await gone(agent("scout"), "the archived agent in the roster");
     await page.screenshot({ path: path.join(evidenceDir, "identity-changes-archived-schedules.png"), fullPage: true });

@@ -356,7 +356,9 @@ them.
   wake or a restore a retryable refusal leaves the member Dormant and its
   next wake asks again once the retry is due (`BuildPreparationRetry`),
   and a refusal for good, as every label refusal is, records the member
-  broken until it is respawned or reset. Core reads the identity's row
+  broken until it is respawned or reset, or, for a label refusal, until
+  its row carries the label: after that update it is served at the next
+  send, with no respawn or reset. Core reads the identity's row
   once at each wake and restore of such a member, before the host is
   asked. A row the identity store cannot serve then, or holds in a form
   this build cannot read, ends that build for a retry as a store that

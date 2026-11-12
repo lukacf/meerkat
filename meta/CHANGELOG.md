@@ -422,11 +422,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   with the state `broken` for an agent refused at its first wake. To seat
   the agent, put the label in its row: at its create, or by an update. An
   update seats an agent that is owed its seat (one created with a first
-  message) at once; an agent Core already holds a member of takes its
-  row's labels when it is respawned or reset (`meta/respawn`,
-  `meta/reset`), and is built at its next wake. The same holds after a
-  later label change of a row: until the member is seated again its seat
-  carries the old labels, and its next build is refused. A customizer that
+  message) at once; an agent Core already holds a member of is refused
+  until its row carries the label, takes its row's labels at the update
+  itself while its member is idle, and is served at its next send, with
+  no respawn or reset (a member that held work then takes them at a
+  retry of the update, at its next update, or at a respawn or a reset).
+  The same holds after a later label change of a row. A customizer that
   sets no labels refuses nothing. An archive and a removal of a refused
   agent are served.
 

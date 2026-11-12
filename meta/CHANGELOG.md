@@ -380,8 +380,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (`docs/rct/console-rest-sse-contract-v0.5.0.json`) documents the family's
   thirteen methods, `adopt` and `changes_hold` included, and what a launch
   without an identity policy answers: its reads are served, and a change or
-  a plan is refused `change_denied`. The console guide has a section on
-  long-term agents.
+  a plan is refused `change_denied`. It names `addressability` and
+  `runtime_mode_override` on a create, an update and the reads, `schedules`
+  on the first answer and on the plan of an archive, an unarchive and a
+  removal, and the answer for an agent the caller may not view
+  (`identity_unknown`, as for a name no agent holds). The console guide has
+  a section on long-term agents.
 
 ### Changed
 
@@ -636,6 +640,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   once the runtime is composed, with both; on a runtime that learns of its
   customizer only at its identity bootstrap it is built without them, as
   before.
+- An update cannot hand an agent's runtime mode back to its profile: to
+  change how such an agent runs, set the other explicit value
+  (`autonomous_host` or `turn_driven`); clearing an override is not offered
+  in this release.
 
 ## [0.9.13] - 2026-11-11
 

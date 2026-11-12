@@ -2640,7 +2640,7 @@
               "agents"
             ],
             "optional_fields": [],
-            "note": "Creates the agents (1 to 256, all or nothing), each {name, profile, display_name?, instructions? (an array of sections), context?, labels?, first_message?, peers?}. The requester is the signed-in person, or the host on its console surface. Gated on a writable console and agent.identity.create. An unknown member is refused."
+            "note": "Creates the agents (1 to 256, all or nothing), each {name, profile, display_name?, instructions? (an array of sections), context?, labels?, first_message?, peers?, addressability?, runtime_mode_override?}. addressability is addressable (the default) or internal_only; runtime_mode_override is autonomous_host or turn_driven (absent, the agent runs as its profile says). The requester is the signed-in person, or the host on its console surface. Gated on a writable console and agent.identity.create. An unknown member is refused."
           },
           "success": {
             "required_fields": [
@@ -2676,7 +2676,7 @@
               "peers_add",
               "peers_remove"
             ],
-            "note": "Updates one agent at the spec digest the caller read (a moved spec answers stale_spec with the current one). set {display_name?, instructions?, context?, labels?, labels_remove?, profile?}: an absent member is unchanged. An agent's entry of the outcome says what became of an instructions change. Gated on a writable console and agent.identity.manage for the agent. An unknown member is refused."
+            "note": "Updates one agent at the spec digest the caller read (a moved spec answers stale_spec with the current one). set {display_name?, instructions?, context?, labels?, labels_remove?, profile?, addressability?, runtime_mode_override?}: an absent member is unchanged. addressability and runtime_mode_override take the values they take on a create; an update sets a runtime mode and cannot return the agent to its profile's. An agent's entry of the outcome says what became of an instructions change. Gated on a writable console and agent.identity.manage for the agent. An unknown member is refused. An agent the caller may not view is answered as a name no agent holds (-32058, kind identity_unknown at name), and nothing is changed."
           },
           "success": {
             "required_fields": [
@@ -2708,14 +2708,14 @@
               "expected_spec_digest"
             ],
             "optional_fields": [],
-            "note": "Archives one agent: it stops and keeps its name, record, conversation and memory, and its last conversation is harvested as for any agent that leaves. Gated on a writable console and agent.identity.manage for the agent. An unknown member is refused."
+            "note": "Archives one agent: it stops and keeps its name, record, conversation and memory, and its last conversation is harvested as for any agent that leaves. Gated on a writable console and agent.identity.manage for the agent. An unknown member is refused. An agent the caller may not view is answered as a name no agent holds (-32058, kind identity_unknown at name), and nothing is changed."
           },
           "success": {
             "required_fields": [
               "outcome",
               "operation_id"
             ],
-            "note": "The change's typed outcome, tagged by outcome: done {operation_id, agents: [{name, state, spec_digest?, spec_revision?, session_id?, seat?, instructions?}]}, pending_decision {operation_id, decision_id, deadline_ms} (nothing is written but the decision) or pending_preparation {operation_id, agents}. The same caller, request_id and request answer the same state again and write nothing."
+            "note": "The change's typed outcome, tagged by outcome: done {operation_id, agents: [{name, state, spec_digest?, spec_revision?, session_id?, seat?, instructions?, schedules?}]}, pending_decision {operation_id, decision_id, deadline_ms} (nothing is written but the decision) or pending_preparation {operation_id, agents}. The same caller, request_id and request answer the same state again and write nothing. schedules {effect, count, schedules: [{schedule_id, name?}], incomplete?} is on the agent's entry of the first answer, on a launch whose host gives the family its schedules: the schedules that target the agent, which the archive paused for their target. incomplete is true, and written only then, when a schedule could not be read or changed; the same request sent again follows the rest. The same request answered again states no schedules."
           },
           "errors": [
             {
@@ -2740,14 +2740,14 @@
               "expected_spec_digest"
             ],
             "optional_fields": [],
-            "note": "Brings one archived agent back on its archived session. Gated on a writable console and agent.identity.manage for the agent. An unknown member is refused."
+            "note": "Brings one archived agent back on its archived session. Gated on a writable console and agent.identity.manage for the agent. An unknown member is refused. An agent the caller may not view is answered as a name no agent holds (-32058, kind identity_unknown at name), and nothing is changed."
           },
           "success": {
             "required_fields": [
               "outcome",
               "operation_id"
             ],
-            "note": "The change's typed outcome, tagged by outcome: done {operation_id, agents: [{name, state, spec_digest?, spec_revision?, session_id?, seat?, instructions?}]}, pending_decision {operation_id, decision_id, deadline_ms} (nothing is written but the decision) or pending_preparation {operation_id, agents}. The same caller, request_id and request answer the same state again and write nothing."
+            "note": "The change's typed outcome, tagged by outcome: done {operation_id, agents: [{name, state, spec_digest?, spec_revision?, session_id?, seat?, instructions?, schedules?}]}, pending_decision {operation_id, decision_id, deadline_ms} (nothing is written but the decision) or pending_preparation {operation_id, agents}. The same caller, request_id and request answer the same state again and write nothing. schedules {effect, count, schedules: [{schedule_id, name?}], incomplete?} is on the agent's entry of the first answer, on a launch whose host gives the family its schedules: the schedules that target the agent, which the unarchive resumed (exactly those its archive paused). incomplete is true, and written only then, when a schedule could not be read or changed; the same request sent again follows the rest. The same request answered again states no schedules."
           },
           "errors": [
             {
@@ -2772,14 +2772,14 @@
               "expected_spec_digest"
             ],
             "optional_fields": [],
-            "note": "Removes one agent for good: its name is never available again, and its last conversation is harvested as for any agent that leaves. Gated on a writable console and agent.identity.remove for the agent. An unknown member is refused."
+            "note": "Removes one agent for good: its name is never available again, and its last conversation is harvested as for any agent that leaves. Gated on a writable console and agent.identity.remove for the agent. An unknown member is refused. An agent the caller may not view is answered as a name no agent holds (-32058, kind identity_unknown at name), and nothing is changed."
           },
           "success": {
             "required_fields": [
               "outcome",
               "operation_id"
             ],
-            "note": "The change's typed outcome, tagged by outcome: done {operation_id, agents: [{name, state, spec_digest?, spec_revision?, session_id?, seat?, instructions?}]}, pending_decision {operation_id, decision_id, deadline_ms} (nothing is written but the decision) or pending_preparation {operation_id, agents}. The same caller, request_id and request answer the same state again and write nothing."
+            "note": "The change's typed outcome, tagged by outcome: done {operation_id, agents: [{name, state, spec_digest?, spec_revision?, session_id?, seat?, instructions?, schedules?}]}, pending_decision {operation_id, decision_id, deadline_ms} (nothing is written but the decision) or pending_preparation {operation_id, agents}. The same caller, request_id and request answer the same state again and write nothing. schedules {effect, count, schedules: [{schedule_id, name?}], incomplete?} is on the agent's entry of the first answer, on a launch whose host gives the family its schedules: the schedules that target the agent, which the removal ended. incomplete is true, and written only then, when a schedule could not be read or changed; the same request sent again follows the rest. The same request answered again states no schedules."
           },
           "errors": [
             {
@@ -2828,7 +2828,7 @@
             "required_fields": [
               "name"
             ],
-            "note": "Gated on agent.view for the agent."
+            "note": "Gated on agent.view for the agent. An agent the caller may not view is answered as a name no agent holds (-32058, kind identity_unknown at name)."
           },
           "success": {
             "required_fields": [
@@ -2841,7 +2841,7 @@
               "labels",
               "peers"
             ],
-            "note": "One agent in full. display_name, spec_revision, provenance {entered, requester_kind, requester, at_ms, consent} (when its record says), open_operations and context are present when set. peers names the peers the caller may view. The read never wakes the agent."
+            "note": "One agent in full. display_name, spec_revision, provenance {entered, requester_kind, requester, at_ms, consent} (when its record says), open_operations and context are present when set. addressability is present as internal_only (an addressable agent says nothing), and runtime_mode_override as autonomous_host or turn_driven (an agent that runs as its profile says says nothing). peers names the peers the caller may view. The read never wakes the agent."
           },
           "errors": [
             {
@@ -2949,7 +2949,7 @@
               "expected_spec_digest"
             ],
             "optional_fields": [],
-            "note": "Releases one agent from the host's configuration: from the adoption on it is changed at run time and configuration no longer declares it. Gated on a writable console and agent.identity.manage for the agent. An unknown member is refused. The stock console does not call it."
+            "note": "Releases one agent from the host's configuration: from the adoption on it is changed at run time and configuration no longer declares it. Gated on a writable console and agent.identity.manage for the agent. An unknown member is refused. An agent the caller may not view is answered as a name no agent holds (-32058, kind identity_unknown at name), and nothing is changed. The stock console does not call it."
           },
           "success": {
             "required_fields": [
@@ -3007,7 +3007,7 @@
               "change",
               "request_id"
             ],
-            "note": "The outcome and the rendering a change would get; nothing is held and nothing is written. change is create, update, archive, unarchive, remove or adopt, and the other members are that change's own params. Gated on what the change it plans needs: agent.identity.create for a create, agent.identity.remove on the agent for a removal, agent.identity.manage on the agent for every other change. The stock console asks it before a profile change."
+            "note": "The outcome and the rendering a change would get; nothing is held and nothing is written. change is create, update, archive, unarchive, remove or adopt, and the other members are that change's own params. Gated on what the change it plans needs: agent.identity.create for a create, agent.identity.remove on the agent for a removal, agent.identity.manage on the agent for every other change. A plan of a change of one agent the caller may not view is answered as a name no agent holds (-32058, kind identity_unknown at name). The stock console asks it before a profile change."
           },
           "success": {
             "required_fields": [
@@ -3018,7 +3018,7 @@
               "subject_digest",
               "rendering"
             ],
-            "note": "outcome is allow, notify or require_approval (a change the host's rules deny is refused, not planned); change is the change class whose rule decided; approver_id is present when the outcome names one."
+            "note": "outcome is allow, notify or require_approval (a change the host's rules deny is refused, not planned); change is the change class whose rule decided; approver_id is present when the outcome names one. schedules {effect, count, schedules, incomplete?} is present on the plan of an archive, an unarchive and a removal, on a launch whose host gives the family its schedules: the schedules the change would take with it, as they are when the plan is made."
           },
           "errors": [
             {

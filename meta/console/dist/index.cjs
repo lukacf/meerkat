@@ -75792,8 +75792,15 @@ var REFUSAL_SENTENCES = {
 };
 var REFUSAL_KINDS_WITH_A_SENTENCE = Object.keys(REFUSAL_SENTENCES);
 var UNKNOWN_REFUSAL_SENTENCE = "The request was refused, and nothing was changed.";
+var MOVE_INTO_PREPARED_PROFILE = "move_into_prepared_profile";
 function refusalSentence(refusal) {
+  if (refusal.kind === "unsupported" && refusal.data.feature === MOVE_INTO_PREPARED_PROFILE) {
+    return "An agent cannot be moved into this profile: its host prepares the agents of this profile before their first use. Create a new agent in this profile instead.";
+  }
   return Object.hasOwn(REFUSAL_SENTENCES, refusal.kind) ? REFUSAL_SENTENCES[refusal.kind] : UNKNOWN_REFUSAL_SENTENCE;
+}
+function readRefusalSentence(refusal) {
+  return refusal.kind === "approval_unavailable" ? "The team's open requests could not be read just now, so the console cannot say what waits for its agents. Try again shortly." : refusalSentence(refusal);
 }
 function refusalDetail(refusal) {
   return refusal.detail || null;
@@ -75861,7 +75868,9 @@ function saidOf(refusal) {
 }
 function readFailure(error48) {
   const refusal = answeredRefusalOf(error48);
-  return refusal ? saidOf(refusal) : { sentence: "The console got no answer it can read.", detail: errorMessage(error48) };
+  if (!refusal) return { sentence: "The console got no answer it can read.", detail: errorMessage(error48) };
+  const detail = refusalDetail(refusal);
+  return { sentence: readRefusalSentence(refusal), ...detail ? { detail } : {} };
 }
 function RefusalDetails({ detail }) {
   if (!detail) return null;

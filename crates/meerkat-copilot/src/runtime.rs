@@ -15009,6 +15009,11 @@ mod tests {
                     .map(|levels| levels.len()),
                 Some(3)
             );
+            assert_eq!(
+                route().api_base,
+                "https://copilot.example.test",
+                "the first sign-in's token named its own API base"
+            );
 
             // A new sign-in while the exchange is down: the list the account
             // holds was fetched with the earlier sign-in's token.
@@ -15036,6 +15041,11 @@ mod tests {
             assert_eq!(
                 route.capabilities, None,
                 "nothing the earlier sign-in's list stated is the new sign-in's"
+            );
+            assert_eq!(
+                route.api_base, DEFAULT_COPILOT_API_BASE,
+                "the API base the earlier sign-in's token named is not the new sign-in's: \
+                 the default one stands until its own token names one"
             );
         }
 

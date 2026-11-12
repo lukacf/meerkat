@@ -47,7 +47,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `meta/set_instruction` and `meta/revoke_instruction` refuse a namespace
   that starts with `meerkat.identity.` (`-32602`, `instruction_set_code`
   `invalid_request`): those namespaces hold each agent's own instructions.
-  `meta/instruction_status` still reads them.
+  `meta/instruction_status` still reads them. Upgrade: a host that wrote a
+  record under `meerkat.identity.` in an earlier release can no longer
+  change or revoke it through these verbs.
 
 - Meta serves an identity whose record is its row in the mob's identity
   store (one created at run time, or one a host adopted into the store) as
@@ -149,11 +151,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Known limitations
 
 - An agent whose instructions were edited while the gateway was down, whose
-  conversation was built before 0.9.14 and that has no instruction record
+  conversation was built through 0.9.14 and that has no instruction record
   yet, may keep the text of its first prompt until the running gateway
   observes a change of it (a roster refresh with other text, an update) or
   its conversation is rebuilt: such a conversation may not record the
-  sections it was built with. A conversation built on 0.9.14 or later
+  sections it was built with. A conversation built after 0.9.14
   does, and the change is recorded when the gateway next registers the
   agent, with one exception: an edit that only removes sections from the
   end of the text, or removes all of them, is not seen then for an agent

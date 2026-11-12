@@ -49,7 +49,7 @@
 //! conversation's build state records are not the current ones (the
 //! session service's `recorded_build_instructions`: committed metadata, no
 //! transcript row). A session whose build state does not say (one built or
-//! resumed before 0.9.14) gets nothing written then: its text changes with
+//! resumed through 0.9.14) gets nothing written then: its text changes with
 //! the next observed change or a fresh session, as before. An agent whose
 //! session no build created yet needs no record: its first build takes the
 //! current text. An agent with a conversation and no seated member
@@ -531,7 +531,7 @@ impl IdentityRuntime {
     /// mob holds no record of, was built with other sections than `current`
     /// ([`other_sections`]), read from the session's committed build state
     /// (its metadata; no transcript row). A session whose record does not
-    /// say, as one built or resumed before 0.9.14 does not, was built with
+    /// say, as one built or resumed through 0.9.14 does not, was built with
     /// nobody knows what: it answers `false`, and nothing is written for it
     /// until a change is observed.
     async fn built_with_other_sections(

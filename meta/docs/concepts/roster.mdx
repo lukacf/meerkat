@@ -383,7 +383,10 @@ What to know:
   `meta/reset` or `meta/delete_identity`, build their first prompt from the
   current, complete text. A reset or a delete revokes the agent's record, so
   nothing is appended to the fresh conversation; a later change is recorded
-  again and reaches it as one entry.
+  again and reaches it as one entry. The record is revoked before the fresh
+  conversation is seated: a reset that is then refused leaves the agent on
+  its earlier conversation, which keeps its entries, and the gateway's next
+  start records the current text for it once more, as one more entry.
 - **Removing an agent** revokes its record. A removal the gateway stopped
   right after, before the record was revoked, is completed at the next
   start: the record of every removed agent is revoked then. Archiving an
@@ -406,8 +409,8 @@ What to know:
   was dropped, a row first named at a delivery door). The gateway compares
   the agent's current text with its record, or, for an agent with no record
   yet, with the sections its conversation was built with. A conversation
-  built before 0.9.14 may not record those sections: for it nothing is
-  written at start, and it keeps its first prompt's text, as before 0.9.14,
+  built through 0.9.14 may not record those sections: for it nothing is
+  written then, and it keeps its first prompt's text, as through 0.9.14,
   until the running gateway observes a change (a roster refresh, an update)
   or the conversation is rebuilt.
 - **One edit made while the gateway was down is not seen** in this release:

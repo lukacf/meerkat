@@ -42521,6 +42521,118 @@ mod tests {
         }
     }
 
+    /// Refusal documents for the surface rows: a catalogued level the model
+    /// does not accept, a refusal that names no route, and the one transient
+    /// reason. Each with the `retryable` value its error data carries.
+    fn reasoning_effort_refusal_documents() -> Vec<(serde_json::Value, bool)> {
+        vec![
+            (
+                serde_json::json!({
+                    "requested": "max", "provider": "anthropic", "model": "claude-opus-4-5",
+                    "route": {"backend": "anthropic_api", "api": "messages"},
+                    "reason": "unsupported_level", "supported": ["low", "medium", "high"],
+                    "facts": "catalog",
+                }),
+                false,
+            ),
+            (
+                serde_json::json!({
+                    "requested": "high", "provider": "other", "model": "custom-model-1",
+                    "route": null,
+                    "reason": "supported_levels_unknown", "supported": null, "facts": null,
+                }),
+                false,
+            ),
+            (
+                serde_json::json!({
+                    "requested": "high", "provider": "openai", "model": "account-model-1",
+                    "route": {"backend": "copilot", "api": "responses"},
+                    "reason": "supported_levels_unavailable", "supported": null, "facts": null,
+                }),
+                true,
+            ),
+        ]
+    }
+
+    /// A refused `reasoning_effort` level answers one shape whichever
+    /// checkpoint refused: the session error path (a refused build), a turn
+    /// that failed for the refusal (an apply failure of its build, or a run
+    /// that failed before a provider request) and a refused live
+    /// reconfiguration all answer invalid params with the same message and
+    /// the same typed data, byte for byte. `retryable` is `true` only for
+    /// the unavailable reason; a refusal that names no route keeps
+    /// `"route": null`.
+    #[test]
+    fn a_refusal_inside_a_turn_answers_like_a_build_refusal() {
+        let session_id = SessionId::new();
+        for (document, retryable) in reasoning_effort_refusal_documents() {
+            let refusal: meerkat_core::ReasoningEffortRefusal =
+                serde_json::from_value(document.clone()).expect("a refusal document reads");
+            let build_answer = session_error_to_rpc(SessionError::Agent(
+                meerkat_core::AgentError::ReasoningEffortRefused(Box::new(refusal.clone())),
+            ));
+            assert_eq!(build_answer.code, error::INVALID_PARAMS, "{build_answer:?}");
+            assert_eq!(build_answer.code, -32602);
+            assert_eq!(build_answer.message, format!("agent error: {refusal}"));
+            assert_eq!(
+                build_answer.data,
+                Some(serde_json::json!({
+                    "kind": "reasoning_effort_refused",
+                    "retryable": retryable,
+                    "reasoning_effort_refusal": document,
+                }))
+            );
+            let build_bytes = serde_json::to_string(&build_answer).expect("serialize");
+
+            let reason = meerkat_core::event::AgentErrorReason::ReasoningEffortRefused {
+                refusal: refusal.clone(),
+            };
+            let detail = format!("agent error: {refusal}");
+            // The turn's build was refused: an apply failure with the reason.
+            let mut apply_failure =
+                meerkat_core::TurnErrorMetadata::runtime_apply_failure(detail.clone());
+            apply_failure.reason = Some(reason.clone());
+            // The run was refused before a provider request: a failed turn
+            // terminal with the reason.
+            let mut failed_run = meerkat_core::TurnErrorMetadata::terminal(
+                meerkat_core::TurnTerminalCauseKind::FatalFailure,
+                meerkat_core::TurnTerminalOutcome::Failed,
+                detail.clone(),
+            );
+            failed_run.reason = Some(reason);
+
+            for turn_error in [apply_failure, failed_run] {
+                for outcome in [
+                    meerkat_runtime::completion::CompletionOutcome::Abandoned {
+                        reason: detail.clone(),
+                        error: turn_error.clone(),
+                    },
+                    meerkat_runtime::completion::CompletionOutcome::AbandonedWithError {
+                        reason: detail.clone(),
+                        error: turn_error.clone(),
+                    },
+                ] {
+                    let answer = completion_outcome_to_rpc_result(outcome, &session_id)
+                        .expect_err("a refused level is an RPC error");
+                    assert_eq!(
+                        serde_json::to_string(&answer).expect("serialize"),
+                        build_bytes,
+                        "a refused turn answers the build refusal's bytes"
+                    );
+                }
+            }
+
+            let swap_answer = runtime_driver_error_to_rpc(
+                meerkat_runtime::RuntimeDriverError::ReasoningEffortRefused(Box::new(refusal)),
+            );
+            assert_eq!(
+                serde_json::to_string(&swap_answer).expect("serialize"),
+                build_bytes,
+                "a refused live reconfiguration answers the build refusal's bytes"
+            );
+        }
+    }
+
     #[test]
     fn completion_outcome_to_rpc_result_finalization_failure_hides_nondurable_result() {
         // Row #85 gate: a finalization (durable-commit) failure is NOT durably

@@ -13,6 +13,10 @@
 
 mod resolve;
 
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod refusal_projection_tests;
+
 use std::fmt;
 
 use serde::{Deserialize, Serialize};

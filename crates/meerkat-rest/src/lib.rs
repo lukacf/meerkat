@@ -18302,6 +18302,175 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
         assert!(matches!(err, ApiError::RequestCancelled { details: None }));
     }
 
+    /// Refusal documents for the REST rows, each with the `retryable` value
+    /// its details carry: a catalogued level the model does not accept, a
+    /// refusal that names no route, and the one transient reason.
+    fn reasoning_effort_refusal_documents() -> Vec<(Value, bool)> {
+        vec![
+            (
+                json!({
+                    "requested": "max", "provider": "anthropic", "model": "claude-opus-4-5",
+                    "route": {"backend": "anthropic_api", "api": "messages"},
+                    "reason": "unsupported_level", "supported": ["low", "medium", "high"],
+                    "facts": "catalog",
+                }),
+                false,
+            ),
+            (
+                json!({
+                    "requested": "high", "provider": "other", "model": "custom-model-1",
+                    "route": null,
+                    "reason": "supported_levels_unknown", "supported": null, "facts": null,
+                }),
+                false,
+            ),
+            (
+                json!({
+                    "requested": "high", "provider": "openai", "model": "account-model-1",
+                    "route": {"backend": "copilot", "api": "responses"},
+                    "reason": "supported_levels_unavailable", "supported": null, "facts": null,
+                }),
+                true,
+            ),
+        ]
+    }
+
+    async fn api_error_status_and_payload(error: ApiError) -> (StatusCode, Value) {
+        use http_body_util::BodyExt as _;
+        let response = error.into_response();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    /// The two turn errors a refused level reaches a completion as: an apply
+    /// failure of the turn's build, and a run that failed before a provider
+    /// request.
+    fn reasoning_effort_refused_turn_errors(
+        refusal: &meerkat_core::ReasoningEffortRefusal,
+    ) -> [meerkat_core::TurnErrorMetadata; 2] {
+        let reason = meerkat_core::event::AgentErrorReason::ReasoningEffortRefused {
+            refusal: refusal.clone(),
+        };
+        let detail = format!("agent error: {refusal}");
+        let mut apply_failure =
+            meerkat_core::TurnErrorMetadata::runtime_apply_failure(detail.clone());
+        apply_failure.reason = Some(reason.clone());
+        let mut failed_run = meerkat_core::TurnErrorMetadata::terminal(
+            meerkat_core::TurnTerminalCauseKind::FatalFailure,
+            meerkat_core::TurnTerminalOutcome::Failed,
+            detail,
+        );
+        failed_run.reason = Some(reason);
+        [apply_failure, failed_run]
+    }
+
+    /// A refused `reasoning_effort` level answers HTTP 400 `INVALID_PARAMS`
+    /// with the typed details, in one shape whichever checkpoint refused:
+    /// the session error path (a refused build), a refused live
+    /// reconfiguration, and a turn that failed for the refusal. `retryable`
+    /// is `true` only for the unavailable reason; a refusal that names no
+    /// route renders with `"route": null`.
+    #[tokio::test]
+    async fn a_refused_reasoning_effort_answers_400_with_the_typed_details() {
+        let session_id = SessionId::new();
+        let realm = meerkat_core::RealmId::parse("test-realm").expect("valid test realm id");
+        for (document, retryable) in reasoning_effort_refusal_documents() {
+            let refusal: meerkat_core::ReasoningEffortRefusal =
+                serde_json::from_value(document.clone()).expect("a refusal document reads");
+            let expected = json!({
+                "error": format!("agent error: {refusal}"),
+                "code": "INVALID_PARAMS",
+                "details": {
+                    "kind": "reasoning_effort_refused",
+                    "retryable": retryable,
+                    "reasoning_effort_refusal": document,
+                },
+            });
+
+            let mut answers = vec![
+                create_session_error_to_api(SessionError::Agent(
+                    meerkat_core::AgentError::ReasoningEffortRefused(Box::new(refusal.clone())),
+                )),
+                create_session_error_to_api(runtime_driver_error_to_session_error(
+                    meerkat_runtime::RuntimeDriverError::ReasoningEffortRefused(Box::new(
+                        refusal.clone(),
+                    )),
+                )),
+            ];
+            for turn_error in reasoning_effort_refused_turn_errors(&refusal) {
+                for outcome in [
+                    meerkat_runtime::completion::CompletionOutcome::Abandoned {
+                        reason: format!("agent error: {refusal}"),
+                        error: turn_error.clone(),
+                    },
+                    meerkat_runtime::completion::CompletionOutcome::AbandonedWithError {
+                        reason: format!("agent error: {refusal}"),
+                        error: turn_error.clone(),
+                    },
+                ] {
+                    answers.push(
+                        completion_outcome_to_api_result(outcome, &session_id, &realm, false)
+                            .expect_err("a refused level is an API error"),
+                    );
+                }
+            }
+            for answer in answers {
+                let (status, payload) = api_error_status_and_payload(answer).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{payload}");
+                assert_eq!(payload, expected);
+            }
+        }
+    }
+
+    /// A turn refused for its level in the request that created its session
+    /// answers the same 400 and details, and names the created session
+    /// beside them, so the caller does not lose it.
+    #[tokio::test]
+    async fn a_refused_first_turn_names_the_created_session_beside_the_refusal() {
+        let session_id = SessionId::new();
+        let realm = meerkat_core::RealmId::parse("test-realm").expect("valid test realm id");
+        for (document, retryable) in reasoning_effort_refusal_documents() {
+            let refusal: meerkat_core::ReasoningEffortRefusal =
+                serde_json::from_value(document.clone()).expect("a refusal document reads");
+            for turn_error in reasoning_effort_refused_turn_errors(&refusal) {
+                let answer = completion_outcome_to_api_result(
+                    meerkat_runtime::completion::CompletionOutcome::AbandonedWithError {
+                        reason: format!("agent error: {refusal}"),
+                        error: turn_error,
+                    },
+                    &session_id,
+                    &realm,
+                    true,
+                )
+                .expect_err("a refused level is an API error");
+                let (status, payload) = api_error_status_and_payload(answer).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{payload}");
+                assert_eq!(
+                    payload,
+                    json!({
+                        "error": format!("agent error: {refusal}"),
+                        "code": "INVALID_PARAMS",
+                        "details": {
+                            "kind": "reasoning_effort_refused",
+                            "retryable": retryable,
+                            "reasoning_effort_refusal": document,
+                            "session_id": session_id.to_string(),
+                            "session_ref": format_session_ref(&realm, &session_id),
+                            "session_created": true,
+                            "resumable": true,
+                        },
+                    })
+                );
+                assert_eq!(
+                    SessionError::reasoning_effort_refusal_from_data(&payload["details"]),
+                    Some(refusal.clone()),
+                    "the reader takes the refusal with the session members beside it"
+                );
+            }
+        }
+    }
+
     #[cfg(feature = "mob")]
     #[tokio::test]
     async fn test_compatibility_mob_routes_are_not_found() {

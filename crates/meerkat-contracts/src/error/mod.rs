@@ -775,6 +775,37 @@ mod tests {
         );
     }
 
+    /// A refused `reasoning_effort` level is the caller's request, refused as
+    /// invalid params (JSON-RPC -32602, HTTP 400), never a provider or
+    /// internal fault, whatever its reason; a refusal that names no route is
+    /// the same error.
+    #[test]
+    fn a_refused_reasoning_effort_is_an_invalid_params_error() {
+        for (reason, route) in [
+            (
+                "unsupported_level",
+                serde_json::json!({"backend": "anthropic_api", "api": "messages"}),
+            ),
+            ("supported_levels_unavailable", serde_json::Value::Null),
+        ] {
+            let refusal: meerkat_core::ReasoningEffortRefusal =
+                serde_json::from_value(serde_json::json!({
+                    "requested": "max", "provider": "anthropic", "model": "claude-opus-4-5",
+                    "route": route, "reason": reason, "supported": null, "facts": null,
+                }))
+                .expect("a refusal document reads");
+            let refused = meerkat_core::AgentError::ReasoningEffortRefused(Box::new(refusal));
+            assert_eq!(
+                agent_transport_error_code(&refused),
+                ErrorCode::InvalidParams
+            );
+            let code = session_transport_error_code(&meerkat_core::SessionError::Agent(refused));
+            assert_eq!(code, ErrorCode::InvalidParams);
+            assert_eq!(code.jsonrpc_code(), -32602);
+            assert_eq!(code.http_status(), 400);
+        }
+    }
+
     /// The session transport mapping (JSON-RPC session methods and the
     /// `rkat` exit status): one representative per `SessionError` class and
     /// per typed `AgentError` cause, through a settlement wrapper too.

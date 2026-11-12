@@ -2430,7 +2430,7 @@ mod tests {
         ));
     }
 
-    /// R2.1: the Gemini family's Copilot client serves Chat Completions on
+    /// The Gemini family's Copilot client serves Chat Completions on
     /// the Copilot backend. It answers for itself: the Chat Completions
     /// client it wraps is another family's and reports no route here. The
     /// account's statement is the routed client's to add.
@@ -2453,7 +2453,7 @@ mod tests {
         );
     }
 
-    /// R2.2, Chat Completions for the Gemini family on Copilot: the level
+    /// Chat Completions for the Gemini family on Copilot: the level
     /// Core writes on the Gemini tag (`thinking_level`) is handed to the
     /// Chat Completions client as its typed effort, which that client writes
     /// as `reasoning_effort` and `reasoning.effort` (pinned in

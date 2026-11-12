@@ -94,7 +94,7 @@ fn observation(backend: OpenAiBackendKind, api: ModelApi) -> ReasoningRouteObser
     }
 }
 
-/// R2.1, the OpenAI family: the Responses client reports the backend of its
+/// The OpenAI family: the Responses client reports the backend of its
 /// wire, the compatible client the OpenAI backend it was declared for and
 /// the API of its mode. No account list and no operator levels are theirs
 /// to state.
@@ -126,7 +126,7 @@ fn every_adapter_reports_its_route() {
     }
 }
 
-/// R2.1: a compatible client that was not told which backend it speaks to
+/// A compatible client that was not told which backend it speaks to
 /// reports no route. Nothing guesses a backend from a base URL.
 #[test]
 fn a_compatible_client_without_a_declared_backend_reports_no_route() {
@@ -145,7 +145,7 @@ fn a_compatible_client_without_a_declared_backend_reports_no_route() {
     );
 }
 
-/// R2.1 and R2.3, self-hosted servers: the compatible client reports the
+/// Self-hosted servers: the compatible client reports the
 /// self-hosted backend kind it was built for, the API of its mode, and the
 /// effort levels the operator declared for the model, as it was given them.
 #[test]
@@ -234,7 +234,7 @@ fn declaring_a_backend_and_operator_levels_changes_no_body() {
     }
 }
 
-/// R2.2, Responses: on every backend a resolved level of a catalogued
+/// Responses: on every backend a resolved level of a catalogued
 /// reasoning model replaces the `effort` value of the payload Meerkat
 /// already sends, and nothing else.
 #[test]
@@ -269,7 +269,7 @@ fn translated_level_reaches_the_wire() {
     }
 }
 
-/// R2.2, Responses, a model the catalog has no row for, on the Copilot wire:
+/// Responses, a model the catalog has no row for, on the Copilot wire:
 /// the account's list stated the level, so it reaches the wire.
 #[test]
 fn translated_level_reaches_the_wire_for_a_model_without_a_catalog_row() {
@@ -287,7 +287,7 @@ fn translated_level_reaches_the_wire_for_a_model_without_a_catalog_row() {
     }
 }
 
-/// R2.2, Chat Completions: the level is written in both spellings the
+/// Chat Completions: the level is written in both spellings the
 /// compatible servers read, `reasoning_effort` and `reasoning.effort`.
 #[test]
 fn translated_level_reaches_the_chat_completions_wire() {
@@ -315,7 +315,7 @@ fn translated_level_reaches_the_chat_completions_wire() {
     }
 }
 
-/// R2.8: for a model whose reasoning payload the catalog does not enable, a
+/// For a model whose reasoning payload the catalog does not enable, a
 /// resolved level is sent as `reasoning: {"effort": <level>}` and nothing
 /// else of Meerkat's reasoning payload: no `summary`, no `include`. The
 /// rest of the body is the body of the same request without a level.
@@ -362,7 +362,7 @@ fn refusal_message(result: Result<Value, LlmError>) -> String {
     }
 }
 
-/// R2.9: a level without the marker (a caller's raw provider param) is
+/// A level without the marker (a caller's raw provider param) is
 /// judged by the catalog row with the message it always had, and is dropped
 /// for a model without a reasoning row, on every backend.
 #[test]
@@ -389,7 +389,7 @@ fn a_raw_level_keeps_todays_adapter_behaviour() {
     }
 }
 
-/// R2.10: a resolved level is not judged by the direct-API catalog row. The
+/// A resolved level is not judged by the direct-API catalog row. The
 /// account's list stated it for the route, so the body carries it.
 #[test]
 fn a_marked_level_is_not_judged_by_the_direct_row() {

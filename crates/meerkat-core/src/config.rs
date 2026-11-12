@@ -5175,7 +5175,7 @@ stream_inactivity_timeout_secs = 600
         );
     }
 
-    /// R2.3: the reasoning effort levels an operator declares for a
+    /// The reasoning effort levels an operator declares for a
     /// self-hosted model merge by presence, reach the model's registry entry
     /// (each level once, from `none` to `max`), and need
     /// `supports_reasoning`: a declaration without it, an empty one

@@ -577,6 +577,10 @@ pub struct ScheduleMobTargetRegistry {
     /// The record of who the adopted runtime's members are private to,
     /// retired members included ([`Self::adopt_mob_runtime`]).
     private_owners: Arc<RwLock<Option<crate::private_owners::PrivateOwners>>>,
+    /// The adopted runtime's own mob, over its non-owning observer handle
+    /// ([`Self::adopt_mob_runtime`]): Core's entry of an agent's name is read
+    /// from it.
+    mob: Arc<RwLock<Option<MobHandle>>>,
 }
 
 /// The mob state a registry resolves bridge sessions against, held weakly:
@@ -614,13 +618,68 @@ impl ScheduleMobTargetRegistry {
     }
 
     /// Adopt `runtime`'s mobs: the mob state bridge sessions resolve against
-    /// ([`Self::set_mob_state`]), and the record of who its members are
-    /// private to, which still knows a member its mob has retired.
+    /// ([`Self::set_mob_state`]), the record of who its members are private
+    /// to, which still knows a member its mob has retired, and the runtime's
+    /// own mob, whose entry of an agent's name says where the agent stands.
     pub(crate) fn adopt_mob_runtime(&self, runtime: &crate::mob_handle_runtime::MobRuntime) {
         self.set_mob_state(runtime.agent_mob_mcp_state());
         if let Ok(mut guard) = self.private_owners.write() {
             *guard = Some(runtime.private_owners().clone());
         }
+        if let Ok(mut guard) = self.mob.write() {
+            *guard = Some(runtime.observer().handle());
+        }
+    }
+
+    /// Core's entry of the member `member` in the adopted runtime's mob:
+    /// `None` when no runtime was adopted, when `mob_id` names another mob,
+    /// and for a name that is no identity entry. Read from the machine state
+    /// the mob's actor last published: it asks the actor nothing and wakes
+    /// nothing.
+    fn core_entry(
+        &self,
+        mob_id: Option<&str>,
+        member: &str,
+    ) -> Result<Option<meerkat_mob::IdentityEntryView>, meerkat_mob::MobError> {
+        let Some(mob) = self.mob.read().ok().and_then(|guard| guard.clone()) else {
+            return Ok(None);
+        };
+        if mob_id.is_some_and(|mob_id| mob_id != mob.mob_id().as_str()) {
+            return Ok(None);
+        }
+        Ok(
+            match mob.identity_entry(&meerkat_mob::AgentIdentity::from(member))? {
+                meerkat_mob::IdentityEntryRead::Entry(entry) => Some(entry),
+                _ => None,
+            },
+        )
+    }
+
+    /// The sessions Core's entry records for the member `member` of mob
+    /// `mob_id`: the session its member is bound to, and, while no member
+    /// holds the identity, the session its archive kept, on which its
+    /// unarchive seats it again. Empty when no runtime was adopted and for
+    /// a name that is no identity entry.
+    fn entry_sessions(
+        &self,
+        mob_id: &str,
+        member: &str,
+    ) -> Result<Vec<String>, meerkat_mob::MobError> {
+        let Some(entry) = self.core_entry(Some(mob_id), member)? else {
+            return Ok(Vec::new());
+        };
+        let bound = match &entry.standing {
+            meerkat_mob::EntryStanding::Seated(seated)
+            | meerkat_mob::EntryStanding::Retiring(seated) => seated.session_id.as_ref(),
+            // No member holds the identity, or it stands in a way this build
+            // does not know: no member's session is read for it.
+            _ => None,
+        };
+        Ok(bound
+            .into_iter()
+            .chain(entry.archived_session.as_ref())
+            .map(ToString::to_string)
+            .collect())
     }
 
     async fn resolve_bridge_session(&self, session_id: &str) -> Option<(String, String)> {
@@ -796,10 +855,20 @@ impl ScheduleMobTargetRegistry {
 /// agents has them follow an agent
 /// ([`crate::identity_creation::AgentSchedules`]): the schedules that
 /// target the agent (a member target of it, an identity target naming it,
-/// or a session target naming its session) are paused for their target by
-/// its archive, resumed by its unarchive when they are paused for their
-/// target, and ended by its removal. Whose pause a pause is, the schedule's
-/// own lifecycle records; nothing is kept here.
+/// a session target naming its session, or a Console caller's schedule
+/// for it) are paused for their target by its archive, resumed by its
+/// unarchive when they are paused for their target, and ended by its
+/// removal. Whose pause a pause is, the schedule's own lifecycle records;
+/// nothing is kept here.
+///
+/// This is the one sender of the schedule lifecycle's two target inputs
+/// (`ScheduleService::pause_for_target`, `resume_for_target`) in a launch:
+/// a schedule holds one mark for its target, so a second sender for the
+/// same target would end the first one's pause with its own resume.
+///
+/// A removed agent's entry records no session any more, so a schedule that
+/// names only the session of a removed agent is not found by its removal:
+/// its fires end as a missing target until somebody deletes it.
 #[derive(Clone)]
 pub struct MobAgentSchedules {
     service: ScheduleService,
@@ -815,7 +884,9 @@ impl MobAgentSchedules {
     }
 
     /// The schedules that target the agent `agent` of the mob `mob_id`
-    /// and are not deleted, in the service's order.
+    /// and are not deleted, in the service's order. A read of Core's entry
+    /// of the agent that fails is an error: the agent's session schedules
+    /// would be left out without a word.
     async fn targeting(
         &self,
         mob_id: &str,
@@ -824,17 +895,69 @@ impl MobAgentSchedules {
         let Some(member) = crate::identity_creation::core_member_name(agent) else {
             return Ok(Vec::new());
         };
+        let sessions = self
+            .targets
+            .entry_sessions(mob_id, member.as_str())
+            .map_err(|error| {
+                meerkat::ScheduleDomainError::Internal(format!(
+                    "reading Core's entry of the agent: {error}"
+                ))
+            })?;
         let mut targeting = Vec::new();
         for schedule in self.service.list().await? {
             if self
-                .targets
-                .target_names_member(&schedule.target, mob_id, member.as_str())
+                .names_agent(&schedule.target, mob_id, agent, member.as_str(), &sessions)
                 .await
             {
                 targeting.push(schedule);
             }
         }
         Ok(targeting)
+    }
+
+    /// Whether `target` names the agent `agent`, member `member` of the mob
+    /// `mob_id`, in any form a schedule names an agent: a member target of
+    /// it; an identity target naming it, by its member id or by its name;
+    /// a session target naming a session of it (the session a live member
+    /// of it holds, or one of `sessions`, which Core's entry records for
+    /// it); or a Console caller's schedule for it.
+    async fn names_agent(
+        &self,
+        target: &TargetBinding,
+        mob_id: &str,
+        agent: &str,
+        member: &str,
+        sessions: &[String],
+    ) -> bool {
+        if let Some(send) = crate::console_schedules::ConsoleScheduledSend::of_target(target) {
+            return send.identity == agent;
+        }
+        if let TargetBinding::Session(session) = target
+            && let Some(session_id) = session_target_session(session)
+            && sessions.contains(&session_id)
+        {
+            return true;
+        }
+        self.targets
+            .target_names_member(target, mob_id, member)
+            .await
+            || (member != agent
+                && self
+                    .targets
+                    .target_names_member(target, mob_id, agent)
+                    .await)
+    }
+
+    /// Whether `schedule` stands as `effect` leaves an agent's schedule:
+    /// paused for its target after an archive, active after an unarchive,
+    /// deleted after a removal.
+    fn stands(effect: crate::identity_creation::ScheduleEffect, schedule: &Schedule) -> bool {
+        use crate::identity_creation::ScheduleEffect;
+        match effect {
+            ScheduleEffect::Paused => schedule.paused_for_target(),
+            ScheduleEffect::Resumed => schedule.phase == SchedulePhase::Active,
+            ScheduleEffect::Ended => schedule.phase == SchedulePhase::Deleted,
+        }
     }
 
     fn named(schedule: &Schedule) -> crate::identity_creation::ScheduleRef {
@@ -872,26 +995,24 @@ impl crate::identity_creation::AgentSchedules for MobAgentSchedules {
             let id = &schedule.schedule_id;
             // Each call is the schedule's own lifecycle's to decide: it
             // changes nothing where it has nothing to do. What is listed
-            // is read from what the call answers, never from the listing
-            // made before it.
-            let done = match effect {
+            // is the schedule as the call answers it, whichever call
+            // brought it there, never the listing made before it: asked
+            // again after a follow that did a part, a follow answers as a
+            // whole one does.
+            let after = match effect {
                 ScheduleEffect::Paused => self
                     .service
                     .pause_for_target(id)
                     .await
-                    .map(|(paused, _)| paused.paused_for_target()),
+                    .map(|(paused, _)| paused),
                 ScheduleEffect::Resumed => self
                     .service
                     .resume_for_target(id)
                     .await
-                    .map(|(_, resumed)| resumed),
-                ScheduleEffect::Ended => self
-                    .service
-                    .delete(id)
-                    .await
-                    .map(|deleted| deleted.phase == SchedulePhase::Deleted),
+                    .map(|(resumed, _)| resumed),
+                ScheduleEffect::Ended => self.service.delete(id).await,
             };
-            match done {
+            match after.map(|after| Self::stands(effect, &after)) {
                 Ok(true) => followed.push(Self::named(schedule)),
                 Ok(false) => {}
                 Err(error) => {
@@ -921,9 +1042,14 @@ impl crate::identity_creation::AgentSchedules for MobAgentSchedules {
                 effect,
                 targeting
                     .iter()
+                    // What the follow would answer: an archive and an
+                    // unarchive move a schedule that is active or paused for
+                    // its target and leave a pause somebody asked for by
+                    // name; a removal ends every one.
                     .filter(|schedule| match effect {
-                        ScheduleEffect::Paused => schedule.phase == SchedulePhase::Active,
-                        ScheduleEffect::Resumed => schedule.paused_for_target(),
+                        ScheduleEffect::Paused | ScheduleEffect::Resumed => {
+                            schedule.phase == SchedulePhase::Active || schedule.paused_for_target()
+                        }
                         ScheduleEffect::Ended => true,
                     })
                     .map(Self::named)

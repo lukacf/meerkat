@@ -4513,9 +4513,9 @@ async fn a_create_and_an_update_set_addressability_and_runtime_mode_as_a_roster_
 /// schedules that target the agent and leaves one somebody paused by name
 /// as theirs; the same archive asked again changes nothing; a resume by
 /// name takes a schedule over; the unarchive resumes exactly the schedules
-/// still paused for their target; a removal ends every one. A plan of each
-/// change lists what it would do. Another agent's schedule is never
-/// touched.
+/// still paused for their target, and says the agent's schedules that are
+/// active after it; a removal ends every one. A plan of each change lists
+/// what the change would answer. Another agent's schedule is never touched.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_schedules_that_target_an_agent_follow_its_archive_unarchive_and_removal() {
     use meerkat::SchedulePhase::{Active, Deleted, Paused};
@@ -4704,12 +4704,14 @@ async fn the_schedules_that_target_an_agent_follow_its_archive_unarchive_and_rem
     assert_eq!(state(&weekly).await, (Active, false));
 
     // The unarchive resumes exactly the schedule still paused for its
-    // target.
+    // target. Its plan and its answer list the agent's schedules that are
+    // active after it: the one a person resumed by name too, never the one
+    // somebody paused by name.
     let scout = digest("scout").await;
     let planned = plan(IdentityChangeSpec::Unarchive(agent_ref("scout", &scout))).await;
     assert_eq!(
         said(&planned["schedules"]),
-        ("resumed".to_owned(), 1, names(&["daily"])),
+        ("resumed".to_owned(), 2, names(&["daily", "weekly"])),
         "{planned:#}"
     );
     let restored = ask(
@@ -4720,7 +4722,7 @@ async fn the_schedules_that_target_an_agent_follow_its_archive_unarchive_and_rem
     assert_eq!(restored.token(), "done", "{restored:?}");
     assert_eq!(
         said(&restored.to_json()["agents"][0]["schedules"]),
-        ("resumed".to_owned(), 1, names(&["daily"])),
+        ("resumed".to_owned(), 2, names(&["daily", "weekly"])),
         "{restored:?}"
     );
     assert_eq!(state(&daily).await, (Active, false));

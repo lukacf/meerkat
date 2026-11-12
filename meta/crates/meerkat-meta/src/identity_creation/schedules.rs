@@ -25,6 +25,14 @@
 //! caller that got no answer asks again and the schedules converge. A
 //! pause or a resume somebody asks for by name between the two takes the
 //! schedule over, and the second asking follows the target again.
+//!
+//! A schedule is an agent's when it names the agent (a member target, an
+//! identity target), names the agent's session, or is a Console caller's
+//! schedule for it. No schedule is pointed at an archived agent through
+//! Meta's own doors (the agents' schedule tools and the Console refuse a
+//! create or an update that would), so nothing targets an archived agent
+//! after its archive paused its schedules but a schedule somebody resumed
+//! by name.
 
 use async_trait::async_trait;
 use serde::Serialize;
@@ -80,8 +88,15 @@ impl ScheduleRef {
     }
 }
 
-/// The schedules a change of an agent took with it, or, in a plan, would
-/// take with it.
+/// The agent's schedules as a change of the agent leaves them, or, in a
+/// plan, would leave them: after an archive the schedules that are paused
+/// for the agent, after an unarchive the agent's schedules that are active
+/// (one somebody resumed by name while the agent was archived included),
+/// after a removal the ended ones. A schedule somebody paused by name is
+/// on no list of an archive or an unarchive. The list is the schedules as
+/// they stand after the change, whichever asking brought each there: a
+/// change that is asked again after one that followed only a part answers
+/// as a whole one does.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
 pub struct SchedulesFollowed {
@@ -117,12 +132,13 @@ impl SchedulesFollowed {
 #[async_trait]
 pub trait AgentSchedules: Send + Sync {
     /// Have the schedules that target the agent `agent` of the mob
-    /// `mob_id` follow `effect`, and answer the ones it was done to. Each
-    /// step changes nothing where it has nothing to do, so the call can be
-    /// made again. It wakes and builds nothing.
+    /// `mob_id` follow `effect`, and answer the agent's schedules as they
+    /// stand after it ([`SchedulesFollowed`]). Each step changes nothing
+    /// where it has nothing to do, so the call can be made again, and it
+    /// then answers the same. It wakes and builds nothing.
     async fn follow(&self, mob_id: &str, agent: &str, effect: ScheduleEffect) -> SchedulesFollowed;
 
-    /// The schedules [`Self::follow`] would do `effect` to now. Nothing is
+    /// What [`Self::follow`] would answer for `effect` now. Nothing is
     /// written.
     async fn planned(&self, mob_id: &str, agent: &str, effect: ScheduleEffect)
     -> SchedulesFollowed;

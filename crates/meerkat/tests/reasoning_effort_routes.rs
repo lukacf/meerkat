@@ -170,9 +170,13 @@ async fn serve(State(state): State<StubState>, uri: Uri, body: String) -> Respon
 
 /// `data:` lines, each followed by `separator`.
 fn sse(separator: &str, data: &[Value]) -> String {
-    data.iter()
-        .map(|value| format!("data: {value}{separator}"))
-        .collect()
+    let mut body = String::new();
+    for value in data {
+        body.push_str("data: ");
+        body.push_str(&value.to_string());
+        body.push_str(separator);
+    }
+    body
 }
 
 /// The text parts a reply streams.
@@ -1829,7 +1833,7 @@ async fn copilot_route_change_re_resolves_before_sending() {
         ..fixture.resolution(level)
     };
     assert_eq!(moved.route.to_string(), "copilot/chat_completions");
-    assert_eq!(request_reports(&events), [moved.clone()]);
+    assert_eq!(request_reports(&events), std::slice::from_ref(&moved));
     let report = result
         .reasoning_effort
         .expect("the result reports the level");

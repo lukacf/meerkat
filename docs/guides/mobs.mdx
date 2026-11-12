@@ -1674,7 +1674,9 @@ member's run: a member seated eagerly on a conversation (a spawn with a
 Resume launch), and a member the mob materializes itself at a start or a
 lift, are recorded by the mob's own delivery, tried at once when the member
 is live; and a member that stays live between runs is not tried at each run
-start. Each
+start. A member the mob brings up itself at a start or a lift with work
+already queued may start that run before the write is tried; the entry then
+reaches the first run that starts after the write. Each
 session applies its target at its next fresh run start, never inside a run.
 Dormant members are recorded at most 16 at a time by default
 (`MobBuilder::with_member_instruction_delivery_concurrency`); deliveries

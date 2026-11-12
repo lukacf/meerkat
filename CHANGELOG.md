@@ -120,7 +120,10 @@ them.
   and nothing produces it for a member any more. A `MobSessionService`
   wrapper that does not forward `record_member_instruction_target` therefore
   leaves its members owed, tried at most 30 seconds apart, where they were
-  reported blocked. A member's `last_failure` is diagnostic: it is kept in
+  reported blocked. The mob logs one warning for a member's failed record,
+  at its first failure, and again only when the failure's class changes or
+  after a record landed, never one per retry; the warning names the member
+  and the class. A member's `last_failure` is diagnostic: it is kept in
   the mob's process and not across a restart.
 
 ### Fixed
@@ -149,7 +152,9 @@ them.
   a member the mob materializes itself at a start or a lift are recorded by
   the mob's own delivery, tried at once when the member is Live and not
   ordered before a run of it; a member that stays Live between runs is not
-  tried at each run start.
+  tried at each run start. A member the mob brings up itself at a start or
+  a lift with work already queued may start that run before the write is
+  tried; the entry then reaches the first run that starts after the write.
 
 ### Upgrade notes
 

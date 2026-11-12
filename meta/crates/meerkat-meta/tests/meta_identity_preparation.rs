@@ -37,10 +37,10 @@ use meerkat_meta::identity_creation::{
     ChangeRequester, GetAgent, IdentityChangeCall, IdentityChangeSpec, IdentityCreationPolicy,
     IdentityFamilyOptions, IdentityRead, IdentityReadAnswer, OperationId, SettlePreparationCall,
 };
-use meerkat_meta::identity_first::contracts::RosterProvider;
+use meerkat_meta::identity_first::contracts::{AgentCustomizer, RosterProvider};
 use meerkat_meta::identity_first::{
-    AgentAddressability, AgentIdentity, DurableAgentSpec, MutableRosterProvider, RosterContext,
-    RosterError,
+    AgentAddressability, AgentBuildContext, AgentBuildDraft, AgentIdentity, CustomizerError,
+    DurableAgentSpec, MutableRosterProvider, RosterContext, RosterError,
 };
 use meerkat_meta::{UnifiedRuntime, UnifiedRuntimeBuilder};
 use meerkat_mob::{EntryStanding, IdentityEntryRead, MobDefinition, ProfileName};
@@ -329,8 +329,8 @@ fn a_launch_serves_a_required_preparation_and_refuses_a_constructed_one() {
     );
     drop(gateway);
 
-    // The stdio gateway is no native host: a held construction is refused
-    // for that, first.
+    // A held construction is refused at init, and the refusal a host reads
+    // on the stdio gateway names the mode it can write instead.
     let scratch = tempfile::tempdir().unwrap();
     let mut gateway = Gateway::start(scratch.path());
     let mut constructed = prepared_policy();
@@ -340,8 +340,10 @@ fn a_launch_serves_a_required_preparation_and_refuses_a_constructed_one() {
     assert_eq!(init["error"]["code"], json!(-32602), "{init:#}");
     let message = init["error"]["message"].as_str().unwrap_or_default();
     assert!(
-        message.contains("identity_creation.preparation.worker")
-            && message.contains("needs a native host"),
+        message.contains("identity_creation.preparation.worker.mode")
+            && message.contains("constructed")
+            && message.contains("write required")
+            && message.contains("meta/identity/settle_preparation"),
         "{message}"
     );
 
@@ -558,6 +560,14 @@ runtime_mode = "turn_driven"
 
 [profiles.worker.tools]
 comms = true
+
+[profiles.plain]
+model = "gpt-5.5"
+external_addressable = true
+runtime_mode = "turn_driven"
+
+[profiles.plain.tools]
+comms = true
 "#
     ))
     .expect("parse the definition")
@@ -684,10 +694,42 @@ struct Rig {
     asked: Arc<Mutex<Vec<String>>>,
 }
 
+/// The host's customizer: it keeps the name of every agent it is asked to
+/// compose a build for, and changes nothing of the build.
+#[derive(Default)]
+struct RecordingCustomizer {
+    composed: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl AgentCustomizer for RecordingCustomizer {
+    async fn customize_build(
+        &self,
+        _context: &AgentBuildContext,
+        spec: &DurableAgentSpec,
+        _draft: &mut AgentBuildDraft,
+    ) -> Result<(), CustomizerError> {
+        self.composed
+            .lock()
+            .unwrap()
+            .push(spec.identity.as_str().to_owned());
+        Ok(())
+    }
+}
+
 /// Boot the gateway's runtime composition on `state` for a fresh mob and
 /// attach `policy` to it. The launch's approver map lets the chat person
 /// [`OWNER`] decide for [`APPROVERS`] through a declared ingress.
 async fn boot(state: &Path, policy: Value) -> Rig {
+    boot_composed(state, policy, None).await
+}
+
+/// [`boot`], with the host's agent `customizer` when it composes one.
+async fn boot_composed(
+    state: &Path,
+    policy: Value,
+    customizer: Option<Arc<dyn AgentCustomizer>>,
+) -> Rig {
     let asked = Arc::new(Mutex::new(Vec::new()));
     let access: meerkat_meta::AccessControlConfig = toml::from_str(
         r#"
@@ -704,7 +746,7 @@ ingress_subjects = [{ ingress = "chat", subject = "U123" }]
             {"ingress": "chat", "attests": "person", "max_clock_skew_ms": 5000},
         ]}))
         .expect("ingress declarations");
-    let builder = UnifiedRuntimeBuilder::default()
+    let mut builder = UnifiedRuntimeBuilder::default()
         .definition(definition(&fresh_mob_id()))
         .persistent_state(state)
         .continuity_from_state_dir(state)
@@ -717,6 +759,9 @@ ingress_subjects = [{ ingress = "chat", subject = "U123" }]
         }))
         .decision_ingresses(ingresses)
         .access_controller(meerkat_meta::AccessController::new(access).expect("controller"));
+    if let Some(customizer) = customizer {
+        builder = builder.agent_customizer(customizer);
+    }
     let runtime = Box::pin(builder.build())
         .await
         .expect("build the gateway-shaped UnifiedRuntime");
@@ -887,6 +932,83 @@ impl Rig {
             )
             .await
             .unwrap_or_else(|error| panic!("Core settles {name}: {error}"));
+    }
+
+    /// Approve the held decision `decision_id` as the person the approver
+    /// map names: a host channel shows it to its approvers first.
+    async fn approve(&self, decision_id: &str) {
+        use meerkat_core::approval::decision::{
+            ApproverId, DecisionId, DecisionReference, PresentationAudience, PresentationRecord,
+        };
+        struct NoNotices;
+        #[async_trait]
+        impl meerkat_meta::DecisionNoticeSink for NoNotices {
+            async fn deliver(&self, _line: String) -> bool {
+                true
+            }
+        }
+        let runtime = &self.runtime;
+        let owner = runtime.durable_decisions().owner().clone();
+        let row = owner
+            .get(&DecisionId::new(decision_id).expect("a decision id"))
+            .expect("the decision is read");
+        owner
+            .present(
+                &row.decision_id,
+                &PresentationRecord::complete(
+                    PresentationAudience::Approver {
+                        approver_id: ApproverId::new(APPROVERS).expect("approver"),
+                    },
+                    &row.descriptor.rendering,
+                    None,
+                    DecisionReference::new("chat:owners").expect("channel"),
+                    DecisionReference::new(format!("message-{}", now_ms())).expect("message"),
+                    now_ms(),
+                ),
+            )
+            .expect("present");
+        let connection = meerkat_meta::StdioDecisionConnection::new(
+            runtime.durable_decisions().realm(),
+            Arc::new(NoNotices) as Arc<dyn meerkat_meta::DecisionNoticeSink>,
+        );
+        let line = json!({"jsonrpc": "2.0", "id": "decide", "method": "meta/decisions/decide",
+        "params": {
+            "decision_id": decision_id,
+            "approve": true,
+            "presented_digest": row.descriptor.subject_digest.to_string(),
+            "attestation": {
+                "ingress": "chat",
+                "subject": OWNER,
+                "scope": "chat-session-1",
+                "event_ref": format!("chat:event:{decision_id}"),
+                "observed_at_ms": now_ms(),
+            },
+        }})
+        .to_string();
+        let answer: Value = serde_json::from_str(
+            &connection
+                .handle_line(runtime, &line)
+                .await
+                .expect("a decision method answers"),
+        )
+        .expect("answer JSON");
+        assert!(answer["error"].is_null(), "{answer:#}");
+    }
+
+    /// Wait until the agent `name` exists, and answer it as a get reads it.
+    async fn get_once_created(&self, name: &str) -> Value {
+        let deadline = std::time::Instant::now() + TURN_BOUND;
+        loop {
+            let answer = self.rpc("meta/identity/get", json!({"name": name})).await;
+            if answer["error"].is_null() {
+                return answer["result"].clone();
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the agent {name} was not created: {answer:#}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 
     async fn shutdown(self) {
@@ -1394,5 +1516,278 @@ async fn a_created_agent_awaits_its_preparation_as_a_configured_one_does() {
         "a settle wakes nobody: {:?}",
         rig.asked.lock().unwrap()
     );
+    rig.shutdown().await;
+}
+
+/// The rows' policy for two profiles: the host prepares the agents of the
+/// profile `worker` and not those of the profile `plain`, and the host may
+/// create, update, move and remove an agent of either at once.
+fn two_profile_policy() -> Value {
+    json!({
+        "enabled": true,
+        "preparation": {"worker": {"mode": "required"}},
+        "approval": {"rules": [{
+            "change": ["create", "descriptive", "profile", "remove"],
+            "requester": {"kind": "host"},
+            "target": {"profile": ["worker", "plain"]},
+            "outcome": {"kind": "allow"},
+        }]},
+    })
+}
+
+/// An agent is not moved into a profile its host prepares: the host
+/// prepares an agent of such a profile before its first use, and an agent
+/// that ran on another profile already was never prepared. The move is
+/// refused `unsupported` at `set.profile`, with a sentence that says what to
+/// do instead, and the agent stays on its profile, seated as it was. A move
+/// out of a prepared profile, of a settled agent and of one that still
+/// waits, is an update like any other.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_move_into_a_prepared_profile_is_refused_and_a_move_out_of_one_is_not() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), two_profile_policy()).await;
+    let created = rig
+        .ok(
+            "meta/identity/create",
+            json!({"request_id": "create-walker",
+                   "agents": [{"name": "walker", "profile": "plain"}]}),
+        )
+        .await;
+    assert_eq!(created["outcome"], json!("done"), "{created:#}");
+    let walker = rig.get("walker").await;
+    assert_eq!(walker["readiness"], json!("dormant"), "{walker:#}");
+
+    let refused = rig
+        .refused(
+            "meta/identity/update",
+            json!({"request_id": "move-in", "name": "walker",
+                   "expected_spec_digest": walker["spec_digest"],
+                   "set": {"profile": "worker"}}),
+        )
+        .await;
+    assert_eq!(refused["kind"], json!("unsupported"), "{refused:#}");
+    assert_eq!(refused["field"], json!("set.profile"), "{refused:#}");
+    assert_eq!(refused["retryable"], json!(false), "{refused:#}");
+    assert!(
+        refused["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("Create the agent in that profile")),
+        "the refusal says what to do instead: {refused:#}"
+    );
+    let after = rig.get("walker").await;
+    assert_eq!(after["profile"], json!("plain"), "{after:#}");
+    assert_eq!(after["spec_digest"], walker["spec_digest"], "{after:#}");
+    assert_eq!(after["readiness"], json!("dormant"), "{after:#}");
+    assert!(
+        rig.asked.lock().unwrap().is_empty(),
+        "nothing ran on the prepared profile: {:?}",
+        rig.asked.lock().unwrap()
+    );
+
+    // A move out of the prepared profile: a settled agent, and one that
+    // still waits for its host.
+    for (name, settle) in [("ranger", true), ("warden", false)] {
+        rig.create_pending(
+            &format!("create-{name}"),
+            json!({"name": name, "profile": "worker"}),
+        )
+        .await;
+        if settle {
+            rig.ok(
+                SETTLE,
+                json!({"request_id": format!("settle-{name}"), "name": name}),
+            )
+            .await;
+        }
+        let digest = rig.get(name).await["spec_digest"].clone();
+        let moved = rig
+            .ok(
+                "meta/identity/update",
+                json!({"request_id": format!("move-out-{name}"), "name": name,
+                       "expected_spec_digest": digest, "set": {"profile": "plain"}}),
+            )
+            .await;
+        assert_eq!(moved["outcome"], json!("done"), "{name}: {moved:#}");
+        let agent = rig.get(name).await;
+        assert_eq!(agent["profile"], json!("plain"), "{name}: {agent:#}");
+        assert_eq!(
+            agent["readiness"],
+            json!(if settle {
+                "dormant"
+            } else {
+                "preparation_pending"
+            }),
+            "a move settles no preparation: {name}: {agent:#}"
+        );
+    }
+    rig.shutdown().await;
+}
+
+/// One request id names one operation, held or committed: a settle under
+/// the request id of a change a person still holds is refused
+/// `operation_reused` and settles nothing; the held change reads as held,
+/// and once the person approves it, it is carried out.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_settle_under_a_held_changes_request_id_is_refused_and_the_change_is_carried_out() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(
+        temp.path(),
+        json!({
+            "enabled": true,
+            "preparation": {"worker": {"mode": "required"}},
+            "approval": {"rules": [
+                {"change": ["create"], "requester": {"kind": "host"},
+                 "target": {"profile": ["worker"]}, "outcome": {"kind": "allow"}},
+                {"change": ["create"], "requester": {"kind": "host"},
+                 "target": {"identity": ["scout"]},
+                 "outcome": {"kind": "require_approval", "approver": {"id": APPROVERS}}},
+            ]},
+        }),
+    )
+    .await;
+    rig.create_pending(
+        "create-keeper",
+        json!({"name": "keeper", "profile": "worker"}),
+    )
+    .await;
+    let held = rig
+        .ok(
+            "meta/identity/create",
+            json!({"request_id": "held-1", "agents": [{"name": "scout", "profile": "worker"}]}),
+        )
+        .await;
+    assert_eq!(held["outcome"], json!("pending_decision"), "{held:#}");
+    let decision_id = held["decision_id"]
+        .as_str()
+        .expect("a decision id")
+        .to_owned();
+
+    let reused = rig
+        .refused(SETTLE, json!({"request_id": "held-1", "name": "keeper"}))
+        .await;
+    assert_eq!(reused["kind"], json!("operation_reused"), "{reused:#}");
+    assert!(rig.pending("keeper"), "{:?}", rig.standing("keeper"));
+    assert_eq!(
+        rig.operation("held-1").await,
+        held,
+        "the held change still reads as held"
+    );
+
+    rig.approve(&decision_id).await;
+    let scout = rig.get_once_created("scout").await;
+    assert_eq!(
+        scout["readiness"],
+        json!("preparation_pending"),
+        "{scout:#}"
+    );
+    let carried_out = rig.operation("held-1").await;
+    assert_eq!(
+        carried_out["agents"][0]["name"],
+        json!("scout"),
+        "the operation is the create's: {carried_out:#}"
+    );
+    let settled = rig
+        .ok(
+            SETTLE,
+            json!({"request_id": "settle-keeper", "name": "keeper"}),
+        )
+        .await;
+    assert_eq!(settled["agents"][0]["seat"], json!("seated"), "{settled:#}");
+    rig.shutdown().await;
+}
+
+/// A reset of an agent that waits for its host has no life to start again:
+/// it is refused, retryable, with a sentence that names the preparation,
+/// before the host is asked to compose a build for it. The agent stays
+/// pending, and nothing was built for it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reset_of_a_pending_agent_is_refused_before_the_host_composes_a_build() {
+    let temp = tempfile::tempdir().unwrap();
+    let customizer = Arc::new(RecordingCustomizer::default());
+    let rig = boot_composed(
+        temp.path(),
+        prepared_policy(),
+        Some(Arc::clone(&customizer) as Arc<dyn AgentCustomizer>),
+    )
+    .await;
+    rig.create_pending("create-1", json!({"name": "scout", "profile": "worker"}))
+        .await;
+
+    let reset = rig.rpc("meta/reset", json!({"identity": "scout"})).await;
+    assert!(reset["result"].is_null(), "{reset:#}");
+    let data = &reset["error"]["data"];
+    assert_eq!(
+        (data["kind"].clone(), data["retryable"].clone()),
+        (json!("identity_wake_retryable"), json!(true)),
+        "a reset of a pending agent is refused typed and retryable: {reset:#}"
+    );
+    assert!(
+        reset["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("preparation")),
+        "the refusal names the preparation: {reset:#}"
+    );
+    assert!(
+        !customizer
+            .composed
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|name| name == "scout"),
+        "the host composed no build for an agent that is not prepared: {:?}",
+        customizer.composed.lock().unwrap()
+    );
+    assert!(rig.pending("scout"), "{:?}", rig.standing("scout"));
+    assert!(!rig.is_member("scout").await);
+
+    // Settled, the agent is there to be reset like any agent.
+    let settled = rig
+        .ok(SETTLE, json!({"request_id": "s-1", "name": "scout"}))
+        .await;
+    assert_eq!(settled["agents"][0]["seat"], json!("seated"), "{settled:#}");
+    rig.shutdown().await;
+}
+
+/// The operation of a create whose agent never waited reads the create as
+/// it committed, whatever became of the agent later: after the agent's
+/// removal it still reads `done` with the agent `committed` and its spec
+/// digest, and no seat. `removed` on a create's operation is the end of a
+/// create that never completed: an agent removed while it still waited.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_create_that_completed_reads_committed_after_its_agents_removal() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), two_profile_policy()).await;
+    let created = rig
+        .ok(
+            "meta/identity/create",
+            json!({"request_id": "create-walker",
+                   "agents": [{"name": "walker", "profile": "plain"}]}),
+        )
+        .await;
+    assert_eq!(
+        created["agents"][0]["state"],
+        json!("committed"),
+        "{created:#}"
+    );
+    let digest = created["agents"][0]["spec_digest"].clone();
+    let removed = rig
+        .ok(
+            "meta/identity/remove",
+            json!({"request_id": "remove-walker", "name": "walker",
+                   "expected_spec_digest": digest}),
+        )
+        .await;
+    assert_eq!(
+        removed["agents"][0]["state"],
+        json!("removed"),
+        "{removed:#}"
+    );
+
+    let operation = rig.operation("create-walker").await;
+    assert_eq!(operation["outcome"], json!("done"), "{operation:#}");
+    let agent = &operation["agents"][0];
+    assert_eq!(agent["state"], json!("committed"), "{operation:#}");
+    assert_eq!(agent["spec_digest"], digest, "{operation:#}");
+    assert!(agent.get("seat").is_none(), "{operation:#}");
     rig.shutdown().await;
 }

@@ -5912,3 +5912,93 @@ async fn a_held_live_member_finishes_its_run_and_is_released_when_idle() {
         .expect("the member wakes once its role is restored");
     fixture.finish().await;
 }
+
+/// A spawn rollback that failed once and is then driven by a caller (a retire
+/// of the half-seated member joins the owed rollback) cancels the member's
+/// pending notices as its first attempt did: a notice handed to the lane
+/// between the two attempts is not sent once the member has left its seat.
+///
+/// The spawn fails where it prepares its kickoff input, and the rollback's
+/// first attempt cannot journal its start, so the rollback stays owed. A
+/// failed notice of the member is then handed to the lane with its send
+/// held, and the member is retired.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_spawn_rollback_driven_by_a_retire_sends_no_kickoff_notice_for_the_member() {
+    let events = Arc::new(FaultInjectedMobEventStore::new());
+    let fixture = WakeFixture::build_with_storage(
+        "kickoff-notice-rollback-retire",
+        |_| {},
+        |definition| {
+            definition.wiring.role_wiring = vec![RoleWiringRule {
+                a: ProfileName::from("worker"),
+                b: ProfileName::from("worker"),
+            }];
+        },
+        false,
+        None,
+        MobStorage::with_events(events.clone()),
+    )
+    .await;
+    let failed = crate::runtime::actor::kickoff_notice::hold_kickoff_notice_send_for_test(
+        fixture.handle.mob_id(),
+        "mob.kickoff_failed",
+    );
+    let peer = fixture.spawn("notice-retire-peer").await;
+    let member = AgentIdentity::from(format!("notice-retire-member-{}", Uuid::new_v4().simple()));
+    crate::runtime::actor::kickoff_notice::fail_autonomous_kickoff_start_for_test(&member);
+    events.fail_appends_for("MemberRetirementStarted").await;
+    let mut spec = SpawnMemberSpec::new("worker", member.clone());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::AutonomousHost);
+    let spawned = tokio::time::timeout(ACTOR_HELD_CAP, fixture.handle.spawn_spec(spec))
+        .await
+        .expect("the spawn answers")
+        .map(|_| ());
+    events.allow_appends_for("MemberRetirementStarted").await;
+    let refused = spawned.expect_err("the injected kickoff failure refuses the spawn");
+    assert!(
+        refused
+            .to_string()
+            .contains("rollback remains owned for retry"),
+        "the rollback's first attempt failed and the rollback stays owed: {refused:?}"
+    );
+
+    // A notice of the half-seated member, handed to the lane between the
+    // rollback's first attempt and the retire that drives its next one.
+    emit_kickoff_notice(&fixture, &member, "mob.kickoff_failed").await;
+    let handed_off = tokio::time::timeout(STEP, async {
+        loop {
+            if failed.arrived() >= 1 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .is_ok();
+    let retired = tokio::time::timeout(WAIT, fixture.handle.retire(member.clone()))
+        .await
+        .expect("the retire answers");
+    let seated_after = fixture
+        .handle
+        .get_member(&member)
+        .await
+        .expect("roster read")
+        .is_some();
+
+    failed.release();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let sent_after = failed.passed();
+    let received = kickoff_notice_kinds(&fixture, &peer, &member).await;
+    assert!(
+        handed_off
+            && retired.is_ok()
+            && !seated_after
+            && sent_after == 0
+            && !received.iter().any(|kind| kind == "mob.kickoff_failed"),
+        "a rollback driven by a retire left the member's kickoff notice to be delivered: the \
+         notice reached its held send: {handed_off}; the retire answered {retired:?}; the member \
+         stayed seated: {seated_after}; {sent_after} send(s) of the notice went on after the \
+         rollback (0 expected); the peer holds {received:?}"
+    );
+    fixture.finish().await;
+}

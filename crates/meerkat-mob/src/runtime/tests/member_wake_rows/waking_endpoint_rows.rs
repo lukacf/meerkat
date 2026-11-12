@@ -531,3 +531,212 @@ async fn a_spawn_that_wired_a_peer_whose_wake_has_not_bound_it_is_rolled_back_at
     assert_both_directions_deliver(&fixture, &later, &second).await;
     fixture.finish().await;
 }
+
+/// How many `mob.peer_retired` notices of `from` `peer`'s transcript holds.
+async fn retired_notices(
+    fixture: &WakeFixture,
+    peer: &AgentIdentity,
+    from: &AgentIdentity,
+) -> usize {
+    let session = fixture.session(peer).await;
+    fixture
+        .transcript(&session)
+        .await
+        .split("Peer lifecycle notice from ")
+        .skip(1)
+        .filter(|notice| {
+            notice.split_once("Kind: ").is_some_and(|(sender, rest)| {
+                sender.contains(from.as_str()) && rest.starts_with("mob.peer_retired")
+            })
+        })
+        .count()
+}
+
+/// A spawn whose second edge cannot be journaled is rolled back while the
+/// wakes of its two peers end. The rollback is held at its first
+/// `spawn-rollback` step, after it has observed the peers' endpoints and
+/// before it removes MobMachine's edges; meanwhile both peers become Live.
+/// `waking`: the peers' wakes are held before their bind when the spawn runs
+/// and let go at the hold; otherwise the peers are Dormant then and are woken
+/// at the hold.
+///
+/// A peer the rollback observed from its recorded endpoint has no comms
+/// runtime the rollback could clean. When that peer's wake binds it before
+/// the rollback removes the edge, the wake's topology step realizes the edge
+/// MobMachine still holds, and the peer then trusts a member that is rolled
+/// back: it holds two rows under the member's name once the identity is
+/// spawned again, and cannot address the new one.
+///
+/// The rows hold the settled state, whether the rollback ended at once or by
+/// a later attempt: the member gone, no edge, no repair owed, neither peer
+/// holding a trust row for the member, at most one retired notice for each
+/// attempt, and the same identity spawned again with a message both ways on
+/// each edge.
+async fn spawn_rollback_whose_peers_wakes_end_meanwhile(label: &'static str, waking: bool) {
+    let events = Arc::new(FaultInjectedMobEventStore::new());
+    let fixture = WakeFixture::build_with_storage(
+        label,
+        |_| {},
+        |definition| {
+            definition.wiring.role_wiring = vec![RoleWiringRule {
+                a: ProfileName::from("worker"),
+                b: ProfileName::from("worker"),
+            }];
+        },
+        false,
+        None,
+        MobStorage::with_events(events.clone()),
+    )
+    .await;
+    let first = fixture.spawn("endpoint-meanwhile-first").await;
+    let second = fixture.spawn("endpoint-meanwhile-second").await;
+    fixture.release(&first).await;
+    fixture.release(&second).await;
+    let mut holds = Vec::new();
+    let mut wakes = Vec::new();
+    if waking {
+        for peer in [&first, &second] {
+            holds.push(provision_finish_test_hooks::hold_before_bind(
+                &fixture.session(peer).await,
+            ));
+        }
+        for peer in [&first, &second] {
+            wakes.push(start_wake(&fixture, peer));
+        }
+        for (peer, hold) in [&first, &second].into_iter().zip(holds.iter_mut()) {
+            wait_held_before_bind(&fixture, peer, hold).await;
+        }
+    }
+
+    // One of the member's two edges is journaled, the next one is refused,
+    // and the rollback is held once it has observed the peers' endpoints.
+    events.fail_appends_for_after("MembersWired", 1).await;
+    let member = AgentIdentity::from(format!(
+        "endpoint-meanwhile-member-{}",
+        Uuid::new_v4().simple()
+    ));
+    let member_spec = || {
+        let mut spec = SpawnMemberSpec::new("worker", member.clone());
+        spec.continuity_intent = SpawnContinuityIntent::DurableIdentity {
+            continuity_key: member.to_string(),
+        };
+        spec
+    };
+    let rollback_held =
+        crate::runtime::actor::retirement_stage_hold::install(&member, "spawn-rollback");
+    let spawning = {
+        let handle = fixture.handle.clone();
+        let spec = member_spec();
+        tokio::spawn(async move { handle.spawn_spec(spec).await.map(|_| ()) })
+    };
+    tokio::time::timeout(WAIT, rollback_held.entered())
+        .await
+        .expect("the spawn's rollback reaches its held step");
+    let member_peer_id = recorded_peer_id(&fixture, &member);
+
+    // The peers' wakes end while the rollback is held.
+    if waking {
+        for hold in &holds {
+            hold.release.send_replace(true);
+        }
+    } else {
+        for peer in [&first, &second] {
+            wakes.push(start_wake(&fixture, peer));
+        }
+    }
+    for wake in wakes {
+        tokio::time::timeout(WAIT, wake)
+            .await
+            .expect("the peer's wake answers while the rollback is held")
+            .expect("the wake task ends")
+            .expect("the peer's wake succeeds");
+    }
+    let live = Some(mob_dsl::MemberMaterializationPhase::Live);
+    fixture.wait_residency(&first, live).await;
+    fixture.wait_residency(&second, live).await;
+
+    rollback_held.release();
+    let refused = tokio::time::timeout(WAIT, spawning)
+        .await
+        .expect("the spawn answers")
+        .expect("the spawn task ends")
+        .expect_err("the spawn's second edge cannot be journaled");
+    events.allow_appends_for("MembersWired").await;
+
+    // The rollback settles: at once, or by its next attempt when a peer's
+    // wake bound the peer after the rollback had observed it.
+    let gone = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if fixture
+                .handle
+                .get_member(&member)
+                .await
+                .expect("roster read")
+                .is_none()
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await;
+    assert!(
+        gone.is_ok(),
+        "the refused member is rolled back: {refused:?}"
+    );
+    assert!(
+        !edge_held(&fixture, &member, &first) && !edge_held(&fixture, &member, &second),
+        "no edge of the refused member is left"
+    );
+    for peer in [&first, &second] {
+        assert!(
+            !trusted_by(&fixture, peer).await.contains(&member_peer_id),
+            "{peer} holds no trust row for the rolled-back member (the spawn answered {refused:?})"
+        );
+        let retired = retired_notices(&fixture, peer, &member).await;
+        assert!(
+            retired <= 2,
+            "{peer} holds at most one retired notice of the member for each attempt: {retired}"
+        );
+    }
+    {
+        let state = fixture.handle.machine_state_watch_rx.borrow();
+        assert!(
+            state.owed_edge_repairs.is_empty(),
+            "no repair is owed after the rollback: {:?}",
+            state.owed_edge_repairs
+        );
+    }
+
+    // The caller's retry: the same identity is spawned again, takes both
+    // declared edges, and each edge carries a message both ways by name.
+    let respawned = tokio::time::timeout(WAIT, fixture.handle.spawn_spec(member_spec()))
+        .await
+        .expect("the respawn answers")
+        .map(|_| ());
+    assert!(
+        respawned.is_ok(),
+        "the same identity is admitted after the rollback: {respawned:?}"
+    );
+    assert!(
+        edge_held(&fixture, &member, &first) && edge_held(&fixture, &member, &second),
+        "the respawned member holds both declared edges"
+    );
+    assert_both_directions_deliver(&fixture, &member, &first).await;
+    assert_both_directions_deliver(&fixture, &member, &second).await;
+    fixture.finish().await;
+}
+
+/// The peers are Waking and not Bound when the rollback observes them, and
+/// their wakes bind them before the rollback removes its edges.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_spawn_rollback_whose_wired_peers_wake_binds_meanwhile_leaves_that_peer_no_trust_row() {
+    spawn_rollback_whose_peers_wakes_end_meanwhile("endpoint-meanwhile-waking", true).await;
+}
+
+/// The peers are Dormant when the rollback observes them, and are woken
+/// before the rollback removes its edges.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_spawn_rollback_whose_wired_peer_is_woken_meanwhile_leaves_that_peer_no_trust_row() {
+    spawn_rollback_whose_peers_wakes_end_meanwhile("endpoint-meanwhile-dormant", false).await;
+}

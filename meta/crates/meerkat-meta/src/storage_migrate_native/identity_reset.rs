@@ -3,22 +3,18 @@
 //!
 //! The reset writes nothing to Core. It leaves a `Fresh` row for the identity
 //! in the first-boot manifest, naming the session Core's last binding of the
-//! identity names; the next roster compile that lists the identity carries
-//! it out the way a reset treats the identity: a live member is replaced by
-//! its successor on a fresh session and stays live, a retired one gets a
-//! fresh session and stays dormant, and the old session stays in Core's
-//! store, bound to nothing. Unlike the online reset, nothing of the old
-//! session is distilled into agent memory. Every check runs, and the row is
+//! identity names; the next start's roster pass carries it out the way a
+//! reset treats the identity (the roster's declaration for an identity the
+//! roster lists, the pass's step for the identities whose record is their
+//! row in the mob's identity store for one of those): a live member is
+//! replaced by its successor on a fresh session and stays live, a retired
+//! one gets a fresh session and stays dormant, and the old session stays in
+//! Core's store, bound to nothing. Every check runs, and the row is
 //! written, while the directory is held exactly as the census holds it: no
 //! process hosting a runtime, and the maintenance fence.
 //!
 //! An identity a host adopted (Core holds an identity intent row for it) is
-//! refused, as every Meta lifecycle verb refuses it. So is an identity whose
-//! record is its row in the mob's identity store (created at run time, or
-//! adopted into the store): the row this command leaves is carried out by
-//! the next roster compile that lists the identity, and no roster lists
-//! such an identity, so nothing would carry it out. The running gateway's
-//! reset verb resets it. A held-completion mark
+//! refused, as every Meta lifecycle verb refuses it. A held-completion mark
 //! counts by the runtime's rule (the marks read at the first wake): owed while
 //! Core binds the identity to nothing since the latest mob reset, which is
 //! refused; stale beside a binding, which the next start drops and the report
@@ -113,12 +109,10 @@ pub enum IdentityResetRefusal {
     PendingRow { row: String },
     /// Writing the manifest failed.
     WriteFailed { detail: String },
-    /// The identity's record is its row in the mob's identity store (it was
-    /// created at run time, or adopted into the store). The row this command
-    /// leaves in the first-boot manifest is carried out by the next roster
-    /// compile that lists the identity, and no roster lists this one, so
-    /// nothing would carry it out. Start the gateway and reset the identity
-    /// with its reset verb (`meta/reset`), which serves it as any identity.
+    /// No longer answered: an identity whose record is its row in the mob's
+    /// identity store (created at run time, or adopted into the store) is
+    /// reset as any identity, and the next start's roster pass carries its
+    /// row out. Kept so that code matching on it still compiles.
     IdentityStoreOwned,
 }
 
@@ -175,9 +169,8 @@ impl std::fmt::Display for IdentityResetRefusal {
                 write!(f, "writing the first-boot manifest failed: {detail}")
             }
             Self::IdentityStoreOwned => f.write_str(
-                "the identity's record is its row in the mob's identity store, and no roster \
-                 compile carries out an offline reset of such an identity: start the gateway \
-                 and reset it with meta/reset",
+                "the identity's record is its row in the mob's identity store (no longer \
+                 answered: such an identity is reset as any identity)",
             ),
         }
     }
@@ -269,15 +262,13 @@ async fn reset(
     let core_identity = crate::member_comms_id::roster_member_id_for_identity(identity.as_str());
     // An identity a host adopted is the host's, as for every Meta lifecycle
     // verb, and an intent row this build cannot read may declare anything.
-    // An identity whose record is its row is refused for another reason: no
-    // roster compile would carry the row this command leaves out.
+    // Every other identity is reset alike, whichever record holds its spec:
+    // the next start's roster pass carries the row out.
     match history.identity_management(&core_identity) {
-        meerkat_mob::MemberIdentityManagement::CommandDriven => {}
+        meerkat_mob::MemberIdentityManagement::CommandDriven
+        | meerkat_mob::MemberIdentityManagement::CreatedEntry => {}
         meerkat_mob::MemberIdentityManagement::IntentManaged => {
             return Err(Refusal::IdentityHostAdopted);
-        }
-        meerkat_mob::MemberIdentityManagement::CreatedEntry => {
-            return Err(Refusal::IdentityStoreOwned);
         }
         meerkat_mob::MemberIdentityManagement::IntentUnreadable => {
             return Err(Refusal::MemberHistoryUnreadable {

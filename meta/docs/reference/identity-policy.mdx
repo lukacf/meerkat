@@ -89,7 +89,7 @@ A rule is `{change, requester, target, outcome}`.
 |-------|------------|
 | `create` | A new agent |
 | `descriptive` | An update of the display name, the instructions, the context or the labels that are no authority field |
-| `capability` | An update of how the agent runs and who reaches it |
+| `capability` | An update of how the agent runs and who reaches it. No method of this release sets either, so no request touches the class yet |
 | `peers` | Peers added or removed |
 | `authority` | An authority field set. A rule that lets it through without a human decision is refused at init |
 | `profile` | A move to another profile: the agent then has that profile's model, tools and skills, on the same conversation |
@@ -129,9 +129,19 @@ A held change answers `pending_decision` and is a durable decision of kind
 `identity.<change>`: a person decides it through the
 [durable decision methods](/api/rpc#durable-decision-methods), and Meerkat
 then carries it out by itself, as the requester that asked. Its requester
-withdraws it with `meta/identity/withdraw`. An agent that asked is told
+withdraws it with `meta/identity/withdraw`, and so does the host's operator
+on the stdio gateway. An agent that asked is told
 the outcome by a message to itself; host code and a person read
 `meta/identity/operation`.
+
+A person's approval is evidence, never authority over the policy. When an
+approved change is carried out, the policy the launch has then is asked
+again: if its rules deny the change now, nothing is executed, the decision
+ends refused and `meta/identity/operation` says the change was denied. A
+launch without an enabled policy carries nothing out: the decision stays
+as it is until a launch with a policy runs, or its deadline passes. A host
+that turns its policy off does not get its held changes refused for that:
+they lapse at their deadlines.
 
 Two more kinds are part of the policy's vocabulary and are **refused at init
 in this release**: `notify`, because no notice reaches an approver yet, and
@@ -204,14 +214,24 @@ An agent never changes itself (`self_change_refused`), and a member that is
 private to one person (a Console side chat, for example) asks for no change
 at all (`private_requester`).
 
+## What a caller is shown
+
+Every read of the family and every peer a change names goes through one
+rule. A caller is shown the agents its view of the mob shows it: on the
+Console the agents the caller's access rules let it view (`agent.view`),
+on the stdio gateway every agent. An agent is shown no agent that is
+private to one person (one whose labels carry `console.private_to`),
+whatever it asks: its `list` and its `directory` leave such an agent out,
+and a `get`, a `plan` or a change of it answers `identity_unknown`,
+exactly as a name no agent holds.
+
 ## Peers a caller may name
 
-A change names as peers only agents its caller may see. On the Console
-that is the agents the caller's access rules let it view (`agent.view`);
-a member private to one person is seen by nobody here. A peer the caller
-may not see is answered `peer_unknown`, exactly as a name no agent holds,
-and never `peer_not_allowed`: a peer rule speaks only to a caller that
-sees the peer.
+A change names as peers only agents its caller is shown, and an agent
+private to one person is nobody's peer. A peer the caller may not name is
+answered `peer_unknown`, exactly as a name no agent holds, and never
+`peer_not_allowed`: a peer rule speaks only to a caller that sees the
+peer.
 
 ## Adopting configured agents
 

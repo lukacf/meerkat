@@ -4501,30 +4501,81 @@ fn query_created_row_observation(
     let Some((storage_type, bytes)) = row else {
         return Ok((false, None));
     };
+    Ok((
+        true,
+        classify_created_row(mob_id, identity, &storage_type, &bytes),
+    ))
+}
+
+/// How the created identity scan reads one row of `mob_id`'s intents table
+/// that `identity`'s key holds: its record, or why it does not read.
+fn classify_created_row(
+    mob_id: &MobId,
+    identity: &AgentIdentity,
+    storage_type: &str,
+    bytes: &[u8],
+) -> Option<crate::identity::CreatedIdentityObservation> {
     if storage_type != "blob" {
-        return Ok((
-            true,
-            Some(crate::identity::CreatedIdentityObservation::Unreadable {
-                evidence_digest: identity_raw_evidence_digest(&bytes),
-                detail: format!(
-                    "identity row uses SQLite storage class '{storage_type}', expected blob"
-                ),
-            }),
-        ));
+        return Some(crate::identity::CreatedIdentityObservation::Unreadable {
+            evidence_digest: identity_raw_evidence_digest(bytes),
+            detail: format!(
+                "identity row uses SQLite storage class '{storage_type}', expected blob"
+            ),
+        });
     }
-    let observation = match crate::identity::classify_created_identity_row(&bytes) {
+    match crate::identity::classify_created_identity_row(bytes) {
         Some(crate::identity::CreatedIdentityObservation::Created(record))
             if record.mob_id != *mob_id || record.agent_identity != *identity =>
         {
             Some(crate::identity::CreatedIdentityObservation::Unreadable {
-                evidence_digest: identity_raw_evidence_digest(&bytes),
+                evidence_digest: identity_raw_evidence_digest(bytes),
                 detail: "created identity row does not match its physical mob/identity key"
                     .to_string(),
             })
         }
         other => other,
-    };
-    Ok((true, observation))
+    }
+}
+
+/// [`query_created_row_observation`] for every identity of `identities` in
+/// one statement: each named identity's row as the created identity scan
+/// reads it, absent when the identity has no created row.
+fn query_created_rows_observation(
+    conn: &Connection,
+    mob_id: &MobId,
+    identities: &[AgentIdentity],
+) -> Result<BTreeMap<AgentIdentity, crate::identity::CreatedIdentityObservation>, MobStoreError> {
+    let placeholders = (0..identities.len())
+        .map(|index| format!("?{}", index + 2))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut statement = conn
+        .prepare(&format!(
+            "SELECT agent_identity, typeof(record_json), CAST(record_json AS BLOB)
+             FROM mob_identity_intents
+             WHERE mob_id = ?1 AND agent_identity IN ({placeholders})"
+        ))
+        .map_err(se)?;
+    let names =
+        std::iter::once(mob_id.as_str()).chain(identities.iter().map(AgentIdentity::as_str));
+    let rows = statement
+        .query_map(rusqlite::params_from_iter(names), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+            ))
+        })
+        .map_err(se)?;
+    let mut observed = BTreeMap::new();
+    for row in rows {
+        let (name, storage_type, bytes) = row.map_err(se)?;
+        let identity = AgentIdentity::from(name.as_str());
+        if let Some(observation) = classify_created_row(mob_id, &identity, &storage_type, &bytes) {
+            observed.insert(identity, observation);
+        }
+    }
+    Ok(observed)
 }
 
 fn query_identity_intent_observation(
@@ -7142,6 +7193,29 @@ impl MobIdentityMemberStore for SqliteMobIdentityStore {
         run_sqlite_task(self.observer_owner(), move || {
             let conn = open_existing_identity_read_connection(&path, &store_instance_id)?;
             Ok(query_created_row_observation(&conn, &mob_id, &identity)?.1)
+        })
+        .await
+    }
+
+    async fn observe_created_identities(
+        &self,
+        mob_id: &MobId,
+        identities: &[AgentIdentity],
+    ) -> Result<BTreeMap<AgentIdentity, crate::identity::CreatedIdentityObservation>, MobStoreError>
+    {
+        if self.event_bus.is_none() {
+            return Err(MobStoreError::IdentityMemberAtomicPersistenceUnavailable);
+        }
+        if identities.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let path = self.path.clone();
+        let store_instance_id = self.store_instance_id.clone();
+        let mob_id = mob_id.clone();
+        let identities = identities.to_vec();
+        run_sqlite_task(self.observer_owner(), move || {
+            let conn = open_existing_identity_read_connection(&path, &store_instance_id)?;
+            query_created_rows_observation(&conn, &mob_id, &identities)
         })
         .await
     }

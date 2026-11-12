@@ -336,6 +336,10 @@ struct ConsoleSnapshotReadModelState {
 #[derive(Clone, Debug, Default)]
 struct IdentityBindingCut {
     bindings: BTreeMap<String, IdentityBinding>,
+    /// The display name of each identity whose registration carries one.
+    /// No part of a binding: a rename moves no session and no walked fact,
+    /// so it makes no row pending.
+    display_names: BTreeMap<String, String>,
     /// Positions of the read's start and completion on
     /// [`IDENTITY_BINDING_CUT_SEQUENCE`]. The empty cut of an unprimed read
     /// model holds 0 for both, before every read.
@@ -366,6 +370,7 @@ impl IdentityBindingCut {
     async fn read(identity_runtime: Option<&crate::identity_first::IdentityRuntime>) -> Self {
         let read_started = next_identity_binding_cut_position();
         let mut bindings = BTreeMap::new();
+        let mut display_names = BTreeMap::new();
         if let Some(identity_runtime) = identity_runtime {
             // A read that fails records no binding, so the walk's rows are
             // left as walked until a later cut answers.
@@ -377,6 +382,12 @@ impl IdentityBindingCut {
                 })
                 .unwrap_or_default();
             for status in statuses {
+                if let Some(display_name) = status.display_name.as_ref() {
+                    display_names.insert(
+                        status.identity.as_str().to_string(),
+                        display_name.as_str().to_string(),
+                    );
+                }
                 bindings.insert(
                     status.identity.as_str().to_string(),
                     IdentityBinding {
@@ -388,6 +399,7 @@ impl IdentityBindingCut {
         }
         Self {
             bindings,
+            display_names,
             read_started,
             read_completed: next_identity_binding_cut_position(),
         }
@@ -1296,10 +1308,36 @@ pub async fn console_json_handler(
                 .as_ref()
                 .and_then(MobRuntime::installed_identity_runtime)
                 .is_some_and(|identity_runtime| identity_runtime.identity_changes_enabled());
+        // The agents whose record is their row in the mob's identity
+        // store: the ones a run-time change can change. An agent its host
+        // configures is offered no control.
+        let mut changed_at_run_time = std::collections::BTreeSet::new();
+        if identity_changes_available
+            && let Some(identity_runtime) = state
+                .runtime
+                .as_ref()
+                .and_then(MobRuntime::installed_identity_runtime)
+        {
+            let listed: Vec<String> = response
+                .body
+                .pointer("/agent_sidebar/live_snapshot/agents")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|agent| agent.get("identity").and_then(Value::as_str))
+                .map(str::to_owned)
+                .collect();
+            for name in listed {
+                if identity_runtime.record_is_store_owned(&name).await {
+                    changed_at_run_time.insert(name);
+                }
+            }
+        }
         crate::runtime::apply_identity_changes_to_experience(
             &mut response.body,
             caller.as_ref().map(|caller| &caller.audience),
             identity_changes_available,
+            &|name| changed_at_run_time.contains(name),
         );
         attach_console_send_dedupe(&mut response.body, state.console_aggregator.as_ref());
         if let Some(runtimes) = panel_runtimes {
@@ -5825,6 +5863,8 @@ async fn retain_visible_member_rows(
     let registered = runtime.console_identity_labels().await;
     // Keyed by the side chat's public alias.
     let side_chats = listed_side_chat_lineages(runtime, entries).await;
+    let handle = runtime.handle();
+    let no_labels = std::collections::BTreeMap::new();
     rows.retain(|row| {
         let labels: Option<std::collections::BTreeMap<String, String>> = row
             .get("labels")
@@ -5834,9 +5874,14 @@ async fn retain_visible_member_rows(
             .or_else(|| row.get("member_id"))
             .or_else(|| row.get("agent_id"))
             .and_then(Value::as_str);
-        let identity = labels
-            .as_ref()
-            .and_then(crate::member_comms_id::durable_identity_label)
+        // A row names its member in either spelling.
+        let resolved = crate::member_comms_id::resolve_member_identity(
+            &handle,
+            &crate::member_comms_id::roster_member_id_for_supplied_id(agent_id.unwrap_or_default()),
+            labels.as_ref().unwrap_or(&no_labels),
+        );
+        let identity = resolved
+            .as_deref()
             .or_else(|| row.get("identity").and_then(Value::as_str))
             .or(agent_id);
         let role = row
@@ -5959,8 +6004,10 @@ fn console_rpc_access_requirements(
         // existing agent; a change of one agent is judged on that agent,
         // and its removal, which is permanent, under an action of its own.
         // Holding the mob's changes is the runtime's administration. A
-        // withdrawal names its caller's own operation, which only a caller
-        // that may ask for a change has, so it needs what viewing needs.
+        // plan is judged as the change it plans, on the agent that change
+        // names. A withdrawal and an operation read name an operation, and
+        // their handler answers only the caller's own: they need what
+        // viewing needs.
         crate::rpc::identity_methods::IDENTITY_CREATE => {
             one(crate::access::ACTION_AGENT_IDENTITY_CREATE, None)
         }
@@ -5977,10 +6024,20 @@ fn console_rpc_access_requirements(
         // The reads: one agent is judged on that agent; a list and the
         // directory leave out the agents the caller may not view.
         crate::rpc::identity_methods::IDENTITY_GET => one(ACTION_AGENT_VIEW, target),
+        crate::rpc::identity_methods::IDENTITY_PLAN => {
+            match params.get("change").and_then(Value::as_str) {
+                Some("create") => one(crate::access::ACTION_AGENT_IDENTITY_CREATE, None),
+                Some("remove") => one(crate::access::ACTION_AGENT_IDENTITY_REMOVE, target),
+                Some("update" | "archive" | "unarchive" | "adopt") => {
+                    one(crate::access::ACTION_AGENT_IDENTITY_MANAGE, target)
+                }
+                // A plan that names no change is refused by its handler.
+                _ => one(ACTION_AGENT_VIEW, None),
+            }
+        }
         crate::rpc::identity_methods::IDENTITY_LIST
         | crate::rpc::identity_methods::IDENTITY_DIRECTORY
         | crate::rpc::identity_methods::IDENTITY_OPERATION
-        | crate::rpc::identity_methods::IDENTITY_PLAN
         | crate::rpc::identity_methods::IDENTITY_WITHDRAW => one(ACTION_AGENT_VIEW, None),
         // Recovering a send answers only the caller's own sends to the
         // identity, so it needs exactly what sending there needs.
@@ -6418,11 +6475,11 @@ pub(crate) fn console_method_member_fields(method: &str) -> Option<&'static [Con
         | crate::rpc::identity_methods::IDENTITY_UNARCHIVE
         | crate::rpc::identity_methods::IDENTITY_REMOVE
         | crate::rpc::identity_methods::IDENTITY_ADOPT
-        | crate::rpc::identity_methods::IDENTITY_GET => NAMED_AGENT,
+        | crate::rpc::identity_methods::IDENTITY_GET
+        | crate::rpc::identity_methods::IDENTITY_PLAN => NAMED_AGENT,
         crate::rpc::identity_methods::IDENTITY_LIST
         | crate::rpc::identity_methods::IDENTITY_DIRECTORY
         | crate::rpc::identity_methods::IDENTITY_OPERATION
-        | crate::rpc::identity_methods::IDENTITY_PLAN
         | crate::rpc::identity_methods::IDENTITY_WITHDRAW
         | crate::rpc::identity_methods::IDENTITY_CHANGES_HOLD => NO_MEMBER,
         // The voice and live channel methods name the member they speak
@@ -11213,7 +11270,7 @@ async fn session_member_owners(
             .as_ref()
             == Some(session_id)
         {
-            owners.push(durable_identity_for_member(&member));
+            owners.push(durable_identity_for_member(handle, &member));
         }
     }
     Some(owners)
@@ -11364,9 +11421,12 @@ fn restore_absent_session(answer: Value, absent: Option<&(String, String)>) -> V
     serde_json::from_str(&answer.to_string().replace(fresh.as_str(), named)).unwrap_or(answer)
 }
 
-fn durable_identity_for_member(member: &meerkat_mob::runtime::MobMemberListEntry) -> String {
-    crate::member_comms_id::durable_identity_label(&member.labels)
-        .map(str::to_owned)
+fn durable_identity_for_member(
+    handle: &MobHandle,
+    member: &meerkat_mob::runtime::MobMemberListEntry,
+) -> String {
+    crate::member_comms_id::resolve_member_identity(handle, &member.agent_identity, &member.labels)
+        .map(std::borrow::Cow::into_owned)
         // Fallback surfaces the public alias, not the comms-safe roster id.
         .unwrap_or_else(|| {
             crate::member_comms_id::runtime_alias_str(member.agent_identity.as_str()).into_owned()
@@ -11431,8 +11491,12 @@ async fn lookup_member_alias_candidates_with_session(
     let label_matches = entries
         .iter()
         .filter(|entry| {
-            crate::member_comms_id::durable_identity_label(&entry.labels)
-                .is_some_and(|identity| identity == requested_identity)
+            crate::member_comms_id::resolve_member_identity(
+                handle,
+                &entry.agent_identity,
+                &entry.labels,
+            )
+            .is_some_and(|identity| identity == requested_identity)
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -11444,7 +11508,7 @@ async fn lookup_member_alias_candidates_with_session(
     for member in matches {
         let runtime_member_id =
             crate::member_comms_id::runtime_alias_str(member.agent_identity.as_str()).into_owned();
-        let identity = durable_identity_for_member(&member);
+        let identity = durable_identity_for_member(handle, &member);
         let session_id = handle
             .resolve_bridge_session_id_observation(&member.agent_identity)
             .await
@@ -13155,7 +13219,9 @@ async fn handle_console_runtime_rpc_with_visibility(
             mob: &handle,
             family: family.as_ref(),
             requester: crate::rpc::identity_methods::console_requester(
-                person.as_ref().map(|person| person.as_str()),
+                person
+                    .as_ref()
+                    .map(meerkat_core::approval::decision::DecisionPrincipalKey::as_str),
             ),
             access: access_view,
         };
@@ -18037,8 +18103,12 @@ async fn console_member_peer_info(
                 .await
                 .into_iter()
                 .filter(|entry| {
-                    crate::member_comms_id::durable_identity_label(&entry.labels)
-                        .is_some_and(|identity| identity == member_alias)
+                    crate::member_comms_id::resolve_member_identity(
+                        &handle,
+                        &entry.agent_identity,
+                        &entry.labels,
+                    )
+                    .is_some_and(|identity| identity == member_alias)
                 })
                 .map(|entry| {
                     crate::member_comms_id::runtime_alias_str(entry.agent_identity.as_str())
@@ -18440,6 +18510,12 @@ async fn build_live_snapshot(
 /// time) until the walk lands. Its other facts stay as walked: visibility
 /// and access decide on them, and the experience renders every record of a
 /// pending row in its withheld shape.
+///
+/// An identity-first row is also labelled by its registration: its
+/// `display_name` label is the display name `cut` read for the identity,
+/// when the registration has one. The roster, the sidebar and the topology
+/// node all read that label, so they show one name, and a change of it shows
+/// at the next read with no new walk.
 async fn join_identity_bindings(
     members: &mut [ConsoleMember],
     walked_cut: &IdentityBindingCut,
@@ -18459,6 +18535,18 @@ async fn join_identity_bindings(
         };
         if !crate::member_comms_id::live_member_is_identity(&member.agent_identity, &identity) {
             continue;
+        }
+        // The label the roster, the sidebar and the topology node read
+        // (`labels.display_name`, else the row's id) is the display name of
+        // the identity's registration, when it has one. A seat carries only
+        // the labels it was seated with: an identity whose record is its row
+        // in the mob's identity store is seated with its row's labels, which
+        // hold no display name, and a change of the row's display name
+        // reaches the registration, never the seat.
+        if let Some(display_name) = cut.display_names.get(&identity) {
+            member
+                .labels
+                .insert("display_name".to_string(), display_name.clone());
         }
         let current = cut.bindings.get(&identity);
         let session_id = current.and_then(|binding| binding.session_id.clone());
@@ -18740,6 +18828,8 @@ async fn reset_all_live_console_agents(
     let mut visible_runtime_member_ids = BTreeSet::new();
     let mut duplicate_live_identities = BTreeSet::new();
     let mut delegate_members = BTreeSet::new();
+    // A member with no `source_mob_id` is the primary mob's.
+    let primary = runtime.handle();
     for member in snapshot.members {
         if member.state == MEMBER_STATE_RETIRING {
             continue;
@@ -18747,17 +18837,18 @@ async fn reset_all_live_console_agents(
         if let Some(source_mob_id) = member.labels.get("source_mob_id").cloned() {
             delegate_members.insert((source_mob_id, member.agent_identity));
         } else {
-            let identity = crate::member_comms_id::durable_identity_label(&member.labels)
-                .map(str::to_owned)
-                .or_else(|| {
-                    identity_by_runtime_member_id
-                        .get(
-                            crate::member_comms_id::runtime_alias_str(&member.agent_identity)
-                                .as_ref(),
-                        )
-                        .cloned()
-                })
-                .unwrap_or_else(|| member.agent_identity.clone());
+            let identity = crate::member_comms_id::resolve_member_identity(
+                &primary,
+                &crate::member_comms_id::mob_member_id(&member.agent_identity),
+                &member.labels,
+            )
+            .map(std::borrow::Cow::into_owned)
+            .or_else(|| {
+                identity_by_runtime_member_id
+                    .get(crate::member_comms_id::runtime_alias_str(&member.agent_identity).as_ref())
+                    .cloned()
+            })
+            .unwrap_or_else(|| member.agent_identity.clone());
             if let Some(existing) = runtime_member_id_by_identity.get(&identity)
                 && existing != &member.agent_identity
             {
@@ -18792,14 +18883,18 @@ async fn reset_all_live_console_agents(
         if member.state == MEMBER_STATE_RETIRING || member.labels.contains_key("source_mob_id") {
             continue;
         }
-        let identity = crate::member_comms_id::durable_identity_label(&member.labels)
-            .map(str::to_owned)
-            .or_else(|| {
-                identity_by_runtime_member_id
-                    .get(crate::member_comms_id::runtime_alias_str(&member.agent_identity).as_ref())
-                    .cloned()
-            })
-            .unwrap_or_else(|| member.agent_identity.clone());
+        let identity = crate::member_comms_id::resolve_member_identity(
+            &primary,
+            &crate::member_comms_id::mob_member_id(&member.agent_identity),
+            &member.labels,
+        )
+        .map(std::borrow::Cow::into_owned)
+        .or_else(|| {
+            identity_by_runtime_member_id
+                .get(crate::member_comms_id::runtime_alias_str(&member.agent_identity).as_ref())
+                .cloned()
+        })
+        .unwrap_or_else(|| member.agent_identity.clone());
         raw_runtime_member_ids_by_identity
             .entry(identity.clone())
             .or_default()
@@ -19729,9 +19824,14 @@ async fn live_member_access_attributes(
     for entry in &entries {
         let alias = crate::member_comms_id::runtime_alias_str(entry.agent_identity.as_str());
         roster_identities.insert(
-            crate::member_comms_id::durable_identity_label(&entry.labels)
-                .unwrap_or(alias.as_ref())
-                .to_string(),
+            crate::member_comms_id::resolve_member_identity(
+                handle,
+                &entry.agent_identity,
+                &entry.labels,
+            )
+            .as_deref()
+            .unwrap_or(alias.as_ref())
+            .to_string(),
         );
     }
     // A side chat names its source as this roster records its fork; the
@@ -19739,6 +19839,7 @@ async fn live_member_access_attributes(
     let side_chats =
         if crate::side_chat::any_side_chat_marker(entries.iter().map(|entry| &entry.labels)) {
             crate::side_chat::side_chat_lineages(
+                handle,
                 &entries
                     .iter()
                     .map(|entry| crate::side_chat::SideChatRosterRow {
@@ -19784,6 +19885,7 @@ async fn live_member_access_attributes(
             let alias = crate::member_comms_id::runtime_alias_str(entry.agent_identity.as_str())
                 .into_owned();
             let labels = projected_console_member_labels(
+                handle,
                 &entry.labels,
                 &alias,
                 host_identity,
@@ -19901,6 +20003,7 @@ async fn delegate_mobs_with_hosts(runtime: &MobRuntime) -> Vec<(String, MobHandl
 /// priming use this projection, so all of them record one value per
 /// identity.
 fn projected_console_member_labels(
+    handle: &MobHandle,
     roster_labels: &BTreeMap<String, String>,
     alias: &str,
     host_identity: Option<&str>,
@@ -19910,8 +20013,12 @@ fn projected_console_member_labels(
 ) -> BTreeMap<String, String> {
     let mut labels = roster_labels.clone();
     crate::console_spawn::sanitize_unverified_lineage_labels(&mut labels);
-    let console_identity_key =
-        crate::member_comms_id::durable_identity_label(roster_labels).unwrap_or(alias);
+    let console_identity = crate::member_comms_id::resolve_member_identity(
+        handle,
+        &crate::member_comms_id::mob_member_id(alias),
+        roster_labels,
+    );
+    let console_identity_key = console_identity.as_deref().unwrap_or(alias);
     if let Some(spawn_labels) = registered_labels.get(console_identity_key) {
         crate::console_spawn::merge_registered_labels(&mut labels, spawn_labels);
     }
@@ -19978,6 +20085,7 @@ async fn project_console_members_from_handle(
         // chat, Meerkat's fork record) may assert (this projection feeds the
         // experience-path ABAC attribute rebuild).
         let labels = projected_console_member_labels(
+            handle,
             &entry.labels,
             &identity,
             host_identity,
@@ -36628,11 +36736,34 @@ mod identity_family_console_access_tests {
             console_rpc_access_requirements("meta/identity/get", &json!({ "name": "scout" })),
             Some(vec![(ACTION_AGENT_VIEW, scout)])
         );
+        // A plan is judged as the change it plans, on the agent it names.
+        let planned = |change: &str| {
+            let mut params = named.clone();
+            params["change"] = json!(change);
+            console_rpc_access_requirements("meta/identity/plan", &params)
+        };
+        assert_eq!(
+            console_rpc_access_requirements(
+                "meta/identity/plan",
+                &json!({"change": "create", "agents": [{"name": "scout", "profile": "worker"}]})
+            ),
+            Some(vec![("agent.identity.create", None)])
+        );
+        for change in ["update", "archive", "unarchive", "adopt"] {
+            assert_eq!(
+                planned(change),
+                Some(vec![("agent.identity.manage", Some("scout".to_string()))]),
+                "{change}"
+            );
+        }
+        assert_eq!(
+            planned("remove"),
+            Some(vec![("agent.identity.remove", Some("scout".to_string()))])
+        );
         for method in [
             "meta/identity/list",
             "meta/identity/directory",
             "meta/identity/operation",
-            "meta/identity/plan",
             "meta/identity/withdraw",
         ] {
             assert_eq!(

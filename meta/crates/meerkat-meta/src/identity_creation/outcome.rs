@@ -174,11 +174,15 @@ pub struct AgentOutcome {
     /// Its spec revision after the change, from 1.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spec_revision: Option<u64>,
-    /// The session its member is bound to, when the change seated one.
+    /// The session its member is bound to, as the agent stands when the
+    /// outcome is answered: a replay, and a read of an earlier operation,
+    /// answer today's session.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
-    /// Whether the agent a create committed is seated. Present on a
-    /// create's outcome only.
+    /// Whether the agent a create committed is seated, as the agent stands
+    /// when the outcome is answered. Present on a create's outcome only,
+    /// and absent once the agent is neither seated nor owed its seat (it
+    /// was archived or removed since).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seat: Option<AgentSeat>,
     /// What became of an update's instructions change. Present on an

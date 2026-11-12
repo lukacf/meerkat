@@ -1603,6 +1603,28 @@ impl MobActor {
             spec.override_profile = entry.effective_profile_override.clone();
             spec.model_override = entry.effective_model_override.clone();
         }
+        // An auto-compact floor the request names rides the successor's
+        // profile override, the carrier a spawn's is: set over the member's
+        // own override or its role's profile, or removed again, after which
+        // an override that equals the role's profile is no override.
+        if let Some(floor) = request.compaction_floor {
+            let role_profile = self
+                .definition
+                .resolve_profile(&role, self.realm_profile_store.as_ref())
+                .await?;
+            match (floor, spec.override_profile.take()) {
+                (Some(floor), own) => {
+                    let mut profile = own.unwrap_or_else(|| role_profile.clone());
+                    profile.auto_compact_threshold = Some(floor);
+                    spec.override_profile = Some(profile);
+                }
+                (None, Some(mut profile)) => {
+                    profile.auto_compact_threshold = role_profile.auto_compact_threshold;
+                    spec.override_profile = (profile != role_profile).then_some(profile);
+                }
+                (None, None) => {}
+            }
+        }
         spec.definition_wiring = entry.definition_wiring;
         // The continuity the current incarnation was spawned with (its spawn
         // row's). An incarnation no spawn row records (a legacy reset) has

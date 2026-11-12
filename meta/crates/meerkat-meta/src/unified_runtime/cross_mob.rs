@@ -396,8 +396,12 @@ async fn resolve_member_alias_under_authority(
         .await
         .into_iter()
         .filter(|entry| {
-            crate::member_comms_id::durable_identity_label(&entry.labels)
-                .is_some_and(|identity| identity == member_alias)
+            crate::member_comms_id::resolve_member_identity(
+                handle,
+                &entry.agent_identity,
+                &entry.labels,
+            )
+            .is_some_and(|identity| identity == member_alias)
         })
         .map(|entry| {
             crate::member_comms_id::runtime_alias_str(entry.agent_identity.as_str()).into_owned()

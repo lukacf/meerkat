@@ -263,9 +263,18 @@ impl IdentityBuildPreparer {
             .map_err(|error| MemberBuildPreparationRefusal::Retryable {
                 reason: format!("the member's roster entry could not be read: {error}"),
             })?;
+        // Core's entry read is the identity runtime's bridge's here: the
+        // build's read handle carries none.
+        let entries = runtime
+            .and_then(IdentityRuntime::bridge)
+            .map(|bridge| &**bridge);
         Ok(entry.as_ref().and_then(|entry| {
-            crate::member_comms_id::durable_identity_label(&entry.labels)
-                .and_then(|label| AgentIdentity::parse(label).ok())
+            crate::member_comms_id::resolve_member_identity(
+                &entries,
+                &entry.agent_identity,
+                &entry.labels,
+            )
+            .and_then(|identity| AgentIdentity::parse(&identity).ok())
         }))
     }
 }

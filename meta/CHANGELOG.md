@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Breaking
+
+- `identity_first::BridgeDelivery` gains the public field
+  `requester_origin: Option<meerkat_core::RequesterOrigin>`. A bridge that
+  builds one with a struct literal adds it; `BridgeDelivery::new` sets `None`.
+
+### Added
+
+- `meta/send` takes an optional `requester`: a person the host attests, under
+  its own host authority, as the original requester of the content it relays
+  (`{"kind": "person", "id": "<opaque host-scoped stable id>"}`; one kind for
+  now, unknown kinds and fields are refused). The member's admitted input and
+  the turn's rows record that person as the turn's direct requester, with
+  origin `host_attested` and typed-text authorship (`TranscriptTurnInput::
+  TypedText`). Absent, the send is today's, byte for byte. It is accepted only
+  on the host route (the gateway's stdin RPC): the Console does not serve
+  `meta/send`, a Console send that passes a `requester` is refused, and no
+  agent tool, peer or comms delivery, schedule, flow or fork can set one. It
+  does not combine with `idempotency_key` (a keyed send is a member
+  continuation, which carries no requester). `meta/capabilities` advertises it
+  as the feature capability `send_host_attested_requester`; the Meta Python
+  SDK (`send(..., requester=...)`) and TypeScript SDK (`send(..., {
+  requester })`) refuse it, typed, on a gateway that does not.
+- A signed-in person's live Console send (origin kind `operator` or none)
+  now stamps the turn's row as typed text, with the person as its direct
+  requester and origin `console_signed_in`; a redispatch of a recorded send
+  carries exactly what the send's frame recorded. A scheduled fire, an
+  operator probe and every internal emitter name the person (a fire) or no
+  one, but never typed text or an origin. These are the rows the Distiller's
+  evidence-scoped taint treats as a person's own typed input (see the
+  distilled memory taint entry under Breaking).
+
+### Known limitations
+
+- The supervisor bridge is not widened: a member it reaches does not carry
+  the requester, and its rows name none. A delivery path that cannot carry
+  the requester onto an admitted runtime input (a placed member, or one
+  without a runtime-backed session) refuses the send typed instead of
+  delivering it without one.
+- The requester has no display name yet: the sender label rides only the
+  Console's host-human lane.
+
 ### Security
 
 - A mob that a member private to a person creates with its own `mob_create`

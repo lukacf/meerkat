@@ -54,6 +54,17 @@ name: Connect release
 #     published: no release, no tag, no token, no provider key. The stage
 #     record is read, scanned and reviewed outside the workflow before
 #     anything is assembled for a release (release/CONNECT-CANDIDATE.md).
+#   - `macos-assemble` (dispatch), stage two: after the stage record's
+#     shutdown evidence was read and accepted, one hosted macos-15 job takes
+#     that stage run's record (attested by this workflow for the dispatched
+#     commit) and the digest of the accepted review as its reader stated it,
+#     reproduces the accepted record, assembles both products at the stage's
+#     own paths and uploads the two archives, their checksum files and
+#     ASSEMBLY.json as a workflow artifact. It builds, runs and signs
+#     nothing and publishes nothing. No job attaches the complete macOS
+#     installation to a release: that will be a separate add-only step that
+#     requires the producer's PUBLISHABLE.json, written only after a clean
+#     private-text scan of the assembled archives.
 # Prerequisites (connect-candidate-monorepo patch): connect-candidate.py names
 # lukacf/meerkat and this workflow; after the workspace wire-up it must build
 # meerkat-connect from the root workspace instead of native-candidate/.
@@ -65,10 +76,10 @@ name: Connect release
   workflow_dispatch:
     inputs:
       mode:
-        description: "candidate: build one target; accept: accept an attested candidate; publish: add accepted assets; macos-build: build and check the macOS executables, publish nothing; macos-assets: build an existing tag's macOS executables and add them to its release; macos-stage: stage the complete macOS installation as a workflow artifact, publish nothing"
+        description: "candidate: build one target; accept: accept an attested candidate; publish: add accepted assets; macos-build: build and check the macOS executables, publish nothing; macos-assets: build an existing tag's macOS executables and add them to its release; macos-stage: stage the complete macOS installation as a workflow artifact, publish nothing; macos-assemble: assemble both complete macOS archives from a reviewed stage record, publish nothing"
         required: true
         type: choice
-        options: [candidate, accept, publish, macos-build, macos-assets, macos-stage]
+        options: [candidate, accept, publish, macos-build, macos-assets, macos-stage, macos-assemble]
       release_tag:
         description: macos-assets only - the existing connect-vX.Y.Z tag whose release gets the macOS executables
         required: false
@@ -95,7 +106,7 @@ name: Connect release
         default: ""
         type: string
       candidate_run_id:
-        description: Accept only - run id of the attested candidate
+        description: "Accept - run id of the attested candidate; macos-assemble - run id of the macos-stage run, optionally followed by -ATTEMPT (default 1)"
         required: false
         default: ""
         type: string
@@ -110,7 +121,7 @@ name: Connect release
         default: ""
         type: string
       acceptance_sha256:
-        description: Publish only - the owner-selected SHA-256 of acceptance.json
+        description: "Publish - the owner-selected SHA-256 of acceptance.json; macos-assemble - the SHA-256 of the accepted shutdown review as its reader stated it"
         required: false
         default: ""
         type: string
@@ -1043,6 +1054,171 @@ jobs:
         with:
           name: connect-macos-arm64-stage-provenance-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/stage-provenance/connect-macos-arm64-stage-provenance.jsonl
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 90
+
+  # Stage two of the complete macOS arm64 installation (dispatch,
+  # macos-assemble), after the stage record's shutdown evidence was read and
+  # accepted outside the workflow. The reader states the digest of the
+  # accepted record; this job reproduces that record from the stage record
+  # alone and refuses any other digest. It builds, runs and signs nothing:
+  # the producer checks every file of the stage record, requires every gate
+  # passed and assembles the CLI product beside the stage's gateway product,
+  # at the stage's own checkout and work root paths. The artifact is what a
+  # private-text scan reads next; nothing here publishes it.
+  assemble_macos:
+    name: Assemble the complete macOS installation (stage two, nothing published)
+    needs: [resolve]
+    if: github.event_name == 'workflow_dispatch' && needs.resolve.outputs.mode == 'macos-assemble'
+    runs-on: macos-15
+    timeout-minutes: 60
+    permissions:
+      actions: read
+      contents: read
+    env:
+      CONNECT_CHECKOUT: /Users/runner/work/meerkat/meerkat
+      CONNECT_WORK: /private/tmp/cw
+      CONNECT_STAGE: /private/tmp/cs
+      CONNECT_ASSEMBLY: /private/tmp/ca
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Checkout the dispatched source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.resolve.outputs.source_ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check the runner layout
+        shell: bash
+        run: |
+          set -euo pipefail
+          here="$(pwd -P)"
+          if [[ "${here}" != "${CONNECT_CHECKOUT}" ]]; then
+            echo "::error::the checkout is at ${here}, not ${CONNECT_CHECKOUT}" >&2
+            exit 1
+          fi
+          if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
+            echo "::error::not a macOS arm64 runner: $(uname -s) $(uname -m)" >&2
+            exit 1
+          fi
+          if [[ -e "${CONNECT_WORK}" || -L "${CONNECT_WORK}" ]]; then
+            echo "::error::the work root ${CONNECT_WORK} already exists" >&2
+            exit 1
+          fi
+          parent="$(dirname "${CONNECT_WORK}")"
+          if [[ ! -d "${parent}" || "$(cd "${parent}" && pwd -P)" != "${parent}" ]]; then
+            echo "::error::the work root's parent ${parent} is not a real directory" >&2
+            exit 1
+          fi
+          head="$(git rev-parse HEAD)"
+          if [[ "${head}" != "${GITHUB_SHA}" ]]; then
+            echo "::error::checked-out commit ${head} is not the dispatched commit ${GITHUB_SHA}" >&2
+            exit 1
+          fi
+          if [[ -n "$(git status --porcelain --untracked-files=normal)" ]]; then
+            echo "::error::the checkout is not clean" >&2
+            exit 1
+          fi
+          echo "checkout ${here} at ${head}; work root ${CONNECT_WORK}"
+          df -k "${parent}"
+
+      - name: Select Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.11'
+
+      - name: Read the stage run and the stated review digest
+        id: request
+        shell: bash
+        env:
+          STAGE_RUN: ${{ inputs.candidate_run_id }}
+          REVIEW_SHA256: ${{ inputs.acceptance_sha256 }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${STAGE_RUN}" =~ ^([1-9][0-9]*)(-([1-9][0-9]*))?$ ]]; then
+            echo "::error::candidate_run_id must be the macos-stage run id, optionally followed by -ATTEMPT; got '${STAGE_RUN}'" >&2
+            exit 1
+          fi
+          run_id="${BASH_REMATCH[1]}"
+          attempt="${BASH_REMATCH[3]:-1}"
+          if [[ ! "${REVIEW_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::acceptance_sha256 must be the SHA-256 of the accepted shutdown review (64 lowercase hex)" >&2
+            exit 1
+          fi
+          {
+            echo "run_id=${run_id}"
+            echo "attempt=${attempt}"
+            echo "review_sha256=${REVIEW_SHA256}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Download the stage record and its provenance
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ steps.request.outputs.run_id }}
+          ATTEMPT: ${{ steps.request.outputs.attempt }}
+        run: |
+          set -euo pipefail
+          gh run download "${RUN_ID}" --repo "${GITHUB_REPOSITORY}" \
+            --name "connect-macos-arm64-stage-${RUN_ID}-${ATTEMPT}" --dir "${CONNECT_STAGE}"
+          gh run download "${RUN_ID}" --repo "${GITHUB_REPOSITORY}" \
+            --name "connect-macos-arm64-stage-provenance-${RUN_ID}-${ATTEMPT}" --dir "${RUNNER_TEMP}/stage-provenance"
+
+      # The stage record must be the one this workflow attested for the
+      # dispatched commit, and must name that commit: the producer then
+      # checks every file of it against STAGE.json.
+      - name: Verify the stage record's attestation and commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh attestation verify "${CONNECT_STAGE}/STAGE.json" --repo "${GITHUB_REPOSITORY}" \
+            --bundle "${RUNNER_TEMP}/stage-provenance/connect-macos-arm64-stage-provenance.jsonl" \
+            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/connect-release.yml" \
+            --source-digest "${GITHUB_SHA}"
+          revision="$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["revision"])' "${CONNECT_STAGE}/STAGE.json")"
+          if [[ "${revision}" != "${GITHUB_SHA}" ]]; then
+            echo "::error::the stage record is of commit ${revision}, not the dispatched commit ${GITHUB_SHA}" >&2
+            exit 1
+          fi
+
+      # The accepted record is a function of the stage record alone: the
+      # producer writes it only when its digest is the one the reader stated.
+      - name: Accept the reviewed shutdown record
+        shell: bash
+        env:
+          REVIEW_SHA256: ${{ steps.request.outputs.review_sha256 }}
+        run: |
+          set -euo pipefail
+          python3 connect/scripts/connect-candidate.py macos accept-review --stage "${CONNECT_STAGE}" \
+            --output "${RUNNER_TEMP}/native-shutdown-review.accepted.json" --review-sha256 "${REVIEW_SHA256}"
+
+      - name: Assemble both products
+        shell: bash
+        env:
+          REVIEW_SHA256: ${{ steps.request.outputs.review_sha256 }}
+        run: |
+          set -euo pipefail
+          python3 connect/scripts/connect-candidate.py macos assemble --work "${CONNECT_WORK}" \
+            --stage "${CONNECT_STAGE}" --review "${RUNNER_TEMP}/native-shutdown-review.accepted.json" \
+            --review-sha256 "${REVIEW_SHA256}" --output "${CONNECT_ASSEMBLY}"
+
+      # Exactly what a publication would carry, and its record: both
+      # archives, their checksum files and ASSEMBLY.json (assembled, not
+      # scanned, not published).
+      - name: Upload the assembly
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: connect-macos-arm64-assembly-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            /private/tmp/ca/ASSEMBLY.json
+            /private/tmp/ca/cli/meerkat-connect-*-macos-arm64.tar.gz
+            /private/tmp/ca/cli/meerkat-connect-*-macos-arm64.tar.gz.sha256
+            /private/tmp/ca/gateway/meerkat-connect-gateway-*-macos-arm64.tar.gz
+            /private/tmp/ca/gateway/meerkat-connect-gateway-*-macos-arm64.tar.gz.sha256
           if-no-files-found: error
           overwrite: false
           retention-days: 90

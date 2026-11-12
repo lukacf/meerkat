@@ -12,6 +12,14 @@
   words for any other. Through 0.9.14 the helper passed no key and the
   first `wireLocal` was refused. `peerInfo` returns the gateway's new
   `pubkey_b64` and `dialable_address` as they come.
+- `MobHandle.wireCrossMob` called again for a pair that is already wired
+  with the same endpoints changes nothing. It reads the local member
+  once before it wires (`getMember`), and a refused second side no
+  longer undoes a first side that was wired before the call. A side that
+  is wired to that peer with another endpoint is refused by the gateway
+  in plain words (a wire is never replaced): call `unwireLocal` on both
+  sides, each with the other member's current `peerInfo`, then wire
+  again.
 
 ## 0.9.14
 

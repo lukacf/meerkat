@@ -706,7 +706,16 @@ that address and the member's key. Otherwise each side is wired by the
 in-process address with no key, which works when one process hosts both mobs
 (the gateway takes the member's key from its own registration and installs
 the route with the trust); a member that process does not have is refused in
-plain words and nothing is wired. A refused second side undoes the first.
+plain words and nothing is wired. A refused second side undoes the first,
+unless that side was wired before the call.
+
+Calling the helper again for a pair that is already wired with the same
+endpoints changes nothing. A wire is never replaced: when a side is already
+wired to that peer with another endpoint (another address, or another key
+after a respawn), its `wire_local` is refused in plain words and nothing
+changes. Call `unwire_local` on both sides, each with the other member's
+current `peer_info`, then wire again. A member of a stopped mob still accepts
+a message through a wire and is handed it when its mob resumes.
 
 A descriptor always carries the MEMBER's key from `peer_info`. `peer_pubkey()`
 is the gateway's own key, for contact directories; it never describes a

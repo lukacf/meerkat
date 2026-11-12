@@ -6051,7 +6051,19 @@ class MobHandle:
           is wired.
 
         When the second ``wire_local`` is refused, the first side is undone
-        with ``unwire_local`` and the refusal is raised.
+        with ``unwire_local`` and the refusal is raised. A side that was
+        already wired to that peer before the call is left as it was.
+
+        **Calling it again.** For a pair that is already wired with the same
+        endpoints the call succeeds and changes nothing. A wire is never
+        replaced: when a side is already wired to that peer name with
+        another endpoint (another address, or another key after a respawn),
+        its ``wire_local`` is refused in plain words and nothing changes.
+        Call ``unwire_local`` on both sides first, each with the other
+        member's current ``peer_info``, then wire again.
+
+        A member of a stopped mob still accepts a message through a wire;
+        it is handed the message when its mob resumes.
 
         Args:
             local_member_id: Member on this mob to wire.
@@ -6077,6 +6089,9 @@ class MobHandle:
 
         remote_name, remote_peer_id, remote_address, remote_key = describe(remote_info)
         local_name, local_peer_id, local_address, local_key = describe(local_info)
+        # A side that is wired to this peer already is not this call's to
+        # undo: a refused second side must leave it as it was.
+        wired_before = remote_name in (await self.get_member(local_member_id)).wired_to
         await self.wire_local(
             local_member_id,
             remote_name,
@@ -6093,6 +6108,8 @@ class MobHandle:
                 remote_pubkey_b64=local_key,
             )
         except Exception:
+            if wired_before:
+                raise
             # Best-effort rollback: undo the local wire with the parameters
             # it was made with. The gateway removes the trust and the route
             # it installed with it.

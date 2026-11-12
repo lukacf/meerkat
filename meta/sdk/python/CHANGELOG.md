@@ -21,6 +21,14 @@ All notable changes to the Python SDK are documented here.
 - The `wire_local` and `wire_cross_mob` docstrings no longer tell a
   cross-process caller to pass the gateway key of `peer_pubkey`: a
   descriptor carries the member's key from `peer_info`.
+- `MobHandle.wire_cross_mob` called again for a pair that is already
+  wired with the same endpoints changes nothing. It reads the local
+  member once before it wires (`get_member`), and a refused second side
+  no longer undoes a first side that was wired before the call. A side
+  that is wired to that peer with another endpoint is refused by the
+  gateway in plain words (a wire is never replaced): call `unwire_local`
+  on both sides, each with the other member's current `peer_info`, then
+  wire again.
 
 ## 0.9.14
 

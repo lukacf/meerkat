@@ -5996,7 +5996,19 @@ export class MobHandle {
    * nothing is wired.
    *
    * When the second `wireLocal` is refused, the first side is undone with
-   * `unwireLocal` and the refusal is thrown.
+   * `unwireLocal` and the refusal is thrown. A side that was already wired to
+   * that peer before the call is left as it was.
+   *
+   * Calling it again: for a pair that is already wired with the same
+   * endpoints the call succeeds and changes nothing. A wire is never
+   * replaced: when a side is already wired to that peer name with another
+   * endpoint (another address, or another key after a respawn), its
+   * `wireLocal` is refused in plain words and nothing changes. Call
+   * `unwireLocal` on both sides first, each with the other member's current
+   * `peerInfo`, then wire again.
+   *
+   * A member of a stopped mob still accepts a message through a wire; it is
+   * handed the message when its mob resumes.
    */
   async wireCrossMob(
     localMemberId: string,
@@ -6021,10 +6033,18 @@ export class MobHandle {
         : [info.comms_name, info.peer_id, info.address, undefined];
     const remotePeer = describe(remoteInfo);
     const localPeer = describe(localInfo);
+    // A side that is wired to this peer already is not this call's to undo:
+    // a refused second side must leave it as it was.
+    const wiredBefore = (await this.getMember(localMemberId)).wiredTo.includes(
+      remotePeer[0],
+    );
     await this.wireLocal(localMemberId, ...remotePeer);
     try {
       await remoteHandle.wireLocal(remoteMemberId, ...localPeer);
     } catch (err) {
+      if (wiredBefore) {
+        throw err;
+      }
       try {
         await this.unwireLocal(localMemberId, ...remotePeer);
       } catch {

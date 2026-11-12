@@ -142,6 +142,13 @@ struct AttachedFamily {
 pub trait PeerVisibility: Send + Sync {
     /// Whether the caller may see the agent `name`.
     fn sees(&self, name: &str) -> bool;
+
+    /// Whether the caller is one its host shows every agent of the mob (an
+    /// administrator of the runtime): a refusal may then say what holds a
+    /// name. A view says so itself; by default it does not.
+    fn sees_every_agent(&self) -> bool {
+        false
+    }
 }
 
 impl IdentityFamilySlot {
@@ -684,6 +691,39 @@ impl IdentityGate {
             seen: Some(seen),
             ..self.clone()
         }
+    }
+
+    /// Whether `requester` is shown every agent of the mob: the host, and
+    /// a caller whose view says so. An agent never is (an agent private
+    /// to a person is hidden from it), and neither is a caller with any
+    /// other view.
+    fn shown_every_agent(&self, requester: &ChangeRequester) -> bool {
+        !matches!(requester, ChangeRequester::Agent { .. })
+            && self
+                .seen
+                .as_ref()
+                .is_none_or(|seen| seen.sees_every_agent())
+    }
+
+    /// `outcome` as `requester` reads it. A taken name cannot be created,
+    /// whoever asks, so a refused create always says that much; what holds
+    /// the name (an agent, a removed agent's name, a worker member) is
+    /// told only to a requester that is shown every agent. To any other
+    /// the holder reads `identity` whatever it is, so the refusal of a
+    /// name an agent it is not shown holds is the refusal of any taken
+    /// name.
+    fn shown_outcome(
+        &self,
+        requester: &ChangeRequester,
+        mut outcome: IdentityOutcome,
+    ) -> IdentityOutcome {
+        if !self.shown_every_agent(requester)
+            && let IdentityOutcome::Refused(refusal) = &mut outcome
+            && let IdentityRefusalKind::NameTaken { by } = &mut refusal.kind
+        {
+            *by = super::NameTakenBy::Identity;
+        }
+        outcome
     }
 
     /// Whether the caller's view of the mob shows the agent `name`: every
@@ -1700,10 +1740,11 @@ impl IdentityFamily for IdentityGate {
         requester: &ChangeRequester,
         call: IdentityChangeCall,
     ) -> IdentityOutcome {
-        match self.changed(mob, requester, &call).await {
+        let outcome = match self.changed(mob, requester, &call).await {
             Ok(outcome) => outcome,
             Err(refusal) => IdentityOutcome::Refused(refusal),
-        }
+        };
+        self.shown_outcome(requester, outcome)
     }
 
     async fn withdraw(

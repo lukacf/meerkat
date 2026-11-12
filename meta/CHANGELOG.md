@@ -78,7 +78,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - An agent is shown no agent that is private to one person (one whose
   labels carry `console.private_to`): its list and its directory leave
   such an agent out, and a get, a plan or a change of it answers
-  `identity_unknown`, as a name no agent holds. Every read of the family
+  `identity_unknown`, as a name no agent holds. A create under its name
+  is refused `name_taken`, as under any taken name (one namespace holds
+  every name, so a taken name cannot be created); to a caller that is
+  not shown every agent (an agent, a Console caller that does not
+  administer the runtime) `name_taken` reads `by: identity` whatever
+  holds the name, and only the host and an administrator read `removed`,
+  `worker` or `unreadable`. Every read of the family
   and every peer a change names goes through this one rule; what a
   person's view of the mob shows is unchanged. Who is private is read
   from the agent's own record, so the rule holds for an agent that has

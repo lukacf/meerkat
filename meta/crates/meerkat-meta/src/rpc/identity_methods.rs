@@ -162,6 +162,10 @@ impl crate::identity_creation::PeerVisibility for ViewedAgents {
     fn sees(&self, name: &str) -> bool {
         self.0.can_view_agent(name)
     }
+
+    fn sees_every_agent(&self) -> bool {
+        self.0.allows(crate::access::ACTION_RUNTIME_ADMIN)
+    }
 }
 
 /// What the surface a call arrived on hands the family.

@@ -1161,6 +1161,120 @@ async fn gating_audit_cursor_is_filtered_by_origin_audience() {
     assert_eq!(empty["error"]["code"], json!(-32602), "{empty:#}");
 }
 
+/// An action gating blocks on a memory conflict leaves an audit entry that
+/// carries the conflict. The conflict's reason text is written from the
+/// records that conflict, which a reader of the entry may not be allowed to
+/// read, so a console that can identify a person serves that text to an
+/// administrator only: every other caller who may see the entry reads the
+/// conflict's entity and topic and no reason. The stored entry keeps it. A
+/// console that can identify nobody serves its one operator the text as
+/// before.
+#[tokio::test]
+async fn a_memory_conflicts_reason_text_in_the_gating_audit_is_for_an_administrator_only() {
+    const REASON: &str = "words written from records the caller may not read";
+    for verifies_tokens in [true, false] {
+        let (_temp_dir, mut runtime) = build_access_runtime_fixture().await;
+        let controller = AccessController::new(gating_router_only_config()).expect("controller");
+        runtime.set_access_controller(controller.clone());
+        let mut decisions = decision_state(false);
+        if !verifies_tokens {
+            decisions.trusted_oidc.jwks_json = r#"{"keys":[]}"#.to_string();
+        }
+        let app = runtime.build_reference_app_router(decisions);
+        runtime
+            .memory_index(meerkat_meta::MemoryIndexRequest {
+                entity: "delivery".to_string(),
+                topic: "email_send".to_string(),
+                store: None,
+                fact: None,
+                metadata: None,
+                conflict: Some(true),
+                conflict_reason: Some(REASON.to_string()),
+            })
+            .await
+            .expect("the conflict is indexed");
+        let blocked = runtime
+            .evaluate_gating_action_with_origin(
+                serde_json::from_value::<meerkat_meta::GatingEvaluateRequest>(json!({
+                    "action": "send_email", "actor_id": "worker", "risk_tier": "r2",
+                    "entity": "delivery", "topic": "email_send",
+                }))
+                .expect("request"),
+                Some(meerkat_meta::GatingOrigin {
+                    identity: "router".to_string(),
+                    conversation_id: None,
+                    interaction_id: None,
+                }),
+            )
+            .await;
+        assert_eq!(
+            blocked.fallback_reason.as_deref(),
+            Some("memory_conflict"),
+            "{blocked:?}"
+        );
+
+        // The conflict of the one conflict block an answer serves.
+        let conflict_of = |answer: &Value| -> Value {
+            answer["result"]["entries"]
+                .as_array()
+                .expect("entries")
+                .iter()
+                .find(|entry| entry["event_type"] == json!("conflict_blocked"))
+                .unwrap_or_else(|| panic!("the conflict block is served: {answer:#}"))["detail"]
+                ["conflict"]
+                .clone()
+        };
+        if !verifies_tokens {
+            let operator = rpc(&app, "meta/gating/audit", json!({})).await;
+            assert_eq!(
+                conflict_of(&operator)["reason"],
+                json!(REASON),
+                "the one operator of a console that can identify nobody reads it as before"
+            );
+            continue;
+        }
+        let admin = rpc_as(
+            &app,
+            &person_token("root@example.test"),
+            "meta/gating/audit",
+            json!({}),
+        )
+        .await;
+        assert_eq!(conflict_of(&admin)["reason"], json!(REASON), "{admin:#}");
+        for (who, answer) in [
+            (
+                "a signed-in person who is not an administrator",
+                rpc_as(
+                    &app,
+                    &person_token("alice@example.test"),
+                    "meta/gating/audit",
+                    json!({}),
+                )
+                .await,
+            ),
+            (
+                "the caller with no token",
+                rpc(&app, "meta/gating/audit", json!({})).await,
+            ),
+        ] {
+            let conflict = conflict_of(&answer);
+            assert_eq!(
+                (&conflict["entity"], &conflict["topic"]),
+                (&json!("delivery"), &json!("email_send")),
+                "{who} still reads which entity and topic conflict: {answer:#}"
+            );
+            assert!(
+                conflict.get("reason").is_none() && !answer.to_string().contains(REASON),
+                "{who} reads no reason text: {answer:#}"
+            );
+        }
+        assert!(
+            format!("{:?}", runtime.gating_state_snapshot().await.audit).contains(REASON),
+            "the stored entry keeps the reason"
+        );
+    }
+}
+
 /// Withdrawal belongs to the requester side (the embedding host's RPC): the
 /// console has no route for it, so even a session allowed to decide cannot
 /// withdraw a request, and the request stays pending until the host does.
@@ -4999,6 +5113,170 @@ async fn memory_panel_dream_history_judges_every_scope_the_realm_names() {
     runtime.set_access_controller(unscoped_reader(&every_grant));
     let app = runtime.build_reference_app_router(decision_state(false));
     assert_dream_history(&app, "run-plain-1", false, "every grant").await;
+
+    let _ = runtime.mob_handle().stop().await;
+}
+
+/// Both dream reads as the signed-in person `subject`: for each, whether it
+/// lists `run_id` and what it says of `withheld_by_access`.
+async fn dream_history_as(app: &axum::Router, subject: &str, run_id: &str) -> Vec<(bool, Value)> {
+    let bearer = person_token(subject);
+    let mut answers = Vec::new();
+    for method in ["dreams", "dream_runs"] {
+        let response = rpc_as(
+            app,
+            &bearer,
+            &format!("meta/memory/panel/{method}"),
+            json!({}),
+        )
+        .await;
+        assert_eq!(response["error"], Value::Null, "{method}: {response:#?}");
+        let result = &response["result"];
+        let listed = result["runs"]
+            .as_array()
+            .is_some_and(|runs| runs.iter().any(|run| run["run_id"] == json!(run_id)));
+        answers.push((listed, result["withheld_by_access"].clone()));
+    }
+    answers
+}
+
+/// The controller of a configuration whose one administrator is root.
+fn rules_with_root(rules: Vec<AccessRule>) -> AccessController {
+    AccessController::new(AccessControlConfig {
+        enabled: true,
+        admins: vec!["root@example.test".to_string()],
+        rules,
+        ..AccessControlConfig::default()
+    })
+    .expect("controller")
+}
+
+/// A realm's dream history is listed only to a caller who may read the
+/// memory of every identity the realm names, and an identity the console
+/// does not know (it was retired before this process read its members) is
+/// one of them: it is judged by the access rules on its name, for a
+/// signed-in person as for the caller with no token. A deny that names it
+/// withholds the history. An allow with no agent selector keeps it listed.
+/// An allow scoped by role does not reach it, since it has no role, and a
+/// deny scoped by label cannot be ruled out for it, since it has no labels:
+/// both withhold the history. The administrator reads it throughout.
+#[tokio::test]
+async fn the_dream_history_counts_the_memory_of_an_identity_the_console_does_not_know() {
+    const PERSON: &str = "alice@example.test";
+    const ROOT: &str = "root@example.test";
+    const RUN: &str = "run-plain-1";
+    let listed = vec![(true, json!(false)); 2];
+    let withheld = vec![(false, json!(true)); 2];
+
+    let (_temp_dir, mut runtime) = build_access_runtime_fixture().await;
+    let memory_dir = tempfile::tempdir().expect("memory dir");
+    let store = plain_dream_store(memory_dir.path()).await;
+    runtime.set_memory_panel_store(Arc::new(store.clone()));
+    let every_grant = [
+        "agent.view",
+        "agent.memory.read",
+        "operator.memory.read",
+        "operator.memory.read_any",
+        "memory.quarantine.review",
+    ];
+    let allow = |id: &str, actions: &[&str]| AccessRule {
+        id: id.to_string(),
+        actions: actions.iter().copied().map(String::from).collect(),
+        ..AccessRule::default()
+    };
+    let read_every_scope = allow("read-every-scope", &every_grant);
+    let named_deny = vec![
+        read_every_scope.clone(),
+        AccessRule {
+            id: "deny-retiree-memory".to_string(),
+            effect: meerkat_meta::AccessEffect::Deny,
+            actions: vec!["agent.memory.read".to_string()],
+            agents: vec!["retiree".to_string()],
+            ..AccessRule::default()
+        },
+    ];
+    // The memory reads for every agent, the view only for the role the
+    // realm's live members hold.
+    let role_scoped_allow = vec![
+        allow("read-memory", &every_grant[1..]),
+        AccessRule {
+            roles: vec!["lead".to_string()],
+            ..allow("view-the-leads", &["agent.view"])
+        },
+    ];
+    let label_scoped_deny = vec![
+        read_every_scope.clone(),
+        AccessRule {
+            effect: meerkat_meta::AccessEffect::Deny,
+            match_labels: BTreeMap::from([("tier".to_string(), "secret".to_string())]),
+            ..allow("deny-secret-memory", &["agent.memory.read"])
+        },
+    ];
+
+    // Control: while the realm names only identities the console knows,
+    // each of these configurations lets the person read every scope.
+    for (rules, what) in [
+        (&named_deny, "a deny that names another identity"),
+        (&role_scoped_allow, "an allow scoped by role"),
+        (&label_scoped_deny, "a deny scoped by label"),
+    ] {
+        runtime.set_access_controller(rules_with_root(rules.clone()));
+        let app = runtime.build_reference_app_router(decision_state(false));
+        assert_eq!(
+            dream_history_as(&app, PERSON, RUN).await,
+            listed,
+            "{what}, every identity known: listed"
+        );
+    }
+
+    // From here on the realm names an identity the console does not know.
+    store
+        .record_pending_harvest("default", "retiree", None, "retired")
+        .await
+        .expect("pending harvest");
+
+    for (rules, what) in [
+        (&named_deny, "a deny that names the identity"),
+        (&role_scoped_allow, "an allow scoped by role"),
+        (&label_scoped_deny, "a deny scoped by label"),
+    ] {
+        runtime.set_access_controller(rules_with_root(rules.clone()));
+        let app = runtime.build_reference_app_router(decision_state(false));
+        assert_eq!(
+            dream_history_as(&app, PERSON, RUN).await,
+            withheld,
+            "{what}: withheld from a signed-in person"
+        );
+        assert_dream_history(
+            &app,
+            RUN,
+            true,
+            &format!("{what}, the caller with no token"),
+        )
+        .await;
+        assert_eq!(
+            dream_history_as(&app, ROOT, RUN).await,
+            listed,
+            "{what}: the administrator reads the history"
+        );
+    }
+
+    // An allow with no agent selector reaches the identity by its name, and
+    // no deny applies: the history is listed, as before.
+    runtime.set_access_controller(rules_with_root(vec![read_every_scope]));
+    let app = runtime.build_reference_app_router(decision_state(false));
+    assert_eq!(
+        dream_history_as(&app, PERSON, RUN).await,
+        listed,
+        "an allow for every agent, no deny: listed for a signed-in person"
+    );
+    assert_dream_history(
+        &app,
+        RUN,
+        false,
+        "an allow for every agent, no deny, the caller with no token",
+    )
+    .await;
 
     let _ = runtime.mob_handle().stop().await;
 }

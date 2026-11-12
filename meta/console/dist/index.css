@@ -18235,6 +18235,13 @@ svg[data-svg=fit],
   font-size: var(--_cc-panel-fs-meta);
   color: var(--_cc-foreground-meta);
 }
+.identity-form__option-hint {
+  flex: 1 0 100%;
+  padding-left: 22px;
+  font-size: var(--_cc-panel-fs-meta);
+  line-height: 1.4;
+  color: var(--_cc-foreground-meta);
+}
 .identity-form__verdict-detail {
   display: flex;
   flex-direction: column;
@@ -18363,6 +18370,9 @@ svg[data-svg=fit],
 }
 .agent-details__change {
   padding: var(--_cc-sp-5, 12px) var(--_cc-panel-pad-x);
+}
+.agent-details__status-note {
+  margin-top: var(--_cc-sp-4, 8px);
 }
 .roster__drawer .identity-form,
 .roster__drawer .identity-confirm {

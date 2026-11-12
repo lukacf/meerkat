@@ -67914,7 +67914,7 @@ function DecisionCard({ card, now: now3, own: own5 }) {
             ] }) : null,
             card.requesterName ? /* @__PURE__ */ (0, import_jsx_runtime90.jsxs)("span", { className: "cc-decision__who", children: [
               /* @__PURE__ */ (0, import_jsx_runtime90.jsx)("span", { className: "cc-decision__label", children: "Asked by" }),
-              /* @__PURE__ */ (0, import_jsx_runtime90.jsx)("span", { className: "cc-decision__requester", title: card.requester, children: card.requesterName })
+              /* @__PURE__ */ (0, import_jsx_runtime90.jsx)("span", { className: "cc-decision__requester", children: card.requesterName })
             ] }) : null
           ] }),
           card.rendering !== void 0 ? /* @__PURE__ */ (0, import_jsx_runtime90.jsx)("pre", { className: "cc-decision__rendering", "data-testid": "decision-card-rendering", children: card.rendering }) : /* @__PURE__ */ (0, import_jsx_runtime90.jsx)("p", { className: "cc-decision__note", children: "What this decision holds could not be read." }),
@@ -75251,6 +75251,8 @@ function summaryOf(raw) {
   const displayName = textOf6(raw.display_name);
   const specRevision = numberOf(raw.spec_revision);
   const provenance = provenanceOf(raw.provenance);
+  const addressability = textOf6(raw.addressability);
+  const runtimeMode = textOf6(raw.runtime_mode_override);
   return {
     name: name2,
     ...displayName ? { displayName } : {},
@@ -75260,7 +75262,9 @@ function summaryOf(raw) {
     archived: raw.archived === true,
     readiness: textOf6(raw.readiness) ?? "",
     ...provenance ? { provenance } : {},
-    openOperations: textsOf(raw.open_operations)
+    openOperations: textsOf(raw.open_operations),
+    ...addressability ? { addressability } : {},
+    ...runtimeMode ? { runtimeMode } : {}
   };
 }
 function parseAgentRecord(value) {
@@ -75314,6 +75318,22 @@ function refusalOf(data, message) {
     data: raw
   };
 }
+function schedulesOf(value) {
+  const raw = rawOf(value);
+  const effect = textOf6(raw?.effect);
+  if (!raw || !effect) return void 0;
+  const schedules = (Array.isArray(raw.schedules) ? raw.schedules : []).flatMap((entry) => {
+    const scheduleId = textOf6(rawOf(entry)?.schedule_id);
+    const name2 = textOf6(rawOf(entry)?.name)?.trim();
+    return scheduleId ? [{ scheduleId, ...name2 ? { name: name2 } : {} }] : [];
+  });
+  return {
+    effect,
+    count: numberOf(raw.count) ?? schedules.length,
+    schedules,
+    incomplete: raw.incomplete === true
+  };
+}
 function agentOutcomeOf(value) {
   const raw = rawOf(value);
   const name2 = textOf6(raw?.name);
@@ -75324,14 +75344,27 @@ function agentOutcomeOf(value) {
   const instructions = rawOf(raw.instructions);
   const instructionKind = textOf6(instructions?.kind);
   const reason = textOf6(instructions?.reason);
+  const schedules = schedulesOf(raw.schedules);
   return {
     name: name2,
     state: textOf6(raw.state) ?? "",
     ...specDigest ? { specDigest } : {},
     ...specRevision !== void 0 ? { specRevision } : {},
     ...seat ? { seat } : {},
-    ...instructionKind ? { instructions: { kind: instructionKind, ...reason ? { reason } : {} } } : {}
+    ...instructionKind ? { instructions: { kind: instructionKind, ...reason ? { reason } : {} } } : {},
+    ...schedules ? { schedules } : {}
   };
+}
+function keepFirstSchedules(first, again) {
+  if (!("agents" in first) || !("agents" in again)) return again;
+  let kept = false;
+  const agents = again.agents.map((agent) => {
+    const said = first.agents.find((known) => known.name === agent.name)?.schedules;
+    if (agent.schedules || !said) return agent;
+    kept = true;
+    return { ...agent, schedules: { ...said, askedAgain: true } };
+  });
+  return kept ? { ...again, agents } : again;
 }
 function parseIdentityOutcome(value) {
   const raw = rawOf(value);
@@ -75406,7 +75439,9 @@ var EMPTY_NEW_AGENT_DRAFT = {
   displayName: "",
   instructions: "",
   firstMessage: "",
-  peers: []
+  peers: [],
+  addressability: "addressable",
+  runtimeMode: ""
 };
 function createAgentsRequest(draft) {
   const displayName = draft.displayName.trim();
@@ -75417,7 +75452,9 @@ function createAgentsRequest(draft) {
       ...displayName ? { display_name: displayName } : {},
       ...draft.instructions.trim() ? { instructions: [draft.instructions] } : {},
       ...draft.firstMessage.trim() ? { first_message: draft.firstMessage } : {},
-      ...draft.peers.length ? { peers: [...draft.peers] } : {}
+      ...draft.peers.length ? { peers: [...draft.peers] } : {},
+      ...draft.addressability && draft.addressability !== "addressable" ? { addressability: draft.addressability } : {},
+      ...draft.runtimeMode ? { runtime_mode_override: draft.runtimeMode } : {}
     }]
   };
 }
@@ -75428,7 +75465,9 @@ function editDraftOf(record10) {
     context: record10.context === void 0 ? "" : JSON.stringify(record10.context, null, 2),
     labels: Object.entries(record10.labels).map(([key, value]) => ({ key, value })),
     profile: record10.profile,
-    peers: [...record10.peers]
+    peers: [...record10.peers],
+    addressability: record10.addressability ?? "addressable",
+    runtimeMode: record10.runtimeMode ?? ""
   };
 }
 function sameJson(left, right) {
@@ -75464,6 +75503,8 @@ function updateAgentRequest(record10, draft) {
   if (Object.keys(labelsSet).length) set3.labels = labelsSet;
   if (labelsRemove.length) set3.labels_remove = labelsRemove;
   if (draft.profile && draft.profile !== record10.profile) set3.profile = draft.profile;
+  if (draft.addressability && draft.addressability !== (record10.addressability ?? "addressable")) set3.addressability = draft.addressability;
+  if (draft.runtimeMode && draft.runtimeMode !== (record10.runtimeMode ?? "")) set3.runtime_mode_override = draft.runtimeMode;
   const peersAdd = draft.peers.filter((peer) => !record10.peers.includes(peer));
   const peersRemove = record10.peers.filter((peer) => !draft.peers.includes(peer));
   return {
@@ -75498,7 +75539,9 @@ var CREATE_FIELDS = {
   display_name: "display_name",
   instructions: "instructions",
   first_message: "first_message",
-  peers: "peers"
+  peers: "peers",
+  addressability: "addressability",
+  runtime_mode_override: "runtime_mode"
 };
 var UPDATE_FIELDS = {
   "set.display_name": "display_name",
@@ -75507,6 +75550,8 @@ var UPDATE_FIELDS = {
   "set.labels": "labels",
   "set.labels_remove": "labels",
   "set.profile": "profile",
+  "set.addressability": "addressability",
+  "set.runtime_mode_override": "runtime_mode",
   peers_add: "peers",
   peers_remove: "peers"
 };
@@ -75549,6 +75594,70 @@ function instructionOutcomeWords(outcome) {
 function seatWords(seat) {
   return seat === "owed" ? "It exists and its name is taken, but it has not started yet: its first message did not start. It starts with its next message, and its first message runs once then." : null;
 }
+var REACH_CHOICES = [
+  { value: "addressable", label: "Can receive messages", hint: "People and the agents connected to it can message it." },
+  { value: "internal_only", label: "Internal only", hint: "Nobody messages it. It works only on what the team itself hands it." }
+];
+var RUN_MODE_CHOICES = [
+  { value: "", label: "As its profile says", hint: "Its profile decides how it runs." },
+  { value: "autonomous_host", label: "On its own", hint: "It works through what it is sent by itself, without waiting to be driven." },
+  { value: "turn_driven", label: "Turn by turn", hint: "It runs one turn for each thing it is given and waits in between." }
+];
+function plainWords(value) {
+  const words2 = value.replace(/[_-]+/g, " ").trim();
+  return words2 ? words2.charAt(0).toUpperCase() + words2.slice(1) : "";
+}
+function runModeWords(runtimeMode) {
+  const value = runtimeMode || "";
+  return RUN_MODE_CHOICES.find((choice) => choice.value === value)?.label ?? plainWords(value);
+}
+function scheduleCount(count2) {
+  return count2 === 1 ? "schedule" : "".concat(count2, " schedules");
+}
+function schedulesWords(followed) {
+  if (!followed) return [];
+  const count2 = Math.max(followed.count, followed.schedules.length);
+  const one3 = count2 === 1;
+  let done;
+  switch (followed.effect) {
+    case "paused":
+      done = "".concat(one3 ? "is" : "are", " paused until it is unarchived");
+      break;
+    case "resumed":
+      done = one3 ? "runs again" : "run again";
+      break;
+    case "ended":
+      done = "".concat(one3 ? "is" : "are", " ended");
+      break;
+    default:
+      return [];
+  }
+  const lines = [];
+  if (count2 > 0) {
+    const named = followed.schedules.flatMap((schedule) => schedule.name ? [schedule.name] : []);
+    const unnamed = count2 - named.length;
+    if (one3) {
+      lines.push("Its schedule".concat(named.length ? " ".concat(named[0]) : "", " ").concat(done, "."));
+    } else if (named.length === 0) {
+      lines.push("Its ".concat(scheduleCount(count2), " ").concat(done, "."));
+    } else {
+      const list5 = unnamed > 0 ? "".concat(named.join(", "), " and ").concat(unnamed, " without a name") : named.join(", ");
+      lines.push("Its ".concat(scheduleCount(count2), " ").concat(done, ": ").concat(list5, "."));
+    }
+  }
+  if (followed.incomplete) {
+    if (followed.askedAgain) {
+      lines.push("Not every schedule could be changed at first. The team was asked again to follow the rest.");
+    } else {
+      lines.push(count2 > 0 ? "Not every schedule could be changed. Try again to follow the rest." : "Its schedules could not be changed. Try again to follow them.");
+    }
+  }
+  return lines;
+}
+function schedulesOweRetry(outcome) {
+  return "agents" in outcome && outcome.agents.some((agent) => agent.schedules?.incomplete === true && !agent.schedules.askedAgain);
+}
+var ROSTER_LISTING_SUPERSEDED_NOTE = "The host's configuration lists an agent of this name too. That entry is not applied: this agent runs from its own record, and a change made here changes that record.";
 function outcomeWords2(change, outcome, name2) {
   if (outcome.outcome === "pending_decision") {
     return {
@@ -75601,11 +75710,12 @@ function outcomeWords2(change, outcome, name2) {
       if (change === "create") {
         title = "".concat(name2, " is created");
         const seat = seatWords(agent?.seat);
-        lines.push(seat ?? "It starts with its first message.");
+        lines.push(seat ?? "It is a member of the team now.");
       } else {
         title = "".concat(name2, " is updated");
       }
   }
+  lines.push(...schedulesWords(agent?.schedules));
   const instructions = instructionOutcomeWords(agent?.instructions);
   if (instructions) lines.push(instructions);
   return { tone: "ok", title, lines };
@@ -75713,11 +75823,12 @@ function requesterWords(provenance, personName) {
   }
   return { kind: "host", words: Object.hasOwn(HOST_SURFACE_WORDS, provenance.requester) ? HOST_SURFACE_WORDS[provenance.requester] : "The host (".concat(provenance.requester, ")") };
 }
+var HARVEST_WORDS = "Its last conversation is harvested, as for any agent that leaves the team.";
 function agentChangeConfirmWords(change, name2) {
   if (change === "archive") {
     return {
       question: "Archive ".concat(name2, "?"),
-      consequence: "It stops and keeps its name, its record, its conversation and its memory. Messages to it are refused until you unarchive it.",
+      consequence: "It stops and keeps its name, its record, its conversation and its memory. ".concat(HARVEST_WORDS, " Messages to it are refused until you unarchive it."),
       confirm: "Archive"
     };
   }
@@ -75730,7 +75841,7 @@ function agentChangeConfirmWords(change, name2) {
   }
   return {
     question: "Remove ".concat(name2, " for good?"),
-    consequence: "Its name can never be used again, and this cannot be undone. Archive is the reversible choice: an archived agent keeps its name, its record, its conversation and its memory, and you can bring it back.",
+    consequence: "Its name can never be used again, and this cannot be undone. ".concat(HARVEST_WORDS, " Archive is the reversible choice: an archived agent keeps its name, its record, its conversation and its memory, and you can bring it back."),
     confirm: "Remove for good"
   };
 }
@@ -75808,6 +75919,32 @@ function ProfilePicker({
     }),
     listed.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-form__hint", children: "This team lists no profile." }) : null
   ] });
+}
+function SettingPicker({
+  label: label2,
+  choices,
+  value,
+  onChange,
+  testIdPrefix,
+  describedBy,
+  invalid: invalid2
+}) {
+  const name2 = import_react81.default.useId();
+  return /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("div", { className: "identity-form__options", role: "radiogroup", "aria-label": label2, "aria-describedby": describedBy, "aria-invalid": invalid2 || void 0, children: choices.map((choice) => /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)("label", { className: "identity-form__option", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(
+      "input",
+      {
+        type: "radio",
+        name: name2,
+        value: choice.value,
+        checked: value === choice.value,
+        onChange: () => onChange(choice.value),
+        "data-testid": "".concat(testIdPrefix, ":").concat(choice.value || "profile")
+      }
+    ),
+    /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-form__option-name", children: choice.label }),
+    /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-form__option-hint", children: choice.hint })
+  ] }, choice.value)) });
 }
 function PeerPicker({
   directory,
@@ -75910,6 +76047,8 @@ function IdentityResultNotice({
   const { outcome } = result;
   const words2 = outcomeWords2(change, outcome, name2);
   const pending = outcome.outcome === "pending_decision";
+  const followAgain = schedulesOweRetry(outcome) && onRetry;
+  const scheduleIds = "agents" in outcome ? outcome.agents.flatMap((agent) => agent.schedules?.schedules ?? []).map((schedule) => schedule.scheduleId) : [];
   return /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)(
     Notice,
     {
@@ -75917,7 +76056,7 @@ function IdentityResultNotice({
       role: "status",
       testId: "identity-notice",
       className: "identity-notice",
-      action: pending && onWithdraw ? /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Button, { size: "sm", disabled: busy, onClick: onWithdraw, "data-testid": "identity-withdraw", children: "Withdraw request" }) : void 0,
+      action: pending && onWithdraw ? /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Button, { size: "sm", disabled: busy, onClick: onWithdraw, "data-testid": "identity-withdraw", children: "Withdraw request" }) : followAgain ? /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Button, { size: "sm", disabled: busy, onClick: onRetry, "data-testid": "identity-retry", children: "Try again" }) : void 0,
       children: [
         /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { "data-outcome": outcome.outcome, className: "identity-notice__title", children: words2.title }),
         words2.lines.map((line, index3) => /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-notice__line", children: line }, index3)),
@@ -75934,7 +76073,8 @@ function IdentityResultNotice({
             className: "identity-notice__tech",
             items: [
               { label: "Operation", value: outcome.operationId },
-              pending ? { label: "Decision", value: outcome.decisionId } : null
+              pending ? { label: "Decision", value: outcome.decisionId } : null,
+              ...scheduleIds.map((scheduleId) => ({ label: "Schedule", value: scheduleId }))
             ]
           }
         ) : null
@@ -75944,6 +76084,7 @@ function IdentityResultNotice({
 }
 function useChangeSender(api, change, name2) {
   const slot = import_react81.default.useRef(null);
+  const first = import_react81.default.useRef(null);
   const [busy, setBusy] = import_react81.default.useState(false);
   const [result, setResult] = import_react81.default.useState(null);
   const alive = import_react81.default.useRef(true);
@@ -75952,8 +76093,16 @@ function useChangeSender(api, change, name2) {
   }, []);
   const send = async (request) => {
     slot.current = requestIdFor(slot.current, change, request, api.mintRequestId);
+    const requestId2 = slot.current.requestId;
     setBusy(true);
-    const answer = await api.change(change, request, slot.current.requestId, name2);
+    let answer = await api.change(change, request, requestId2, name2);
+    if (answer.kind === "outcome") {
+      if (first.current?.requestId === requestId2) {
+        answer = { kind: "outcome", outcome: keepFirstSchedules(first.current.outcome, answer.outcome) };
+      } else {
+        first.current = { requestId: requestId2, outcome: answer.outcome };
+      }
+    }
     if (alive.current) {
       setBusy(false);
       setResult(answer);
@@ -76093,7 +76242,29 @@ function NewAgentForm({ api, onClose }) {
             }
           ) }),
           /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Field, { field: "peers", label: "Peers", hint: "Optional. The agents it can message. Nothing else is connected to it.", error: errors.peers, children: (ids) => /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(PeerPicker, { directory, value: draft.peers, onChange: (peers) => set3("peers", "peers", peers), describedBy: ids.describedBy }) }),
-          /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Field, { field: "first_message", label: "First message", hint: "Optional. Its first turn, run once. Without one it starts with the first message it receives.", error: errors.first_message, children: (ids) => /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(
+          /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Field, { field: "addressability", label: "Reachability", error: errors.addressability, children: (ids) => /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(
+            SettingPicker,
+            {
+              label: "Reachability",
+              choices: REACH_CHOICES,
+              value: draft.addressability,
+              onChange: (value) => set3("addressability", "addressability", value),
+              testIdPrefix: "identity-addressability",
+              ...ids
+            }
+          ) }),
+          /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Field, { field: "runtime_mode", label: "How it runs", error: errors.runtime_mode, children: (ids) => /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(
+            SettingPicker,
+            {
+              label: "How it runs",
+              choices: RUN_MODE_CHOICES,
+              value: draft.runtimeMode,
+              onChange: (value) => set3("runtimeMode", "runtime_mode", value),
+              testIdPrefix: "identity-runtime-mode",
+              ...ids
+            }
+          ) }),
+          /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Field, { field: "first_message", label: "First message", hint: "Optional. The agent is given it once, when it starts; what an agent does at its start follows from how it runs, which its profile decides unless you choose above.", error: errors.first_message, children: (ids) => /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(
             "textarea",
             {
               className: "cc-input",
@@ -76270,6 +76441,37 @@ function EditAgentForm({
             ] }) : null
           ] }) }),
           /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Field, { field: "peers", label: "Peers", hint: "The agents it can message.", error: errors.peers, children: (ids) => /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(PeerPicker, { directory, value: draft.peers, exclude: name2, onChange: (peers) => set3("peers", "peers", peers), describedBy: ids.describedBy }) }),
+          /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Field, { field: "addressability", label: "Reachability", error: errors.addressability, children: (ids) => /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(
+            SettingPicker,
+            {
+              label: "Reachability",
+              choices: REACH_CHOICES,
+              value: draft.addressability,
+              onChange: (value) => set3("addressability", "addressability", value),
+              testIdPrefix: "identity-addressability",
+              ...ids
+            }
+          ) }),
+          /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(
+            Field,
+            {
+              field: "runtime_mode",
+              label: "How it runs",
+              hint: record10.runtimeMode ? "It can be changed, not handed back to the profile." : void 0,
+              error: errors.runtime_mode,
+              children: (ids) => /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(
+                SettingPicker,
+                {
+                  label: "How it runs",
+                  choices: record10.runtimeMode ? RUN_MODE_CHOICES.filter((choice) => choice.value !== "") : RUN_MODE_CHOICES,
+                  value: draft.runtimeMode,
+                  onChange: (value) => set3("runtimeMode", "runtime_mode", value),
+                  testIdPrefix: "identity-runtime-mode",
+                  ...ids
+                }
+              )
+            }
+          ),
           /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Field, { field: "labels", label: "Labels", error: errors.labels, children: (ids) => /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)("div", { className: "identity-form__labels", "aria-describedby": ids.describedBy, children: [
             draft.labels.map((label2, index3) => /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)("div", { className: "identity-form__label-row", children: [
               /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(
@@ -76594,6 +76796,9 @@ function AgentRecordFacts({
             } : null,
             provenance ? { label: "When", value: /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("time", { dateTime: new Date(provenance.atMs).toISOString(), children: formatAbsoluteTime(provenance.atMs) }) } : null,
             provenance?.consentForm ? { label: "Consent", value: consentWords(provenance.consentForm) } : null,
+            // How the agent runs, as its record says; who reaches it is
+            // the status's word, in the pane's overview.
+            { label: "How it runs", value: runModeWords(record10.runtimeMode) },
             record10.openOperations.length ? { label: "Open requests", value: "".concat(record10.openOperations.length, " waiting") } : null
           ]
         }
@@ -77916,6 +78121,7 @@ function AgentDetailsPanel({
               ]
             }
           ),
+          view.roster_listing_superseded === true ? /* @__PURE__ */ (0, import_jsx_runtime109.jsx)(Notice, { tone: "neutral", className: "agent-details__status-note", testId: "inspect-roster-superseded:".concat(identity), children: ROSTER_LISTING_SUPERSEDED_NOTE }) : null,
           /* @__PURE__ */ (0, import_jsx_runtime109.jsxs)(Part, { label: "Activity \xB7 24h", action: "".concat(countWords2(turnsToday, "turn"), " today"), testId: "inspect-activity:".concat(identity), children: [
             /* @__PURE__ */ (0, import_jsx_runtime109.jsx)("div", { ref: barsRef, className: "agent-details__bars-box" }),
             /* @__PURE__ */ (0, import_jsx_runtime109.jsx)(
@@ -94312,6 +94518,14 @@ function actionVisible(actions, key) {
   return actions?.[key] !== false;
 }
 function normalizeConsoleInspectResult(value) {
+  const view = normalizeConsoleInspectView(value);
+  if (!view) return null;
+  const record10 = value !== null && typeof value === "object" ? value : {};
+  const facts = record10.identity !== null && typeof record10.identity === "object" ? record10.identity : {};
+  const superseded = record10.roster_listing_superseded === true || facts.roster_listing_superseded === true;
+  return superseded ? { ...view, roster_listing_superseded: true } : view;
+}
+function normalizeConsoleInspectView(value) {
   const direct = normalizeIdentityInspectViewState(value);
   if (direct) return direct;
   const record10 = value && typeof value === "object" ? value : {};

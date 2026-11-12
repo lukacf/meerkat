@@ -41,6 +41,7 @@ from meerkat_meta import (
     IdentityRefusedError,
     IdentityWithdrawn,
     SchedulesFollowed,
+    UpdateAgent,
 )
 from meerkat_meta.builder import Meta
 from meerkat_meta.errors import RpcError
@@ -549,7 +550,6 @@ async def test_a_change_a_person_must_decide_is_held_read_and_withdrawn(tmp_path
         assert "editor" not in {agent.name for agent in listed}
 
 
-@_ahead("capability")
 async def test_a_create_and_an_update_set_who_reaches_an_agent_and_how_it_runs(tmp_path):
     async with gateway(tmp_path) as identities:
         created = await identities.create(
@@ -601,7 +601,6 @@ async def test_a_create_and_an_update_set_who_reaches_an_agent_and_how_it_runs(t
         assert refused.value.kind == "invalid_request"
 
 
-@_ahead("schedules")
 async def test_a_change_that_stops_or_restores_an_agent_says_what_became_of_its_schedules(
     tmp_path,
 ):
@@ -705,6 +704,57 @@ async def test_a_status_says_when_the_roster_lists_an_agent_served_from_its_reco
         # An agent the roster does not list says nothing.
         await _created(identities)
         assert (await runtime.status("editor")).roster_listing_superseded is False
+
+
+@_ahead("roster_listing_superseded")
+async def test_get_list_the_directory_and_a_plan_say_when_the_roster_lists_an_agent(tmp_path):
+    async with gateway(tmp_path) as identities:
+
+        async def read(name: str) -> list[bool]:
+            listed = {agent.name: agent for agent in (await identities.list()).agents}
+            peers = {peer.name: peer for peer in (await identities.directory()).peers}
+            return [
+                (await identities.get(name)).roster_listing_superseded,
+                listed[name].roster_listing_superseded,
+                peers[name].roster_listing_superseded,
+            ]
+
+        async def planned_rename(name: str, digest: str) -> bool:
+            plan = await identities.plan(
+                "update",
+                UpdateAgent(
+                    name=name,
+                    expected_spec_digest=digest,
+                    request_id=f"plan-rename-{name}",
+                    set=AgentSet(display_name="Renamed"),
+                ),
+            )
+            return plan.roster_listing_superseded
+
+        # The roster lists scout and serves it: nothing is superseded.
+        record = await identities.get("scout")
+        assert await read("scout") == [False, False, False]
+        plan = await identities.plan(
+            "adopt",
+            AgentRef(
+                name="scout",
+                expected_spec_digest=record.spec_digest,
+                request_id="plan-adopt-scout",
+            ),
+        )
+        assert plan.roster_listing_superseded is False
+
+        adopted = await identities.adopt(
+            "scout", expected_spec_digest=record.spec_digest, request_id="adopt-scout"
+        )
+        assert isinstance(adopted, IdentityDone), adopted
+        # The roster still lists scout, and its record serves it now.
+        assert await read("scout") == [True, True, True]
+        assert await planned_rename("scout", record.spec_digest) is True
+        # An agent the roster does not list says nothing.
+        digest = await _created(identities)
+        assert await read("editor") == [False, False, False]
+        assert await planned_rename("editor", digest) is False
 
 
 @_ahead("preparation_reads")

@@ -517,7 +517,7 @@ describe("identity family on a real gateway", () => {
 
   it(
     "a create and an update set who reaches an agent and how it runs",
-    { skip: ahead("capability") },
+    { skip },
     async () => {
       await withGateway(async (identities) => {
         const made = await identities.create(
@@ -583,7 +583,7 @@ describe("identity family on a real gateway", () => {
   // was followed; a replay states nothing of them.
   it(
     "a change that stops or restores an agent says what became of its schedules",
-    { skip: ahead("schedules") },
+    { skip },
     async () => {
       await withGateway(async (identities) => {
         const digest = await created(identities);
@@ -786,6 +786,56 @@ describe("identity family on a real gateway", () => {
         // An agent the roster does not list says nothing.
         await created(identities);
         assert.equal((await status("editor")).rosterListingSuperseded, false);
+      });
+    },
+  );
+
+  it(
+    "get, list, the directory and a plan say when the roster lists an agent",
+    { skip: ahead("roster_listing_superseded") },
+    async () => {
+      await withGateway(async (identities) => {
+        const read = async (name: string) => {
+          const listed = (await identities.list()).agents.find((agent) => agent.name === name);
+          const peer = (await identities.directory()).peers.find((entry) => entry.name === name);
+          return [
+            (await identities.get(name)).rosterListingSuperseded,
+            listed?.rosterListingSuperseded,
+            peer?.rosterListingSuperseded,
+          ];
+        };
+        const plannedRename = async (name: string, digest: string) =>
+          (
+            await identities.plan("update", {
+              name,
+              expectedSpecDigest: digest,
+              requestId: `plan-rename-${name}`,
+              set: { displayName: "Renamed" },
+            })
+          ).rosterListingSuperseded;
+
+        // The roster lists scout and serves it: nothing is superseded.
+        const record = await identities.get("scout");
+        assert.deepEqual(await read("scout"), [false, false, false]);
+        const plan = await identities.plan("adopt", {
+          name: "scout",
+          expectedSpecDigest: record.specDigest,
+          requestId: "plan-adopt-scout",
+        });
+        assert.equal(plan.rosterListingSuperseded, false);
+
+        const adopted = await identities.adopt("scout", {
+          expectedSpecDigest: record.specDigest,
+          requestId: "adopt-scout",
+        });
+        assert.equal(adopted.outcome, "done");
+        // The roster still lists scout, and its record serves it now.
+        assert.deepEqual(await read("scout"), [true, true, true]);
+        assert.equal(await plannedRename("scout", record.specDigest), true);
+        // An agent the roster does not list says nothing.
+        const digest = await created(identities);
+        assert.deepEqual(await read("editor"), [false, false, false]);
+        assert.equal(await plannedRename("editor", digest), false);
       });
     },
   );

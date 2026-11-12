@@ -8715,7 +8715,17 @@ mod tests {
         );
         assert!(
             hidden.starts_with("error:") && !hidden.contains("destroy-kept"),
-            "the report names no member hidden from the caller: {hidden}"
+            "the report names no member hidden from the caller, in the refusal's message or \
+             in its data: {hidden}"
+        );
+        assert!(
+            hidden.contains("mob destroy incomplete") && hidden.contains("mob_destroy_incomplete"),
+            "a destroy whose only failure is a hidden member's is still answered as \
+             incomplete: {hidden}"
+        );
+        assert!(
+            !hidden.contains("the archive is refused"),
+            "no text of the hidden member's failure is answered: {hidden}"
         );
     }
 

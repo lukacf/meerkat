@@ -957,39 +957,40 @@ fn a_constructed_preparation_needs_its_deadline_and_a_native_host() {
         PreparationMode::None,
         "a profile the policy does not name needs no preparation"
     );
-    let refusal = resolve(
-        None,
-        RuntimeOptionPolicy::Enabled(Box::new(policy.clone())),
-        true,
-    )
-    .expect_err("no native host");
-    assert_eq!(refusal.path, "preparation.analyst");
-    assert_eq!(refusal.kind, PolicyRefusalKind::NeedsNativeHost);
-    // With a native host it is not the host the launch lacks. The launch
-    // still refuses the policy in this release, at the preparation's mode:
-    // no method settles a preparation yet.
-    let unserved = resolve(
-        Some(Ok(None)),
-        RuntimeOptionPolicy::Enabled(Box::new(policy)),
-        true,
-    )
-    .expect_err("no preparation is carried out in this release");
-    assert_eq!(unserved.path, "preparation.analyst.mode");
-    assert!(
-        matches!(unserved.kind, PolicyRefusalKind::Unsupported { .. }),
-        "{unserved}"
-    );
-    // Only a constructed preparation needs a native host: a required one is
-    // refused for what it is, not for a host.
-    value["preparation"] = json!({"analyst": {"mode": "required"}});
-    let required = parse(&value);
+    // No launch of this release holds or activates a construction: the
+    // policy is refused at the constructed preparation's mode, with a text
+    // that names the mode a host writes, whether the launch has a native
+    // host or not. What is not served is said before what a host lacks.
+    for native_host in [false, true] {
+        let unserved = resolve(
+            native_host.then_some(Ok(None)),
+            RuntimeOptionPolicy::Enabled(Box::new(policy.clone())),
+            true,
+        )
+        .expect_err("no construction is held in this release");
+        assert_eq!(
+            unserved.path, "preparation.analyst.mode",
+            "native host: {native_host}"
+        );
+        assert!(
+            matches!(&unserved.kind, PolicyRefusalKind::Unsupported { feature }
+                if feature.contains("constructed") && feature.contains("write required")),
+            "native host: {native_host}: {unserved}"
+        );
+    }
+    // A required preparation needs no native host and is served: the host
+    // settles it. The policy is one a launch serves in every other
+    // respect too (no rule names an outcome nothing carries out).
+    let mut served_value = served_policy_json();
+    served_value["preparation"] = json!({"analyst": {"mode": "required"}});
+    let required = parse(&served_value);
     assert!(!required.needs_native_host());
-    let unserved = resolve(None, RuntimeOptionPolicy::Enabled(Box::new(required)), true)
-        .expect_err("no preparation is carried out in this release");
-    assert_eq!(unserved.path, "preparation.analyst.mode");
-    assert!(
-        matches!(unserved.kind, PolicyRefusalKind::Unsupported { .. }),
-        "{unserved}"
+    let served = resolve(None, RuntimeOptionPolicy::Enabled(Box::new(required)), true)
+        .expect("a launch serves a required preparation")
+        .expect("the policy is the launch's");
+    assert_eq!(
+        preparation_of(&served, "analyst"),
+        PreparationMode::Required
     );
     value["preparation"] =
         json!({"analyst": {"mode": "constructed", "construction_deadline_ms": 10}});

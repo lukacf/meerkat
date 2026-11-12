@@ -120,6 +120,8 @@ pub use executor::{
     ChangeConsent, ChangeRequester, CoreChangeExecutor, ExecutorError, IdentityChangeExecutor,
     InstructionStep, committed_outcome, consent_of_plan, refusal_of_core, refusal_of_error,
 };
+// The settle of an agent's preparation, as the seam and the family take it.
+pub use executor::{MOVE_INTO_PREPARED_PROFILE, PreparationSettle};
 pub use family::{
     AgentEntered, AgentPage, AgentProvenance, AgentReadiness, AgentRecord, AgentRef, AgentSet,
     AgentSpec, AgentSummary, ChangePlan, ChangesHold, ChangesHoldRequest, ConsentSummary,
@@ -128,6 +130,7 @@ pub use family::{
     ListAgents, OperationRef, OperationState, ReadDirectory, UpdateAgent, WithdrawRequest,
     Withdrawn,
 };
+pub use family::{SettlePreparation, SettlePreparationCall};
 pub(crate) use gate::IdentityGate;
 pub use gate::{
     FIRST_MESSAGE_IN_GOVERNED_REALM, IdentityFamilyOptions, IdentityFamilySlot, IdentityHostHooks,

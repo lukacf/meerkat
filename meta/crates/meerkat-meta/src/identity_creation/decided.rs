@@ -62,9 +62,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use meerkat_core::approval::ApprovalConsentDeliveryState;
 use meerkat_core::approval::decision::{
-    ApproverId, ConsentProvenance, DecisionHoldRequest, DecisionId, DecisionKind,
-    DecisionOperationId, DecisionPhase, DecisionPrincipalKey, DecisionReference, DecisionRenderer,
-    DecisionRendering, DecisionRequestBody, DecisionSubjectKey, DecisionTier, StoredDecision,
+    ApproverId, ConsentProvenance, DECISION_PAGE_MAX, DecisionHoldRequest, DecisionId,
+    DecisionKind, DecisionListFilter, DecisionOperationId, DecisionPhase, DecisionPrincipalKey,
+    DecisionReference, DecisionRenderer, DecisionRendering, DecisionRequestBody,
+    DecisionSubjectKey, DecisionTier, StoredDecision,
 };
 use meerkat_core::{PrincipalKind, PrincipalRef, TrustDomainId};
 use meerkat_mob::{MobHandle, ProfileName};
@@ -474,6 +475,16 @@ fn unavailable(error: &DecisionError) -> IdentityRefusal {
     )
 }
 
+/// The mob's held changes could not be listed now: what is open for its
+/// agents is not known, and a read says so instead of answering "nothing".
+fn unlisted(error: &DecisionError) -> IdentityRefusal {
+    tracing::warn!(%error, "the held changes of a mob's agents could not be listed");
+    IdentityRefusal::new(IdentityRefusalKind::ApprovalUnavailable).with_detail(
+        "The mob's held changes could not be read now, so what is open for its agents is not \
+         known: read again later.",
+    )
+}
+
 /// The subject key of the decision that holds `operation_id` in `mob_id`.
 fn subject_key(
     mob_id: &str,
@@ -734,6 +745,72 @@ impl IdentityDecisions {
             Some(row) => Ok(Some(self.state_of(mob, operation_id, &row).await)),
             None => Ok(None),
         }
+    }
+
+    /// The operations the decisions of `mob`'s changes keep open, by the
+    /// agent each names: a change held for a person's decision, and one a
+    /// person approved that is not carried out yet (the states an operation
+    /// reads `pending_decision` in). It is read from the decision rows at
+    /// each call, one listing of the open and one of the approved decisions:
+    /// nothing is kept of it, nothing is written (a decision past its
+    /// deadline is left out, and its expiry is not recorded here), and no
+    /// agent is read, loaded or woken. A decision of another mob, of another
+    /// kind, or whose body this version does not read keeps nothing open
+    /// here. A launch whose decisions are unavailable holds no change, so
+    /// nothing is open; a listing that fails is refused, never read as
+    /// "nothing is open".
+    pub fn open_operations(
+        &self,
+        mob: &MobHandle,
+    ) -> Result<BTreeMap<String, Vec<OperationId>>, IdentityRefusal> {
+        let mut open: BTreeMap<String, Vec<OperationId>> = BTreeMap::new();
+        if !self.decisions.is_available() {
+            return Ok(open);
+        }
+        let mob_id = mob.mob_id();
+        for phase in [DecisionPhase::Open, DecisionPhase::Approved] {
+            let filter = DecisionListFilter::default().with_phase(phase);
+            let mut after: Option<String> = None;
+            loop {
+                let page = self
+                    .decisions
+                    .owner()
+                    .list(&filter, after.as_deref(), DECISION_PAGE_MAX)
+                    .map_err(|error| unlisted(&error))?;
+                for row in &page.decisions {
+                    // The listing reads each row at its clock: one past its
+                    // deadline is no longer held.
+                    if !matches!(
+                        row.state.phase,
+                        DecisionPhase::Open | DecisionPhase::Approved
+                    ) {
+                        continue;
+                    }
+                    let Ok(held) = HeldIdentityChange::of(row) else {
+                        continue;
+                    };
+                    if held.mob_id != mob_id.as_str() {
+                        continue;
+                    }
+                    let Some(operation_id) =
+                        OperationId::from_recorded(row.descriptor.operation_id.as_str())
+                    else {
+                        continue;
+                    };
+                    for identity in held.request.action.identities() {
+                        open.entry(identity.to_owned())
+                            .or_default()
+                            .push(operation_id.clone());
+                    }
+                }
+                match page.next_after {
+                    // A store that names the same row again has no more.
+                    Some(next) if after.as_ref() != Some(&next) => after = Some(next),
+                    _ => break,
+                }
+            }
+        }
+        Ok(open)
     }
 
     /// The host's lines for `request`, asked now.

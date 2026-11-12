@@ -7654,8 +7654,10 @@ fn identity_lifecycle_state_json(
 /// member in; null while Core holds no member of it) and
 /// `customizer_tools_pending` (null while the identity's customizer tools
 /// are published); `convergence`, `wake_refusal` and `replaced_session`
-/// only when set. Every field comes from the one status read. The session
-/// repair hold is answered by `meta/member_health`, not here.
+/// only when set, and `archived` and `preparation_pending` only when true
+/// (why no member holds the identity). Every field comes from the one
+/// status read. The session repair hold is answered by
+/// `meta/member_health`, not here.
 fn identity_status_wire(status: &crate::identity_first::IdentityStatus) -> Value {
     let mut result = serde_json::json!({
         "state": identity_lifecycle_state_json(status.state),
@@ -7677,7 +7679,9 @@ fn identity_status_wire(status: &crate::identity_first::IdentityStatus) -> Value
 
 /// The optional status fields: Core's mob member id of the identity's
 /// binding, Core's convergence of a host-adopted identity, the last refused
-/// wake, and the session the last wake replaced.
+/// wake, the session the last wake replaced, and why no member holds the
+/// identity (archived, or awaiting its host's preparation), each written
+/// only when it is so.
 fn insert_identity_status_extras(
     result: &mut Value,
     status: &crate::identity_first::IdentityStatus,
@@ -7687,6 +7691,14 @@ fn insert_identity_status_extras(
     };
     if let Some(member_id) = status.member_id.as_ref() {
         fields.insert("member_id".to_string(), Value::String(member_id.clone()));
+    }
+    for (member, set) in [
+        ("archived", status.record.archived),
+        ("preparation_pending", status.record.preparation_pending),
+    ] {
+        if set {
+            fields.insert(member.to_string(), Value::Bool(true));
+        }
     }
     if let Some(convergence) = status.convergence.as_ref()
         && let Ok(value) = serde_json::to_value(convergence)
@@ -9268,6 +9280,42 @@ mod tests {
             assert_eq!(set.get(key), record.get(key), "{key}: {set}");
         }
         assert!(set.get("session_repair_required").is_none(), "{set}");
+    }
+
+    /// `meta/status_identity` answers why no member holds an identity in
+    /// the status record's own form: `archived` and `preparation_pending`,
+    /// each only when true, so the answer of an identity a member holds
+    /// names neither.
+    #[test]
+    fn status_identity_answers_why_no_member_holds_an_identity() {
+        let seated: crate::identity_first::IdentityStatus = serde_json::from_value(json!({
+            "identity": "review:singleton",
+            "state": "active",
+            "addressability": "addressable",
+        }))
+        .expect("identity status");
+        let unset = super::identity_status_wire(&seated);
+        for member in ["archived", "preparation_pending"] {
+            assert!(unset.get(member).is_none(), "{member}: {unset}");
+        }
+        for (member, other) in [
+            ("archived", "preparation_pending"),
+            ("preparation_pending", "archived"),
+        ] {
+            let mut read = json!({
+                "identity": "review:singleton",
+                "state": "dormant",
+                "addressability": "addressable",
+            });
+            read[member] = json!(true);
+            let status: crate::identity_first::IdentityStatus =
+                serde_json::from_value(read).expect("identity status");
+            let set = super::identity_status_wire(&status);
+            let record = serde_json::to_value(&status).expect("the status record serializes");
+            assert_eq!(set.get(member), Some(&json!(true)), "{member}: {set}");
+            assert_eq!(set.get(member), record.get(member), "{member}: {set}");
+            assert!(set.get(other).is_none(), "{other}: {set}");
+        }
     }
 
     #[derive(Debug, Default)]

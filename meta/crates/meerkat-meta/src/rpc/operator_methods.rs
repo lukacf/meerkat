@@ -792,10 +792,13 @@ pub(super) async fn handle_set_instruction(
                 Ok(resolved) => resolved,
                 Err(response) => return *response,
             };
+            // The host verb names one agent's own instructions: the record
+            // is that member's alone.
             meerkat_mob::OperatorInstructionTarget::Member {
                 agent_identity: crate::member_comms_id::roster_member_id_for_identity(
                     resolved.identity.as_str(),
                 ),
+                include_forks: false,
             }
         }
     };

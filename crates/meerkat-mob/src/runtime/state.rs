@@ -2083,6 +2083,19 @@ pub(super) enum MobCommand {
         outcomes: Vec<super::operator_instruction_delivery::MemberInstructionDeliveryOutcome>,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
+    /// A durable fork asks MobMachine, before it seats its child, for the
+    /// fork lineage root the child's seat records and the child's operator
+    /// instruction snapshot for its committed session (internal): one read
+    /// of the machine's state, no transition.
+    PrepareForkMemberInstructionBirth {
+        source: AgentIdentity,
+        child: AgentIdentity,
+        profile_name: ProfileName,
+        fork_session_id: SessionId,
+        reply_tx: oneshot::Sender<
+            Result<super::operator_instruction_delivery::ForkMemberInstructionBirth, MobError>,
+        >,
+    },
     PollEvents {
         after_cursor: u64,
         limit: usize,
@@ -2573,6 +2586,7 @@ impl MobCommand {
             Self::GrantMemberTool { .. } => ShutdownAnswerClass::CallerRequest,
             Self::PrepareMemberInstructionDelivery { .. } => ShutdownAnswerClass::CallerRequest,
             Self::SettleMemberInstructionDeliveries { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::PrepareForkMemberInstructionBirth { .. } => ShutdownAnswerClass::CallerRequest,
             Self::PollEvents { .. } => ShutdownAnswerClass::CallerRequest,
             Self::ReplayAllEvents { .. } => ShutdownAnswerClass::CallerRequest,
             Self::RecordOperatorActionProvenance { .. } => ShutdownAnswerClass::CallerRequest,
@@ -2811,6 +2825,7 @@ impl MobCommand {
             Self::GrantMemberTool { .. } => "GrantMemberTool",
             Self::PrepareMemberInstructionDelivery { .. } => "PrepareMemberInstructionDelivery",
             Self::SettleMemberInstructionDeliveries { .. } => "SettleMemberInstructionDeliveries",
+            Self::PrepareForkMemberInstructionBirth { .. } => "PrepareForkMemberInstructionBirth",
             Self::PollEvents { .. } => "PollEvents",
             Self::ReplayAllEvents { .. } => "ReplayAllEvents",
             Self::RecordOperatorActionProvenance { .. } => "RecordOperatorActionProvenance",

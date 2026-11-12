@@ -221,11 +221,20 @@ impl Fixture {
     /// Fork the source as `fork_off` does (the child's first turn is started
     /// by the fork itself) and return the child's first request.
     async fn self_starting_fork(&self, child: &str) -> meerkat_client::LlmRequest {
+        self.self_starting_fork_of(&self.identity, child).await
+    }
+
+    /// [`Self::self_starting_fork`] of the member `source`.
+    async fn self_starting_fork_of(
+        &self,
+        source: &AgentIdentity,
+        child: &str,
+    ) -> meerkat_client::LlmRequest {
         let before = self.client.requests().len();
         let outcome = tokio::time::timeout(
             WAIT,
             self.handle.fork_member_then_run_bounded(
-                &self.identity,
+                source,
                 SpawnMemberSpec::new(ProfileName::from("lead"), AgentIdentity::from(child))
                     .with_initial_message("the forked task"),
                 None,
@@ -831,5 +840,286 @@ async fn a_forks_inheritance_survives_a_restart_before_its_first_run() {
         &second,
         "the revision reached the child as an appended entry",
     );
+    fixture.finish().await;
+}
+
+impl Fixture {
+    /// The slot keys the mob's status read lists in `identity`'s row.
+    async fn listed_slots(&self, identity: &AgentIdentity) -> Vec<String> {
+        self.handle
+            .operator_instruction_status(OperatorInstructionStatusQuery::default())
+            .await
+            .expect("the status read answers")
+            .members
+            .into_iter()
+            .find(|member| &member.agent_identity == identity)
+            .unwrap_or_else(|| panic!("{identity} has a status row"))
+            .slots
+            .into_iter()
+            .map(|slot| slot.slot.key.to_string())
+            .collect()
+    }
+}
+
+/// A fork's seat records what the fork descends from in the step that seats
+/// it, before the mob can prepare a delivery for the seat. So the first
+/// snapshot the child's session records, the one it holds when the mob
+/// reads the child as current, is at the mob's generation and names its
+/// source's record with the body, before the child has run anything.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_forks_first_recorded_snapshot_holds_its_sources_record() {
+    let fixture =
+        Fixture::source_with_record(member_and_forks(&AgentIdentity::from("restored-member")))
+            .await;
+    let child = fixture.host_driven_fork("fork-child").await;
+    fixture.instructions_current(&child).await;
+
+    let page = fixture
+        .handle
+        .operator_instruction_status(OperatorInstructionStatusQuery::default())
+        .await
+        .expect("the status read answers");
+    let row = page
+        .members
+        .iter()
+        .find(|member| member.agent_identity == child)
+        .expect("the child has a status row");
+    assert_eq!(
+        row.delivery.recorded_generation,
+        Some(page.generation),
+        "the mob reads the child as current at its generation"
+    );
+
+    let session = fixture
+        .member_session(&child)
+        .await
+        .expect("the child has a session");
+    let durable = fixture
+        .durable(&session)
+        .await
+        .expect("the child's durable session");
+    let target = durable
+        .instruction_target_state()
+        .expect("the child's recorded target reads back typed")
+        .expect("the child's session recorded a snapshot");
+    assert_eq!(
+        target.target_generation(),
+        page.generation,
+        "the snapshot the child's session holds is the one the mob reads as current"
+    );
+    let slot = target
+        .slot(&InstructionSlot {
+            namespace: InstructionNamespace::new("app.example").expect("namespace"),
+            key: InstructionKey::new("call-sign").expect("key"),
+        })
+        .expect("the child's first recorded snapshot names its source's record");
+    assert_eq!(slot.effect, meerkat_core::InstructionEffect::Active);
+    assert_eq!(
+        slot.pending_body.as_deref(),
+        Some(CALL_SIGN),
+        "with its body, pending until the child's first run applies it"
+    );
+    assert_eq!(
+        fixture.listed_slots(&child).await,
+        vec!["call-sign".to_string()],
+        "the child's status row lists its source's record"
+    );
+    fixture.finish().await;
+}
+
+/// A record for a member and its forks follows the member's fork family
+/// from its root. Three members: the first, a fork of it, and a fork of
+/// that fork. A record written for the fork between and its forks selects
+/// that fork only: the fork below it never carries the body, and its status
+/// row does not list the record. A record written for the first member and
+/// its forks reaches all three. The write's receipt counts exactly the
+/// seated members the record selects, and each member's status row lists
+/// the records of its snapshot.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_record_for_a_fork_and_its_forks_selects_that_fork_only() {
+    let fixture = Fixture::restored_member().await;
+    fixture.run_turn("the first member's turn").await;
+    let first = fixture.identity.clone();
+    let between = fixture.host_driven_fork("fork-between").await;
+    fixture
+        .turn_request(&between, "the fork between runs a turn")
+        .await;
+    let below = AgentIdentity::from("fork-below");
+    tokio::time::timeout(
+        WAIT,
+        fixture.handle.fork_member(
+            &between,
+            SpawnMemberSpec::new(ProfileName::from("lead"), below.clone()),
+            None,
+        ),
+    )
+    .await
+    .expect("the second fork answers")
+    .expect("the second fork commits and seats the fork below");
+
+    // For the fork between and its forks: that fork only.
+    let receipt = fixture
+        .handle
+        .set_operator_instruction(write(
+            "house-style",
+            1,
+            HOUSE_STYLE,
+            member_and_forks(&between),
+        ))
+        .await
+        .expect("the record for the fork between commits");
+    assert_eq!(
+        receipt.matched_members, 1,
+        "a record for a fork and its forks selects that fork only"
+    );
+    fixture.instructions_current(&between).await;
+    let request = fixture
+        .turn_request(&between, "the fork between under its record")
+        .await;
+    assert_eq!(
+        entries_with(&request, HOUSE_STYLE),
+        1,
+        "the fork the record names has it in effect"
+    );
+    let request = fixture
+        .turn_request(&below, "the fork below runs a turn")
+        .await;
+    assert!(
+        !carries(&request, HOUSE_STYLE),
+        "the fork below the named fork carries the body nowhere"
+    );
+    assert_eq!(
+        fixture.listed_slots(&between).await,
+        vec!["house-style".to_string()]
+    );
+    for other in [&first, &below] {
+        assert!(
+            fixture.listed_slots(other).await.is_empty(),
+            "{other}'s status row does not list the record for the fork between"
+        );
+    }
+
+    // For the first member and its forks: all three.
+    let receipt = fixture
+        .handle
+        .set_operator_instruction(write("call-sign", 1, CALL_SIGN, member_and_forks(&first)))
+        .await
+        .expect("the record for the first member commits");
+    assert_eq!(
+        receipt.matched_members, 3,
+        "a record for the first member and its forks selects it and every fork below it"
+    );
+    for member in [&first, &between, &below] {
+        fixture.instructions_current(member).await;
+        let request = fixture
+            .turn_request(member, "a turn under the family's record")
+            .await;
+        assert_eq!(
+            entries_with(&request, CALL_SIGN),
+            1,
+            "{member} has the first member's record in effect, once"
+        );
+    }
+    assert_eq!(
+        fixture.listed_slots(&first).await,
+        vec!["call-sign".to_string()]
+    );
+    assert_eq!(
+        fixture.listed_slots(&between).await,
+        vec!["call-sign".to_string(), "house-style".to_string()]
+    );
+    assert_eq!(
+        fixture.listed_slots(&below).await,
+        vec!["call-sign".to_string()],
+        "the fork below lists its root's record, not the record of the fork between"
+    );
+    let request = fixture
+        .turn_request(&below, "the fork below runs another turn")
+        .await;
+    assert!(
+        !carries(&request, HOUSE_STYLE),
+        "the fork below still carries the other record's body nowhere"
+    );
+    fixture.finish().await;
+}
+
+/// A fork of a fork is recorded with the first member of its family by
+/// every fork route, never with the fork it was taken from: a fork that
+/// starts its own turn and a helper fork, each taken from a fork of the
+/// first member, run their first turn under the first member's record and
+/// not under the record written for the fork between and its forks, and
+/// the mob's status read lists the first member's record in their rows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fork_of_a_fork_is_recorded_with_the_first_member_by_every_route() {
+    let fixture =
+        Fixture::source_with_record(member_and_forks(&AgentIdentity::from("restored-member")))
+            .await;
+    let between = fixture.host_driven_fork("fork-between").await;
+    fixture
+        .turn_request(&between, "the fork between runs a turn")
+        .await;
+    let receipt = fixture
+        .handle
+        .set_operator_instruction(write(
+            "house-style",
+            1,
+            HOUSE_STYLE,
+            member_and_forks(&between),
+        ))
+        .await
+        .expect("the record for the fork between commits");
+    assert_eq!(receipt.matched_members, 1);
+    fixture.instructions_current(&between).await;
+    fixture
+        .turn_request(&between, "the fork between under its own record")
+        .await;
+
+    // A fork that starts its own turn, taken from the fork between.
+    let request = fixture
+        .self_starting_fork_of(&between, "self-starting-below")
+        .await;
+    assert_eq!(
+        entries_with(&request, CALL_SIGN),
+        1,
+        "the self-starting fork of a fork has the first member's record in effect, once"
+    );
+    assert!(
+        !carries(&request, HOUSE_STYLE),
+        "and carries the record of the fork between nowhere"
+    );
+
+    // A helper fork, taken from the fork between.
+    let before = fixture.client.requests().len();
+    fixture
+        .handle
+        .spawn_spec(
+            context_fork_spec(
+                "helper-below",
+                &between,
+                crate::launch::ForkContext::FullHistory,
+            )
+            .with_initial_message("the forked task")
+            .with_runtime_mode(crate::MobRuntimeMode::TurnDriven),
+        )
+        .await
+        .expect("the context fork of the fork between spawns");
+    let request = fixture.first_request_after(before).await;
+    assert_eq!(
+        entries_with(&request, CALL_SIGN),
+        1,
+        "the helper fork of a fork has the first member's record in effect, once"
+    );
+    assert!(
+        !carries(&request, HOUSE_STYLE),
+        "and carries the record of the fork between nowhere"
+    );
+
+    for below in ["self-starting-below", "helper-below"] {
+        assert_eq!(
+            fixture.listed_slots(&AgentIdentity::from(below)).await,
+            vec!["call-sign".to_string()],
+            "{below}'s status row lists the first member's record and no other"
+        );
+    }
     fixture.finish().await;
 }

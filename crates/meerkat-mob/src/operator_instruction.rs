@@ -32,12 +32,14 @@ use crate::event::MobEventKind;
 use crate::ids::{AgentIdentity, MobId, ProfileName};
 
 /// Which members an operator instruction targets: every member of the mob,
-/// the members of one profile, or one member.
+/// the members of one profile, or one member (alone, or with the forks of
+/// its fork family).
 ///
 /// A target is a predicate over the roster, not a reference: a profile or a
 /// member that does not exist (yet) is legal and selects nobody until it
 /// does. A member added later, or moved to the profile later, receives the
-/// record then.
+/// record then, and so does a fork seated later that a record written for
+/// a member and its forks selects.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OperatorInstructionTarget {
@@ -46,21 +48,73 @@ pub enum OperatorInstructionTarget {
     /// The members of one profile.
     Profile { profile: ProfileName },
     /// One member.
-    Member { agent_identity: AgentIdentity },
+    Member {
+        agent_identity: AgentIdentity,
+        /// Whether the record follows the member's fork family from its
+        /// root. `false` (the default) keeps the record the member's alone.
+        ///
+        /// Written for a member that is not itself a fork, the record
+        /// selects that member and every fork below it, forks of forks
+        /// included, for as long as each is seated. Written for a member
+        /// that is a fork, it selects that member only: a fork family
+        /// follows the records written for its first member. A fork under
+        /// the record follows its later revisions and its revoke as the
+        /// member does.
+        ///
+        /// The family's root is a name, as a member target is. Its forks go
+        /// on following the records written for that name after the root's
+        /// identity ends, so there is one exception to "that member only":
+        /// when the name of a family's first member is seated again later,
+        /// as a fork or not, a record written for it and its forks still
+        /// selects the forks the earlier member of that name left.
+        ///
+        /// Left out of the stored and the wire form when `false`, and read
+        /// as `false` when absent.
+        #[serde(default, skip_serializing_if = "is_false")]
+        include_forks: bool,
+    },
+}
+
+/// `skip_serializing_if` for a flag whose default is `false`.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(flag: &bool) -> bool {
+    !*flag
 }
 
 impl OperatorInstructionTarget {
     /// Whether this target selects `agent_identity`, a member of profile
     /// `member_profile` (the machine's target predicate).
+    ///
+    /// The answer is for a member that is not fork-derived. A record written
+    /// for a member and its forks also selects the seated forks of that
+    /// member's fork family; which members those are is MobMachine's own
+    /// record of each fork seat, so this answers `false` for a fork the
+    /// record selects through its lineage. The mob's status read
+    /// ([`crate::MobHandle::operator_instruction_status`]) lists every
+    /// member's records, a fork's included.
     #[must_use]
     pub fn selects(&self, agent_identity: &AgentIdentity, member_profile: &ProfileName) -> bool {
+        self.selects_in_lineage(agent_identity, member_profile.as_str(), None)
+    }
+
+    /// Whether this target selects `agent_identity`, a member of profile
+    /// `member_profile` whose fork lineage root is `lineage_root` as
+    /// MobMachine holds it (`None` for a member that is not fork-derived):
+    /// the machine's target predicate.
+    pub(crate) fn selects_in_lineage(
+        &self,
+        agent_identity: &AgentIdentity,
+        member_profile: &str,
+        lineage_root: Option<&AgentIdentity>,
+    ) -> bool {
         let (kind, profile, member) = self.machine_parts();
-        crate::machines::mob_machine::operator_instruction_target_applies(
+        crate::machines::mob_machine::operator_instruction_target_applies_to_lineage(
             kind,
             &profile,
             member.as_deref(),
-            Some(member_profile.as_str()),
+            Some(member_profile),
             agent_identity.as_str(),
+            lineage_root.map(AgentIdentity::as_str),
         )
     }
 
@@ -81,8 +135,15 @@ impl OperatorInstructionTarget {
                 profile.as_str().to_owned(),
                 None,
             ),
-            Self::Member { agent_identity } => (
-                InstructionTargetKind::Member,
+            Self::Member {
+                agent_identity,
+                include_forks,
+            } => (
+                if *include_forks {
+                    InstructionTargetKind::MemberAndForks
+                } else {
+                    InstructionTargetKind::Member
+                },
                 String::new(),
                 Some(agent_identity.as_str().to_owned()),
             ),
@@ -104,11 +165,14 @@ impl OperatorInstructionTarget {
                     profile: ProfileName::from(profile),
                 })
             }
-            (InstructionTargetKind::Member, "", Some(member)) if !member.is_empty() => {
-                Ok(Self::Member {
-                    agent_identity: AgentIdentity::from(member),
-                })
-            }
+            (
+                kind @ (InstructionTargetKind::Member | InstructionTargetKind::MemberAndForks),
+                "",
+                Some(member),
+            ) if !member.is_empty() => Ok(Self::Member {
+                agent_identity: AgentIdentity::from(member),
+                include_forks: kind == InstructionTargetKind::MemberAndForks,
+            }),
             (kind, profile, member) => Err(MobError::Internal(format!(
                 "MobMachine holds a malformed operator instruction target: kind {kind:?}, \
                  profile {profile:?}, member {member:?}"
@@ -126,7 +190,7 @@ impl OperatorInstructionTarget {
                     "a profile target names its profile".to_string(),
                 ))
             }
-            Self::Member { agent_identity } if agent_identity.as_str().is_empty() => {
+            Self::Member { agent_identity, .. } if agent_identity.as_str().is_empty() => {
                 Err(InstructionWriteError::InvalidRequest(
                     "a member target names its member".to_string(),
                 ))
@@ -570,9 +634,11 @@ impl OperatorInstructionTarget {
             Self::Profile { profile } => meerkat_contracts::WireInstructionTarget::Profile {
                 profile: profile.as_str().to_owned(),
             },
-            Self::Member { agent_identity } => meerkat_contracts::WireInstructionTarget::Member {
-                agent_identity: agent_identity.as_str().to_owned(),
-            },
+            Self::Member { agent_identity, .. } => {
+                meerkat_contracts::WireInstructionTarget::Member {
+                    agent_identity: agent_identity.as_str().to_owned(),
+                }
+            }
         }
     }
 
@@ -586,6 +652,7 @@ impl OperatorInstructionTarget {
             },
             meerkat_contracts::WireInstructionTarget::Member { agent_identity } => Self::Member {
                 agent_identity: AgentIdentity::from(agent_identity),
+                include_forks: false,
             },
         }
     }
@@ -791,5 +858,130 @@ impl MemberInstructionStatus {
             },
             live_channel_open: self.live_channel_open,
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::machines::mob_machine::InstructionTargetKind;
+    use serde_json::json;
+
+    fn member(name: &str, include_forks: bool) -> OperatorInstructionTarget {
+        OperatorInstructionTarget::Member {
+            agent_identity: AgentIdentity::from(name),
+            include_forks,
+        }
+    }
+
+    /// A member target's fork scope is left out of its serialized form when
+    /// it is off, so the stored journal row of a record without the scope
+    /// is byte for byte what an earlier release wrote; it is written and
+    /// read when it is on; and a row written before the scope existed reads
+    /// as a record for the member alone.
+    #[test]
+    fn a_member_targets_fork_scope_is_omitted_when_off_and_read_when_present() {
+        let alone = member("worker-1", false);
+        assert_eq!(
+            serde_json::to_string(&alone).unwrap(),
+            r#"{"kind":"member","agent_identity":"worker-1"}"#,
+            "the form without the scope is the earlier release's, byte for byte"
+        );
+        let earlier_release = json!({ "kind": "member", "agent_identity": "worker-1" });
+        assert_eq!(
+            serde_json::from_value::<OperatorInstructionTarget>(earlier_release).unwrap(),
+            alone,
+            "a row written before the scope reads as the member alone"
+        );
+
+        let family = member("worker-1", true);
+        let written = serde_json::to_value(&family).unwrap();
+        assert_eq!(
+            written,
+            json!({ "kind": "member", "agent_identity": "worker-1", "include_forks": true })
+        );
+        assert_eq!(
+            serde_json::from_value::<OperatorInstructionTarget>(written).unwrap(),
+            family
+        );
+        assert_eq!(
+            serde_json::from_value::<OperatorInstructionTarget>(
+                json!({ "kind": "member", "agent_identity": "worker-1", "include_forks": false })
+            )
+            .unwrap(),
+            alone,
+            "an explicit false is the default"
+        );
+
+        // The stored committed row carries the target the same way.
+        let committed = |target: OperatorInstructionTarget| OperatorInstructionCommittedEvent {
+            slot: InstructionSlot {
+                namespace: InstructionNamespace::new("app.example").unwrap(),
+                key: InstructionKey::new("tone").unwrap(),
+            },
+            revision: InstructionRevision::new(1).unwrap(),
+            effect: InstructionEffect::Active,
+            content_sha256: None,
+            body_bytes: 0,
+            target,
+            generation: 1,
+            body: None,
+        };
+        let row = serde_json::to_value(committed(alone)).unwrap();
+        assert!(
+            row["target"].get("include_forks").is_none(),
+            "a record for the member alone journals no scope: {row}"
+        );
+        let row = serde_json::to_value(committed(family)).unwrap();
+        assert_eq!(row["target"]["include_forks"], json!(true));
+    }
+
+    /// The fork scope is the machine's target kind: a record for a member
+    /// and its forks is `MemberAndForks`, both ways.
+    #[test]
+    fn a_member_targets_fork_scope_is_the_machines_target_kind() {
+        for (include_forks, kind) in [
+            (false, InstructionTargetKind::Member),
+            (true, InstructionTargetKind::MemberAndForks),
+        ] {
+            let target = member("worker-1", include_forks);
+            let (machine_kind, profile, machine_member) = target.machine_parts();
+            assert_eq!(machine_kind, kind);
+            assert_eq!(profile, "");
+            assert_eq!(machine_member.as_deref(), Some("worker-1"));
+            assert_eq!(
+                OperatorInstructionTarget::from_machine_parts(kind, "", Some("worker-1")).unwrap(),
+                target
+            );
+            assert!(target.validate().is_ok());
+        }
+        assert!(member("", true).validate().is_err());
+        assert!(
+            OperatorInstructionTarget::from_machine_parts(
+                InstructionTargetKind::MemberAndForks,
+                "",
+                None
+            )
+            .is_err(),
+            "a record for a member and its forks names its member"
+        );
+
+        // The public predicate answers for a member that is not
+        // fork-derived; the lineage root is the machine's own fact.
+        let family = member("first", true);
+        let worker = ProfileName::from("worker");
+        assert!(family.selects(&AgentIdentity::from("first"), &worker));
+        assert!(!family.selects(&AgentIdentity::from("fork"), &worker));
+        assert!(family.selects_in_lineage(
+            &AgentIdentity::from("fork"),
+            "worker",
+            Some(&AgentIdentity::from("first"))
+        ));
+        assert!(!member("first", false).selects_in_lineage(
+            &AgentIdentity::from("fork"),
+            "worker",
+            Some(&AgentIdentity::from("first"))
+        ));
     }
 }

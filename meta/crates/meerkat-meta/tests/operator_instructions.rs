@@ -329,6 +329,7 @@ async fn meta_set_instruction_maps_identity_and_profile_to_core() {
         targets.get("persona"),
         Some(&OperatorInstructionTarget::Member {
             agent_identity: meerkat_meta::member_comms_id::roster_member_id_for_identity(IDENTITY),
+            include_forks: false,
         }),
         "{targets:#?}"
     );

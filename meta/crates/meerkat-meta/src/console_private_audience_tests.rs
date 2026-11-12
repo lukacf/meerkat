@@ -3038,6 +3038,91 @@ async fn per_member_tools_hide_a_private_member_this_process_has_not_built() -> 
     Ok(())
 }
 
+/// The member list an agent's mob tools answer keeps to the same audience
+/// as its per-member tools: with manage scope over the mob, an agent's
+/// `mob_list_members` lists no member private to a person the agent does
+/// not act for (the row is absent, not redacted) and still lists every
+/// other member; the private member's own list names it. The host's own
+/// reads are unchanged.
+#[tokio::test]
+async fn a_member_list_names_no_private_member_the_caller_does_not_act_for() -> TestResult {
+    const MOB: &str = "private-member-list";
+    let state = tempfile::tempdir()?;
+    let runtime = persistent_gateway_runtime_in(state.path(), MOB, "", "").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    seeded_member(&runtime, "worker", "beta", &[]).await?;
+    let app = console_json_router_with_state(enforced_console(&runtime, None));
+    let forked = fork_on_console(&app, Some(&bearer(alice_claims())), "alpha", "alpha-side").await;
+    assert!(forked["error"].is_null(), "{forked:#}");
+    let handle = runtime.handle();
+    let side = AgentIdentity::from("alpha-side");
+    assert!(
+        handle.get_member(&side).await?.is_some(),
+        "the host reads the private member"
+    );
+
+    // The names `member`'s own mob tools list, with manage scope over the mob.
+    type Listed = Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>>;
+    let listed = async |member: &str| -> Listed {
+        let authority =
+            meerkat_runtime::mob_operator_authority::create_only_mob_operator_authority()?;
+        let authority = meerkat_runtime::mob_operator_authority::grant_manage_mob(
+            &authority,
+            handle.mob_id().as_str(),
+            handle.live_incarnation(),
+        )?;
+        let session = member_session(&runtime, member).await?;
+        let surface: Arc<dyn meerkat_core::AgentToolDispatcher> =
+            Arc::new(meerkat_mob_mcp::AgentMobToolSurface::new(
+                runtime
+                    .agent_mob_mcp_state()
+                    .ok_or("the runtime installs the agent mob tools")?,
+                None,
+                authority,
+                "gpt-5.5".to_string(),
+                session.clone(),
+                None,
+                None,
+                None,
+            ));
+        let tools = surface
+            .bind_ops_lifecycle(
+                Arc::new(meerkat_runtime::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
+                session,
+            )
+            .map_err(|error| format!("bind the tool lifecycle: {error:?}"))?
+            .into_dispatcher();
+        let outcome = agent_tool_call(&tools, "mob_list_members", json!({ "mob_id": MOB }))
+            .await
+            .map_err(|error| error.to_transcript_content())?;
+        let payload: Value = serde_json::from_str(&outcome.result.text_content())?;
+        let names: Vec<String> = payload["members"]
+            .as_array()
+            .ok_or("the list answers members")?
+            .iter()
+            .filter_map(|entry| entry["agent_identity"].as_str().map(str::to_owned))
+            .collect();
+        Ok(names)
+    };
+    let names = |member: &str| member.to_owned();
+
+    let shared = listed("alpha").await?;
+    assert!(
+        shared.contains(&names("alpha")) && shared.contains(&names("beta")),
+        "a shared agent is listed the shared members: {shared:?}"
+    );
+    assert!(
+        !shared.contains(&names("alpha-side")),
+        "a shared agent is listed no member private to a person: {shared:?}"
+    );
+    let private = listed("alpha-side").await?;
+    assert!(
+        private.contains(&names("alpha-side")) && private.contains(&names("beta")),
+        "the private member is listed itself and the shared members: {private:?}"
+    );
+    Ok(())
+}
+
 fn daily_schedule(name: &str, target: Value) -> Value {
     json!({
         "name": name,

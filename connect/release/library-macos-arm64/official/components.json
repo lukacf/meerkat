@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "github": {
+    "catalog_id": "github",
+    "version": "2.0.3",
+    "asset": "github-mcp-server_Darwin_arm64.tar.gz",
+    "source_revision": "b98d115bbb080e9555466a96656ec4df605aea21",
+    "profile": "selected-reads",
+    "selected_operations": ["get_me", "list_commits", "get_file_contents"],
+    "required_secret_environment": ["GITHUB_PERSONAL_ACCESS_TOKEN"]
+  },
+  "playwright": {
+    "catalog_id": "playwright",
+    "profile": "isolated-chrome",
+    "source_revision": "f183dad4a52965583e3cc1d59b88cdc279e2e57d",
+    "selected_operations": [
+      "browser_navigate",
+      "browser_snapshot",
+      "browser_fill_form",
+      "browser_click",
+      "browser_close"
+    ],
+    "packages": {
+      "@playwright/mcp": "0.0.83",
+      "playwright": "1.64.0-alpha-1790635538000",
+      "playwright-core": "1.64.0-alpha-1790635538000"
+    }
+  }
+}

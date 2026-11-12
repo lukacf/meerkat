@@ -646,24 +646,35 @@ impl ConsoleEventStore {
             && let Some(image_result) = parse_generate_image_tool_result(&projected_data)
         {
             for (idx, image) in image_result.images.iter().enumerate() {
+                let mut data = json!({
+                    "source_event_type": event_type,
+                    "identity": projected_data.get("identity"),
+                    "run_id": projected_data.get("run_id"),
+                    "tool_call_id": projected_data.get("id").cloned().unwrap_or(Value::Null),
+                    "image_id": image.image_id.0.to_string(),
+                    "blob_id": image.blob_ref.blob_id,
+                    "media_type": image.media_type.as_str(),
+                    "width": image.width,
+                    "height": image.height,
+                    "revised_prompt": image_result.revised_prompt.clone(),
+                });
+                // The image record names the session of the result event it
+                // is projected from, so the console witnesses it by that
+                // session's member, as it witnesses the result itself.
+                if let Some(session_id) = projected_data
+                    .get("session_id")
+                    .filter(|session| session.is_string())
+                    && let Some(object) = data.as_object_mut()
+                {
+                    object.insert("session_id".to_string(), session_id.clone());
+                }
                 self.append_envelope(ConsoleIdentityEventEnvelope {
                     event_id: format!("{}#assistant_image:{idx}", event.event_id),
                     interaction_id: interaction_id.clone(),
                     identity: identity.clone(),
                     event_type: "assistant_image".to_string(),
                     timestamp_ms: event.timestamp_ms,
-                    data: json!({
-                        "source_event_type": event_type,
-                        "identity": projected_data.get("identity"),
-                        "run_id": projected_data.get("run_id"),
-                        "tool_call_id": projected_data.get("id").cloned().unwrap_or(Value::Null),
-                        "image_id": image.image_id.0.to_string(),
-                        "blob_id": image.blob_ref.blob_id,
-                        "media_type": image.media_type.as_str(),
-                        "width": image.width,
-                        "height": image.height,
-                        "revised_prompt": image_result.revised_prompt.clone(),
-                    }),
+                    data,
                 })
                 .await;
             }

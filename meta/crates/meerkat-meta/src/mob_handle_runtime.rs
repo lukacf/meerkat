@@ -23997,8 +23997,12 @@ image_generation = true
                 .collect()
         }
 
+        /// The outcome of `mob_spawn_member` names no session of the member
+        /// it made: the spawn registers the member's console identity and
+        /// leaves no kickoff. The member's first message stands on its page
+        /// from its own session history.
         #[tokio::test]
-        async fn mob_spawn_member_projects_kickoff_into_console() {
+        async fn mob_spawn_member_registers_its_member_and_writes_no_kickoff() {
             let store = ConsoleEventStore::new();
             let dispatcher = console_wrapper(
                 serde_json::json!({
@@ -24023,14 +24027,10 @@ image_generation = true
             .await;
             assert!(!outcome.result.is_error);
 
-            let kickoffs = kickoff_events(&store).await;
-            assert_eq!(kickoffs.len(), 1, "spawn must project one kickoff");
-            let kickoff = &kickoffs[0];
-            assert_eq!(kickoff.identity, "worker-3");
-            assert!(kickoff.event_id.starts_with("spawn-kickoff:ops:worker-3:"));
-            assert_eq!(kickoff.data["content"][0]["text"], "Find the person");
-            assert_eq!(kickoff.data["via_tool"], "mob_spawn_member");
-            assert_eq!(kickoff.data["parent_identity"], "ops-lead");
+            assert!(
+                kickoff_events(&store).await.is_empty(),
+                "an outcome that names no session leaves no kickoff"
+            );
 
             let labels = store
                 .identity_labels("worker-3")
@@ -24047,19 +24047,19 @@ image_generation = true
         async fn repeated_spawn_dispatch_keeps_one_kickoff() {
             let store = ConsoleEventStore::new();
             let dispatcher = console_wrapper(
-                serde_json::json!({ "agent_identity": "worker-3" }),
+                serde_json::json!({
+                    "agent_identity": "helper-3f2a",
+                    "member_ref": "opaque",
+                    "mob_id": "implicit-1",
+                    "session_id": "helper-session"
+                }),
                 false,
                 Some(&store),
             );
-            let args = serde_json::json!({
-                "mob_id": "ops",
-                "profile": "person-worker",
-                "member_id": "worker-3",
-                "initial_message": "Find the person"
-            });
+            let args = serde_json::json!({ "task": "Find the person" });
 
-            dispatch_tool(&dispatcher, "mob_spawn_member", args.clone()).await;
-            dispatch_tool(&dispatcher, "mob_spawn_member", args).await;
+            dispatch_tool(&dispatcher, "delegate", args.clone()).await;
+            dispatch_tool(&dispatcher, "delegate", args).await;
 
             assert_eq!(
                 kickoff_events(&store).await.len(),
@@ -24068,6 +24068,8 @@ image_generation = true
             );
         }
 
+        /// `delegate` names the session its helper ran on: the kickoff is
+        /// written under the helper and names that session.
         #[tokio::test]
         async fn delegate_projects_task_kickoff_for_generated_helper() {
             let store = ConsoleEventStore::new();
@@ -24076,7 +24078,8 @@ image_generation = true
                     "agent_identity": "helper-3f2a",
                     "member_ref": "opaque",
                     "mob_id": "implicit-1",
-                    "wired": true
+                    "wired": true,
+                    "session_id": "helper-session"
                 }),
                 false,
                 Some(&store),
@@ -24094,6 +24097,41 @@ image_generation = true
             assert_eq!(kickoffs[0].identity, "helper-3f2a");
             assert_eq!(kickoffs[0].data["content"][0]["text"], "Review the diff");
             assert_eq!(kickoffs[0].data["via_tool"], "delegate");
+            assert_eq!(kickoffs[0].data["session_id"], "helper-session");
+            assert_eq!(kickoffs[0].data["parent_identity"], "ops-lead");
+        }
+
+        /// `fork_off` names the child's session: the kickoff is written
+        /// under the child and names that session, not the session of the
+        /// child's finished turn.
+        #[tokio::test]
+        async fn fork_off_projects_a_kickoff_that_names_the_childs_session() {
+            let store = ConsoleEventStore::new();
+            let dispatcher = console_wrapper(
+                serde_json::json!({
+                    "mob_id": "ops",
+                    "source_member_id": "ops-lead",
+                    "agent_identity": "investigator",
+                    "member_ref": "opaque",
+                    "fork_session_id": "child-session",
+                    "turn_session_id": "child-turn-session"
+                }),
+                false,
+                Some(&store),
+            );
+
+            dispatch_tool(
+                &dispatcher,
+                "fork_off",
+                serde_json::json!({ "member_id": "investigator", "task": "Inspect the ledger" }),
+            )
+            .await;
+
+            let kickoffs = kickoff_events(&store).await;
+            assert_eq!(kickoffs.len(), 1);
+            assert_eq!(kickoffs[0].identity, "investigator");
+            assert_eq!(kickoffs[0].data["via_tool"], "fork_off");
+            assert_eq!(kickoffs[0].data["session_id"], "child-session");
         }
 
         #[tokio::test]

@@ -36623,6 +36623,7 @@ mod console_access_priming_tests {
             ]),
             spawned_by: Some("lead".to_string()),
             spawned_by_session: None,
+            session_id: None,
             via_tool: "mob_spawn_member".to_string(),
         })
         .await;
@@ -36679,6 +36680,7 @@ mod console_access_priming_tests {
             ]),
             spawned_by: Some("lead".to_string()),
             spawned_by_session: None,
+            session_id: None,
             via_tool: "mob_spawn_member".to_string(),
         })
         .await;
@@ -36954,6 +36956,7 @@ mod console_access_priming_tests {
             labels: BTreeMap::from([("role".to_string(), "worker".to_string())]),
             spawned_by: Some("lead".to_string()),
             spawned_by_session: None,
+            session_id: None,
             via_tool: "mob_spawn_member".to_string(),
         })
         .await;
@@ -37126,6 +37129,7 @@ comms = true
                 labels: BTreeMap::new(),
                 spawned_by: Some(spawner.to_string()),
                 spawned_by_session: None,
+                session_id: None,
                 via_tool: "mob_spawn_member".to_string(),
             })
             .await;

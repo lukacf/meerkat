@@ -74,6 +74,10 @@ pub(crate) struct ConsoleSpawnSeed {
     pub(crate) spawned_by: Option<String>,
     /// Session of the spawning agent's incarnation, when known.
     pub(crate) spawned_by_session: Option<String>,
+    /// Session of the member this spawn made, when the spawn's own outcome
+    /// names it ([`outcome_session_field`]). The kickoff is written only
+    /// with it: nothing else says which member the kickoff is the record of.
+    pub(crate) session_id: Option<String>,
     /// Tool that performed the spawn (`mob_spawn_member`, `delegate`, ...).
     pub(crate) via_tool: String,
 }
@@ -100,7 +104,8 @@ impl ConsoleSpawnSink {
         self.console_events.identity_labels_snapshot().await
     }
 
-    /// Register the member's console identity and append its kickoff event.
+    /// Register the member's console identity and, for a seed that names
+    /// the member's session, append its kickoff event.
     /// Idempotent per `(mob_id, member_id, initial_message)`.
     pub(crate) async fn project_spawned_member(&self, seed: &ConsoleSpawnSeed) {
         let identity = seed.identity.trim();
@@ -186,6 +191,19 @@ impl ConsoleSpawnSink {
         let Some(initial_message) = seed.initial_message.as_ref() else {
             return;
         };
+        // The kickoff is the record of the member this spawn made, and only
+        // the session the spawn's own outcome names says which member that
+        // is: the console witnesses the kickoff by exactly that session.
+        // Without it no kickoff is written, and the member's first message
+        // stands on its page from its own session history.
+        let session_id = seed
+            .session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|session| !session.is_empty());
+        if session_id.is_none() {
+            return;
+        }
         let content = match initial_message {
             Value::String(text) => json!([{ "type": "text", "text": text }]),
             other => other.clone(),
@@ -203,6 +221,9 @@ impl ConsoleSpawnSink {
             }
             if let Some(parent) = seed.spawned_by.as_deref() {
                 object.insert("parent_identity".to_string(), json!(parent));
+            }
+            if let Some(session_id) = session_id {
+                object.insert("session_id".to_string(), json!(session_id));
             }
         }
         // `append_envelope` dedupes by event id against the replay window
@@ -352,24 +373,6 @@ pub(crate) fn lineage_parent(labels: &BTreeMap<String, String>) -> Option<Lineag
     })
 }
 
-/// The agent whose spawn made a member, as its console labels name it
-/// (`spawned_by`, bound by `spawned_by_session`): the spawn path's own
-/// record, never a side chat's source. A spawn-initial frame is written for
-/// a member only when this names the spawning agent.
-pub(crate) fn spawned_by(labels: &BTreeMap<String, String>) -> Option<LineageParent<'_>> {
-    let trimmed = |key: &str| {
-        labels
-            .get(key)
-            .map(String::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-    };
-    Some(LineageParent {
-        identity: trimmed(SPAWNED_BY_LABEL)?,
-        bound_session: trimmed(SPAWNED_BY_SESSION_LABEL),
-    })
-}
-
 /// Whether a member's console labels name the source it was forked from as a
 /// side chat (a non-empty `side_chat_of`). Such a member holds its source's
 /// audience exactly: the console's access decisions decide it as its source,
@@ -513,11 +516,28 @@ fn typed_batch_spawned_members(outcome: &Value) -> Option<Vec<String>> {
 struct SpawnOutcomeTarget {
     member_id: String,
     mob_id: Option<String>,
+    /// The session the outcome names for this member, read from the field
+    /// in which the tool names it.
+    session_id: Option<String>,
+}
+
+/// The outcome field in which a spawn tool names the session of the member
+/// it made: `fork_off` names the child's session (`fork_session_id`),
+/// `delegate` the session its helper ran on (`session_id`). The outcomes of
+/// the other spawn tools name no session. A field of that name in another
+/// tool's outcome is not read: nothing says it is the spawned member's.
+fn outcome_session_field(tool_name: &str) -> Option<&'static str> {
+    match tool_name {
+        "fork_off" => Some("fork_session_id"),
+        "delegate" => Some("session_id"),
+        _ => None,
+    }
 }
 
 fn collect_outcome_targets(
     value: &Value,
     default_mob_id: Option<&str>,
+    session_field: Option<&str>,
     targets: &mut Vec<SpawnOutcomeTarget>,
 ) {
     if let Some(member_id) = member_id_field(value)
@@ -526,6 +546,7 @@ fn collect_outcome_targets(
         targets.push(SpawnOutcomeTarget {
             member_id,
             mob_id: text_field(value, "mob_id").or_else(|| default_mob_id.map(ToString::to_string)),
+            session_id: session_field.and_then(|field| text_field(value, field)),
         });
     }
     for key in ["members", "specs", "spawned", "results"] {
@@ -537,6 +558,7 @@ fn collect_outcome_targets(
             collect_outcome_targets(
                 nested,
                 nested_default.as_deref().or(default_mob_id),
+                session_field,
                 targets,
             );
         }
@@ -566,7 +588,9 @@ pub(crate) fn spawn_seed_console_identity(
 /// labels, and identity overrides. A typed batch outcome (`spawn_many_members`)
 /// projects only its spawned entries: a failed entry's argument record never
 /// stands in for it. Otherwise, when the outcome carries no parsable member,
-/// argument records with explicit member ids are used as fallback.
+/// argument records with explicit member ids are used as fallback. A seed
+/// names its member's session only when the outcome itself does
+/// ([`outcome_session_field`]).
 pub(crate) fn console_spawn_seeds(
     tool_name: &str,
     args: &Value,
@@ -586,13 +610,20 @@ pub(crate) fn console_spawn_seeds(
         outcome_targets.extend(spawned.iter().map(|member_id| SpawnOutcomeTarget {
             member_id: member_id.clone(),
             mob_id: None,
+            session_id: None,
         }));
     } else if let Some(outcome) = &outcome {
-        collect_outcome_targets(outcome, None, &mut outcome_targets);
+        collect_outcome_targets(
+            outcome,
+            None,
+            outcome_session_field(tool_name),
+            &mut outcome_targets,
+        );
     }
 
     let seed_for = |member_id: String,
                     mob_id: Option<String>,
+                    session_id: Option<String>,
                     record: Option<&SpawnArgRecord>|
      -> ConsoleSpawnSeed {
         let labels = record
@@ -609,6 +640,7 @@ pub(crate) fn console_spawn_seeds(
             labels,
             spawned_by: spawned_by.clone(),
             spawned_by_session: None,
+            session_id,
             via_tool: tool_name.to_string(),
         }
     };
@@ -626,16 +658,23 @@ pub(crate) fn console_spawn_seeds(
                         [only] if only.member_id.is_none() => Some(only),
                         _ => None,
                     });
-                seed_for(target.member_id, target.mob_id, record)
+                seed_for(target.member_id, target.mob_id, target.session_id, record)
             })
             .collect();
     }
 
+    // An outcome that names no member names no session either: the argument
+    // record registers the member's identity, and leaves no kickoff.
     arg_records
         .iter()
         .filter_map(|record| {
             let member_id = record.member_id.clone()?;
-            Some(seed_for(member_id, record.mob_id.clone(), Some(record)))
+            Some(seed_for(
+                member_id,
+                record.mob_id.clone(),
+                None,
+                Some(record),
+            ))
         })
         .collect()
 }
@@ -725,6 +764,9 @@ mod tests {
             labels: BTreeMap::from([("group".to_string(), "workers".to_string())]),
             spawned_by: Some("ops-lead".to_string()),
             spawned_by_session: None,
+            // The session of the member the seed is for: the sink appends a
+            // kickoff only for a seed that names it.
+            session_id: Some("worker-session".to_string()),
             via_tool: "mob_spawn_member".to_string(),
         }
     }
@@ -753,6 +795,7 @@ mod tests {
         assert_eq!(kickoff.data["message"]["role"], "user");
         assert_eq!(kickoff.data["source_event_type"], "spawn_initial_message");
         assert_eq!(kickoff.data["via_tool"], "mob_spawn_member");
+        assert_eq!(kickoff.data["session_id"], "worker-session");
         assert_eq!(kickoff.data["parent_identity"], "ops-lead");
     }
 
@@ -897,6 +940,7 @@ mod tests {
         let sink = ConsoleSpawnSink::new(store.clone());
         let mut bound = ConsoleSpawnSeed {
             spawned_by_session: Some("lead-session-1".to_string()),
+            session_id: None,
             ..seed("worker-3", None)
         };
         bound.labels.insert(
@@ -964,6 +1008,7 @@ mod tests {
         let unknown_parent = ConsoleSpawnSeed {
             spawned_by: None,
             spawned_by_session: None,
+            session_id: None,
             labels: BTreeMap::from([(SPAWNED_BY_LABEL.to_string(), "victim-agent".to_string())]),
             ..seed("worker-9", None)
         };
@@ -1062,6 +1107,7 @@ mod tests {
         let unknown_spawner = ConsoleSpawnSeed {
             spawned_by: None,
             spawned_by_session: None,
+            session_id: None,
             via_tool: "spawn_member".to_string(),
             ..seed("worker-3", None)
         };

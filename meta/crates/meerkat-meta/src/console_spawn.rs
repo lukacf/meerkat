@@ -1178,6 +1178,137 @@ mod tests {
         }));
     }
 
+    /// The kickoff events one spawn-tool outcome leaves in the store.
+    async fn kickoffs_of(tool: &str, args: Value, outcome_text: &str) -> Vec<Value> {
+        let store = ConsoleEventStore::new();
+        let sink = ConsoleSpawnSink::new(store.clone());
+        for seed in
+            console_spawn_seeds(tool, &args, outcome_text, Some("ops/orchestrator/ops-lead"))
+        {
+            sink.project_spawned_member(&seed).await;
+        }
+        store
+            .replay_all(None)
+            .await
+            .expect("replay")
+            .into_iter()
+            .filter(|event| event.event_type == "user_input")
+            .map(|event| event.data)
+            .collect()
+    }
+
+    /// A kickoff is written only when the spawn's own outcome names the
+    /// session of the member it made, and it names that session: `fork_off`
+    /// (run to its end, or started detached) and `delegate`. The outcomes of
+    /// `mob_spawn_member`, `spawn_member` and `spawn_many_members` name no
+    /// session, and an outcome with no member names none either: no kickoff.
+    #[tokio::test]
+    async fn a_kickoff_names_the_session_its_spawn_outcome_names_or_is_not_written() {
+        let fork_args = json!({ "member_id": "child", "task": "Inspect the ledger" });
+        let forked = kickoffs_of(
+            "fork_off",
+            fork_args.clone(),
+            &json!({
+                "mob_id": "ops",
+                "source_member_id": "ops-lead",
+                "agent_identity": "child",
+                "member_ref": "opaque-ref",
+                "fork_session_id": "child-session",
+                "turn_session_id": "child-turn-session",
+            })
+            .to_string(),
+        )
+        .await;
+        assert_eq!(forked.len(), 1, "{forked:?}");
+        assert_eq!(forked[0]["session_id"], json!("child-session"));
+
+        let detached = kickoffs_of(
+            "fork_off",
+            fork_args,
+            &json!({
+                "status": "running",
+                "mob_id": "ops",
+                "source_member_id": "ops-lead",
+                "agent_identity": "child",
+                "member_ref": "opaque-ref",
+                "fork_session_id": "child-session",
+                "job_id": "job-1",
+            })
+            .to_string(),
+        )
+        .await;
+        assert_eq!(detached.len(), 1, "{detached:?}");
+        assert_eq!(detached[0]["session_id"], json!("child-session"));
+
+        let delegated = kickoffs_of(
+            "delegate",
+            json!({ "task": "Summarize the ledger" }),
+            &json!({
+                "mob_id": "ops",
+                "agent_identity": "helper-1",
+                "member_ref": "opaque-ref",
+                "session_id": "helper-session",
+                "output": "done",
+            })
+            .to_string(),
+        )
+        .await;
+        assert_eq!(delegated.len(), 1, "{delegated:?}");
+        assert_eq!(delegated[0]["session_id"], json!("helper-session"));
+
+        let spawn_args = json!({
+            "mob_id": "ops",
+            "profile": "person-worker",
+            "member_id": "worker-3",
+            "initial_message": "Find the person",
+        });
+        let named_no_session = json!({ "agent_identity": "worker-3", "member_ref": "opaque-ref" });
+        // A field another tool uses for its session is not this tool's.
+        let foreign_session_field = json!({
+            "agent_identity": "worker-3",
+            "member_ref": "opaque-ref",
+            "session_id": "some-session",
+            "fork_session_id": "some-session",
+        });
+        for (tool, args, outcome_text) in [
+            (
+                "mob_spawn_member",
+                spawn_args.clone(),
+                named_no_session.to_string(),
+            ),
+            (
+                "spawn_member",
+                spawn_args.clone(),
+                named_no_session.to_string(),
+            ),
+            (
+                "mob_spawn_member",
+                spawn_args.clone(),
+                foreign_session_field.to_string(),
+            ),
+            (
+                "spawn_many_members",
+                json!({ "specs": [spawn_args.clone()] }),
+                spawn_many_outcome(vec![spawned_row("worker-3")]),
+            ),
+            // An outcome that names no member: the argument record alone
+            // names the member, and nothing names a session.
+            (
+                "mob_spawn_member",
+                spawn_args.clone(),
+                "spawned".to_string(),
+            ),
+            ("delegate", spawn_args.clone(), "done".to_string()),
+        ] {
+            let kickoffs = kickoffs_of(tool, args, &outcome_text).await;
+            assert!(
+                kickoffs.is_empty(),
+                "{tool} with outcome {outcome_text} names no session of the member it made: \
+                 {kickoffs:?}"
+            );
+        }
+    }
+
     #[test]
     fn seeds_honor_agent_identity_label_override() {
         let args = json!({

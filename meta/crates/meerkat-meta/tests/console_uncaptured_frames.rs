@@ -212,11 +212,29 @@ struct Gateway {
     composition: GatewayComposition<ActiveGateway>,
     app: Router,
     controller: Option<AccessController>,
+    console_log: Arc<meerkat_meta::SqliteConsoleLogStore>,
 }
 
 impl Gateway {
     fn runtime(&self) -> &Arc<UnifiedRuntime> {
         self.composition.runtime()
+    }
+
+    /// Whether the console log itself holds a frame under `identity` whose
+    /// payload holds `canary`, whoever may read it.
+    async fn log_holds(&self, identity: &str, canary: &str) -> bool {
+        use meerkat_meta::ConsoleLogStore;
+        self.console_log
+            .query_frames(meerkat_meta::ConsoleTimelineQuery {
+                identity: Some(identity.to_string()),
+                limit: 1_000,
+                ..Default::default()
+            })
+            .await
+            .expect("console log frames")
+            .frames
+            .iter()
+            .any(|frame| frame.payload.to_string().contains(canary))
     }
 }
 
@@ -289,7 +307,7 @@ async fn start_gateway(
     let controller = access.map(|config| AccessController::new(config).expect("controller"));
     {
         let runtime = composition.runtime_mut();
-        runtime.set_console_log_store(console_log);
+        runtime.set_console_log_store(console_log.clone());
         if let Some(controller) = &controller {
             runtime.set_access_controller(controller.clone());
         }
@@ -310,6 +328,7 @@ async fn start_gateway(
         composition,
         app,
         controller,
+        console_log,
     }
 }
 
@@ -372,6 +391,21 @@ async fn window(app: &Router, bearer: Option<&str>, identity: Option<&str>) -> S
         .await
         .expect("window body");
     String::from_utf8_lossy(&body).into_owned()
+}
+
+/// The RPC timeline page (`meta/console/query_timeline`) as `bearer` reads
+/// it: the page of `identity`, or the global page.
+async fn rpc_page(app: &Router, bearer: &str, identity: Option<&str>) -> String {
+    let mut params = json!({ "mode": "recent", "limit": 1000 });
+    if let Some(identity) = identity {
+        params["identity"] = json!(identity);
+    }
+    let answer = rpc_as(app, bearer, "meta/console/query_timeline", params).await;
+    assert!(
+        answer["error"].is_null(),
+        "the RPC page answers: {answer:#}"
+    );
+    answer["result"].to_string()
 }
 
 /// The timeline stream of `identity` as `bearer` reads it: its snapshot,
@@ -633,7 +667,7 @@ async fn a_frame_with_no_member_witness_is_shown_to_an_administrator_only() {
         })
         .await;
     }
-    eventually("the helper's kickoff", || async {
+    eventually("the helper's first message on its own page", || async {
         window(&app, Some(&root), Some(HELPER))
             .await
             .contains(&made)
@@ -641,8 +675,10 @@ async fn a_frame_with_no_member_witness_is_shown_to_an_administrator_only() {
     .await;
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    // The spawn that ran: its kickoff stands under the member it made, for
-    // that member's owner and the administrator.
+    // The spawn that ran: the outcome of `mob_spawn_member` names no
+    // session, so no kickoff record is written. The member it made shows its
+    // first message from its own session history, to that member's owner
+    // and the administrator.
     assert!(
         window(&app, Some(&alice), Some(HELPER))
             .await
@@ -728,23 +764,33 @@ async fn a_frame_with_no_member_witness_is_shown_to_an_administrator_only() {
         })
         .count();
     assert_eq!(
-        kickoffs, 1,
-        "the spawn wrote one kickoff, for the member it made: none for the later holder"
+        kickoffs, 0,
+        "the spawn wrote no kickoff record: its outcome names no session. None stands under \
+         the name for the later holder either"
     );
     assert!(
         window(&app, Some(&alice), Some(HELPER))
             .await
             .contains(&made),
-        "the owner of the member that spawn made still reads its kickoff"
+        "the owner of the member that spawn made still reads its first message, from that \
+         member's own history"
+    );
+    assert!(
+        rpc_page(&app, &root, Some(HELPER))
+            .await
+            .contains(&after_helper_left),
+        "an administrator reads the record with no witness on the RPC page"
     );
     for page in [
         window(&app, Some(&bob), Some(HELPER)).await,
         window(&app, Some(&bob), None).await,
+        rpc_page(&app, &bob, Some(HELPER)).await,
+        rpc_page(&app, &bob, None).await,
     ] {
         assert!(
             !page.contains(&made) && !page.contains(&after_helper_left),
-            "another person reads neither the old member's kickoff nor the record with no \
-             witness, though a shared member holds the name now"
+            "another person reads neither the old member's first message nor the record with \
+             no witness, though a shared member holds the name now"
         );
     }
     assert!(
@@ -860,13 +906,15 @@ async fn a_frame_with_no_member_witness_is_shown_to_an_administrator_only() {
     stop_gateway(gateway).await;
 }
 
-/// A record written for a member while it is seated carries that member's
-/// witness, with or without a session named: a member memory event that
-/// names its session and one that names none are read by the private
-/// member's owner and by an administrator, and never by another person, also
-/// after the member left and a shared member took its name.
+/// A record written for a member carries the witness of the session it
+/// names, and none when it names no session. A member memory event that
+/// names the private member's session is read by that member's owner and by
+/// an administrator, and never by another person, also after the member left
+/// and a shared member took its name. One that names no session (a harvest)
+/// is read by an administrator only, before and after: it is never judged by
+/// the member that holds the name.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_record_written_for_a_seated_member_carries_its_witness() {
+async fn a_record_carries_the_witness_of_the_session_it_names() {
     let state = tempfile::tempdir().expect("state dir");
     let nonce = format!("{:x}", std::process::id());
     let mob_id = format!("frames-seated-{nonce}");
@@ -911,24 +959,27 @@ async fn a_record_written_for_a_seated_member_carries_its_witness() {
         cause: by_session.clone(),
     });
     sink.emit(harvest(SIDE, &by_identity));
-    for text in [&by_session, &by_identity] {
+    for (text, owner_reads) in [(&by_session, true), (&by_identity, false)] {
         eventually("the side chat's memory event", || async {
             window(&app, Some(&root), Some(SIDE))
                 .await
                 .contains(text.as_str())
         })
         .await;
-        assert!(
+        assert_eq!(
             window(&app, Some(&alice), Some(SIDE))
                 .await
                 .contains(text.as_str()),
-            "the owner reads a record written for her member while it was seated"
+            owner_reads,
+            "the owner reads a record of her member that names its session, and not one that \
+             names none"
         );
-        assert!(
-            !window(&app, Some(&bob), Some(SIDE))
-                .await
-                .contains(text.as_str())
-        );
+        for page in [
+            window(&app, Some(&bob), Some(SIDE)).await,
+            rpc_page(&app, &bob, Some(SIDE)).await,
+        ] {
+            assert!(!page.contains(text.as_str()));
+        }
     }
 
     let retired = rpc_as(&app, &alice, "meta/retire", json!({ "identity": SIDE })).await;
@@ -952,16 +1003,25 @@ async fn a_record_written_for_a_seated_member_carries_its_witness() {
             .contains("reply-after")
     })
     .await;
-    for text in [&by_session, &by_identity] {
-        assert!(
+    for (text, owner_reads) in [(&by_session, true), (&by_identity, false)] {
+        assert_eq!(
             window(&app, Some(&alice), Some(SIDE))
                 .await
                 .contains(text.as_str()),
-            "the owner still reads her member's records"
+            owner_reads,
+            "the owner still reads the record that names her member's session"
+        );
+        assert!(
+            window(&app, Some(&root), Some(SIDE))
+                .await
+                .contains(text.as_str()),
+            "an administrator reads both records"
         );
         for page in [
             window(&app, Some(&bob), Some(SIDE)).await,
             window(&app, Some(&bob), None).await,
+            rpc_page(&app, &bob, Some(SIDE)).await,
+            rpc_page(&app, &bob, None).await,
         ] {
             assert!(
                 !page.contains(text.as_str()),
@@ -998,13 +1058,10 @@ async fn consoles_with_no_administrator_decide_a_frame_with_no_witness() {
         let bob = person_token(BOB);
         let reader = sign_in.then_some(bob.as_str());
         if sign_in {
-            // Nobody reads it there, so the wait is on the log's own growth:
-            // the record is in the log once a later turn's reply is read.
-            send_as(&app, &bob, SOURCE, "after", "TAG|after|").await;
-            eventually("the reply to a later send", || async {
-                window(&app, reader, Some(SOURCE))
-                    .await
-                    .contains("reply-after")
+            // Nobody reads it there, so the wait is on the log itself: the
+            // record stands in the console log, and then it is refused.
+            eventually("the record is in the console log", || async {
+                gateway.log_holds("ghost-y", &canary).await
             })
             .await;
             assert!(

@@ -2358,6 +2358,36 @@ mod tests {
         }
     }
 
+    /// A generated image record names the session of the tool result event
+    /// it is projected from, and none when that event names none.
+    #[tokio::test]
+    async fn a_generated_image_record_names_the_result_events_session() {
+        for session in [Some("pilot-session"), None] {
+            let store = ConsoleEventStore::new();
+            store.register_runtime_identity("rt:pilot:1", "pilot").await;
+            let mut received = generate_image_payload(true);
+            if let Some(session) = session {
+                received["session_id"] = json!(session);
+            }
+            store
+                .project_unified_event(&agent_event_with_payload(
+                    "evt-received",
+                    "rt:pilot:1",
+                    "tool_result_received",
+                    received,
+                ))
+                .await;
+
+            let images = assistant_image_frames(&store).await;
+            assert_eq!(images.len(), 1);
+            assert_eq!(
+                images[0].get("session_id").and_then(Value::as_str),
+                session,
+                "the image record names the result event's session"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn without_a_blob_store_live_tool_result_images_stay_inline() {
         let store = ConsoleEventStore::new();

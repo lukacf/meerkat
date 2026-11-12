@@ -16992,7 +16992,12 @@ impl MobActor {
                 .unwrap_or_default(),
             member_grant_mint: self.member_residency.member_grant_mint.clone(),
             member_tool_audience: self.member_residency.member_tool_audience.clone(),
+            // The residency holds a build preparer only with the runtime
+            // adapter (`MobBuilder::with_member_build_preparer`).
+            #[cfg(feature = "runtime-adapter")]
             member_build_preparer: self.member_residency.build_preparer.clone(),
+            #[cfg(not(feature = "runtime-adapter"))]
+            member_build_preparer: None,
         }
     }
 
@@ -36922,10 +36927,39 @@ impl MobActor {
             Some(owner_session_id) => self.spawner_for_bridge_session(owner_session_id).await,
             None => None,
         };
+        // The seat of a store-owned identity's fresh local spawn carries its
+        // row's labels (Core lowered it from the row, and its host composed
+        // it before the spawn was sent): the labels the spawn carries are
+        // compared with them once the customizer ran, below. A held or
+        // owner-bound spawn is its host's own, whose spec its host wrote.
+        let store_owned_seat_labels = (respawn_origin.is_none()
+            && held.is_none()
+            && owner_bridge_session_id.is_none()
+            && spec.seats_store_owned_row())
+        .then(|| spec.labels.clone().unwrap_or_default());
         if respawn_origin.is_none()
             && let Err(error) = self.customize_spawn_spec(spawn_source, spawner.as_ref(), &mut spec)
         {
             reject_spawn_before_custody!("customize_spawn_spec", error);
+        }
+        // A store-owned member carries its seat's labels and no others: a
+        // label the customizer set, dropped or changed is refused as one
+        // the host's composition answered is, for good, naming the keys.
+        // The spawn fails before custody: nothing is built, and the
+        // identity stays owed its seat.
+        if let Some(seat_labels) = store_owned_seat_labels
+            && let Some(refusal) = super::MemberBuildPreparationRefusal::seat_labels_differ(
+                &requested_identity,
+                &seat_labels,
+                spec.labels
+                    .as_ref()
+                    .unwrap_or(&std::collections::BTreeMap::new()),
+            )
+        {
+            reject_spawn_before_custody!(
+                "store_owned_seat_labels",
+                super::member_build_preparer::spawn_refusal_error(&requested_identity, refusal)
+            );
         }
         // A prompt-context fork holds its source's history: whether it is
         // seated from a lineage that runs under a tool dispatch admission is

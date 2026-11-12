@@ -6062,6 +6062,7 @@ async fn a_failed_member_history_read_is_the_passs_own_error() {
         outcomes: BTreeMap::new(),
         managed_edges: Vec::new(),
         unlisted: BTreeMap::new(),
+        roster_listings_superseded: BTreeSet::new(),
     };
 
     runtime

@@ -388,3 +388,97 @@ async fn after_an_adoption_the_row_is_registered_and_the_rosters_listing_gives_w
         "and tracks it from its row"
     );
 }
+
+/// A roster's listing of a name its row serves is marked on the
+/// registration and noted once: the row's registration that replaces the
+/// roster's carries the mark at once (an adoption between two passes), a
+/// pass whose roster lists the name keeps it, a pass whose roster no longer
+/// lists it clears it, and an identity the roster never listed carries
+/// none. The log names each such identity once per process, however many
+/// passes list it.
+#[tokio::test]
+async fn a_roster_listing_its_row_supersedes_is_marked_and_noted_once() {
+    let bridge = Arc::new(CoreReadsBridge::default());
+    let identities = runtime_over(&bridge, "listing-superseded");
+    let adopted = id("adopted");
+    let unlisted = id("created-unlisted");
+    register_live(
+        &identities,
+        &bridge.core,
+        spec(&adopted),
+        1,
+        SessionId::new(),
+    )
+    .await
+    .expect("the roster's identity is registered and live");
+    assert!(
+        !identities.roster_listing_superseded(&adopted).await,
+        "a configured identity's listing is applied"
+    );
+
+    // The host adopts it into the store between two passes: the roster's
+    // registration gives way, and its listing is superseded from now.
+    bridge.hold_created(&adopted, "analyst");
+    assert!(
+        identities
+            .register_from_row(&adopted)
+            .await
+            .expect("the row reads")
+    );
+    assert!(
+        identities.roster_listing_superseded(&adopted).await,
+        "the roster listed the name its row serves now"
+    );
+    // The row moves on: its own registration keeps the mark.
+    bridge.hold_created(&adopted, "reviewer");
+    assert!(
+        identities
+            .register_from_row(&adopted)
+            .await
+            .expect("the row reads")
+    );
+    assert!(identities.roster_listing_superseded(&adopted).await);
+
+    // An identity created under a name the roster never listed.
+    bridge.hold_created(&unlisted, "analyst");
+    assert!(
+        identities
+            .register_from_row(&unlisted)
+            .await
+            .expect("the row reads")
+    );
+    assert!(!identities.roster_listing_superseded(&unlisted).await);
+
+    // A pass whose roster lists the name: marked, and noted.
+    for _ in 0..2 {
+        assert!(
+            identities
+                .roster_without_row_identities(&[spec(&adopted)])
+                .await
+                .is_empty(),
+            "the pass leaves the roster's listing out"
+        );
+        assert!(identities.roster_listing_superseded(&adopted).await);
+        assert!(!identities.roster_listing_superseded(&unlisted).await);
+    }
+    assert!(
+        !identities.first_note_of_superseded_listing(&adopted),
+        "the passes noted the name: a later note is not its first"
+    );
+    assert!(
+        identities.first_note_of_superseded_listing(&unlisted),
+        "no pass noted an identity the roster does not list"
+    );
+
+    // A pass whose roster no longer lists it: the mark is cleared.
+    assert!(
+        identities
+            .roster_without_row_identities(&[])
+            .await
+            .is_empty()
+    );
+    assert!(
+        !identities.roster_listing_superseded(&adopted).await,
+        "a roster that no longer lists the name supersedes nothing"
+    );
+}

@@ -532,6 +532,7 @@ fn identity_first_types_identity_status_full_roundtrip() {
         }),
         replaced_session: None,
         customizer_tools_pending: None,
+        roster_listing_superseded: false,
         record: Default::default(),
         session_repair_required: Some(
             meerkat_meta::identity_first::SessionRepairRequired::audited_endpoint_divergence(

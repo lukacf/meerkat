@@ -24,6 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (`IdentityRecordFacts`), so a struct literal of it needs the member
   (`record: Default::default()`). The status of a seated agent is written
   on the wire as before.
+- Rust API of `meerkat-meta`: `IdentityStatus` gains the member
+  `roster_listing_superseded` and `RestoreFlowResult` gains the member
+  `roster_listings_superseded`, so a struct literal of either needs its new
+  member (`roster_listing_superseded: false`,
+  `roster_listings_superseded: Default::default()`). The status as written
+  on the wire is unchanged while the member is `false`.
 - `runtime_options.identity_creation` (and the Rust form a native host
   returns): a policy that names the approval outcome `notify` or `review`, or
   the preparation mode `constructed`, is refused at init, with the policy
@@ -37,6 +43,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   late-bound reference to the session bridge, through which it asks whether
   Core holds a member as an identity entry, and a session bridge has
   neither trait. No Meerkat code relied on them.
+
+### Upgrade
+
+- A Rust host that composes its runtime through `UnifiedRuntime::bootstrap`
+  or the `bootstrap_with_*` family must complete the bootstrap before an
+  agent created at run time can be built: an identity bootstrap
+  (`install_and_bootstrap_identity_first_context`, or
+  `bootstrap_installed_identity_first_context` and its held variants) or
+  `activate_without_identity_context`. Until one of them returns, every
+  build of such an agent is refused for now with a reason that names both
+  calls, and one warning is logged per process. An agent that starts at
+  its creation (it was given a first message, or its profile runs as an
+  autonomous host, the default) and one the mob's start owes its seat stay
+  owed their seat, and the call that completes the bootstrap seats them. A
+  delivery to an agent seated dormant is refused retryable
+  (`host_preparation_pending`), nothing is delivered, and the sender sends
+  it again once the bootstrap is complete; work the agent already owes is
+  retried by the mob. Creating an agent that builds
+  nothing (no first message, a turn-driven profile) is unchanged. Through
+  0.9.14 such an agent was built from its record at once.
+  `UnifiedRuntimeBuilder` and both gateway binaries complete the bootstrap
+  themselves.
 
 ### Added
 
@@ -553,6 +581,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- An agent created at run time that the mob's start seats before the
+  host's identity runtime is composed is not built from its row alone.
+  That is an agent created with a first message whose first spawn failed
+  or was refused, so it is owed its seat: the start embodies it before the
+  host's customizer can run. Meta's build preparer refuses that build for
+  now, as it does for a wake and a restore, and the composition asks Core
+  once to seat the agents owed their seat
+  (`MobHandle::seat_owed_store_owned_identities`, through the new
+  defaulted `SessionBridge::seat_created_identities_owed_their_seat`). The
+  host's build step then decides each as at any build: an agent whose row
+  lacks a label the customizer sets stays refused its seat and never runs,
+  and every other one is built from the host's inputs (its model, system
+  prompt, instructions, provider parameters, context and tools) as a
+  configured agent is, and its first message runs once. Until the runtime
+  is composed the agent stays owed its seat, and a send to it is refused.
+
+- The same holds on a runtime that learns only when its host completes the
+  bootstrap whether it composes an agent customizer
+  (`UnifiedRuntime::bootstrap` or the `bootstrap_with_*` family over a spec
+  that does not declare one). A mob a killed process left running starts
+  inside `bootstrap`, before the host can install anything, and embodied
+  the seats it owed there: an agent created at run time was built from its
+  row alone, with no comparison of the customizer's labels with its seat's,
+  and ran its first message; a delivery that reached a dormant one before
+  the identity bootstrap built it the same way. Until the host completes
+  the bootstrap the build preparer of such a runtime now refuses every
+  build of such an agent for now, as it does before the identity runtime
+  is composed: a seat stays owed, and a dormant agent stays dormant. An
+  identity bootstrap that finds a customizer has the runtime's first
+  composition seat the agents owed their seat, where the host's build step
+  and its label rule decide; an identity bootstrap that finds none, and
+  `activate_without_identity_context`, settle that the composition has no
+  customizer and ask Core once to seat them from their records (see
+  Upgrade).
+
+- A name an agent holds through its record in the mob's identity store
+  that the host's roster lists too (the host adopted the agent into the
+  store, or its configuration lists a name an agent was created under) is
+  served from the record, as before, and that is no longer silent. The
+  agent's status (`meta/status_identity` and the status lists) carries
+  `roster_listing_superseded: true`, absent for every other agent; the
+  roster pass's result names such agents
+  (`RestoreFlowResult::roster_listings_superseded`); and the gateway logs
+  one warning per name. The roster's entry for the name is still not
+  applied: change the agent through the identity methods, or remove the
+  entry from the roster, which drops the member at the next roster pass.
+
 - An agent created at run time (an identity whose record is its row) is
   built from the same host inputs as a configured agent on its profile: the
   model, the system prompt, the additional instructions, the provider
@@ -690,17 +765,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   closes that window). A change of a paused schedule's target through
   Meerkat's own methods (its prompt, for one) makes its pause a pause by
   name: the agent's unarchive does not resume it.
-- Before the identity runtime is composed, the host's customizer cannot
-  run. A member of an identity whose record is its row that the mob's
-  start spawns then (a seat the start owes it) is built from its row
-  alone: without the customizer's tools until its next build, and without
-  its system prompt, instructions and context for that life; the
-  customizer is not asked, so its labels are not compared with the seat's
-  for that build either. One the
-  start restores then (one that owes work) is refused for now and built
-  once the runtime is composed, with both; on a runtime that learns of its
-  customizer only at its identity bootstrap it is built without them, as
-  before.
 
 ## [0.9.13] - 2026-11-11
 

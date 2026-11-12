@@ -4987,7 +4987,7 @@ comms = true
                 calls: llm_calls.clone(),
             })),
         });
-        let runtime = crate::UnifiedRuntime::bootstrap(
+        let mut runtime = crate::UnifiedRuntime::bootstrap(
             mob_spec,
             crate::MetaConfig {
                 modules: vec![],
@@ -5001,6 +5001,12 @@ comms = true
         )
         .await
         .expect("bootstrap schedule test runtime");
+        // The host completes the runtime's bootstrap: an agent created at
+        // run time is built only after that.
+        runtime
+            .activate_without_identity_context()
+            .await
+            .expect("complete the runtime's bootstrap");
         let handle = runtime.mob_handle();
 
         // An identity created at runtime: Core seats it Dormant, and its row

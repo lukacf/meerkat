@@ -467,7 +467,7 @@ seats); the agent lane is refused `MobError::ScopeDenied`.
 | Identity | Verdict and answer |
 |----------|--------------------|
 | No member holds it | Seated Dormant (`Seated`): on the session its retirement archived, on a first-boot request's session, or on a fresh session. No wake. A fresh seat of an identity that owes a kickoff is spawned live (`Embodied`). When the session the seat resumes was last built under another role, the seat declares the migration the roster declares from that role, and the session's next build moves it; with none declared the identity is held (`RoleMigrationHeld`) and not seated. |
-| Seated, role and runtime mode as declared | Kept (`Kept`): nothing is written. A change of display name, labels, context or instructions alone is no lifecycle fact: the facets are the host's and the apply stores none of them, so the member's next build applies the host's current ones only through the host's build preparer or spawn customizer (the build inputs a seat recorded stay as recorded). A change of placement alone is kept too: placement is read only for an identity no member holds. |
+| Seated, role and runtime mode as declared | Kept (`Kept`): nothing is written. A change of display name, labels, context or instructions alone is no lifecycle fact: the facets are the host's and the apply stores none of them, so the member's next build applies the host's current ones only through the host's build preparer or spawn customizer (the build inputs a seat recorded stay as recorded). A change of placement alone is kept too: placement is read only for an identity no member holds. A store-owned identity's label update is the exception: it restamps the seated member with its row's labels (see Update below). |
 | Seated, another runtime mode | Restamped on its own session at its next generation (`Restamped`), once it is idle. |
 | Seated, another role, the migration declared from its current role | Restamped under the new role on its own session (`RoleMigrated`), once it is idle. The successor's builds on that session take the spec's build inputs (its context, for one), as a resume of the session built from that spec takes them, after a restart too. |
 | Seated, another role or mode, on a session that lives in memory only | Rotated onto a fresh session (`RoleRotated`). |
@@ -702,16 +702,35 @@ composition without the built-in identity and member store commits no change
   message stay the row's, an answer that changed the seat's identity, role,
   launch mode or custody is refused, and a refusal ends the build as a
   refused build preparation does: a spawn fails with the identity owed its
-  seat, a wake leaves the member Dormant and asks again. The seat's labels
-  are its row's, and the labels of the host's answer must be exactly the
-  seat's: what decides on a member's labels reads its seat, so a member is
-  never seated without a label its host requires, nor with one its row
-  does not carry. An answer that adds a label key, drops one or gives one
-  another value is refused for good
+  seat (the mob's next start asks again); at a wake or a restore a
+  retryable refusal leaves the member Dormant and its next wake asks again
+  once the retry is due, and a refusal for good records the member broken
+  until it is respawned or reset. The seat's labels are the labels the
+  member is seated with: its row's at a fresh spawn, and the member's own
+  seat labels at a wake or a restore, which a label update seats at once
+  (see Update). A build must carry exactly the seat's labels, since what
+  decides on a member's labels reads its seat. Core compares them at every
+  build it composes, on the host's answer and again on the labels the
+  build carries once the host's spawn customizer ran, whether or not a
+  build preparer is configured: a label key that is added, dropped or
+  given another value is refused for good
   (`MemberBuildPreparationRefusal::store_owned_seat_labels`; the reason
   names the keys, never a value), and nothing is built: the label belongs
-  in the identity's row, at its create or by an update, and a seated member
-  takes its row's labels when it is seated again or respawned. A seat Core
+  in the identity's row, at its create or by an update. The comparison is
+  not made where Core composes no build of the seat: a spawn its host
+  wrote itself under created custody (placed, externally bound, held or
+  owner-bound), a live actor that is kept, a reload or warm revival (the
+  member is rebuilt with its seat's labels, the profile and tool overlay of
+  its last build in the process and its session's own context and
+  instructions) and an explicit resume of a stopped mob (each member is
+  rebuilt from its seat as the host's spawn customizer makes it, labels
+  included); neither of the last two asks the host for the seat. A host
+  whose build step is not ready to answer refuses retryably: until the
+  host's preparer is composed the seat is not built. A seat an earlier
+  release left with other labels than its row
+  (`IdentityRecordCensus::seats_stale` above zero after an upgrade) is
+  respawned with its row's labels before its host adopts the seat
+  composition or a customizer that sets labels. A seat Core
   holds Dormant asks nothing until it is built. A placed or externally
   bound identity is hosted on its first use,
   one whose creation its host holds (`CreatedIdentityRequest::held_creation`)
@@ -723,13 +742,26 @@ composition without the built-in identity and member store commits no change
   admission and the identity's verdict with the declared apply's own arms
   (`DeclareIdentityEntry`), so a store-owned identity and a roster-owned one
   of the same spec answer the same verdict for the same change
-  (`IdentityUpdateOutcome::applied`). A descriptive change (display name,
-  labels, context, instructions) keeps the member and is in the row at
-  once; a seat whose session no build created yet takes the new context and
-  instructions at its first build; otherwise the seat keeps its recorded
-  build inputs, as for a roster-owned identity, and its labels change when
-  it is seated again or respawned with them (`MemberRespawn::with_labels`;
-  `IdentityRecordCensus::seats_stale` counts such seats). A runtime-mode
+  (`IdentityUpdateOutcome::applied`), a label change excepted. A
+  descriptive change (display name, context, instructions) keeps the member
+  and is in the row at once; a seat whose session no build created yet
+  takes the new context and instructions at its first build; otherwise the
+  seat keeps its recorded build inputs, as for a roster-owned identity. A
+  label change is in the row at once and restamps the seated member with
+  the row's labels on its own session (`Restamped`: the same-session
+  respawn with `MemberRespawn::with_labels`), since every build of a
+  store-owned member must carry exactly its seat's labels: the member
+  keeps its identity entry, session, conversation and edges, nothing is
+  built or woken, and no kickoff runs again. A member that holds work is
+  not interrupted: the update answers `Deferred`, the restamp is owed
+  until the update is retried (a retry replays and carries it out), the
+  seat counts in `IdentityRecordCensus::seats_stale` until then, and a
+  cold build of the member in between is refused naming the changed key.
+  A member a same-session successor cannot serve (placed, wired to a
+  placed member, or on a session service that keeps no durable sessions)
+  keeps its seat and labels (`Kept`). A roster-owned identity's label
+  change keeps its member: the declared apply stores no labels. A
+  runtime-mode
   change restamps the member on its own session; a profile change is the
   declared migration from the member's current role, kept in the row until
   the restamp commits, so a crash before it is carried out at the next

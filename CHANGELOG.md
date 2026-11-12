@@ -76,23 +76,83 @@ them.
   state each time, and may be asked more than once for one seat. The seat's
   runtime mode, binding, placement and first message stay as Core
   lowered them, and an answer that changed the seat's identity, role,
-  launch mode or custody is refused. The seat's labels are its row's, and
-  the answer's labels must be exactly the seat's: what decides on a
-  member's labels (an access rule, an audience) reads its seat, so a member
-  is never seated without a label its host requires, nor with one its row
-  does not carry. An answer that adds a label key, drops one or gives one
-  another value is refused for good and the member is not built;
+  launch mode or custody is refused. The seat's labels are the labels its
+  member is seated with: its row's labels at a fresh spawn, and the
+  member's own seat labels at a wake or a restore, which a label update of
+  the row seats at once (see Changed). A build must carry exactly the
+  seat's labels: what decides on a member's labels (an access rule, an
+  audience) reads its seat. Core compares them at every build it composes,
+  twice: on the host's answer, and on the labels the build carries once
+  the host's spawn customizer ran, whether or not a build preparer is
+  configured. A key that is added, dropped or given another value is
+  refused for good and the member is not built;
   `MemberBuildPreparationRefusal::store_owned_seat_labels` is that refusal
   (its reason names the label keys, never a value, and the remedy: the
-  label belongs in the identity's row, at its create or by an update, and
-  a seated member takes its row's labels when it is seated again or
-  respawned), public so that a host can refuse first with the same reason.
-  A refusal fails the build before
-  anything is built: at a spawn the identity stays owed its seat and the
-  mob's next start asks again; at a wake or a restore the member stays
-  Dormant (`BuildPreparationRetry`) or is recorded broken, as for a refused
-  build preparation. Additive: the method is defaulted and composes
-  nothing, so hosts that do not implement it see no change.
+  label belongs in the identity's row, at its create or by an update),
+  public so that a host can refuse first with the same reason. The
+  comparison is not made where Core composes no build of the seat: a spawn
+  its host wrote itself under created custody (a placed or externally
+  bound member, a held spawn, an owner-bound spawn); a live actor that is
+  kept, which builds nothing; a reload or warm revival of a member, which
+  rebuilds it with its seat's labels, the profile and tool overlay of its
+  last build in the process and its session's own context and
+  instructions, and asks its host for no seat; and an explicit resume of a
+  stopped mob, which rebuilds each member from its seat as the host's
+  spawn customizer makes it, labels included, and asks its host for no
+  seat either. A host whose build step is not ready to answer refuses
+  retryably: until the host's preparer is composed the seat is not built.
+  A refusal fails the build before anything is built: at a spawn the
+  identity stays owed its seat and the mob's next start asks again; at a
+  wake or a restore a retryable refusal leaves the member Dormant and its
+  next wake asks again once the retry is due (`BuildPreparationRetry`),
+  and a refusal for good, as every label refusal is, records the member
+  broken until it is respawned or reset. Additive: the method is defaulted
+  and composes nothing, so hosts that do not implement it see no change
+  from it.
+
+### Changed
+
+- Mob: a label update of a store-owned identity
+  (`update_store_owned_identity`) seats the row's labels at once: its
+  seated member is restamped on its own session at the next generation
+  (the same-session respawn a runtime-mode change makes, with
+  `MemberRespawn::with_labels`), and the update answers
+  `DeclaredEntryOutcome::Restamped`. From 0.9.9 through 0.9.13 such an
+  update kept the member with the labels it was seated with until its host
+  respawned it (`IdentityRecordCensus::seats_stale` counted the seat).
+  With the label rule above a build must carry exactly its seat's labels,
+  so a seat that trailed its row would either be built without a label its
+  host requires or be refused its next build for good. The restamp keeps
+  the member: the same identity entry, session and conversation, its edges
+  and its comms key; nothing is built or woken (a live idle member is
+  released, and its next delivery wakes it), no kickoff runs again, and
+  its next build resumes its session. A member that holds work is not
+  interrupted: the update commits, answers
+  `DeclaredEntryOutcome::Deferred`, and the restamp is owed until the
+  update is retried (a retry replays and carries it out); until then the
+  seat counts in `seats_stale`, and a cold build of the member is refused
+  naming the changed key. A member a same-session successor cannot serve
+  (a placed member, a member wired to a placed member, a member on a
+  session service that keeps no durable sessions) keeps its seat and its
+  labels, and the update answers `Kept` as before. A roster-owned
+  identity's label change is unchanged: its member is kept, and its host
+  labels its builds (the declared apply stores no labels). See Upgrade
+  notes for seats an earlier release left with other labels than their
+  row.
+
+- Mob: the labels a store-owned member's build carries are compared with
+  its seat's after the host's spawn customizer
+  (`MobBuilder::with_spawn_member_customizer`) ran, at the fresh spawn of
+  its create, of a start's owed seat and of a rotation, and at every wake
+  and boot restore. Through 0.9.13 a label the customizer set reached such
+  a member unchecked: at a fresh spawn it was seated with a label its row
+  does not carry. Now the build is refused for good, naming the label keys
+  and never a value, as an answer of the host's seat composition is: the
+  spawn fails with the identity owed its seat, or the wake fails and the
+  member is recorded broken, and nothing is built. A host that labels its
+  members in its customizer puts those labels in the store-owned
+  identity's row. Members the host spawns itself and roster-owned
+  identities are not compared.
 
 ### Fixed
 
@@ -102,14 +162,30 @@ them.
   restore: the member Core starts at the identity's create to run its first
   message, and the seat a start owes it. The preparer is asked once, off
   the actor, before the provision, about the session the spawn names (which
-  no build has created yet), with no wired peers. Through 0.9.13 that
-  member was built and ran its kickoff with nothing the host prepares for a
-  build, for example without the tools it publishes for the member's
+  no build has created yet), with the wired peers the mob's durable wiring
+  records for the identity at that moment: none for an identity no edge
+  names yet, and the edges the mob holds for it otherwise (the owned edges
+  a start recovered for an identity owed its seat, say). Through 0.9.13
+  that member was built and ran its kickoff with nothing the host prepares
+  for a build, for example without the tools it publishes for the member's
   identity. A refusal, for now or for good, is a failed kickoff spawn: the
   create stays committed, nothing is built, the identity is owed its seat,
   and the mob's next start asks again. A hold the host asks for
   (`HoldUntilReleased`) holds the member's run starts until
   `release_member_run_starts`. Hosts with no preparer see no change.
+
+### Upgrade notes
+
+- Mob: a seated store-owned identity whose seat an earlier release left
+  with other labels than its row (0.9.9 through 0.9.13 kept the member's
+  labels at a label update) is not restamped by a start. Read
+  `MobHandle::identity_record_census()`: while `seats_stale` is above zero,
+  respawn each such member with its row's labels
+  (`MobHandle::respawn_member` with `MemberRespawn::new().with_labels(..)`)
+  before the host adopts `MemberBuildPreparer::prepare_store_owned_seat` or
+  a spawn customizer that sets labels. A host that answers such a member's
+  seat from its row is otherwise refused the member's build, naming the
+  label keys that differ.
 
 ## [0.9.13] - 2026-11-11
 

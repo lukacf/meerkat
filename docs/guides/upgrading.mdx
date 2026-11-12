@@ -1766,6 +1766,12 @@ preparation (`preparations_open`), the held constructions
 last seat row predates their row's labels or profile (`seats_stale`: 0.9.8
 rebuilds such a member from its seat row; a respawn with the row's labels,
 `MemberRespawn::with_labels`, or a restamp brings the seat row up to date).
+From the release after 0.9.13 a label update restamps its idle member
+itself, so only a seat an earlier release left behind, or one whose member
+held work at its update, counts here; respawn each with its row's labels
+before the host adopts `MemberBuildPreparer::prepare_store_owned_seat` or a
+spawn customizer that sets labels, since no start restamps it and a host
+that answers such a seat from its row is refused the member's build.
 Change receipts are rows of the identity store's receipts table under keys
 0.9.8 never asks for.
 

@@ -55,9 +55,9 @@ them.
 - Behaviour-only (not measured by the gate): `rkat`: `--comms-binding-out`
   replaces what is at its path with a new owner-only file instead of writing
   into it. A named pipe, a socket, a device or a directory at the path, a
-  symbolic link to one of them, and any path in `/dev` or `/proc`
-  (`/dev/stdout`) is refused, and another account can no longer read the
-  binding file. See Security and the Upgrade notes.
+  symbolic link to one of them, and any path in `/proc` or in `/dev` outside
+  `/dev/shm` (`/dev/stdout`) is refused, and another account can no longer
+  read the binding file. See Security and the Upgrade notes.
 
 ### Added
 
@@ -345,11 +345,12 @@ them.
     regular file or to nothing is replaced by the binding file (the file it
     pointed to stays as it was, and nothing is created where it pointed),
     and a link to a named pipe, a socket, a device or a directory is
-    refused, as those things themselves are. A path in `/dev` or `/proc`
-    (`/dev/stdout`, also when standard output is redirected to a file) is
-    refused whatever it holds. A refusal comes before anything is removed
-    or created, with an error that names what is there. The directory of
-    the path must allow the removal and the creation of a file.
+    refused, as those things themselves are. A path in `/proc`, or in `/dev`
+    other than under `/dev/shm` (a memory file system for ordinary files),
+    is refused whatever it holds: `/dev/stdout`, for one, also when standard
+    output is redirected to a file. A refusal comes before anything is
+    removed or created, with an error that names what is there. The
+    directory of the path must allow the removal and the creation of a file.
   - On Unix the file is 0600 from its creation, whatever the umask and
     whatever mode the file before it had.
   - A supervisor that runs under another account than `rkat` cannot read
@@ -406,10 +407,11 @@ them.
     the path of the file itself.
   - A named pipe, a socket, a device or a directory at the path, and a
     symbolic link to one of them, is refused and left untouched. So is any
-    path in `/dev` or `/proc`, whatever it holds (a file under `/dev/shm`
-    included). `--comms-binding-out /dev/stdout`, or a named pipe a
+    path in `/proc` or in `/dev`, whatever it holds; `/dev/shm`, a memory
+    file system for ordinary files, is the one exception.
+    `--comms-binding-out /dev/stdout`, or a named pipe a
     supervisor reads the binding from, worked before and is now an error:
-    write the binding to a regular file outside those two directories and
+    write the binding to a regular file (one under `/dev/shm` will do) and
     have the supervisor read that.
   - The directory of the path must let `rkat` remove and create a file in
     it. A binding file that was created for `rkat` in a directory it cannot

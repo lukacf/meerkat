@@ -31455,6 +31455,69 @@ async fn wire_members_answer_a_hidden_member_beside_an_approval_branch_as_absent
     }
 }
 
+/// A wire or unwire an agent makes that names an identity entry beside a
+/// member the host's audience hides from the caller answers exactly as the
+/// same call with a name the mob does not hold in the hidden member's place:
+/// member not found comes before the refusal of the entry. A call that
+/// names the entry beside a member the caller is shown still answers that
+/// refusal, and no call wires the entry.
+#[tokio::test]
+async fn wire_members_answer_a_hidden_member_beside_an_identity_entry_as_absent() {
+    let handle = mob_with_kept_members(&[
+        ("entry-kept", Some("ann")),
+        ("entry-shown", None),
+        ("entry-caller", None),
+    ])
+    .await;
+    let entry = AgentIdentity::from("entry-held");
+    let mut spec =
+        SpawnMemberSpec::new(ProfileName::from("worker"), entry.clone()).with_entry_custody(true);
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    handle
+        .spawn_spec(spec)
+        .await
+        .expect("the host seats its identity entry");
+    let caller = manage_scope_tools(&handle, "entry-caller").await;
+
+    for tool in ["wire_members", "unwire_members"] {
+        assert_hidden_end_answers_as_absent_beside(
+            &caller,
+            tool,
+            "entry-held",
+            "entry-kept",
+            "entry-gone",
+        )
+        .await;
+        for (member, peer) in [("entry-held", "entry-shown"), ("entry-shown", "entry-held")] {
+            let shown = masked_tool_answer(
+                &dispatch_operator_tool(
+                    &caller,
+                    tool,
+                    serde_json::json!({ "member_id": member, "peer_member_id": peer }),
+                )
+                .await,
+                "entry-held",
+            );
+            assert!(
+                shown.starts_with("error:")
+                    && shown.contains("member '<member>' is an identity entry"),
+                "{tool}: a call that names the entry beside a member the caller is shown \
+                 ('{member}', '{peer}') still answers the refusal of the entry: {shown}"
+            );
+        }
+    }
+    assert!(
+        handle
+            .get_member(&entry)
+            .await
+            .expect("roster read")
+            .expect("the entry is seated")
+            .wired_to
+            .is_empty(),
+        "no edge reaches the identity entry"
+    );
+}
+
 /// The end a wire tool answers as a member the mob does not hold
 /// (`MobHandle::wire_end_answered_absent`) is the end the mob itself names
 /// for two names it does not hold: the first of the two in the order of

@@ -204,6 +204,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   nothing more. No order is promised between these side effects and the
   answer of the change that owes them.
 
+- An agent whose record is its row in the mob's identity store (one created
+  at run time) is a durable identity to every check and copy the gateway
+  keeps for its long-term agents, on any profile. With this release's Core,
+  such an agent's seat is recorded durable whether or not its profile
+  declares `durable = true`, so, as for a configured agent: the start's
+  check of a state directory counts the agent once its conversation exists
+  and refuses a start whose `runtime.sqlite` no longer holds any session;
+  the storage census of the members' comms identities names it when it is
+  restored without its key pair; the continuity mirror
+  (`UnifiedRuntimeBuilder::continuity_mirror`) carries its record and its
+  session; `storage-migrate-native` lists it among a directory's
+  identities; and the launch's WorkGraph resume gate is asked before an
+  interrupted run of it resumes. Before, each of these covered such an
+  agent only on a `durable = true` profile. An agent seated by an earlier
+  build gets them from its next seat (a reset, a respawn, an unarchive).
+
 ### Known limitations
 
 - Before the identity runtime is composed, the host's customizer cannot

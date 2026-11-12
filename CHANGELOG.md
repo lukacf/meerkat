@@ -107,6 +107,24 @@ them.
   (`HoldUntilReleased`) holds the member's run starts until
   `release_member_run_starts`. Hosts with no preparer see no change.
 
+- Mob: the seat of a store-owned identity (one created at run time, whose
+  record is its row in the mob's identity store) is a durable identity's,
+  whatever its profile says of durability: its spawn row records
+  `SpawnContinuityIntent::DurableIdentity`, keyed by the identity, as the
+  seat of a `durable = true` profile's member does. Such an identity is a
+  long-term agent by definition. Its member is therefore built with the
+  mob's durable resume gate bound on its registration
+  (`MobBuilder::with_durable_resume_gate`), and it is listed by
+  `MobHandle::durable_identity_members` and
+  `MemberBindingHistory::durable_identity_bindings`, so a host's checks
+  over its durable identities cover it. Before, a store-owned identity on
+  a profile without `durable = true` was seated ephemeral and was absent
+  from all of these. A plain worker's seat is unchanged, and so is the
+  refusal of a `durable = true` profile on a session service that keeps no
+  durable sessions (it still follows the profile alone). A seat recorded
+  before this release keeps its row until the identity's next seat (a
+  reset, a respawn, an unarchive).
+
 ## [0.9.13] - 2026-11-11
 
 ### Changed

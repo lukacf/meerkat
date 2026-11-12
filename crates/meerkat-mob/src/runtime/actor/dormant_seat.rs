@@ -613,10 +613,11 @@ impl MobActor {
                 generation,
             ),
         };
-        let continuity_intent = spec
-            .continuity_intent
-            .clone()
-            .for_profile(&profile, &agent_identity);
+        let continuity_intent = spec.continuity_intent.clone().for_seat(
+            &profile,
+            &agent_identity,
+            spec.created_custody,
+        );
         // A session a seat named and no build created (its member was retired
         // before its first wake) is seated unborn again: MobMachine's fact.
         let session_never_born = super::super::boot_plan::domain_seat_session_never_born(

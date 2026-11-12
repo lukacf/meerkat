@@ -7118,14 +7118,23 @@ pub enum SpawnContinuityIntent {
 }
 
 impl SpawnContinuityIntent {
-    /// The intent a spawn of `profile` takes. An explicit durable intent on
-    /// the spawn wins. Otherwise a profile that declares `durable = true`
-    /// turns the default ephemeral intent into a durable identity keyed by
-    /// the member's identity, as identity convergence keys it.
+    /// The intent a seat of `profile` takes. An explicit durable intent on
+    /// the spawn wins. Otherwise the default ephemeral intent becomes a
+    /// durable identity keyed by the member's identity, as identity
+    /// convergence keys it, for a profile that declares `durable = true`,
+    /// and for a seat taken with created custody (`created_custody`): the
+    /// seat of an identity whose record is its row in the mob's identity
+    /// store, which is a long-term identity whatever its profile says of
+    /// durability. No other seat becomes durable here.
     #[must_use]
-    pub(crate) fn for_profile(self, profile: &crate::Profile, identity: &AgentIdentity) -> Self {
+    pub(crate) fn for_seat(
+        self,
+        profile: &crate::Profile,
+        identity: &AgentIdentity,
+        created_custody: bool,
+    ) -> Self {
         match self {
-            Self::Ephemeral if profile.durable => Self::DurableIdentity {
+            Self::Ephemeral if profile.durable || created_custody => Self::DurableIdentity {
                 continuity_key: identity.as_str().to_string(),
             },
             other => other,
@@ -23434,17 +23443,38 @@ mod tests {
         };
 
         assert_eq!(
-            SpawnContinuityIntent::Ephemeral.for_profile(&durable, &identity),
+            SpawnContinuityIntent::Ephemeral.for_seat(&durable, &identity, false),
             SpawnContinuityIntent::DurableIdentity {
                 continuity_key: "worker-1".to_string(),
             }
         );
         assert_eq!(
-            SpawnContinuityIntent::Ephemeral.for_profile(&ordinary, &identity),
+            SpawnContinuityIntent::Ephemeral.for_seat(&ordinary, &identity, false),
             SpawnContinuityIntent::Ephemeral
         );
-        assert_eq!(explicit.clone().for_profile(&durable, &identity), explicit);
-        assert_eq!(explicit.clone().for_profile(&ordinary, &identity), explicit);
+        // A seat taken with created custody is durable on any profile.
+        for profile in [&ordinary, &durable] {
+            assert_eq!(
+                SpawnContinuityIntent::Ephemeral.for_seat(profile, &identity, true),
+                SpawnContinuityIntent::DurableIdentity {
+                    continuity_key: "worker-1".to_string(),
+                }
+            );
+        }
+        for created_custody in [false, true] {
+            assert_eq!(
+                explicit
+                    .clone()
+                    .for_seat(&durable, &identity, created_custody),
+                explicit
+            );
+            assert_eq!(
+                explicit
+                    .clone()
+                    .for_seat(&ordinary, &identity, created_custody),
+                explicit
+            );
+        }
     }
 
     /// A failed fork-context probe is classified by what failed it: a

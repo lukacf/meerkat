@@ -27985,13 +27985,15 @@ comms = true
     }
 
     /// The change path's step once a change of `name`'s record committed.
+    /// The profiles the steward's context reads are then exactly the
+    /// profiles of the registrations made from rows.
     async fn record_changed(runtime: &UnifiedRuntime, name: &str) {
-        runtime
-            .identity_runtime()
-            .expect("the identity runtime")
-            .runtime()
-            .note_agent_record_changed(name)
-            .await;
+        let identities = runtime.identity_runtime().expect("the identity runtime");
+        identities.runtime().note_agent_record_changed(name).await;
+        assert!(
+            identities.runtime().row_profiles_in_step().await,
+            "the row profiles follow the registrations after a change of {name}"
+        );
     }
 
     /// Create an agent at run time from `spec`, through Core.

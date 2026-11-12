@@ -480,6 +480,19 @@ impl IdentityRuntime {
             .collect()
     }
 
+    /// Test only: whether the profiles kept beside the table are exactly
+    /// the profiles of the registrations made from rows.
+    #[cfg(test)]
+    pub(crate) async fn row_profiles_in_step(&self) -> bool {
+        let table = self.entries.read().await;
+        let profiles = self.entries.row_profiles();
+        table
+            .iter()
+            .filter(|(_, entry)| entry.created)
+            .map(|(identity, entry)| (identity, &entry.spec.profile))
+            .eq(profiles.iter())
+    }
+
     /// `roster` without the identities this runtime serves from their rows:
     /// a row is its identity's one owner, also while the host's roster
     /// still lists its name, so a pass neither registers nor declares the

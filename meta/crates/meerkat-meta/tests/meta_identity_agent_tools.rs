@@ -452,13 +452,17 @@ impl IdentityFamily for ScriptedFamily {
                         },
                     ),
                 ];
-                page.peers = vec![DirectoryPeer::new(
+                // A peer whose name the host's roster lists as well, as the
+                // host's read says it.
+                let mut peer = DirectoryPeer::new(
                     PLAIN,
                     WORKER,
                     DirectoryVerdict::NotAllowed {
                         reason: Some("outside your team".to_owned()),
                     },
-                )];
+                );
+                peer.roster_listing_superseded = true;
+                page.peers = vec![peer];
                 page.next = Some("next-entry".to_owned());
                 Ok(IdentityReadAnswer::Directory(page))
             }
@@ -468,12 +472,14 @@ impl IdentityFamily for ScriptedFamily {
 
 /// One agent as the scripted family's host read shows it: another agent
 /// asked for it, so it carries its provenance and an operation that agent
-/// holds open for it, whose id tells who asked.
+/// holds open for it, whose id tells who asked; and the host's roster
+/// lists its name as well, which the host's read says.
 fn hosts_view_of_scout() -> AgentSummary {
     let mut agent = AgentSummary::new("scout", WORKER, sha("scout"), AgentReadiness::Unseated);
     agent.display_name = Some("Scout".to_owned());
     agent.spec_revision = Some(3);
     agent.archived = true;
+    agent.roster_listing_superseded = true;
     agent.provenance = Some(AgentProvenance::new(
         AgentEntered::Created,
         RequesterKind::Agent,
@@ -1125,7 +1131,8 @@ async fn each_identity_tool_reaches_the_family_with_its_wire_request() {
 
     // An agent that lists the mob's agents is not shown who asked for
     // another agent, when, or under which consent, nor an operation another
-    // requester holds open for it: the host's read keeps that.
+    // requester holds open for it, nor whether the host's roster lists the
+    // agent's name as well: the host's read keeps that.
     let listed = call(&rig, IDENTITY_LIST, json!({})).await.text();
     for hidden in [
         "provenance",
@@ -1135,12 +1142,18 @@ async fn each_identity_tool_reaches_the_family_with_its_wire_request() {
         "decided",
         "open_operations",
         "held-request-1",
+        "roster_listing_superseded",
     ] {
         assert!(
             !listed.contains(hidden),
             "identity_list names no `{hidden}`: {listed}"
         );
     }
+    let directory = call(&rig, IDENTITY_DIRECTORY, json!({})).await.text();
+    assert!(
+        !directory.contains("roster_listing_superseded"),
+        "identity_directory does not say where a peer's record lives: {directory}"
+    );
     rig.shutdown().await;
 }
 
@@ -2663,7 +2676,7 @@ async fn an_agent_changes_no_agent_the_hosts_configuration_declares() {
 /// What a read of an agent's list or record must never carry: who asked for
 /// the agent, when, under which consent, or an operation another requester
 /// holds open for it.
-const NEVER_SHOWN_TO_AN_AGENT: [&str; 8] = [
+const NEVER_SHOWN_TO_AN_AGENT: [&str; 9] = [
     "provenance",
     "another-agent",
     "requester",
@@ -2672,6 +2685,7 @@ const NEVER_SHOWN_TO_AN_AGENT: [&str; 8] = [
     "decided",
     "open_operations",
     "held-request-1",
+    "roster_listing_superseded",
 ];
 
 /// `identity_get` is one of the identity tools: listed with the others, with

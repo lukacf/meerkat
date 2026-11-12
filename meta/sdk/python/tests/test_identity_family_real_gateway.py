@@ -35,7 +35,12 @@ from meerkat_meta import (
     IdentityChangesHold,
     IdentityDone,
     IdentityOperationUnknown,
+    IdentityPendingDecision,
+    IdentityPendingPreparation,
+    IdentityRefused,
     IdentityRefusedError,
+    IdentityWithdrawn,
+    SchedulesFollowed,
 )
 from meerkat_meta.builder import Meta
 from meerkat_meta.errors import RpcError
@@ -125,6 +130,42 @@ _HOST_MAY_CHANGE_AGENTS = {
     # Which peers an agent may list; the default is deny.
     "peers": {"default": "allow"},
 }
+
+
+# A person decides every create the host asks for on the stdio surface.
+_A_PERSON_DECIDES_A_CREATE = {
+    "enabled": True,
+    "approval": {
+        "rules": [
+            {
+                "change": ["create"],
+                "requester": {"kind": "host", "surface": "rpc"},
+                "outcome": {"kind": "require_approval", "approver": {"id": "owner"}},
+            }
+        ]
+    },
+    "peers": {"default": "allow"},
+}
+
+# The host prepares every new agent of the profile `writer` before its
+# first use.
+_THE_HOST_PREPARES_WRITERS = dict(
+    _HOST_MAY_CHANGE_AGENTS, preparation={"writer": {"mode": "required"}}
+)
+
+_AHEAD_ROWS = {
+    name for name in os.environ.get("META_IDENTITY_AHEAD_ROWS", "").split(",") if name
+}
+
+
+def _ahead(member: str):
+    """A row for a member the host methods of this tree do not carry yet. It
+    runs when ``META_IDENTITY_AHEAD_ROWS`` names the member (against a
+    gateway that serves it); the mark goes when the host methods carry it."""
+    return pytest.mark.skipif(
+        member not in _AHEAD_ROWS,
+        reason=f"the host methods of this tree do not carry {member} yet",
+    )
 
 
 class Roster:
@@ -444,6 +485,205 @@ async def test_withdraw_refuses_an_operation_no_decision_is_held_for(tmp_path):
         with pytest.raises(IdentityRefusedError) as refused:
             await identities.withdraw(request_id="never-asked")
         assert refused.value.kind == "decision_not_found"
+
+
+async def test_a_change_a_person_must_decide_is_held_read_and_withdrawn(tmp_path):
+    """A held decision is a normal answer: nothing is written, the same id
+    and request return the same state, the operation reads it by either
+    name, and its requester withdraws it. No person decides here and nothing
+    runs."""
+    async with gateway(tmp_path, policy=_A_PERSON_DECIDES_A_CREATE) as identities:
+        agents = [AgentSpec(name="editor", profile="writer")]
+        held = await identities.create(agents, request_id="create-editor")
+        assert isinstance(held, IdentityPendingDecision), held
+        assert held.operation_id and held.decision_id
+        assert held.deadline_ms > 0
+        listed = (await identities.list(include_archived=True)).agents
+        assert "editor" not in {agent.name for agent in listed}
+
+        assert await identities.create(agents, request_id="create-editor") == held
+        assert await identities.operation(request_id="create-editor") == held
+        assert await identities.operation(operation_id=held.operation_id) == held
+
+        withdrawn = await identities.withdraw(request_id="create-editor")
+        assert withdrawn == IdentityWithdrawn(
+            operation_id=held.operation_id, decision_id=held.decision_id
+        )
+        # The decision is closed, and nothing was written: the operation
+        # reads the withdrawal, and the same id is not asked again.
+        for after in (
+            await identities.operation(operation_id=held.operation_id),
+            await identities.operation(request_id="create-editor"),
+        ):
+            assert isinstance(after, IdentityRefused), after
+            assert after.refusal.kind == "decision_closed"
+            assert after.refusal.details.get("state") == "withdrawn"
+        with pytest.raises(IdentityRefusedError) as refused:
+            await identities.withdraw(operation_id=held.operation_id)
+        assert refused.value.kind == "decision_closed"
+        with pytest.raises(IdentityRefusedError) as refused:
+            await identities.create(agents, request_id="create-editor")
+        assert refused.value.kind == "decision_closed"
+        listed = (await identities.list(include_archived=True)).agents
+        assert "editor" not in {agent.name for agent in listed}
+
+
+@_ahead("capability")
+async def test_a_create_and_an_update_set_who_reaches_an_agent_and_how_it_runs(tmp_path):
+    async with gateway(tmp_path) as identities:
+        created = await identities.create(
+            [
+                AgentSpec(
+                    name="editor",
+                    profile="writer",
+                    addressability="internal_only",
+                    runtime_mode_override="turn_driven",
+                )
+            ],
+            request_id="create-editor",
+        )
+        assert isinstance(created, IdentityDone), created
+        record = await identities.get("editor")
+        assert (record.addressability, record.runtime_mode_override) == (
+            "internal_only",
+            "turn_driven",
+        )
+        listed = {agent.name: agent for agent in (await identities.list()).agents}
+        assert (listed["editor"].addressability, listed["editor"].runtime_mode_override) == (
+            "internal_only",
+            "turn_driven",
+        )
+        # A configured agent reads the same way, from its roster row: the
+        # default addressability is left out.
+        assert (listed["scout"].addressability, listed["scout"].runtime_mode_override) == (
+            None,
+            "turn_driven",
+        )
+
+        updated = await identities.update(
+            "editor",
+            expected_spec_digest=record.spec_digest,
+            request_id="update-editor",
+            set=AgentSet(addressability="addressable"),
+        )
+        assert isinstance(updated, IdentityDone), updated
+        after = await identities.get("editor")
+        assert (after.addressability, after.runtime_mode_override) == (None, "turn_driven")
+        assert after.spec_digest == updated.agents[0].spec_digest
+        assert after.spec_digest != record.spec_digest
+
+        with pytest.raises(IdentityRefusedError) as refused:
+            await identities.create(
+                [AgentSpec(name="clerk", profile="writer", addressability="by_invitation")],
+                request_id="create-clerk",
+            )
+        assert refused.value.kind == "invalid_request"
+
+
+@_ahead("schedules")
+async def test_a_change_that_stops_or_restores_an_agent_says_what_became_of_its_schedules(
+    tmp_path,
+):
+    """No schedule targets the agent here, so each first answer says that
+    none was followed; a replay states nothing of them."""
+    async with gateway(tmp_path) as identities:
+        digest = await _created(identities)
+        steps = [
+            ("archive", identities.archive, "paused"),
+            ("unarchive", identities.unarchive, "resumed"),
+            ("remove", identities.remove, "ended"),
+        ]
+        for change, call, effect in steps:
+            none_followed = SchedulesFollowed(effect=effect, count=0)
+            planned = await identities.plan(
+                change,
+                AgentRef(
+                    name="editor",
+                    expected_spec_digest=digest,
+                    request_id=f"plan-{change}-editor",
+                ),
+            )
+            assert planned.schedules == none_followed, change
+
+            first = await call(
+                "editor", expected_spec_digest=digest, request_id=f"{change}-editor"
+            )
+            assert isinstance(first, IdentityDone), first
+            assert first.agents[0].schedules == none_followed, change
+
+            replay = await call(
+                "editor", expected_spec_digest=digest, request_id=f"{change}-editor"
+            )
+            assert isinstance(replay, IdentityDone), replay
+            assert replay.operation_id == first.operation_id
+            assert [agent.name for agent in replay.agents] == ["editor"]
+            assert replay.agents[0].schedules is None, change
+            read = await identities.operation(request_id=f"{change}-editor")
+            assert isinstance(read, IdentityDone), read
+            assert read.agents[0].schedules is None, change
+
+        # A change that takes no schedule with it says nothing of them.
+        record = await identities.get("scout")
+        adopted = await identities.adopt(
+            "scout", expected_spec_digest=record.spec_digest, request_id="adopt-scout"
+        )
+        assert isinstance(adopted, IdentityDone), adopted
+        assert adopted.agents[0].schedules is None
+
+
+@_ahead("preparation")
+async def test_the_host_settles_the_preparation_of_an_agent_it_created(tmp_path):
+    async with gateway(tmp_path, policy=_THE_HOST_PREPARES_WRITERS) as identities:
+        waiting = await identities.create(
+            [AgentSpec(name="editor", profile="writer")], request_id="create-editor"
+        )
+        assert isinstance(waiting, IdentityPendingPreparation), waiting
+        assert [agent.name for agent in waiting.agents] == ["editor"]
+        assert (await identities.get("editor")).readiness == "preparation_pending"
+
+        settled = await identities.settle_preparation("editor", request_id="settle-editor")
+        assert isinstance(settled, IdentityDone), settled
+        agent = settled.agents[0]
+        assert (agent.name, agent.state) == ("editor", "committed")
+        assert agent.seat in ("seated", "owed")
+        assert (await identities.get("editor")).readiness != "preparation_pending"
+        # The same id and name answer the same result and write nothing.
+        again = await identities.settle_preparation("editor", request_id="settle-editor")
+        assert isinstance(again, IdentityDone), again
+        assert again.operation_id == settled.operation_id
+        # The create reads done once its agent is settled.
+        assert isinstance(
+            await identities.operation(request_id="create-editor"), IdentityDone
+        )
+
+        with pytest.raises(IdentityRefusedError) as refused:
+            await identities.settle_preparation("editor", request_id="settle-editor-2")
+        assert refused.value.kind == "preparation_not_pending"
+        with pytest.raises(IdentityRefusedError) as refused:
+            await identities.settle_preparation("nobody", request_id="settle-nobody")
+        assert refused.value.kind == "identity_unknown"
+        assert refused.value.field == "name"
+        # An agent of a profile the policy does not prepare awaits none.
+        with pytest.raises(IdentityRefusedError) as refused:
+            await identities.settle_preparation("scout", request_id="settle-scout")
+        assert refused.value.kind in ("preparation_not_pending", "owner_read_only")
+
+
+@_ahead("roster_listing_superseded")
+async def test_a_status_says_when_the_roster_lists_an_agent_served_from_its_record(tmp_path):
+    async with gateway(tmp_path) as identities:
+        runtime = identities._runtime
+        assert (await runtime.status("scout")).roster_listing_superseded is False
+        record = await identities.get("scout")
+        adopted = await identities.adopt(
+            "scout", expected_spec_digest=record.spec_digest, request_id="adopt-scout"
+        )
+        assert isinstance(adopted, IdentityDone), adopted
+        # The roster still lists scout, and its record serves it now.
+        assert (await runtime.status("scout")).roster_listing_superseded is True
+        # An agent the roster does not list says nothing.
+        await _created(identities)
+        assert (await runtime.status("editor")).roster_listing_superseded is False
 
 
 async def test_directory_lists_what_a_change_may_name(tmp_path):

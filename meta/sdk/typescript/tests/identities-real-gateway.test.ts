@@ -23,6 +23,7 @@ import {
   INSTRUCTION_OUTCOME_KINDS,
   IdentityRefusedError,
   Meta,
+  parseIdentityStatus,
 } from "../src/index.js";
 import type { IdentitiesHandle } from "../src/index.js";
 
@@ -74,6 +75,44 @@ const HOST_MAY_CHANGE_AGENTS = {
   // Which peers an agent may list; the default is deny.
   peers: { default: "allow" },
 };
+
+// A person decides every create the host asks for on the stdio surface.
+const A_PERSON_DECIDES_A_CREATE = {
+  enabled: true,
+  approval: {
+    rules: [
+      {
+        change: ["create"],
+        requester: { kind: "host", surface: "rpc" },
+        outcome: { kind: "require_approval", approver: { id: "owner" } },
+      },
+    ],
+  },
+  peers: { default: "allow" },
+};
+
+// The host prepares every new agent of the profile `writer` before its first
+// use.
+const THE_HOST_PREPARES_WRITERS = {
+  ...HOST_MAY_CHANGE_AGENTS,
+  preparation: { writer: { mode: "required" } },
+};
+
+const aheadRows = new Set(
+  (process.env.META_IDENTITY_AHEAD_ROWS ?? "").split(",").filter((name) => name !== ""),
+);
+
+/**
+ * The skip of a row for a member the host methods of this tree do not carry
+ * yet. It runs when `META_IDENTITY_AHEAD_ROWS` names the member (against a
+ * gateway that serves it); the mark goes when the host methods carry it.
+ */
+function ahead(member: string): string | false {
+  if (skip) return skip;
+  return aheadRows.has(member)
+    ? false
+    : `the host methods of this tree do not carry ${member} yet`;
+}
 
 // The agents the host's configuration declares: one, `scout`.
 const roster = {
@@ -413,6 +452,235 @@ describe("identity family on a real gateway", () => {
       assert.equal(refused.kind, "decision_not_found");
     });
   });
+
+  // A held decision is a normal answer: nothing is written, the same id and
+  // request return the same state, the operation reads it by either name, and
+  // its requester withdraws it. No person decides here and nothing runs.
+  it("a change a person must decide is held, read and withdrawn", { skip }, async () => {
+    await withGateway(async (identities) => {
+      const agents = [{ name: "editor", profile: "writer" }];
+      const names = async () =>
+        (await identities.list({ includeArchived: true })).agents.map((agent) => agent.name);
+
+      const held = await identities.create(agents, { requestId: "create-editor" });
+      assert.ok(held.outcome === "pending_decision", JSON.stringify(held));
+      assert.ok(held.operationId !== "" && held.decisionId !== "");
+      assert.ok(held.deadlineMs > 0);
+      assert.ok(!(await names()).includes("editor"));
+
+      assert.deepEqual(await identities.create(agents, { requestId: "create-editor" }), held);
+      assert.deepEqual(await identities.operation({ requestId: "create-editor" }), held);
+      assert.deepEqual(await identities.operation({ operationId: held.operationId }), held);
+
+      assert.deepEqual(await identities.withdraw({ requestId: "create-editor" }), {
+        operationId: held.operationId,
+        decisionId: held.decisionId,
+      });
+      // The decision is closed, and nothing was written: the operation reads
+      // the withdrawal, and the same id is not asked again.
+      for (const after of [
+        await identities.operation({ operationId: held.operationId }),
+        await identities.operation({ requestId: "create-editor" }),
+      ]) {
+        assert.ok(after.outcome === "refused", JSON.stringify(after));
+        assert.equal(after.refusal.kind, "decision_closed");
+        assert.equal(after.refusal.details.state, "withdrawn");
+      }
+      const again = await refusedBy(identities.withdraw({ operationId: held.operationId }));
+      assert.equal(again.kind, "decision_closed");
+      const asked = await refusedBy(identities.create(agents, { requestId: "create-editor" }));
+      assert.equal(asked.kind, "decision_closed");
+      assert.ok(!(await names()).includes("editor"));
+    }, A_PERSON_DECIDES_A_CREATE);
+  });
+
+  it(
+    "a create and an update set who reaches an agent and how it runs",
+    { skip: ahead("capability") },
+    async () => {
+      await withGateway(async (identities) => {
+        const made = await identities.create(
+          [
+            {
+              name: "editor",
+              profile: "writer",
+              addressability: "internal_only",
+              runtimeModeOverride: "turn_driven",
+            },
+          ],
+          { requestId: "create-editor" },
+        );
+        assert.equal(made.outcome, "done");
+        const record = await identities.get("editor");
+        assert.deepEqual(
+          [record.addressability, record.runtimeModeOverride],
+          ["internal_only", "turn_driven"],
+        );
+        const listed = new Map(
+          (await identities.list()).agents.map((agent) => [agent.name, agent]),
+        );
+        assert.deepEqual(
+          [listed.get("editor")?.addressability, listed.get("editor")?.runtimeModeOverride],
+          ["internal_only", "turn_driven"],
+        );
+        // A configured agent reads the same way, from its roster row: the
+        // default addressability is left out.
+        assert.deepEqual(
+          [listed.get("scout")?.addressability, listed.get("scout")?.runtimeModeOverride],
+          [null, "turn_driven"],
+        );
+
+        const updated = await identities.update("editor", {
+          expectedSpecDigest: record.specDigest,
+          requestId: "update-editor",
+          set: { addressability: "addressable" },
+        });
+        assert.ok(updated.outcome === "done", JSON.stringify(updated));
+        const after = await identities.get("editor");
+        assert.deepEqual([after.addressability, after.runtimeModeOverride], [null, "turn_driven"]);
+        assert.equal(after.specDigest, updated.agents[0].specDigest);
+        assert.notEqual(after.specDigest, record.specDigest);
+
+        const refused = await refusedBy(
+          identities.create(
+            [
+              {
+                name: "clerk",
+                profile: "writer",
+                addressability: "by_invitation" as "internal_only",
+              },
+            ],
+            { requestId: "create-clerk" },
+          ),
+        );
+        assert.equal(refused.kind, "invalid_request");
+      });
+    },
+  );
+
+  // No schedule targets the agent here, so each first answer says that none
+  // was followed; a replay states nothing of them.
+  it(
+    "a change that stops or restores an agent says what became of its schedules",
+    { skip: ahead("schedules") },
+    async () => {
+      await withGateway(async (identities) => {
+        const digest = await created(identities);
+        for (const [change, effect] of [
+          ["archive", "paused"],
+          ["unarchive", "resumed"],
+          ["remove", "ended"],
+        ] as const) {
+          const noneFollowed = { effect, count: 0, schedules: [], incomplete: false };
+          const planned = await identities.plan(change, {
+            name: "editor",
+            expectedSpecDigest: digest,
+            requestId: `plan-${change}-editor`,
+          });
+          assert.deepEqual(planned.schedules, noneFollowed, change);
+
+          const options = { expectedSpecDigest: digest, requestId: `${change}-editor` };
+          const first = await identities[change]("editor", options);
+          assert.ok(first.outcome === "done", JSON.stringify(first));
+          assert.deepEqual(first.agents[0].schedules, noneFollowed, change);
+
+          const replay = await identities[change]("editor", options);
+          assert.ok(replay.outcome === "done", JSON.stringify(replay));
+          assert.equal(replay.operationId, first.operationId);
+          assert.deepEqual(replay.agents.map((agent) => agent.name), ["editor"]);
+          assert.equal(replay.agents[0].schedules, null, change);
+          const read = await identities.operation({ requestId: `${change}-editor` });
+          assert.ok(read.outcome === "done", JSON.stringify(read));
+          assert.equal(read.agents[0].schedules, null, change);
+        }
+
+        // A change that takes no schedule with it says nothing of them.
+        const record = await identities.get("scout");
+        const adopted = await identities.adopt("scout", {
+          expectedSpecDigest: record.specDigest,
+          requestId: "adopt-scout",
+        });
+        assert.ok(adopted.outcome === "done", JSON.stringify(adopted));
+        assert.equal(adopted.agents[0].schedules, null);
+      });
+    },
+  );
+
+  it(
+    "the host settles the preparation of an agent it created",
+    { skip: ahead("preparation") },
+    async () => {
+      await withGateway(async (identities) => {
+        const waiting = await identities.create([{ name: "editor", profile: "writer" }], {
+          requestId: "create-editor",
+        });
+        assert.ok(waiting.outcome === "pending_preparation", JSON.stringify(waiting));
+        assert.deepEqual(waiting.agents.map((agent) => agent.name), ["editor"]);
+        assert.equal((await identities.get("editor")).readiness, "preparation_pending");
+
+        const settled = await identities.settlePreparation("editor", {
+          requestId: "settle-editor",
+        });
+        assert.ok(settled.outcome === "done", JSON.stringify(settled));
+        const agent = settled.agents[0];
+        assert.deepEqual([agent.name, agent.state], ["editor", "committed"]);
+        assert.ok(agent.seat === "seated" || agent.seat === "owed", String(agent.seat));
+        assert.notEqual((await identities.get("editor")).readiness, "preparation_pending");
+        // The same id and name answer the same result and write nothing.
+        const again = await identities.settlePreparation("editor", {
+          requestId: "settle-editor",
+        });
+        assert.ok(again.outcome === "done", JSON.stringify(again));
+        assert.equal(again.operationId, settled.operationId);
+        // The create reads done once its agent is settled.
+        assert.equal(
+          (await identities.operation({ requestId: "create-editor" })).outcome,
+          "done",
+        );
+
+        const settledBefore = await refusedBy(
+          identities.settlePreparation("editor", { requestId: "settle-editor-2" }),
+        );
+        assert.equal(settledBefore.kind, "preparation_not_pending");
+        const unknown = await refusedBy(
+          identities.settlePreparation("nobody", { requestId: "settle-nobody" }),
+        );
+        assert.equal(unknown.kind, "identity_unknown");
+        assert.equal(unknown.field, "name");
+        // An agent of a profile the policy does not prepare awaits none.
+        const none = await refusedBy(
+          identities.settlePreparation("scout", { requestId: "settle-scout" }),
+        );
+        assert.ok(
+          none.kind === "preparation_not_pending" || none.kind === "owner_read_only",
+          none.kind,
+        );
+      }, THE_HOST_PREPARES_WRITERS);
+    },
+  );
+
+  it(
+    "a status says when the roster lists an agent served from its record",
+    { skip: ahead("roster_listing_superseded") },
+    async () => {
+      await withGateway(async (identities, rpc) => {
+        const status = async (identity: string) =>
+          parseIdentityStatus(await rpc("meta/status_identity", { identity }));
+        assert.equal((await status("scout")).rosterListingSuperseded, false);
+        const record = await identities.get("scout");
+        const adopted = await identities.adopt("scout", {
+          expectedSpecDigest: record.specDigest,
+          requestId: "adopt-scout",
+        });
+        assert.equal(adopted.outcome, "done");
+        // The roster still lists scout, and its record serves it now.
+        assert.equal((await status("scout")).rosterListingSuperseded, true);
+        // An agent the roster does not list says nothing.
+        await created(identities);
+        assert.equal((await status("editor")).rosterListingSuperseded, false);
+      });
+    },
+  );
 
   it("directory lists what a change may name", { skip }, async () => {
     await withGateway(async (identities) => {

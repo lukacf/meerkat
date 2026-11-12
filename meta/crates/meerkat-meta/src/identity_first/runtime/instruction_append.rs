@@ -81,9 +81,8 @@ use meerkat_mob::{
 
 use super::super::types::{AgentIdentity, DurableAgentSpec};
 use super::IdentityRuntime;
-
-pub use interface_stand_in::{
-    InstructionNextSessionReason, InstructionOutcome, InstructionsChanged,
+use crate::identity_creation::{
+    InstructionNextSessionReason, InstructionOutcome, InstructionStep, InstructionsChanged,
 };
 
 /// The instruction namespaces the platform keeps for itself: a host's
@@ -97,65 +96,6 @@ pub const INSTRUCTIONS_NAMESPACE: &str = "meerkat.identity.instructions";
 #[must_use]
 pub fn is_reserved_instruction_namespace(namespace: &str) -> bool {
     namespace.starts_with(RESERVED_INSTRUCTION_NAMESPACE_PREFIX)
-}
-
-/// STAND-IN for the identity change interface's types
-/// (`identity_creation::{InstructionOutcome, InstructionNextSessionReason}`
-/// and `identity_creation::executor::InstructionsChanged`). This module is
-/// deleted, and its names imported from there, when that interface lands.
-mod interface_stand_in {
-    /// What an agent's changed instructions mean for the agent. Closed.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-    #[serde(tag = "kind", rename_all = "snake_case")]
-    pub enum InstructionOutcome {
-        /// Recorded: the agent applies the current text at its next run. A
-        /// run that starts within moments of the change may still use the
-        /// earlier instructions.
-        AppliesAtNextRun,
-        /// Recorded, and the agent's model takes a system instruction only
-        /// ahead of the conversation: the current text applies once a
-        /// compaction at a run's first request carries it, or with a fresh
-        /// session.
-        AppliesAfterCompaction,
-        /// The current text applies from the agent's next fresh session,
-        /// for `reason`.
-        AppliesAtNextSession {
-            reason: InstructionNextSessionReason,
-        },
-        /// The mob already holds the current text for the agent.
-        Unchanged,
-    }
-
-    /// Why an agent's changed instructions apply only from its next fresh
-    /// session. Closed.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-    #[serde(rename_all = "snake_case")]
-    pub enum InstructionNextSessionReason {
-        /// The runtime is governed, and no authorization exists for an
-        /// instruction record there.
-        PreparedAuthorizationRequired,
-        /// The mob holds as many instruction records as it can.
-        SlotLimitExceeded,
-        /// The mob's instruction bodies hold as many bytes as they can.
-        ActiveSetBudgetExceeded,
-        /// The agent's model takes no system instruction besides its
-        /// prompt.
-        LoweringUnavailable,
-        /// The text is larger than one instruction record holds.
-        BodyTooLarge,
-        /// The mob could not take the record now. The change is committed;
-        /// the next start writes the record, and the text then reaches the
-        /// agent at its next run.
-        RecordUnavailable,
-    }
-
-    /// An agent's instructions changed: both texts, as lists of sections.
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct InstructionsChanged {
-        pub identity: String,
-        pub previous: Vec<String>,
-        pub current: Vec<String>,
-    }
 }
 
 /// A step's future, heap-placed: the future of a caller that awaits it holds
@@ -563,9 +503,8 @@ impl IdentityRuntime {
     }
 
     /// After the store commit of an update of a store-owned agent that
-    /// changed its instructions, and on a replay of that update: the
-    /// comparison, with both texts in hand. A repeat finds the record
-    /// current and writes nothing.
+    /// changed its instructions: the comparison, with both texts in hand.
+    /// A repeat finds the record current and writes nothing.
     pub async fn after_update(
         &self,
         mob: &MobHandle,
@@ -877,6 +816,23 @@ impl IdentityRuntime {
             })
             .await
             .ok()
+    }
+}
+
+/// The step the identity change interface calls after its commits: the
+/// comparison after an update, the revoke after a removal.
+#[async_trait::async_trait]
+impl InstructionStep for IdentityRuntime {
+    async fn after_update(
+        &self,
+        mob: &MobHandle,
+        change: &InstructionsChanged,
+    ) -> InstructionOutcome {
+        IdentityRuntime::after_update(self, mob, change).await
+    }
+
+    async fn after_removal(&self, mob: &MobHandle, identity: &str) {
+        IdentityRuntime::after_removal(self, mob, identity).await;
     }
 }
 

@@ -77,8 +77,8 @@ mod tool_grant_seat;
 use build_preparation::{admission_door_refusal_of, door_refusal_of};
 pub(crate) use declare::HostedIdentities;
 pub use instruction_append::{
-    INSTRUCTIONS_NAMESPACE, InstructionNextSessionReason, InstructionOutcome, InstructionsChanged,
-    RESERVED_INSTRUCTION_NAMESPACE_PREFIX, is_reserved_instruction_namespace,
+    INSTRUCTIONS_NAMESPACE, RESERVED_INSTRUCTION_NAMESPACE_PREFIX,
+    is_reserved_instruction_namespace,
 };
 pub(crate) use records::host_pending_members_before_build;
 

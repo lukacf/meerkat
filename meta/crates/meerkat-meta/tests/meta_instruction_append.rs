@@ -29,7 +29,7 @@ use meerkat_client::{LlmError, LlmEvent, LlmRequest};
 use meerkat_core::Message;
 use meerkat_core::types::StopReason;
 use meerkat_meta::UnifiedRuntimeBuilder;
-use meerkat_meta::identity_first::runtime::{
+use meerkat_meta::identity_creation::{
     InstructionNextSessionReason, InstructionOutcome, InstructionsChanged,
 };
 use meerkat_meta::identity_first::{
@@ -115,6 +115,12 @@ fn fresh_mob_id() -> String {
 
 fn text(sections: &[&str]) -> Vec<String> {
     sections.iter().map(ToString::to_string).collect()
+}
+
+/// The change of `identity`'s instructions from `previous` to `current`, as
+/// an update's commit states it.
+fn changed(identity: &str, previous: Vec<String>, current: Vec<String>) -> InstructionsChanged {
+    InstructionsChanged::between(identity, previous, current).expect("the two texts differ")
 }
 
 /// The configured agent's spec with `instructions`, on `profile`.
@@ -637,11 +643,7 @@ impl Rig {
             .expect("identity runtime installed")
             .after_update(
                 &self.mob(),
-                &InstructionsChanged {
-                    identity: CREATED.to_string(),
-                    previous: text(previous),
-                    current: text(current),
-                },
+                &changed(CREATED, text(previous), text(current)),
             )
             .await
     }
@@ -1424,11 +1426,11 @@ async fn a_start_revokes_the_record_of_an_agent_removed_without_its_step() {
             identities
                 .after_update(
                     &rig.mob(),
-                    &InstructionsChanged {
-                        identity: name.to_string(),
-                        previous: text(&["Keep ALPHA records."]),
-                        current: text(&["Keep BETA records."]),
-                    },
+                    &changed(
+                        name,
+                        text(&["Keep ALPHA records."]),
+                        text(&["Keep BETA records."]),
+                    ),
                 )
                 .await,
             InstructionOutcome::AppliesAtNextRun,
@@ -2251,14 +2253,7 @@ async fn more_than_64_agents_each_get_their_own_appended_instruction() {
         .await;
         assert_eq!(
             identities
-                .after_update(
-                    &rig.mob(),
-                    &InstructionsChanged {
-                        identity: name.clone(),
-                        previous: vec![previous],
-                        current: vec![current],
-                    },
-                )
+                .after_update(&rig.mob(), &changed(&name, vec![previous], vec![current]),)
                 .await,
             InstructionOutcome::AppliesAtNextRun,
             "{name}'s change is recorded"

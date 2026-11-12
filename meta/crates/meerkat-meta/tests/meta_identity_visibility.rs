@@ -228,7 +228,7 @@ fn policy() -> Arc<IdentityCreationPolicy> {
 
 /// One booted gateway runtime with the family attached.
 struct Rig {
-    runtime: UnifiedRuntime,
+    runtime: Arc<UnifiedRuntime>,
     fail_sessions: Arc<FailSessions>,
 }
 
@@ -261,7 +261,7 @@ async fn boot(state: &Path, roster: Vec<DurableAgentSpec>, access: Option<&str>)
         "the runtime serves identities and takes the policy"
     );
     Rig {
-        runtime,
+        runtime: Arc::new(runtime),
         fail_sessions,
     }
 }
@@ -1216,7 +1216,7 @@ async fn boot_with(
         "the runtime serves identities and takes the policy"
     );
     Rig {
-        runtime,
+        runtime: Arc::new(runtime),
         fail_sessions,
     }
 }
@@ -1361,6 +1361,236 @@ async fn the_console_s_member_reads_decide_a_placed_agent_no_member_was_created_
     // No read used an agent: each stands as it stood.
     for name in [PRIVATE, REVIEWER, PLAIN] {
         assert_registered_with_no_member(&rig, name).await;
+    }
+    rig.shutdown().await;
+}
+
+/// A signed-in person's Console token.
+fn console_token(subject: &str) -> String {
+    let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
+    header.kid = Some("kid-current".to_string());
+    jsonwebtoken::encode(
+        &header,
+        &json!({
+            "iss": ISSUER,
+            "aud": "meerkat-console",
+            "sub": subject,
+            "email": subject,
+            "provider": "google_oauth",
+            "exp": chrono::Utc::now().timestamp() + 300,
+        }),
+        &jsonwebtoken::EncodingKey::from_secret(b"phase7-trusted-current-secret"),
+    )
+    .expect("signed fixture token")
+}
+
+/// The answer of a Console GET of `path` as `subject`, which succeeds.
+async fn console_read(app: &axum::Router, subject: &str, path: &str) -> Value {
+    use tower::ServiceExt;
+    let request = axum::http::Request::builder()
+        .method("GET")
+        .uri(path)
+        .header(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {}", console_token(subject)),
+        )
+        .body(axum::body::Body::empty())
+        .expect("get request");
+    let response = tokio::time::timeout(CALL_BOUND, app.clone().oneshot(request))
+        .await
+        .expect("bounded get")
+        .expect("get response");
+    assert_eq!(response.status(), 200, "{path} as {subject}");
+    let body = axum::body::to_bytes(response.into_body(), 8 * 1024 * 1024)
+        .await
+        .expect("get body");
+    serde_json::from_slice(&body).unwrap_or_else(|_| panic!("json of {path}"))
+}
+
+/// The rows' agents among `names`, without the name of the runtime a
+/// Console that serves several puts before each, in name order.
+fn of_the_row(names: impl Iterator<Item = String>, agents: &[&str]) -> Vec<String> {
+    let mut names: Vec<String> = names
+        .map(|name| name.rsplit('/').next().unwrap_or_default().to_owned())
+        .filter(|name| agents.contains(&name.as_str()))
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
+/// The agents of `agents` whose record each list of the Console `app` names
+/// to `subject`: the identity list as a route and as a call, and with
+/// `sidebar` the agent rows of the experience.
+async fn listed_records(
+    app: &axum::Router,
+    subject: &str,
+    agents: &[&str],
+    sidebar: bool,
+) -> Vec<(&'static str, Vec<String>)> {
+    let names_of = |listed: &Value, key: &str| {
+        of_the_row(
+            listed
+                .as_array()
+                .unwrap_or_else(|| panic!("a list of records: {listed:#}"))
+                .iter()
+                .map(|record| {
+                    record[key]
+                        .as_str()
+                        .or(record["agent_identity"].as_str())
+                        .unwrap_or_default()
+                        .to_owned()
+                }),
+            agents,
+        )
+    };
+    let route = console_read(app, subject, "/console/identities").await;
+    let call = console_rpc(app, subject, "meta/console/list_identities", json!({})).await;
+    let mut lists = vec![
+        (
+            "GET /console/identities",
+            names_of(&route["identities"], "identity"),
+        ),
+        (
+            "meta/console/list_identities",
+            names_of(&console_ok(&call)["identities"], "identity"),
+        ),
+    ];
+    if sidebar {
+        let experience = console_read(app, subject, "/console/experience").await;
+        lists.push((
+            "the agent rows of /console/experience",
+            names_of(
+                &experience["agent_sidebar"]["live_snapshot"]["agents"],
+                "identity",
+            ),
+        ));
+    }
+    lists
+}
+
+/// A Console that serves `rig`'s runtime without holding it as its own
+/// runtime, under the access rules `access` (TOML): it names each agent
+/// with the runtime's name `served` before it.
+fn serving_console(rig: &Rig, access: &str) -> axum::Router {
+    let aggregator = meerkat_meta::MetaConsoleAggregator::in_memory();
+    aggregator.register_runtime(meerkat_meta::ConsoleRuntimeRegistration {
+        runtime_key: "served".to_owned(),
+        identity_namespace: "served".to_owned(),
+        runtime: Arc::clone(&rig.runtime),
+        visibility_policy: Arc::new(meerkat_meta::AllowAllConsoleVisibilityPolicy),
+    });
+    let config: meerkat_meta::AccessControlConfig = toml::from_str(access).expect("access TOML");
+    meerkat_meta::console_json_router_with_aggregator_and_access(
+        signed_console_decisions(),
+        aggregator,
+        Some(meerkat_meta::AccessController::new(config).expect("controller")),
+    )
+}
+
+/// A deny by role holds for the list record of an agent that has no live
+/// member, as it holds for the record of a live one. The Console lists an
+/// agent with no live member from what the identity runtime registered of
+/// it; the record carries the agent's profile as its role, so a person a
+/// deny by role names is not listed such an agent of that role: an agent its
+/// host configures that no member was created for, and an agent of the
+/// identity store that is owed its seat. A person the rules allow is listed
+/// every agent, and the denied person is listed the agents of a role no deny
+/// names, with a live member or without. It holds on the runtime's own
+/// Console and on a Console that serves the runtime beside others.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deny_by_role_holds_for_the_list_record_of_an_agent_with_no_live_member() {
+    const AGENTS: [&str; 6] = [
+        "plain-live",
+        "plain-owed",
+        "plain-placed",
+        "rev-live",
+        "rev-owed",
+        "rev-placed",
+    ];
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot_with(
+        temp.path(),
+        vec![
+            placed(roster_spec("rev-placed", "reviewer", &[])),
+            placed(roster_spec("plain-placed", "worker", &[])),
+            roster_spec("rev-live", "reviewer", &[]),
+            roster_spec("plain-live", "worker", &[]),
+        ],
+        Some(SCOPED_DENIES),
+        |builder| {
+            builder.identity_bootstrap_mode(meerkat_meta::IdentityBootstrapMode::LazyMaterialize)
+        },
+    )
+    .await;
+    let app = rig.console();
+    // The placed agents have no member; the others have a live one.
+    for name in ["rev-placed", "plain-placed"] {
+        assert_registered_with_no_member(&rig, name).await;
+    }
+    let roster: Vec<String> = rig
+        .runtime
+        .mob_handle()
+        .list_all_members()
+        .await
+        .iter()
+        .map(|row| row.agent_identity.to_string())
+        .collect();
+    assert_eq!(
+        of_the_row(roster.into_iter(), &AGENTS),
+        ["plain-live", "rev-live"],
+        "the roster holds the two live members"
+    );
+    // Two agents of the identity store that stay owed their seat.
+    rig.fail_sessions.failing.store(true, Ordering::SeqCst);
+    let made = console_rpc(
+        &app,
+        ROOT,
+        "meta/identity/create",
+        json!({"request_id": "make-1", "agents": [
+            {"name": "rev-owed", "profile": "reviewer", "first_message": "Begin the watch."},
+            {"name": "plain-owed", "profile": "worker", "first_message": "Begin the watch."},
+        ]}),
+    )
+    .await;
+    for agent in console_ok(&made)["agents"]
+        .as_array()
+        .expect("the created agents")
+    {
+        assert_eq!(agent["seat"], json!("owed"), "{made:#}");
+    }
+
+    let serving = serving_console(&rig, SCOPED_DENIES);
+    for (console, app, sidebar) in [("own", &app, false), ("serving", &serving, true)] {
+        // The denied person: no agent of the denied role, live or not.
+        for (list, names) in listed_records(app, BOB, &AGENTS, sidebar).await {
+            assert_eq!(
+                names,
+                ["plain-live", "plain-owed", "plain-placed"],
+                "{console} Console, {list}"
+            );
+        }
+        // A person the rules allow: every agent.
+        for (list, names) in listed_records(app, ANN, &AGENTS, sidebar).await {
+            assert_eq!(names, AGENTS, "{console} Console, {list}");
+        }
+    }
+    // The record of an agent with no live member carries its profile as
+    // its role, as a live member's record carries its role.
+    let listed = console_read(&app, ROOT, "/console/identities").await;
+    for (name, role) in [
+        ("rev-placed", "reviewer"),
+        ("rev-owed", "reviewer"),
+        ("plain-placed", "worker"),
+        ("rev-live", "reviewer"),
+    ] {
+        let record = listed["identities"]
+            .as_array()
+            .expect("the records")
+            .iter()
+            .find(|record| record["identity"] == json!(name))
+            .unwrap_or_else(|| panic!("the record of {name}: {listed:#}"));
+        assert_eq!(record["labels"]["role"], json!(role), "{name}: {record:#}");
     }
     rig.shutdown().await;
 }

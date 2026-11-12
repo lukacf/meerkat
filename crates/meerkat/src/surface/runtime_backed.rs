@@ -3004,6 +3004,10 @@ mod tests {
             self.selection.clone()
         }
 
+        fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+            self.inner.reasoning_route()
+        }
+
         fn project_replay_messages(
             &self,
             messages: &[meerkat_core::Message],
@@ -4048,10 +4052,17 @@ mod tests {
 
         let temp = tempfile::tempdir().expect("tempdir");
         let provider_requests = Arc::new(AtomicUsize::new(0));
+        // The client reports the family's direct route, whose catalog row
+        // accepts `high` for this model: a session created at `high` passes
+        // the build's level check and reaches the turn-level rules below.
         let (service, adapter) = build_test_service_with_llm(
             &temp,
             Arc::new(ControllerSetupClient {
-                inner: TestClient::for_provider(meerkat_core::Provider::OpenAI),
+                inner: TestClient::for_provider(meerkat_core::Provider::OpenAI)
+                    .with_reasoning_route(
+                        meerkat_core::direct_route_observation(meerkat_core::Provider::OpenAI)
+                            .expect("the family has a direct route"),
+                    ),
                 selection: None,
                 calls: Arc::clone(&provider_requests),
             }),

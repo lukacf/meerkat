@@ -91,6 +91,21 @@ them.
   Code that builds it with a struct literal sets the new field; `None` keeps
   the earlier behaviour.
 
+- `meerkat-core`: `event::AgentErrorReason` gains the variant
+  `ReasoningEffortRefused { refusal: ReasoningEffortRefusal }`, appended
+  last (see Added). A match over the enum without a wildcard arm handles the
+  new variant. On the wire the reason vocabulary of a failed run
+  (`error_report.reason.reason_type`) gains the value
+  `reasoning_effort_refused`; a client that reads it as a closed set accepts
+  the new value. `AgentError` gains the variant
+  `ReasoningEffortRefused(Box<ReasoningEffortRefusal>)`, appended last; the
+  enum is `#[non_exhaustive]`, so a match outside the crate is unaffected.
+
+- `meerkat`: `BuildAgentError` gains the variant
+  `ReasoningEffortRefused(Box<ReasoningEffortRefusal>)`, appended last (see
+  Added). A match over the enum without a wildcard arm handles the new
+  variant.
+
 ### Added
 
 - `meerkat-core`, `meerkat-llm-core`: the vocabulary of a provider-neutral
@@ -331,6 +346,64 @@ them.
   turn clears it. Provider-specific effort settings (`provider_tag`) are
   unchanged. The LayerDecision schema that adaptive mob packs bundle does
   not carry the level, so the schema stays the released one.
+
+- `meerkat-core`, `meerkat-contracts`, `meerkat`, `meerkat-runtime`,
+  `meerkat-rpc`, `meerkat-rest`, `meerkat-mob`: a reasoning effort level the
+  model's route does not accept is refused when the agent is built or a
+  caller reconfigures it, with one typed answer on every surface.
+
+  A session's level (`provider_params.reasoning_effort`) is judged against
+  the route of the client its build made and the model's catalog row, next
+  to the other build-time request checks: at a fresh build, at a resumed
+  build (which keeps the stored level through the resume merge, a mob
+  member's included), at the build that recovers a session that is not
+  live, and when a caller reconfigures a live session (a turn's model,
+  provider params or level override; the JSON-RPC session runtime and the
+  mob member executor apply those). A level the route does not accept is
+  refused before anything is published: no session is created, no provider
+  request is made, a refused resume or recovery leaves the stored identity
+  as it was, and a refused reconfiguration leaves the live session's
+  identity, client and stored params as they were. The stored params are
+  never rewritten: the level stays in the neutral field. A build or a
+  target that carries no level is not judged. A supported level passes this
+  check and is still refused at its first request until the level is
+  resolved for requests (see the entry above this one).
+
+  The refusal is `ReasoningEffortRefusal`, raised as
+  `AgentError::ReasoningEffortRefused` (from a build:
+  `BuildAgentError::ReasoningEffortRefused`; from a live reconfiguration:
+  `RuntimeDriverError::ReasoningEffortRefused`, with
+  `RuntimeDriverError::reasoning_effort_refused_session_error()` giving the
+  session error). Its error class is `config`, its turn failure source is
+  `ConfigError`, it is never retried and never a model fallback trigger.
+  Surfaces answer it as `INVALID_PARAMS` (JSON-RPC `-32602`, HTTP `400`)
+  with the data
+  `{"kind": "reasoning_effort_refused", "retryable": <bool>, "reasoning_effort_refusal": {...}}`
+  (`SessionError::REASONING_EFFORT_REFUSED_KIND`, read back by
+  `SessionError::reasoning_effort_refusal_from_data`). `retryable` is `true`
+  only for the reason `supported_levels_unavailable`
+  (`ReasoningEffortRefusalReason::is_transient()`): the account's model
+  list is not loaded, and the same request can succeed later with no
+  change. Meerkat itself does not retry it. A turn that fails for the
+  refusal carries it as its typed reason
+  (`AgentErrorReason::ReasoningEffortRefused`, in `run_failed` as
+  `{"reason_type": "reasoning_effort_refused", "refusal": {...}}`), and
+  JSON-RPC and REST answer such a turn exactly as they answer a refused
+  build, so a caller sees one shape whichever checkpoint refused. On REST,
+  a refused turn of the request that created its session also names the
+  created session in `details` (`session_id`, `session_ref`,
+  `session_created`, `resumable`).
+
+  `SessionLlmReconfigureHost` (`meerkat-runtime`) gains the defaulted method
+  `judge_requested_target_session_llm_identity`: the host's judgement of a
+  target a caller asked for, called by
+  `reconfigure_session_llm_identity` after the target is resolved and
+  before anything is staged. It decides nothing about a committed
+  model-routing handoff, whose lifecycle the routing machine owns: a
+  `brain_swap` handoff and a switch-turn request are applied as before and
+  keep the session's level, and a level their target's route does not
+  accept is then refused at each request until it is changed or cleared.
+  The default accepts every target; the facade's host judges the level.
 
 ### Fixed
 

@@ -2694,6 +2694,9 @@ fn runtime_driver_error_to_session_error(err: RuntimeDriverError) -> SessionErro
     if let Some(in_progress) = err.teardown_in_progress_session_error() {
         return in_progress;
     }
+    if let Some(refused) = err.reasoning_effort_refused_session_error() {
+        return refused;
+    }
     SessionError::Agent(meerkat_core::error::AgentError::InternalError(
         err.to_string(),
     ))
@@ -2723,6 +2726,11 @@ pub(crate) fn runtime_driver_error_to_rpc(err: RuntimeDriverError) -> RpcError {
     // A session another runtime owner hosts keeps its typed refusal (#1813).
     if let Some(hosting) = err.hosting_session_error() {
         return session_error_to_rpc(hosting);
+    }
+    // A reconfiguration refused for its reasoning effort level answers what
+    // a refused build answers: invalid params with the typed refusal data.
+    if let Some(refused) = err.reasoning_effort_refused_session_error() {
+        return session_error_to_rpc(refused);
     }
     match err {
         RuntimeDriverError::ValidationFailed { reason } => RpcError {
@@ -16450,8 +16458,12 @@ fn turn_failure_rpc_code(turn_error: &meerkat_core::TurnErrorMetadata) -> i32 {
 /// refused its scoped tool grant gate carries the typed refusal as its
 /// error's reason, and answers it exactly as the session error path does,
 /// through [`session_error_to_rpc`]: the invalid-params refusal with its typed
-/// data, never a turn failure. Any other turn answers its
-/// [`turn_failure_rpc_code`] with the typed turn error as `data.error`.
+/// data, never a turn failure. A turn that failed for a refused
+/// `reasoning_effort` level (at its build, at a reconfiguration before it, or
+/// before a provider request) carries that refusal the same way and answers
+/// the same way, so a caller sees one shape whichever checkpoint refused. Any
+/// other turn answers its [`turn_failure_rpc_code`] with the typed turn error
+/// as `data.error`.
 fn abandoned_turn_rpc_error(
     reason: String,
     turn_error: meerkat_core::TurnErrorMetadata,
@@ -16461,6 +16473,13 @@ fn abandoned_turn_rpc_error(
     {
         return session_error_to_rpc(SessionError::Agent(
             meerkat_core::AgentError::ToolGrantGateRefused(Box::new(refusal.clone())),
+        ));
+    }
+    if let Some(meerkat_core::event::AgentErrorReason::ReasoningEffortRefused { refusal }) =
+        &turn_error.reason
+    {
+        return session_error_to_rpc(SessionError::Agent(
+            meerkat_core::AgentError::ReasoningEffortRefused(Box::new(refusal.clone())),
         ));
     }
     RpcError {
@@ -17855,6 +17874,53 @@ mod tests {
                     outcome: meerkat_client::LlmDoneOutcome::success(StopReason::EndTurn),
                 }),
             ]))
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    /// [`MockLlmClient`] on an account route whose model list states `high`
+    /// for the selected model, so a reconfiguration that sets `high` is
+    /// accepted on it. A client that reports no route has every level
+    /// refused as unknown.
+    struct HighStatingMockLlmClient;
+
+    #[async_trait]
+    impl LlmClient for HighStatingMockLlmClient {
+        fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+            Some(meerkat_core::ReasoningRouteObservation {
+                backend: meerkat_core::ReasoningBackend::Anthropic(
+                    meerkat_core::provider_matrix::AnthropicBackendKind::Copilot,
+                ),
+                api: meerkat_core::ModelApi::Messages,
+                account: meerkat_core::AccountLevelStatement::Stated(vec![
+                    meerkat_core::model_profile::capabilities::EffortLevel::High,
+                ]),
+                operator_levels: None,
+            })
+        }
+
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            MockLlmClient.project_replay_messages(messages)
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a meerkat_client::LlmRequest,
+        ) -> Pin<
+            Box<dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>> + Send + 'a>,
+        > {
+            static MOCK: MockLlmClient = MockLlmClient;
+            MOCK.stream(request)
         }
 
         fn provider(&self) -> meerkat_core::Provider {
@@ -41672,7 +41738,8 @@ mod tests {
     /// A direct turn on a live session whose only override is the level: the
     /// hot swap runs, the session's identity carries the level, and the turn
     /// is refused before any provider request because nothing resolves the
-    /// level yet. The level is sticky until a turn clears it.
+    /// level yet. The level is sticky until a turn clears it. The session's
+    /// client states the level for its route, so the swap is accepted.
     #[tokio::test]
     async fn turn_reasoning_effort_hot_swaps_a_live_session_and_is_refused_unresolved() {
         use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
@@ -41680,7 +41747,7 @@ mod tests {
 
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
-        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        runtime.set_default_llm_client(Some(Arc::new(HighStatingMockLlmClient)));
         let session_id = runtime
             .create_session(mock_build_config(), None, None, Vec::new())
             .await
@@ -41759,7 +41826,7 @@ mod tests {
 
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
-        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        runtime.set_default_llm_client(Some(Arc::new(HighStatingMockLlmClient)));
         let session_id = runtime
             .create_session(mock_build_config(), None, None, Vec::new())
             .await
@@ -41820,6 +41887,133 @@ mod tests {
                 .provider_params,
             None
         );
+    }
+
+    /// A turn whose level the session's route does not accept is refused
+    /// typed, end to end, and leaves the session as it was: directly (the
+    /// hot swap before the turn answers the refusal) and through the runtime
+    /// (the executor's hot swap fails the turn's apply with the typed reason,
+    /// and the turn's answer is mapped back to the same refusal). The mock
+    /// client reports no route, so every level is refused as unknown and no
+    /// route is named. The session keeps its identity and keeps serving.
+    #[tokio::test]
+    async fn a_turn_level_the_route_refuses_answers_the_typed_refusal_and_leaves_the_session() {
+        use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        for through_runtime in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let runtime = if through_runtime {
+                make_runtime_with_runtime_store(temp_factory(&temp), 10)
+            } else {
+                make_runtime(temp_factory(&temp), 10)
+            };
+            runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+            let session_id = runtime
+                .create_session(mock_build_config(), None, None, Vec::new())
+                .await
+                .unwrap();
+            let turn = |overrides: Option<crate::handlers::turn::TurnOverrides>| {
+                let runtime = Arc::clone(&runtime);
+                let session_id = session_id.clone();
+                async move {
+                    let (event_tx, _event_rx) = mpsc::channel(100);
+                    if through_runtime {
+                        runtime
+                            .start_turn_via_runtime(
+                                &session_id,
+                                "Hello".into(),
+                                Vec::new(),
+                                event_tx,
+                                None,
+                                None,
+                                None,
+                                overrides,
+                            )
+                            .await
+                    } else {
+                        runtime
+                            .start_turn(
+                                &session_id,
+                                "Hello".into(),
+                                event_tx,
+                                None,
+                                None,
+                                None,
+                                overrides,
+                            )
+                            .await
+                    }
+                }
+            };
+            let live_identity = || {
+                let runtime = Arc::clone(&runtime);
+                let session_id = session_id.clone();
+                async move {
+                    runtime
+                        .service
+                        .export_live_session(&session_id)
+                        .await
+                        .expect("live session")
+                        .session_metadata()
+                        .expect("live session metadata")
+                        .llm_identity()
+                }
+            };
+            turn(None).await.expect("the first turn runs");
+            let before = live_identity().await;
+
+            let refused = turn(Some(level_overrides(TurnMetadataOverride::Set(
+                EffortLevel::High,
+            ))))
+            .await
+            .expect_err("a level the route does not accept is refused");
+            assert_eq!(
+                refused.code,
+                error::INVALID_PARAMS,
+                "through_runtime={through_runtime}: {refused:?}"
+            );
+            assert_eq!(
+                refused.data,
+                Some(serde_json::json!({
+                    "kind": "reasoning_effort_refused",
+                    "retryable": false,
+                    "reasoning_effort_refusal": {
+                        "requested": "high", "provider": "anthropic",
+                        "model": "claude-sonnet-4-5", "route": null,
+                        "reason": "supported_levels_unknown", "supported": null,
+                        "facts": null,
+                    },
+                })),
+                "through_runtime={through_runtime}"
+            );
+            assert_eq!(
+                refused.message,
+                "agent error: reasoning effort 'high' cannot be checked for anthropic model \
+                 'claude-sonnet-4-5': no source states the levels this route accepts; \
+                 provider_params can set a provider-specific effort",
+                "through_runtime={through_runtime}"
+            );
+            // A direct turn's swap is refused before anything is staged: the
+            // live session is untouched. Through the runtime the refused
+            // dispatch may leave the live actor to be rebuilt from the
+            // stored session at the next turn (the runtime's own handling of
+            // a failed dispatch), so the stored identity is what the next
+            // turn proves.
+            if !through_runtime {
+                assert_eq!(
+                    live_identity().await,
+                    before,
+                    "a refused turn leaves the live session's identity"
+                );
+            }
+            turn(None).await.expect("the session keeps serving");
+            assert_eq!(
+                live_identity().await,
+                before,
+                "through_runtime={through_runtime}: a refused turn leaves the session's identity"
+            );
+        }
     }
 
     #[tokio::test]

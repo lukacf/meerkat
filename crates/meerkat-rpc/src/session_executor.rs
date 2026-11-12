@@ -987,6 +987,13 @@ pub(crate) fn core_executor_error_from_rpc(err: RpcError) -> CoreExecutorError {
         .data
         .as_ref()
         .and_then(SessionError::tool_grant_gate_refusal_from_data);
+    // A refused `reasoning_effort` level (the session's build, or the
+    // reconfiguration before the turn) crosses the same way, in its own
+    // typed data.
+    let effort_refusal = err
+        .data
+        .as_ref()
+        .and_then(SessionError::reasoning_effort_refusal_from_data);
     let message = err.message;
     let cause = match kind {
         Some(CoreApplyFailureCauseKind::ExecutorStopped) => {
@@ -1002,6 +1009,11 @@ pub(crate) fn core_executor_error_from_rpc(err: RpcError) -> CoreExecutorError {
     let cause = match gate_refusal {
         Some(refusal) => cause
             .with_reason(meerkat_core::event::AgentErrorReason::ToolGrantGateRefused { refusal }),
+        None => cause,
+    };
+    let cause = match effort_refusal {
+        Some(refusal) => cause
+            .with_reason(meerkat_core::event::AgentErrorReason::ReasoningEffortRefused { refusal }),
         None => cause,
     };
     CoreExecutorError::apply_failed(cause)

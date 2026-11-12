@@ -162,7 +162,13 @@ struct DeferredBrainSwapClient {
     /// that actually served the call.
     provider: Provider,
     route: RouteSpec,
+    /// The route this client reports for the provider-neutral reasoning
+    /// effort option; `None` (the default) reports no route.
+    reasoning_route: ScriptedReasoningRoute,
 }
+
+/// A route observation a row scripts for every client of its environment.
+type ScriptedReasoningRoute = Arc<StdMutex<Option<meerkat_core::ReasoningRouteObservation>>>;
 
 impl DeferredBrainSwapClient {
     fn record(&self, model: &str) -> usize {
@@ -196,6 +202,13 @@ fn done_event(stop_reason: StopReason) -> LlmEvent {
 
 #[async_trait]
 impl LlmClient for DeferredBrainSwapClient {
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        self.reasoning_route
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     fn project_replay_messages(
         &self,
         messages: &[meerkat_core::Message],
@@ -464,6 +477,7 @@ fn brain_swap_discovery_requires_configured_routes_without_foreign_auth() {
                 requested_calls: Arc::new(StdMutex::new(Vec::new())),
                 provider: route.provider_b,
                 route,
+                reasoning_route: ScriptedReasoningRoute::default(),
             }),
             availability,
             client_build_models: Arc::clone(&client_build_models),
@@ -580,9 +594,19 @@ struct AbEnvironment {
     availability: Arc<ModelAvailability>,
     client_build_models: Arc<StdMutex<Vec<String>>>,
     resolved_auth_bindings: Arc<StdMutex<Vec<AuthBindingRef>>>,
+    reasoning_route: ScriptedReasoningRoute,
 }
 
 impl AbHarness {
+    /// The route every client of this environment reports from now on.
+    fn set_reasoning_route(&self, route: Option<meerkat_core::ReasoningRouteObservation>) {
+        *self
+            .environment
+            .reasoning_route
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = route;
+    }
+
     fn requested_models(&self) -> Vec<String> {
         self.environment
             .requested_calls
@@ -780,6 +804,7 @@ fn new_environment(profile: PersistenceProfile, route: RouteSpec) -> Arc<AbEnvir
         availability: Arc::new(ModelAvailability::default()),
         client_build_models: Arc::new(StdMutex::new(Vec::new())),
         resolved_auth_bindings: Arc::new(StdMutex::new(Vec::new())),
+        reasoning_route: ScriptedReasoningRoute::default(),
     })
 }
 
@@ -824,6 +849,7 @@ async fn try_attach_harness(
             requested_calls: Arc::clone(&environment.requested_calls),
             provider,
             route,
+            reasoning_route: Arc::clone(&environment.reasoning_route),
         });
         registry = registry.with_runtime(Arc::new(DeferredBrainSwapProviderRuntime {
             provider,
@@ -1832,4 +1858,203 @@ async fn head_canonical_a_restart_bootstraps_no_client_for_a_target_that_cannot_
         PersistenceProfile::HeadCanonical,
     )
     .await;
+}
+
+// ---------------------------------------------------------------------------
+// The session's reasoning effort level
+// ---------------------------------------------------------------------------
+
+/// An account route whose model list states `levels` for the selected model.
+fn account_route_stating(
+    levels: &[meerkat_core::model_profile::capabilities::EffortLevel],
+) -> meerkat_core::ReasoningRouteObservation {
+    meerkat_core::ReasoningRouteObservation {
+        backend: meerkat_core::ReasoningBackend::OpenAi(
+            meerkat_core::provider_matrix::OpenAiBackendKind::Copilot,
+        ),
+        api: meerkat_core::ModelApi::Responses,
+        account: meerkat_core::AccountLevelStatement::Stated(levels.to_vec()),
+        operator_levels: None,
+    }
+}
+
+fn level_request(
+    model: Option<&str>,
+    level: Option<
+        meerkat_core::lifecycle::run_primitive::TurnMetadataOverride<
+            meerkat_core::model_profile::capabilities::EffortLevel,
+        >,
+    >,
+) -> meerkat_runtime::SessionLlmReconfigureRequest {
+    meerkat_runtime::SessionLlmReconfigureRequest {
+        model: model.map(str::to_string),
+        provider: None,
+        self_hosted_server_id: None,
+        provider_params: None,
+        auth_binding: None,
+        reasoning_effort: level,
+    }
+}
+
+/// A committed `brain_swap` handoff is not judged against the session's
+/// reasoning effort level; only a caller's reconfiguration is.
+///
+/// The session takes a level its route accepts while a handoff to B is
+/// committed. A caller's hot swap to B is refused typed (B's route does not
+/// accept the level) and leaves the session whole. The handoff to the same
+/// model is then realized at the next input as before, keeping the level, and
+/// that input's request is refused before it reaches the provider. Clearing
+/// the level makes the next request run on B.
+#[tokio::test]
+async fn a_brain_swap_keeps_the_level_and_requests_are_refused_until_it_is_cleared() {
+    use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+    use meerkat_core::model_profile::capabilities::EffortLevel;
+
+    let harness = build_harness(PersistenceProfile::WholeBlob).await;
+    let route = harness.environment.route;
+    let _committed = commit_brain_swap_request(&harness).await;
+
+    // A's entry of the account's list states `high`: the session takes it.
+    harness.set_reasoning_route(Some(account_route_stating(&[EffortLevel::High])));
+    harness
+        .adapter
+        .reconfigure_session_llm_identity(
+            &harness.session_id,
+            level_request(None, Some(TurnMetadataOverride::Set(EffortLevel::High))),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("a level the route accepts is applied: {error}"));
+    let before_durable = harness.durable_identity().await;
+    let before_live = harness.live_identity().await;
+    assert_eq!(before_live, before_durable);
+    assert_eq!(before_live.model, route.model_a);
+    assert_eq!(
+        before_live
+            .provider_params
+            .as_ref()
+            .and_then(|params| params.reasoning_effort),
+        Some(EffortLevel::High)
+    );
+
+    // B's entry states only `low`. A caller's hot swap to B is refused typed
+    // and changes nothing, live or stored.
+    harness.set_reasoning_route(Some(account_route_stating(&[EffortLevel::Low])));
+    let error = harness
+        .adapter
+        .reconfigure_session_llm_identity(
+            &harness.session_id,
+            level_request(Some(route.model_b), None),
+        )
+        .await
+        .expect_err("a caller's swap to a route that refuses the level is refused");
+    let meerkat_runtime::RuntimeDriverError::ReasoningEffortRefused(refusal) = &error else {
+        panic!("expected the typed reasoning effort refusal, got: {error:?}");
+    };
+    assert_eq!(
+        serde_json::to_value(&**refusal).expect("a refusal serializes"),
+        serde_json::json!({
+            "requested": "high", "provider": "openai", "model": route.model_b,
+            "route": {"backend": "copilot", "api": "responses"},
+            "reason": "unsupported_level", "supported": ["low"], "facts": "account",
+        })
+    );
+    assert_eq!(harness.durable_identity().await, before_durable);
+    assert_eq!(harness.live_identity().await, before_live);
+    assert_eq!(harness.realized_terminal_count().await, 0);
+    let calls_before = harness.requested_models();
+    assert_eq!(
+        calls_before,
+        vec![route.model_a.to_string(), route.model_a.to_string()]
+    );
+
+    // The committed handoff to the same model is realized at the next input,
+    // not judged: the session moves to B and keeps its level. The input's
+    // own request is then refused before any provider call.
+    let refused = harness.run_prompt("the next input, after the swap").await;
+    assert_eq!(
+        harness.realized_terminal_count().await,
+        1,
+        "the handoff is realized as before: {refused:?}"
+    );
+    let swapped = harness.live_identity().await;
+    assert_eq!(swapped.model, route.model_b);
+    assert_eq!(
+        swapped
+            .provider_params
+            .as_ref()
+            .and_then(|params| params.reasoning_effort),
+        Some(EffortLevel::High),
+        "the handoff keeps the session's level"
+    );
+    assert_eq!(harness.durable_identity().await, swapped);
+    assert_eq!(
+        harness.requested_models(),
+        calls_before,
+        "the refused request reached no provider"
+    );
+    match &refused {
+        CompletionOutcome::Completed(run) => {
+            panic!("a request whose level the route refuses must not run: {run:?}")
+        }
+        CompletionOutcome::AbandonedWithError { error, .. }
+            if matches!(
+                error.reason,
+                Some(meerkat_core::event::AgentErrorReason::ReasoningEffortRefused { .. })
+            ) =>
+        {
+            // The per-request check names the level and the route.
+            let Some(meerkat_core::event::AgentErrorReason::ReasoningEffortRefused { refusal }) =
+                &error.reason
+            else {
+                unreachable!("matched above");
+            };
+            assert_eq!(refusal.requested, EffortLevel::High);
+            assert_eq!(refusal.model, route.model_b);
+            assert_eq!(
+                refusal.route.as_ref().map(ToString::to_string).as_deref(),
+                Some("copilot/responses")
+            );
+        }
+        other => {
+            // Before the per-request resolution exists, the request is
+            // refused by the guard that lets no unresolved level through.
+            let text = format!("{other:?}");
+            assert!(
+                text.contains("reasoning_effort cannot be resolved by this build"),
+                "the request must be refused for its level: {text}"
+            );
+        }
+    }
+
+    // Clearing the level makes the next request run, on B.
+    harness
+        .adapter
+        .reconfigure_session_llm_identity(
+            &harness.session_id,
+            level_request(None, Some(TurnMetadataOverride::Clear)),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("clearing the level is applied: {error}"));
+    let next = harness
+        .run_prompt("the input after the level is cleared")
+        .await;
+    assert!(
+        matches!(next, CompletionOutcome::Completed(ref run) if run.text == NEXT_TURN_TEXT),
+        "the request runs once the level is cleared: {next:?}"
+    );
+    assert_eq!(
+        harness.requested_calls().last(),
+        Some(&ProviderCall {
+            provider: route.provider_b,
+            model: route.model_b.to_string(),
+        })
+    );
+    assert_eq!(
+        harness
+            .live_identity()
+            .await
+            .provider_params
+            .and_then(|params| params.reasoning_effort),
+        None
+    );
 }

@@ -785,10 +785,16 @@ pub struct AgentSummary {
     /// says. Recorded and shown; never read for a decision.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provenance: Option<AgentProvenance>,
-    /// The operations open for it: held decisions and pending preparation.
-    /// An operation id tells who asked (its text carries the requester's
-    /// kind and a digest of its id), so it is for the host plane: an
-    /// answer an agent reads leaves this empty.
+    /// The operations open for it: the create of an agent that waits for
+    /// its host's preparation, until the host settles it, and each change
+    /// of it that is held for a person's decision or approved and not yet
+    /// carried out. Absent on the wire when nothing is open. Each is read
+    /// from the record that owns it at the read (the agent's record, the
+    /// decision rows); nothing keeps a copy. An operation id tells who
+    /// asked (its text carries the requester's kind and a digest of its
+    /// id), so it is for the host plane: an answer an agent reads leaves
+    /// this empty, and a surface names a caller the operations that caller
+    /// may read.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub open_operations: Vec<OperationId>,
 }

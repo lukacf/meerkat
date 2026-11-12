@@ -40,10 +40,10 @@ use serde_json::{Map, Value, json};
 use super::{JSONRPC_VERSION, JsonRpcError, JsonRpcResponse};
 use crate::access::AccessView;
 use crate::identity_creation::{
-    AgentRef, ChangeRequester, ChangesHoldRequest, CreateAgents, GetAgent, IdentityChangeCall,
-    IdentityChangeSpec, IdentityFamily, IdentityOutcome, IdentityRead, IdentityReadAnswer,
-    IdentityRefusal, IdentityRefusalKind, ListAgents, OperationId, OperationRef, OperationState,
-    ReadDirectory, RequestProblem, UpdateAgent, WithdrawRequest,
+    AgentRef, AgentSummary, ChangeRequester, ChangesHoldRequest, CreateAgents, GetAgent,
+    IdentityChangeCall, IdentityChangeSpec, IdentityFamily, IdentityOutcome, IdentityRead,
+    IdentityReadAnswer, IdentityRefusal, IdentityRefusalKind, ListAgents, OperationId,
+    OperationRef, OperationState, ReadDirectory, RequestProblem, UpdateAgent, WithdrawRequest,
 };
 use crate::identity_creation::{SettlePreparation, SettlePreparationCall};
 
@@ -359,6 +359,16 @@ impl IdentityFamilySurface<'_> {
                 .access
                 .is_none_or(|view| view.allows(crate::access::ACTION_RUNTIME_ADMIN))
     }
+
+    /// `agent` with the open operations the caller reads
+    /// ([`Self::reads_operation`]): an operation id names its requester, so
+    /// a list or a get names an agent's open operations to a caller exactly
+    /// as an operation read would answer them.
+    fn shown_operations(&self, agent: &mut AgentSummary) {
+        agent
+            .open_operations
+            .retain(|operation_id| self.reads_operation(operation_id));
+    }
 }
 
 async fn withdraw(
@@ -442,7 +452,10 @@ async fn get(
 ) -> Result<Value, IdentityRefusal> {
     let params: GetAgent = parse(params)?;
     match read(surface, IdentityRead::Get(params)).await? {
-        IdentityReadAnswer::Get(record) => serialized(&record),
+        IdentityReadAnswer::Get(mut record) => {
+            surface.shown_operations(&mut record.agent);
+            serialized(&record)
+        }
         _ => Err(unexpected_answer()),
     }
 }
@@ -459,6 +472,9 @@ async fn list(
                 page.agents.retain(|agent| {
                     view.allows_agent(crate::access::ACTION_AGENT_VIEW, &agent.name)
                 });
+            }
+            for agent in &mut page.agents {
+                surface.shown_operations(agent);
             }
             serialized(&page)
         }

@@ -123,6 +123,10 @@ use super::request::{
 /// The most agents one page of a list or of the directory names.
 const PAGE_MAX: usize = 100;
 
+/// The operations the mob's held changes keep open, by the agent each
+/// names ([`IdentityDecisions::open_operations`]).
+type HeldOperations = BTreeMap<String, Vec<OperationId>>;
+
 /// The `unsupported` feature of a create that gives a first message in a
 /// mob whose runtime is governed.
 pub const FIRST_MESSAGE_IN_GOVERNED_REALM: &str = "first_message_in_governed_realm";
@@ -353,6 +357,10 @@ struct AgentFacts {
     provenance: Option<AgentProvenance>,
     /// The peers its changes listed.
     peers: Vec<String>,
+    /// The operation it waits on its host for: the one that wrote its
+    /// record first (its create), read from that record while Core holds
+    /// the agent with no member for its host's preparation.
+    awaited: Option<OperationId>,
 }
 
 impl AgentFacts {
@@ -392,7 +400,7 @@ impl AgentFacts {
             archived: self.archived,
             readiness: self.readiness,
             provenance: self.provenance.clone(),
-            open_operations: Vec::new(),
+            open_operations: self.awaited.iter().cloned().collect(),
         }
     }
 
@@ -793,13 +801,24 @@ impl IdentityGate {
     }
 
     /// `summary` as `requester` is shown it: who asked for the agent is
-    /// left out when that is an agent the requester is not shown.
+    /// left out when that is an agent the requester is not shown, and the
+    /// operations open for it are the one it waits on its host for and the
+    /// ones `held` names for it (the changes of it a person still decides).
+    /// An agent is told no operation id: an id tells who asked.
     async fn shown_summary(
         &self,
         mob: &MobHandle,
         requester: &ChangeRequester,
         mut summary: AgentSummary,
+        held: &HeldOperations,
     ) -> AgentSummary {
+        if matches!(requester, ChangeRequester::Agent { .. }) {
+            summary.open_operations.clear();
+        } else if let Some(held) = held.get(&summary.name) {
+            summary.open_operations.extend(held.iter().cloned());
+            summary.open_operations.sort();
+            summary.open_operations.dedup();
+        }
         let asked_by = summary
             .provenance
             .as_ref()
@@ -813,6 +832,24 @@ impl IdentityGate {
         summary
     }
 
+    /// The operations the mob's held changes keep open, by the agent each
+    /// names, for a read by `requester`: one listing of the decisions that
+    /// are open or approved, nothing written and nobody woken. None is
+    /// read for an agent, which is told no operation id, nor on a launch
+    /// that holds no change.
+    fn held_operations(
+        &self,
+        mob: &MobHandle,
+        requester: &ChangeRequester,
+    ) -> Result<HeldOperations, IdentityRefusal> {
+        match &self.decisions {
+            Some(decisions) if !matches!(requester, ChangeRequester::Agent { .. }) => {
+                decisions.open_operations(mob)
+            }
+            _ => Ok(HeldOperations::new()),
+        }
+    }
+
     /// `record` as `requester` is shown it: its peers are the ones the
     /// requester is shown.
     async fn shown_record(
@@ -820,6 +857,7 @@ impl IdentityGate {
         mob: &MobHandle,
         requester: &ChangeRequester,
         mut record: AgentRecord,
+        held: &HeldOperations,
     ) -> AgentRecord {
         let mut peers = Vec::with_capacity(record.peers.len());
         for peer in std::mem::take(&mut record.peers) {
@@ -828,7 +866,7 @@ impl IdentityGate {
             }
         }
         record.peers = peers;
-        record.agent = self.shown_summary(mob, requester, record.agent).await;
+        record.agent = self.shown_summary(mob, requester, record.agent, held).await;
         record
     }
 
@@ -942,6 +980,15 @@ impl IdentityGate {
         let Some(spec_digest) = digest_of(&spec) else {
             return Ok(None);
         };
+        // The create of an agent that waits for its host is open until the
+        // host settles it: Core's entry says the agent waits, and its record
+        // names the operation that wrote it first.
+        let awaited = matches!(
+            view.standing,
+            EntryStanding::Unseated(UnseatedEntryCause::PreparationPending)
+        )
+        .then(|| OperationId::from_recorded(&record.provenance.operation_id))
+        .flatten();
         Ok(Some(AgentFacts {
             name,
             spec_digest,
@@ -956,6 +1003,7 @@ impl IdentityGate {
                 .map(|edge| identity_name_of_member(&edge.peer))
                 .collect(),
             spec,
+            awaited,
         }))
     }
 
@@ -983,6 +1031,7 @@ impl IdentityGate {
             archived,
             provenance: None,
             peers: Vec::new(),
+            awaited: None,
         })
     }
 
@@ -1554,6 +1603,7 @@ impl IdentityGate {
         };
         let mut after = after;
         let mut agents: Vec<AgentSummary> = Vec::new();
+        let held = self.held_operations(mob, requester)?;
         // A page of the mob none of whose agents is shown (filtered out, or
         // not the caller's to see) is passed over: the caller's page starts
         // further on.
@@ -1577,7 +1627,10 @@ impl IdentityGate {
                 {
                     continue;
                 }
-                agents.push(self.shown_summary(mob, requester, agent.summary()).await);
+                agents.push(
+                    self.shown_summary(mob, requester, agent.summary(), &held)
+                        .await,
+                );
             }
             match (page.next, agents.last()) {
                 (Some(next), Some(last)) => {
@@ -1903,8 +1956,10 @@ impl IdentityFamily for IdentityGate {
             )),
             IdentityRead::Get(GetAgent { name, .. }) => {
                 let agent = self.target(mob, requester, &name).await?;
+                let held = self.held_operations(mob, requester)?;
                 Ok(IdentityReadAnswer::Get(Box::new(
-                    self.shown_record(mob, requester, agent.record()).await,
+                    self.shown_record(mob, requester, agent.record(), &held)
+                        .await,
                 )))
             }
             IdentityRead::Operation(operation_id) => {

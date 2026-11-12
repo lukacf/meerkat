@@ -10383,9 +10383,10 @@ pub(crate) fn timeline_frame_visible_to(
     }
     if crate::console_contracts::is_runtime_plane_identity(&frame.identity) {
         // A runtime-plane record names no member. One that carries text
-        // written from memory records (a memory conflict signal) is decided
-        // as a record with no member witness: nothing says whose records the
-        // text speaks of.
+        // written from memory records, or that speaks of a member it does
+        // not name (a memory conflict signal, a quarantined write, a taint
+        // transition, a promotion), is decided as a record with no member
+        // witness: nothing says whose records or which member it speaks of.
         if runtime_plane_record_text(frame) {
             return view.can_view_uncaptured_member(&frame.identity);
         }
@@ -10460,7 +10461,9 @@ fn captured_lineage(
 }
 
 /// Whether `frame` is a runtime-plane record that carries text written from
-/// memory records (a memory conflict signal): the one input of the decision
+/// memory records or speaks of a member it does not name
+/// ([`crate::memory::events::carries_record_text_with_no_member`]): the one
+/// input of the decision
 /// ([`timeline_frame_visible_to`]) that is neither the frame's identity nor
 /// its witness. The decision branches on it and the decider's cache key
 /// holds it, both through this function, so the decision kept for one

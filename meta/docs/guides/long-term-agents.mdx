@@ -169,6 +169,10 @@ Three things make this safe to automate:
   applying your configuration, so send the same request again.
 
 Once the adoption committed, stop declaring the agent in your configuration.
+While your roster still lists it, the agent is served from its record and the
+roster's entry for that name is not applied: the identity's status
+(`runtime.status(name)`) reads `roster_listing_superseded` true
+(`rosterListingSuperseded` in TypeScript), and false for every other agent.
 
 To adopt every agent, page through `list` and adopt each one:
 
@@ -225,7 +229,7 @@ A change answers one of three outcomes, or is refused:
 | --- | --- |
 | `done` | The change committed. `agents` lists each agent with its `spec_digest` afterwards. |
 | `pending_decision` | A person must decide. Nothing but the decision is written. This is a normal answer, not an error. |
-| `pending_preparation` | The change committed, and an agent is not usable yet. No launch of this release answers it: a policy that asks for host preparation is refused at init. |
+| `pending_preparation` | The change committed, and an agent is not usable until your host has prepared it and called `settle_preparation` (see Host preparation in section 4). A create answers it for an agent of a profile whose preparation your policy names `required`. |
 
 `pending_decision` carries the `operation_id`, the `decision_id` and the
 decision's `deadline_ms`. Do not repeat the change under a new `request_id`.
@@ -350,11 +354,19 @@ await identities.remove("editor", { expectedSpecDigest: digest, requestId: "remo
   `agents[i].first_message`): create the agent without one. The peers an
   agent lists are checked against the policy's `peers` rules, whose default
   is `deny` (`peer_not_allowed`): allow them there, for example with
-  `"peers": {"default": "allow"}`.
+  `"peers": {"default": "allow"}`. An agent may name who reaches it,
+  `addressability` (`addressable`, the default, or `internal_only`), and
+  how it runs, `runtime_mode_override` (`autonomous_host` or `turn_driven`;
+  left out, as its profile says): the members and values of a
+  [roster row](/concepts/roster), with the same meaning. `get` and `list`
+  read both back, each only when it is not the default.
 - **Update.** `set` names what changes; a member left out is unchanged.
   `instructions` and `context` are replaced whole. `labels` sets the keys it
   names, and `labels_remove` removes keys. A `profile` change moves the agent
   to that profile's model and tools on the same conversation.
+  `addressability` and `runtime_mode_override` take the values they take on
+  a create and are the change class `capability` of your policy; an update
+  sets a runtime mode and cannot return the agent to its profile's.
 - **Instructions.** A change of instructions is in the agent's record at
   once. It reaches the agent at its next run; a run that starts within
   moments of the change may still use the earlier instructions; earlier
@@ -362,11 +374,36 @@ await identities.remove("editor", { expectedSpecDigest: digest, requestId: "remo
   `applies_at_next_run`, `applies_after_compaction`, `applies_at_next_session`
   (with a `reason`) or `unchanged`.
 - **Archive and unarchive.** An archived agent keeps its name, record,
-  conversation and memory, and messages to it are refused. Unarchive brings
-  it back on the same conversation.
+  conversation and memory (the agent's last conversation is harvested as
+  for any agent that leaves), and messages to it are refused. Unarchive
+  brings it back on the same conversation.
 - **Remove.** Removal is permanent: the name is never available again
-  (`name_taken`). The agent's conversation and memory are kept, and no other
-  agent can reach them. Archive an agent that may be needed later.
+  (`name_taken`). The agent's conversation and memory are kept (the agent's
+  last conversation is harvested as for any agent that leaves), and no
+  other agent can reach them. Archive an agent that may be needed later.
+- **Schedules.** The schedules that target an agent follow these three
+  changes, so that none keeps firing at an agent that takes no delivery: an
+  archive pauses its Active schedules, an unarchive resumes exactly the
+  schedules paused that way (one somebody paused by name stays paused), and
+  a removal ends every one. The agent's entry of the first answer says what
+  was done: `schedules` with its `effect` (`paused`, `resumed`, `ended`),
+  `count`, the `schedules` (`schedule_id` and `name`) and `incomplete`,
+  true when a schedule could not be read or changed (send the same request
+  again: it follows the rest). A replay of the request and a later
+  `operation` read state no `schedules`, so do not compare a retry's answer
+  whole with the first one. `plan` of those changes names the schedules the
+  change would take with it.
+- **Host preparation.** When your policy names a profile's preparation
+  `required`, a create of an agent of that profile answers
+  `pending_preparation`: the agent reads `readiness` `preparation_pending`,
+  takes no delivery (a retryable refusal), runs nothing and wakes nothing.
+  Prepare what it needs, then call
+  `identities.settle_preparation(name, request_id=...)`
+  (`settlePreparation(name, { requestId })`): the agent is seated dormant
+  and its first message, if it has one, runs once. The same `request_id`
+  and name answer the same result. An agent that awaits no preparation
+  refuses `preparation_not_pending`. If you cannot prepare an agent, leave
+  it pending (waiting costs nothing) or remove it.
 
 `directory` lists the profiles you may name and the agents you may list as
 peers, each with the verdict your rules give it (`allowed`, `needs_decision`
@@ -438,8 +475,10 @@ gateway-wide `-32047` and kind `candidate_launch` (`AnnouncementRefusedError`
 in both SDKs). It still answers the reads.
 
 Advisory values are open. An agent's `readiness`, a change's `state`, a
-provenance's `entered` and a directory verdict may take values your SDK does
-not know: they are kept as the gateway sent them.
+provenance's `entered`, a directory verdict, the `addressability` and
+`runtime_mode_override` an agent reads back and the `effect` on its
+schedules may take values your SDK does not know: they are kept as the
+gateway sent them.
 
 `get` and `list` answer each agent's `provenance`: how it came to exist, who
 asked, when, and the consent the change committed under. It is recorded and

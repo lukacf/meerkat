@@ -26,6 +26,20 @@ All notable changes to the Python SDK are documented here.
 - `MetaBuilder.identity_creation(policy)` sends the launch policy for
   changes of long-term agents as `runtime_options.identity_creation`,
   unchanged.
+- `AgentSpec` and `AgentSet` take `addressability` (`addressable`,
+  `internal_only`) and `runtime_mode_override` (`autonomous_host`,
+  `turn_driven`); `AgentSummary` and `AgentRecord` read both back, each
+  `None` when it is the default.
+- `AgentOutcome.schedules` and `IdentityChangePlan.schedules`
+  (`SchedulesFollowed`, `ScheduleRef`): what became of the schedules that
+  target an agent at its archive, unarchive or removal, on the first
+  answer of the change, and what a planned change would do to them. A
+  replay of the request and an `operation` read state none.
+- `IdentitiesHandle.settle_preparation(name, request_id=...)` calls
+  `meta/identity/settle_preparation`: the host has prepared an agent whose
+  create answered `IdentityPendingPreparation`.
+- `IdentityStatus.roster_listing_superseded`: `True` when the host's
+  roster lists a name whose agent is served from its record.
 
 ## 0.9.13
 

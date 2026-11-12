@@ -495,9 +495,10 @@ state = await identities.operation(request_id="adopt-scout-1")
 
 | Call | Sends | Returns |
 | --- | --- | --- |
-| `create(agents, *, request_id, proposer=None, source_evidence=None)` | `agents`: a list of `AgentSpec(name, profile, display_name, instructions, context, labels, first_message, peers)` | outcome |
-| `update(name, *, expected_spec_digest, request_id, set=None, peers_add=(), peers_remove=(), ...)` | `set`: `AgentSet(display_name, instructions, context, labels, labels_remove, profile)` | outcome |
+| `create(agents, *, request_id, proposer=None, source_evidence=None)` | `agents`: a list of `AgentSpec(name, profile, display_name, instructions, context, labels, first_message, peers, addressability, runtime_mode_override)` | outcome |
+| `update(name, *, expected_spec_digest, request_id, set=None, peers_add=(), peers_remove=(), ...)` | `set`: `AgentSet(display_name, instructions, context, labels, labels_remove, profile, addressability, runtime_mode_override)` | outcome |
 | `archive`, `unarchive`, `remove`, `adopt` `(name, *, expected_spec_digest, request_id, ...)` | the agent and the spec digest you read | outcome |
+| `settle_preparation(name, *, request_id)` | the agent your host has prepared | outcome |
 | `withdraw(*, request_id=None, operation_id=None)` | exactly one of the two | `IdentityWithdrawn` |
 | `changes_hold(held, *, reason=None)` | | `IdentityChangesHold` |
 | `list(*, profile=None, include_archived=False, after=None)` | | `AgentPage` of `AgentSummary` |
@@ -519,6 +520,30 @@ state. Each `AgentOutcome` carries the agent's `spec_digest` afterwards, a
 create's `seat` (`seated` or `owed`) and an update's `instructions`
 (`InstructionOutcome`: `applies_at_next_run`, `applies_after_compaction`,
 `applies_at_next_session` with a `reason`, or `unchanged`).
+
+The first answer of an `archive`, an `unarchive` and a `remove` also carries
+the agent's `schedules` (`SchedulesFollowed`: `effect`, `count`,
+`schedules` of `ScheduleRef(schedule_id, name)`, `incomplete`): the
+schedules that target the agent were paused, resumed or ended with it. A
+replay of the request and an `operation` read state none, so compare a
+retry by `operation_id` and each agent's `state` and `spec_digest`, not
+whole. `IdentityChangePlan.schedules` names the schedules a planned change
+would take with it.
+
+`AgentSpec` and `AgentSet` take `addressability` (`addressable`,
+`internal_only`) and `runtime_mode_override` (`autonomous_host`,
+`turn_driven`), the members and values of a roster row; `AgentSummary` and
+`AgentRecord` read both back, each `None` when it is the default.
+
+A create of an agent of a profile whose preparation the policy names
+`required` returns `IdentityPendingPreparation`: prepare what the agent
+needs, then `settle_preparation(name, request_id=...)` seats it. An agent
+that awaits none refuses `preparation_not_pending`.
+
+`IdentityStatus.roster_listing_superseded` (`runtime.status(name)`) is
+`True` when the host's roster lists a name whose agent is served from its
+record, an adopted agent your roster still lists for one: the roster's
+entry is not applied.
 
 Every refusal of every call raises `IdentityRefusedError` (`-32058`); its
 kinds are the closed vocabulary `IDENTITY_REFUSAL_KINDS`. A kind newer than
@@ -1723,7 +1748,8 @@ from meerkat_meta import (
     # Long-term agents
     IdentitiesHandle, AgentSpec, AgentSet, CreateAgents, UpdateAgent, AgentRef,
     SourceEvidence, AgentPage, AgentSummary, AgentRecord, AgentProvenance,
-    AgentOutcome, InstructionOutcome, IdentityDone, IdentityPendingDecision,
+    AgentOutcome, InstructionOutcome, SchedulesFollowed, ScheduleRef,
+    IdentityDone, IdentityPendingDecision,
     IdentityPendingPreparation, IdentityRefused, IdentityOperationUnknown,
     IdentityRefusal, IdentityRefusedError, IdentityWithdrawn, IdentityChangesHold,
     AgentDirectoryPage, DirectoryProfile, DirectoryPeer,

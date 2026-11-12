@@ -22,6 +22,19 @@
   the SDK cannot read throws `ContractMismatchError`.
 - `MetaBuilder.identityCreation(policy)` sends the launch policy for changes
   of long-term agents as `runtime_options.identity_creation`, unchanged.
+- `AgentSpec` and `AgentSet` take `addressability` (`AgentAddressability`)
+  and `runtimeModeOverride` (`AgentRuntimeMode`); `AgentSummary` and
+  `AgentRecord` read both back, each `null` when it is the default.
+- `AgentOutcome.schedules` and `IdentityChangePlan.schedules`
+  (`SchedulesFollowed`, `ScheduleRef`): what became of the schedules that
+  target an agent at its archive, unarchive or removal, on the first
+  answer of the change, and what a planned change would do to them. A
+  replay of the request and an `operation` read state none.
+- `IdentitiesHandle.settlePreparation(name, { requestId })` calls
+  `meta/identity/settle_preparation`: the host has prepared an agent whose
+  create answered `pending_preparation`.
+- `IdentityStatus.rosterListingSuperseded`: `true` when the host's roster
+  lists a name whose agent is served from its record.
 
 ## 0.9.13
 

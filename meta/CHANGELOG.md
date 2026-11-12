@@ -277,6 +277,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (`identityCreation`) sends the host's policy for changes of long-term
   agents as `runtime_options.identity_creation`, unchanged. Without it every
   change of `runtime.identities` is refused `change_denied`.
+- Python SDK and TypeScript SDK: the long-term agent calls carry the host
+  methods' newer members. A create's agent and an update's `set` take
+  `addressability` and `runtime_mode_override` (`runtimeModeOverride`), and
+  `get` and `list` read both back. An agent of an archive's, an unarchive's
+  and a removal's first answer, and a plan of those changes, carry
+  `schedules` (`SchedulesFollowed`): the schedules that target the agent
+  and what was done to them; a replay of the request states none.
+  `runtime.identities.settle_preparation(name, request_id)`
+  (`settlePreparation`) calls `meta/identity/settle_preparation`. The
+  identity status type reads `roster_listing_superseded`
+  (`rosterListingSuperseded`).
 
 ### Changed
 

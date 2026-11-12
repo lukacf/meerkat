@@ -74972,7 +74972,7 @@ function agentNowLine(agent, activity, nowMs) {
   const progress = agent.progress;
   const lastProgress = progress && progress.last_progress_at_ms > 0 ? progress.last_progress_at_ms : null;
   if (health.kind === "retired" || health.kind === "retiring") return { text: health.word, live: false };
-  if (health.kind === "broken") return { text: "Broken: it needs a respawn or a reset", live: false };
+  if (health.kind === "broken") return { text: "Broken: it may need a respawn or a reset", live: false };
   if (health.kind === "stalled") {
     return { text: lastProgress ? "No progress for ".concat(shortSpan(nowMs - lastProgress), ", its run still open") : "No progress, its run still open", live: false };
   }
@@ -75273,7 +75273,8 @@ function summaryOf(raw) {
     ...provenance ? { provenance } : {},
     openOperations: textsOf(raw.open_operations),
     ...addressability ? { addressability } : {},
-    ...runtimeMode ? { runtimeMode } : {}
+    ...runtimeMode ? { runtimeMode } : {},
+    ...raw.roster_listing_superseded === true ? { rosterListingSuperseded: true } : {}
   };
 }
 function waitsForItsHost(agent) {
@@ -75650,13 +75651,18 @@ function schedulesWords(followed) {
   const lines = [];
   if (count2 > 0) {
     const named = followed.schedules.flatMap((schedule) => schedule.name ? [schedule.name] : []);
-    const unnamed = count2 - named.length;
+    const unnamed = followed.schedules.length - named.length;
+    const unlisted = count2 - followed.schedules.length;
     if (one3) {
       lines.push("Its schedule".concat(named.length ? " ".concat(named[0]) : "", " ").concat(done, "."));
     } else if (named.length === 0) {
       lines.push("Its ".concat(scheduleCount(count2), " ").concat(done, "."));
     } else {
-      const list5 = unnamed > 0 ? "".concat(named.join(", "), " and ").concat(unnamed, " without a name") : named.join(", ");
+      const rest = [
+        ...unnamed > 0 ? ["".concat(unnamed, " without a name")] : [],
+        ...unlisted > 0 ? ["".concat(unlisted, " more")] : []
+      ];
+      const list5 = rest.length === 0 ? named.join(", ") : rest.length === 1 ? "".concat(named.join(", "), " and ").concat(rest[0]) : "".concat(named.join(", "), ", ").concat(rest[0], " and ").concat(rest[1]);
       lines.push("Its ".concat(scheduleCount(count2), " ").concat(done, ": ").concat(list5, "."));
     }
   }
@@ -75708,6 +75714,7 @@ function outcomeWords2(change, outcome, name2) {
     case "archived":
       title = "".concat(name2, " is archived");
       lines.push("It keeps its name, its record, its conversation and its memory. Messages to it are refused until it is unarchived.");
+      lines.push(HARVEST_WORDS);
       break;
     case "restored":
       title = "".concat(name2, " is back");
@@ -75845,7 +75852,7 @@ function requesterWords(provenance, personName) {
   }
   return { kind: "host", words: Object.hasOwn(HOST_SURFACE_WORDS, provenance.requester) ? HOST_SURFACE_WORDS[provenance.requester] : "The host (".concat(provenance.requester, ")") };
 }
-var HARVEST_WORDS = "Its last conversation is harvested, as for any agent that leaves the team.";
+var HARVEST_WORDS = "Its last conversation is harvested and distilled, as for any agent that leaves the team.";
 function agentChangeConfirmWords(change, name2, state = {}) {
   if (change === "remove" && state.waiting === true) {
     return {
@@ -77988,6 +77995,7 @@ function AgentDetailsPanel({
   spawnedBy,
   now: now3,
   identityChanges,
+  rosterListingSuperseded,
   children
 }) {
   const directory = useAgentDirectory();
@@ -78191,7 +78199,7 @@ function AgentDetailsPanel({
               ]
             }
           ),
-          view.roster_listing_superseded === true ? /* @__PURE__ */ (0, import_jsx_runtime109.jsx)(Notice, { tone: "neutral", className: "agent-details__status-note", testId: "inspect-roster-superseded:".concat(identity), children: ROSTER_LISTING_SUPERSEDED_NOTE }) : null,
+          view.roster_listing_superseded === true || rosterListingSuperseded === true ? /* @__PURE__ */ (0, import_jsx_runtime109.jsx)(Notice, { tone: "neutral", className: "agent-details__status-note", testId: "inspect-roster-superseded:".concat(identity), children: ROSTER_LISTING_SUPERSEDED_NOTE }) : null,
           /* @__PURE__ */ (0, import_jsx_runtime109.jsxs)(Part, { label: "Activity \xB7 24h", action: "".concat(countWords2(turnsToday, "turn"), " today"), testId: "inspect-activity:".concat(identity), children: [
             /* @__PURE__ */ (0, import_jsx_runtime109.jsx)("div", { ref: barsRef, className: "agent-details__bars-box" }),
             /* @__PURE__ */ (0, import_jsx_runtime109.jsx)(
@@ -95307,6 +95315,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const [scheduleOffer, setScheduleOffer] = import_react106.default.useState(NO_CONSOLE_SCHEDULES);
   const [agentRecordOffered, setAgentRecordOffered] = import_react106.default.useState(false);
   const [agentListOffered, setAgentListOffered] = import_react106.default.useState(false);
+  const [rosterListingSuperseded, setRosterListingSuperseded] = import_react106.default.useState({});
   const [transportState, setTransportState] = import_react106.default.useState({
     phase: "connecting",
     stale: true,
@@ -96588,11 +96597,25 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     void refreshPendingIdentityRequests?.();
   }, [experience, refreshPendingIdentityRequests]);
   async function loadAgentRecord(name2) {
-    const record10 = parseAgentRecord(await executeHeadlessCommand(
-      CONSOLE_COMMAND_NAMES2.getAgentRecord,
-      identityWorkbenchTarget(name2, "inspect"),
-      { name: name2 }
-    ));
+    const noteSuperseded = (said) => setRosterListingSuperseded((current) => {
+      if (current[name2] === true === said) return current;
+      const next = { ...current };
+      if (said) next[name2] = true;
+      else delete next[name2];
+      return next;
+    });
+    let record10;
+    try {
+      record10 = parseAgentRecord(await executeHeadlessCommand(
+        CONSOLE_COMMAND_NAMES2.getAgentRecord,
+        identityWorkbenchTarget(name2, "inspect"),
+        { name: name2 }
+      ));
+    } catch (error49) {
+      noteSuperseded(false);
+      throw error49;
+    }
+    noteSuperseded(record10?.rosterListingSuperseded === true);
     if (!record10) throw new Error("The gateway's answer was not an agent's record.");
     return record10;
   }
@@ -99095,6 +99118,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           retire: canRetire ? { label: configuredActionLabels.retire, onClick: () => void onLifecycleAction(target.identity, "meta/retire") } : void 0
         },
         identityChanges: identityChanges ? { api: identityChanges, controls: agentIdentityControls(identityChanges.flags, agent?.affordances) } : null,
+        rosterListingSuperseded: agentRecordOffered && rosterListingSuperseded[target.identity] === true,
         children: [
           agentRecordOffered ? /* @__PURE__ */ (0, import_jsx_runtime127.jsx)(
             AgentRecordFacts,

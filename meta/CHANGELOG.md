@@ -17,6 +17,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- A host that labels its members in its customizer must put those labels
+  in the row of an agent created at run time (an identity whose record is
+  its row). Such an agent's member carries its row's labels and no others,
+  and what decides on a member's labels (an access rule's `match_labels`,
+  an audience) reads its seat. So when the labels the customizer's draft
+  holds are not exactly the seat's (a key added, a key dropped, a key given
+  another value), the agent is refused its seat for good and nothing is
+  built or run: it is never seated without a label its host requires, so a
+  deny rule keyed on a host label cannot miss it. The refusal is Core's
+  `MemberBuildPreparationRefusal::store_owned_seat_labels`. Its reason names
+  the label keys, never a value, and the remedy; the refused send answers
+  it, and `meta/status_identity` shows it under `customizer_tools_pending`,
+  with the state `broken` for an agent refused at its first wake. To seat
+  the agent, put the label in its row: at its create, or by an update. An
+  update seats an agent that is owed its seat (one created with a first
+  message) at once; an agent Core already holds a member of takes its
+  row's labels when it is respawned or reset (`meta/respawn`,
+  `meta/reset`), and is built at its next wake. The same holds after a
+  later label change of a row: until the member is seated again its seat
+  carries the old labels, and its next build is refused. A customizer that
+  sets no labels refuses nothing. An archive and a removal of a refused
+  agent are served.
+
 - Meta serves an identity whose record is its row in the mob's identity
   store (one created at run time, or one a host adopted into the store) as
   any identity. The lifecycle verbs act on it with the effect they have on a
@@ -196,18 +219,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   run. A member of an identity whose record is its row that the mob's
   start spawns then (a seat the start owes it) is built from its row
   alone: without the customizer's tools until its next build, and without
-  its system prompt, instructions and context for that life. One the
+  its system prompt, instructions and context for that life; the
+  customizer is not asked, so its labels are not compared with the seat's
+  for that build either. One the
   start restores then (one that owes work) is refused for now and built
   once the runtime is composed, with both; on a runtime that learns of its
   customizer only at its identity bootstrap it is built without them, as
   before.
-
-- The labels a host customizer sets on a build's draft do not reach the
-  member of an identity whose record is its row: its roster labels are its
-  row's, at its create and at a reset. A rule that matches a label only the
-  customizer adds (an access rule's `match_labels`, for example) matches a
-  configured agent and not such an agent. The customizer's model, system
-  prompt, instructions, provider parameters, context and tools do reach it.
 
 ## [0.9.13] - 2026-11-11
 

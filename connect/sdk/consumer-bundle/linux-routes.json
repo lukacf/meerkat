@@ -1,0 +1,1195 @@
+{
+  "catalog_sha256": "047ed4368288d443291d4a0b55986da71573729771a78d7de720d90767185d6b",
+  "components": {
+    "activepieces": {
+      "path": "activepieces/rkat-toolkit-activepieces-0.1.0.tgz",
+      "profiles": [
+        "activecampaign.create-contact",
+        "acuity.find-appointments",
+        "airtable.get-record",
+        "algolia.browse-records",
+        "amazon-s3.list-files",
+        "asana.get-task",
+        "baserow.get-row",
+        "bitly.get-bitlink-details",
+        "brevo.find-contact",
+        "calendly.get-scheduled-event",
+        "campaign-monitor.find-subscriber",
+        "clockify.find-running-timer",
+        "coda.get-row",
+        "confluence.get-page-content",
+        "contentful.get-entry",
+        "datadog.submit-log",
+        "dropbox.get-file-metadata",
+        "figma.get-comments",
+        "freshdesk.get-contact",
+        "freshservice.create-ticket",
+        "ghost.get-post",
+        "gitea.create-issue",
+        "gmail.get-thread",
+        "google-calendar.get-event",
+        "google-cloud-storage.search-objects",
+        "google-contacts.search-contact",
+        "google-docs.get-document",
+        "google-drive.get-file",
+        "google-forms.get-form",
+        "google-sheets.get-values",
+        "google-slides.get-presentation",
+        "google-tasks.get-task",
+        "help-scout.find-conversation",
+        "hubspot.get-contact",
+        "intercom.get-conversation",
+        "jira-cloud.get-issue",
+        "jotform.get-submission",
+        "kit.get-subscriber",
+        "linear.get-issue",
+        "mailchimp.get-campaign-report",
+        "mailer-lite.get-campaign",
+        "microsoft-excel-365.get-table-columns",
+        "microsoft-teams.get-channel-message",
+        "monday.get-items",
+        "nocodb.get-record",
+        "notion.get-page",
+        "okta.find-user-by-email",
+        "onedrive.get-item",
+        "outlook.get-message",
+        "pagerduty.get-incident",
+        "pipedrive.get-activity",
+        "postmark.get-delivery-stats",
+        "quickbooks.find-invoice",
+        "sendgrid.find-list-by-name",
+        "slack.get-thread-replies",
+        "stripe.get-invoice",
+        "supabase.get-user",
+        "tally.get-form",
+        "toggl.find-project",
+        "typeform.get-form-messages",
+        "webflow.get-collection-item",
+        "wordpress.get-page",
+        "xero.find-invoice"
+      ],
+      "sha256": "dc5cd3ea4d36203524370fe841730c8d2d81fc932d1ef56fa3e5a4feab6123dc"
+    },
+    "agno": {
+      "path": "agno/meerkat_toolkit_agno-0.1.5-py3-none-any.whl",
+      "profiles": [
+        "arxiv",
+        "aws-lambda",
+        "bitbucket",
+        "bright-data",
+        "calcom",
+        "clickup",
+        "discord",
+        "exa",
+        "financial-datasets",
+        "firecrawl",
+        "gitlab",
+        "hackernews",
+        "jina",
+        "linkup",
+        "openrouteservice",
+        "openweather",
+        "oxylabs",
+        "plivo",
+        "postgres",
+        "pubmed",
+        "reddit",
+        "salesforce",
+        "searxng",
+        "shopify",
+        "spotify",
+        "tavily",
+        "todoist",
+        "trello",
+        "twilio",
+        "unsplash",
+        "webex",
+        "wikipedia",
+        "x",
+        "youtube",
+        "zendesk",
+        "zoom"
+      ],
+      "sha256": "70aba6b1ac7d9ca65c5af11bd68d57f6e34599bb81243df7c1576871705c77a3"
+    },
+    "services": {
+      "path": "services/meerkat_toolkit_services-0.1.23-py3-none-any.whl",
+      "profiles": [
+        "gmail",
+        "google-calendar",
+        "google-drive",
+        "slack"
+      ],
+      "sha256": "d96f63711cf16b383319e4f34e1d1ac282b6e8849e6cc838d16cc2386d7819d9"
+    }
+  },
+  "provenance": {
+    "inventory": {
+      "path": "docs/adoption/oss-inventory.json",
+      "sha256": "8e96203830b987430b0a2be9bee6b998148c0bf938de30d8e8e217ca39d410f9"
+    },
+    "profile_captures": {
+      "activepieces": {
+        "path": "docs/verification/20261003-remaining-provider-guidance/installed/profiles.stdout",
+        "sha256": "a96d92d7b53f67899e46e6ff6884aa99bd6beb4247ba8d62c64798bdc54f0840"
+      },
+      "agno": {
+        "path": "docs/verification/20261011-agno-startup-isolation/agno-seed/profiles.stdout",
+        "sha256": "378d9d83915d24390c2dcd1f5f1f66e2675727e051436fdf9c5399e13350176e"
+      },
+      "services": {
+        "path": "docs/verification/20261008-native-connector-packages/canonical-adoption/services/profiles.stdout",
+        "sha256": "aa18661ca9970afbb8dcae9bb7d1c6fe15d5dc6b85ae1f4a33ef8464adfc8bab"
+      }
+    }
+  },
+  "routes": [
+    {
+      "family": "agno",
+      "identity": {
+        "name": "hacker-news",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:6bae3e01346801ea8f896af123127fc571333079e3814425a2231b488db2bc8a"
+      },
+      "profile": "hackernews",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "agno",
+      "identity": {
+        "name": "pubmed",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:82f7f43a62f9289ecfb655b1d52053ea1878aa0d70ce5a25f894a49c2237750e"
+      },
+      "profile": "pubmed",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "agno",
+      "identity": {
+        "name": "bitbucket",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:b803112b9d29a4f9ed6eded273f9bc76dcd4b6231af136738c6207b523b4e38f"
+      },
+      "profile": "bitbucket",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "agno",
+      "identity": {
+        "name": "bright-data",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:62da7f139310926ce9b636f84b3924e56f89202584a153510206ff695c32a62a"
+      },
+      "profile": "bright-data",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "agno",
+      "identity": {
+        "name": "cal-com",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:0ace199719b65d554819ec599f3491fe2a4056d441cbbec45fb10e94cfab70db"
+      },
+      "profile": "calcom",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "agno",
+      "identity": {
+        "name": "clickup",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:42a1930a0fcb668c22e48f0889465d5ed471ee7c091be79214364b521e36019c"
+      },
+      "profile": "clickup",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "agno",
+      "identity": {
+        "name": "discord",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:7afb75ab7af8d95c5bca3c904bd9dfcd70cd035593af91fc2bc27f8d8e675ae6"
+      },
+      "profile": "discord",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "agno",
+      "identity": {
+        "name": "exa",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:cce1c70b047a44c677b6f528e7a451ad0ea4d0d7e140db0a71839607a6d1ecc6"
+      },
+      "profile": "exa",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "agno",
+      "identity": {
+        "name": "financial-datasets",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:d7d7c221a93fdfe9e75d95b74d53a09bb9e30f58b216cb1389aa6076ae556aef"
+      },
+      "profile": "financial-datasets",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "agno",
+      "identity": {
+        "name": "firecrawl",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:a7a853609f40856b142931a2b7f5c7cc796858e0234c85bcbf896dd2d7c1b3c0"
+      },
+      "profile": "firecrawl",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "agno",
+      "identity": {
+        "name": "gitlab",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:47fa2a69d78e0a8bfb48aac899e079cc03123dfa189a53effa703f9e77992ec1"
+      },
+      "profile": "gitlab",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "agno",
+      "identity": {
+        "name": "jina",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:81a05ea0a734beb90e6d47240710df38ff8a74377816494631ce2e25c09eba95"
+      },
+      "profile": "jina",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "agno",
+      "identity": {
+        "name": "linkup",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:20b3b55d9246c0c3dc35b7e7c0bda2c469b9a94117f78c4d6c430b4e1be4ccc7"
+      },
+      "profile": "linkup",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "agno",
+      "identity": {
+        "name": "openrouteservice",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:7901e150705bbae3f8d2cb6d22013341b254ac5cf80ddc9f9cd9c8a56d36f6dd"
+      },
+      "profile": "openrouteservice",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "agno",
+      "identity": {
+        "name": "openweather",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:ec86b5d20db7e6cbc01a0fe7d236d0b350a37789d7927516ef7ed741396dbbde"
+      },
+      "profile": "openweather",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "agno",
+      "identity": {
+        "name": "oxylabs",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:8ba8b1eca1bb431704ba0826e0e49301951156e4f6d1edcde8ec210c9fc5eaae"
+      },
+      "profile": "oxylabs",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "agno",
+      "identity": {
+        "name": "plivo",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:74759f2acb9b8c4995e39ea1ac5c8705ebc3c7fe44e3cbfc88bc1f60c6f7abe6"
+      },
+      "profile": "plivo",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "agno",
+      "identity": {
+        "name": "reddit",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:cab8bb015d9ebcd5b0174f5318f7b92bfcd04d04ca9eaa3ae8ca3a4f2be2af62"
+      },
+      "profile": "reddit",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "agno",
+      "identity": {
+        "name": "salesforce",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:23cb09e561414a998c13e4820057010b721859627db3bfd1779f51ace42d33ed"
+      },
+      "profile": "salesforce",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "agno",
+      "identity": {
+        "name": "searxng",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:a4afe49562784fe45f3911ea3760b82826f21fdee84505c25dd830ad8b9b16b7"
+      },
+      "profile": "searxng",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "agno",
+      "identity": {
+        "name": "shopify",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:a427b233e6055f2f6f46445ed7783a4193d1a178dc3d60ce824b5e89cf3103de"
+      },
+      "profile": "shopify",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "agno",
+      "identity": {
+        "name": "spotify",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:3b91a5b578340bca0ab24d1801bfd935526e57403b4330f46ede513005c998a2"
+      },
+      "profile": "spotify",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "agno",
+      "identity": {
+        "name": "tavily",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:98f013fb219241ad019dad9444ef66dfe51d9367e9bfaa31ae72bb746ea732f0"
+      },
+      "profile": "tavily",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "agno",
+      "identity": {
+        "name": "todoist",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:dd7abedda032327cf8aca9b8bae24ced641fb6c73f98dedc894ed3a0cd2d90bb"
+      },
+      "profile": "todoist",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "agno",
+      "identity": {
+        "name": "trello",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:82a18f8f50680b081c4ad89c4d8a98eab9194999aef838116381b74c10942a92"
+      },
+      "profile": "trello",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "agno",
+      "identity": {
+        "name": "twilio",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:8b2663841fbfb12995953b5de398f3fb32c8287f8aaa8d3b81129858194ad9f5"
+      },
+      "profile": "twilio",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "agno",
+      "identity": {
+        "name": "unsplash",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:208fa8479ac73277dfe5f02cf3a594c10835b7549c65bd65d5a02a9baa49e61b"
+      },
+      "profile": "unsplash",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "agno",
+      "identity": {
+        "name": "webex",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:442d59dc32f326c4d7b29e9266b284eab3c3bbc8a808c9db1e2b77c312bf2c28"
+      },
+      "profile": "webex",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "agno",
+      "identity": {
+        "name": "x",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:cf8f47ea6bf242e9bc4017855040081b77bcfcedaa5927c8c92f16e41996da83"
+      },
+      "profile": "x",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "agno",
+      "identity": {
+        "name": "youtube",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:847b5397bd99457d7470da8180dc2f5546768155eb0cd59b611facccbf0b999d"
+      },
+      "profile": "youtube",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "agno",
+      "identity": {
+        "name": "zendesk",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:1a60b46e31c786a6279fb9ec366c9674dabb64e801fad03c638dd0c339c67469"
+      },
+      "profile": "zendesk",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "agno",
+      "identity": {
+        "name": "zoom",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:82fdaf93cee5979622ad3c36674b642dbfb94de4a708f73e250386bf275c2332"
+      },
+      "profile": "zoom",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "activecampaign",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:96bf6cb00981070972fef11992db3fdce9d8288d1b10e419cc04d7b46f2bc882"
+      },
+      "profile": "activecampaign.create-contact",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "airtable",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:24f48569d93aad1f22ca1d7dbf7c2d1a947c3faaf657b204b837fc7f6bd6781c"
+      },
+      "profile": "airtable.get-record",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "algolia",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:0bc338c15a9164fd12dbf55a895d898df7e73da91316e398daaec5901e715d7c"
+      },
+      "profile": "algolia.browse-records",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "baserow",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:19c6956ee8cf3588fbbddb07bf8fc25f127af75e36218f57d6daabc75eb337eb"
+      },
+      "profile": "baserow.get-row",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "bitly",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:157eac118b1c7082addea6abab42ddd3ceadcb2c9da406312be112601e57210d"
+      },
+      "profile": "bitly.get-bitlink-details",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "brevo",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:c15d8eae76aa2d98e312dacb60a30d382be1861759f747f03090799265b8a06a"
+      },
+      "profile": "brevo.find-contact",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "calendly",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:43ee0c333a14bc1d968706578577bb1e5f63f7803ff0f912bc3bdbc6f9d00b09"
+      },
+      "profile": "calendly.get-scheduled-event",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "campaign-monitor",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:24b6a15dbb6f05b675ed6836475d1f3e9514af44c246362c508b3f83831100ff"
+      },
+      "profile": "campaign-monitor.find-subscriber",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "clockify",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:c7c504d6636616ad98cc89e804bcf360692a57a5be930e33cbffdf365752d545"
+      },
+      "profile": "clockify.find-running-timer",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "coda",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:796bc2a6dc3fadaa07dae0be45497c41ba6a720f201195b250f36857c92c971d"
+      },
+      "profile": "coda.get-row",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "confluence",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:89ddfc3c89874501097b4388264b690a06f1e51e95bd72b3c54d2f2134e47299"
+      },
+      "profile": "confluence.get-page-content",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "contentful",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:12ea56e88cc2092d4f527f4733631bcca0770c571309417085781357b2bc4030"
+      },
+      "profile": "contentful.get-entry",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "datadog",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:016606f333b7bfd4aba9e868f349c69dc60efb64f9d87e98ccf99673e70e5d8d"
+      },
+      "profile": "datadog.submit-log",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "freshdesk",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:7c3a5f650bbf6db88e419dbd8311d1192d4dde04a31d5ad8fdd7527c4956190f"
+      },
+      "profile": "freshdesk.get-contact",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "freshservice",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:165baf28ec3413ed10bb113be986051182d76f447c61dff05bf62c7b90018579"
+      },
+      "profile": "freshservice.create-ticket",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "ghost",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:27939d1101f2c28a754e5b12452939a90d8af56feff8c8d6c5b54ea38d391f71"
+      },
+      "profile": "ghost.get-post",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "jira",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:b9ee705dc3ae0d8e7cfb090dffe8e0f497e7fcf6d1050c8cfcdb582f7e8c7f89"
+      },
+      "profile": "jira-cloud.get-issue",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "jotform",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:4e140266301d8304b468cbee853c33939e1c85533990d50029f1ccc17346c1af"
+      },
+      "profile": "jotform.get-submission",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "kit",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:fa06651acb4a5aa0cc7bd563adce33065fa9d93e6616e74205ebb0732519b256"
+      },
+      "profile": "kit.get-subscriber",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "linear",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:04f50d9143c83bd7ab0314d2cd431a9aa2cf66d1ff0042b568d4d42eaf43d85a"
+      },
+      "profile": "linear.get-issue",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "mailerlite",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:ae83c55b7bff1cab2a4bc1acaae50fae03abed07ff9530f1a634a603f472c661"
+      },
+      "profile": "mailer-lite.get-campaign",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "monday",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:f9bd4c6173a2c4a933072f1bcca04f3601a663da371e3df47e559cb152f4325b"
+      },
+      "profile": "monday.get-items",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "nocodb",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:2cc6fa8825b36b0433fef67ecfcee5f562540ad174e9b540c59c1e784db2cc9f"
+      },
+      "profile": "nocodb.get-record",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "okta",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:3a9ff1dc315c7a74a83ab7ea0ff28a878c8f31516cf72b7809ba824cf1fd31d1"
+      },
+      "profile": "okta.find-user-by-email",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "pagerduty",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:5865403a69dfd851020f95f3e22d6e1e880371415d9104b93cf42d030bfb4486"
+      },
+      "profile": "pagerduty.get-incident",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "postmark",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:87d4d96d6189b5f09b629d99c48477179e46d43b189625462c4e06d6184c85dc"
+      },
+      "profile": "postmark.get-delivery-stats",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "sendgrid",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:7b5b6b33d85cdb0d8ef847290ba8dadd5940851de57b67f0659df2ae7a0165ae"
+      },
+      "profile": "sendgrid.find-list-by-name",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "stripe",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:ed0aa3d32a4758e4a3ab28f6f588c9fc1d1c1f2cea3d6a40e9efab9a3982d530"
+      },
+      "profile": "stripe.get-invoice",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "tally",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:11e5e7116ed2a91d5737504157c2f8af5ef1aef5a29ffcf368b6311a43641a5a"
+      },
+      "profile": "tally.get-form",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "toggl-track",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:b35a040091db7fe203e06c29a19926a2aeb38f6ecf42223fc451165729f2a989"
+      },
+      "profile": "toggl.find-project",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "wordpress",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:e87b350d4b1825f7ceaacc38d554704064b71629103f0d8b001c9080f64767ef"
+      },
+      "profile": "wordpress.get-page",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "acuity-scheduling",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:d5fb340c0e6edb5b2d0ef9fe0ee2b3bf517f535c1cdcecb24a43b82f1137b714"
+      },
+      "profile": "acuity.find-appointments",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "asana",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:e7673ff9934582b23e79ee6772e185b3822b153119e88200c361ae110b9d0f00"
+      },
+      "profile": "asana.get-task",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "dropbox",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:69502a2ff7fec4c6b7e206161dfd49c7ae79830988f00370c53ed8aba2a5e1dd"
+      },
+      "profile": "dropbox.get-file-metadata",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "figma",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:6f2be6e3de34084b0fd08d61f5e68f0d246959bc3856736fc64f5eae8072a781"
+      },
+      "profile": "figma.get-comments",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "gitea",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:ba76fa9df3635910adff8214ccda30f1a6956efcfed6ab5a5c783d2e4f2370a1"
+      },
+      "profile": "gitea.create-issue",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "gmail",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:74f74d59775005e5d72dd93eabe8084d268aed0e2e7a4711ad7f8d9086782a33"
+      },
+      "profile": "gmail.get-thread",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "services",
+      "identity": {
+        "name": "gmail",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:74f74d59775005e5d72dd93eabe8084d268aed0e2e7a4711ad7f8d9086782a33"
+      },
+      "profile": "gmail",
+      "strategy_id": "first-party-services-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "google-calendar",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:a1425347d1d4361c0fb92da01fb92cc4d0b7de279931a1cfac98d28d8282b659"
+      },
+      "profile": "google-calendar.get-event",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "services",
+      "identity": {
+        "name": "google-calendar",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:a1425347d1d4361c0fb92da01fb92cc4d0b7de279931a1cfac98d28d8282b659"
+      },
+      "profile": "google-calendar",
+      "strategy_id": "first-party-services-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "google-cloud-storage",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:d0207d773c3beecbd6f900971bc0f6a0d5aebf425eace58f815ad94601dc6f9c"
+      },
+      "profile": "google-cloud-storage.search-objects",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "google-contacts",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:c47426ec9739a93886984475acfc0a77a96d09561b28d29210ffccb0383f379a"
+      },
+      "profile": "google-contacts.search-contact",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "google-docs",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:b4c9cf1ace4039168f3eddbafb98609a06dcc2047bc0643383a6c3f56cf04e92"
+      },
+      "profile": "google-docs.get-document",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "google-drive",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:8849cb9881d18d123afb52024ed1399c9580e8011c0080d14972d48f03caab87"
+      },
+      "profile": "google-drive.get-file",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "services",
+      "identity": {
+        "name": "google-drive",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:8849cb9881d18d123afb52024ed1399c9580e8011c0080d14972d48f03caab87"
+      },
+      "profile": "google-drive",
+      "strategy_id": "first-party-services-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "google-forms",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:58183b3720007df64c20d48d4722fc508c2586e8de5ee8101749d2413905019d"
+      },
+      "profile": "google-forms.get-form",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "google-sheets",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:27563a94c42cd68a6407fb60a8ff5da13d928e53732f101e848e43cee7eebfff"
+      },
+      "profile": "google-sheets.get-values",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "google-slides",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:479054e499ca4d2e4943d7086f7f6d098346c9b5a4b973eccd63336c9167dd1d"
+      },
+      "profile": "google-slides.get-presentation",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "google-tasks",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:8333e89ca6a0e3a4fdcf434fca580d380a5b0001a4462802de476f2bfc4972e7"
+      },
+      "profile": "google-tasks.get-task",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "help-scout",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:455cae4f2b3024b355020b49041072dea7b6f365090073b00e750011ad7ec2e2"
+      },
+      "profile": "help-scout.find-conversation",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "hubspot",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:b796e0daa12b0cdc13db388aec7c608acea82f44d404592a3e7ce9e851cd0c89"
+      },
+      "profile": "hubspot.get-contact",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "intercom",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:7870b20e9eaaa99add4291832e4a7a9d2924e826ee795c14c42d267631c1309d"
+      },
+      "profile": "intercom.get-conversation",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "mailchimp",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:e8ea04099f1d4310154a7a47c5c03d41699dc7ac58241a204a344a2474ae72f0"
+      },
+      "profile": "mailchimp.get-campaign-report",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "microsoft-excel",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:8a0ffa76b6ff3c1c4f741097e52a49c7f00c396c9b9dca93470740bfc23a3b0f"
+      },
+      "profile": "microsoft-excel-365.get-table-columns",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "microsoft-onedrive",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:2d91af722bc7c31becacac869fd3a745a9f4e75a08f216dd1460fe65e9bf73ea"
+      },
+      "profile": "onedrive.get-item",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "microsoft-outlook",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:49c324a0ba8fe955bb629623b26d88d7af64cc51da4ee0f93d06db26e7af2ea4"
+      },
+      "profile": "outlook.get-message",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "microsoft-teams",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:d475f0bea416f82a03e53470cbf1c9a699d7af0b7e920bce9c24b985fd5b7ee7"
+      },
+      "profile": "microsoft-teams.get-channel-message",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "notion",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:93c80adf066b1cbfce583abbda22ea2e146efd848f82363b12787a211a355af0"
+      },
+      "profile": "notion.get-page",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "pipedrive",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:37fbf8ba8c3537ce9a80f6a91e7aeed5e0ff6ba24cabe0bd8a88b3de1cbe905f"
+      },
+      "profile": "pipedrive.get-activity",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "quickbooks-online",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:4b79ed01182328693d212f611deea5104b104abf07045fc65dc985a812811874"
+      },
+      "profile": "quickbooks.find-invoice",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "slack",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:98f14e2bd1dd326e17478457ae00d0512d6b9ca00db68af990aeec1c170673e4"
+      },
+      "profile": "slack.get-thread-replies",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "services",
+      "identity": {
+        "name": "slack",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:98f14e2bd1dd326e17478457ae00d0512d6b9ca00db68af990aeec1c170673e4"
+      },
+      "profile": "slack",
+      "strategy_id": "first-party-services-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "typeform",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:8eb623ed56e138a3630e31b9841f3210c4c8ff151173600fbe348cc2e454a936"
+      },
+      "profile": "typeform.get-form-messages",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "webflow",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:62e5fc3ab923f35560893ab3fb97a1fa2c10bc89766bbcff96c39b384e837441"
+      },
+      "profile": "webflow.get-collection-item",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "xero",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:027ca717c624fbf002cca35ff637740ba83a9844909c35382d4087cb235e67ce"
+      },
+      "profile": "xero.find-invoice",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "agno",
+      "identity": {
+        "name": "arxiv",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:f453805b04bdaa0a9808e89eeac0402a409ebbcb3372bb2a6cded2f30622b58d"
+      },
+      "profile": "arxiv",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "agno",
+      "identity": {
+        "name": "aws-lambda",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:5b0cbd13dbb992cba863ea48414f97aac3284e1e4755bfe678a4fe34aca573b0"
+      },
+      "profile": "aws-lambda",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "agno",
+      "identity": {
+        "name": "postgresql",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:4fe051b3fba72cc0fcfed52d73c12cd884858360bbfd6ade0b78cf0a0d172bd3"
+      },
+      "profile": "postgres",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "agno",
+      "identity": {
+        "name": "wikipedia",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:0119c8ffd33bd228bdd191ec00b86dc769097c7ff3e3ff644a004d8476b909c6"
+      },
+      "profile": "wikipedia",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "amazon-s3",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:fcdcc8b97874535addeee1bd9296dc123939fed5596c2e747cfa181ddef2dd5c"
+      },
+      "profile": "amazon-s3.list-files",
+      "strategy_id": "selected-local-mcp"
+    },
+    {
+      "family": "activepieces",
+      "identity": {
+        "name": "supabase",
+        "publisher": "meerkat-toolkit",
+        "version": "metadata-sha256:e3f9c122b2733e5030fbf3091af599c167f26872f3dbdea6af947651f59a1831"
+      },
+      "profile": "supabase.get-user",
+      "strategy_id": "selected-local-mcp"
+    }
+  ],
+  "runtime_target": {
+    "node": {
+      "arch": "x64",
+      "npm_version": "10.9.8",
+      "platform": "linux",
+      "version": "v22.23.2"
+    },
+    "python": {
+      "glibc": "glibc 2.39",
+      "implementation": "cpython",
+      "machine": "x86_64",
+      "platform": "linux",
+      "pointer_bits": 64,
+      "version": "3.11.16"
+    }
+  },
+  "schema_version": 1
+}

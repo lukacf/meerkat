@@ -92,9 +92,11 @@ them.
   the earlier behaviour.
 
 - `meerkat-core`: `event::AgentErrorReason` gains the variant
-  `ReasoningEffortRefused { refusal: ReasoningEffortRefusal }`, appended
-  last (see Added). A match over the enum without a wildcard arm handles the
-  new variant. On the wire the reason vocabulary of a failed run
+  `ReasoningEffortRefused { refusal: Box<ReasoningEffortRefusal> }`,
+  appended last (see Added). A match over the enum without a wildcard arm
+  handles the new variant. The refusal is boxed to keep the reason small; a
+  box serializes as its content, so the wire form is the refusal's own. On
+  the wire the reason vocabulary of a failed run
   (`error_report.reason.reason_type`) gains the value
   `reasoning_effort_refused`; a client that reads it as a closed set accepts
   the new value. `AgentError` gains the variant
@@ -375,7 +377,9 @@ them.
   `RuntimeDriverError::ReasoningEffortRefused`, with
   `RuntimeDriverError::reasoning_effort_refused_session_error()` giving the
   session error). Its error class is `config`, its turn failure source is
-  `ConfigError`, it is never retried and never a model fallback trigger.
+  `ConfigError`, the agent loop never retries it and it is never a model
+  fallback trigger (for the stored record of a turn refused before its run
+  starts, see Known limitations).
   Surfaces answer it as `INVALID_PARAMS` (JSON-RPC `-32602`, HTTP `400`)
   with the data
   `{"kind": "reasoning_effort_refused", "retryable": <bool>, "reasoning_effort_refusal": {...}}`
@@ -384,7 +388,7 @@ them.
   only for the reason `supported_levels_unavailable`
   (`ReasoningEffortRefusalReason::is_transient()`): the account's model
   list is not loaded, and the same request can succeed later with no
-  change. Meerkat itself does not retry it. A turn that fails for the
+  change. Meerkat does not retry it for the caller. A turn that fails for the
   refusal carries it as its typed reason
   (`AgentErrorReason::ReasoningEffortRefused`, in `run_failed` as
   `{"reason_type": "reasoning_effort_refused", "refusal": {...}}`), and
@@ -442,6 +446,17 @@ them.
   replacing or clearing `provider_params` does not. Sessions and inputs
   that never carried the level are written exactly as before and read on
   either release.
+
+### Known limitations
+
+- A turn that asks for a reasoning effort level its session's route refuses
+  is answered with the typed refusal and makes no provider request, but its
+  stored input does not end with the refusal as its reason. Through the
+  JSON-RPC session runtime the turn is attempted once and its stored input
+  ends as abandoned with the reason `stopped`: the runtime retires the
+  session's live registration after the refused start and rebuilds it from
+  the stored session at the next turn. The refusal reason is in the typed
+  details of the answer (`reasoning_effort_refusal`).
 
 ## [0.9.14] - 2026-11-11
 

@@ -947,6 +947,10 @@ mod live {
     /// binding) is unchanged, the live session still runs the identity it
     /// had, and no provider request was made. The caller can then swap with
     /// a level the new model accepts in the same request.
+    ///
+    /// The refused request names a model and nothing else: the request a
+    /// change of the global default model sends to each live session through
+    /// this same entry, so such a session keeps its model and its level.
     #[tokio::test]
     async fn hot_swap_to_a_model_without_the_level_is_refused() {
         let harness = LiveHarness::new().await;
@@ -994,6 +998,15 @@ mod live {
             harness.durable_identity().await,
             before,
             "a refused swap leaves the stored identity and params as they were"
+        );
+        assert_eq!(
+            harness
+                .service
+                .live_session_llm_identity(&harness.session_id)
+                .await
+                .expect("the live session's identity"),
+            before,
+            "a refused swap stages nothing: the live session keeps its model and its level"
         );
         assert!(
             harness.script.served().is_empty(),

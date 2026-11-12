@@ -17932,6 +17932,47 @@ mod tests {
         }
     }
 
+    /// [`MockLlmClient`] that reports no route and counts how often its
+    /// route is read and how many requests it serves.
+    struct CountingNoRouteMockLlmClient {
+        route_reads: Arc<AtomicUsize>,
+        requests: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl LlmClient for CountingNoRouteMockLlmClient {
+        fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+            self.route_reads.fetch_add(1, AtomicOrdering::SeqCst);
+            None
+        }
+
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            MockLlmClient.project_replay_messages(messages)
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a meerkat_client::LlmRequest,
+        ) -> Pin<
+            Box<dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>> + Send + 'a>,
+        > {
+            static MOCK: MockLlmClient = MockLlmClient;
+            self.requests.fetch_add(1, AtomicOrdering::SeqCst);
+            MOCK.stream(request)
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
     #[derive(Default)]
     struct RecordingMessagesLlmClient {
         requests: StdMutex<Vec<Vec<meerkat_core::Message>>>,
@@ -42014,6 +42055,134 @@ mod tests {
                 "through_runtime={through_runtime}: a refused turn leaves the session's identity"
             );
         }
+    }
+
+    /// A known limit, pinned as measured. A turn through the runtime whose
+    /// level the session's route refuses is a refused start. The caller is
+    /// answered with the typed refusal; the level was judged once and no
+    /// request reached the provider. The stored input does not end with the
+    /// refusal as its reason: the cleanup this runtime runs after a failed
+    /// start retires the session's live registration (the next turn rebuilds
+    /// it from the stored session), which ends the input `Abandoned` with the
+    /// reason `Stopped`. The input is not attempted again.
+    ///
+    /// This is the one row to change when a refused start ends with the
+    /// refusal as its stored reason.
+    #[tokio::test]
+    async fn a_turn_level_the_route_refuses_is_attempted_once_and_ends_abandoned_as_stopped_today()
+    {
+        use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+        use meerkat_runtime::input_state::{InputAbandonReason, InputTerminalOutcome};
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
+        let route_reads = Arc::new(AtomicUsize::new(0));
+        let requests = Arc::new(AtomicUsize::new(0));
+        let client = || -> Arc<dyn LlmClient> {
+            Arc::new(CountingNoRouteMockLlmClient {
+                route_reads: Arc::clone(&route_reads),
+                requests: Arc::clone(&requests),
+            })
+        };
+        runtime.set_default_llm_client(Some(client()));
+        let session_id = runtime
+            .create_session(
+                AgentBuildConfig {
+                    llm_client_override: Some(client()),
+                    ..AgentBuildConfig::new("claude-sonnet-4-5")
+                },
+                None,
+                None,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let turn = |overrides: Option<crate::handlers::turn::TurnOverrides>| {
+            let runtime = Arc::clone(&runtime);
+            let session_id = session_id.clone();
+            async move {
+                let (event_tx, _event_rx) = mpsc::channel(100);
+                runtime
+                    .start_turn_via_runtime(
+                        &session_id,
+                        "Hello".into(),
+                        Vec::new(),
+                        event_tx,
+                        None,
+                        None,
+                        None,
+                        overrides,
+                    )
+                    .await
+            }
+        };
+        turn(None).await.expect("the first turn runs");
+        assert_eq!(requests.load(AtomicOrdering::SeqCst), 1);
+        let route_reads_before = route_reads.load(AtomicOrdering::SeqCst);
+
+        let refused = turn(Some(level_overrides(TurnMetadataOverride::Set(
+            EffortLevel::High,
+        ))))
+        .await
+        .expect_err("a level the route does not accept is refused");
+        assert_eq!(refused.code, error::INVALID_PARAMS, "{refused:?}");
+        assert_eq!(
+            refused
+                .data
+                .as_ref()
+                .map(|data| data["reasoning_effort_refusal"]["reason"].clone()),
+            Some(serde_json::json!("supported_levels_unknown")),
+            "{refused:?}"
+        );
+
+        // The caller is answered once the runtime's cleanup after the failed
+        // start has run. Wait (bounded) until both stored inputs, the first
+        // turn's and the refused turn's, are terminal, then read them.
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
+        let mut terminals = Vec::new();
+        for _ in 0..400 {
+            terminals = runtime
+                .service
+                .runtime_store()
+                .load_input_states_strict(&runtime_id)
+                .await
+                .expect("the stored input rows are readable")
+                .into_iter()
+                .map(|row| row.seed.terminal_outcome)
+                .collect::<Vec<_>>();
+            if terminals.len() == 2 && terminals.iter().all(Option::is_some) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        let mut consumed = 0;
+        let mut others = Vec::new();
+        for terminal in terminals.iter().cloned() {
+            match terminal {
+                Some(InputTerminalOutcome::Consumed) => consumed += 1,
+                other => others.push(other),
+            }
+        }
+        assert_eq!(consumed, 1, "the first turn's input: {terminals:?}");
+        assert_eq!(
+            others,
+            vec![Some(InputTerminalOutcome::Abandoned {
+                reason: InputAbandonReason::Stopped,
+            })],
+            "the refused turn's input ends abandoned as stopped today, not with the refusal: \
+             {terminals:?}"
+        );
+        assert_eq!(
+            route_reads.load(AtomicOrdering::SeqCst) - route_reads_before,
+            1,
+            "the level is judged once: the refused start is not attempted again"
+        );
+        assert_eq!(
+            requests.load(AtomicOrdering::SeqCst),
+            1,
+            "the refused turn made no provider request"
+        );
     }
 
     #[tokio::test]

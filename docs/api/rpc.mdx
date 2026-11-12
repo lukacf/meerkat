@@ -4517,7 +4517,7 @@ the source cannot be read now. A conflict also names `conflicting_param`, and
 `conflicting_level` when the conflicting setting is itself a level.
 `retryable` is `true` only for `supported_levels_unavailable` (the account's
 model list is not loaded): the same request can succeed later with no change.
-Meerkat itself never retries a refused level.
+Meerkat does not retry a refused level for the caller.
 
 The answer is the same wherever the level is refused. A session's level is
 checked when its agent is built: `session/create` answers the refusal (a
@@ -4525,7 +4525,10 @@ deferred create reports it at its first `turn/start`), and so does the build
 of a resumed or recovered session, whose stored identity stays as it was. A
 `turn/start` whose overrides move a live session to a model or level its
 route does not accept is refused the same way, and the session keeps its
-model, its level and its stored params. A run that fails for the refusal
+model, its level and its stored params. Such a turn is attempted once; its
+stored input ends as abandoned with the reason `stopped`, not with the
+refusal, and the session's live registration is rebuilt from the stored
+session at the next turn. A run that fails for the refusal
 reports it in `run_failed` as the `error_report` reason
 `{"reason_type": "reasoning_effort_refused", "refusal": {...}}` with class
 `config`. No provider request is made for a refused level.

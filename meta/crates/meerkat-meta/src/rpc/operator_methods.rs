@@ -563,11 +563,15 @@ impl From<meerkat_contracts::WireInstructionTarget> for InstructionTargetView {
             meerkat_contracts::WireInstructionTarget::Profile { profile } => {
                 Self::Profile { profile }
             }
-            meerkat_contracts::WireInstructionTarget::Member { agent_identity } => Self::Member {
-                identity: crate::member_comms_id::durable_identity_for_roster_member(
-                    &agent_identity,
-                ),
-            },
+            // Meta's status view names a member target by its Meta identity
+            // and does not show the record's fork scope.
+            meerkat_contracts::WireInstructionTarget::Member { agent_identity, .. } => {
+                Self::Member {
+                    identity: crate::member_comms_id::durable_identity_for_roster_member(
+                        &agent_identity,
+                    ),
+                }
+            }
         }
     }
 }

@@ -634,11 +634,13 @@ impl OperatorInstructionTarget {
             Self::Profile { profile } => meerkat_contracts::WireInstructionTarget::Profile {
                 profile: profile.as_str().to_owned(),
             },
-            Self::Member { agent_identity, .. } => {
-                meerkat_contracts::WireInstructionTarget::Member {
-                    agent_identity: agent_identity.as_str().to_owned(),
-                }
-            }
+            Self::Member {
+                agent_identity,
+                include_forks,
+            } => meerkat_contracts::WireInstructionTarget::Member {
+                agent_identity: agent_identity.as_str().to_owned(),
+                include_forks: *include_forks,
+            },
         }
     }
 
@@ -650,9 +652,12 @@ impl OperatorInstructionTarget {
             meerkat_contracts::WireInstructionTarget::Profile { profile } => Self::Profile {
                 profile: ProfileName::from(profile),
             },
-            meerkat_contracts::WireInstructionTarget::Member { agent_identity } => Self::Member {
+            meerkat_contracts::WireInstructionTarget::Member {
+                agent_identity,
+                include_forks,
+            } => Self::Member {
                 agent_identity: AgentIdentity::from(agent_identity),
-                include_forks: false,
+                include_forks,
             },
         }
     }
@@ -983,5 +988,27 @@ mod tests {
             "worker",
             Some(&AgentIdentity::from("first"))
         ));
+    }
+
+    /// The wire form carries the fork scope both ways, and a target without
+    /// it crosses the wire as it did before the scope existed.
+    #[test]
+    fn a_member_targets_fork_scope_crosses_the_wire() {
+        for include_forks in [false, true] {
+            let target = member("worker-1", include_forks);
+            let wire = target.to_wire();
+            assert_eq!(
+                wire,
+                meerkat_contracts::WireInstructionTarget::Member {
+                    agent_identity: "worker-1".to_string(),
+                    include_forks,
+                }
+            );
+            assert_eq!(OperatorInstructionTarget::from_wire(wire), target);
+        }
+        assert_eq!(
+            serde_json::to_string(&member("worker-1", false).to_wire()).unwrap(),
+            r#"{"kind":"member","agent_identity":"worker-1"}"#
+        );
     }
 }

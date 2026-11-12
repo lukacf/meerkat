@@ -11393,19 +11393,27 @@ impl MobHandle {
 
     /// The members among `targets` that the host's member tool audience
     /// ([`MobBuilder::with_member_tool_audience`](super::MobBuilder::with_member_tool_audience))
-    /// hides from `caller`: the one check behind every member operator tool
-    /// that names or lists members (`member_status`, `retire_member`,
-    /// `force_cancel_member`, `list_members`, and the mob tools'
-    /// `mob_list_members`).
+    /// hides from `caller`: the one place the audience is asked. The member
+    /// tools that name or list members ask through it: `member_status`,
+    /// `retire_member`, `force_cancel_member`, `wire_members`,
+    /// `unwire_members` and `list_members`, and the mob tools'
+    /// `mob_check_member`, `mob_retire_member`, `mob_wire`, `mob_unwire`,
+    /// `mob_list_members` and `council`.
     ///
     /// A hidden member is one the caller's tools answer exactly as a member
     /// the mob does not hold: a tool that names it answers member not
     /// found, and a list leaves its row out whole. `caller` is the member
-    /// bound to the session that made the call; `None` is a call no
-    /// member's session made (a host's or an operator's own surface), and
-    /// what such a call is shown is the audience's to say, like every other.
+    /// the call was made for: the member bound to the session that made it,
+    /// or the placed member whose request the controlling side serves.
+    /// `None` is a call made by no member of this mob (a host's own
+    /// dispatch, a dispatch that carries no origin session, or, through the
+    /// mob tools, the session of a member of another mob), and what such a
+    /// call is shown is the audience's to say, like every other: an
+    /// audience that shows a member to `None` shows it to every such call.
     /// The audience is asked once per target, with the labels the caller
     /// and that target carry on their own roster rows, from one roster read.
+    /// A target the roster holds no row for is handed over without labels,
+    /// and the host decides from its own record.
     /// Empty when the host installed no audience.
     pub async fn members_hidden_from(
         &self,

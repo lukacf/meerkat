@@ -37,7 +37,7 @@ them.
 
 ### Fixed
 
-- `meerkat-mob`: a member whose comms key another member of the host already
+- `meerkat-mob`: a member whose comms key another member of its mob already
   holds is refused before anything of it is recorded. The refusal is a wiring
   error that names the refused member alone, two members spawned at the same
   moment cannot both pass, and nothing of the refused member is left behind.
@@ -48,17 +48,20 @@ them.
 - `meerkat-mob`: a mob whose records already hold such a member starts,
   whether it was running or stopped when its host went away. The member is
   listed broken with a reason that says to retire it, holds no endpoint and
-  is never woken; the member that holds the key is untouched. For a mob that
-  was running, retiring the broken member is enough, and the next start is
-  clean. For a mob that was stopped, retire the broken member before the mob
-  is lifted; after a lift see Known limitations. On records written
-  before this fix, the member that is kept is the one recorded first. A
-  member whose session comes up, at a start, on a key another member holds
-  is listed broken alone in the same way, and the start goes on.
+  is never woken; the member that holds the key is untouched. Retiring the
+  broken member is enough, and the next start is clean, as long as the mob
+  has not been lifted with the member in it: for a mob that was running,
+  retire it before any stop and lift of the mob; for a mob that was stopped,
+  retire it before the mob is lifted. After a lift see Known limitations. On
+  records written before this fix, the member that is kept is the one
+  recorded first. A member whose session comes up, at a start, on a key
+  another member holds is listed broken alone in the same way, and the start
+  goes on.
 - `meerkat-mob`: a declared member that is refused because another member
   holds its comms key is built once, not again after every retry period. It
-  is built again when its declaration changes or when a member of the mob is
-  retired, and its convergence status says so.
+  is built again when its declaration changes, when a member of the mob is
+  retired, or when a spawn in the mob is rolled back. Its convergence status
+  carries the refusal.
 
 ### Known limitations
 
@@ -72,11 +75,12 @@ them.
   listener, before its key is judged: that is an ordinary build failure, and
   a declared member is built again on the reconciler's retry periods.
 - `meerkat-mob`: a broken member of this kind cannot be retired cleanly once
-  its mob, started stopped, has been lifted: the retire answers an error, the
-  member stays retiring and its name cannot be used again until the host
-  restarts. The restart completes the retirement, and the next start is
-  clean. A host that lifts a stopped mob when it starts (the Meta gateways
-  do) always meets this: retire the member, then restart the host.
+  its mob has been lifted with the member in it (started stopped, or stopped
+  and lifted later): the retire answers an error, the member stays retiring
+  and its name cannot be used again until the host restarts. The restart
+  completes the retirement, and the next start is clean. A host that lifts a
+  stopped mob when it starts (the Meta gateways do) always meets this: retire
+  the member, then restart the host.
 
 ## [0.9.14] - 2026-11-11
 

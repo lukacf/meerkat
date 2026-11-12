@@ -168,7 +168,7 @@ Every change answers one typed outcome, the same on every surface:
 | --- | --- | --- |
 | `done` | The change committed. `agents` names each agent with its `state`, `spec_digest` and `spec_revision`. | Keep the `spec_digest`: the next change of that agent sends it as `expected_spec_digest`. |
 | `pending_decision` | A person must decide (`decision_id`, `deadline_ms`). Nothing is written but the decision. | Wait. Repeating the call with other arguments is a new request. The identical call with the same `request_id` returns the current state. An agent that is itself a long-term agent gets a notice when the decision is made. |
-| `pending_preparation` | The change committed and at least one agent is not usable yet: the host is still preparing it. | Wait for the host. |
+| `pending_preparation` | The create committed, and at least one agent (its `state` is `pending_preparation`) waits for the host to prepare it: it has no member, takes no message and runs nothing until the host settles it, and its first message runs once then. | Nothing: no tool settles it. `identity_list` and `identity_get` read it as `readiness: "preparation_pending"`, and the identical call with the same `request_id` returns where it stands. |
 | `refused` | Nothing was written. `kind` is one of a closed vocabulary, `field` names the argument, `detail` says what to send instead, `retryable` says whether the same call may succeed later. | Fix what `detail` names, or retry later when `retryable` is true. |
 
 A person cannot approve a request they made themselves.
@@ -183,6 +183,25 @@ of the first.
 On a create, an agent's `seat` is `seated`, or `owed` when its first message
 did not start: the agent exists and its name is taken, and it is seated, and
 its first message runs once, at its next delivery.
+
+### An agent the host prepares
+
+A policy may name a preparation for a profile
+(`preparation.<profile>.mode: "required"`, see
+[Identity policy](/reference/identity-policy)). An agent created of such a
+profile waits for its host: its create answers `pending_preparation`, and
+until the host's operator settles it (`meta/identity/settle_preparation`) it
+has no member, takes no message and runs nothing. Its first message, if it
+has one, runs once when it is settled. There is no tool for the settle, and
+nothing an agent sends speeds it up: the agent that asked reads where the new
+agent stands with `identity_list` and `identity_get`
+(`readiness: "preparation_pending"`), or with the identical create under the
+same `request_id`, which answers `done` once the agent is settled.
+
+An update of an agent that waits changes its record only, and the agent still
+waits. An update that moves an agent into a profile the host prepares is
+refused `unsupported` at `set.profile`: the agent is created in that profile
+instead. Only a create answers `pending_preparation`.
 
 ## Changing instructions
 
@@ -226,7 +245,9 @@ name. Each entry carries
 `name`, `display_name`, `profile`, `spec_digest`, `spec_revision`, `archived`
 and `readiness`, and, read back only, `addressability` when the agent is
 `internal_only` and `runtime_mode_override` when the agent's record names
-one. An agent is not shown who asked for another agent, when, or
+one. An agent that waits for its host's preparation reads
+`readiness: "preparation_pending"`: it has no member and takes no message
+until the host settles that. An agent is not shown who asked for another agent, when, or
 under which consent, nor another requester's open operations, nor whether the
 host's roster lists the agent's name as well; the host's
 `meta/identity/list` shows those. A list is in one stable order, and `after`

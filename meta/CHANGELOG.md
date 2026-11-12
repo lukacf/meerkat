@@ -393,6 +393,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     has them. An agent does not set them: `identity_create` and
     `identity_update` do not take them, and the host does
     (`meta/identity/create`, `meta/identity/update`).
+  - An agent the host prepares is told so in plain words. `identity_create`
+    says what `pending_preparation` is: the agent has no member, takes no
+    message and runs nothing until its host settles it, and its first
+    message runs once then. `identity_list` and `identity_get` say what
+    `readiness: "preparation_pending"` is, and `identity_update` says that
+    a move into a profile the host prepares is refused `unsupported` at
+    `set.profile` and that an update of an agent that waits changes its
+    record only. There is no tool for the settle: it stays the host's
+    (`meta/identity/settle_preparation`).
   - The eight tools may wait behind the deferred tool catalog: in a session
     whose catalog is exact, their definitions are loaded on demand.
   - Rust API: `identity_creation::{IdentityAgentTools, IdentityToolCaller,

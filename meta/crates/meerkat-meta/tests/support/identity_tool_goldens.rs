@@ -21,7 +21,7 @@ Each agent takes a unique `name` and a `profile` of the mob, which gives its mod
 All agents of one call (1 to 256) are created together or not at all. The host's rules decide what happens, and the result's `outcome` says which:
 - `done`: created. `agents` lists each agent's `name`, `spec_digest` and `spec_revision`. `seat: "owed"` on an agent means its first message has not started: the agent exists, and it is seated and its first message runs at its next delivery.
 - `pending_decision`: a person must decide (`decision_id`, `deadline_ms`). Nothing is created yet. Do not repeat the call with new arguments: that is a new request. If you are a long-term agent yourself, a notice reaches you when it is decided; in every case the identical call with the same `request_id` returns the current state.
-- `pending_preparation`: created, and the host is still preparing at least one agent, which is not usable yet.
+- `pending_preparation`: created, and at least one agent (its `state` is `pending_preparation`) waits for the host to prepare it. Until the host settles that, the agent has no member, takes no message and runs nothing; its first message runs once when it is settled. No tool settles it, and nothing you send speeds it up: identity_list and identity_get read it as `readiness: "preparation_pending"`, and the identical call with the same `request_id` returns where it stands.
 - `refused`: nothing was created. `kind` names why, `field` the argument it concerns, `detail` what to send instead. Repeat the same call later only when `retryable` is true.
 
 Pass `request_id` when you may need to ask again: the same id with the same arguments returns the same state and never creates twice, and the same id with other arguments is refused `operation_reused`. Without it, only a retry of this same tool call is recognized as the same request.
@@ -103,13 +103,13 @@ A name that was removed is never available again (`name_taken`)."#,
 
 Send `expected_spec_digest`: the agent's `spec_digest` from identity_list, or from the last result that named it. If the agent changed meanwhile you get `stale_spec` with `current_digest`: read the agent again, then decide whether your change still applies. A `name` that no agent holds, and an agent you are not shown (one private to a person), both answer `identity_unknown`.
 
-`set` names what changes; a member you leave out stays as it is. `instructions` and `context` are replaced whole. `labels` sets each key you give and keeps the others; `labels_remove` removes keys. `profile` moves the agent to that profile's model, tools and skills on the same conversation. `peers_add` and `peers_remove` change who it can message.
+`set` names what changes; a member you leave out stays as it is. `instructions` and `context` are replaced whole. `labels` sets each key you give and keeps the others; `labels_remove` removes keys. `profile` moves the agent to that profile's model, tools and skills on the same conversation. A move into a profile whose agents the host prepares is refused `unsupported` at `set.profile`: create the agent in that profile instead. `peers_add` and `peers_remove` change who it can message.
 
 An instructions change is in the agent's record at once. It reaches the agent at its next run; a run that starts within moments of the change may still use the earlier instructions; earlier instructions are never rewritten. The result says what became of it in `agents[0].instructions.kind`: `applies_at_next_run`; `applies_after_compaction` (the agent's model takes new instructions only at the head of what it reads, so the change reaches it after its next compaction); `applies_at_next_session` with a `reason` (the change does not reach the agent as it runs now, and applies when it next starts a new conversation); `unchanged`.
 
 You cannot change yourself (`self_change_refused`). An agent that the host's configuration declares is changed there, not here (`owner_read_only`).
 
-The result's `outcome` is `done`, `pending_decision`, `pending_preparation` or `refused`, and `request_id` works, as for identity_create.",
+The result's `outcome` is `done`, `pending_decision` or `refused`, and `request_id` works, as for identity_create. An update of an agent that waits for its host's preparation changes its record only: the agent still waits.",
         r#"{
   "additionalProperties": false,
   "properties": {
@@ -280,7 +280,7 @@ The result's `outcome` is `done` (the agent's `state` is `retiring` while its me
         "identity_list",
         r"List the long-term agents of your mob: every agent that is not private to a person, of any profile, whoever asked for it and however it came to exist. An agent of a profile you may not create agents of is listed too: `identity_directory` says what you may create and name. Read only: it never wakes an agent and loads nothing.
 
-Each entry of `agents` has `name`, `display_name`, `profile`, `spec_digest` (what a change sends as `expected_spec_digest`), `spec_revision`, `archived` and `readiness`. `readiness` is `dormant` (nothing is loaded; its next delivery wakes it), `live`, `broken`, `preparation_pending`, `retiring` or `unseated` (archived, or its seat is owed). An entry also has `addressability` when the agent is `internal_only` (who reaches it; an addressable agent says nothing) and `runtime_mode_override` (`autonomous_host` or `turn_driven`) when the agent's record names how it runs instead of its profile. `addressability` and `runtime_mode_override` are read back only: the host sets them, and identity_create and identity_update do not take them.
+Each entry of `agents` has `name`, `display_name`, `profile`, `spec_digest` (what a change sends as `expected_spec_digest`), `spec_revision`, `archived` and `readiness`. `readiness` is `dormant` (nothing is loaded; its next delivery wakes it), `live`, `broken`, `preparation_pending` (it waits for its host to prepare it: no member, no message taken, nothing runs until the host settles that; no tool of yours does), `retiring` or `unseated` (archived, or its seat is owed). An entry also has `addressability` when the agent is `internal_only` (who reaches it; an addressable agent says nothing) and `runtime_mode_override` (`autonomous_host` or `turn_driven`) when the agent's record names how it runs instead of its profile. `addressability` and `runtime_mode_override` are read back only: the host sets them, and identity_create and identity_update do not take them.
 
 `profile` narrows the list to one profile; `include_archived` adds archived agents; when the result has `next`, pass it as `after` to read on.",
         r#"{
@@ -304,11 +304,11 @@ Each entry of `agents` has `name`, `display_name`, `profile`, `spec_digest` (wha
     ),
     (
         "identity_get",
-        r"Read one long-term agent of your mob by name: what identity_list says of it (`name`, `display_name`, `profile`, `spec_digest`, `spec_revision`, `archived`, `readiness`, and `addressability` and `runtime_mode_override` when the agent has them) and the rest of what a create or an update sets: its `instructions`, `context`, `labels` and `peers` (the peers its changes listed, among the agents you are shown). An archived agent is read too, and so is your own record. Read only: it never wakes an agent and loads nothing.
+        r#"Read one long-term agent of your mob by name: what identity_list says of it (`name`, `display_name`, `profile`, `spec_digest`, `spec_revision`, `archived`, `readiness`, and `addressability` and `runtime_mode_override` when the agent has them) and the rest of what a create or an update sets: its `instructions`, `context`, `labels` and `peers` (the peers its changes listed, among the agents you are shown). An archived agent is read too, and so is your own record. An agent that waits for its host's preparation reads `readiness: "preparation_pending"`: it takes no message until the host settles that. Read only: it never wakes an agent and loads nothing.
 
 You are not shown who asked for the agent, when, or under which consent. A `name` that no agent holds, and an agent you are not shown (one private to a person), both answer `identity_unknown`. `addressability` and `runtime_mode_override` are read back only: the host sets them, and identity_create and identity_update do not take them.
 
-A change of the agent sends its `spec_digest` as `expected_spec_digest`.",
+A change of the agent sends its `spec_digest` as `expected_spec_digest`."#,
         r#"{
   "additionalProperties": false,
   "properties": {

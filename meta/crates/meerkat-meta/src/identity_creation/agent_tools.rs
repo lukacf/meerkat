@@ -199,8 +199,13 @@ fn description(name: &str) -> String {
              new request. If you are a long-term agent yourself, a notice reaches you when \
              it is decided; in every case the identical call with the same `request_id` \
              returns the current state.\n\
-             - `pending_preparation`: created, and the host is still preparing at least one \
-             agent, which is not usable yet.\n\
+             - `pending_preparation`: created, and at least one agent (its `state` is \
+             `pending_preparation`) waits for the host to prepare it. Until the host settles \
+             that, the agent has no member, takes no message and runs nothing; its first \
+             message runs once when it is settled. No tool settles it, and nothing you send \
+             speeds it up: identity_list and identity_get read it as `readiness: \
+             \"preparation_pending\"`, and the identical call with the same `request_id` \
+             returns where it stands.\n\
              - `refused`: nothing was created. `kind` names why, `field` the argument it \
              concerns, `detail` what to send instead. Repeat the same call later only when \
              `retryable` is true.\n\n\
@@ -220,7 +225,9 @@ fn description(name: &str) -> String {
              `set` names what changes; a member you leave out stays as it is. \
              `instructions` and `context` are replaced whole. `labels` sets each key you \
              give and keeps the others; `labels_remove` removes keys. `profile` moves the \
-             agent to that profile's model, tools and skills on the same conversation. \
+             agent to that profile's model, tools and skills on the same conversation. A \
+             move into a profile whose agents the host prepares is refused `unsupported` at \
+             `set.profile`: create the agent in that profile instead. \
              `peers_add` and `peers_remove` change who it can message.\n\n\
              An instructions change is in the agent's record at once. {INSTRUCTIONS_REACH} \
              The result says what became of it in `agents[0].instructions.kind`: \
@@ -230,8 +237,9 @@ fn description(name: &str) -> String {
              does not reach the agent as it runs now, and applies when it next starts a new \
              conversation); `unchanged`.\n\n\
              You cannot change yourself (`self_change_refused`). {CONFIGURED_AGENT}\n\n\
-             The result's `outcome` is `done`, `pending_decision`, `pending_preparation` or \
-             `refused`, {AS_FOR_CREATE}"
+             The result's `outcome` is `done`, `pending_decision` or `refused`, \
+             {AS_FOR_CREATE} An update of an agent that waits for its host's preparation \
+             changes its record only: the agent still waits."
         ),
         IDENTITY_ARCHIVE => format!(
             "Stop a long-term agent and keep it. Its name, record, conversation and memory \
@@ -278,7 +286,9 @@ fn description(name: &str) -> String {
              Each entry of `agents` has `name`, `display_name`, `profile`, `spec_digest` \
              (what a change sends as `expected_spec_digest`), `spec_revision`, `archived` \
              and `readiness`. `readiness` is `dormant` (nothing is loaded; its next delivery \
-             wakes it), `live`, `broken`, `preparation_pending`, `retiring` or `unseated` \
+             wakes it), `live`, `broken`, `preparation_pending` (it waits for its host to \
+             prepare it: no member, no message taken, nothing runs until the host settles \
+             that; no tool of yours does), `retiring` or `unseated` \
              (archived, or its seat is owed). An entry also has `addressability` when the \
              agent is `internal_only` (who reaches it; an addressable agent says nothing) \
              and `runtime_mode_override` (`autonomous_host` or `turn_driven`) when the \
@@ -293,7 +303,9 @@ fn description(name: &str) -> String {
              has them) and the rest of what a create or an update sets: its \
              `instructions`, `context`, `labels` and `peers` (the peers its changes listed, \
              among the agents you are shown). An archived agent is read too, and so is your \
-             own record. Read only: it never wakes an agent and loads nothing.\n\n\
+             own record. An agent that waits for its host's preparation reads `readiness: \
+             \"preparation_pending\"`: it takes no message until the host settles that. \
+             Read only: it never wakes an agent and loads nothing.\n\n\
              You are not shown who asked for the agent, when, or under which consent. \
              {UNKNOWN_NAME} {READ_BACK_ONLY}\n\n\
              A change of the agent sends its `spec_digest` as `expected_spec_digest`."

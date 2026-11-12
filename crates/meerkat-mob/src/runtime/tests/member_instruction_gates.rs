@@ -293,11 +293,19 @@ impl Fixture {
             ServiceDouble::NonForwarding => Arc::new(NonForwardingDecorator {
                 inner: service.clone(),
                 records_need_a_live_actor: false,
+                never_durable: false,
                 records: Arc::clone(&records),
             }),
             ServiceDouble::RecordsNeedALiveActor => Arc::new(NonForwardingDecorator {
                 inner: service.clone(),
                 records_need_a_live_actor: true,
+                never_durable: false,
+                records: Arc::clone(&records),
+            }),
+            ServiceDouble::NeverDurable => Arc::new(NonForwardingDecorator {
+                inner: service.clone(),
+                records_need_a_live_actor: true,
+                never_durable: true,
                 records: Arc::clone(&records),
             }),
         };
@@ -3002,9 +3010,15 @@ async fn a_fork_of_a_running_source_names_a_tool_the_child_cannot_call() {
 /// actor `session not found`: a service whose store-only record cannot
 /// reach a member's conversation until the member's wake has loaded it (a
 /// conversation the host keeps archived until then).
+///
+/// With `never_durable` it answers every record `durability_unavailable`,
+/// whatever its session, as a service that keeps no durable session
+/// document does (the in-memory service, and the trait default of a wrapper
+/// that does not forward the record): a permanent condition.
 struct NonForwardingDecorator {
     inner: Arc<Service>,
     records_need_a_live_actor: bool,
+    never_durable: bool,
     records: Arc<RecordSeam>,
 }
 
@@ -3017,7 +3031,8 @@ enum LiveRecord {
     /// It waits for the seam's gate, then the real service takes it: a
     /// session that is waiting for its turn boundary or its store.
     Hold,
-    /// The session's store cannot take it now (`durability_unavailable`).
+    /// The session's store cannot take it now: a store error, as a durable
+    /// service answers during an outage of its store.
     StoreUnavailable,
     /// The session answers `session not found`, live as it is.
     SessionGone,
@@ -3104,6 +3119,8 @@ enum ServiceDouble {
     NonForwarding,
     /// [`NonForwardingDecorator`] with `records_need_a_live_actor`.
     RecordsNeedALiveActor,
+    /// [`NonForwardingDecorator`] with `never_durable`.
+    NeverDurable,
 }
 
 #[async_trait]
@@ -3436,6 +3453,9 @@ impl MobSessionService for NonForwardingDecorator {
         self.records
             .calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.never_durable {
+            return Err(meerkat_core::service::SessionInstructionError::DurabilityUnavailable);
+        }
         if self
             .records
             .hold_all
@@ -3454,7 +3474,10 @@ impl MobSessionService for NonForwardingDecorator {
             LiveRecord::Forward => {}
             LiveRecord::Hold => self.records.pass_gate().await,
             LiveRecord::StoreUnavailable => {
-                return Err(meerkat_core::service::SessionInstructionError::DurabilityUnavailable);
+                return Err(SessionError::Store(Box::new(std::io::Error::other(
+                    "the session store is unavailable",
+                )))
+                .into());
             }
             LiveRecord::SessionGone => {
                 return Err(SessionError::NotFound { id: session_id }.into());

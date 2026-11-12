@@ -70,9 +70,15 @@ impl Fixture {
     /// Write the standing record for the member, not seated yet, and seat
     /// the member dormant on the conversation it already has.
     async fn seat_dormant_under_the_record(&self, session_id: &SessionId) {
+        self.seat_dormant_under_the_record_of(session_id, "standing")
+            .await;
+    }
+
+    /// [`Self::seat_dormant_under_the_record`] with the record in slot `key`.
+    async fn seat_dormant_under_the_record_of(&self, session_id: &SessionId, key: &str) {
         self.handle
             .set_operator_instruction(write(
-                "standing",
+                key,
                 1,
                 STANDING,
                 OperatorInstructionTarget::Member {
@@ -287,6 +293,51 @@ async fn a_wake_behind_a_delivery_in_flight_leaves_the_mob_answering() {
     fixture.finish().await;
 }
 
+/// The mob's own delivery to the member is in the member's session and is
+/// never answered, so it holds the member's delivery lock for good. The
+/// wake waits for it at most its own short bound: the member goes Live and
+/// runs its turn, without the entry, and its status says why it is still
+/// owed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_delivery_in_flight_past_the_bound_does_not_hold_the_wake() {
+    let (fixture, session_id) = Fixture::unseated(ServiceDouble::RecordsNeedALiveActor, None).await;
+    fixture.records.hold_all();
+    fixture.seat_dormant_under_the_record(&session_id).await;
+    fixture.records.wait_held(1).await;
+
+    let before = fixture.client.requests().len();
+    let turn = fixture.spawn_turn("the first task after the seat");
+    let turn = tokio::time::timeout(Duration::from_secs(25), turn)
+        .await
+        .expect("a delivery in flight does not hold the member's wake past its bound")
+        .expect("the turn's task");
+    tokio::time::timeout(WAIT, turn.wait())
+        .await
+        .expect("the first turn finishes")
+        .expect("the first turn succeeds");
+    let request = fixture
+        .client
+        .requests()
+        .get(before)
+        .cloned()
+        .expect("the first turn reached the model");
+    assert_eq!(entries_with(&request, STANDING), 0);
+    let after_wake = fixture.delivery_of(&fixture.identity).await;
+    assert!(
+        matches!(
+            &after_wake,
+            Some(MemberInstructionDeliveryState::Owed {
+                last_failure: Some(failure),
+                ..
+            }) if failure.contains("still in flight")
+        ),
+        "the member is Live and owed, and its status names the delivery in flight: \
+         {after_wake:?}"
+    );
+    fixture.records.open();
+    fixture.finish().await;
+}
+
 /// The member's session takes the record at the wake and does not answer
 /// (it waits for its turn boundary or its store). The wake does not wait
 /// for it past its own short bound: the member goes Live and runs its turn,
@@ -343,11 +394,12 @@ async fn a_record_the_session_holds_past_the_bound_leaves_the_member_live_and_ow
     fixture.finish().await;
 }
 
-/// The member's store cannot take the record at the wake
-/// (`durability_unavailable`). The member goes Live and stays owed, with
-/// the failure in its status: it is not blocked. The store comes back while
-/// the member is dormant again, and its next wake writes the record: that
-/// run carries the entry.
+/// The member's store cannot take the record at the wake: the session
+/// answers a store error, as a durable service does during an outage of its
+/// store. The member goes Live and stays owed, with the failure in its
+/// status: it is not blocked. The store comes back while the member is
+/// dormant again, and its next wake writes the record: that run carries the
+/// entry.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_record_the_store_cannot_take_stays_owed_and_the_next_wake_writes_it() {
     let (fixture, session_id) = Fixture::unseated(ServiceDouble::RecordsNeedALiveActor, None).await;
@@ -363,12 +415,11 @@ async fn a_record_the_store_cannot_take_stays_owed_and_the_next_wake_writes_it()
         matches!(
             &after_wake,
             Some(MemberInstructionDeliveryState::Owed {
-                last_failure: Some(_),
+                last_failure: Some(failure),
                 ..
-            })
+            }) if failure.contains("the session store is unavailable")
         ),
-        "a store that cannot take the record leaves the member owed with the failure, not \
-         blocked: {after_wake:?}"
+        "a store error leaves the member owed with the failure, not blocked: {after_wake:?}"
     );
 
     // Dormant again: the mob's own retry cannot reach the conversation, so
@@ -391,6 +442,52 @@ async fn a_record_the_store_cannot_take_stays_owed_and_the_next_wake_writes_it()
         entries_with(&request, STANDING),
         1,
         "the member's next wake wrote the record it was still owed"
+    );
+    fixture.finish().await;
+}
+
+/// The mob runs over a session service that keeps no durable session
+/// document: every record is answered `durability_unavailable`, for good.
+/// The member is blocked with that reason from its seat on, and the mob
+/// does not try the record again: not on its own retry, and not at the
+/// member's wake.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_service_that_keeps_no_durable_sessions_blocks_the_member_for_good() {
+    let (fixture, session_id) = Fixture::unseated(ServiceDouble::NeverDurable, None).await;
+    fixture.seat_dormant_under_the_record(&session_id).await;
+    fixture
+        .wait_for_delivery(
+            "a service that keeps no durable member sessions blocks the member",
+            Duration::from_secs(10),
+            |state| {
+                matches!(
+                    state,
+                    MemberInstructionDeliveryState::Blocked {
+                        reason: MemberInstructionBlockReason::DurabilityUnavailable
+                    }
+                )
+            },
+        )
+        .await;
+    let recorded = fixture.records.calls();
+
+    let request = fixture
+        .first_request_of_a_turn("the first task after the seat")
+        .await;
+    assert_eq!(entries_with(&request, STANDING), 0);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        fixture.records.calls(),
+        recorded,
+        "the blocked member's record is not tried again, at its wake or after"
+    );
+    let after_wake = fixture.delivery_of(&fixture.identity).await;
+    assert_eq!(
+        after_wake,
+        Some(MemberInstructionDeliveryState::Blocked {
+            reason: MemberInstructionBlockReason::DurabilityUnavailable
+        }),
+        "the member is still blocked after its wake"
     );
     fixture.finish().await;
 }
@@ -437,9 +534,17 @@ async fn a_record_another_owner_refuses_at_the_wake_blocks_the_member() {
 /// read.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_wake_of_a_member_that_is_owed_nothing_reads_no_journal_row() {
-    use crate::runtime::operator_instruction_delivery::JOURNALED_BODY_ROW_READS;
+    use crate::runtime::operator_instruction_delivery::journaled_body_row_reads;
+    // A slot key only this row writes: the probe counts per slot key, so
+    // another row's journal read in the same process is not counted here.
+    const KEY: &str = "standing-unread-at-wake";
+    let slot_key = write(KEY, 1, STANDING, OperatorInstructionTarget::Mob)
+        .slot
+        .machine_key();
     let (fixture, session_id) = Fixture::unseated(ServiceDouble::Real, None).await;
-    fixture.seat_dormant_under_the_record(&session_id).await;
+    fixture
+        .seat_dormant_under_the_record_of(&session_id, KEY)
+        .await;
     fixture
         .wait_for_delivery(
             "the dormant member's store-only record lands",
@@ -448,13 +553,13 @@ async fn a_wake_of_a_member_that_is_owed_nothing_reads_no_journal_row() {
         )
         .await;
 
-    let reads = JOURNALED_BODY_ROW_READS.load(std::sync::atomic::Ordering::SeqCst);
+    let reads = journaled_body_row_reads(&slot_key);
     let request = fixture
         .first_request_of_a_turn("the first task after the seat")
         .await;
     assert_eq!(entries_with(&request, STANDING), 1);
     assert_eq!(
-        JOURNALED_BODY_ROW_READS.load(std::sync::atomic::Ordering::SeqCst),
+        journaled_body_row_reads(&slot_key),
         reads,
         "the wake of a member that is owed nothing reads no row of the mob's journal"
     );

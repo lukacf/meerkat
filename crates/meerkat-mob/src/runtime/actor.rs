@@ -25,6 +25,7 @@ mod host_preparation_hold;
 mod identity_change;
 mod identity_entry_admission;
 mod identity_preparation;
+pub(super) mod kickoff_notice;
 #[cfg(feature = "openai-live")]
 pub(super) mod live_durable_source_loads;
 pub(super) mod member_effect_lane;
@@ -6383,6 +6384,10 @@ pub(super) struct PeerDeliveryInflight {
     to: AgentIdentity,
     cancel_token: tokio_util::sync::CancellationToken,
     settled: tokio::sync::watch::Receiver<bool>,
+    /// The delivery is a kickoff lifecycle notice (see
+    /// [`kickoff_notice`]): the next notice of `from` to `to` waits for it
+    /// to settle.
+    kickoff_notice: bool,
     /// Tokio task identity captured from the `AbortHandle` returned by
     /// `JoinSet::spawn`. A panicked task returns no `PeerDeliveryCompletion`,
     /// so this is the only exact bridge back to the logical delivery id.
@@ -17592,6 +17597,7 @@ impl MobActor {
                 to,
                 cancel_token,
                 settled,
+                kickoff_notice: false,
                 #[cfg(not(target_arch = "wasm32"))]
                 task_id: abort_handle.id(),
             },
@@ -67059,7 +67065,7 @@ impl MobActor {
             )? {
                 continue;
             }
-            let (recipient_spec, recipient_unmaterialized) = match self
+            let (recipient_spec, dormant_endpoint) = match self
                 .resolve_wiring_endpoint(&recipient_entry, "notify_kickoff_event")
                 .await?
             {
@@ -67074,57 +67080,33 @@ impl MobActor {
                     )));
                 }
             };
-            if recipient_unmaterialized {
-                // The send waits for the recipient's wake, which this actor
-                // runs: it leaves the actor on the peer delivery lane, sent
-                // to the recipient's durable endpoint (its wake route).
-                let command = Self::peer_event_command(
-                    intent,
-                    &recipient_spec,
-                    agent_identity,
-                    &entry,
-                    &self.sender_notice_spec(&entry).await?,
-                )?;
-                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-                self.spawn_peer_message_delivery(
-                    PeerMessageDeliveryPlan {
-                        from: agent_identity.clone(),
-                        to: recipient_entry.agent_identity.clone(),
-                        sender_comms: Arc::clone(&sender_comms),
-                        command,
-                    },
-                    reply_tx,
+            // The recipient is not live in MobMachine's residency: Dormant,
+            // or Waking, whether or not its wake has built its comms runtime
+            // yet. The send wakes it, or joins its wake.
+            let recipient_unmaterialized = dormant_endpoint
+                || super::boot_plan::domain_member_is_unmaterialized(
+                    self.dsl_authority.state(),
+                    &recipient_entry.agent_identity,
                 );
-                // The delivery settles off the actor: a notice that was not
-                // delivered is reported, as a failed send to a live recipient
-                // is.
-                let mob_id = self.definition.id.clone();
-                let from = agent_identity.clone();
-                let to = recipient_entry.agent_identity.clone();
-                tokio::spawn(async move {
-                    let failure = match reply_rx.await {
-                        Ok(Ok(_)) => return,
-                        Ok(Err(error)) => error.to_string(),
-                        Err(_) => "the delivery ended without an outcome".to_string(),
-                    };
-                    tracing::warn!(
-                        %mob_id,
-                        from = %from,
-                        to = %to,
-                        error = %failure,
-                        "a kickoff notice to a peer that was not materialized was not delivered"
-                    );
-                });
-                continue;
-            }
-            self.notify_peer_event(
+            // The actor prepares the notice and never awaits its send (see
+            // `kickoff_notice`): a send to a recipient that is not live
+            // waits for the recipient's wake, which this actor runs, and a
+            // send to a live one waits on the recipient's drain.
+            let command = Self::peer_event_command(
                 intent,
                 &recipient_spec,
                 agent_identity,
                 &entry,
-                &sender_comms,
-            )
-            .await?;
+                &self.sender_notice_spec(&entry).await?,
+            )?;
+            self.spawn_kickoff_notice_delivery(kickoff_notice::KickoffNoticeDelivery {
+                from: agent_identity.clone(),
+                to: recipient_entry.agent_identity.clone(),
+                intent,
+                recipient_unmaterialized,
+                sender_comms: Arc::clone(&sender_comms),
+                command,
+            });
         }
         Ok(())
     }

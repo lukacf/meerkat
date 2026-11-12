@@ -278,6 +278,30 @@ them.
   neither stays behind to be waited on. A file an earlier release already
   emptied is not restored.
 
+- `meerkat-mob`: a kickoff notice to a wired peer that was being woken held
+  the whole mob for 30 seconds (since 0.9.7, when a send to a member that is
+  not live began to wake it). When a member's kickoff changed phase, for
+  example resolved, while a wired peer's wake was between its applied plan
+  and its readiness, the mob's actor sent the notice on its own step. The
+  send joined the peer's wake, the wake's next step needed the actor, and the
+  step ended only when the send's budget did (`wake_timed_out`). Until then
+  every other command of the mob waited: a spawn, a wire, an identity change,
+  a status read, a stop. The notice was not delivered, and the peer was woken
+  without it. The actor now prepares each kickoff notice and hands its send
+  to a task it owns on the peer delivery lane, for live recipients and
+  recipients that are not live alike, so the peer's wake is served while the
+  notice waits for it. The notices of one member to one peer are sent one at
+  a time, in the order the kickoff went through its phases; at most eight may
+  be pending for one member and one peer, and a notice beyond that is refused
+  and logged. A notice that cannot be delivered is logged as before (`a
+  kickoff notice to a peer that was not materialized was not delivered`, or
+  `failed to emit kickoff lifecycle notice` for a live recipient), now with
+  the recipient and the notice's kind, and a failed send to one live peer no
+  longer skips the member's remaining peers. A stop, a complete, a reset, a
+  destroy or a shutdown of the mob, an unwire of the edge and a retirement of
+  either member cancel a pending notice as they cancel a pending peer
+  message. A kickoff notice still wakes a peer that is not live.
+
 ### Known limitations
 
 - The issuer of OpenAI-family continuity material is the service (a kind of

@@ -3823,7 +3823,7 @@ async fn kickoff_notices_to_a_dormant_peer_wake_it_once() {
 const ACTOR_ANSWER_BOUND: Duration = Duration::from_secs(5);
 /// The longest a row waits for one actor command before it reports the
 /// actor as held.
-const ACTOR_HELD_CAP: Duration = Duration::from_secs(120);
+const ACTOR_HELD_CAP: Duration = Duration::from_mins(2);
 
 /// A mob whose workers are wired to each other by role at their spawn, so a
 /// new worker's kickoff notices go to every worker seated before it.
@@ -4289,6 +4289,64 @@ async fn a_shutdown_with_a_kickoff_notice_pending_answers_without_waiting_for_it
         "a shutdown waited for a pending kickoff notice: it answered {shut_down:?} after \
          {answered_after:?} (bound {ACTOR_ANSWER_BOUND:?})"
     );
+}
+
+/// The kickoff notices of one member that are pending for one peer are
+/// bounded. With the bound at one, the first notice owed to a waking peer is
+/// pending on the peer's wake; the started notice, owed while that one is
+/// pending, is refused on the actor's own step and recorded as not
+/// delivered, and nothing waits behind it. The pending notice is delivered
+/// once the peer is woken.
+///
+/// A current-thread runtime, so the actor's warning reaches this thread's
+/// capture.
+#[tokio::test]
+async fn a_kickoff_notice_beyond_the_pending_bound_of_its_peer_is_refused_and_recorded() {
+    let (warnings, _capture) = capture_warnings();
+    // A second registered dispatch keeps callsite interest per thread.
+    let _anchor = tracing::Dispatch::new(tracing_subscriber::Registry::default());
+    let fixture = kickoff_notice_fixture("kickoff-notice-bound").await;
+    crate::runtime::actor::kickoff_notice::set_kickoff_notice_pending_limit_for_test(
+        fixture.handle.mob_id(),
+        1,
+    );
+    let (peer, readiness) = peer_held_at_wake_readiness(&fixture, "notice-bound-peer").await;
+
+    fixture.client.block();
+    let member = spawn_kickoff_member(&fixture, "notice-bound-member").await;
+    wait_wake_bound(&fixture, &peer).await;
+    fixture.client.release();
+    wait_kickoff_started(&fixture, &member).await;
+    let answered_after = actor_answer_time(&fixture).await;
+    let refused = undelivered_started_notices(&warnings, &member, &peer, "limit=1");
+
+    let _ = readiness.send(true);
+    fixture
+        .wait_residency(&peer, Some(mob_dsl::MemberMaterializationPhase::Live))
+        .await;
+    let _ = tokio::time::timeout(WAIT, async {
+        while kickoff_notice_kinds(&fixture, &peer, &member)
+            .await
+            .is_empty()
+        {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    // A refused notice, if it were sent after all, lands with the first.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let delivered = kickoff_notice_kinds(&fixture, &peer, &member).await;
+    assert!(
+        answered_after < ACTOR_ANSWER_BOUND
+            && refused == 1
+            && delivered.len() == 1
+            && !delivered.iter().any(|kind| kind == "mob.kickoff_started"),
+        "the pending bound did not hold: the actor answered after {answered_after:?} (bound \
+         {ACTOR_ANSWER_BOUND:?}); {refused} record(s) of the refused started notice (1 \
+         expected); the woken peer holds the member's notices {delivered:?} (the one that was \
+         pending, and no started notice, expected)"
+    );
+    fixture.finish().await;
 }
 
 /// The declared apply on a durable store: an identity a complete roster

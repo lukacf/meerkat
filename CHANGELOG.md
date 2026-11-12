@@ -324,7 +324,10 @@ them.
   yet applied its plan, wherever it resolves an endpoint, the rollback of a
   refused spawn included. Such a member takes the edge on its own side when
   its wake restores its wiring. A member whose wake has applied its plan is
-  wired through its comms runtime, as before.
+  wired through its comms runtime, as before. A kickoff notice that cannot be
+  prepared for one of a member's peers no longer skips the peers after it:
+  it is logged with the peer and the notice's kind (`a kickoff notice could
+  not be prepared for one peer`), and the others get theirs.
 
 ### Known limitations
 

@@ -28398,4 +28398,83 @@ comms = true
         );
         let _ = runtime.shutdown().await;
     }
+
+    /// Change a created agent's row from the spec `from` to `to`, through
+    /// Core, as the change `step`.
+    async fn update(
+        runtime: &UnifiedRuntime,
+        step: &str,
+        from: &meerkat_mob::CreatedIdentitySpec,
+        to: meerkat_mob::CreatedIdentitySpec,
+    ) {
+        let name = to.identity.as_str().to_string();
+        let change = runtime
+            .mob_handle()
+            .update_store_owned_identity(
+                meerkat_mob::StoreOwnedIdentityUpdate::new(
+                    operation(&format!("{step}-{name}")),
+                    meerkat_mob::IdentityChangeRequesterInput::host("console"),
+                    to,
+                    from.spec_digest().expect("the row's digest"),
+                ),
+                allow(),
+            )
+            .await
+            .map(|updated| updated.change);
+        assert!(committed(&change), "Core updates {name}: {change:?}");
+        record_changed(runtime, &name).await;
+    }
+
+    /// The steward's line of a created agent follows its row: an update of
+    /// its labels changes nothing the steward reads, and an update of its
+    /// profile shows at the next read.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_stewards_line_of_a_created_agent_follows_its_rows_profile() {
+        let state = tempfile::tempdir().expect("a state directory");
+        let roster = [configured(&[("role", "desk")])];
+        let members = Arc::new(RecordingModel::default());
+        let runtime = boot(state.path(), &roster, &members).await;
+        let source = steward_source(&runtime, &roster);
+        let line_of_keeper = || {
+            source.mob_contexts()[0]
+                .member_labels
+                .iter()
+                .find(|(name, _)| name == "keeper")
+                .map(|(_, labels)| format!("{labels:?}"))
+        };
+        let created = meerkat_mob::CreatedIdentitySpec::new("keeper", "analyst");
+        create(&runtime, created.clone()).await;
+        assert_eq!(
+            line_of_keeper().as_deref(),
+            Some(r#"{"profile": "analyst"}"#)
+        );
+
+        let mut relabelled = created.clone();
+        relabelled.labels = BTreeMap::from([("note".to_string(), format!("{MARKER} label"))]);
+        update(&runtime, "relabel", &created, relabelled.clone()).await;
+        assert_eq!(
+            line_of_keeper().as_deref(),
+            Some(r#"{"profile": "analyst"}"#),
+            "an update of the row's labels changes nothing the steward reads"
+        );
+
+        let mut moved = relabelled.clone();
+        moved.profile = "worker".into();
+        update(&runtime, "move", &relabelled, moved).await;
+        assert_eq!(
+            line_of_keeper().as_deref(),
+            Some(r#"{"profile": "worker"}"#),
+            "an update of the row's profile shows at the next read"
+        );
+
+        let requests = dream_requests(&source).await;
+        let listed = listed(&source);
+        assert_eq!(carrying(&requests, MARKER), 0, "{listed}");
+        assert_eq!(
+            carrying(&requests, &member_line("keeper", "profile=worker")),
+            2,
+            "{listed}"
+        );
+        let _ = runtime.shutdown().await;
+    }
 }

@@ -79,7 +79,11 @@ pub enum DiagnosticCode {
     /// or unarchived, on a profile the definition no longer has. Emitted
     /// by [`crate::MobStorage::update_definition`], which reads the
     /// mob's rows; `location` is `profiles.<name>`, and the message names
-    /// the agents and what an operator can do.
+    /// the agents and what an operator can do. An update that drops a
+    /// profile while a created agent's row cannot be read by this build
+    /// is refused under this code too, since such a row may name the
+    /// profile: `location` is then `profiles`, and the message names the
+    /// agents whose rows cannot be read.
     ProfileHeldByIdentity,
 }
 

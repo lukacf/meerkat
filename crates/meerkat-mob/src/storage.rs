@@ -28,8 +28,24 @@ use std::path::Path;
 use std::sync::Arc;
 
 /// How many agents a refused definition update names per profile it would
-/// drop from under them; the rest are counted.
+/// drop from under them, and of the agents whose rows this build cannot
+/// read; the rest are counted.
 const HELD_PROFILE_AGENTS_NAMED: usize = 5;
+
+/// The first [`HELD_PROFILE_AGENTS_NAMED`] of `agents` by name, and how
+/// many more there are.
+fn first_agents_named(agents: &std::collections::BTreeSet<String>) -> String {
+    let named = agents
+        .iter()
+        .take(HELD_PROFILE_AGENTS_NAMED)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    match agents.len().saturating_sub(HELD_PROFILE_AGENTS_NAMED) {
+        0 => named,
+        more => format!("{named} and {more} more"),
+    }
+}
 
 /// Read-only health of the durable definition authority and spec projection.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -822,9 +838,12 @@ impl MobStorage {
     /// [`HELD_PROFILE_AGENTS_NAMED`], the rest counted) and what an operator
     /// can do. An archived agent's row counts, since its unarchive seats it
     /// on its profile; a removed agent's row is its name's tombstone and
-    /// counts for nothing, and a row this build cannot read names no
-    /// profile it can judge. It reads the identity store's created rows
-    /// only: nothing is built, seated, woken or written.
+    /// counts for nothing. A row this build cannot read may name any
+    /// profile, so while the mob has one an update that drops a profile is
+    /// refused with one more diagnostic, at `profiles`, naming those agents
+    /// the same way. An update that drops no profile reads no row. It reads
+    /// the identity store's created rows only: nothing is built, seated,
+    /// woken or written.
     async fn profiles_held_by_created_identities(
         &self,
         current: &MobDefinition,
@@ -841,6 +860,7 @@ impl MobStorage {
             return Ok(Vec::new());
         }
         let mut holders = BTreeMap::<_, std::collections::BTreeSet<_>>::new();
+        let mut unreadable = std::collections::BTreeSet::new();
         let mut after = None;
         loop {
             let page = self
@@ -852,48 +872,70 @@ impl MobStorage {
                 )
                 .await?;
             for (identity, observation) in &page.observations {
-                if let CreatedIdentityObservation::Created(record) = observation
-                    && record.presence != CreatedIdentityPresence::Removed
-                    && let Some(spec) = &record.spec
-                    && dropped.contains(&spec.profile)
-                {
-                    holders
-                        .entry(spec.profile.clone())
-                        .or_default()
-                        .insert(identity.to_string());
+                match observation {
+                    CreatedIdentityObservation::Created(record) => {
+                        if record.presence != CreatedIdentityPresence::Removed
+                            && let Some(spec) = &record.spec
+                            && dropped.contains(&spec.profile)
+                        {
+                            holders
+                                .entry(spec.profile.clone())
+                                .or_default()
+                                .insert(identity.to_string());
+                        }
+                    }
+                    CreatedIdentityObservation::Unreadable { .. } => {
+                        unreadable.insert(identity.to_string());
+                    }
                 }
             }
             match page.next {
-                Some(cursor) => after = Some(cursor),
                 None => break,
+                Some(cursor) if after.as_ref().is_none_or(|last| &cursor > last) => {
+                    after = Some(cursor);
+                }
+                Some(_) => {
+                    return Err(MobError::Internal(format!(
+                        "the created identity scan of mob '{}' returned a non-advancing cursor",
+                        next.id
+                    )));
+                }
             }
         }
-        Ok(holders
+        let mut diagnostics = holders
             .into_iter()
-            .map(|(profile, agents)| {
-                let count = agents.len();
-                let named = agents
-                    .iter()
-                    .take(HELD_PROFILE_AGENTS_NAMED)
-                    .map(String::as_str)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let rest = match count.saturating_sub(HELD_PROFILE_AGENTS_NAMED) {
-                    0 => String::new(),
-                    more => format!(" and {more} more"),
-                };
-                crate::validate::Diagnostic {
-                    code: crate::validate::DiagnosticCode::ProfileHeldByIdentity,
-                    message: format!(
-                        "the update drops profile '{profile}' while {count} created agent(s) \
-                         of the mob are on it: {named}{rest}; keep the profile, or update or \
-                         remove those agents first"
-                    ),
-                    location: Some(format!("profiles.{profile}")),
-                    severity: crate::validate::DiagnosticSeverity::Error,
-                }
+            .map(|(profile, agents)| crate::validate::Diagnostic {
+                code: crate::validate::DiagnosticCode::ProfileHeldByIdentity,
+                message: format!(
+                    "the update drops profile '{profile}' while {} created agent(s) of the mob \
+                     are on it: {}; keep the profile, or update or remove those agents first",
+                    agents.len(),
+                    first_agents_named(&agents),
+                ),
+                location: Some(format!("profiles.{profile}")),
+                severity: crate::validate::DiagnosticSeverity::Error,
             })
-            .collect())
+            .collect::<Vec<_>>();
+        if !unreadable.is_empty() {
+            let profiles = dropped
+                .iter()
+                .map(|profile| format!("'{profile}'"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            diagnostics.push(crate::validate::Diagnostic {
+                code: crate::validate::DiagnosticCode::ProfileHeldByIdentity,
+                message: format!(
+                    "the update drops profile(s) {profiles} while this build cannot read the \
+                     row(s) of {} created agent(s) of the mob, which may be on them: {}; keep \
+                     every profile, or run the update on the build that reads those rows",
+                    unreadable.len(),
+                    first_agents_named(&unreadable),
+                ),
+                location: Some("profiles".to_string()),
+                severity: crate::validate::DiagnosticSeverity::Error,
+            });
+        }
+        Ok(diagnostics)
     }
 
     pub(crate) async fn converge_definition_projection(

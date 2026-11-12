@@ -57,6 +57,31 @@ Meerkat is pre-1.0, and patch releases can carry declared breaking changes.
 
 ## Upgrading to 0.9.15
 
+### A definition update that drops a profile agents were created on
+
+`MobStorage::update_definition` (on Meta, a declared definition update:
+`runtime_options.declare_spec_update`) refuses an update that drops a
+profile, or renames it, while a created agent's row names the profile: the
+answer is the diagnostic `profile_held_by_identity` at `profiles.<name>`,
+which names the agents, and nothing is written. Earlier releases accepted
+the update, and such an agent then failed each restore.
+
+**Before such an update:** keep the profile, or update those agents to
+another profile or remove them. An archived agent holds its profile; a
+removed one does not. A start that carries no update starts as before.
+
+**After a rollback from a later release:** a created agent's row that
+release wrote may not be readable by this one. While the mob has such a
+row, an update that drops or renames a profile is refused the same way, at
+`profiles`, naming those agents, since such a row may name the profile.
+Keep the profile, or run the update on the release that reads the rows.
+
+**Exported agents:** an import of exported agents
+(`MobHandle::import_created_identities`) restores their rows without
+judging their profiles against the definition, and between the purge and
+the import the check reads no row. Keep the profiles of exported agents
+until the import.
+
 ### Schedules paused for their target, and a rollback
 
 A schedule can be paused for its target (`ScheduleService::pause_for_target`):

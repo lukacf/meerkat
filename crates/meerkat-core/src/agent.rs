@@ -38,6 +38,8 @@ mod reasoning_effort_guard_tests;
 pub(crate) mod reasoning_preference;
 pub(crate) mod request_reasoning_effort;
 #[cfg(all(test, feature = "workspace-tests"))]
+mod request_reasoning_effort_tests;
+#[cfg(all(test, feature = "workspace-tests"))]
 mod round_commit_tests;
 mod runner;
 pub mod skills;

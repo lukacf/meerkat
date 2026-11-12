@@ -1932,6 +1932,142 @@ mod tests {
         }
     }
 
+    /// A request whose params carry the route witness of a resolved
+    /// reasoning effort level is built only while the route its projection
+    /// is bound to is the witnessed one. A different route is a route
+    /// change: the request is refused before anything is streamed, so the
+    /// agent prepares it again. The comparison is with the projection's own
+    /// route, not with the route the client reports request-free.
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn adapter_refuses_a_request_whose_route_changed_since_its_level_was_resolved() {
+        use meerkat_core::error::{LlmFailureReason, LlmProviderErrorKind};
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+        use meerkat_core::provider_matrix::OpenAiBackendKind;
+        use meerkat_core::{
+            AccountLevelStatement, ModelApi, ReasoningBackend, ReasoningRouteObservation,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        /// Reports no route request-free; its projections are bound to
+        /// `bound`.
+        struct BoundRouteClient {
+            bound: ReasoningRouteObservation,
+            streams: Arc<AtomicUsize>,
+        }
+
+        #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+        impl LlmClient for BoundRouteClient {
+            fn reasoning_route_of(
+                &self,
+                _projection: &crate::types::LlmReplayProjection,
+            ) -> Option<ReasoningRouteObservation> {
+                Some(self.bound.clone())
+            }
+
+            fn project_replay_messages(
+                &self,
+                messages: &[Message],
+            ) -> Result<Vec<Message>, LlmError> {
+                Ok(messages.to_vec())
+            }
+
+            fn stream<'a>(&'a self, _request: &'a LlmRequest) -> LlmStream<'a> {
+                self.streams.fetch_add(1, Ordering::SeqCst);
+                Box::pin(stream::iter([Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::success(StopReason::EndTurn),
+                })]))
+            }
+
+            fn provider(&self) -> meerkat_core::Provider {
+                meerkat_core::Provider::Other
+            }
+
+            async fn health_check(&self) -> Result<(), LlmError> {
+                Ok(())
+            }
+        }
+
+        let observation = |api| ReasoningRouteObservation {
+            backend: ReasoningBackend::OpenAi(OpenAiBackendKind::Copilot),
+            api,
+            account: AccountLevelStatement::Stated(vec![EffortLevel::High]),
+            operator_levels: None,
+        };
+        let bound = observation(ModelApi::ChatCompletions);
+        let streams = Arc::new(AtomicUsize::new(0));
+        let adapter = Arc::new(LlmClientAdapter::new(
+            Arc::new(BoundRouteClient {
+                bound: bound.clone(),
+                streams: Arc::clone(&streams),
+            }),
+            "scripted-model".into(),
+        ));
+        let params = |witness| ProviderParamsOverride {
+            reasoning_route_witness: witness,
+            ..Default::default()
+        };
+        let messages = vec![Message::User(UserMessage::text("hello"))];
+        let route_changed = |error: AgentError| {
+            assert!(
+                matches!(
+                    &error,
+                    AgentError::Llm {
+                        reason: LlmFailureReason::ProviderError(provider_error),
+                        ..
+                    } if provider_error.kind == LlmProviderErrorKind::AuthorizationRouteChanged
+                ),
+                "a stale route witness is a route change: {error:?}"
+            );
+        };
+
+        // The level was resolved for the Responses route; the projection is
+        // bound to the Chat Completions route.
+        let stale = params(Some(observation(ModelApi::Responses)));
+        route_changed(
+            adapter
+                .build_request(&messages, &[], 1024, None, Some(&stale))
+                .map(|_| ())
+                .expect_err("build_request refuses the stale witness"),
+        );
+        route_changed(
+            adapter
+                .stream_response(&messages, &[], 1024, None, Some(&stale))
+                .await
+                .map(|_| ())
+                .expect_err("stream_response refuses the stale witness"),
+        );
+        route_changed(
+            Arc::clone(&adapter)
+                .prepare_request_attempt_authorized(
+                    Arc::new(messages.clone()),
+                    Arc::from(Vec::new()),
+                    1024,
+                    None,
+                    Some(stale),
+                    None,
+                )
+                .map(|_| ())
+                .expect_err("prepare_request_attempt_authorized refuses the stale witness"),
+        );
+        assert_eq!(streams.load(Ordering::SeqCst), 0, "nothing is streamed");
+
+        // The witnessed route is the projection's route: the request is sent.
+        adapter
+            .stream_response(&messages, &[], 1024, None, Some(&params(Some(bound))))
+            .await
+            .expect("a request on the witnessed route is served");
+        assert_eq!(streams.load(Ordering::SeqCst), 1);
+
+        // A request without a witness carries no resolved level: no comparison.
+        adapter
+            .stream_response(&messages, &[], 1024, None, Some(&params(None)))
+            .await
+            .expect("a request without a witness is served");
+        assert_eq!(streams.load(Ordering::SeqCst), 2);
+    }
+
     /// Counts what reaches the wire client: replay projections and streams.
     struct CountingClient {
         projections: Arc<std::sync::atomic::AtomicUsize>,

@@ -477,12 +477,19 @@ export interface ChangePlan {
   /** `allow`, `notify` or `require_approval`. Advisory: another value is
    * kept as it is. */
   outcome: string;
+  /** The schedules the change would take with it, as they are when the plan
+   * is made: on the plan of an archive, an unarchive and a removal, where
+   * the team's host gives the family its schedules. Absent otherwise. */
+  schedules?: SchedulesFollowed;
 }
 
 /** The answer of `meta/identity/plan`; null when it is no plan. */
 export function parseChangePlan(value: unknown): ChangePlan | null {
-  const outcome = textOf(rawOf(value)?.outcome);
-  return outcome ? { outcome } : null;
+  const raw = rawOf(value);
+  const outcome = textOf(raw?.outcome);
+  if (!raw || !outcome) return null;
+  const schedules = schedulesOf(raw.schedules);
+  return { outcome, ...(schedules ? { schedules } : {}) };
 }
 
 /** A plan in words, for the field of the form whose change was planned.
@@ -871,6 +878,33 @@ function scheduleCount(count: number): string {
 }
 
 /**
+ * The sentence about the schedules that target an agent: how many, what is
+ * done to them (`done`, in the number of the count), and which by name. A
+ * listed schedule without a name is counted as such and never shown by its
+ * id; a schedule that is counted and not listed is one more, and nothing is
+ * said of its name. Null where none is counted.
+ */
+function schedulesSentence(followed: SchedulesFollowed, done: string): string | null {
+  const count = Math.max(followed.count, followed.schedules.length);
+  if (count <= 0) return null;
+  const named = followed.schedules.flatMap((schedule) => (schedule.name ? [schedule.name] : []));
+  const unnamed = followed.schedules.length - named.length;
+  const unlisted = count - followed.schedules.length;
+  if (count === 1) return `Its schedule${named.length ? ` ${named[0]}` : ""} ${done}.`;
+  if (named.length === 0) return `Its ${scheduleCount(count)} ${done}.`;
+  const rest = [
+    ...(unnamed > 0 ? [`${unnamed} without a name`] : []),
+    ...(unlisted > 0 ? [`${unlisted} more`] : []),
+  ];
+  const list = rest.length === 0
+    ? named.join(", ")
+    : rest.length === 1
+      ? `${named.join(", ")} and ${rest[0]}`
+      : `${named.join(", ")}, ${rest[0]} and ${rest[1]}`;
+  return `Its ${scheduleCount(count)} ${done}: ${list}.`;
+}
+
+/**
  * What a change did to the schedules that target its agent, in words: how
  * many, what was done, and which by name. A schedule without a name is
  * counted and never shown by its id (the ids are for Technical details).
@@ -880,8 +914,7 @@ function scheduleCount(count: number): string {
  */
 export function schedulesWords(followed: SchedulesFollowed | undefined): string[] {
   if (!followed) return [];
-  const count = Math.max(followed.count, followed.schedules.length);
-  const one = count === 1;
+  const one = Math.max(followed.count, followed.schedules.length) === 1;
   let done: string;
   switch (followed.effect) {
     case "paused":
@@ -897,40 +930,40 @@ export function schedulesWords(followed: SchedulesFollowed | undefined): string[
       return [];
   }
   const lines: string[] = [];
-  if (count > 0) {
-    const named = followed.schedules.flatMap((schedule) => (schedule.name ? [schedule.name] : []));
-    // A listed schedule without a name is counted as such. A schedule the
-    // answer counts and does not list is only counted: nothing is said of
-    // its name.
-    const unnamed = followed.schedules.length - named.length;
-    const unlisted = count - followed.schedules.length;
-    if (one) {
-      lines.push(`Its schedule${named.length ? ` ${named[0]}` : ""} ${done}.`);
-    } else if (named.length === 0) {
-      lines.push(`Its ${scheduleCount(count)} ${done}.`);
-    } else {
-      const rest = [
-        ...(unnamed > 0 ? [`${unnamed} without a name`] : []),
-        ...(unlisted > 0 ? [`${unlisted} more`] : []),
-      ];
-      const list = rest.length === 0
-        ? named.join(", ")
-        : rest.length === 1
-          ? `${named.join(", ")} and ${rest[0]}`
-          : `${named.join(", ")}, ${rest[0]} and ${rest[1]}`;
-      lines.push(`Its ${scheduleCount(count)} ${done}: ${list}.`);
-    }
-  }
+  const sentence = schedulesSentence(followed, done);
+  if (sentence) lines.push(sentence);
   if (followed.incomplete) {
     if (followed.askedAgain) {
       lines.push("Not every schedule could be changed at first. The team was asked again to follow the rest.");
     } else {
-      lines.push(count > 0
+      lines.push(sentence
         ? "Not every schedule could be changed. Try again to follow the rest."
         : "Its schedules could not be changed. Try again to follow them.");
     }
   }
   return lines;
+}
+
+/**
+ * What a change would do to the schedules that target its agent, as its
+ * plan says (`meta/identity/plan`): the result's words in the question's
+ * tense, for the confirmation of an archive, an unarchive and a removal.
+ * Null for a plan that says nothing of schedules, one that would take none
+ * (or could list none), and an effect this console has no words for: the
+ * question then says nothing of schedules.
+ */
+export function plannedSchedulesWords(planned: SchedulesFollowed | undefined): string | null {
+  if (!planned) return null;
+  switch (planned.effect) {
+    case "paused":
+      return schedulesSentence(planned, "will be paused until it is unarchived");
+    case "resumed":
+      return schedulesSentence(planned, "will run again");
+    case "ended":
+      return schedulesSentence(planned, "will be ended");
+    default:
+      return null;
+  }
 }
 
 /** Whether a change's answer says that not every schedule was followed

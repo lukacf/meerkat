@@ -14,6 +14,7 @@ import {
   keepFirstSchedules,
   outcomeWords,
   planWords,
+  plannedSchedulesWords,
   answeredRefusalOf,
   readRefusalSentence,
   refusalDetail,
@@ -970,9 +971,16 @@ export function EditAgentForm({
 /**
  * The confirmation of a change of one agent as a whole: archive, unarchive
  * or remove. It names the agent as people know it and says what happens;
- * a removal says that the name can never be used again and that archive is
- * the reversible choice. On Confirm it reads the agent's record once for
- * its spec digest and sends the change; trying again sends that request.
+ * a removal says that the name can never be used again and, for an agent
+ * that is not archived, that archive is the reversible choice.
+ *
+ * When it opens it reads the agent's record once, for its spec digest, and
+ * asks the gateway what the change would take with it (`meta/identity/plan`,
+ * which changes nothing): where the plan lists schedules, the question says
+ * what will become of them, by name. A read or a plan that fails is not
+ * said, and the question then says nothing of schedules. Confirm sends the
+ * change at the digest read when the dialog opened (it reads the record
+ * itself where that read failed); trying again sends that request.
  */
 export function AgentChangeConfirm({
   api,
@@ -1000,13 +1008,62 @@ export function AgentChangeConfirm({
   const sender = useChangeSender(api, change, displayName);
   const request = React.useRef<Record<string, unknown> | null>(null);
   const [reading, setReading] = React.useState(false);
+  // What the plan says the change will do to the agent's schedules, in words.
+  const [schedules, setSchedules] = React.useState<string | null>(null);
+  // Counts up at Read it again: the record and the plan are read again.
+  const [asked, setAsked] = React.useState(0);
+  // The read of the record the dialog makes when it opens, while Confirm
+  // has not taken it: the request it read, or null where it read none.
+  const opening = React.useRef<Promise<Record<string, unknown> | null> | null>(null);
+  const loadRecord = React.useRef(api.loadRecord);
+  loadRecord.current = api.loadRecord;
+  const plan = React.useRef(api.plan);
+  plan.current = api.plan;
   const questionId = React.useId();
   const consequenceId = React.useId();
+  React.useEffect(() => {
+    setSchedules(null);
+    opening.current = null;
+    // An agent that waits for its host never started and no schedule
+    // targets it: nothing is read for it before Confirm.
+    if (waiting) return undefined;
+    let active = true;
+    const read = loadRecord.current(name).then(
+      (record) => {
+        if (!active) return null;
+        request.current = agentRefRequest(record);
+        return request.current;
+      },
+      // A read that fails here is not said: Confirm reads the record itself,
+      // and says so when it cannot.
+      () => null,
+    );
+    opening.current = read;
+    void read.then(async (asks) => {
+      if (!asks) return;
+      // A plan that is not answered, is refused or says nothing of schedules
+      // leaves the question without a word of them: the gateway judges the
+      // change when it is sent.
+      let answer: IdentityPlanResult;
+      try {
+        answer = await plan.current(change, asks);
+      } catch {
+        return;
+      }
+      if (active && answer.kind === "plan") setSchedules(plannedSchedulesWords(answer.plan.schedules));
+    });
+    return () => { active = false; };
+  }, [name, change, waiting, asked]);
   const confirm = async () => {
     if (!request.current) {
       setReading(true);
       try {
-        request.current = agentRefRequest(await api.loadRecord(name));
+        // The read made when the dialog opened may not have ended: Confirm
+        // waits for it, so that the record is not read twice. Where it read
+        // nothing, or none was made, the record is read now.
+        const opened = opening.current;
+        opening.current = null;
+        request.current = (opened ? await opened : null) ?? agentRefRequest(await api.loadRecord(name));
       } catch (error) {
         // The record could not be read, so no change was sent.
         const said = readFailure(error);
@@ -1022,6 +1079,9 @@ export function AgentChangeConfirm({
     // The agent changed since it was read: a new read is a new request.
     request.current = null;
     sender.setResult(null);
+    // The record is read again now, and the plan asked again: the question
+    // says what the change will do to the agent as it is.
+    setAsked((count) => count + 1);
   };
   const busy = reading || sender.busy;
   const open = keepsForm(sender.result);
@@ -1053,7 +1113,13 @@ export function AgentChangeConfirm({
             <StatusMark tone={change === "remove" ? "crit" : "warn"} />
             {words.question}
           </p>
-          <p className="lifecycle-confirm__consequence" id={consequenceId}>{words.consequence}</p>
+          <p className="lifecycle-confirm__consequence" id={consequenceId}>
+            {words.consequence}
+            {schedules ? (
+              // Part of what the dialog is described by, on a line of its own.
+              <>{" "}<span className="identity-confirm__schedules" data-testid="identity-confirm-schedules">{schedules}</span></>
+            ) : null}
+          </p>
         </>
       ) : null}
       {sender.result ? (

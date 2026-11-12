@@ -192,6 +192,11 @@ function createScriptedIdentityFamily(options = {}) {
     return null;
   }
 
+  // A schedule as an answer names it: its id, and its name where it has one.
+  function namedSchedule(schedule) {
+    return { schedule_id: schedule.schedule_id, ...(schedule.name ? { name: schedule.name } : {}) };
+  }
+
   // Have the schedules that target `name` follow a change of it, as the
   // launch's schedule owner does after the change committed, and answer
   // the ones it was done to: an archive pauses the active ones for their
@@ -214,9 +219,20 @@ function createScriptedIdentityFamily(options = {}) {
     return {
       effect,
       count: done.length,
-      schedules: done.map(schedule => ({ schedule_id: schedule.schedule_id, ...(schedule.name ? { name: schedule.name } : {}) })),
+      schedules: done.map(namedSchedule),
       ...(done.length < due.length ? { incomplete: true } : {}),
     };
+  }
+
+  // The schedules a change of `name` would take with it, as they are now,
+  // for a plan: an archive and an unarchive would move the ones that are
+  // active or paused for their target and leave a pause somebody asked for
+  // by name; a removal would end every one. Nothing is changed by asking,
+  // and no scripted fault of a pass is used up.
+  function plannedSchedules(name, effect) {
+    const due = (schedules.get(name) || []).filter(schedule =>
+      effect === "ended" || schedule.state === "active" || schedule.state === "paused_for_target");
+    return { effect, count: due.length, schedules: due.map(namedSchedule) };
   }
 
   function record(agent) {
@@ -371,14 +387,37 @@ function createScriptedIdentityFamily(options = {}) {
     return judged.rule === "require_approval" ? { hold: apply } : { agents: apply() };
   }
 
+  // What a change of a whole agent does to the schedules that target it.
+  const SCHEDULE_EFFECTS = { archive: "paused", unarchive: "resumed", remove: "ended" };
+
   // `meta/identity/plan`: the outcome a change would get. Nothing is held
-  // and nothing is written. The script plans updates, the one change the
-  // console asks a plan of.
+  // and nothing is written. The script plans the changes the console asks
+  // a plan of: an update, and an archive, an unarchive and a removal, whose
+  // plan also says which schedules the change would take with it, on a
+  // family that is given them.
   function plan(params) {
     const { change: planned, request_id: requestId, ...body } = params;
     if (typeof requestId !== "string" || !requestId) {
       return { error: refusal("invalid_request", "request_id", { problem: "empty" },
         "A change names its operation: send a request_id, and the same one again to read the change's result.") };
+    }
+    if (Object.hasOwn(SCHEDULE_EFFECTS, planned)) {
+      // Judged as the change would be, at the digest it names.
+      const found = target(body);
+      if (found.refused) return { error: found.refused };
+      if (planned === "unarchive" && !found.agent.archived) return { error: refusal("not_archived", "name") };
+      const rendering = `${planned[0].toUpperCase()}${planned.slice(1)} ${found.agent.name}`;
+      return {
+        result: {
+          outcome: "allow",
+          change: planned,
+          timeout_ms: 3_600_000,
+          request_digest: sha256(stable(body)),
+          subject_digest: sha256(rendering),
+          rendering,
+          ...(givesSchedules ? { schedules: plannedSchedules(found.agent.name, SCHEDULE_EFFECTS[planned]) } : {}),
+        },
+      };
     }
     if (planned !== "update") {
       return { error: refusal("invalid_request", "change", { problem: "malformed" },
@@ -401,9 +440,6 @@ function createScriptedIdentityFamily(options = {}) {
       },
     };
   }
-
-  // What a change of a whole agent does to the schedules that target it.
-  const SCHEDULE_EFFECTS = { archive: "paused", unarchive: "resumed", remove: "ended" };
 
   function whole(params, change) {
     const found = target(params);

@@ -119,6 +119,8 @@
   border-color: var(--_cc-border-strong);
   background: var(--_cc-surface-soft);
 }
+/* What the change will do to the agent's schedules: a line of its own. */
+.identity-confirm__schedules { display: block; margin-top: 4px; }
 
 /* The roster: requests that wait for a decision, and the archived agents. */
 .identity-pending {

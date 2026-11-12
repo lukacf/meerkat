@@ -621,12 +621,16 @@ describe("long-term agents in the console", () => {
       .toBe("The mob has no profile of this name: name one of the mob's profiles.");
     fireEvent.click(view.getByTestId("identity-cancel"));
 
-    // An agent that is gone when its change is confirmed: the read is
-    // refused, its sentence shows, and no change is sent.
+    // An agent that is gone when the question of its change opens: the
+    // question's own read says nothing of it. Confirm reads the record, the
+    // read is refused, its sentence shows, and no change is sent.
     await selectAgent(view, "warden");
+    family.agents.delete("warden");
     fireEvent.click(view.getByTestId("roster-action:warden:archive"));
     const confirm = await find(view, "identity-confirm:warden:archive");
-    family.agents.delete("warden");
+    await waitFor(() => expect(calls(family, "meta/identity/get").filter((params) => params.name === "warden").length).toBeGreaterThan(0), { timeout: 5_000 });
+    await settle(50);
+    expect(present(view, "identity-notice")).toBe(false);
     fireEvent.click(within(confirm).getByTestId("identity-confirm-yes"));
     const unread = await find(view, "identity-notice");
     expect(unread.querySelector("[data-outcome='unread']")?.textContent).toBe("This team has no agent of this name. It may have been removed.");
@@ -1875,6 +1879,25 @@ describe("long-term agents in the console", () => {
     await waitFor(() => expect(noticeWords(view.getByTestId("identity-notice"))).toContain("The porter is removed"), { timeout: 5_000 });
     expect(reads("porter")).toBe(1);
     expect(plans()).toHaveLength(askedBefore);
+
+    // An agent that is gone between the question's read and Confirm: the
+    // change is sent at the digest read, and the gateway's refusal of it
+    // is shown in the console's words. Nothing more is read.
+    await find(view, "roster-archived:scout");
+    fireEvent.click(view.getByTestId("identity-confirm-cancel"));
+    fireEvent.click(view.getByTestId("roster-archived-action:scout:unarchive"));
+    confirm = await find(view, "identity-confirm:scout:unarchive");
+    await within(confirm).findByTestId("identity-confirm-schedules", undefined, { timeout: 5_000 });
+    digest = digestNow();
+    readsBefore = reads();
+    const sentBefore = calls(family, "meta/identity/unarchive").length;
+    family.agents.delete("scout");
+    fireEvent.click(within(confirm).getByTestId("identity-confirm-yes"));
+    notice = await find(view, "identity-notice");
+    expect(notice.querySelector("[data-outcome='refused']")?.textContent).toBe("This team has no agent of this name. It may have been removed.");
+    expect(reads()).toBe(readsBefore);
+    expect(calls(family, "meta/identity/unarchive")).toHaveLength(sentBefore + 1);
+    expect(calls(family, "meta/identity/unarchive").at(-1)).toMatchObject({ name: "scout", expected_spec_digest: digest });
     view.unmount();
   }, 60_000);
 

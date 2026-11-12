@@ -3517,6 +3517,15 @@ pub(crate) struct PendingRunTerminals {
 /// a wake only means "re-read now".
 struct IdentityEntries {
     table: RwLock<BTreeMap<AgentIdentity, IdentityEntry>>,
+    /// The profile of every identity registered from its row in the mob's
+    /// identity store, by name: what a caller that cannot wait on the table
+    /// reads ([`IdentityRuntime::row_registered_members`]). Every write that
+    /// registers, re-registers or forgets an identity keeps it in step with
+    /// the table, under the table's write lock
+    /// ([`IdentityEntriesWriteGuard::note_registration`], in
+    /// `runtime/created.rs`, the one module that reads which record holds
+    /// an identity's spec).
+    row_profiles: StdRwLock<BTreeMap<AgentIdentity, meerkat_mob::ProfileName>>,
     changed: watch::Sender<()>,
     /// Told (an epoch bump) whenever a verb of this runtime woke, retired or
     /// replaced an identity's Core member. The identity health monitor
@@ -3536,6 +3545,7 @@ impl IdentityEntries {
     fn new() -> Self {
         Self {
             table: RwLock::new(BTreeMap::new()),
+            row_profiles: StdRwLock::new(BTreeMap::new()),
             changed: watch::channel(()).0,
             binding_observer: StdRwLock::new(None),
             binding_sequence: AtomicU64::new(0),
@@ -3562,6 +3572,15 @@ impl IdentityEntries {
 
     fn subscribe(&self) -> watch::Receiver<()> {
         self.changed.subscribe()
+    }
+
+    /// The profile of every identity registered from its row, by name: a
+    /// copy, read without waiting on the table.
+    fn row_profiles(&self) -> BTreeMap<AgentIdentity, meerkat_mob::ProfileName> {
+        self.row_profiles
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// A verb of this runtime moved an identity's Core member (woke, retired
@@ -7779,6 +7798,7 @@ impl IdentityRuntime {
                     created: false,
                 },
             );
+            entries.note_registration(&identity);
         }
         // The event channel outlives a re-registration: its subscribers
         // belong to the identity's life, not to the roster row.
@@ -10292,14 +10312,16 @@ impl IdentityRuntime {
     ) -> Result<(), IdentityRuntimeError> {
         self.append_changed_instructions_on_registration(&spec)
             .await;
+        let identity = spec.identity.clone();
         let mut entries = self.entries.write().await;
         let entry = entries
-            .get_mut(&spec.identity)
-            .ok_or_else(|| IdentityRuntimeError::UnknownIdentity(spec.identity.clone()))?;
+            .get_mut(&identity)
+            .ok_or_else(|| IdentityRuntimeError::UnknownIdentity(identity.clone()))?;
         entry.spec = spec;
         if let Some(refused) = declaration_refused {
             entry.declaration_refused = refused;
         }
+        entries.note_registration(&identity);
         Ok(())
     }
 
@@ -10532,7 +10554,10 @@ impl IdentityRuntime {
         identity: &AgentIdentity,
     ) -> Option<IdentityEntry> {
         self.event_channels.write().await.remove(identity);
-        self.entries.write().await.remove(identity)
+        let mut entries = self.entries.write().await;
+        let removed = entries.remove(identity);
+        entries.note_registration(identity);
+        removed
     }
 
     /// A member's agent event stream closed for good (its executor is gone).

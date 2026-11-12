@@ -3,6 +3,7 @@ import React from "react";
 import {
   CONSOLE_SCHEDULE_COMMANDS,
   describeLatestTakeover,
+  describeSchedulePause,
   describeSchedulePhase,
   describeScheduleSender,
   describeScheduleSenderHistory,
@@ -749,6 +750,7 @@ export function SchedulesSection({
     const id = schedule.scheduleId;
     const label = schedule.name || "Untitled schedule";
     const working = busy !== null;
+    const pauseReason = describeSchedulePause(schedule);
     return (
       <li key={id} className="console-schedules__item" data-testid={`schedule:${id}`} data-phase={schedule.phase}>
         <div className="console-schedules__row">
@@ -762,6 +764,11 @@ export function SchedulesSection({
             {describeSchedulePhase(schedule.phase)}
           </Chip>
         </div>
+        {pauseReason ? (
+          <p className="console-schedules__meta" data-testid={`schedule-pause-reason:${id}`}>
+            {pauseReason}
+          </p>
+        ) : null}
         <p className="console-schedules__content">{schedule.content}</p>
         <p className="console-schedules__meta" data-testid={`schedule-when:${id}`}>
           {describeScheduleTrigger(schedule.trigger, formatTime)}

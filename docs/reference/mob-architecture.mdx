@@ -699,10 +699,16 @@ composition without the built-in identity and member store commits no change
   of its member (the fresh spawn of its create, of a start's owed seat and
   of a rotation, and every wake and boot restore) Core hands the host the
   request it lowered, before the spawn customizer runs. Every build takes
-  the profile and model overrides the host set on it, and the first build
+  the profile and model overrides the host set on it and the overlays that
+  are objects of the host's process (its external tools, the compaction
+  curator and the tool dispatch admission), which no journal holds, so a
+  build after a restart has them from this answer; in a process that
+  already built the member, the external tools overlay it kept for the
+  member stands, as for every member. The first build
   of the member's session also takes the context, the instructions, the
-  system prompt and the other first-build inputs; a later build keeps what
-  its session was first built with. No build relies on an earlier answer,
+  system prompt and the other first-build inputs (the tool policies, the
+  budget limits, the auth binding and the shell environment); a later
+  build keeps what its session was first built with. No build relies on an earlier answer,
   so the host is the one source at each and a restart changes
   nothing. The seat's runtime mode, binding, placement and first
   message stay the row's, an answer that changed the seat's identity, role,

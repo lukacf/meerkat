@@ -62935,6 +62935,7 @@ function parseConsoleSchedule(value) {
     content: item.content,
     trigger: parseScheduleTrigger(item.trigger),
     phase: nonEmptyString3(item.phase) ?? "unknown",
+    pausedForTarget: item.paused_for_target === true,
     revision: wholeNumber(item.revision),
     sender: senderHidden ? null : nonEmptyString3(item.sender),
     senderHidden,
@@ -63003,6 +63004,10 @@ function describeSchedulePhase(phase2) {
   if (phase2 === "active") return "Active";
   if (phase2 === "paused") return "Paused";
   return phase2;
+}
+function describeSchedulePause(schedule) {
+  if (schedule.phase !== "paused" || !schedule.pausedForTarget) return null;
+  return "Paused because its agent is archived. It resumes when the agent is unarchived.";
 }
 function describeScheduleSender(sender, agentName = () => void 0) {
   const raw = typeof sender === "string" ? sender.trim() : "";
@@ -63207,6 +63212,8 @@ function scheduleErrorMessage(error48, command) {
       return "This schedule sends as someone else, so nothing was changed. Take it over to change it.";
     case "unknown_identity":
       return "The console does not know this agent.";
+    case "identity_archived":
+      return "This agent is archived, so its schedules cannot be created or changed until it is unarchived.";
     case "not_addressable":
       return "This agent takes no console messages, so it cannot be scheduled.";
     case "governed_target":
@@ -77408,6 +77415,7 @@ function SchedulesSection({
     const id = schedule.scheduleId;
     const label2 = schedule.name || "Untitled schedule";
     const working = busy !== null;
+    const pauseReason = describeSchedulePause(schedule);
     return /* @__PURE__ */ (0, import_jsx_runtime110.jsxs)("li", { className: "console-schedules__item", "data-testid": "schedule:".concat(id), "data-phase": schedule.phase, children: [
       /* @__PURE__ */ (0, import_jsx_runtime110.jsxs)("div", { className: "console-schedules__row", children: [
         /* @__PURE__ */ (0, import_jsx_runtime110.jsx)("strong", { children: label2 }),
@@ -77422,6 +77430,7 @@ function SchedulesSection({
           }
         )
       ] }),
+      pauseReason ? /* @__PURE__ */ (0, import_jsx_runtime110.jsx)("p", { className: "console-schedules__meta", "data-testid": "schedule-pause-reason:".concat(id), children: pauseReason }) : null,
       /* @__PURE__ */ (0, import_jsx_runtime110.jsx)("p", { className: "console-schedules__content", children: schedule.content }),
       /* @__PURE__ */ (0, import_jsx_runtime110.jsx)("p", { className: "console-schedules__meta", "data-testid": "schedule-when:".concat(id), children: describeScheduleTrigger(schedule.trigger, formatTime2) }),
       schedule.phase === "active" ? /* @__PURE__ */ (0, import_jsx_runtime110.jsx)("p", { className: "console-schedules__meta", "data-testid": "schedule-next:".concat(id), children: schedule.nextDueAt ? "Next: ".concat(formatTime2(schedule.nextDueAt)) : "Next: none planned" }) : null,
@@ -78391,6 +78400,7 @@ function SchedulesPanel({
     const isPaused = schedule.phase !== "active";
     const working = busy !== null;
     const sender = schedule.senderHidden ? null : describeScheduleSender(schedule.sender, (raw) => directory.lookup(raw)?.label);
+    const pauseReason = describeSchedulePause(schedule);
     const actions = editing.canChange ? /* @__PURE__ */ (0, import_jsx_runtime112.jsx)("span", { className: "schedules__actions", children: confirmingDelete === id ? /* @__PURE__ */ (0, import_jsx_runtime112.jsxs)(import_jsx_runtime112.Fragment, { children: [
       /* @__PURE__ */ (0, import_jsx_runtime112.jsx)(
         Button,
@@ -78434,7 +78444,8 @@ function SchedulesPanel({
         title: name2,
         subtitle: /* @__PURE__ */ (0, import_jsx_runtime112.jsxs)(import_jsx_runtime112.Fragment, { children: [
           /* @__PURE__ */ (0, import_jsx_runtime112.jsx)("span", { children: describeScheduleTrigger(schedule.trigger, formatTime2) }),
-          sender ? /* @__PURE__ */ (0, import_jsx_runtime112.jsx)("span", { title: schedule.sender || void 0, children: " \xB7 Sends as ".concat(sender) }) : null
+          sender ? /* @__PURE__ */ (0, import_jsx_runtime112.jsx)("span", { title: schedule.sender || void 0, children: " \xB7 Sends as ".concat(sender) }) : null,
+          pauseReason ? /* @__PURE__ */ (0, import_jsx_runtime112.jsx)("span", { "data-testid": "schedules-pause-reason:".concat(id), children: " \xB7 ".concat(pauseReason) }) : null
         ] }),
         status: /* @__PURE__ */ (0, import_jsx_runtime112.jsx)(StatusPill, { tone: isPaused ? "warn" : "ok", variant: "quiet", testId: "schedules-phase:".concat(id), children: describeSchedulePhase(schedule.phase) }),
         time: plan.next !== null ? /* @__PURE__ */ (0, import_jsx_runtime112.jsx)(Countdown, { to: plan.next, now: now3 ? nowMs : void 0, testId: "schedules-next:".concat(id) }) : isPaused ? void 0 : /* @__PURE__ */ (0, import_jsx_runtime112.jsx)("span", { className: "schedules__no-run", children: "No run planned" }),
@@ -78552,6 +78563,7 @@ function SchedulesPanel({
           children: [
             /* @__PURE__ */ (0, import_jsx_runtime112.jsxs)(DrawerSection, { label: "When", children: [
               /* @__PURE__ */ (0, import_jsx_runtime112.jsx)("p", { className: "schedules__detail-text", children: describeScheduleTrigger(schedule.trigger, formatTime2) }),
+              describeSchedulePause(schedule) ? /* @__PURE__ */ (0, import_jsx_runtime112.jsx)(Notice, { tone: "warn", children: describeSchedulePause(schedule) }) : null,
               plan.invalidZone ? /* @__PURE__ */ (0, import_jsx_runtime112.jsx)(Notice, { tone: "warn", children: "This console cannot read the schedule's time zone, so its runs are not drawn." }) : null
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime112.jsx)(DrawerSection, { label: "Next runs", count: upcoming.length || null, children: upcoming.length ? /* @__PURE__ */ (0, import_jsx_runtime112.jsx)("ol", { className: "schedules__runs", children: upcoming.map((t, index3) => /* @__PURE__ */ (0, import_jsx_runtime112.jsxs)("li", { children: [

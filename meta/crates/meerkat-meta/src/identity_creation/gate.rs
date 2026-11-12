@@ -2598,7 +2598,7 @@ mod tests {
         for listed in [true, false] {
             let agent = agent(listed);
             let member = |value: Value| value.get("roster_listing_superseded").cloned();
-            let expected = listed.then(|| json!(true));
+            let expected = listed.then_some(json!(true));
             assert_eq!(
                 member(serde_json::to_value(agent.summary()).expect("a list entry")),
                 expected,

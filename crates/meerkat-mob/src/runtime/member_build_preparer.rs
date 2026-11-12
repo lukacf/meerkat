@@ -23,9 +23,15 @@
 //! build's preparation: before a fresh spawn under created custody is sent
 //! (the kickoff spawn of its create, and the spawn a start or a rotation
 //! owes it), and at every wake and boot restore of the member. Each build
-//! takes the profile and model overrides of the answer; the first build of
-//! the member's session also takes the build inputs that author it (the
-//! context, the instructions, the system prompt). No build relies on an
+//! takes the profile and model overrides of the answer and the overlays
+//! that are objects of the host's process (the external tools, the
+//! compaction curator and the tool dispatch admission), which no journal
+//! holds; in a process that already built the member, the external tools
+//! overlay it kept for the member stands, as for every member. The first
+//! build of the member's session also takes the build inputs that author
+//! it (the context, the instructions, the system prompt, and with them the
+//! tool policies, the budget limits, the auth binding and the shell
+//! environment). No build relies on an
 //! earlier answer: the host is the one source at each, so a restart
 //! changes nothing. The default composes nothing.
 //!
@@ -214,14 +220,21 @@ pub trait MemberBuildPreparer: Send + Sync {
     ///   apply as any member's overrides do: the session's own model and
     ///   provider parameters stand unless the profile's resume mask names
     ///   them;
+    /// - at every build too, the overlays that are objects of the host's
+    ///   process: the external tools, the compaction curator and the tool
+    ///   dispatch admission. No journal holds them and a process keeps
+    ///   them only for a member it built, so a build after a restart has
+    ///   them only from this answer. In a process that already built the
+    ///   member, the external tools overlay it kept for the member stands,
+    ///   as for every member;
     /// - at the first build of the member's session only, the build inputs
     ///   that author it: the context, the additional instructions and the
     ///   system prompt override, and with them the tool access and
-    ///   application tool policies, the budget limits, the shell
-    ///   environment, the auth binding and the process-local overlays
-    ///   (external tools, compaction curator, tool dispatch admission). A
-    ///   later build keeps what its session was first built with:
-    ///   instructions are never rewritten after the fact.
+    ///   application tool policies, the budget limits, the auth binding
+    ///   and the shell environment (launch authority of that first build:
+    ///   no member's rebuild on its durable session takes one). A later
+    ///   build keeps what its session was first built with: instructions
+    ///   are never rewritten after the fact.
     ///
     /// Nothing else of the answer is taken. The seat's runtime mode,
     /// backend, binding, placement, first message, tool category overrides
@@ -338,10 +351,12 @@ fn refused_seat_change(seat: &SpawnMemberSpec, composed: &SpawnMemberSpec) -> Op
 /// Ask the host's build preparer to compose `seat`, the request Core
 /// lowered for a build of a store-owned identity's member
 /// ([`MemberBuildPreparer::prepare_store_owned_seat`]), and set on it what
-/// that build takes from the answer: the profile and model overrides at
-/// every build, and at the first build of the member's session
-/// (`first_build`) the build inputs that author it. Everything else of
-/// `seat` stays as Core lowered it.
+/// that build takes from the answer: the profile and model overrides and
+/// the overlays that are objects of the host's process (the external
+/// tools, the compaction curator and the tool dispatch admission) at every
+/// build, and at the first build of the member's session (`first_build`)
+/// the build inputs that author it. Everything else of `seat` stays as
+/// Core lowered it.
 ///
 /// The host composes a copy: a refusal, an answer that changed the seat's
 /// identity, role, launch mode or custody, and an answer whose labels are
@@ -385,6 +400,13 @@ pub(crate) async fn compose_store_owned_seat(
     if let (Some(profile), Some(model)) = (seat.override_profile.as_mut(), &seat.model_override) {
         profile.model.clone_from(model);
     }
+    // The overlays that are objects of the host's process: no journal holds
+    // them, and a process keeps them only for a member it built. Every
+    // build takes them from the host again, so a build after a restart has
+    // them as the first build had.
+    seat.external_tools = composed.external_tools;
+    seat.compaction_curator_override = composed.compaction_curator_override;
+    seat.tool_dispatch_admission = composed.tool_dispatch_admission;
     if first_build {
         seat.context = composed.context;
         seat.additional_instructions = composed.additional_instructions;
@@ -392,11 +414,10 @@ pub(crate) async fn compose_store_owned_seat(
         seat.tool_access_policy = composed.tool_access_policy;
         seat.application_tool_policy = composed.application_tool_policy;
         seat.budget_limits = composed.budget_limits;
+        // The shell environment is launch authority of the session's first
+        // build: no member's rebuild on its durable session takes one.
         seat.shell_env = composed.shell_env;
         seat.auth_binding = composed.auth_binding;
-        seat.external_tools = composed.external_tools;
-        seat.compaction_curator_override = composed.compaction_curator_override;
-        seat.tool_dispatch_admission = composed.tool_dispatch_admission;
     }
     Ok(())
 }

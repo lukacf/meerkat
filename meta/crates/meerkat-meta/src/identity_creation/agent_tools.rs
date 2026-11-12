@@ -67,7 +67,7 @@ pub const IDENTITY_ARCHIVE: &str = "identity_archive";
 pub const IDENTITY_UNARCHIVE: &str = "identity_unarchive";
 /// Remove one long-term agent for good.
 pub const IDENTITY_REMOVE: &str = "identity_remove";
-/// List the long-term agents the caller's grant covers.
+/// List the mob's long-term agents, of any profile.
 pub const IDENTITY_LIST: &str = "identity_list";
 /// List what the caller may name in a create or an update.
 pub const IDENTITY_DIRECTORY: &str = "identity_directory";
@@ -252,9 +252,11 @@ fn description(name: &str) -> String {
              member stops, then `removed`), `pending_decision` or `refused`, \
              {AS_FOR_CREATE}"
         ),
-        IDENTITY_LIST => "List the long-term agents of your mob that your grant covers: every \
-             agent of a profile you may create agents of, whoever asked for it and however \
-             it came to exist. Read only: it never wakes an agent and loads nothing.\n\n\
+        IDENTITY_LIST => "List the long-term agents of your mob: every agent that is not \
+             private to a person, of any profile, whoever asked for it and however it came \
+             to exist. An agent of a profile you may not create agents of is listed too: \
+             `identity_directory` says what you may create and name. Read only: it never \
+             wakes an agent and loads nothing.\n\n\
              Each entry of `agents` has `name`, `display_name`, `profile`, `spec_digest` \
              (what a change sends as `expected_spec_digest`), `spec_revision`, `archived` \
              and `readiness`. `readiness` is `dormant` (nothing is loaded; its next delivery \

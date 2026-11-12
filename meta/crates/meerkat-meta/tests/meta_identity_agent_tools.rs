@@ -1911,6 +1911,14 @@ fn the_descriptions_say_what_a_model_must_know() {
     assert!(text(IDENTITY_REMOVE).contains("its name can never be used again"));
     assert!(text(IDENTITY_REMOVE).contains("use identity_archive when the agent may be needed"));
     assert!(text(IDENTITY_LIST).contains("it never wakes an agent"));
+    // What the list shows is what the family lists, not what the caller may
+    // create: `identity_list_shows_an_agent_of_a_profile_the_caller_may_not_create`.
+    assert!(text(IDENTITY_LIST).contains("every agent that is not private to a person"));
+    assert!(
+        text(IDENTITY_LIST)
+            .contains("An agent of a profile you may not create agents of is listed too")
+    );
+    assert!(!text(IDENTITY_LIST).contains("your grant covers"));
     assert!(text(IDENTITY_DIRECTORY).contains("it never wakes an agent"));
     for tool in IDENTITY_TOOLS {
         let all = format!("{} {}", text(tool), schema_of(tool)).to_lowercase();
@@ -2356,6 +2364,101 @@ async fn an_agent_is_refused_a_change_the_hosts_rules_do_not_give_it() {
     assert!(
         !names.contains(&"second-lead"),
         "the refused create made nothing: {names:?}"
+    );
+    rig.shutdown().await;
+}
+
+/// The names `identity_list` answered, in the answer's order.
+fn listed_names(answer: &ToolAnswer) -> Vec<String> {
+    assert!(!answer.is_error, "the list answers: {}", answer.content);
+    answer.content["agents"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the agents: {}", answer.content))
+        .iter()
+        .filter_map(|entry| entry["name"].as_str().map(str::to_owned))
+        .collect()
+}
+
+/// `identity_list` shows an agent the long-term agents of its mob whatever
+/// their profile: the list is no function of what the calling agent may
+/// create. An agent of a profile the host's rules let the caller create no
+/// agent of (the directory says `not_allowed`) is listed like any other,
+/// alone and under its profile's filter, with the digest a change of it
+/// would send. A worker member holds no entry of the list, private to a
+/// person or not: a member private to a person is never listed.
+#[tokio::test(flavor = "multi_thread")]
+async fn identity_list_shows_an_agent_of_a_profile_the_caller_may_not_create() {
+    let state = tempfile::tempdir().unwrap();
+    let rig = boot(state.path(), &fresh_mob_id()).await;
+    assert!(
+        rig.runtime
+            .attach_identity_policy(policy(), IdentityFamilyOptions::new())
+    );
+    // A shared agent of the profile the rules give the caller no create of.
+    rig.create("warden", MAKER).await;
+    // Two worker members, one private to a person and one shared: neither
+    // is a long-term agent.
+    rig.worker_turn("side", WORKER, &[(PRIVATE_TO, "alice")], "seen-private")
+        .await;
+    rig.worker_turn("temp", WORKER, &[], "seen-shared").await;
+
+    let directory = rig
+        .tool(LEAD, "seen-directory", IDENTITY_DIRECTORY, json!({}))
+        .await;
+    let verdict = directory.content["profiles"]
+        .as_array()
+        .expect("the profiles")
+        .iter()
+        .find(|entry| entry["profile"] == MAKER)
+        .unwrap_or_else(|| panic!("the profile is in the directory: {}", directory.content))
+        ["verdict"]
+        .clone();
+    assert_eq!(
+        verdict, "not_allowed",
+        "the caller may create no agent of the profile"
+    );
+
+    let listed = rig.tool(LEAD, "seen-list", IDENTITY_LIST, json!({})).await;
+    let names = listed_names(&listed);
+    for name in ["warden", LEAD, PLAIN] {
+        assert!(
+            names.iter().any(|listed| listed == name),
+            "{name} is listed: {names:?}"
+        );
+    }
+    let warden = listed.content["agents"]
+        .as_array()
+        .expect("the agents")
+        .iter()
+        .find(|entry| entry["name"] == "warden")
+        .expect("the agent's entry");
+    assert_eq!(warden["profile"], MAKER);
+    assert!(
+        warden["spec_digest"]
+            .as_str()
+            .is_some_and(|digest| !digest.is_empty()),
+        "with its spec digest: {warden}"
+    );
+    for worker in ["side", "temp"] {
+        assert!(
+            !names.iter().any(|listed| listed == worker),
+            "a worker member, private to a person or shared, is no entry of the list: {names:?}"
+        );
+    }
+
+    let makers = rig
+        .tool(
+            LEAD,
+            "seen-profile",
+            IDENTITY_LIST,
+            json!({"profile": MAKER}),
+        )
+        .await;
+    let makers: BTreeSet<String> = listed_names(&makers).into_iter().collect();
+    assert_eq!(
+        makers,
+        BTreeSet::from([LEAD.to_owned(), "warden".to_owned()]),
+        "the profile filter keeps the agents of that profile"
     );
     rig.shutdown().await;
 }

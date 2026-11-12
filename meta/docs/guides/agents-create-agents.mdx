@@ -116,7 +116,7 @@ first message. A call that reaches the tools anyway is refused
 | `identity_archive` | `name`, `expected_spec_digest`, `request_id?` | Stops an agent and keeps it: name, record, conversation and memory stay, and messages to it are refused. |
 | `identity_unarchive` | `name`, `expected_spec_digest`, `request_id?` | Brings an archived agent back on the conversation it had. |
 | `identity_remove` | `name`, `expected_spec_digest`, `request_id?` | Removes an agent for good. Its name is never available again. |
-| `identity_list` | `profile?`, `include_archived?`, `after?` | Lists the agents of profiles the caller's grant covers. Read only. |
+| `identity_list` | `profile?`, `include_archived?`, `after?` | Lists the mob's long-term agents that are not private to a person, of any profile. Read only. |
 | `identity_directory` | `query?`, `after?` | Lists the profiles the caller may create agents of and the agents it may name as peers, each `allowed`, `needs_decision` or `not_allowed`. Read only. |
 
 These are the same requests the host methods `meta/identity/*` take, field
@@ -212,8 +212,12 @@ interchangeable:
 
 ## Listing and looking up
 
-`identity_list` shows every agent of a profile the caller's grant covers,
-whoever asked for it: it is not a list of "my agents". Each entry carries
+`identity_list` shows every long-term agent of the mob that is not private to
+a person, of any profile and whoever asked for it. It is not a list of "my
+agents", and it is not limited to what the caller may create: an agent of a
+profile the caller may create no agent of is listed too, and
+`identity_directory` is the read that says what the caller may create and
+name. Each entry carries
 `name`, `display_name`, `profile`, `spec_digest`, `spec_revision`, `archived`
 and `readiness`. An agent is not shown who asked for another agent, when, or
 under which consent, nor another requester's open operations; the host's

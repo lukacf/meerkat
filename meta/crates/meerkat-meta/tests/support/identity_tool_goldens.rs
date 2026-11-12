@@ -278,7 +278,7 @@ The result's `outcome` is `done` (the agent's `state` is `retiring` while its me
     ),
     (
         "identity_list",
-        r"List the long-term agents of your mob that your grant covers: every agent of a profile you may create agents of, whoever asked for it and however it came to exist. Read only: it never wakes an agent and loads nothing.
+        r"List the long-term agents of your mob: every agent that is not private to a person, of any profile, whoever asked for it and however it came to exist. An agent of a profile you may not create agents of is listed too: `identity_directory` says what you may create and name. Read only: it never wakes an agent and loads nothing.
 
 Each entry of `agents` has `name`, `display_name`, `profile`, `spec_digest` (what a change sends as `expected_spec_digest`), `spec_revision`, `archived` and `readiness`. `readiness` is `dormant` (nothing is loaded; its next delivery wakes it), `live`, `broken`, `preparation_pending`, `retiring` or `unseated` (archived, or its seat is owed).
 

@@ -454,6 +454,12 @@ request to a server of its choice. Writes refuse a realm server holding `${`,
 and a realm config that already holds one fails when its MCP servers are
 resolved. Put env-derived values in an `mcp.toml` server.
 
+A literal token in a server's args, env or headers is in the file as written.
+On Unix `rkat` writes `mcp.toml`, like every config document, readable by its
+owner only (mode 0600), or by the directory's group too (0640) when its
+`.rkat` directory has the setgid bit (see
+[File permissions](/concepts/configuration#file-permissions)).
+
 `rkat run` (and `--resume`) starts the servers of all three scopes, and
 `rkat mcp login` resolves them. The RPC and REST servers do not start configured
 servers in their sessions; hosts attach servers with `mcp/add`.

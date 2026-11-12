@@ -533,7 +533,7 @@ archive's upstream MIT license; a complete dependency-notice audit is not claime
 The host can enable `official-playwright` using the same official bundle and
 installer pins above, plus `--node`, `--npm-cli`, `--playwright-host-profile` and
 `--playwright-host-profile-sha256`. This candidate supports macOS arm64 with
-Node 24.19.0 and npm 11.12.1. It accepts an existing Chrome executable, whose
+Node 24.19.0 and npm 11.17.0. It accepts an existing Chrome executable, whose
 compatibility or current sandbox launch permission is not established by checking
 its file hash and executable mode bits. No browser is bundled
 or downloaded. Older distributions do not acquire this route automatically.

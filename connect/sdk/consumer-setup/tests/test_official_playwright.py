@@ -67,7 +67,7 @@ class FixedRunner(backend.Runner):
 def realize(calls,argv,cwd,env,label,**kwargs):
     calls.append((argv,dict(env),label))
     if label=='node-runtime':return owner.encoded({'version':'v24.19.0','platform':'darwin','arch':'arm64'})
-    if label=='npm-runtime':return b'11.12.1\n'
+    if label=='npm-runtime':return b'11.17.0\n'
     if label=='npm-install':
         for a in (cwd/'inputs/playwright/archives').iterdir():
             content=owner.npm_archive(a.read_bytes());root=cwd/'node_modules'/content['name']

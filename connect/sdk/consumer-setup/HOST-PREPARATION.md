@@ -335,7 +335,7 @@ Pass the profile and its exact file hash:
 ```
 
 The current Playwright route supports macOS arm64 with Node 24.19.0 and
-npm 11.12.1. Supply those through the library `--node` and `--npm-cli`
+npm 11.17.0. Supply those through the library `--node` and `--npm-cli`
 arguments and their SHA-256 arguments. Playwright shares this pair with
 Activepieces; it does not use `--selected-node` or `--selected-npm-cli`.
 The latter pair remains independent for selected-package acquisition.

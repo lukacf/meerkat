@@ -3512,6 +3512,13 @@ pub(crate) struct PendingRunTerminals {
 /// a wake only means "re-read now".
 struct IdentityEntries {
     table: RwLock<BTreeMap<AgentIdentity, IdentityEntry>>,
+    /// The profile of every identity registered from its row in the mob's
+    /// identity store, by name: what a caller that cannot wait on the table
+    /// reads ([`IdentityRuntime::row_registered_members`]). Every write that
+    /// registers, re-registers or forgets an identity keeps it in step with
+    /// the table, under the table's write lock
+    /// ([`IdentityEntriesWriteGuard::note_registration`]).
+    row_profiles: StdRwLock<BTreeMap<AgentIdentity, meerkat_mob::ProfileName>>,
     changed: watch::Sender<()>,
     /// Told (an epoch bump) whenever a verb of this runtime woke, retired or
     /// replaced an identity's Core member. The identity health monitor
@@ -3531,6 +3538,7 @@ impl IdentityEntries {
     fn new() -> Self {
         Self {
             table: RwLock::new(BTreeMap::new()),
+            row_profiles: StdRwLock::new(BTreeMap::new()),
             changed: watch::channel(()).0,
             binding_observer: StdRwLock::new(None),
             binding_sequence: AtomicU64::new(0),
@@ -3559,6 +3567,15 @@ impl IdentityEntries {
         self.changed.subscribe()
     }
 
+    /// The profile of every identity registered from its row, by name: a
+    /// copy, read without waiting on the table.
+    fn row_profiles(&self) -> BTreeMap<AgentIdentity, meerkat_mob::ProfileName> {
+        self.row_profiles
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     /// A verb of this runtime moved an identity's Core member (woke, retired
     /// or replaced it): wake the completion waiters and the binding observer.
     fn notify_binding_changed(&self) {
@@ -3583,6 +3600,31 @@ impl IdentityEntries {
 struct IdentityEntriesWriteGuard<'a> {
     guard: tokio::sync::RwLockWriteGuard<'a, BTreeMap<AgentIdentity, IdentityEntry>>,
     entries: &'a IdentityEntries,
+}
+
+impl IdentityEntriesWriteGuard<'_> {
+    /// This write made, replaced or dropped `identity`'s registration: the
+    /// row profiles follow what the table holds for it now.
+    fn note_registration(&self, identity: &AgentIdentity) {
+        let profile = self
+            .guard
+            .get(identity)
+            .filter(|entry| entry.created)
+            .map(|entry| entry.spec.profile.clone());
+        let mut profiles = self
+            .entries
+            .row_profiles
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match profile {
+            Some(profile) => {
+                profiles.insert(identity.clone(), profile);
+            }
+            None => {
+                profiles.remove(identity);
+            }
+        }
+    }
 }
 
 impl std::ops::Deref for IdentityEntriesWriteGuard<'_> {
@@ -7757,6 +7799,7 @@ impl IdentityRuntime {
                     created: false,
                 },
             );
+            entries.note_registration(&identity);
         }
         // The event channel outlives a re-registration: its subscribers
         // belong to the identity's life, not to the roster row.
@@ -10268,14 +10311,16 @@ impl IdentityRuntime {
         spec: DurableAgentSpec,
         declaration_refused: Option<bool>,
     ) -> Result<(), IdentityRuntimeError> {
+        let identity = spec.identity.clone();
         let mut entries = self.entries.write().await;
         let entry = entries
-            .get_mut(&spec.identity)
-            .ok_or_else(|| IdentityRuntimeError::UnknownIdentity(spec.identity.clone()))?;
+            .get_mut(&identity)
+            .ok_or_else(|| IdentityRuntimeError::UnknownIdentity(identity.clone()))?;
         entry.spec = spec;
         if let Some(refused) = declaration_refused {
             entry.declaration_refused = refused;
         }
+        entries.note_registration(&identity);
         Ok(())
     }
 
@@ -10508,7 +10553,10 @@ impl IdentityRuntime {
         identity: &AgentIdentity,
     ) -> Option<IdentityEntry> {
         self.event_channels.write().await.remove(identity);
-        self.entries.write().await.remove(identity)
+        let mut entries = self.entries.write().await;
+        let removed = entries.remove(identity);
+        entries.note_registration(identity);
+        removed
     }
 
     /// A member's agent event stream closed for good (its executor is gone).

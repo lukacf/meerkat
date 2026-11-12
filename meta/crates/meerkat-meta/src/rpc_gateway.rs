@@ -20139,6 +20139,7 @@ external_addressable = true
                             mob_purpose: Some(Arc::new(GatewayMobPurposeSource {
                                 mob: mob_definition.id.to_string(),
                                 roster: steward_roster_slot.clone(),
+                                identities: Arc::downgrade(&irt),
                             })),
                             private_members: Some(runtime.mob_runtime().private_member_source()),
                             steward_gating: Some(Arc::new(GatewayMemoryGatingBridge {
@@ -21670,16 +21671,35 @@ impl StewardLateRuntime {
     }
 }
 
-/// Mob-purpose context from the hosted mob's id plus the restored roster's
-/// labels (no mob-level purpose field exists — verified; a `mob_purpose`
-/// or `purpose` label on any member spec is adopted as the mob's purpose).
+/// Mob-purpose context from the hosted mob's id, the launch's roster and the
+/// agents created at run time.
+///
+/// The purpose is configuration: no mob-level purpose field exists, so a
+/// `mob_purpose` or `purpose` label on a spec of the launch's roster is
+/// adopted as the mob's purpose, and nothing else is. A configured agent is
+/// listed with its roster labels. An agent whose record is its row in the
+/// mob's identity store (created at run time, or adopted into the store) is
+/// listed while it is a member of the mob, with its name and its profile and
+/// nothing else ([`crate::identity_first::IdentityRuntime::row_registered_members`]):
+/// its labels, display name, context, instructions and first message are a
+/// requester's text, which enters no steward prompt and decides nothing
+/// here. A roster's listing of a name its row holds gives way to the row.
 struct GatewayMobPurposeSource {
     mob: String,
     roster: Arc<std::sync::Mutex<Vec<crate::identity_first::DurableAgentSpec>>>,
+    /// The launch's identity runtime, which serves the agents created at
+    /// run time. Weak: the runtime holds the steward that holds this source.
+    identities: std::sync::Weak<crate::identity_first::IdentityRuntime>,
 }
 
 impl crate::MobPurposeSource for GatewayMobPurposeSource {
     fn mob_contexts(&self) -> Vec<crate::memory::steward::MobContext> {
+        // Read before the roster is locked: neither read waits on the other.
+        let row_members = self
+            .identities
+            .upgrade()
+            .map(|identities| identities.row_registered_members())
+            .unwrap_or_default();
         let roster = self.roster.lock().unwrap_or_else(|err| err.into_inner());
         let purpose = roster.iter().find_map(|spec| {
             spec.labels
@@ -21687,10 +21707,22 @@ impl crate::MobPurposeSource for GatewayMobPurposeSource {
                 .or_else(|| spec.labels.get("purpose"))
                 .cloned()
         });
-        let member_labels = roster
+        let mut member_labels = roster
             .iter()
+            .filter(|spec| !row_members.contains_key(&spec.identity))
             .map(|spec| (spec.identity.as_str().to_string(), spec.labels.clone()))
-            .collect();
+            .collect::<Vec<_>>();
+        member_labels.extend(row_members.into_iter().filter_map(|(identity, profile)| {
+            profile.map(|profile| {
+                (
+                    identity.as_str().to_string(),
+                    std::collections::BTreeMap::from([(
+                        "profile".to_string(),
+                        profile.as_str().to_string(),
+                    )]),
+                )
+            })
+        }));
         vec![crate::memory::steward::MobContext {
             mob: self.mob.clone(),
             purpose,
@@ -27925,6 +27957,12 @@ comms = true
         Arc::new(GatewayMobPurposeSource {
             mob: runtime.mob_handle().definition().id.to_string(),
             roster: Arc::new(std::sync::Mutex::new(roster.to_vec())),
+            identities: Arc::downgrade(
+                runtime
+                    .identity_runtime()
+                    .expect("the identity runtime")
+                    .runtime(),
+            ),
         })
     }
 

@@ -43,7 +43,7 @@
 //!
 //! [`SessionBridge::created_identity`]: super::super::bridge::SessionBridge::created_identity
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use tokio::sync::broadcast;
 
@@ -438,6 +438,48 @@ impl IdentityRuntime {
             .collect()
     }
 
+    /// The agents this runtime serves from their rows, each with its row's
+    /// profile while it is a member of the mob: Core holds its name as a
+    /// created entry that is not archived, and the profile is one of the
+    /// mob definition's. `None` for an archived agent, for a name Core no
+    /// longer holds as such an entry (removed since, whatever this runtime
+    /// still has registered), for a profile the definition does not have,
+    /// and for an entry Core did not answer; every agent reads `None`
+    /// without a mob handle.
+    ///
+    /// For a caller that cannot wait (the memory steward's mob context): it
+    /// reads the profiles kept beside the registrations and the machine
+    /// state Core's actor last published. No row is read, no command is
+    /// sent, and no member is built, woken or loaded.
+    pub(crate) fn row_registered_members(
+        &self,
+    ) -> BTreeMap<AgentIdentity, Option<meerkat_mob::ProfileName>> {
+        let handle = self.family_mob_handle();
+        self.entries
+            .row_profiles()
+            .into_iter()
+            .map(|(identity, profile)| {
+                let member = handle.as_ref().is_some_and(|handle| {
+                    handle.definition().profiles.contains_key(&profile)
+                        && matches!(
+                            handle.identity_entry(
+                                &crate::member_comms_id::roster_member_id_for_identity(
+                                    identity.as_str(),
+                                ),
+                            ),
+                            Ok(meerkat_mob::IdentityEntryRead::Entry(entry))
+                                if entry.origin == meerkat_mob::IdentityEntryOrigin::Created
+                                    && entry.standing
+                                        != meerkat_mob::EntryStanding::Unseated(
+                                            meerkat_mob::UnseatedEntryCause::Archived,
+                                        )
+                        )
+                });
+                (identity, member.then_some(profile))
+            })
+            .collect()
+    }
+
     /// `roster` without the identities this runtime serves from their rows:
     /// a row is its identity's one owner, also while the host's roster
     /// still lists its name, so a pass neither registers nor declares the
@@ -795,6 +837,7 @@ impl IdentityRuntime {
                 identity.clone(),
                 Self::created_entry(spec, bootstrap_generation, wake_refusal),
             );
+            entries.note_registration(&identity);
         }
         self.ensure_registration_channels(identity).await;
     }
@@ -807,11 +850,13 @@ impl IdentityRuntime {
     async fn register_created_if_absent(&self, spec: DurableAgentSpec) {
         let identity = spec.identity.clone();
         let bootstrap_generation = self.identity_bootstrap_status_with_generation().0;
-        self.entries
-            .write()
-            .await
-            .entry(identity.clone())
-            .or_insert_with(|| Self::created_entry(spec, bootstrap_generation, None));
+        {
+            let mut entries = self.entries.write().await;
+            entries
+                .entry(identity.clone())
+                .or_insert_with(|| Self::created_entry(spec, bootstrap_generation, None));
+            entries.note_registration(&identity);
+        }
         self.ensure_registration_channels(identity).await;
     }
 
@@ -882,7 +927,9 @@ impl IdentityRuntime {
             }
         }
         self.event_channels.write().await.remove(identity);
-        self.entries.write().await.remove(identity);
+        let mut entries = self.entries.write().await;
+        entries.remove(identity);
+        entries.note_registration(identity);
     }
 
     /// The refusal of a delivery, a wake or a grant to `identity` when Core

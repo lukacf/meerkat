@@ -4678,6 +4678,84 @@ async fn a_call_attributed_to_another_agent_than_its_sessions_member_is_never_he
     rig.shutdown().await;
 }
 
+/// A person is never asked to decide a call made in a session no member
+/// of the mob holds: under a rule that needs approval, an agent's create
+/// and its plan in such a session are refused `invalid_request` at once.
+/// No decision holds the operation, and nothing is created. The same
+/// agent, asked for by its recorded identity, is held for a person, as
+/// the rule says.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_call_in_a_session_no_member_holds_is_never_held() {
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, asked, fail_next_session) =
+        launch_with(temp.path(), &fresh_mob_id(), false, true).await;
+    let approval = json!({"kind": "require_approval", "approver": {"id": APPROVERS}});
+    let policy = IdentityCreationPolicy::parse(&json!({
+        "enabled": true,
+        "approval": {"rules": [
+            {"change": ["create"],
+             "requester": {"kind": "agent", "profile": ["worker", "planner"]},
+             "target": {"profile": ["worker"]}, "outcome": approval},
+        ]},
+    }))
+    .expect("the policy parses")
+    .expect("the policy is enabled");
+    assert!(runtime.attach_identity_policy(Arc::new(policy), IdentityFamilyOptions::new()));
+    let rig = Rig {
+        runtime,
+        asked,
+        step: Arc::new(RecordingStep::default()),
+        fail_next_session,
+    };
+    let mob = rig.runtime.mob_handle();
+    let third = || create_of(json!([{"name": "third", "profile": "worker"}]));
+
+    let stray = ChangeRequester::agent_session(PLANNER, meerkat_core::SessionId::new());
+    let refused = rig.change(&stray, "r-1", third()).await;
+    assert_eq!(
+        refusal_of(&refused),
+        ("invalid_request".to_owned(), None),
+        "{refused:?}"
+    );
+    let operation = OperationId::for_request(&stray.recorded(), "r-1").expect("a request id");
+    let unheld = rig
+        .family()
+        .read(
+            &mob,
+            &ChangeRequester::host("ops"),
+            IdentityRead::Operation(operation),
+        )
+        .await;
+    assert!(
+        matches!(
+            unheld,
+            Ok(IdentityReadAnswer::Operation(OperationState::Unknown))
+        ),
+        "no decision holds a refused call: {unheld:?}"
+    );
+    assert!(rig.agent("third").await.is_none(), "nothing was created");
+    let planned = rig
+        .family()
+        .read(
+            &mob,
+            &stray,
+            IdentityRead::Plan(Box::new(IdentityChangeCall::new(
+                OperationId::for_request(&stray.recorded(), "p-1").expect("a request id"),
+                third(),
+            ))),
+        )
+        .await
+        .expect_err("a call in a session no member holds plans nothing");
+    assert_eq!(planned.kind_token(), "invalid_request", "{planned}");
+
+    // The same agent by its recorded identity is held for a person.
+    let held = rig
+        .change(&ChangeRequester::agent_recorded(PLANNER), "r-2", third())
+        .await;
+    assert_eq!(held.token(), "pending_decision", "{held:?}");
+    rig.shutdown().await;
+}
+
 /// The label by which a host says an agent is private to a person.
 const PRIVATE_TO: &str = "console.private_to";
 

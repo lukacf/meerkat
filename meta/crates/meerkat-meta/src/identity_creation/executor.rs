@@ -926,16 +926,39 @@ pub(super) fn outcome_of_change(
 /// change did to it, `pending_preparation` when one of them waits for its
 /// preparation and `done` otherwise. An agent's session is read from
 /// Core's published entry, which wakes nothing.
+///
+/// An agent the receipt records as pending its preparation is read where
+/// it stands now, as its session and its seat are: the receipt is of the
+/// commit, and the host settles the preparation, or removes the agent,
+/// afterwards. It is still `pending_preparation` while Core holds it for
+/// its preparation, `committed` once it was settled (with its seat, on a
+/// create), and `removed` once it was removed, with no spec digest, as a
+/// removal answers. An entry Core's published state does not read stays as
+/// the receipt says.
 pub(super) fn outcome_of_receipt(
     mob: &MobHandle,
     operation_id: &OperationId,
     receipt: &IdentityChangeReceipt,
 ) -> Result<IdentityOutcome, ExecutorError> {
+    use meerkat_mob::{EntryStanding, IdentityEntryRead, UnseatedEntryCause};
+
     let mut agents = Vec::with_capacity(receipt.identities.len());
     for entry in &receipt.identities {
+        let (standing, removed) = match mob.identity_entry(&entry.identity) {
+            Ok(IdentityEntryRead::Entry(view)) => (Some(view.standing), false),
+            Ok(IdentityEntryRead::Removed) => (None, true),
+            _ => (None, false),
+        };
         let state = match entry.outcome {
             IdentityChangeEntryOutcome::Committed => AgentChangeState::Committed,
-            IdentityChangeEntryOutcome::PendingPreparation => AgentChangeState::PendingPreparation,
+            IdentityChangeEntryOutcome::PendingPreparation => match (&standing, removed) {
+                (Some(EntryStanding::Unseated(UnseatedEntryCause::PreparationPending)), _) => {
+                    AgentChangeState::PendingPreparation
+                }
+                (Some(_), _) => AgentChangeState::Committed,
+                (None, true) => AgentChangeState::Removed,
+                (None, false) => AgentChangeState::PendingPreparation,
+            },
             IdentityChangeEntryOutcome::Archiving => AgentChangeState::Archiving,
             IdentityChangeEntryOutcome::Archived => AgentChangeState::Archived,
             IdentityChangeEntryOutcome::Restored => AgentChangeState::Restored,
@@ -949,10 +972,15 @@ pub(super) fn outcome_of_receipt(
             }
         };
         let mut agent = AgentOutcome::new(identity_name_of_member(&entry.identity), state);
-        agent.spec_digest = entry.spec_digest.as_deref().and_then(Sha256Digest::parse);
-        agent.spec_revision = entry.revision;
-        let standing = entry_standing(mob, &entry.identity);
-        if let Some(meerkat_mob::EntryStanding::Seated(seated)) = &standing {
+        // An agent removed since it was committed pending has no spec any
+        // more: its entry answers none, as a removal's does.
+        let gone = entry.outcome == IdentityChangeEntryOutcome::PendingPreparation
+            && state == AgentChangeState::Removed;
+        if !gone {
+            agent.spec_digest = entry.spec_digest.as_deref().and_then(Sha256Digest::parse);
+            agent.spec_revision = entry.revision;
+        }
+        if let Some(EntryStanding::Seated(seated)) = &standing {
             agent.session_id = seated.session_id.as_ref().map(ToString::to_string);
         }
         // A create and the settle of a preparation both seat the agent they
@@ -964,10 +992,10 @@ pub(super) fn outcome_of_receipt(
         ) && state == AgentChangeState::Committed
         {
             agent.seat = match standing {
-                Some(meerkat_mob::EntryStanding::Seated(_)) => Some(AgentSeat::Seated),
-                Some(meerkat_mob::EntryStanding::Unseated(
-                    meerkat_mob::UnseatedEntryCause::SeatOwed,
-                )) => Some(AgentSeat::Owed),
+                Some(EntryStanding::Seated(_)) => Some(AgentSeat::Seated),
+                Some(EntryStanding::Unseated(UnseatedEntryCause::SeatOwed)) => {
+                    Some(AgentSeat::Owed)
+                }
                 _ => None,
             };
         }
@@ -990,18 +1018,6 @@ pub(super) fn outcome_of_receipt(
             }
         },
     )
-}
-
-/// Where the member of `member` stands, from Core's published entry: no
-/// actor command and no wake. `None` when the name is no readable entry.
-fn entry_standing(
-    mob: &MobHandle,
-    member: &meerkat_mob::AgentIdentity,
-) -> Option<meerkat_mob::EntryStanding> {
-    match mob.identity_entry(member) {
-        Ok(meerkat_mob::IdentityEntryRead::Entry(view)) => Some(view.standing),
-        _ => None,
-    }
 }
 
 /// The correlation of an `admission_unsettled` that answers a member step

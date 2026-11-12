@@ -1497,6 +1497,11 @@ answers a result too: `{"outcome": "refused", "kind", "retryable",
 "detail"}` with the kind's members and no `operation_id`. Such an operation
 is closed for good: ask the change again under a new `request_id`.
 
+The entry of an agent whose create answered `pending_preparation` says what
+became of the agent since: `pending_preparation` while it waits for its
+host, `committed` (and the outcome `done`) once its preparation was settled,
+and `removed` once it was removed. The create asked again answers the same.
+
 ### `meta/identity/withdraw` and `meta/identity/changes_hold`
 
 `meta/identity/withdraw` takes the operation as `meta/identity/operation`

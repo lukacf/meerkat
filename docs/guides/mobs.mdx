@@ -1688,8 +1688,10 @@ completed or destroyed mob are refused typed
 (`OperatorInstructionError::code`; on the wire `error.data.instruction_set_code`).
 
 A member's snapshot is the shared records (targeted at every member or at a
-profile) plus the member-targeted records that name the member. Another
-member's member-targeted record is not in it, so a member's session and its
+profile) plus the member-targeted records that name the member (and, for a
+fork, the records written for the first member of its fork family and its
+forks, see `include_forks` below). Any other
+member-targeted record is not in it, so a member's session and its
 status row do not grow with the number of other members that hold a record.
 The two limits bound that snapshot, the shared records and the member's own
 together: at most 64 records (`slot_limit_exceeded`) and 1 MiB of Active
@@ -1708,7 +1710,8 @@ records. A record that names a member the mob no longer has is in no
 snapshot, but the limits still count it under the name it targets: they
 count a member-targeted record by its target, seated or not, so the records
 of a retired or never-seated name keep taking room from new shared records
-(a shared record must fit beside the most records any one name holds) until
+(a shared record must fit beside the most records any one name holds, and
+beside what another name's records pass to its forks, see below) until
 they are written with another target or a reset clears them. A refused
 shared write does not name the member whose snapshot is full; the status
 read's `desired` list shows each record's target. Writes need the `AdminHost` scope and are never an agent tool. On a
@@ -1716,6 +1719,78 @@ governed runtime (a runtime with a native work authorization host) every
 write and revoke is refused `prepared_authorization_required` before anything
 is journaled: such a write needs prepared authorization, which this release
 does not mint, so a retry is refused the same way.
+
+A member-targeted record covers the member's forks when it is written with
+`include_forks`
+(`{"kind": "member", "agent_identity": ..., "include_forks": true}`,
+`OperatorInstructionTarget::Member { include_forks: true, .. }` in Rust).
+Without it, the default, the record is its member's alone and a fork of the
+member runs without it, as before. With it the record follows the member's
+fork family from its root. Written for a member that is not itself a fork,
+it selects that member and every fork below it, forks of forks included.
+Written for a member that is itself a fork, it selects that member only:
+that fork's own forks
+follow the records written for the first member of their family, not for
+the fork between. Each member's row of `mob/instruction_status` lists the
+records of its snapshot, a fork's included, so the rows show which members
+a record selects, and the
+write's `matched_members` counts the seated ones. A durable
+fork (`fork_off`, `MobHandle::fork_member` and its bounded and detached
+forms, `mob/fork_member`, a
+live delegation's fork) has its snapshot recorded in its committed session
+before it is seated, so its first run applies the record, and a helper fork
+(a spawn with a fork launch mode) is born with it. A seated fork then
+follows the record like any member it selects: a higher revision and the
+revoke reach it as entries appended at its next fresh run start, and nothing
+already in the fork's conversation is rewritten. A durable fork copies its
+source's conversation up to the fork point, so its model also reads the
+source's earlier entry
+rows, each as a header without a body
+(`[meerkat-inherited-operator-instructions-v1]`,
+`status=not_active_in_child`): those are history, and the fork's own entry
+after them is what applies. The same recording gives every durable fork the
+shared records (targeted at every member or at its profile) in its first
+run; before, a fork that started its own turn could run it without them. A
+fork whose snapshot cannot be recorded is not seated
+(`fork_member_provision_failed`): once the mob has recorded its first
+operator instruction, a durable fork fails over a child session that refuses
+the record for any reason, where a seated child was only blocked before
+(another owner of the session's target, or a session service that keeps no
+durable session document or does not forward the record). The mob holds each
+fork's lineage (the
+first member of the family it descends from) with its roster: it survives a
+restart, it follows the fork's identity through a respawn, a rotation and a
+host's adoption, and it ends with the fork's
+identity. The lineage names that member as a target does, by name, across
+lives: the forks of a member that was removed keep following the records
+written for that name until those are revoked, and a record written with
+`include_forks` for a new member seated under that name, as a fork or not,
+reaches the earlier
+member's forks too (the one exception to "that member only"). A record for
+a member and its forks counts in the
+snapshot of every other name as well (any name may be seated as a fork of
+that member), so such a write is refused `slot_limit_exceeded` or
+`active_set_budget_exceeded` when it would not fit beside the most another
+name holds: a member that holds 64 records of its own blocks every
+`include_forks` write for another member, and one name's records for forks
+lower
+the room every other name has for its own. The refusal does not name that
+member: the mob logs a warning at the refused write that names the member
+whose snapshot would be full and what fills it (the shared records, its
+own, and what another member's records pass to forks; with no
+member-targeted record it says that the shared records alone fill every
+snapshot), and the status
+read's `desired` list shows each record's target. No fork is refused
+at its seat for room. The participants of a
+temporary council are seated in the council's own mob, which holds none of
+their source's records: they are not covered. Only a fork the mob itself
+takes (the routes above) joins a fork family: a session forked outside the
+mob and seated later as a member is not a fork for this rule, and neither
+is a fork seated by a release before 0.9.15 (see
+[Upgrading](/guides/upgrading#operator-instructions-for-a-member-and-its-forks)).
+A placed helper fork whose seat the mob repairs after its host stopped in
+the middle of it is seated outside its fork family (the mob logs a warning
+that names the member).
 
 `mob/instruction_status` (`MobHandle::operator_instruction_status`, scope
 `ReadHistory`) reads the

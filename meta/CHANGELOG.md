@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- `meta/instruction_status` shows the fork scope of a record: a member
+  target written for the member and the forks of its fork family (Meerkat's
+  `include_forks`, new in Core 0.9.15) reads `{"kind": "member",
+  "identity": ..., "include_forks": true}`. A record for the member alone
+  reads as before, without the member.
+
+### Known limitations
+
+- `meta/set_instruction` cannot write a record for a member and its forks:
+  it writes for the member alone and refuses a target that carries
+  `include_forks`. `meta/instruction_status` shows the scope of a record
+  written elsewhere. A Rust host that embeds Meta sets the scope through
+  the mob handle's `set_operator_instruction`; the gateway method follows
+  in a later release.
+
 ## [0.9.13] - 2026-11-11
 
 Meta 0.9.13 is part of Meerkat 0.9.13 (Core 0.9.13, Meta 0.9.13 and Connect

@@ -46,7 +46,88 @@ them.
   variant's implicit discriminant moves; an exhaustive match on the enum
   needs the two arms.
 
+- `meerkat-mob`, `meerkat-contracts`: the member variant of an operator
+  instruction target gains the field `include_forks: bool`, for a record
+  written for a member and its forks (see Added):
+  `OperatorInstructionTarget::Member { agent_identity, include_forks }` and
+  `WireInstructionTarget::Member { agent_identity, include_forks }`. Code that
+  builds either variant names the field (`include_forks: false` keeps the
+  meaning it had), and a pattern that lists the variant's fields needs it or
+  `..`. Nothing changes on the wire or in a stored row for a record without
+  it: the field is left out when false and reads false when absent.
+
+- `meerkat-machine-schema`, `meerkat-machine-kernels`, `meerkat-mob`:
+  MobMachine holds a fork's lineage for operator instructions (see Added).
+  In `meerkat-machine-schema`, `MobMachineState` gains the field
+  `member_instruction_lineage`, `MobMachineInput` and
+  `MobMachineInputVariant` gain `RecordMemberInstructionLineage`, and
+  `InstructionTargetKind` gains `MemberAndForks`. In `meerkat-mob` the
+  generated `MobMachineCatalogInput` gains `RecordMemberInstructionLineage`
+  (and its `ALL` entry). In
+  `meerkat-machine-kernels` the kernel's `generated::mob::State` gains the
+  field `member_instruction_lineage`, `generated::mob::Input` and
+  `generated::mob::InputKind` gain `RecordMemberInstructionLineage`,
+  `generated::mob::InstructionTargetKind` gains `MemberAndForks`, and
+  `generated::mob::TransitionId` gains
+  `RecordMemberInstructionLineageRunning` and
+  `RecordMemberInstructionLineageStopped`. Each is appended last (the
+  `TransitionId` pair after
+  `SetOperatorInstructionAdvanceSlotLimitExceededStopped`), so no existing
+  variant's implicit discriminant moves; an exhaustive match on one of the
+  enums needs the new arms, and code that builds either state names the
+  field.
+
 ### Added
+
+- Operator instructions for a member and its forks. A member-targeted record
+  written with `include_forks`
+  (`{"kind":"member","agent_identity":...,"include_forks":true}` on
+  `mob/set_instruction`, `OperatorInstructionTarget::Member { include_forks:
+  true, .. }` in Rust) follows the member's fork family from its root.
+  Written for a member that is not itself a fork, it selects that member and
+  every fork below it, forks of forks included. Written for a member that is
+  itself a fork, it selects that member only: a fork of a fork follows the
+  records written for the first member of its family, not for the fork it
+  was taken from. Each member's row of `mob/instruction_status` lists the
+  records of its snapshot, a fork's included, and the write's
+  `matched_members` counts the seated members the record selects. Without
+  the field, the default, a member-targeted record stays its member's alone
+  and a fork runs without it, as before. A durable fork (`fork_off`,
+  `MobHandle::fork_member` and its bounded and detached forms,
+  `mob/fork_member`, a live delegation's fork) has its snapshot recorded in
+  its committed session before it is seated, so its first run applies the
+  record; a helper fork is born with it. A seated fork follows
+  the record like any member it selects: a higher revision and the revoke
+  reach it as entries appended at its next fresh run start, and nothing in
+  the source's or the fork's conversation is rewritten. MobMachine owns the
+  lineage (`member_instruction_lineage`, written by
+  `RecordMemberInstructionLineage` in the fork's seat step and restored from
+  the fork's spawn row after a restart) and selects forks in its target
+  predicate (`InstructionTargetKind::MemberAndForks`;
+  `operator_instruction_target_applies_to_lineage` is the predicate in
+  Rust), so a write, a higher revision, a revoke and a replay owe the seated
+  forks themselves. A lineage names the first member of its family by name,
+  as a target does, across lives: the forks of a member that was removed
+  keep following the records written for that name until those are revoked,
+  and a record written with `include_forks` for a new member seated under
+  that name, as a fork or not, reaches the earlier member's forks too (the
+  one exception to "that member only"). The two limits count such a
+  record in the snapshot of every other name too (any name may be seated as
+  a fork of that member), so no fork is refused at its seat for room, and a
+  member that holds 64 records of its own blocks every `include_forks`
+  write for another member; at a write refused `slot_limit_exceeded` or
+  `active_set_budget_exceeded` the mob now logs a warning that names the
+  member whose snapshot would be full and what fills it, or says that the
+  shared records alone fill every snapshot (the refusal itself is
+  unchanged). The Python and TypeScript SDKs carry the scope both ways:
+  `InstructionTarget`'s member form gains the optional `include_forks`
+  (`Mob.set_instruction` / `setInstruction` send it, and
+  `mob_instruction_status` / `mobInstructionStatus` keep it on a record
+  that carries it and refuse a value that is not a boolean). Limits: the
+  participants of a
+  temporary council are seated in the council's own mob and are not
+  covered; a governed runtime still refuses every write (see Known
+  limitations).
 
 - `rkat storage doctor` lists each mob database whose operator instruction
   records are past what a release before this one holds in one mob: more
@@ -57,6 +138,26 @@ them.
   behind it.
 
 ### Changed
+
+- `meerkat-mob`: a durable fork child has its operator instruction snapshot
+  before its first run. The mob records the child's snapshot (the shared
+  records, and the records written for the first member of its fork family
+  and its forks, see Added) in the child's committed session before it
+  seats the child. Before, a child was seated
+  over its committed session with no snapshot and received it by delivery
+  after its seat, which nothing ordered before the first run of a fork that
+  starts its own turn (`fork_off`, a detached fork, a live delegation's
+  fork): such a child could run its only run without the records the mob
+  targets at every member or at its profile. A mob that never held a record
+  writes nothing, as before. A child whose snapshot cannot be recorded is
+  not seated: the fork fails `fork_member_provision_failed`, as it does
+  when its seat fails. That holds for every refusal of the record, also
+  one that only blocked a seated child before (`owned_by_session`,
+  `owned_by_other_mob`, `slot_managed_by_activation`, and
+  `durability_unavailable` from a session service that keeps no durable
+  session document or a wrapper that does not forward the record): once
+  the mob has recorded its first operator instruction, a durable fork over
+  such a session fails and seats nobody.
 
 - `meerkat-mob`, `meerkat-machine-schema`: a mob's operator instruction
   limits bound one member's snapshot, not the mob. A member's snapshot is
@@ -88,7 +189,9 @@ them.
   the member) and every member's row of `mob/instruction_status`
   (`MobHandle::operator_instruction_status`) listed them all as
   `not_targeted`. A member's recorded target and its status row now name
-  the shared records and its own; a record that moves to another member
+  the shared records and its own (a fork's also name the records written
+  for the first member of its fork family and its forks, see Added); a
+  record that moves to another member
   leaves the first member's target, its session revokes the slot at its
   next fresh run start, and the status row lists that record until then.
   The page's `desired` list still names every record of the mob.
@@ -167,6 +270,52 @@ them.
   Mobs within both totals are unaffected in either direction. A journal an
   earlier release wrote replays on this one without a refusal. See "Rolling
   back to 0.9.14" in `docs/guides/upgrading.mdx`.
+
+- Clients and servers of an earlier release and `include_forks`: a client
+  that decodes operator instruction targets with an earlier release's
+  `meerkat-contracts` (`WireInstructionTarget` denies unknown fields)
+  refuses a `mob/instruction_status` page that lists a record written with
+  `include_forks`; upgrade such clients before the first such write. A page
+  with no such record is unchanged: the field is left out when false. A
+  server of an earlier release refuses a `mob/set_instruction` whose target
+  carries the field; it never writes it as a record for the member alone.
+
+- Forks seated by an earlier release, and rolling back with operator
+  instruction records written for a member and its forks (`include_forks`).
+  A fork seated by a release before this one, or while rolled back to one,
+  has no lineage root on its stored spawn row: no record written with
+  `include_forks` ever selects it, and a record written for it and its
+  forks reaches its own forks, which are rooted at it. Rolling back: an
+  earlier release reads such a record as a record for the member alone and
+  ignores the lineage root on a fork's spawn row (there the fork is a
+  member with no fork family), so on that release these records do not
+  select the forks. Nothing is refused. What the return to this release
+  restores depends on the mob's store. On the SQLite store no stored row is
+  rewritten: the lineage of every fork seated on this release is restored
+  from its spawn row and the records select those forks again; write each
+  such record at a new revision after the return, which delivers it to
+  every fork it selects. On a host store (a realm kept in the host's own
+  database through the host store SPI) the earlier release writes the
+  mob's journal again at its next checkpoint, from what it read: without
+  the fork scope of the records and without the lineage roots. They do not
+  come back: after the return those records are their members' alone and
+  the forks seated before have no lineage. Write the records again, at a
+  new revision, with `include_forks`; they then select the forks seated
+  from then on.
+
+### Known limitations
+
+- Operator instructions for a member and its forks (`include_forks`). The
+  participants of a temporary council are not covered: they are seated in
+  the council's own mob. A session forked outside the mob and seated later
+  as a member is not a fork for this rule. A placed helper fork whose seat
+  the mob repairs after its host stopped in the middle of it is seated
+  outside its fork family, and no record written for the family reaches it
+  (the mob logs a warning that names the member). After a fork's seat fails
+  and the host restarts, a member seated later under that fork's name can
+  be counted in the fork family and receive the records written for the
+  family's first member and its forks: give the new member another name,
+  or write those records again without `include_forks`.
 
 ## [0.9.13] - 2026-11-11
 

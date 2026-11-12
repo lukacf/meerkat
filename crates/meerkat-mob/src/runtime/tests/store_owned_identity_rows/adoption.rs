@@ -611,8 +611,11 @@ fn not_adoptable_while_its_host_settles_the_identity_is_retryable() {
 /// recorded durable, keyed by the identity, its member is built with the
 /// host's resume gate bound on its registration, and Core lists it among
 /// its durable identities. Beside it a plain worker's successor stays
-/// ephemeral with no gate, and the successor of a member a host spawned as
-/// a durable identity keeps the key its host gave it.
+/// ephemeral with no gate, the successor of a member a host spawned as a
+/// durable identity keeps the key its host gave it, and the successor of a
+/// roster-owned identity its host declared with no durable mark stays
+/// ephemeral with no gate: its host says what it is, and only an identity
+/// whose entry is the store's takes the rule.
 ///
 /// RED before a successor took the rule: the successor copied the recorded
 /// intent, so the adopted identity stayed ephemeral through every respawn,
@@ -648,8 +651,16 @@ async fn a_respawn_seats_a_store_owned_identity_recorded_ephemeral_as_a_durable_
         crate::runtime::SpawnContinuityIntent::Ephemeral,
         "the adoption keeps the worker's seat as it was recorded"
     );
+    // A roster-owned identity on the same profile, declared with no durable
+    // mark: an identity entry too, recorded ephemeral, but not the store's.
+    mob.declare(&["listed"]).await;
+    assert_eq!(
+        mob.spawn_row("listed").await.continuity_intent,
+        crate::runtime::SpawnContinuityIntent::Ephemeral,
+        "the roster-owned identity's seat is recorded as its host declared it"
+    );
 
-    for name in ["helper", "plain", "marked"] {
+    for name in ["helper", "plain", "marked", "listed"] {
         tokio::time::timeout(
             STEP,
             mob.handle
@@ -684,6 +695,11 @@ async fn a_respawn_seats_a_store_owned_identity_recorded_ephemeral_as_a_durable_
         },
         "a host's durable identity keeps the key its host gave it"
     );
+    assert_eq!(
+        mob.spawn_row("listed").await.continuity_intent,
+        crate::runtime::SpawnContinuityIntent::Ephemeral,
+        "a roster-owned identity's successor keeps the continuity its host declared"
+    );
     assert!(
         member_registration_holds_resume_admission(&mob.handle, &machine, &id("helper")).await,
         "the store-owned identity's successor holds the gate"
@@ -696,6 +712,10 @@ async fn a_respawn_seats_a_store_owned_identity_recorded_ephemeral_as_a_durable_
         member_registration_holds_resume_admission(&mob.handle, &machine, &id("marked")).await,
         "the host's durable identity holds the gate as before"
     );
+    assert!(
+        !member_registration_holds_resume_admission(&mob.handle, &machine, &id("listed")).await,
+        "a roster-owned identity declared with no durable mark holds none"
+    );
     let durable: Vec<AgentIdentity> = mob
         .handle
         .durable_identity_members()
@@ -707,7 +727,8 @@ async fn a_respawn_seats_a_store_owned_identity_recorded_ephemeral_as_a_durable_
     assert!(
         durable.contains(&id("helper"))
             && durable.contains(&id("marked"))
-            && !durable.contains(&id("plain")),
+            && !durable.contains(&id("plain"))
+            && !durable.contains(&id("listed")),
         "Core lists the store-owned identity among its durable identities: {durable:?}"
     );
 }

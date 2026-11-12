@@ -95,7 +95,8 @@ export function DecisionCard({ card, now, own }: {
             {card.requesterName ? (
               <span className="cc-decision__who">
                 <span className="cc-decision__label">Asked by</span>
-                <span className="cc-decision__requester" title={card.requester}>{card.requesterName}</span>
+                {/* The name only: a person's key is under Technical details. */}
+                <span className="cc-decision__requester">{card.requesterName}</span>
               </span>
             ) : null}
           </p>

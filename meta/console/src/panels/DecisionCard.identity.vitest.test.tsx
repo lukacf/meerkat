@@ -59,6 +59,27 @@ describe("decision cards of agent changes", () => {
     }
   });
 
+  it("names who asked and keeps the person's key under Technical details only", () => {
+    const view = render(<DecisionCardList cards={[whole]} signedIn />);
+    const element = view.getByTestId("decision-card:decision-whole");
+    // The card names the requester as people know them.
+    expect(element.querySelector(".cc-decision__requester")?.textContent).toBe("carol");
+    // Outside the Technical details the key is nowhere: no text, no
+    // tooltip, no other attribute.
+    for (const node of [element, ...Array.from(element.querySelectorAll("*"))]) {
+      if (node.closest(".cc-approval__details")) continue;
+      for (const attribute of Array.from(node.attributes)) {
+        expect(`${attribute.name}=${attribute.value}`).not.toContain("principal:");
+      }
+    }
+    // It is text in one place: the collapsed Technical details.
+    const holders = Array.from(element.querySelectorAll("*")).filter((node) =>
+      Array.from(node.childNodes).some((child) => child.nodeType === 3 && (child.textContent || "").includes("principal:")));
+    expect(holders.length).toBeGreaterThan(0);
+    for (const node of holders) expect(node.closest(".cc-approval__details")).not.toBeNull();
+    expect((element.querySelector(".cc-approval__details") as HTMLDetailsElement).open).toBe(false);
+  });
+
   it("offers the withdrawal on the open card of a request this page made, and only there", async () => {
     const withdraw = vi.fn(async () => null as { sentence: string; detail?: string } | null);
     const closed = card({ decisionId: "decision-closed", kind: "identity.create", phase: "withdrawn", statusOnly: true });

@@ -1440,3 +1440,245 @@ async fn the_decision_kept_for_a_request_equals_the_decision_for_every_frame() -
     let _ = runtime.shutdown().await;
     Ok(())
 }
+
+/// The records of the system page that speak of a member they do not name
+/// as their identity, each with the text it carries of that member: a
+/// write that landed quarantined (its author and what tainted the session),
+/// a session's taint transition with no identity (the session key and the
+/// source), a promoted record and a promotion that awaits approval (the
+/// scope key).
+fn system_records_that_speak_of_a_member() -> Vec<(
+    &'static str,
+    crate::memory::events::MemoryTimelineEvent,
+    Vec<&'static str>,
+)> {
+    use crate::memory::events::MemoryTimelineEvent;
+
+    vec![
+        (
+            "a quarantined write",
+            MemoryTimelineEvent::QuarantinedWrite {
+                realm: "pages".to_string(),
+                author: "Agent { identity: \"quarantined-author-name\" }".to_string(),
+                reason: "session tainted by quarantined-taint-source".to_string(),
+            },
+            vec!["quarantined-author-name", "quarantined-taint-source"],
+        ),
+        (
+            "a taint transition",
+            MemoryTimelineEvent::TaintTransition {
+                identity: None,
+                session_key: "taint-session-key".to_string(),
+                kind: "tainted".to_string(),
+                source: "taint-source-name".to_string(),
+            },
+            vec!["taint-session-key", "taint-source-name"],
+        ),
+        (
+            "a promoted record",
+            MemoryTimelineEvent::RecordPromoted {
+                realm: "pages".to_string(),
+                record_id: "promoted-record-id".to_string(),
+                source_record_id: None,
+                scope_kind: "identity".to_string(),
+                scope_key: "promoted-scope-key".to_string(),
+                proposal_id: None,
+                gated: false,
+            },
+            vec!["promoted-scope-key"],
+        ),
+        (
+            "a promotion that awaits approval",
+            MemoryTimelineEvent::PromotionPendingGate {
+                realm: "pages".to_string(),
+                pending_id: "pending-promotion-id".to_string(),
+                record_id: "pending-record-id".to_string(),
+                scope_kind: "identity".to_string(),
+                scope_key: "pending-scope-key".to_string(),
+            },
+            vec!["pending-scope-key"],
+        ),
+    ]
+}
+
+/// `event` as a record of the system page with no witness, under the store
+/// key `key`.
+fn system_page_record(
+    key: &str,
+    event: &crate::memory::events::MemoryTimelineEvent,
+    timestamp_ms: u64,
+) -> NewConsoleFrame {
+    let mut frame = frame_with(crate::console_contracts::SYSTEM_EVENT_IDENTITY, key, None);
+    frame.kind = event.event_type().to_string();
+    frame.payload = event.data();
+    frame.timestamp_ms = timestamp_ms;
+    frame
+}
+
+/// The decision for the record of the system page that `named` names
+/// ([`system_records_that_speak_of_a_member`]): it speaks of a member it
+/// does not name as its identity, and nothing says who may know of that
+/// member, so it is decided as a record with no member witness. An
+/// administrator reads it, no other person does, a caller with no token on a
+/// console that can identify a person does not, and the one operator of a
+/// console that can identify nobody reads it as it reads a member's record
+/// with no witness. A dream record beside it stays readable by every caller
+/// who may view the system page.
+async fn system_record_is_shown_to_an_administrator_only(named: &str) -> TestResult {
+    use crate::memory::events::MemoryTimelineEvent;
+
+    let (what, event, _) = system_records_that_speak_of_a_member()
+        .into_iter()
+        .find(|(what, _, _)| *what == named)
+        .ok_or("the record is one of the system page's")?;
+    let log = MetaConsoleAggregator::in_memory();
+    let record = log
+        .store()
+        .append_if_absent(system_page_record("speaks-of-a-member", &event, 2_001))
+        .await?
+        .frame;
+    let dream = log
+        .store()
+        .append_if_absent(system_page_record(
+            "dream-beside-it",
+            &MemoryTimelineEvent::DreamSkipped {
+                realm: "pages".to_string(),
+                reason: "dream-skipped-record".to_string(),
+            },
+            2_002,
+        ))
+        .await?
+        .frame;
+    let readers = readers();
+    let open = crate::access::AccessController::new(crate::access::AccessControlConfig::default())
+        .expect("access controller");
+    for (reader, view, reads_record) in [
+        ("a person", readers.alice, false),
+        ("another person", readers.bob, false),
+        ("an administrator", readers.root, true),
+        (
+            "a caller with no token on a console that can identify a person",
+            open.view_for_caller(None, None).on_console(true),
+            false,
+        ),
+        (
+            "the one operator of a console that can identify nobody",
+            open.view_for_caller(None, None).on_console(false),
+            true,
+        ),
+    ] {
+        assert_eq!(
+            timeline_frame_visible_to(&view, &record),
+            reads_record,
+            "{what} on the system page, read by {reader}"
+        );
+        assert!(
+            timeline_frame_visible_to(&view, &dream),
+            "a dream record on the system page is served to {reader}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_quarantined_write_on_the_system_page_is_shown_to_an_administrator_only() -> TestResult {
+    system_record_is_shown_to_an_administrator_only("a quarantined write").await
+}
+
+#[tokio::test]
+async fn a_taint_transition_on_the_system_page_is_shown_to_an_administrator_only() -> TestResult {
+    system_record_is_shown_to_an_administrator_only("a taint transition").await
+}
+
+#[tokio::test]
+async fn a_promoted_record_on_the_system_page_is_shown_to_an_administrator_only() -> TestResult {
+    system_record_is_shown_to_an_administrator_only("a promoted record").await
+}
+
+#[tokio::test]
+async fn a_promotion_that_awaits_approval_on_the_system_page_is_shown_to_an_administrator_only()
+-> TestResult {
+    system_record_is_shown_to_an_administrator_only("a promotion that awaits approval").await
+}
+
+/// Every page of the global timeline keeps the system page's records that
+/// speak of a member for an administrator: with a dream's started record,
+/// one record of each such kind and the dream's completed record in the log,
+/// a person who is not an administrator reads the two dream records and
+/// nothing of the others on the REST window and the RPC page, newest first
+/// and oldest first, and on the stream's snapshot, on a console with its own
+/// runtime and on one that only aggregates. An administrator reads them all.
+#[tokio::test]
+async fn every_timeline_page_keeps_a_system_record_that_speaks_of_a_member_for_an_administrator()
+-> TestResult {
+    use crate::memory::events::MemoryTimelineEvent;
+
+    let state_dir = tempfile::tempdir()?;
+    let runtime =
+        persistent_gateway_runtime_in(state_dir.path(), "witness-system-members", "", "").await?;
+    let bob = bearer(bob_claims());
+    let root = bearer(root_claims());
+    let records = system_records_that_speak_of_a_member();
+    let log = MetaConsoleAggregator::in_memory();
+    log.store()
+        .append_if_absent(system_page_record(
+            "dream-started",
+            &MemoryTimelineEvent::DreamStarted {
+                realm: "pages".to_string(),
+                run_id: "dream-started-record".to_string(),
+            },
+            2_000,
+        ))
+        .await?;
+    for (index, (what, event, _)) in records.iter().enumerate() {
+        log.store()
+            .append_if_absent(system_page_record(what, event, 2_001 + index as u64))
+            .await?;
+    }
+    log.store()
+        .append_if_absent(system_page_record(
+            "dream-completed",
+            &MemoryTimelineEvent::DreamCompleted {
+                realm: "pages".to_string(),
+                run_id: "dream-completed-record".to_string(),
+                ops_committed: 0,
+                detail: json!({}),
+            },
+            2_100,
+        ))
+        .await?;
+    for (console, own_runtime) in [
+        ("a console with its own runtime", true),
+        ("a console that only aggregates", false),
+    ] {
+        let mut state = enforced_console(&runtime, Some(everyone_drives_every_agent()));
+        if !own_runtime {
+            state.runtime = None;
+        }
+        state.console_aggregator = Some(log.clone());
+        let app = console_json_router_with_state(state);
+        for (reader, token, reads_records) in [
+            ("a person who is not an administrator", &bob, false),
+            ("an administrator", &root, true),
+        ] {
+            for (surface, page) in global_pages(&app, Some(token.as_str())).await {
+                for record in ["dream-started-record", "dream-completed-record"] {
+                    assert!(
+                        page.contains(record),
+                        "{surface} of {console}: {reader} reads {record}"
+                    );
+                }
+                for (what, _, texts) in &records {
+                    for text in texts {
+                        assert_eq!(
+                            page.contains(text),
+                            reads_records,
+                            "{surface} of {console}: {reader} and {text} of {what}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}

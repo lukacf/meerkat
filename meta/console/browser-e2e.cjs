@@ -5047,6 +5047,15 @@ async function runIdentityChangesStoryProof() {
     await form.getByTestId("identity-field:display_name").fill("Scout");
     await form.getByTestId("identity-field:instructions:0").fill("Scout the archive.");
     await form.getByTestId("identity-peer:warden").check();
+    // The two settings a form lists, each choice in words: an agent can
+    // receive messages and runs as its profile says unless the person
+    // chooses otherwise.
+    assert.equal(await form.getByTestId("identity-addressability:addressable").isChecked(), true);
+    assert.equal(await form.getByTestId("identity-runtime-mode:profile").isChecked(), true);
+    await form.locator("[data-field='addressability']").getByText("Internal only").waitFor();
+    await form.locator("[data-field='runtime_mode']").getByText("Turn by turn").waitFor();
+    await form.getByTestId("identity-addressability:internal_only").check();
+    await form.getByTestId("identity-runtime-mode:turn_driven").check();
     await form.getByTestId("identity-field:first_message").fill("Introduce yourself.");
     await page.screenshot({ path: path.join(evidenceDir, "identity-changes-new-agent.png"), fullPage: true });
     await form.getByTestId("identity-submit").click();
@@ -5062,29 +5071,49 @@ async function runIdentityChangesStoryProof() {
       instructions: ["Scout the archive."],
       first_message: "Introduce yourself.",
       peers: ["warden"],
+      addressability: "internal_only",
+      runtime_mode_override: "turn_driven",
     }]);
     await page.getByTestId("identity-cancel").click();
+    // Two schedules target the new agent: a change of the whole agent takes
+    // them with it and says so.
+    family.setSchedules("scout", [
+      { schedule_id: "sched-0001", name: "Morning report" },
+      { schedule_id: "sched-0002", name: "Weekly digest" },
+    ]);
 
-    // Edit.
+    // Edit opens on what the record says, and sends only what changed.
     await openAgent("scout");
     await page.getByTestId("roster-action:scout:edit").click();
     const edit = page.getByTestId("identity-edit:scout");
     await edit.getByTestId("identity-field:display_name").fill("Chief scout");
     await edit.getByTestId("identity-field:instructions:0").fill("Scout the vault.");
+    assert.equal(await edit.getByTestId("identity-addressability:internal_only").isChecked(), true);
+    assert.equal(await edit.getByTestId("identity-runtime-mode:turn_driven").isChecked(), true);
+    await edit.getByTestId("identity-runtime-mode:autonomous_host").check();
     await edit.getByTestId("identity-submit").click();
     await notice.getByText("Scout is updated").waitFor();
     await notice.getByText(/reach the agent at its next run/).waitFor();
-    assert.deepEqual(familyCalls("meta/identity/update")[0].set, { display_name: "Chief scout", instructions: ["Scout the vault."] });
+    assert.deepEqual(familyCalls("meta/identity/update")[0].set, {
+      display_name: "Chief scout",
+      instructions: ["Scout the vault."],
+      runtime_mode_override: "autonomous_host",
+    });
     await agent("scout").getByText("Chief scout").first().waitFor();
     await page.screenshot({ path: path.join(evidenceDir, "identity-changes-edited.png"), fullPage: true });
     await page.getByTestId("identity-cancel").click();
 
-    // Archive, then unarchive from the archived agents.
+    // Archive, then unarchive from the archived agents. The question says
+    // that the last conversation is harvested; the answer says what became
+    // of the agent's schedules, by name.
     await openAgent("scout");
     await page.getByTestId("roster-action:scout:archive").click();
+    await page.getByTestId("identity-confirm:scout:archive").getByText(/Its last conversation is harvested, as for any agent that leaves the team\./).waitFor();
     await page.getByTestId("identity-confirm:scout:archive").getByTestId("identity-confirm-yes").click();
     await notice.getByText("Chief scout is archived").waitFor();
+    await notice.getByText("Its 2 schedules are paused until it is unarchived: Morning report, Weekly digest.").waitFor();
     await gone(agent("scout"), "the archived agent in the roster");
+    await page.screenshot({ path: path.join(evidenceDir, "identity-changes-archived-schedules.png"), fullPage: true });
     await page.getByTestId("identity-confirm-cancel").click();
     // The archived agents are read when they are opened.
     assert.equal(await page.getByTestId("roster-archived").count(), 0);
@@ -5094,6 +5123,7 @@ async function runIdentityChangesStoryProof() {
     await page.getByTestId("roster-archived-action:scout:unarchive").click();
     await page.getByTestId("identity-confirm:scout:unarchive").getByTestId("identity-confirm-yes").click();
     await notice.getByText("Chief scout is back").waitFor();
+    await notice.getByText("Its 2 schedules run again: Morning report, Weekly digest.").waitFor();
     await agent("scout").waitFor();
     await page.getByTestId("identity-confirm-cancel").click();
 
@@ -5102,10 +5132,14 @@ async function runIdentityChangesStoryProof() {
     await page.getByTestId("roster-action:scout:remove").click();
     const confirm = page.getByTestId("identity-confirm:scout:remove");
     await confirm.getByText(/Its name can never be used again/).waitFor();
+    await confirm.getByText(/Its last conversation is harvested/).waitFor();
     await confirm.getByText(/Archive is the reversible choice/).waitFor();
     await page.screenshot({ path: path.join(evidenceDir, "identity-changes-remove-confirm.png"), fullPage: true });
     await confirm.getByTestId("identity-confirm-yes").click();
     await notice.getByText("Chief scout is removed").waitFor();
+    await notice.getByText("Its 2 schedules are ended: Morning report, Weekly digest.").waitFor();
+    // A schedule's id is no primary text of the notice.
+    assert.equal(await notice.locator(".identity-notice__title, .identity-notice__line").getByText(/sched-000/).count(), 0);
     await gone(agent("scout"), "the removed agent in the roster");
     assert.equal(family.agents.has("scout"), false);
     await page.getByTestId("identity-confirm-cancel").click();

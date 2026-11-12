@@ -238,6 +238,33 @@ async function fullStory() {
     await page.screenshot({ path: path.join(evidence, "real-identity-story-created.png"), fullPage: true });
     await page.getByTestId("identity-cancel").click();
 
+    // The details of the agent that was just created: its status is read
+    // (the pane names it and says how it stands), and its Record says who
+    // asked for it, by name and never by key, and how it runs.
+    await openAgent("scout");
+    await page.getByTestId("roster-detail:scout").getByRole("button", { name: "Details", exact: true }).click();
+    await page.getByTestId("inspect-panel:scout").waitFor();
+    await page.getByTestId("inspect-state:scout").waitFor();
+    const scoutRecord = page.getByTestId("inspect-record:scout");
+    await scoutRecord.waitFor();
+    // The record's own facts: the first list of the section (the second is
+    // its technical details).
+    const facts = await scoutRecord.locator(".cc-kv").first().textContent();
+    assert.match(facts, /Asked for by/);
+    assert.match(facts, /Allowed by the host's rules/);
+    assert.match(facts, /How it runs\s*As its profile says/);
+    assert.equal(facts.includes(record.provenance.requester), false, "the person's key is no text of the record");
+    assert.equal(/principal:/.test(await scoutRecord.innerHTML()), false, "the person's key is in no attribute of the record");
+    assert.equal(await scoutRecord.getByText(/created|configured|adopted|imported|origin/i).count(), 0);
+    await page.screenshot({ path: path.join(evidence, "real-identity-story-created-details.png"), fullPage: true });
+    // The details opened beside the roster: close them, and the story goes
+    // on in the roster.
+    await page.locator('[data-testid^="pane:"]').filter({ has: page.getByTestId("inspect-panel:scout") })
+      .locator('[data-testid^="pane-close:"]').click();
+    await gone(page.getByTestId("inspect-panel:scout"), "the closed details");
+    await page.getByTestId("roster-panel").waitFor();
+    await agent("scout").waitFor();
+
     // An agent created without a display name has none: Edit opens with an
     // empty display name, and the roster names it by its name in words.
     await page.getByTestId("roster-new-agent").click();
@@ -280,6 +307,7 @@ async function fullStory() {
     // Archive: the agent leaves the roster and is among the archived agents.
     await openAgent("scout");
     await page.getByTestId("roster-action:scout:archive").click();
+    await page.getByTestId("identity-confirm:scout:archive").getByText(/Its last conversation is harvested/).waitFor();
     await page.getByTestId("identity-confirm:scout:archive").getByTestId("identity-confirm-yes").click();
     await outcome(/is stopping$|is archived$/);
     assert.equal(sent(fixture, "meta/identity/archive")[0].expected_spec_digest, record.spec_digest);
@@ -322,6 +350,7 @@ async function fullStory() {
     await page.getByTestId("roster-action:scout:remove").click();
     const confirm = page.getByTestId("identity-confirm:scout:remove");
     await confirm.getByText(/Its name can never be used again/).waitFor();
+    await confirm.getByText(/Its last conversation is harvested/).waitFor();
     await confirm.getByText(/Archive is the reversible choice/).waitFor();
     await confirm.getByTestId("identity-confirm-yes").click();
     await outcome(/is stopping$|is removed$/);

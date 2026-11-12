@@ -23349,6 +23349,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// materialized. `None` when no committed session exists under `id` or
     /// its document records no build state; an archived session's record
     /// stays readable. A corrupt record is a read fault, never `None`.
+    ///
+    /// Plumbing: a host reads a session's instruction sections with
+    /// meerkat-mob's `MobSessionService::recorded_build_instructions`, which
+    /// answers from this method on a persistent service. It is public
+    /// because that read lives in another crate.
     pub async fn load_authoritative_session_build_state(
         &self,
         id: &SessionId,

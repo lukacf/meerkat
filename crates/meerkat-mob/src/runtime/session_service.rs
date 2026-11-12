@@ -2440,11 +2440,15 @@ pub trait MobSessionService:
 
     /// The instruction sections a session was built with: what the committed
     /// build state of `session_id` records
-    /// (`SessionBuildState::additional_instructions`), the sections of the
-    /// newest prompt the session's builds wrote. This is the read a host
-    /// uses to compare the sections a member's session holds with the
-    /// sections it would build the member with now; a member's session id
-    /// is [`super::MobHandle::resolve_bridge_session_id`].
+    /// (`SessionBuildState::additional_instructions`): the sections named
+    /// by the newest build that named any, or an empty list when a newer
+    /// build wrote a prompt and named none. This is the read a host uses to
+    /// compare the sections a member's session holds with the sections it
+    /// would build the member with now; a member's session id is
+    /// [`super::MobHandle::resolve_bridge_session_id`]. It is the one read
+    /// of the record for a host: the persistent service's
+    /// `load_authoritative_session_build_state` and the build state
+    /// decoders behind it are its plumbing.
     ///
     /// - `Ok(Some(sections))`: the recorded sections, in order.
     ///   `Some(vec![])` is a session built with none.
@@ -2456,12 +2460,17 @@ pub trait MobSessionService:
     /// - `Err`: the store could not be read, or the record is corrupt. A
     ///   corrupt record is never `Ok(None)`.
     ///
-    /// A resume that writes no prompt keeps the record, so the answer is
-    /// stable across restarts, wakes and rebuilds, and a fork child answers
-    /// its source's sections. A first build may append the sections the
-    /// host's spawn customizer adds, so a session records its spec's
-    /// sections followed by those. The record is durable configuration of
-    /// the session's build, not a lifecycle fact.
+    /// A resume that names no sections and writes no prompt keeps the
+    /// record, so the answer is stable across restarts, wakes and rebuilds,
+    /// and a fork child answers its source's sections. A build that names
+    /// sections always records them: a resume that names sections and is
+    /// given no system prompt records them without writing a prompt, so
+    /// the record can name sections that no prompt row holds (no mob
+    /// rebuild names sections, and session recovery names the record
+    /// itself; a direct factory embedder can name any). A first build may
+    /// append the sections the host's spawn customizer adds, so a session
+    /// records its spec's sections followed by those. The record is durable
+    /// configuration of the session's build, not a lifecycle fact.
     ///
     /// The read never materializes the session, wakes no member and sends
     /// the mob actor no command. It answers for this service's own

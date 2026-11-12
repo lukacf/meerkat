@@ -10932,17 +10932,19 @@ impl AgentFactory {
             .unwrap_or_default();
         // The instruction sections are session-owned too: durable
         // configuration of the session's build, kept in this record, not a
-        // lifecycle fact that a machine owns. The record states the
-        // sections of the newest prompt the session's builds wrote. A build
-        // that names sections records those (an empty list clears them). A
-        // build that names none and writes a prompt (a first build, or a
-        // resume that is given an explicit prompt) wrote none into it, and
-        // records an empty list. A build that names none and writes no
-        // prompt keeps what the session records: such a resume authors
-        // nothing, and writing that absence would erase what the first
-        // build recorded. So an absent record only ever means that the
-        // sections are not known (a session built before this record was
-        // kept across resumes, or one whose record such a resume erased).
+        // lifecycle fact that a machine owns. A build that names sections
+        // records those (an empty list clears them), whether or not it
+        // writes a prompt: a resume that names sections and is given no
+        // prompt records them and writes no prompt row, so the record can
+        // name sections that no prompt row holds. A build that names none
+        // and writes a prompt (a first build, or a resume that is given an
+        // explicit prompt) wrote none into it, and records an empty list.
+        // A build that names none and writes no prompt keeps what the
+        // session records: such a resume authors nothing, and writing that
+        // absence would erase what the first build recorded. So an absent
+        // record only ever means that the sections are not known (a session
+        // built before this record was kept across resumes, or one whose
+        // record such a resume erased).
         let recorded_instruction_sections = build_config
             .additional_instructions
             .clone()

@@ -4464,15 +4464,19 @@ pub struct SessionBuildState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_context: Option<serde_json::Value>,
     /// The instruction sections the session's builds were given, in order:
-    /// the sections of the newest prompt its builds wrote.
+    /// the sections named by the newest build that named any, or an empty
+    /// list when a newer build wrote a prompt and named none.
     ///
     /// Durable configuration of the build, kept in this record; it is not a
     /// lifecycle fact and no machine owns it. Session-owned: a build that
-    /// names sections records those (an empty list clears them). A build
-    /// that names none and writes a prompt (a first build, or a resume
-    /// given an explicit system prompt) records `Some(vec![])`. A build
-    /// that names none and writes no prompt keeps what is recorded, so a
-    /// resume never erases them. `None` means the sections are not known: a
+    /// names sections records those (an empty list clears them), whether
+    /// or not it writes a prompt: a resume that names sections and is given
+    /// no system prompt records them and writes no prompt row, so the
+    /// record can name sections that no prompt row holds. A build that
+    /// names none and writes a prompt (a first build, or a resume given an
+    /// explicit system prompt) records `Some(vec![])`. A build that names
+    /// none and writes no prompt keeps what is recorded, so such a resume
+    /// never erases them. `None` means the sections are not known: a
     /// session built by 0.9.14 or an earlier release, or one whose record
     /// such a release's resume erased.
     #[serde(default, skip_serializing_if = "Option::is_none")]

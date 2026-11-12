@@ -121,6 +121,7 @@
             "group": "Governance",
             "pages": [
               "reference/decisions",
+              "reference/identity-policy",
               "reference/governance"
             ]
           }

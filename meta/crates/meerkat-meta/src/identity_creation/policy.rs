@@ -285,6 +285,10 @@ pub struct Timeouts {
     pub profile: u64,
     /// A remove.
     pub remove: u64,
+    /// An archive or an unarchive.
+    pub archive: u64,
+    /// An adoption.
+    pub adopt: u64,
     /// The largest timeout.
     pub max: u64,
 }
@@ -300,6 +304,8 @@ impl Timeouts {
             ChangeClass::Authority => self.authority,
             ChangeClass::Profile => self.profile,
             ChangeClass::Remove => self.remove,
+            ChangeClass::Archive => self.archive,
+            ChangeClass::Adopt => self.adopt,
         }
     }
 }
@@ -470,6 +476,62 @@ impl IdentityCreationPolicy {
         &self.approval
     }
 
+    /// Refuse what a launch cannot name in this release: the approval
+    /// outcome `notify`, for which no notice reaches an approver, the
+    /// outcome `review`, for which no reviewer decides, and a preparation
+    /// other than `none`, which no method of this release settles. Each
+    /// would otherwise do less than it says: the refusal names the policy
+    /// path and what a host writes instead.
+    pub fn check_served(&self) -> Result<(), PolicyRefusal> {
+        let refused = |path: String, feature: &str| {
+            refusal(
+                path,
+                PolicyRefusalKind::Unsupported {
+                    feature: feature.to_owned(),
+                },
+            )
+        };
+        if let Some((profile, rule)) = self
+            .preparation
+            .iter()
+            .find(|(_, rule)| rule.mode != PreparationMode::None)
+        {
+            return Err(refused(
+                format!("preparation.{profile}.mode"),
+                &format!(
+                    "the preparation {} (no method of this release settles an agent's \
+                     preparation, so an agent of the profile would wait for it without end: \
+                     leave the profile out)",
+                    rule.mode.token()
+                ),
+            ));
+        }
+        let not_served = |kind: ApprovalKind| match kind {
+            ApprovalKind::Notify => Some(
+                "the outcome notify (no notice reaches an approver in this release: write \
+                 allow, whose consent reads back from the agent's record and from its \
+                 operation, or require_approval)",
+            ),
+            ApprovalKind::Review => Some(
+                "the outcome review (no reviewer decides in this release: write \
+                 require_approval, or review in the host's own code before it asks under allow)",
+            ),
+            _ => None,
+        };
+        for (index, rule) in self.approval.rules.iter().enumerate() {
+            if let Some(feature) = not_served(rule.outcome.kind) {
+                return Err(refused(
+                    format!("approval.rules[{index}].outcome.kind"),
+                    feature,
+                ));
+            }
+        }
+        if let Some(feature) = not_served(self.approval.default.kind) {
+            return Err(refused("approval.default.kind".to_owned(), feature));
+        }
+        Ok(())
+    }
+
     /// Check the policy against the profiles of the mob definition: every
     /// profile a preparation or a selector names must be one of them. A
     /// misspelled one would seat that profile's identities unprepared, or
@@ -573,6 +635,7 @@ pub fn resolve_launch_policy(
             PolicyRefusalKind::NeedsNativeHost,
         ));
     }
+    policy.check_served()?;
     Ok(Some(Arc::new(policy)))
 }
 
@@ -1182,6 +1245,8 @@ fn timeouts(config: &TimeoutsConfig) -> Result<Timeouts, PolicyRefusal> {
         ("authority", config.authority),
         ("profile", config.profile),
         ("remove", config.remove),
+        ("archive", config.archive),
+        ("adopt", config.adopt),
     ] {
         if !(1..=config.max).contains(&value) {
             return Err(refusal(
@@ -1202,6 +1267,8 @@ fn timeouts(config: &TimeoutsConfig) -> Result<Timeouts, PolicyRefusal> {
         authority: config.authority,
         profile: config.profile,
         remove: config.remove,
+        archive: config.archive,
+        adopt: config.adopt,
         max: config.max,
     })
 }

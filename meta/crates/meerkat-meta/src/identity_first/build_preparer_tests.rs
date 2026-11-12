@@ -391,6 +391,131 @@ async fn r109_after_the_composition_a_registered_identity_is_prepared_inline_and
     Ok(())
 }
 
+/// The seat of an identity whose record is its row is composed from the
+/// host's build step once per build, and only once the identity runtime is
+/// composed. Before that a fresh spawn's seat is left as Core lowered it
+/// and a wake's is refused retryable, and the customizer does not run.
+/// After it the customizer runs once, the draft is lowered onto the seat
+/// (its context and instructions; the seat's labels stay as they were), and
+/// the build's preparation that follows answers without running the
+/// customizer again. A failed customizer refuses the seat retryable.
+#[tokio::test]
+async fn a_store_owned_seat_is_composed_once_per_build_once_the_runtime_is_composed() -> TestResult
+{
+    let alice = identity("personal:alice");
+    let core = Arc::new(HoldingCore::default());
+    let customizer = Arc::new(CountingCustomizer::default());
+    let (runtime, _registry) = runtime_with(&core, Some(Arc::clone(&customizer))).await?;
+    let preparer = IdentityBuildPreparer::new(true);
+    preparer.bind(&runtime, None).await;
+    let lowered = || {
+        let mut seat = meerkat_mob::SpawnMemberSpec::host_root("personal", member_of(&alice))
+            .with_created_custody(true);
+        seat.labels = Some(BTreeMap::from([(
+            "custody".to_string(),
+            "store".to_string(),
+        )]));
+        seat.context = Some(serde_json::json!({"row": "context"}));
+        seat.model_override = Some("an-earlier-build".to_string());
+        seat
+    };
+    let resumed = || {
+        let mut seat = lowered();
+        seat.launch_mode = meerkat_mob::launch::MemberLaunchMode::Resume {
+            bridge_session_id: SessionId::new(),
+            resume_from_role: None,
+        };
+        seat
+    };
+
+    // Bound, not composed yet: there is no host step to run.
+    let mut fresh = lowered();
+    assert_eq!(preparer.compose_store_owned_seat(&mut fresh).await, Ok(()));
+    assert_eq!(
+        (fresh.context.clone(), fresh.model_override.clone()),
+        (lowered().context, lowered().model_override),
+        "a fresh spawn's seat is left as Core lowered it"
+    );
+    let mut wake = resumed();
+    assert!(
+        matches!(
+            preparer.compose_store_owned_seat(&mut wake).await,
+            Err(MemberBuildPreparationRefusal::Retryable { .. })
+        ),
+        "a wake's seat is refused for now"
+    );
+    assert_eq!(customizer.builds.load(Ordering::SeqCst), 0);
+
+    runtime
+        .register(DurableAgentSpec {
+            context: Some(serde_json::json!({"host": "context"})),
+            additional_instructions: vec!["Answer for the desk.".to_string()],
+            ..spec(&alice)
+        })
+        .await
+        .expect("the identity registers");
+    runtime.compose_member_builds().await;
+
+    let mut seat = resumed();
+    assert_eq!(preparer.compose_store_owned_seat(&mut seat).await, Ok(()));
+    assert_eq!(customizer.builds.load(Ordering::SeqCst), 1);
+    assert_eq!(seat.context, Some(serde_json::json!({"host": "context"})));
+    assert_eq!(
+        seat.additional_instructions,
+        Some(vec!["Answer for the desk.".to_string()])
+    );
+    assert_eq!(
+        seat.model_override, None,
+        "no override is kept from an earlier build: the draft names no model"
+    );
+    assert_eq!(
+        seat.labels,
+        lowered().labels,
+        "the seat's labels stay as Core lowered them"
+    );
+    let prepared = preparer
+        .prepare_identity_member(
+            &member_of(&alice),
+            alice.clone(),
+            Some(Arc::clone(&runtime)),
+            management(MemberIdentityManagement::CommandDriven),
+        )
+        .await;
+    assert_eq!(prepared, Ok(MemberBuildPrepared::Prepared));
+    assert_eq!(
+        customizer.builds.load(Ordering::SeqCst),
+        1,
+        "the build's preparation does not run the customizer again"
+    );
+
+    // A build whose seat was not composed first is prepared as before.
+    let prepared = preparer
+        .prepare_identity_member(
+            &member_of(&alice),
+            alice.clone(),
+            Some(Arc::clone(&runtime)),
+            management(MemberIdentityManagement::CommandDriven),
+        )
+        .await;
+    assert_eq!(prepared, Ok(MemberBuildPrepared::Prepared));
+    assert_eq!(customizer.builds.load(Ordering::SeqCst), 2);
+
+    // A failed customizer refuses the seat, retryable.
+    runtime
+        .set_agent_customizer(Some(Arc::new(CountingCustomizer {
+            refuse: Some(|| CustomizerError::BuildFailed("the host is down".to_string())),
+            ..CountingCustomizer::default()
+        }) as Arc<dyn AgentCustomizer>))
+        .await;
+    let mut seat = resumed();
+    let refused = preparer.compose_store_owned_seat(&mut seat).await;
+    let Err(MemberBuildPreparationRefusal::Retryable { reason }) = refused else {
+        return Err(format!("expected a retryable refusal, got {refused:?}").into());
+    };
+    assert!(reason.contains("the host is down"), "{reason}");
+    Ok(())
+}
+
 /// R112: a preparation whose host build fails is refused retryable (the
 /// member stays dormant), and the customizer's failure is recorded with its
 /// typed reason: a delivery Core refused for the build preparation's retry

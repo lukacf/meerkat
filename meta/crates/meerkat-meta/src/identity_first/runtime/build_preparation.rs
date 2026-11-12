@@ -17,8 +17,23 @@ use meerkat_mob::{MemberBuildPreparationRefusal, MemberBuildPrepared};
 
 use super::super::bridge::{BridgeAdmissionError, BridgeError};
 use super::super::build_preparer::IdentityBuildPreparer;
-use super::super::types::{AgentBuildContext, AgentIdentity, CustomizerToolsPending};
+use super::super::types::{
+    AgentBuildContext, AgentBuildDraft, AgentIdentity, CustomizerToolsPending, DurableAgentSpec,
+};
 use super::{IdentityRuntime, IdentityRuntimeError};
+
+/// How far the host's build step of one build got
+/// ([`IdentityRuntime::compose_identity_build`]).
+enum ComposedIdentityBuild {
+    /// The runtime composes no customizer: there is no host build step.
+    NoCustomizer,
+    /// The identity is not registered (it left the roster since the
+    /// preparer read it).
+    Unregistered,
+    /// The customizer ran and its tools are published: the identity's
+    /// registered spec and the draft the customizer composed from it.
+    Composed(Box<(DurableAgentSpec, AgentBuildDraft)>),
+}
 
 impl IdentityRuntime {
     /// Install the preparer the mob was built with: the composition
@@ -54,8 +69,90 @@ impl IdentityRuntime {
         &self,
         identity: &AgentIdentity,
     ) -> Result<MemberBuildPrepared, MemberBuildPreparationRefusal> {
+        Ok(match self.compose_identity_build(identity).await? {
+            ComposedIdentityBuild::NoCustomizer => MemberBuildPrepared::Prepared,
+            // The identity left the roster since the preparer read it: the
+            // roster pass retires its member, which holds no run until then.
+            ComposedIdentityBuild::Unregistered => MemberBuildPrepared::HoldUntilReleased,
+            ComposedIdentityBuild::Composed(_) => self.composed_build_answer(),
+        })
+    }
+
+    /// What Core is answered for a build whose customizer tools were just
+    /// published: it may run, except on a candidate launch, which holds the
+    /// member (its runs belong to the authoritative launch).
+    fn composed_build_answer(&self) -> MemberBuildPrepared {
+        if self.is_candidate_launch() {
+            MemberBuildPrepared::HoldUntilReleased
+        } else {
+            MemberBuildPrepared::Prepared
+        }
+    }
+
+    /// Compose `seat`, the seat Core lowered for a build of registered
+    /// `identity`'s member, an identity whose record is its row: run the
+    /// host's `customize_build` once for this build, publish its tools into
+    /// the identity's stable dispatcher, and lower the rest of the draft
+    /// onto the seat through the lowering a configured identity's seat is
+    /// composed with
+    /// ([`super::super::bridge::SessionBridge::lower_store_owned_seat_build`]).
+    /// Core decides what the build takes of it: the model and the provider
+    /// parameters at every build, the context, the instructions and the
+    /// system prompt at the first build of the member's session.
+    ///
+    /// `Ok(Some(answer))` is what this build's preparation answers, the
+    /// customizer having run for it already; `Ok(None)` when nothing was
+    /// composed (the runtime composes no customizer, or the identity left
+    /// the registration) and the seat is as Core lowered it. A failed
+    /// customizer, and a draft that does not lower, refuse the build
+    /// retryable, with the failure recorded for the identity's status and
+    /// the typed answer to a refused delivery.
+    pub(crate) async fn compose_store_owned_seat(
+        &self,
+        identity: &AgentIdentity,
+        seat: &mut meerkat_mob::SpawnMemberSpec,
+    ) -> Result<Option<MemberBuildPrepared>, MemberBuildPreparationRefusal> {
+        let Some(bridge) = self.bridge() else {
+            return Ok(None);
+        };
+        let ComposedIdentityBuild::Composed(composed) =
+            self.compose_identity_build(identity).await?
+        else {
+            return Ok(None);
+        };
+        let (spec, draft) = *composed;
+        if let Err(error) = bridge.lower_store_owned_seat_build(&spec, &draft, seat) {
+            let reason = format!("the host's build did not lower onto the member's seat: {error}");
+            tracing::warn!(
+                %identity,
+                %reason,
+                "the member's build was refused: it stays dormant until its build preparation \
+                 is retried"
+            );
+            self.record_customizer_failure(
+                identity,
+                CustomizerToolsPending {
+                    reason: reason.clone(),
+                    artifact_refusal: None,
+                },
+            );
+            return Err(MemberBuildPreparationRefusal::Retryable { reason });
+        }
+        Ok(Some(self.composed_build_answer()))
+    }
+
+    /// Run the host's `customize_build` for the build of registered
+    /// `identity`'s member Core is about to perform, with the runtime's
+    /// real context, and publish its tools into the identity's stable
+    /// dispatcher, unreleased: the one host build step of a build, whose
+    /// draft the caller lowers further or drops. A failed customizer is
+    /// refused retryable, its failure recorded.
+    async fn compose_identity_build(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<ComposedIdentityBuild, MemberBuildPreparationRefusal> {
         let Some(customizer) = self.customizer.read().await.clone() else {
-            return Ok(MemberBuildPrepared::Prepared);
+            return Ok(ComposedIdentityBuild::NoCustomizer);
         };
         let Some(spec) = self
             .entries
@@ -64,9 +161,7 @@ impl IdentityRuntime {
             .get(identity)
             .map(|entry| entry.spec.clone())
         else {
-            // The identity left the roster since the preparer read it: the
-            // roster pass retires its member, which holds no run until then.
-            return Ok(MemberBuildPrepared::HoldUntilReleased);
+            return Ok(ComposedIdentityBuild::Unregistered);
         };
         let context = AgentBuildContext {
             identity: identity.clone(),
@@ -99,10 +194,7 @@ impl IdentityRuntime {
             Ok(()) => {
                 self.publish_customizer_tools_unreleased(identity, &mut draft)
                     .await;
-                if self.is_candidate_launch() {
-                    return Ok(MemberBuildPrepared::HoldUntilReleased);
-                }
-                Ok(MemberBuildPrepared::Prepared)
+                Ok(ComposedIdentityBuild::Composed(Box::new((spec, draft))))
             }
             Err(error) => {
                 let reason = format!("customize_build failed: {error}");

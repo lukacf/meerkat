@@ -7,8 +7,27 @@
 //! composes for the member's identity. Core asks the host's
 //! [`MemberBuildPreparer`] once per build, off the actor, before the member's
 //! provision, on every wake and every boot-set restore, so a member never runs
-//! with a surface its host has not prepared. With no preparer configured,
-//! nothing changes.
+//! with a surface its host has not prepared. The spawn of a store-owned
+//! identity's member (the kickoff spawn of its create, or the seat a start
+//! owes it) is such a build too: it is asked before that spawn's provision,
+//! about the session the spawn names, which no build has created yet, with
+//! no wired peers (the spawn wires them). A refusal there fails the spawn:
+//! the identity stays owed its seat, and no retry is recorded. With no
+//! preparer configured, nothing changes.
+//!
+//! A store-owned identity's member is seated from its row in the mob's
+//! identity store, with no host step. So that it is built from the same host
+//! inputs as a member its host spawns itself, Core asks the preparer to
+//! compose its seat ([`MemberBuildPreparer::prepare_store_owned_seat`]) at
+//! every build of it, before the host's spawn customizer and before the
+//! build's preparation: before a fresh spawn under created custody is sent
+//! (the kickoff spawn of its create, and the spawn a start or a rotation
+//! owes it), and at every wake and boot restore of the member. Each build
+//! takes the profile and model overrides of the answer; the first build of
+//! the member's session also takes the build inputs that author it (the
+//! context, the instructions, the system prompt). No build relies on an
+//! earlier answer: the host is the one source at each, so a restart
+//! changes nothing. The default composes nothing.
 //!
 //! The preparer receives a read-only [`MobReadHandle`]: it is called inside a
 //! wake and inside a boot restore before the mob's actor runs, so it must not
@@ -22,6 +41,7 @@ use meerkat_core::types::SessionId;
 
 use crate::ids::AgentIdentity;
 use crate::runtime::MobReadHandle;
+use crate::runtime::handle::SpawnMemberSpec;
 use crate::runtime::session_service::MobSessionService;
 
 /// What the host is asked to prepare for one member's build.
@@ -107,11 +127,79 @@ pub trait MemberBuildPreparer: Send + Sync {
         request: MemberBuildPreparation,
     ) -> Result<MemberBuildPrepared, MemberBuildPreparationRefusal>;
 
+    /// Compose the seat of a store-owned identity's member
+    /// ([`crate::IdentityEntryOrigin::Created`]) for the build Core is about
+    /// to perform. Core seats such a member from its row in the mob's
+    /// identity store, with no host step; this is where its host sets the
+    /// build inputs it sets on the spec of a member it spawns itself.
+    /// `seat` is the request Core lowered: the row's profile, labels,
+    /// context and instructions for a first build, the member's own
+    /// recorded request for a later one.
+    ///
+    /// Called at every build of such a member, off the actor, before the
+    /// host's spawn customizer and before [`Self::prepare_member_build`]:
+    /// the kickoff spawn of its create, the spawn a start or a rotation
+    /// owes it, and every wake and boot restore. A seat Core holds Dormant
+    /// asks nothing until it is built. What a build takes from the answer:
+    ///
+    /// - at every build, the profile and model overrides
+    ///   ([`SpawnMemberSpec::override_profile`],
+    ///   [`SpawnMemberSpec::model_override`]), which carry the model and
+    ///   the provider parameters. They replace the overrides the member's
+    ///   request held from an earlier build, so the answer is the member's
+    ///   overrides for that build, and no answer builds it on its profile
+    ///   as the definition gives it. On a rebuild of a durable session they
+    ///   apply as any member's overrides do: the session's own model and
+    ///   provider parameters stand unless the profile's resume mask names
+    ///   them;
+    /// - at the first build of the member's session only, the build inputs
+    ///   that author it: the context, the additional instructions and the
+    ///   system prompt override, and with them the tool access and
+    ///   application tool policies, the budget limits, the shell
+    ///   environment, the auth binding and the process-local overlays
+    ///   (external tools, compaction curator, tool dispatch admission). A
+    ///   later build keeps what its session was first built with:
+    ///   instructions are never rewritten after the fact.
+    ///
+    /// Nothing else of the answer is taken. The seat's labels, runtime
+    /// mode, backend, binding, placement, first message, tool category
+    /// overrides and wiring stay as Core lowered them. An answer that
+    /// changed the seat's identity, role, launch mode or custody is
+    /// refused: the build fails as a
+    /// [`MemberBuildPreparationRefusal::Final`] refusal does.
+    ///
+    /// The host answers from the identity's row and its own state, the same
+    /// for every build: no build relies on an earlier answer, so a restart
+    /// changes nothing. It may be called more than once for one seat: a
+    /// first build that fails after the host answered is asked again.
+    /// `handle` is the read-only view [`MemberBuildPreparation`] carries,
+    /// with the same rule: it issues no actor command.
+    ///
+    /// A refusal fails the build before anything is built. At a spawn the
+    /// identity stays owed its seat, and the mob's next start asks again. At
+    /// a wake or a boot restore it is the refusal
+    /// [`Self::prepare_member_build`] would give: the member stays Dormant
+    /// (its session unborn if no build created it), and its next wake asks
+    /// again once the retry is due
+    /// ([`MemberBuildPreparationRefusal::Retryable`]), or the member is
+    /// recorded broken ([`MemberBuildPreparationRefusal::Final`]).
+    ///
+    /// The default changes nothing: the member is built from its row alone.
+    async fn prepare_store_owned_seat(
+        &self,
+        handle: MobReadHandle,
+        seat: &mut SpawnMemberSpec,
+    ) -> Result<(), MemberBuildPreparationRefusal> {
+        let _ = (handle, seat);
+        Ok(())
+    }
+
     /// The member Core built is live, with this tool surface. Called once per
     /// successful local build, off the actor: a wake's or a boot restore's
     /// (which Core prepared through this preparer), and a spawn's once its
     /// activation committed (a fresh or embodied spawn, a held create once
-    /// activated, a respawn), which Core does not prepare. A build that
+    /// activated, a respawn), which Core does not prepare, except the spawn
+    /// of a store-owned identity's member, which it does. A build that
     /// failed, or a wake that was refused or abandoned, is never reported.
     /// The default ignores it.
     async fn member_built(&self, report: MemberBuildReport) {
@@ -138,6 +226,145 @@ pub(crate) fn member_build_wired_peers(
             }
         })
         .collect()
+}
+
+/// The fact of a store-owned seat its host's composition changed that Core
+/// refuses a change of (its identity, role, launch mode or custody); `None`
+/// when the composition changed none.
+fn refused_seat_change(seat: &SpawnMemberSpec, composed: &SpawnMemberSpec) -> Option<&'static str> {
+    use crate::launch::MemberLaunchMode;
+    let same_launch = match (&seat.launch_mode, &composed.launch_mode) {
+        (MemberLaunchMode::Fresh, MemberLaunchMode::Fresh) => true,
+        (
+            MemberLaunchMode::Resume {
+                bridge_session_id: seated,
+                ..
+            },
+            MemberLaunchMode::Resume {
+                bridge_session_id: answered,
+                ..
+            },
+        ) => seated == answered,
+        _ => false,
+    };
+    if composed.identity != seat.identity {
+        Some("identity")
+    } else if composed.role_name != seat.role_name {
+        Some("role")
+    } else if !same_launch {
+        Some("launch mode")
+    } else if composed.created_custody != seat.created_custody
+        || composed.entry_custody != seat.entry_custody
+    {
+        Some("custody")
+    } else {
+        None
+    }
+}
+
+/// Ask the host's build preparer to compose `seat`, the request Core
+/// lowered for a build of a store-owned identity's member
+/// ([`MemberBuildPreparer::prepare_store_owned_seat`]), and set on it what
+/// that build takes from the answer: the profile and model overrides at
+/// every build, and at the first build of the member's session
+/// (`first_build`) the build inputs that author it. Everything else of
+/// `seat` stays as Core lowered it, its labels included.
+///
+/// The host composes a copy: a refusal, and an answer that changed the
+/// seat's identity, role, launch mode or custody (refused as
+/// [`MemberBuildPreparationRefusal::Final`], naming what changed), leave
+/// `seat` untouched.
+pub(crate) async fn compose_store_owned_seat(
+    preparer: &dyn MemberBuildPreparer,
+    handle: MobReadHandle,
+    seat: &mut SpawnMemberSpec,
+    first_build: bool,
+) -> Result<(), MemberBuildPreparationRefusal> {
+    let mut composed = seat.clone();
+    preparer
+        .prepare_store_owned_seat(handle, &mut composed)
+        .await?;
+    if let Some(changed) = refused_seat_change(seat, &composed) {
+        return Err(MemberBuildPreparationRefusal::Final {
+            reason: format!(
+                "the host's composition of the seat of '{}' changed its {changed}",
+                seat.identity
+            ),
+        });
+    }
+    seat.override_profile = composed.override_profile;
+    seat.model_override = composed.model_override;
+    // The seat's profile override reads as a spawn and a Dormant seat
+    // record theirs: with the model override applied to it, so the member's
+    // roster entry holds the same override whichever path built it.
+    if let (Some(profile), Some(model)) = (seat.override_profile.as_mut(), &seat.model_override) {
+        profile.model.clone_from(model);
+    }
+    if first_build {
+        seat.context = composed.context;
+        seat.additional_instructions = composed.additional_instructions;
+        seat.system_prompt_override = composed.system_prompt_override;
+        seat.tool_access_policy = composed.tool_access_policy;
+        seat.application_tool_policy = composed.application_tool_policy;
+        seat.budget_limits = composed.budget_limits;
+        seat.shell_env = composed.shell_env;
+        seat.auth_binding = composed.auth_binding;
+        seat.external_tools = composed.external_tools;
+        seat.compaction_curator_override = composed.compaction_curator_override;
+        seat.tool_dispatch_admission = composed.tool_dispatch_admission;
+    }
+    Ok(())
+}
+
+/// The error the spawn of `agent_identity`'s member fails with when its
+/// host refused, for now or for good, to compose its seat or to prepare its
+/// build: the host's reason, named for which of the two refusals it is.
+pub(crate) fn spawn_refusal_error(
+    agent_identity: &AgentIdentity,
+    refusal: MemberBuildPreparationRefusal,
+) -> crate::error::MobError {
+    match refusal {
+        MemberBuildPreparationRefusal::Retryable { reason } => {
+            crate::error::MobError::Internal(format!(
+                "the host asked to retry the build preparation of '{agent_identity}': {reason}"
+            ))
+        }
+        MemberBuildPreparationRefusal::Final { reason } => crate::error::MobError::Internal(
+            format!("the host refused to prepare the build of '{agent_identity}': {reason}"),
+        ),
+    }
+}
+
+/// Ask the host's build preparer about the spawn of a store-owned
+/// identity's member (the kickoff spawn of its create, or the seat a start
+/// owes it) before its provision, off the actor, as a wake asks it. `Ok` is
+/// whether a hold the host asked for was staged on the member's next
+/// registration: the caller removes it again when the spawn fails. A
+/// refusal, for now or for good, fails the spawn with the host's reason:
+/// the identity stays owed its seat, and the mob's next start asks again.
+/// No retry is recorded for it, since no member exists yet to refuse a wake
+/// of.
+#[cfg(feature = "runtime-adapter")]
+pub(crate) async fn prepare_spawn_member_build(
+    preparer: &dyn MemberBuildPreparer,
+    provisioner: &dyn crate::runtime::provisioner::MobProvisioner,
+    request: MemberBuildPreparation,
+) -> Result<bool, crate::error::MobError> {
+    let agent_identity = request.agent_identity.clone();
+    let session_id = request.session_id.clone();
+    match preparer.prepare_member_build(request).await {
+        Ok(MemberBuildPrepared::Prepared) => Ok(false),
+        Ok(MemberBuildPrepared::HoldUntilReleased) => {
+            provisioner
+                .stage_member_registration_run_start_hold_only(
+                    &crate::event::MemberRef::from_bridge_session_id(session_id),
+                    meerkat_runtime::RunStartHoldReason::ToolsNotPublished,
+                )
+                .await?;
+            Ok(true)
+        }
+        Err(refusal) => Err(spawn_refusal_error(&agent_identity, refusal)),
+    }
 }
 
 /// Report a built member to the host's preparer, if one is configured: read

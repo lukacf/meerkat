@@ -16992,6 +16992,7 @@ impl MobActor {
                 .unwrap_or_default(),
             member_grant_mint: self.member_residency.member_grant_mint.clone(),
             member_tool_audience: self.member_residency.member_tool_audience.clone(),
+            member_build_preparer: self.member_residency.build_preparer.clone(),
         }
     }
 
@@ -38508,6 +38509,45 @@ impl MobActor {
             reject_spawn_before_custody!("recipient_trust_obligation", error);
         }
 
+        // The spawn of a store-owned identity's member (the kickoff spawn of
+        // its create, or the seat a start owes it) is a build the host
+        // prepares, as a wake's is: the provisioning task asks the host's
+        // build preparer before the provision, off the actor, about the
+        // session the spawn's request names.
+        #[cfg(feature = "runtime-adapter")]
+        let build_preparation = if created_custody
+            && held.is_none()
+            && matches!(provision_input.binding(), crate::RuntimeBinding::Session)
+        {
+            self.member_residency
+                .build_preparer
+                .clone()
+                .map(|preparer| {
+                    (
+                        preparer,
+                        super::member_build_preparer::MemberBuildPreparation {
+                            agent_identity: agent_identity.clone(),
+                            session_id: admitted_bridge_session_id.clone(),
+                            handle: self.member_wakes.host_read_handle.clone(),
+                            wired_peers: super::member_build_preparer::member_build_wired_peers(
+                                self.dsl_authority.state(),
+                                &agent_identity,
+                            ),
+                        },
+                    )
+                })
+        } else {
+            None
+        };
+        // Whether the preparation staged a hold on the member's next
+        // registration: a spawn that fails after it removes the hold again.
+        #[cfg(feature = "runtime-adapter")]
+        let build_hold_session = build_preparation
+            .as_ref()
+            .map(|(_, request)| request.session_id.clone());
+        #[cfg(feature = "runtime-adapter")]
+        let build_hold_staged = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
         let pending = PendingSpawn {
             profile_name,
             agent_identity,
@@ -38600,6 +38640,8 @@ impl MobActor {
         self.inline_step_watchdog
             .set_spawn_stage(SpawnInlineStage::ProvisionDispatch);
         let spawn_preparation_permits = self.spawn_preparations.permits();
+        #[cfg(feature = "runtime-adapter")]
+        let task_build_hold_staged = Arc::clone(&build_hold_staged);
         let provisioner = self.provisioner.clone();
         let session_service = self.session_service.clone();
         let command_tx = self.command_tx.clone();
@@ -38653,6 +38695,23 @@ impl MobActor {
                         )
                         .await?;
                         drop(preparation_permit);
+                        // The host prepares a store-owned identity's spawn
+                        // before its provision. A refusal fails the spawn
+                        // here, before anything is built.
+                        #[cfg(feature = "runtime-adapter")]
+                        {
+                            if let Some((preparer, request)) = build_preparation {
+                                let staged =
+                                    super::member_build_preparer::prepare_spawn_member_build(
+                                        preparer.as_ref(),
+                                        provisioner.as_ref(),
+                                        request,
+                                    )
+                                    .await?;
+                                task_build_hold_staged
+                                    .store(staged, std::sync::atomic::Ordering::SeqCst);
+                            }
+                        }
                         // A plain resume adopts an existing transcript: read
                         // whether it still owes the member's first turn from
                         // the session the resume already loaded.
@@ -38753,6 +38812,28 @@ impl MobActor {
                     })
                 }
             };
+            // A spawn that failed after its build preparation staged a hold
+            // leaves none behind: the member's next spawn is prepared again.
+            #[cfg(feature = "runtime-adapter")]
+            {
+                if provision_result.is_err()
+                    && build_hold_staged.load(std::sync::atomic::Ordering::SeqCst)
+                    && let Some(session_id) = build_hold_session
+                    && let Err(error) = provisioner
+                        .unstage_member_registration_run_start_hold(
+                            &MemberRef::from_bridge_session_id(session_id),
+                            meerkat_runtime::RunStartHoldReason::ToolsNotPublished,
+                        )
+                        .await
+                {
+                    tracing::warn!(
+                        spawn_ticket,
+                        member = %panic_member_identity,
+                        %error,
+                        "a failed spawn's staged run-start hold could not be removed"
+                    );
+                }
+            }
 
             if let Err(send_error) = command_tx
                 .send(RoutedMobCommand::internal(MobCommand::SpawnProvisioned {

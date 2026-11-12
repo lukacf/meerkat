@@ -3246,6 +3246,99 @@ async fn mob_check_and_retire_member_answer_a_hidden_member_as_an_absent_one() -
 
 /// The arguments of a daily `meerkat_schedule_create` named `name` aimed at
 /// `target`.
+/// Who is private to a person is said by the member's own roster row, not
+/// by what this process built. With a record of built members that knows
+/// nobody (a member seated and never built here, or the record not yet
+/// read after a start), a shared agent's `mob_check_member` and
+/// `mob_retire_member` of a private member still answer as for a name no
+/// member holds and retire nothing, and the private member's own council
+/// is still refused.
+#[tokio::test]
+async fn per_member_tools_hide_a_private_member_this_process_has_not_built() -> TestResult {
+    const MOB: &str = "private-unbuilt-member";
+    let state = tempfile::tempdir()?;
+    let runtime = persistent_gateway_runtime_in(state.path(), MOB, "", "").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    let app = console_json_router_with_state(enforced_console(&runtime, None));
+    let forked = fork_on_console(&app, Some(&bearer(alice_claims())), "alpha", "alpha-side").await;
+    assert!(forked["error"].is_null(), "{forked:#}");
+    let overrides = runtime
+        .implicit_delegate_retirement_overrides()
+        .ok_or("the runtime installs the agent mob tools")?;
+    let side = AgentIdentity::from("alpha-side");
+    let row = runtime
+        .handle()
+        .get_member(&side)
+        .await?
+        .ok_or("the private member has a roster row")?;
+    assert!(
+        crate::access::private_owner(&row.labels).is_some(),
+        "its roster row names its person"
+    );
+    // A record that knows no member of the mob.
+    let unread = crate::private_owners::PrivateOwners::default();
+    let check = |member: &str| json!({ "mob_id": MOB, "member_id": member });
+    let answer = |outcome: Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError>,
+                  name: &str| {
+        let text = match outcome {
+            Ok(outcome) => format!("ok: {outcome:?}"),
+            Err(error) => format!("error: {}", error.to_transcript_content()),
+        };
+        text.replace(name, "<member>")
+    };
+
+    let shared = crate::mob_handle_runtime::agent_mob_tool_wrapper_as_member_with_owners_for_test(
+        OwnedMemberTools::new(runtime.handle(), "alpha"),
+        overrides.clone(),
+        &runtime,
+        member_session(&runtime, "alpha").await?,
+        unread.clone(),
+    );
+    for tool in ["mob_check_member", "mob_retire_member"] {
+        let hidden = answer(
+            agent_tool_call(&shared, tool, check("alpha-side")).await,
+            "alpha-side",
+        );
+        let absent = answer(
+            agent_tool_call(&shared, tool, check("alpha-gone")).await,
+            "alpha-gone",
+        );
+        assert_eq!(
+            hidden, absent,
+            "a shared agent's {tool} of a private member answers as for an absent member"
+        );
+    }
+    assert!(
+        runtime.handle().get_member(&side).await?.is_some(),
+        "the private member was not retired"
+    );
+
+    let tools = OwnedMemberTools::new(runtime.handle(), "alpha-side");
+    let side_chat =
+        crate::mob_handle_runtime::agent_mob_tool_wrapper_as_member_with_owners_for_test(
+            tools.clone(),
+            overrides,
+            &runtime,
+            member_session(&runtime, "alpha-side").await?,
+            unread,
+        );
+    let council = json!({
+        "question": "Which of us remembers the code word?",
+        "participants": ["alpha"],
+    });
+    match agent_tool_call(&side_chat, "council", council).await {
+        Err(meerkat_core::ToolError::PolicyDenied { denial }) => {
+            assert_eq!(denial.code, "private_member_council", "{}", denial.message);
+        }
+        other => panic!("a private member's council is refused as a policy denial: {other:?}"),
+    }
+    assert!(
+        tools.calls().is_empty(),
+        "the council tool never ran for the private member"
+    );
+    Ok(())
+}
+
 fn daily_schedule(name: &str, target: Value) -> Value {
     json!({
         "name": name,

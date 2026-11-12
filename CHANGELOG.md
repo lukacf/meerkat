@@ -48,6 +48,60 @@ them.
 
 ### Added
 
+- `MobHandle::seat_owed_store_owned_identities` seats, while the mob runs,
+  every store-owned identity that is owed its seat (the spawn of its
+  create's kickoff failed), and answers the identities still owed
+  afterwards. It runs the pass a start runs, so a host need not restart the
+  mob to seat such an identity; its kickoff then runs once. The pass also
+  carries out what the rows keep owed besides: the retirement of a removed
+  or archived identity whose member is not retiring yet.
+
+- Mob: `MobHandle::identity_records` reads the rows of many identities in
+  the mob's identity store at once, in pages of at most
+  `IDENTITY_ENTRY_PAGE_MAX` names, one store read per page, where
+  `identity_record` reads one row per call. A host that serves many
+  store-owned identities reads their rows at a start with a number of store
+  reads that does not grow with their number beyond pages. A name the store
+  holds no row of is absent from the answer. Additive.
+
+- Mob: `MemberRespawn::with_compaction_floor` (and the public field
+  `MemberRespawn::compaction_floor`) seats a member's same-session
+  successor (`MobHandle::respawn_member`) with an auto-compact floor.
+  `Some(floor)` sets the threshold on the profile the successor builds
+  with (the member's own profile override, or its role's profile), which
+  the successor then carries as its override; `None` removes a floor
+  again, and an override that then equals the role's profile is dropped,
+  so the member follows its role as before. A host that rebuilds a member
+  for a maintenance compaction names the floor first and removes it
+  afterwards. A request that names no floor keeps what the member builds
+  with. Additive: `MemberRespawn` is non-exhaustive.
+
+- Mob: `MemberBuildPreparer::prepare_store_owned_seat` lets a host compose
+  the seat of a store-owned identity's member for each of its builds. Core
+  seats such a member from its row in the mob's identity store, with no
+  host step, so until now its host could give it tools only. The method
+  receives the request Core lowered and sets build inputs on it, as a host
+  does on the spec of a member it spawns itself. Core asks at every build
+  of the member, before the host's spawn customizer and before
+  `prepare_member_build`: before the fresh spawn of its create (one with a
+  first message), of a start's owed seat and of a rotation, and at every
+  wake and boot restore. A seat Core holds Dormant asks nothing until it is
+  built. Every build takes the profile and model overrides of the answer
+  (the model and the provider parameters); the first build of the member's
+  session also takes the context, the additional instructions, the system
+  prompt override and the other first-build inputs. A later build keeps
+  what its session was first built with. No build relies on an earlier
+  answer, so the host answers the same from the row and its own
+  state each time, and may be asked more than once for one seat. The seat's
+  labels, runtime mode, binding, placement and first message stay as Core
+  lowered them, and an answer that changed the seat's identity, role,
+  launch mode or custody is refused. A refusal fails the build before
+  anything is built: at a spawn the identity stays owed its seat and the
+  mob's next start asks again; at a wake or a restore the member stays
+  Dormant (`BuildPreparationRetry`) or is recorded broken, as for a refused
+  build preparation. Additive: the method is defaulted and composes
+  nothing, so hosts that do not implement it see no change.
+
 - `meerkat-mob`: `MobSessionService::recorded_build_instructions(session_id)`
   (a provided trait method) reads the instruction sections a session was
   built with (`additional_instructions`), from the session's committed build
@@ -89,6 +143,13 @@ them.
   behind it.
 
 ### Changed
+
+- Durable decisions of the kinds `identity.create`, `identity.update`,
+  `identity.archive`, `identity.unarchive`, `identity.remove` and
+  `identity.adopt` (a change of an agent) are decided by people only
+  (`DECIDED_BY_PEOPLE_ONLY`): a hold of one that names a reviewer is refused
+  `ReviewStageNotAllowed`, so an agent never approves a change of an agent.
+  No released surface held a decision of these kinds.
 
 - `meerkat-mob`, `meerkat-machine-schema`: a mob's operator instruction
   limits bound one member's snapshot, not the mob. A member's snapshot is
@@ -147,6 +208,21 @@ them.
   the mob's process and not across a restart.
 
 ### Fixed
+
+- Mob: Core asks the host's member build preparer
+  (`MobBuilder::with_member_build_preparer`) before the spawn of a
+  store-owned identity's member, as it asks before a wake and a boot
+  restore: the member Core starts at the identity's create to run its first
+  message, and the seat a start owes it. The preparer is asked once, off
+  the actor, before the provision, about the session the spawn names (which
+  no build has created yet), with no wired peers. Through 0.9.13 that
+  member was built and ran its kickoff with nothing the host prepares for a
+  build, for example without the tools it publishes for the member's
+  identity. A refusal, for now or for good, is a failed kickoff spawn: the
+  create stays committed, nothing is built, the identity is owed its seat,
+  and the mob's next start asks again. A hold the host asks for
+  (`HoldUntilReleased`) holds the member's run starts until
+  `release_member_run_starts`. Hosts with no preparer see no change.
 
 - `meerkat`, `meerkat-mob` (0.5.1 through 0.9.14): a session keeps the
   instruction sections it was built with. A session's durable build state

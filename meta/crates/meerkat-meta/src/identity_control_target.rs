@@ -434,9 +434,13 @@ async fn live_aliases(
         if !seen_member_ids.insert(runtime_member_id.clone()) {
             continue;
         }
-        let identity = crate::member_comms_id::durable_identity_label(&member.labels)
-            .map(str::to_owned)
-            .unwrap_or_else(|| runtime_member_id.clone());
+        let identity = crate::member_comms_id::resolve_member_identity(
+            handle,
+            &member.agent_identity,
+            &member.labels,
+        )
+        .map(std::borrow::Cow::into_owned)
+        .unwrap_or_else(|| runtime_member_id.clone());
         let session_id = handle
             .resolve_bridge_session_id_observation(&member.agent_identity)
             .await

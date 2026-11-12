@@ -17,6 +17,21 @@
 //!   not a roster pass or a door registered it yet, and is prepared the
 //!   same way: Meta's spawn customizer attached the stable dispatcher to
 //!   the build, because Core holds the member id as an identity entry;
+//! - the seat of an identity whose record is its row is composed from the
+//!   host's build step at every build of its member
+//!   (`MemberBuildPreparer::prepare_store_owned_seat`): Core seats such an
+//!   identity from its row, so the customizer's draft is lowered onto the
+//!   seat Core is about to build, through the lowering a configured
+//!   identity's seat is composed with, and Core takes the model and the
+//!   provider parameters of it at every build and the context, the
+//!   instructions and the system prompt at the first build of the member's
+//!   session. The customizer runs once for the build: the preparation that
+//!   follows in the same build answers what the composition found. Before
+//!   the identity runtime is composed there is no host step to run: a fresh
+//!   spawn is left as Core lowered it (a refusal would leave the identity
+//!   owed its seat until the mob's next start, which asks in the same
+//!   state), and a wake or a restore is refused retryable, so the member
+//!   stays Dormant and is asked again;
 //! - before the identity runtime is composed (its roster registered, its
 //!   customizer and runtime services installed), an identity's member is
 //!   answered `HoldUntilReleased`: Core builds it and holds its run starts,
@@ -48,7 +63,8 @@ use std::sync::{Arc, Weak};
 
 use meerkat_mob::{
     AgentIdentity as MobAgentIdentity, MemberBuildPreparation, MemberBuildPreparationRefusal,
-    MemberBuildPrepared, MemberBuildPreparer, MemberBuildReport, MobSessionService,
+    MemberBuildPrepared, MemberBuildPreparer, MemberBuildReport, MobReadHandle, MobSessionService,
+    SpawnMemberSpec,
 };
 
 use super::runtime::IdentityRuntime;
@@ -58,6 +74,11 @@ use super::types::AgentIdentity;
 /// not composed yet.
 pub(crate) const PUBLISHED_ONCE_COMPOSED: &str =
     "customizer tools are published once the identity runtime is composed";
+
+/// Why the seat of an identity whose record is its row is not composed for
+/// a wake or a restore while the identity runtime is not composed yet.
+const SEAT_COMPOSED_ONCE_COMPOSED: &str = "the member's seat is composed from the host's build step once the identity runtime is \
+     composed";
 
 /// Meta's preparer of member builds: see the module documentation.
 ///
@@ -94,6 +115,13 @@ struct PreparerState {
     /// The identity each member being built belongs to, from its
     /// preparation, for the report of that build.
     building: BTreeMap<MobAgentIdentity, AgentIdentity>,
+    /// The members whose seat this preparer composed for the build in
+    /// progress (`prepare_store_owned_seat`), each with what that build's
+    /// preparation answers: the host's customizer ran for the build
+    /// already, so the preparation that follows takes the answer and does
+    /// not run it again. The next composition of the member's seat replaces
+    /// it, and its build's report clears it.
+    seat_composed: BTreeMap<MobAgentIdentity, MemberBuildPrepared>,
 }
 
 impl IdentityBuildPreparer {
@@ -263,9 +291,18 @@ impl IdentityBuildPreparer {
             .map_err(|error| MemberBuildPreparationRefusal::Retryable {
                 reason: format!("the member's roster entry could not be read: {error}"),
             })?;
+        // Core's entry read is the identity runtime's bridge's here: the
+        // build's read handle carries none.
+        let entries = runtime
+            .and_then(IdentityRuntime::bridge)
+            .map(|bridge| &**bridge);
         Ok(entry.as_ref().and_then(|entry| {
-            crate::member_comms_id::durable_identity_label(&entry.labels)
-                .and_then(|label| AgentIdentity::parse(label).ok())
+            crate::member_comms_id::resolve_member_identity(
+                &entries,
+                &entry.agent_identity,
+                &entry.labels,
+            )
+            .and_then(|identity| AgentIdentity::parse(&identity).ok())
         }))
     }
 }
@@ -291,6 +328,12 @@ impl IdentityBuildPreparer {
         {
             let mut state = self.lock_state();
             state.building.insert(member.clone(), identity.clone());
+            // The seat of this build was composed: the host's customizer
+            // ran for the build and its tools are published, so the
+            // preparation answers what the composition found.
+            if let Some(answer) = state.seat_composed.remove(member) {
+                return Ok(answer);
+            }
             if !self.publishes_tools() {
                 return Ok(MemberBuildPrepared::Prepared);
             }
@@ -349,6 +392,79 @@ impl IdentityBuildPreparer {
         Ok(MemberBuildPrepared::HoldUntilReleased)
     }
 
+    /// Compose `seat`, the seat Core lowered for a build of the member of
+    /// an identity whose record is its row
+    /// (`MemberBuildPreparer::prepare_store_owned_seat`): once the identity
+    /// runtime is composed, the identity is registered from its row if no
+    /// roster pass or door registered it yet, the host's customizer runs
+    /// once for the build, its tools are published, and the rest of its
+    /// draft is lowered onto the seat
+    /// ([`IdentityRuntime::compose_store_owned_seat`]). The build's
+    /// preparation, which Core asks next, then answers what the composition
+    /// found and does not run the customizer again.
+    async fn compose_store_owned_seat(
+        &self,
+        seat: &mut SpawnMemberSpec,
+    ) -> Result<(), MemberBuildPreparationRefusal> {
+        // An inert preparer, and a composition with no agent customizer,
+        // have no host build step: the seat stays as Core lowered it.
+        if !self.publishes_tools() {
+            return Ok(());
+        }
+        // Nothing is kept of an earlier composition of this member's seat.
+        self.lock_state().seat_composed.remove(&seat.identity);
+        let composed = self.lock_state().composed;
+        let runtime = match self.bound_runtime() {
+            Some(Ok(runtime)) if composed => runtime,
+            Some(Err(())) => {
+                return Err(MemberBuildPreparationRefusal::Retryable {
+                    reason: "the identity runtime is shut down".to_string(),
+                });
+            }
+            // The identity runtime is not composed yet, so its customizer
+            // cannot run. A fresh spawn is left as Core lowered it: refused,
+            // the identity would stay owed its seat until the mob's next
+            // start, which asks in this same state. A wake or a restore is
+            // refused for now: the member stays Dormant, and Core asks
+            // again once the retry is due.
+            Some(Ok(_)) | None => {
+                if matches!(
+                    seat.launch_mode,
+                    meerkat_mob::launch::MemberLaunchMode::Fresh
+                ) {
+                    return Ok(());
+                }
+                return Err(MemberBuildPreparationRefusal::Retryable {
+                    reason: SEAT_COMPOSED_ONCE_COMPOSED.to_string(),
+                });
+            }
+        };
+        let Ok(identity) = AgentIdentity::parse(
+            &crate::member_comms_id::durable_identity_for_roster_member(seat.identity.as_str()),
+        ) else {
+            return Ok(());
+        };
+        // An identity no roster pass or door registered yet is registered
+        // from its row, as its build's preparation registers it; a row that
+        // could not be read refuses the build, retryable.
+        if !runtime.contains(&identity).await
+            && !runtime
+                .register_created_member_for_build(&identity)
+                .await
+                .map_err(|reason| MemberBuildPreparationRefusal::Retryable { reason })?
+        {
+            return Ok(());
+        }
+        // Held behind a box: the customizer's future and the lowering stay
+        // out of the frame of Core's build.
+        if let Some(answer) = Box::pin(runtime.compose_store_owned_seat(&identity, seat)).await? {
+            self.lock_state()
+                .seat_composed
+                .insert(seat.identity.clone(), answer);
+        }
+        Ok(())
+    }
+
     /// Record the visible tools Core reported for the build of `member` on
     /// `session_id`, for the identity its preparation named, or, for a build
     /// Core did not ask this preparer about, the registered identity its
@@ -366,6 +482,7 @@ impl IdentityBuildPreparer {
             let mut state = self.lock_state();
             let prepared = state.building.remove(member);
             let held = state.held_builds.remove(member);
+            state.seat_composed.remove(member);
             if let Some(identity) = &prepared
                 && self.runtime.get().is_none()
             {
@@ -436,6 +553,17 @@ impl MemberBuildPreparer for IdentityBuildPreparer {
             handle.identity_management(&member).await
         })
         .await
+    }
+
+    async fn prepare_store_owned_seat(
+        &self,
+        _handle: MobReadHandle,
+        seat: &mut SpawnMemberSpec,
+    ) -> Result<(), MemberBuildPreparationRefusal> {
+        // The composition reads through the identity runtime's session
+        // bridge, as the build's preparation reads a row: it needs nothing
+        // of the build's read handle.
+        self.compose_store_owned_seat(seat).await
     }
 
     async fn member_built(&self, report: MemberBuildReport) {

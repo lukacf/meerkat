@@ -573,6 +573,81 @@ fn apply_workgraph_to_experience(
     }
 }
 
+/// Append the `identity_changes` affordance section the console reads
+/// before it offers a change of the mob's long-term agents, and each listed
+/// agent's `can_change_identity` and `can_remove_identity` affordances.
+///
+/// `available` says whether this console serves the writers of
+/// `meta/identity/*` to the caller at all: the runtime attached the family
+/// and the console is not read-only. `can_create`, `can_change` and
+/// `can_remove` are `available` intersected with the caller's grants when
+/// access control is enforced (`agent.identity.create`, and
+/// `agent.identity.manage` and `agent.identity.remove` on at least one
+/// agent), and mirror `available` otherwise; an agent's two affordances are
+/// the same two actions judged on that agent. They are advisory: every
+/// method is checked again when it is called, and the host's identity
+/// policy, which the flags do not read, still decides each change.
+pub(crate) fn apply_identity_changes_to_experience(
+    body: &mut Value,
+    view: Option<&AccessView>,
+    available: bool,
+    changed_at_run_time: &dyn Fn(&str) -> bool,
+) {
+    let enforced = view.filter(|view| view.enforced());
+    let (can_create, can_change, can_remove) = match enforced {
+        Some(view) => (
+            available && view.allows(crate::access::ACTION_AGENT_IDENTITY_CREATE),
+            available && view.may_perform_anywhere(crate::access::ACTION_AGENT_IDENTITY_MANAGE),
+            available && view.may_perform_anywhere(crate::access::ACTION_AGENT_IDENTITY_REMOVE),
+        ),
+        None => (available, available, available),
+    };
+    if let Some(agents) = body
+        .pointer_mut("/agent_sidebar/live_snapshot/agents")
+        .and_then(Value::as_array_mut)
+    {
+        for agent in agents {
+            let identity = agent
+                .get("identity")
+                .or_else(|| agent.get("member_id"))
+                .or_else(|| agent.get("agent_id"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            // An agent its host configures takes no run-time change: the
+            // call would be refused `owner_read_only`, so no control is
+            // offered for it. The refusal at the call stays the authority.
+            let changeable = available && changed_at_run_time(&identity);
+            let allowed = |action: &str| {
+                changeable && enforced.is_none_or(|view| view.allows_agent(action, &identity))
+            };
+            let can_change_agent = allowed(crate::access::ACTION_AGENT_IDENTITY_MANAGE);
+            let can_remove_agent = allowed(crate::access::ACTION_AGENT_IDENTITY_REMOVE);
+            if let Some(affordances) = agent.get_mut("affordances").and_then(Value::as_object_mut) {
+                affordances.insert(
+                    "can_change_identity".to_string(),
+                    Value::Bool(can_change_agent),
+                );
+                affordances.insert(
+                    "can_remove_identity".to_string(),
+                    Value::Bool(can_remove_agent),
+                );
+            }
+        }
+    }
+    if let Some(object) = body.as_object_mut() {
+        object.insert(
+            "identity_changes".to_string(),
+            serde_json::json!({
+                "available": available,
+                "can_create": can_create,
+                "can_change": can_change,
+                "can_remove": can_remove,
+            }),
+        );
+    }
+}
+
 /// Append the `memory` affordance section (§9.3) the console nav gate
 /// consumes. Coarse by design — `can_read` means "some memory read could
 /// succeed for this caller", mirroring the capabilities intersection;
@@ -2856,6 +2931,139 @@ mod topology_mob_tests {
             assert_eq!(mob_id(&named), Some(Value::from("ops-team")));
             assert_eq!(mob_id(&snapshot(members)), None);
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod identity_changes_flag_tests {
+    use super::*;
+    use crate::access::{
+        ACTION_AGENT_IDENTITY_CREATE, ACTION_AGENT_IDENTITY_MANAGE, AccessControlConfig, AccessRule,
+    };
+
+    fn experience() -> Value {
+        serde_json::json!({
+            "agent_sidebar": {"live_snapshot": {"agents": [
+                {"identity": "scout", "affordances": {"can_send_message": true}},
+                {"identity": "ledger", "affordances": {"can_send_message": true}},
+            ]}},
+        })
+    }
+
+    fn affordance(body: &Value, agent: usize, flag: &str) -> Value {
+        body["agent_sidebar"]["live_snapshot"]["agents"][agent]["affordances"][flag].clone()
+    }
+
+    /// The `identity_changes` section says whether the console serves
+    /// changes of agents to the caller and which of them its grants admit:
+    /// everything while access control is not enforced, nothing while the
+    /// family is not served, and with access control enforced exactly what
+    /// the caller's rules grant, per agent for the two per-agent flags.
+    #[test]
+    fn the_identity_changes_flags_follow_availability_and_the_callers_grants() {
+        let mut open = experience();
+        apply_identity_changes_to_experience(&mut open, None, true, &|_| true);
+        assert_eq!(
+            open["identity_changes"],
+            serde_json::json!({
+                "available": true, "can_create": true, "can_change": true, "can_remove": true,
+            })
+        );
+        assert_eq!(
+            affordance(&open, 0, "can_change_identity"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            affordance(&open, 0, "can_remove_identity"),
+            Value::Bool(true)
+        );
+
+        let mut unserved = experience();
+        apply_identity_changes_to_experience(&mut unserved, None, false, &|_| true);
+        assert_eq!(
+            unserved["identity_changes"],
+            serde_json::json!({
+                "available": false, "can_create": false, "can_change": false,
+                "can_remove": false,
+            })
+        );
+        assert_eq!(
+            affordance(&unserved, 1, "can_change_identity"),
+            Value::Bool(false)
+        );
+
+        let controller = AccessController::new(AccessControlConfig {
+            enabled: true,
+            admins: vec!["root@example.test".to_string()],
+            rules: vec![
+                AccessRule {
+                    id: "creates".to_string(),
+                    actions: vec![ACTION_AGENT_IDENTITY_CREATE.to_string()],
+                    ..AccessRule::default()
+                },
+                AccessRule {
+                    id: "manages-scout".to_string(),
+                    actions: vec![ACTION_AGENT_IDENTITY_MANAGE.to_string()],
+                    agents: vec!["scout".to_string()],
+                    ..AccessRule::default()
+                },
+            ],
+            ..AccessControlConfig::default()
+        })
+        .expect("controller");
+        let view = controller.view_for_subject(Some("person@example.test"));
+        let mut enforced = experience();
+        apply_identity_changes_to_experience(&mut enforced, Some(&view), true, &|_| true);
+        assert_eq!(
+            enforced["identity_changes"],
+            serde_json::json!({
+                "available": true, "can_create": true, "can_change": true, "can_remove": false,
+            })
+        );
+        assert_eq!(
+            affordance(&enforced, 0, "can_change_identity"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            affordance(&enforced, 1, "can_change_identity"),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            affordance(&enforced, 0, "can_remove_identity"),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            affordance(&enforced, 0, "can_send_message"),
+            Value::Bool(true),
+            "the other affordances are untouched"
+        );
+
+        // An agent its host configures is offered no control, whatever the
+        // caller's grants: its change would only be refused.
+        let mut configured = experience();
+        apply_identity_changes_to_experience(&mut configured, None, true, &|name| name == "ledger");
+        assert_eq!(
+            affordance(&configured, 0, "can_change_identity"),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            affordance(&configured, 0, "can_remove_identity"),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            affordance(&configured, 1, "can_change_identity"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            affordance(&configured, 1, "can_remove_identity"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            configured["identity_changes"]["can_change"],
+            Value::Bool(true),
+            "the console still serves changes"
+        );
     }
 }
 

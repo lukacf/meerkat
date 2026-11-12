@@ -54,6 +54,24 @@ fn policy() -> IdentityCreationPolicy {
     parse(&policy_json())
 }
 
+/// [`policy_json`] as a launch accepts it in this release: no rule names an
+/// outcome that nothing carries out yet (each such rule asks for a
+/// person's approval instead), and no profile is prepared.
+fn served_policy_json() -> Value {
+    let mut value = policy_json();
+    if let Some(rules) = value["approval"]["rules"].as_array_mut() {
+        for rule in rules {
+            if matches!(rule["outcome"]["kind"].as_str(), Some("notify" | "review")) {
+                rule["outcome"] = json!({
+                    "kind": "require_approval",
+                    "approver": rule["outcome"]["approver"].clone(),
+                });
+            }
+        }
+    }
+    value
+}
+
 fn refusal_of(value: &Value) -> PolicyRefusal {
     IdentityCreationPolicy::parse(value).expect_err("a refused policy")
 }
@@ -156,7 +174,11 @@ fn only_created(request: &IdentityRequest) -> &CreatedSpec {
             [created] => created,
             _ => panic!("one created identity"),
         },
-        RequestAction::Update(_) | RequestAction::Remove { .. } => panic!("a create request"),
+        RequestAction::Update(_)
+        | RequestAction::Remove { .. }
+        | RequestAction::Archive { .. }
+        | RequestAction::Unarchive { .. }
+        | RequestAction::Adopt { .. } => panic!("a create request"),
     }
 }
 
@@ -395,7 +417,11 @@ fn created_spec<'a>(request: &'a IdentityRequest, identity: &str) -> &'a Created
             .iter()
             .find(|created| created.spec.identity.as_str() == identity)
             .expect("the identity"),
-        RequestAction::Update(_) | RequestAction::Remove { .. } => panic!("a create request"),
+        RequestAction::Update(_)
+        | RequestAction::Remove { .. }
+        | RequestAction::Archive { .. }
+        | RequestAction::Unarchive { .. }
+        | RequestAction::Adopt { .. } => panic!("a create request"),
     }
 }
 
@@ -405,14 +431,22 @@ fn created_spec_mut<'a>(request: &'a mut IdentityRequest, identity: &str) -> &'a
             .iter_mut()
             .find(|created| created.spec.identity.as_str() == identity)
             .expect("the identity"),
-        RequestAction::Update(_) | RequestAction::Remove { .. } => panic!("a create request"),
+        RequestAction::Update(_)
+        | RequestAction::Remove { .. }
+        | RequestAction::Archive { .. }
+        | RequestAction::Unarchive { .. }
+        | RequestAction::Adopt { .. } => panic!("a create request"),
     }
 }
 
 fn updated_mut(request: &mut IdentityRequest) -> &mut UpdatedSpec {
     match &mut request.action {
         RequestAction::Update(updated) => updated,
-        RequestAction::Create { .. } | RequestAction::Remove { .. } => panic!("an update request"),
+        RequestAction::Create { .. }
+        | RequestAction::Remove { .. }
+        | RequestAction::Archive { .. }
+        | RequestAction::Unarchive { .. }
+        | RequestAction::Adopt { .. } => panic!("an update request"),
     }
 }
 
@@ -931,23 +965,31 @@ fn a_constructed_preparation_needs_its_deadline_and_a_native_host() {
     .expect_err("no native host");
     assert_eq!(refusal.path, "preparation.analyst");
     assert_eq!(refusal.kind, PolicyRefusalKind::NeedsNativeHost);
+    // With a native host it is not the host the launch lacks. The launch
+    // still refuses the policy in this release, at the preparation's mode:
+    // no method settles a preparation yet.
+    let unserved = resolve(
+        Some(Ok(None)),
+        RuntimeOptionPolicy::Enabled(Box::new(policy)),
+        true,
+    )
+    .expect_err("no preparation is carried out in this release");
+    assert_eq!(unserved.path, "preparation.analyst.mode");
     assert!(
-        resolve(
-            Some(Ok(None)),
-            RuntimeOptionPolicy::Enabled(Box::new(policy)),
-            true,
-        )
-        .unwrap()
-        .is_some()
+        matches!(unserved.kind, PolicyRefusalKind::Unsupported { .. }),
+        "{unserved}"
     );
-    // Only a constructed preparation needs a native host.
+    // Only a constructed preparation needs a native host: a required one is
+    // refused for what it is, not for a host.
     value["preparation"] = json!({"analyst": {"mode": "required"}});
     let required = parse(&value);
     assert!(!required.needs_native_host());
+    let unserved = resolve(None, RuntimeOptionPolicy::Enabled(Box::new(required)), true)
+        .expect_err("no preparation is carried out in this release");
+    assert_eq!(unserved.path, "preparation.analyst.mode");
     assert!(
-        resolve(None, RuntimeOptionPolicy::Enabled(Box::new(required)), true)
-            .unwrap()
-            .is_some()
+        matches!(unserved.kind, PolicyRefusalKind::Unsupported { .. }),
+        "{unserved}"
     );
     value["preparation"] =
         json!({"analyst": {"mode": "constructed", "construction_deadline_ms": 10}});
@@ -987,7 +1029,7 @@ fn a_launch_without_persistence_refuses_a_policy_from_either_source() {
 
 #[test]
 fn the_policy_comes_from_the_option_or_the_host_never_both() {
-    let policy = policy();
+    let policy = parse(&served_policy_json());
     let from_option = resolve(
         None,
         RuntimeOptionPolicy::Enabled(Box::new(policy.clone())),
@@ -1092,8 +1134,8 @@ fn the_launch_refuses_a_profile_the_mob_does_not_define() {
     .expect_err("the host's policy is checked too");
     assert_eq!(refusal.path, "approval.rules[1].target.profile");
     // Every profile of the mob may be named.
-    let mut known = policy_json();
-    known["preparation"] = json!({"lead": {"mode": "required"}});
+    let mut known = served_policy_json();
+    known["preparation"] = json!({"lead": {"mode": "none"}});
     known["approval"]["rules"][1]["target"] = json!({"profile": ["assistant", "analyst", "lead"]});
     let option = RuntimeOptionPolicy::parse(&known).expect("a valid policy");
     assert!(resolve(None, option, true).unwrap().is_some());
@@ -1174,40 +1216,40 @@ fn normalization_refuses_typed() {
         spec_case(
             |spec| set_profile(spec, "ghost"),
             json!({"kind": "profile_unknown", "profile": "ghost",
-                   "field": "identities[0].spec.profile"}),
+                   "field": "agents[0].profile"}),
         ),
         spec_case(
             |spec| set_labels(spec, &[("team", "x")]),
-            json!({"kind": "reserved_key", "key": "team", "field": "identities[0].spec.labels"}),
+            json!({"kind": "reserved_key", "key": "team", "field": "agents[0].labels"}),
         ),
         spec_case(
             |spec| set_labels(spec, &[("role", "x")]),
-            json!({"kind": "reserved_key", "key": "role", "field": "identities[0].spec.labels"}),
+            json!({"kind": "reserved_key", "key": "role", "field": "agents[0].labels"}),
         ),
         spec_case(
             |spec| set_labels(spec, &[("bad key", "x")]),
             json!({"kind": "invalid_request", "problem": "malformed",
-                   "field": "identities[0].spec.labels"}),
+                   "field": "agents[0].labels"}),
         ),
         spec_case(
             |spec| set_labels(spec, &[("", "x")]),
             json!({"kind": "invalid_request", "problem": "malformed",
-                   "field": "identities[0].spec.labels"}),
+                   "field": "agents[0].labels"}),
         ),
         spec_case(
             |spec| set_labels(spec, &[("note\u{202E}", "x")]),
             json!({"kind": "invalid_request", "problem": "malformed",
-                   "field": "identities[0].spec.labels"}),
+                   "field": "agents[0].labels"}),
         ),
         spec_case(
             |spec| set_labels(spec, &[("note", "a\nb")]),
             json!({"kind": "invalid_request", "problem": "malformed",
-                   "field": "identities[0].spec.labels.note"}),
+                   "field": "agents[0].labels.note"}),
         ),
         spec_case(
             |spec| set_labels(spec, &[("clearance", "top")]),
             json!({"kind": "authority_field_invalid", "key": "clearance",
-                   "field": "identities[0].spec.labels"}),
+                   "field": "agents[0].labels"}),
         ),
         spec_case(
             |spec| {
@@ -1220,21 +1262,21 @@ fn normalization_refuses_typed() {
                 );
             },
             json!({"kind": "unsupported", "feature": "a bootstrap token in an identity request",
-                   "field": "identities[0].spec.binding"}),
+                   "field": "agents[0]"}),
         ),
         spec_case(
             |spec| spec.peers = vec!["ghost".to_owned()],
-            json!({"kind": "peer_unknown", "field": "identities[0].peers[0]"}),
+            json!({"kind": "peer_unknown", "field": "agents[0].peers[0]"}),
         ),
         spec_case(
             |spec| spec.peers = vec!["stranger".to_owned()],
             json!({"kind": "peer_not_allowed", "identity": "stranger",
-                   "field": "identities[0].peers[0]"}),
+                   "field": "agents[0].peers[0]"}),
         ),
         spec_case(
             |spec| spec.peers = vec!["helper".to_owned()],
             json!({"kind": "peer_not_allowed", "identity": "helper",
-                   "field": "identities[0].peers[0]"}),
+                   "field": "agents[0].peers[0]"}),
         ),
     ];
     for (change, expected) in cases {
@@ -1249,7 +1291,7 @@ fn normalization_refuses_typed() {
         create(&policy(), &lead(), &[spec("helper"), spec("helper")]).expect_err("a duplicate");
     assert_eq!(
         refusal.to_data(),
-        json!({"kind": "name_taken", "by": "created", "field": "identities[1].spec.identity"})
+        json!({"kind": "name_taken", "by": "identity", "field": "agents[1].name"})
     );
 
     let refusal = create(&policy(), &lead(), &[]).expect_err("nothing to create");
@@ -1289,7 +1331,7 @@ fn normalization_refuses_typed() {
         update(&RequesterFacts::host("gateway"), &entry, &meta_key)
             .unwrap_err()
             .to_data(),
-        json!({"kind": "reserved_key", "key": "role", "field": "set.authority_fields"})
+        json!({"kind": "reserved_key", "key": "role", "field": "set.labels"})
     );
 }
 
@@ -1457,7 +1499,7 @@ fn a_label_key_a_selector_reads_is_reserved() {
         set_labels(&mut request, &[(key, "x")]);
         assert_eq!(
             create(&policy, &host, &[request]).unwrap_err().to_data(),
-            json!({"kind": "reserved_key", "key": key, "field": "identities[0].spec.labels"}),
+            json!({"kind": "reserved_key", "key": key, "field": "agents[0].labels"}),
             "{key}"
         );
         let mut set = json!({"descriptive_labels": {}});
@@ -1467,7 +1509,7 @@ fn a_label_key_a_selector_reads_is_reserved() {
             update_with(&policy, &host, &entry, &relabel)
                 .unwrap_err()
                 .to_data(),
-            json!({"kind": "reserved_key", "key": key, "field": "set.descriptive_labels"}),
+            json!({"kind": "reserved_key", "key": key, "field": "set.labels"}),
             "{key}"
         );
     }
@@ -2088,7 +2130,6 @@ Requester: agent "lead-1"
 Proposer: none
 Source evidence: none
 Identity: "helper"
-Expected spec digest: sha256:f492d9d2daff15216fd985868a9d8de35c95ab45cfffbc22e9415834da650d7f
 Changes: descriptive capability peers profile
 
 Update of: "helper"
@@ -2123,7 +2164,6 @@ Source subject: "user-9"
 Source reference: "event:42"
 Source observed at ms: 1730000000000
 Identity: "helper"
-Expected spec digest: sha256:f492d9d2daff15216fd985868a9d8de35c95ab45cfffbc22e9415834da650d7f
 
 Consequences (0):
 
@@ -2660,9 +2700,6 @@ fn a_changed_update_or_remove_field_cannot_be_approved_by_an_old_tap() {
     }
     let updates = [
         change(|request| updated_mut(request).identity = "other".to_owned()),
-        change(|request| {
-            updated_mut(request).expected_spec_digest = Sha256Digest::of(b"another spec");
-        }),
         change(|request| updated_mut(request).profile = None),
         change(|request| updated_mut(request).profile = migration("assistant", "lead")),
         change(|request| updated_mut(request).profile = migration("lead", "analyst")),
@@ -2698,20 +2735,12 @@ fn a_changed_update_or_remove_field_cannot_be_approved_by_an_old_tap() {
                 .insert("stranger".to_owned());
         }),
     ];
-    let removes = [
-        change(|request| {
-            request.action = RequestAction::Remove {
-                identity: "other".to_owned(),
-                expected_spec_digest: helper_spec_digest(),
-            };
-        }),
-        change(|request| {
-            request.action = RequestAction::Remove {
-                identity: "helper".to_owned(),
-                expected_spec_digest: Sha256Digest::of(b"another spec"),
-            };
-        }),
-    ];
+    let removes = [change(|request| {
+        request.action = RequestAction::Remove {
+            identity: "other".to_owned(),
+            expected_spec_digest: helper_spec_digest(),
+        };
+    })];
     for (base, changes) in [
         (golden_update(), updates.as_slice()),
         (golden_remove(), removes.as_slice()),
@@ -3239,6 +3268,10 @@ fn every_refusal_kind() -> Vec<IdentityRefusalKind> {
         IdentityRefusalKind::ProfileNotAllowed {
             profile: "p".to_owned(),
         },
+        IdentityRefusalKind::PrivilegedField {
+            field: "backend".to_owned(),
+        },
+        IdentityRefusalKind::GrantRevoked,
         IdentityRefusalKind::ReservedKey {
             key: "k".to_owned(),
         },
@@ -3252,7 +3285,7 @@ fn every_refusal_kind() -> Vec<IdentityRefusalKind> {
         IdentityRefusalKind::ConsequencesUnavailable,
         IdentityRefusalKind::InvalidName,
         IdentityRefusalKind::NameTaken {
-            by: NameTakenBy::Declared,
+            by: NameTakenBy::Identity,
         },
         IdentityRefusalKind::PeerNotAllowed {
             identity: "p".to_owned(),
@@ -3273,16 +3306,26 @@ fn every_refusal_kind() -> Vec<IdentityRefusalKind> {
         },
         IdentityRefusalKind::IdentityUnknown,
         IdentityRefusalKind::SelfChangeRefused,
+        IdentityRefusalKind::PrivateRequester,
         IdentityRefusalKind::StaleSpec {
             current_digest: Sha256Digest::of(b"s"),
             current_revision: Some(1),
         },
         IdentityRefusalKind::OperationReused,
+        IdentityRefusalKind::OwnerReadOnly,
+        IdentityRefusalKind::NotAdoptable {
+            reason: NotAdoptableReason::HostedOnFirstUse,
+        },
+        IdentityRefusalKind::NotArchived,
+        IdentityRefusalKind::DeclaredApplyOpen,
         IdentityRefusalKind::AdmissionUnsettled {
             correlation: "c".to_owned(),
         },
         IdentityRefusalKind::PredecessorMismatch,
         IdentityRefusalKind::ImportRefused,
+        IdentityRefusalKind::PurgeRefused {
+            reason: "changes_not_held".to_owned(),
+        },
         IdentityRefusalKind::PreparationNotPending,
         IdentityRefusalKind::PreparationMismatch,
         IdentityRefusalKind::ConstructionOpen,
@@ -3310,6 +3353,8 @@ fn every_refusal_kind() -> Vec<IdentityRefusalKind> {
         IdentityRefusalKind::CandidateLaunch,
         IdentityRefusalKind::IdentityMember,
         IdentityRefusalKind::StorageUnsupported,
+        IdentityRefusalKind::MobNotRunning,
+        IdentityRefusalKind::Purged,
         IdentityRefusalKind::ConstructionRefused {
             kind: "controller_route_refused".to_owned(),
         },
@@ -3318,6 +3363,8 @@ fn every_refusal_kind() -> Vec<IdentityRefusalKind> {
         match kind {
             IdentityRefusalKind::ProfileUnknown { .. }
             | IdentityRefusalKind::ProfileNotAllowed { .. }
+            | IdentityRefusalKind::PrivilegedField { .. }
+            | IdentityRefusalKind::GrantRevoked
             | IdentityRefusalKind::ReservedKey { .. }
             | IdentityRefusalKind::AuthorityFieldNeedsApproval { .. }
             | IdentityRefusalKind::AuthorityFieldInvalid { .. }
@@ -3334,11 +3381,17 @@ fn every_refusal_kind() -> Vec<IdentityRefusalKind> {
             | IdentityRefusalKind::Unsupported { .. }
             | IdentityRefusalKind::IdentityUnknown
             | IdentityRefusalKind::SelfChangeRefused
+            | IdentityRefusalKind::PrivateRequester
             | IdentityRefusalKind::StaleSpec { .. }
             | IdentityRefusalKind::OperationReused
+            | IdentityRefusalKind::OwnerReadOnly
+            | IdentityRefusalKind::NotAdoptable { .. }
+            | IdentityRefusalKind::NotArchived
+            | IdentityRefusalKind::DeclaredApplyOpen
             | IdentityRefusalKind::AdmissionUnsettled { .. }
             | IdentityRefusalKind::PredecessorMismatch
             | IdentityRefusalKind::ImportRefused
+            | IdentityRefusalKind::PurgeRefused { .. }
             | IdentityRefusalKind::PreparationNotPending
             | IdentityRefusalKind::PreparationMismatch
             | IdentityRefusalKind::ConstructionOpen
@@ -3362,6 +3415,8 @@ fn every_refusal_kind() -> Vec<IdentityRefusalKind> {
             | IdentityRefusalKind::CandidateLaunch
             | IdentityRefusalKind::IdentityMember
             | IdentityRefusalKind::StorageUnsupported
+            | IdentityRefusalKind::MobNotRunning
+            | IdentityRefusalKind::Purged
             | IdentityRefusalKind::ConstructionRefused { .. } => {}
         }
     }
@@ -3378,6 +3433,8 @@ fn every_refusal_token_is_the_closed_vocabulary() {
             // Profile.
             "profile_unknown",
             "profile_not_allowed",
+            "privileged_field",
+            "grant_revoked",
             // Request data.
             "reserved_key",
             "authority_field_needs_approval",
@@ -3399,11 +3456,17 @@ fn every_refusal_token_is_the_closed_vocabulary() {
             // Identities and operations.
             "identity_unknown",
             "self_change_refused",
+            "private_requester",
             "stale_spec",
             "operation_reused",
+            "owner_read_only",
+            "not_adoptable",
+            "not_archived",
+            "declared_apply_open",
             "admission_unsettled",
             "predecessor_mismatch",
             "import_refused",
+            "purge_refused",
             "preparation_not_pending",
             "preparation_mismatch",
             "construction_open",
@@ -3430,12 +3493,14 @@ fn every_refusal_token_is_the_closed_vocabulary() {
             "candidate_launch",
             "identity_member",
             "storage_unsupported",
+            "mob_not_running",
+            "purged",
             "construction_refused",
         ],
         "one vocabulary for every identity: no template, creator or limit kind"
     );
     let distinct: BTreeSet<&str> = tokens.iter().copied().collect();
-    assert_eq!(distinct.len(), 47);
+    assert_eq!(distinct.len(), 57);
     let retryable: BTreeSet<&str> = kinds
         .iter()
         .filter(|kind| kind.is_retryable())
@@ -3444,9 +3509,12 @@ fn every_refusal_token_is_the_closed_vocabulary() {
     assert_eq!(
         retryable,
         BTreeSet::from([
+            "admission_unsettled",
             "changes_held",
             "consequences_unavailable",
+            "declared_apply_open",
             "host_preparation_pending",
+            "not_adoptable",
         ])
     );
     let problems: Vec<&str> = [
@@ -3459,8 +3527,7 @@ fn every_refusal_token_is_the_closed_vocabulary() {
     .collect();
     assert_eq!(problems, ["empty", "conflicting", "malformed"]);
     let takers: Vec<&str> = [
-        NameTakenBy::Declared,
-        NameTakenBy::Created,
+        NameTakenBy::Identity,
         NameTakenBy::Removed,
         NameTakenBy::Worker,
         NameTakenBy::Unreadable,
@@ -3468,10 +3535,7 @@ fn every_refusal_token_is_the_closed_vocabulary() {
     .into_iter()
     .map(NameTakenBy::token)
     .collect();
-    assert_eq!(
-        takers,
-        ["declared", "created", "removed", "worker", "unreadable"]
-    );
+    assert_eq!(takers, ["identity", "removed", "worker", "unreadable"]);
 }
 
 #[test]
@@ -3481,11 +3545,11 @@ fn refusal_data_carries_the_kind_its_field_and_its_payload() {
             IdentityRefusal::new(IdentityRefusalKind::ProfileNotAllowed {
                 profile: "ghost".to_owned(),
             })
-            .at("identities[0].spec.profile"),
+            .at("agents[0].profile"),
             json!({
                 "kind": "profile_not_allowed",
                 "profile": "ghost",
-                "field": "identities[0].spec.profile"
+                "field": "agents[0].profile"
             }),
         ),
         (
@@ -3528,11 +3592,11 @@ fn refusal_data_carries_the_kind_its_field_and_its_payload() {
             IdentityRefusal::new(IdentityRefusalKind::InvalidRequest {
                 problem: RequestProblem::Malformed,
             })
-            .at("identities[0].spec.labels"),
+            .at("agents[0].labels"),
             json!({
                 "kind": "invalid_request",
                 "problem": "malformed",
-                "field": "identities[0].spec.labels"
+                "field": "agents[0].labels"
             }),
         ),
     ];

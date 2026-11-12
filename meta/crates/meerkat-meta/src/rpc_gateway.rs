@@ -830,6 +830,27 @@ fn launch_identity_creation_policy(
     .map_err(|refusal| refusal.to_string())
 }
 
+/// The native host composition's own check of an identity request and
+/// its consequence lines, as the identity family asks them.
+struct HostIdentityHooks(Arc<dyn GatewayHostComposition>);
+
+impl crate::identity_creation::IdentityHostHooks for HostIdentityHooks {
+    fn validate(
+        &self,
+        request: &crate::identity_creation::IdentityRequest,
+    ) -> Result<(), crate::identity_creation::ValidationRefusal> {
+        self.0.validate_identity_request(request)
+    }
+
+    fn consequences(
+        &self,
+        request: &crate::identity_creation::IdentityRequest,
+    ) -> Result<Vec<crate::identity_creation::ConsequenceLine>, crate::identity_creation::HookRefusal>
+    {
+        self.0.identity_consequences(request)
+    }
+}
+
 #[derive(Default)]
 struct InMemoryEventLogStore {
     events: std::sync::Mutex<Vec<PersistedEvent>>,
@@ -16467,8 +16488,8 @@ pub trait GatewayHostComposition: Send + Sync + 'static {
     /// them. They are computed before anything is held and again when the
     /// operation executes, and the same request must give the same lines.
     /// `Err` refuses the request `consequences_unavailable`: it is never
-    /// rendered without them. The default states none. A gateway host
-    /// declares the host callback `identity.consequences` instead.
+    /// rendered without them. The default states none. A host behind an SDK
+    /// supplies none in this release: its decisions render without them.
     fn identity_consequences(
         &self,
         request: &crate::identity_creation::IdentityRequest,
@@ -18128,8 +18149,9 @@ external_addressable = true
     // The identity policy, settled before the durable phase: the native
     // host's Rust form or the init option, never both, checked against the
     // definition's profiles, and refused on a launch without persistence.
-    // Nothing acts on it yet; the operation executor takes it from here.
-    let _identity_creation = launch_identity_creation_policy(
+    // The launch attaches it to its identity runtime, below, before the
+    // identity bootstrap.
+    let identity_creation = launch_identity_creation_policy(
         host,
         std::mem::take(&mut gateway_options.identity_creation),
         &definition,
@@ -19673,6 +19695,13 @@ external_addressable = true
     // which Meerkat materializes without the spawn customizers, and the
     // durable child mobs agents created, which a restore rebuilds from their
     // stored definitions. An in-memory mob storage starts with none of them.
+    // The mob storage's realm profiles, for the family of the mob's
+    // long-term agents: a held change of an agent on a profile bound to a
+    // realm profile shows what that profile declares.
+    let identity_realm_profiles_db = mob_spec
+        .mob_storage_provenance
+        .persistent_path()
+        .map(std::path::Path::to_path_buf);
     if let Some(binding) = gateway_options.member_auth_binding.as_ref() {
         let booted = launch_definition.as_ref().unwrap_or(&mob_spec.definition);
         if let Some(event_log_db) = mob_spec.mob_storage_provenance.persistent_path() {
@@ -19916,6 +19945,10 @@ external_addressable = true
     // OnceCell defers the binding without restructuring bootstrap. The
     // roster slot feeds mob-purpose context once restore_flow has run.
     let steward_late_runtime = StewardLateRuntime::default();
+    // The runtime, for the notices of decided identity changes: a back-edge
+    // bound once the runtime is shared, read per notice.
+    let identity_notices_runtime: Arc<std::sync::OnceLock<std::sync::Weak<UnifiedRuntime>>> =
+        Arc::new(std::sync::OnceLock::new());
     let steward_roster_slot: Arc<std::sync::Mutex<Vec<crate::identity_first::DurableAgentSpec>>> =
         Arc::new(std::sync::Mutex::new(Vec::new()));
     let mut agent_memory_steward: Option<Arc<crate::memory::steward::StewardEngine>> = None;
@@ -20382,6 +20415,40 @@ external_addressable = true
         // identity supervisors. A refusal fails init before that bootstrap,
         // and the existing init cleanup shuts the runtime down.
         runtime.install_identity_first_context(Arc::clone(&identity_context));
+        // The launch's identity policy, attached once: from here on the
+        // runtime serves the changes of its long-term agents under it, and
+        // the agents' identity tools are mounted. A launch without a
+        // policy keeps the family its identity install attached: the reads
+        // are served and every change is refused.
+        if let Some(policy) = identity_creation.clone() {
+            // An agent that asked for a change a person decided is told by
+            // a keyed send to its own name. The route reads the runtime
+            // when a notice is delivered and keeps nothing of it.
+            let notices_runtime = identity_notices_runtime.clone();
+            let mut options = crate::identity_creation::IdentityFamilyOptions::new()
+                .with_decision_notices(Arc::new(crate::identity_creation::KeyedSendNotices::new(
+                    move || {
+                        notices_runtime
+                            .get()
+                            .and_then(std::sync::Weak::upgrade)
+                            .and_then(|runtime| runtime.identity_runtime())
+                    },
+                )));
+            if let Some(host) = host {
+                options = options.with_host_hooks(Arc::new(HostIdentityHooks(Arc::clone(host))));
+            }
+            if let Some(db) = identity_realm_profiles_db.as_deref() {
+                match meerkat_mob::store::SqliteRealmProfileStore::open(db) {
+                    Ok(store) => options = options.with_realm_profiles(Arc::new(store)),
+                    Err(error) => tracing::warn!(
+                        %error,
+                        "the mob storage's realm profiles cannot be opened: a held change of \
+                         an agent on a profile bound to a realm profile is refused"
+                    ),
+                }
+            }
+            runtime.attach_identity_policy(policy, options);
+        }
         if let Some(host) = host {
             host.bind_identity_runtime(runtime)
                 .await
@@ -20693,6 +20760,7 @@ external_addressable = true
     // Bind the steward's late runtime seams and wire gating decisions back
     // to staged promotion commits (§10.2).
     steward_late_runtime.bind(runtime.clone());
+    let _ = identity_notices_runtime.set(Arc::downgrade(&runtime));
     runtime
         .set_gating_escalation_routes(gateway_options.gating.escalation.clone())
         .await;
@@ -27293,7 +27361,7 @@ mod identity_creation_launch_tests {
         assert!(refused.contains("\"ghost\""), "{refused}");
         let mut known = policy_value();
         known["approval"]["rules"][0]["target"] = json!({"profile": ["default"]});
-        known["preparation"] = json!({"default": {"mode": "required"}});
+        known["preparation"] = json!({"default": {"mode": "none"}});
         assert!(
             launch(
                 None,

@@ -6105,6 +6105,27 @@ pub trait SessionBridge: Send + Sync {
         })
     }
 
+    /// [`SessionBridge::created_identity`] for many identities at once: the
+    /// spec of each of `names` whose record is its row, absent from the
+    /// answer when [`SessionBridge::created_identity`] would answer `None`.
+    /// A bridge over Core reads the rows in pages, one store read per page
+    /// of names, so a roster pass over many identities it has not
+    /// registered yet makes no read per identity. The default asks
+    /// [`SessionBridge::created_identity`] for each name, which answers the
+    /// same; a bridge that wraps another forwards it.
+    async fn created_identities_of(
+        &self,
+        names: &[AgentIdentity],
+    ) -> Result<BTreeMap<AgentIdentity, DurableAgentSpec>, BridgeError> {
+        let mut specs = BTreeMap::new();
+        for name in names {
+            if let Some(spec) = self.created_identity(name).await? {
+                specs.insert(name.clone(), spec);
+            }
+        }
+        Ok(specs)
+    }
+
     /// The names of the identities whose record is their row in the mob's
     /// identity store, in identity order, read from Core's identity entry
     /// pages (`MobHandle::identity_entries`): the machine state the mob's
@@ -6148,6 +6169,31 @@ pub trait SessionBridge: Send + Sync {
         false
     }
 
+    /// Lower `draft`, the host's build draft of `spec`, onto `seat`, the
+    /// seat Core lowered for a build of the member of an identity whose
+    /// record is its row (Core's
+    /// `MemberBuildPreparer::prepare_store_owned_seat`): the draft's
+    /// context, instruction sections, model, provider parameters, system
+    /// prompt, tool overlay and compaction curator, through the lowering a
+    /// configured identity's seat is composed with, so the same draft gives
+    /// both the same build inputs. The seat's labels stay its row's, and it
+    /// gets none of a roster spawn's marks. Core decides what each build
+    /// takes of the result. No read of Core, no actor command, no wake.
+    ///
+    /// The default lowers with no definition profile to resolve: a draft
+    /// model is a field-scoped override, and declared provider parameters
+    /// are refused, as for an identity whose profile resolves to no inline
+    /// definition profile. A bridge over a mob resolves the identity's
+    /// definition profile; a bridge that wraps another forwards it.
+    fn lower_store_owned_seat_build(
+        &self,
+        spec: &DurableAgentSpec,
+        draft: &AgentBuildDraft,
+        seat: &mut SpawnMemberSpec,
+    ) -> Result<(), BridgeError> {
+        lower_store_owned_seat_draft(seat, spec, draft, None)
+    }
+
     /// Replace `identity`'s member by its successor on its own session as
     /// ONE Core transition (`MobHandle::respawn_member`): the current
     /// incarnation is retired and the next one is seated Dormant at the next
@@ -6155,7 +6201,10 @@ pub trait SessionBridge: Send + Sync {
     /// member, and a mob restarted in between finishes it itself. The
     /// successor is seated with `spec`'s profile, runtime mode and labels
     /// (the identity's current record), and keeps the member's conversation;
-    /// under the member's own profile it keeps its wiring too. Nothing is
+    /// under the member's own profile it keeps its wiring too. A
+    /// `compaction_floor` change seats it with that auto-compact floor
+    /// (`Some(None)` removes one an earlier successor was seated with;
+    /// `None` keeps what the member builds with). Nothing is
     /// materialized: the caller wakes the successor. The identity runtime
     /// asks it for an identity whose record is its row in the mob's identity
     /// store, which no declaration seats again.
@@ -6166,6 +6215,7 @@ pub trait SessionBridge: Send + Sync {
         &self,
         identity: &AgentIdentity,
         _spec: &DurableAgentSpec,
+        _compaction_floor: Option<Option<std::num::NonZeroU64>>,
     ) -> Result<(), BridgeError> {
         Err(BridgeError::InvalidInput(format!(
             "this SessionBridge does not implement the same-session successor, so identity \
@@ -8704,22 +8754,32 @@ impl MobSessionBridge {
             .identity_record(member)
             .await
             .map_err(|error| created_identity_read_error("created_identity", error))?;
-        let Some(meerkat_mob::CreatedIdentityObservation::Created(record)) = observation else {
-            return Ok(None);
-        };
-        if record.presence == meerkat_mob::CreatedIdentityPresence::Removed {
-            return Ok(None);
-        }
-        let (Some(identity), Some(spec)) = (served_identity_of_member(member), record.spec) else {
-            tracing::warn!(
-                %member,
-                "a created entry's row carries no spec, or its member id names no identity this \
-                 runtime serves: the identity runtime does not serve it"
-            );
-            return Ok(None);
-        };
-        Ok(Some(durable_spec_of_created(identity, spec)))
+        Ok(created_spec_of_observation(member, observation))
     }
+}
+
+/// The spec this runtime serves from `observation`, the row of `member` in
+/// the mob's identity store as Core read it: see
+/// [`MobSessionBridge::created_identity_of_member`].
+fn created_spec_of_observation(
+    member: &MobAgentIdentity,
+    observation: Option<meerkat_mob::CreatedIdentityObservation>,
+) -> Option<DurableAgentSpec> {
+    let Some(meerkat_mob::CreatedIdentityObservation::Created(record)) = observation else {
+        return None;
+    };
+    if record.presence == meerkat_mob::CreatedIdentityPresence::Removed {
+        return None;
+    }
+    let (Some(identity), Some(spec)) = (served_identity_of_member(member), record.spec) else {
+        tracing::warn!(
+            %member,
+            "a created entry's row carries no spec, or its member id names no identity this \
+             runtime serves: the identity runtime does not serve it"
+        );
+        return None;
+    };
+    Some(durable_spec_of_created(identity, spec))
 }
 
 /// The identity this runtime serves a store-owned entry's member id as: the
@@ -9336,23 +9396,60 @@ pub(crate) fn build_spawn_spec(
     if let Some(message) = spec.initial_message.as_ref() {
         spawn_spec = spawn_spec.with_initial_message(message.clone());
     }
+    lower_build_draft(
+        &mut spawn_spec,
+        spec,
+        draft,
+        base_profile,
+        DraftLabels::RosterMarked,
+    )?;
+    Ok(spawn_spec)
+}
+
+/// What a lowered draft does with a seat's labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DraftLabels {
+    /// The seat takes the draft's labels with a roster spawn's marks (the
+    /// `agent_identity` and `profile_name` labels): the seat of an identity
+    /// whose record is its host's roster.
+    RosterMarked,
+    /// The seat's labels are left as they are: the seat of an identity
+    /// whose record is its row, whose labels are its row's.
+    SeatKept,
+}
+
+/// Lower `draft`, the host's build draft of `spec`, onto `spawn_spec`: the
+/// half of a member's spawn spec the host's build step decides (its context,
+/// its instruction sections, its model and provider parameters, its system
+/// prompt, its tool overlay and its compaction curator). The one lowering of
+/// a draft: the seat of an identity whose record is its host's roster
+/// ([`build_spawn_spec`]) and the seat of one whose record is its row
+/// ([`SessionBridge::lower_store_owned_seat_build`]) are both composed
+/// here, so the same draft gives both the same build inputs.
+fn lower_build_draft(
+    spawn_spec: &mut SpawnMemberSpec,
+    spec: &DurableAgentSpec,
+    draft: &AgentBuildDraft,
+    base_profile: Option<&meerkat_mob::Profile>,
+    labels: DraftLabels,
+) -> Result<(), BridgeError> {
     if let Some(ref ctx) = draft.app_context {
-        spawn_spec = spawn_spec.with_context(ctx.clone());
+        spawn_spec.context = Some(ctx.clone());
     }
-    let mut labels = draft.labels.clone();
-    labels.insert(
-        "agent_identity".to_string(),
-        spec.identity.as_str().to_string(),
-    );
-    labels.insert(
-        "profile_name".to_string(),
-        spec.profile.as_str().to_string(),
-    );
-    if !labels.is_empty() {
-        spawn_spec = spawn_spec.with_labels(labels);
+    if labels == DraftLabels::RosterMarked {
+        let mut labels = draft.labels.clone();
+        labels.insert(
+            "agent_identity".to_string(),
+            spec.identity.as_str().to_string(),
+        );
+        labels.insert(
+            "profile_name".to_string(),
+            spec.profile.as_str().to_string(),
+        );
+        spawn_spec.labels = Some(labels);
     }
     if !draft.additional_instructions.is_empty() {
-        spawn_spec = spawn_spec.with_additional_instructions(draft.additional_instructions.clone());
+        spawn_spec.additional_instructions = Some(draft.additional_instructions.clone());
     }
     if let Some(model) = draft.model.as_ref() {
         match base_profile {
@@ -9398,9 +9495,30 @@ pub(crate) fn build_spawn_spec(
 
     // Runs after the model block: it composes with whatever snapshot that
     // block installed instead of clobbering it.
-    apply_provider_params(&mut spawn_spec, spec, draft, base_profile)?;
+    apply_provider_params(spawn_spec, spec, draft, base_profile)?;
 
-    Ok(spawn_spec)
+    Ok(())
+}
+
+/// Lower `draft`, the host's build draft of `spec`, onto `seat`, the seat
+/// of an identity whose record is its row, for the build Core is about to
+/// perform ([`SessionBridge::lower_store_owned_seat_build`]). The draft is
+/// the one source of the seat's build inputs: it started from the row's
+/// context and instructions, and no override is kept from an earlier build,
+/// so what the seat carried of them is set aside first. The seat's labels
+/// stay its row's, with none of a roster spawn's marks.
+fn lower_store_owned_seat_draft(
+    seat: &mut SpawnMemberSpec,
+    spec: &DurableAgentSpec,
+    draft: &AgentBuildDraft,
+    base_profile: Option<&meerkat_mob::Profile>,
+) -> Result<(), BridgeError> {
+    seat.context = None;
+    seat.additional_instructions = None;
+    seat.system_prompt_override = None;
+    seat.override_profile = None;
+    seat.model_override = None;
+    lower_build_draft(seat, spec, draft, base_profile, DraftLabels::SeatKept)
 }
 
 /// Build the spawn spec for a RESUME of `session_id`.
@@ -10857,6 +10975,44 @@ impl SessionBridge for MobSessionBridge {
         self.created_identity_of_member(&member).await
     }
 
+    async fn created_identities_of(
+        &self,
+        names: &[AgentIdentity],
+    ) -> Result<BTreeMap<AgentIdentity, DurableAgentSpec>, BridgeError> {
+        // The names Core holds as created entries (published machine state,
+        // no store read), then their rows in pages: one store read per page.
+        let mut members = Vec::with_capacity(names.len());
+        for name in names {
+            let member = member_id_for_identity(name);
+            match self.handle.identity_entry(&member) {
+                Ok(meerkat_mob::IdentityEntryRead::Entry(view))
+                    if view.origin == meerkat_mob::IdentityEntryOrigin::Created =>
+                {
+                    members.push((name.clone(), member));
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    return Err(created_identity_read_error("created_identities_of", error));
+                }
+            }
+        }
+        let asked = members
+            .iter()
+            .map(|(_, member)| member.clone())
+            .collect::<Vec<_>>();
+        let mut rows = self
+            .handle
+            .identity_records(&asked)
+            .await
+            .map_err(|error| created_identity_read_error("created_identities_of", error))?;
+        Ok(members
+            .into_iter()
+            .filter_map(|(name, member)| {
+                created_spec_of_observation(&member, rows.remove(&member)).map(|spec| (name, spec))
+            })
+            .collect())
+    }
+
     async fn created_identity_names(&self) -> Result<Vec<AgentIdentity>, BridgeError> {
         let mut names = Vec::new();
         let mut after: Option<MobAgentIdentity> = None;
@@ -10916,10 +11072,20 @@ impl SessionBridge for MobSessionBridge {
         )
     }
 
+    fn lower_store_owned_seat_build(
+        &self,
+        spec: &DurableAgentSpec,
+        draft: &AgentBuildDraft,
+        seat: &mut SpawnMemberSpec,
+    ) -> Result<(), BridgeError> {
+        lower_store_owned_seat_draft(seat, spec, draft, self.base_profile_for_spec(spec).as_ref())
+    }
+
     async fn respawn_member_on_own_session(
         &self,
         identity: &AgentIdentity,
         spec: &DurableAgentSpec,
+        compaction_floor: Option<Option<std::num::NonZeroU64>>,
     ) -> Result<(), BridgeError> {
         let member = member_id_for_identity(identity);
         let mut request = meerkat_mob::MemberRespawn::new()
@@ -10927,6 +11093,9 @@ impl SessionBridge for MobSessionBridge {
             .with_labels(spec.labels.clone());
         if let Some(runtime_mode) = spec.runtime_mode_override {
             request = request.with_runtime_mode(runtime_mode);
+        }
+        if let Some(floor) = compaction_floor {
+            request = request.with_compaction_floor(floor);
         }
         self.handle
             .respawn_member(member.clone(), request)
@@ -12172,6 +12341,13 @@ impl SessionBridge for super::PublicSessionBridge {
         self.bridge.created_identity(identity).await
     }
 
+    async fn created_identities_of(
+        &self,
+        names: &[AgentIdentity],
+    ) -> Result<BTreeMap<AgentIdentity, DurableAgentSpec>, BridgeError> {
+        self.bridge.created_identities_of(names).await
+    }
+
     async fn created_identity_names(&self) -> Result<Vec<AgentIdentity>, BridgeError> {
         self.bridge.created_identity_names().await
     }
@@ -12187,13 +12363,23 @@ impl SessionBridge for super::PublicSessionBridge {
         self.bridge.holds_identity_entry(member)
     }
 
+    fn lower_store_owned_seat_build(
+        &self,
+        spec: &DurableAgentSpec,
+        draft: &AgentBuildDraft,
+        seat: &mut SpawnMemberSpec,
+    ) -> Result<(), BridgeError> {
+        self.bridge.lower_store_owned_seat_build(spec, draft, seat)
+    }
+
     async fn respawn_member_on_own_session(
         &self,
         identity: &AgentIdentity,
         spec: &DurableAgentSpec,
+        compaction_floor: Option<Option<std::num::NonZeroU64>>,
     ) -> Result<(), BridgeError> {
         self.bridge
-            .respawn_member_on_own_session(identity, spec)
+            .respawn_member_on_own_session(identity, spec, compaction_floor)
             .await
     }
 

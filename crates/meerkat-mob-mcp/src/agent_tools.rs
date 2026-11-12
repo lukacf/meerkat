@@ -8370,6 +8370,185 @@ mod tests {
         }
     }
 
+    /// A host's member tool audience that decides on the roster labels
+    /// alone: a member whose row carries the label `kept_for` is hidden from
+    /// every caller whose own row does not carry the same value.
+    struct HideKeptMembers;
+
+    impl meerkat_mob::MemberToolAudience for HideKeptMembers {
+        fn hides(
+            &self,
+            _mob_id: &MobId,
+            _caller: Option<&AgentIdentity>,
+            caller_labels: Option<&std::collections::BTreeMap<String, String>>,
+            _target: &AgentIdentity,
+            target_labels: Option<&std::collections::BTreeMap<String, String>>,
+        ) -> bool {
+            let kept_for = |labels: Option<&std::collections::BTreeMap<String, String>>| {
+                labels.and_then(|labels| labels.get("kept_for")).cloned()
+            };
+            match kept_for(target_labels) {
+                Some(keeper) => kept_for(caller_labels) != Some(keeper),
+                None => false,
+            }
+        }
+    }
+
+    /// A mob a host built with [`HideKeptMembers`] as its member tool
+    /// audience and registered with the mob tools' state, with `members`
+    /// seated: each with the keeper its row's `kept_for` label names, if any.
+    async fn host_mob_with_kept_members(
+        state: &Arc<MobMcpState>,
+        mob_id: &str,
+        members: &[(&str, Option<&str>)],
+    ) -> MobHandle {
+        let mut builder = meerkat_mob::MobBuilder::new(
+            sample_definition(mob_id),
+            meerkat_mob::MobStorage::in_memory(),
+        )
+        .with_session_service(state.session_service())
+        .allow_ephemeral_sessions(true)
+        .with_member_tool_audience(Arc::new(HideKeptMembers));
+        if let Some(adapter) = &state.runtime_adapter {
+            builder = builder.with_runtime_adapter(adapter.clone());
+        }
+        let handle = builder.create().await.expect("create the host's mob");
+        state
+            .mob_insert_handle(handle.mob_id().clone(), handle.clone())
+            .await;
+        // The host has registered every mob it hosts.
+        state.declare_mob_set_restored();
+        for (member, keeper) in members {
+            let mut spec =
+                SpawnMemberSpec::new(ProfileName::from("worker"), AgentIdentity::from(*member));
+            if let Some(keeper) = keeper {
+                spec = spec.with_labels(std::collections::BTreeMap::from([(
+                    "kept_for".to_string(),
+                    (*keeper).to_string(),
+                )]));
+            }
+            state
+                .mob_spawn_spec(handle.mob_id(), spec)
+                .await
+                .expect("spawn the member");
+        }
+        handle
+    }
+
+    /// The capability to create mobs with manage scope over the mob `handle`
+    /// serves: what a council over that mob's members needs.
+    fn create_and_manage_authority(handle: &MobHandle) -> MobToolAuthorityContext {
+        meerkat_runtime::mob_operator_authority::grant_manage_mob(
+            &create_only_authority(),
+            handle.mob_id().as_str(),
+            handle.live_incarnation(),
+        )
+        .expect("generated mob authority should grant managed mob scope")
+    }
+
+    /// The agent mob tools of member `member` of the mob `handle` serves,
+    /// holding `authority`.
+    async fn member_mob_tools(
+        state: &Arc<MobMcpState>,
+        handle: &MobHandle,
+        member: &str,
+        authority: MobToolAuthorityContext,
+    ) -> Arc<dyn AgentToolDispatcher> {
+        let session = handle
+            .resolve_bridge_session_id(&AgentIdentity::from(member))
+            .await
+            .expect("the member's session");
+        let surface: Arc<dyn AgentToolDispatcher> = Arc::new(AgentMobToolSurface::new(
+            Arc::clone(state),
+            None,
+            authority,
+            "claude-sonnet-4-5".to_string(),
+            session.clone(),
+            None,
+            None,
+            None,
+        ));
+        surface
+            .bind_ops_lifecycle(
+                Arc::new(meerkat_runtime::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
+                session,
+            )
+            .expect("bind ops lifecycle")
+            .into_dispatcher()
+    }
+
+    /// One agent mob tool call, answered within a minute, as text with the
+    /// member name `name` masked: the answers for two names compare equal
+    /// when they differ in nothing but the name.
+    async fn masked_mob_tool_answer(
+        tools: &Arc<dyn AgentToolDispatcher>,
+        tool: &'static str,
+        args: serde_json::Value,
+        name: &str,
+    ) -> String {
+        let raw = serde_json::value::RawValue::from_string(args.to_string()).unwrap();
+        let call = tools.dispatch(ToolCallView {
+            id: "audience-tool-call",
+            name: tool,
+            args: &raw,
+        });
+        match tokio::time::timeout(std::time::Duration::from_secs(60), call).await {
+            Ok(Ok(outcome)) => format!("ok: {}", outcome.result.text_content()),
+            Ok(Err(error)) => format!("error: {error:?}"),
+            Err(_) => "no answer within a minute".to_string(),
+        }
+        .replace(name, "<member>")
+    }
+
+    /// `council` asks the host's member tool audience about each participant
+    /// it names: a member the audience hides from the convener answers
+    /// exactly as a name the mob does not hold, with create authority and
+    /// manage scope.
+    #[tokio::test]
+    async fn council_answers_a_participant_hidden_from_the_convener_as_absent() {
+        let state = MobMcpState::new_in_memory();
+        let handle = host_mob_with_kept_members(
+            &state,
+            "council-audience",
+            &[("council-kept", Some("ann")), ("council-convener", None)],
+        )
+        .await;
+        let tools = member_mob_tools(
+            &state,
+            &handle,
+            "council-convener",
+            create_and_manage_authority(&handle),
+        )
+        .await;
+        let council = |member: &str| {
+            json!({
+                "council_id": format!("audience-{member}"),
+                "topic": "What were you asked so far?",
+                "participants": [{
+                    "mob_id": "council-audience",
+                    "member_id": member,
+                    "role": "witness",
+                }],
+                "max_rounds": 1,
+            })
+        };
+
+        let absent =
+            masked_mob_tool_answer(&tools, "council", council("council-gone"), "council-gone")
+                .await;
+        assert!(
+            absent.starts_with("error:"),
+            "a participant the mob does not hold is refused: {absent}"
+        );
+        let hidden =
+            masked_mob_tool_answer(&tools, "council", council("council-kept"), "council-kept")
+                .await;
+        assert_eq!(
+            hidden, absent,
+            "a participant hidden from the convener answers as a name the mob does not hold"
+        );
+    }
+
     /// The classification behind `wired`: only a committed edge between the
     /// caller and the new member reports it wired, whatever was requested.
     #[test]

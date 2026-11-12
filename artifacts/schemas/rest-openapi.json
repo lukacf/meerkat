@@ -16471,6 +16471,17 @@
               }
             ]
           },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EffortLevel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Provider-neutral reasoning effort level for the session's requests:\n`none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` (one\nspelling each). It is not a provider setting itself: a request that\nstill carries it when it reaches a provider client is refused, so the\nlevel is never sent as it is and never dropped. A session keeps it\nacross a replacement of its other provider params."
+          },
           "temperature": {
             "format": "float",
             "type": [
@@ -26747,6 +26758,17 @@
                 "type": "null"
               }
             ]
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EffortLevel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Provider-neutral reasoning effort level for the session's requests:\n`none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` (one\nspelling each). A session keeps it across a replacement of its other\nprovider params."
           },
           "temperature": {
             "format": "float",

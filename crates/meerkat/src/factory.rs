@@ -10978,6 +10978,7 @@ impl AgentFactory {
                 || mask.provider
                 || mask.self_hosted_server_id
                 || mask.provider_params
+                || mask.reasoning_effort
                 || mask.auth_binding
             {
                 metadata.apply_llm_identity(&SessionLlmIdentity {
@@ -21058,6 +21059,7 @@ mod tests {
                         auth_binding: Some(
                             meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear,
                         ),
+                        reasoning_effort: None,
                     },
                 )
                 .unwrap(),
@@ -21075,6 +21077,7 @@ mod tests {
                         auth_binding: Some(
                             meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear,
                         ),
+                        reasoning_effort: None,
                     },
                 )
                 .unwrap(),
@@ -21096,6 +21099,7 @@ mod tests {
                         auth_binding: Some(
                             meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear,
                         ),
+                        reasoning_effort: None,
                     },
                 )
                 .unwrap(),

@@ -3888,6 +3888,7 @@ impl SessionRuntime {
         // K2: `TurnOverrides` carries the typed `ProviderParamsOverride`
         // tri-state end-to-end — no legacy JSON round-trip at this seam.
         let provider_params = overrides.and_then(|ov| ov.provider_params.clone());
+        let reasoning_effort = overrides.and_then(|ov| ov.reasoning_effort.clone());
         let auth_binding = overrides.and_then(|ov| ov.auth_binding.clone());
         let provider = overrides.and_then(|ov| {
             ov.provider
@@ -3916,6 +3917,7 @@ impl SessionRuntime {
             provider,
             self_hosted_server_id: overrides.and_then(|ov| ov.self_hosted_server_id.clone()),
             provider_params,
+            reasoning_effort,
             render_metadata: None,
             auth_binding,
             execution_kind: None,
@@ -3969,6 +3971,7 @@ impl SessionRuntime {
         // K2: the surface seam carries the typed `ProviderParamsOverride`
         // tri-state; pass it through unchanged.
         let provider_params = metadata.provider_params.clone();
+        let reasoning_effort = metadata.reasoning_effort.clone();
         let auth_binding = metadata.auth_binding.clone();
         // Rehydrate the full tri-state from the typed directive carrier:
         // Enable -> Some(true), Disable -> Some(false), absent -> None
@@ -3987,6 +3990,7 @@ impl SessionRuntime {
                 .map(|provider| provider.as_str().to_string()),
             self_hosted_server_id: metadata.self_hosted_server_id.clone(),
             provider_params,
+            reasoning_effort,
             auth_binding,
             transient_turn_context: metadata.transient_turn_context.clone(),
             ..Default::default()
@@ -6667,6 +6671,7 @@ impl SessionRuntime {
                 })?,
             self_hosted_server_id: overrides.and_then(|ov| ov.self_hosted_server_id.clone()),
             provider_params: overrides.and_then(|ov| ov.provider_params.clone()),
+            reasoning_effort: overrides.and_then(|ov| ov.reasoning_effort.clone()),
             auth_binding: overrides.and_then(|ov| ov.auth_binding.clone()),
             max_tokens: overrides.and_then(|ov| ov.max_tokens),
             output_schema,
@@ -7454,6 +7459,7 @@ impl SessionRuntime {
             provider: ov.provider.clone(),
             self_hosted_server_id: ov.self_hosted_server_id.clone(),
             provider_params: ov.provider_params.clone(),
+            reasoning_effort: ov.reasoning_effort.clone(),
             auth_binding: ov.auth_binding.clone(),
         };
         self.llm_reconfigure_host()
@@ -7590,6 +7596,7 @@ impl SessionRuntime {
             provider: ov.provider.clone(),
             self_hosted_server_id: ov.self_hosted_server_id.clone(),
             provider_params: ov.provider_params.clone(),
+            reasoning_effort: ov.reasoning_effort.clone(),
             auth_binding: ov.auth_binding.clone(),
         };
 
@@ -10671,6 +10678,7 @@ impl SessionRuntime {
                     || ov.provider.is_some()
                     || ov.self_hosted_server_id.is_some()
                     || ov.provider_params.is_some()
+                    || ov.reasoning_effort.is_some()
                     || ov.auth_binding.is_some())
             {
                 match llm_reconfigure_boundary {
@@ -12119,6 +12127,7 @@ impl SessionRuntime {
                 || ov.provider.is_some()
                 || ov.self_hosted_server_id.is_some()
                 || ov.provider_params.is_some()
+                || ov.reasoning_effort.is_some()
                 || ov.auth_binding.is_some())
         {
             self.hot_swap_llm_client(session_id, ov).await?;
@@ -27128,6 +27137,7 @@ mod tests {
             self_hosted_server_id: None,
             provider_params: None,
             auth_binding: None,
+            reasoning_effort: None,
         };
 
         let err = host
@@ -27158,6 +27168,7 @@ mod tests {
             self_hosted_server_id: None,
             provider_params: None,
             auth_binding: None,
+            reasoning_effort: None,
         };
 
         let err = host
@@ -36049,6 +36060,7 @@ mod tests {
             provider_params: None,
             auth_binding: None,
             transient_turn_context: None,
+            reasoning_effort: None,
         };
         let (event_tx, _event_rx) = mpsc::channel(100);
         let rejected = runtime
@@ -41586,6 +41598,230 @@ mod tests {
         assert_eq!(stored_meta.provider_params, Some(provider_params));
     }
 
+    const REASONING_EFFORT_UNRESOLVED: &str = "reasoning_effort cannot be resolved by this build";
+
+    fn level_only_params(
+        level: meerkat_core::model_profile::capabilities::EffortLevel,
+    ) -> meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+        meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+            reasoning_effort: Some(level),
+            ..Default::default()
+        }
+    }
+
+    fn level_overrides(
+        level: meerkat_core::lifecycle::run_primitive::TurnMetadataOverride<
+            meerkat_core::model_profile::capabilities::EffortLevel,
+        >,
+    ) -> crate::handlers::turn::TurnOverrides {
+        crate::handlers::turn::TurnOverrides {
+            reasoning_effort: Some(level),
+            ..Default::default()
+        }
+    }
+
+    /// The turn's reasoning effort level is carried, unchanged, by every
+    /// copy between the turn's overrides, the runtime input's metadata and
+    /// the recovery overrides: a turn that names only the level is not an
+    /// empty turn, and set and clear both arrive.
+    #[test]
+    fn turn_reasoning_effort_is_carried_by_every_override_copy() {
+        use meerkat_core::lifecycle::run_primitive::{RuntimeTurnMetadata, TurnMetadataOverride};
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+        for level in [
+            TurnMetadataOverride::Set(EffortLevel::High),
+            TurnMetadataOverride::Clear,
+        ] {
+            let overrides = level_overrides(level.clone());
+            assert!(!overrides.is_empty(), "{level:?}");
+
+            // Overrides to the runtime input's metadata.
+            let metadata = SessionRuntime::turn_metadata_from_overrides(
+                None,
+                None,
+                None,
+                Some(&overrides),
+                None,
+            )
+            .expect("a turn that names only the level produces turn metadata");
+            assert_eq!(metadata.reasoning_effort, Some(level.clone()));
+
+            // The metadata back to overrides, as the executor reads them.
+            let round_tripped = SessionRuntime::turn_overrides_from_metadata(Some(&metadata))
+                .expect("metadata that carries only the level reconstructs overrides");
+            assert_eq!(round_tripped.reasoning_effort, Some(level.clone()));
+            let from_bare_metadata =
+                SessionRuntime::turn_overrides_from_metadata(Some(&RuntimeTurnMetadata {
+                    reasoning_effort: Some(level.clone()),
+                    ..Default::default()
+                }))
+                .expect("a level-only metadata reconstructs overrides");
+            assert_eq!(from_bare_metadata.reasoning_effort, Some(level.clone()));
+
+            // Overrides to the recovery of a session that is not live.
+            let recovered = runtime
+                .recovery_overrides_from_turn(Some(&overrides), false)
+                .expect("valid recovery overrides");
+            assert_eq!(recovered.reasoning_effort, Some(level));
+        }
+    }
+
+    /// A direct turn on a live session whose only override is the level: the
+    /// hot swap runs, the session's identity carries the level, and the turn
+    /// is refused before any provider request because nothing resolves the
+    /// level yet. The level is sticky until a turn clears it.
+    #[tokio::test]
+    async fn turn_reasoning_effort_hot_swaps_a_live_session_and_is_refused_unresolved() {
+        use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None, Vec::new())
+            .await
+            .unwrap();
+        let turn = |overrides: Option<crate::handlers::turn::TurnOverrides>| {
+            let runtime = Arc::clone(&runtime);
+            let session_id = session_id.clone();
+            async move {
+                let (event_tx, _event_rx) = mpsc::channel(100);
+                runtime
+                    .start_turn(
+                        &session_id,
+                        "Hello".into(),
+                        event_tx,
+                        None,
+                        None,
+                        None,
+                        overrides,
+                    )
+                    .await
+            }
+        };
+        let live_params = || {
+            let runtime = Arc::clone(&runtime);
+            let session_id = session_id.clone();
+            async move {
+                runtime
+                    .service
+                    .export_live_session(&session_id)
+                    .await
+                    .expect("live session")
+                    .session_metadata()
+                    .expect("live session metadata")
+                    .provider_params
+            }
+        };
+        turn(None).await.expect("the first turn runs");
+
+        let refused = turn(Some(level_overrides(TurnMetadataOverride::Set(
+            EffortLevel::High,
+        ))))
+        .await
+        .expect_err("a turn that sets the level is refused until it can be resolved");
+        assert!(
+            refused.message.contains(REASONING_EFFORT_UNRESOLVED),
+            "{refused:?}"
+        );
+        assert_eq!(
+            live_params().await,
+            Some(level_only_params(EffortLevel::High))
+        );
+
+        // Sticky: the next turn, with no override, is refused too.
+        let refused = turn(None)
+            .await
+            .expect_err("the level stays on the session");
+        assert!(
+            refused.message.contains(REASONING_EFFORT_UNRESOLVED),
+            "{refused:?}"
+        );
+
+        // A turn that clears the level runs, and the session has no params
+        // again.
+        turn(Some(level_overrides(TurnMetadataOverride::Clear)))
+            .await
+            .expect("a turn that clears the level runs");
+        assert_eq!(live_params().await, None);
+    }
+
+    /// The same through the runtime: the level travels on the accepted
+    /// input's metadata to the executor, which hot swaps before the turn.
+    #[tokio::test]
+    async fn turn_reasoning_effort_reaches_the_executor_through_the_runtime() {
+        use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None, Vec::new())
+            .await
+            .unwrap();
+        let turn = |overrides: Option<crate::handlers::turn::TurnOverrides>| {
+            let runtime = Arc::clone(&runtime);
+            let session_id = session_id.clone();
+            async move {
+                let (event_tx, _event_rx) = mpsc::channel(100);
+                runtime
+                    .start_turn_via_runtime(
+                        &session_id,
+                        "Hello".into(),
+                        Vec::new(),
+                        event_tx,
+                        None,
+                        None,
+                        None,
+                        overrides,
+                    )
+                    .await
+            }
+        };
+        turn(None).await.expect("the first turn runs");
+
+        let refused = turn(Some(level_overrides(TurnMetadataOverride::Set(
+            EffortLevel::High,
+        ))))
+        .await
+        .expect_err("a turn that sets the level is refused until it can be resolved");
+        assert!(
+            refused.message.contains(REASONING_EFFORT_UNRESOLVED),
+            "{refused:?}"
+        );
+        let live = runtime
+            .service
+            .export_live_session(&session_id)
+            .await
+            .expect("live session");
+        assert_eq!(
+            live.session_metadata()
+                .expect("live session metadata")
+                .provider_params,
+            Some(level_only_params(EffortLevel::High))
+        );
+
+        turn(Some(level_overrides(TurnMetadataOverride::Clear)))
+            .await
+            .expect("a turn that clears the level runs");
+        let live = runtime
+            .service
+            .export_live_session(&session_id)
+            .await
+            .expect("live session");
+        assert_eq!(
+            live.session_metadata()
+                .expect("live session metadata")
+                .provider_params,
+            None
+        );
+    }
+
     #[tokio::test]
     async fn materialized_hot_swap_updates_durable_identity_for_recovery() {
         let temp = tempfile::tempdir().unwrap();
@@ -43205,6 +43441,7 @@ mod tests {
                             self_hosted_server_id: None,
                             provider_params: None,
                             auth_binding: None,
+                            reasoning_effort: None,
                         },
                     )
                     .await

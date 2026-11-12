@@ -13867,6 +13867,7 @@ fn runtime_llm_reconfigure_request_from_primitive(
         && metadata.provider.is_none()
         && metadata.self_hosted_server_id.is_none()
         && metadata.provider_params.is_none()
+        && metadata.reasoning_effort.is_none()
         && metadata.auth_binding.is_none()
     {
         return None;
@@ -13882,6 +13883,7 @@ fn runtime_llm_reconfigure_request_from_primitive(
             .map(|provider| provider.as_str().to_string()),
         self_hosted_server_id: metadata.self_hosted_server_id.clone(),
         provider_params: metadata.provider_params.clone(),
+        reasoning_effort: metadata.reasoning_effort.clone(),
         auth_binding: metadata.auth_binding.clone(),
     })
 }
@@ -22499,4 +22501,61 @@ fn decode_ack_member_pubkey(pubkey: &str) -> Result<[u8; 32], MobError> {
         ));
     }
     Ok(bytes)
+}
+
+#[cfg(all(test, feature = "runtime-adapter"))]
+#[allow(clippy::expect_used)]
+mod turn_reasoning_effort_reconfigure_tests {
+    use super::runtime_llm_reconfigure_request_from_primitive;
+    use meerkat_core::lifecycle::run_primitive::{
+        RunApplyBoundary, RunPrimitive, RuntimeTurnMetadata, StagedRunInput, TurnMetadataOverride,
+    };
+    use meerkat_core::model_profile::capabilities::EffortLevel;
+
+    fn primitive(metadata: RuntimeTurnMetadata) -> RunPrimitive {
+        RunPrimitive::StagedInput(StagedRunInput {
+            boundary: RunApplyBoundary::RunStart,
+            appends: Vec::new(),
+            contributing_input_ids: Vec::new(),
+            turn_metadata: Some(metadata),
+        })
+    }
+
+    /// A member turn whose metadata names only the reasoning effort level
+    /// asks for an LLM reconfigure, and the request carries the level as the
+    /// turn gave it (set or clear). A turn that names no identity field asks
+    /// for none.
+    #[test]
+    fn turn_reasoning_effort_reaches_the_member_reconfigure_request() {
+        for level in [
+            TurnMetadataOverride::Set(EffortLevel::High),
+            TurnMetadataOverride::Clear,
+        ] {
+            let request =
+                runtime_llm_reconfigure_request_from_primitive(&primitive(RuntimeTurnMetadata {
+                    reasoning_effort: Some(level.clone()),
+                    ..Default::default()
+                }))
+                .expect("a turn that names only the level asks for a reconfigure");
+            assert_eq!(request.reasoning_effort, Some(level));
+            assert_eq!(request.model, None);
+            assert_eq!(request.provider_params, None);
+        }
+        assert_eq!(
+            runtime_llm_reconfigure_request_from_primitive(&primitive(
+                RuntimeTurnMetadata::default()
+            )),
+            None
+        );
+        // A resumed run continues under the identity its first dispatch
+        // applied: no second reconfigure, with or without the level.
+        assert_eq!(
+            runtime_llm_reconfigure_request_from_primitive(&primitive(RuntimeTurnMetadata {
+                reasoning_effort: Some(TurnMetadataOverride::Set(EffortLevel::High)),
+                execution_kind: Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumeRun),
+                ..Default::default()
+            })),
+            None
+        );
+    }
 }

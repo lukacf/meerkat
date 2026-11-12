@@ -848,6 +848,17 @@ export type ContextBudgetFact = {
 export type BindingOrigin = "configured" | "synthetic_env_default";
 
 /**
+ * Reasoning/effort control level, the shared typed vocabulary behind both
+ * Anthropic `output_config.effort` and OpenAI `reasoning.effort`.
+ *
+ * The two providers expose effort in different request shapes but draw from
+ * the same level vocabulary; modeling it as a typed enum keeps the catalog
+ * value-domain compiler-checked instead of relying on raw string literals.
+ * Each catalog row declares its accepted subset via `effort_levels`.
+ */
+export type EffortLevel = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
+/**
  * Typed shape of Anthropic's prompt-cache breakpoint policy.
  */
 export type AnthropicCacheControlPolicy = "disabled" | "automatic" | "system_prefix" | "system_and_conversation";
@@ -1055,6 +1066,7 @@ export type ProviderParamsOverride = {
   max_output_tokens?: number | null;
   provider_tag?: ProviderTag | null;
   reasoning?: ReasoningMode | null;
+  reasoning_effort?: EffortLevel | null;
   temperature?: number | null;
   thinking_budget_tokens?: number | null;
   top_p?: number | null;
@@ -1123,17 +1135,6 @@ export type PendingCallbackToolCall = {
   tool_name: string;
   tool_use_id: string;
 };
-
-/**
- * Reasoning/effort control level, the shared typed vocabulary behind both
- * Anthropic `output_config.effort` and OpenAI `reasoning.effort`.
- *
- * The two providers expose effort in different request shapes but draw from
- * the same level vocabulary; modeling it as a typed enum keeps the catalog
- * value-domain compiler-checked instead of relying on raw string literals.
- * Each catalog row declares its accepted subset via `effort_levels`.
- */
-export type EffortLevel = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 /**
  * How one runtime batch resolved its inputs' reasoning preferences. The

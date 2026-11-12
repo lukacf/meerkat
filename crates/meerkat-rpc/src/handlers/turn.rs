@@ -221,6 +221,11 @@ pub struct TurnOverrides {
     pub provider_params: Option<
         TurnMetadataOverride<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
     >,
+    /// The session's provider-neutral reasoning effort level for this turn
+    /// and the turns after it, as the runtime input's turn metadata carries
+    /// it. No `turn/start` parameter sets it.
+    pub reasoning_effort:
+        Option<TurnMetadataOverride<meerkat_core::model_profile::capabilities::EffortLevel>>,
     pub auth_binding: Option<TurnMetadataOverride<meerkat_core::AuthBindingRef>>,
     pub transient_turn_context: Option<meerkat_core::lifecycle::run_primitive::TurnRequestContext>,
 }
@@ -236,6 +241,7 @@ impl TurnOverrides {
             && self.output_schema.is_none()
             && self.structured_output_retries.is_none()
             && self.provider_params.is_none()
+            && self.reasoning_effort.is_none()
             && self.auth_binding.is_none()
             && self.transient_turn_context.is_none()
     }
@@ -341,6 +347,9 @@ pub async fn start_turn_with_params(
         output_schema: params.output_schema,
         structured_output_retries: params.structured_output_retries,
         provider_params: params.provider_params,
+        // `turn/start` has no parameter for the level; a level named inside
+        // `provider_params` rides there.
+        reasoning_effort: None,
         auth_binding: params.auth_binding,
         transient_turn_context: params.transient_turn_context,
     };

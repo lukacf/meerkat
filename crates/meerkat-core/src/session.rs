@@ -138,6 +138,8 @@ pub mod model_routing_handoff_staging;
 mod operator_instructions;
 #[cfg(test)]
 mod operator_instructions_tests;
+#[cfg(test)]
+mod reasoning_effort_carrier_tests;
 mod system_prompt_update;
 mod system_row_prune;
 #[cfg(test)]
@@ -10110,11 +10112,11 @@ pub struct SessionLlmIdentity {
 
 /// Typed per-turn override request for a session LLM identity.
 ///
-/// `provider_params` and `auth_binding` carry the canonical Inherit/Set/Clear
-/// tri-state via [`TurnMetadataOverride`]: `None` preserves the durable value,
-/// `Some(Set)` overrides it for this turn, and `Some(Clear)` removes it. The
-/// illegal "set and clear" fourth state is structurally unrepresentable, so the
-/// resolver needs no reject branch for it.
+/// `provider_params`, `reasoning_effort` and `auth_binding` carry the canonical
+/// Inherit/Set/Clear tri-state via [`TurnMetadataOverride`]: `None` preserves
+/// the durable value, `Some(Set)` overrides it for this turn, and `Some(Clear)`
+/// removes it. The illegal "set and clear" fourth state is structurally
+/// unrepresentable, so the resolver needs no reject branch for it.
 pub struct SessionLlmIdentityOverride<'a> {
     pub model: Option<&'a str>,
     pub provider: Option<Provider>,
@@ -10124,6 +10126,10 @@ pub struct SessionLlmIdentityOverride<'a> {
     pub self_hosted_server_id: Option<&'a str>,
     pub provider_params:
         Option<TurnMetadataOverride<&'a crate::lifecycle::run_primitive::ProviderParamsOverride>>,
+    /// The session's provider-neutral reasoning effort level, decided on its
+    /// own beside `provider_params` (see [`resolve_session_provider_params`]).
+    pub reasoning_effort:
+        Option<TurnMetadataOverride<crate::model_profile::capabilities::EffortLevel>>,
     pub auth_binding: Option<TurnMetadataOverride<&'a crate::AuthBindingRef>>,
 }
 
@@ -10147,6 +10153,36 @@ pub enum SessionLlmIdentityOverrideError {
         requested: String,
         configured: String,
     },
+    /// The change names the reasoning effort level in two places that
+    /// disagree. `top_level` is what the `reasoning_effort` field asks for:
+    /// `Some(level)` when it sets a level, `None` when it clears the level.
+    /// `nested` is the level the new `provider_params` name.
+    #[error("{}", reasoning_effort_disagreement_text(*top_level, *nested))]
+    ReasoningEffortSpellingsDisagree {
+        top_level: Option<crate::model_profile::capabilities::EffortLevel>,
+        nested: crate::model_profile::capabilities::EffortLevel,
+    },
+}
+
+/// The text of
+/// [`SessionLlmIdentityOverrideError::ReasoningEffortSpellingsDisagree`]:
+/// what each place asks for, then what a caller can do.
+fn reasoning_effort_disagreement_text(
+    top_level: Option<crate::model_profile::capabilities::EffortLevel>,
+    nested: crate::model_profile::capabilities::EffortLevel,
+) -> String {
+    let nested = nested.as_wire_str();
+    match top_level {
+        Some(top_level) => format!(
+            "reasoning_effort is '{}' but provider_params.reasoning_effort is '{nested}': set \
+             one of them, or the same level in both",
+            top_level.as_wire_str()
+        ),
+        None => format!(
+            "reasoning_effort is cleared but provider_params.reasoning_effort is '{nested}': \
+             clear the level or name one, not both"
+        ),
+    }
 }
 
 /// Resolve a turn-time model/provider/auth override against the current
@@ -10187,11 +10223,11 @@ pub fn resolve_session_llm_identity_override(
         ));
     }
 
-    let provider_params = match overrides.provider_params {
-        Some(TurnMetadataOverride::Clear) => None,
-        Some(TurnMetadataOverride::Set(value)) => Some(value.clone()),
-        None => current.provider_params.clone(),
-    };
+    let provider_params = resolve_session_provider_params(
+        current.provider_params.as_ref(),
+        overrides.provider_params,
+        overrides.reasoning_effort,
+    )?;
     if overrides.self_hosted_server_id.is_some() && provider != Provider::SelfHosted {
         return Err(SessionLlmIdentityOverrideError::SelfHostedServerRequiresSelfHostedProvider);
     }
@@ -10258,6 +10294,110 @@ pub fn resolve_session_llm_identity_override(
     })
 }
 
+/// The provider params a session carries across an LLM identity change.
+///
+/// One rule for every seam that moves a session's identity: a turn or hot-swap
+/// override ([`resolve_session_llm_identity_override`]), the recovered build of
+/// a session that is not live
+/// ([`crate::session_recovery::resolve_effective_turn_config`]) and a resumed
+/// build ([`resolve_resumed_session_llm_identity`]).
+///
+/// `params_override` replaces the params (`Set`) or removes them (`Clear`);
+/// absent keeps them. The provider-neutral reasoning effort level inside the
+/// params is decided on its own, so it is sticky across a params change:
+///
+/// - `reasoning_effort` is `Set(level)`: that level; `Clear`: no level;
+/// - `reasoning_effort` is absent and the new params name the nested
+///   `reasoning_effort` key: that level;
+/// - otherwise the current level, even when the params are replaced without
+///   the key, or cleared.
+///
+/// A params value that holds only the level is created when one is needed,
+/// and a params value that clearing the level leaves empty is dropped. With no
+/// level anywhere the result is the params tri-state alone.
+///
+/// A change that names the level in both places, the field and the nested
+/// key of its new params, must ask for one outcome. Two different levels are
+/// refused, and so is a field that clears the level beside new params that
+/// name one, whatever level that is
+/// ([`SessionLlmIdentityOverrideError::ReasoningEffortSpellingsDisagree`]).
+/// The same level in both is accepted, and a clear beside new params that
+/// name no level is a clear.
+pub fn resolve_session_provider_params(
+    current: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+    params_override: Option<
+        TurnMetadataOverride<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+    >,
+    reasoning_effort: Option<TurnMetadataOverride<crate::model_profile::capabilities::EffortLevel>>,
+) -> Result<
+    Option<crate::lifecycle::run_primitive::ProviderParamsOverride>,
+    SessionLlmIdentityOverrideError,
+> {
+    if let (Some(TurnMetadataOverride::Set(params)), Some(field)) =
+        (params_override.as_ref(), reasoning_effort.as_ref())
+        && let Some(nested) = params.reasoning_effort
+    {
+        let top_level = match field {
+            TurnMetadataOverride::Set(level) => Some(*level),
+            TurnMetadataOverride::Clear => None,
+        };
+        if top_level != Some(nested) {
+            return Err(
+                SessionLlmIdentityOverrideError::ReasoningEffortSpellingsDisagree {
+                    top_level,
+                    nested,
+                },
+            );
+        }
+    }
+    Ok(session_provider_params_rule(
+        current,
+        params_override,
+        reasoning_effort,
+    ))
+}
+
+/// The rule of [`resolve_session_provider_params`], for a change whose two
+/// spellings of the level cannot disagree: either that function compared
+/// them, or the caller holds the level in one place.
+fn session_provider_params_rule(
+    current: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+    params_override: Option<
+        TurnMetadataOverride<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+    >,
+    reasoning_effort: Option<TurnMetadataOverride<crate::model_profile::capabilities::EffortLevel>>,
+) -> Option<crate::lifecycle::run_primitive::ProviderParamsOverride> {
+    let level = match (&reasoning_effort, &params_override) {
+        (Some(TurnMetadataOverride::Set(level)), _) => Some(*level),
+        (Some(TurnMetadataOverride::Clear), _) => None,
+        (None, Some(TurnMetadataOverride::Set(params))) if params.reasoning_effort.is_some() => {
+            params.reasoning_effort
+        }
+        (None, _) => current.and_then(|params| params.reasoning_effort),
+    };
+    let mut params = match params_override {
+        Some(TurnMetadataOverride::Clear) => None,
+        Some(TurnMetadataOverride::Set(value)) => Some(value.clone()),
+        None => current.cloned(),
+    };
+    match level {
+        Some(level) => {
+            params.get_or_insert_with(Default::default).reasoning_effort = Some(level);
+        }
+        None => {
+            // Only a params value that held a level can be emptied by
+            // clearing it: an empty params value the caller set stays.
+            let emptied = params
+                .as_mut()
+                .is_some_and(|held| held.reasoning_effort.take().is_some() && held.is_empty());
+            if emptied {
+                params = None;
+            }
+        }
+    }
+    params
+}
+
 /// The credential binding a session carries across an LLM identity change.
 ///
 /// One rule for every seam that moves a session's identity: a turn or hot-swap
@@ -10292,6 +10432,13 @@ pub fn resolve_session_auth_binding(
 /// - The self-hosted server follows the route: a build that claims the model,
 ///   the provider or the server keeps its own server, and otherwise the
 ///   durable server stays.
+/// - The provider params follow the one params rule
+///   ([`resolve_session_provider_params`]): a build that claims
+///   `provider_params` replaces the durable params with its own (removes them
+///   when it has none), and the durable reasoning effort level stays unless
+///   the build's params name a level; a build that claims `reasoning_effort`
+///   seats the level its params name, or none. A build holds the level in one
+///   place, its params, so the two spellings cannot disagree here.
 /// - The binding follows [`resolve_resumed_session_auth_binding`].
 #[must_use]
 pub fn resolve_resumed_session_llm_identity(
@@ -10310,6 +10457,22 @@ pub fn resolve_resumed_session_llm_identity(
         candidate.auth_binding.as_ref(),
         mask.auth_binding,
     );
+    // What the build claims, in the rule's terms: its params (or their
+    // removal) when it claims `provider_params`, and the level its params
+    // name (or none) when it claims `reasoning_effort`.
+    let build_params = candidate.provider_params.as_ref();
+    let params_claim = mask.provider_params.then_some(match build_params {
+        Some(params) => TurnMetadataOverride::Set(params),
+        None => TurnMetadataOverride::Clear,
+    });
+    let level_claim = mask.reasoning_effort.then_some(
+        match build_params.and_then(|params| params.reasoning_effort) {
+            Some(level) => TurnMetadataOverride::Set(level),
+            None => TurnMetadataOverride::Clear,
+        },
+    );
+    let provider_params =
+        session_provider_params_rule(durable.provider_params.as_ref(), params_claim, level_claim);
     SessionLlmIdentity {
         model: if mask.model {
             candidate.model
@@ -10322,11 +10485,7 @@ pub fn resolve_resumed_session_llm_identity(
         } else {
             durable.self_hosted_server_id.clone()
         },
-        provider_params: if mask.provider_params {
-            candidate.provider_params
-        } else {
-            durable.provider_params.clone()
-        },
+        provider_params,
         auth_binding,
     }
 }
@@ -15371,6 +15530,7 @@ mod tests {
                 self_hosted_server_id: None,
                 provider_params: None,
                 auth_binding: None,
+                reasoning_effort: None,
             },
         )
         .unwrap();
@@ -15407,6 +15567,7 @@ mod tests {
                 self_hosted_server_id: None,
                 provider_params: None,
                 auth_binding: None,
+                reasoning_effort: None,
             },
         )
         .unwrap();
@@ -15471,6 +15632,7 @@ mod tests {
                 self_hosted_server_id: Some("local-b"),
                 provider_params: None,
                 auth_binding: None,
+                reasoning_effort: None,
             },
         )
         .expect("exact configured local route should resolve");
@@ -15500,6 +15662,7 @@ mod tests {
                 self_hosted_server_id: Some("local-a"),
                 provider_params: None,
                 auth_binding: None,
+                reasoning_effort: None,
             },
         )
         .expect_err("server id must match the requested model alias route");

@@ -1099,6 +1099,14 @@ pub struct ProviderParamsOverride {
     pub thinking_budget_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_tag: Option<ProviderTag>,
+    /// Provider-neutral reasoning effort level for the session's requests:
+    /// `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` (one
+    /// spelling each). It is not a provider setting itself: a request that
+    /// still carries it when it reaches a provider client is refused, so the
+    /// level is never sent as it is and never dropped. A session keeps it
+    /// across a replacement of its other provider params.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<EffortLevel>,
     /// Request-local tool choice for one provider call. The agent loop sets
     /// it on each request's own copy from the turn's tool-choice plan
     /// (`TurnToolOverlay::tool_choice_plan`) and replaces any value that
@@ -1111,13 +1119,17 @@ pub struct ProviderParamsOverride {
 
 impl ProviderParamsOverride {
     /// Whether these params set a reasoning knob explicitly: the generic
-    /// reasoning mode or thinking budget, or any provider tag's effort,
-    /// thinking or reasoning field (nested or flat). Unrelated knobs
+    /// reasoning mode or thinking budget, the provider-neutral reasoning
+    /// effort level, or any provider tag's effort, thinking or reasoning
+    /// field (nested or flat). Unrelated knobs
     /// (temperature, sampling, limits, caching, search) do not count; an
     /// untyped tag bag counts, since it may carry one.
     #[must_use]
     pub fn sets_reasoning(&self) -> bool {
-        if self.reasoning.is_some() || self.thinking_budget_tokens.is_some() {
+        if self.reasoning.is_some()
+            || self.thinking_budget_tokens.is_some()
+            || self.reasoning_effort.is_some()
+        {
             return true;
         }
         match &self.provider_tag {
@@ -1149,6 +1161,7 @@ impl ProviderParamsOverride {
             && self.reasoning.is_none()
             && self.thinking_budget_tokens.is_none()
             && self.provider_tag.is_none()
+            && self.reasoning_effort.is_none()
             && self.tool_choice.is_none()
     }
 
@@ -1939,6 +1952,13 @@ pub struct RuntimeTurnMetadata {
     /// (typed; no Value).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_params: Option<TurnMetadataOverride<ProviderParamsOverride>>,
+    /// Set, clear, or preserve the session's provider-neutral reasoning
+    /// effort level, for this turn and the turns after it. It is its own
+    /// field: a turn that replaces or clears `provider_params` keeps the
+    /// level unless it also names this field, or its new params name the
+    /// nested `reasoning_effort` key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<TurnMetadataOverride<EffortLevel>>,
     /// Override, clear, or preserve the auth binding reference this turn must
     /// resolve against.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2007,6 +2027,7 @@ impl RuntimeTurnMetadata {
             && self.provider.is_none()
             && self.self_hosted_server_id.is_none()
             && self.provider_params.is_none()
+            && self.reasoning_effort.is_none()
             && self.auth_binding.is_none()
             && self.keep_alive.is_none()
             && self.render_metadata.is_none()
@@ -2057,6 +2078,9 @@ impl RuntimeTurnMetadata {
             provider,
             self_hosted_server_id,
             provider_params,
+            // The reasoning effort level is model routing, like
+            // `provider_params`: only a fresh turn applies it.
+            reasoning_effort,
             auth_binding,
             keep_alive,
             render_metadata,
@@ -2078,6 +2102,7 @@ impl RuntimeTurnMetadata {
             && provider.is_none()
             && self_hosted_server_id.is_none()
             && provider_params.is_none()
+            && reasoning_effort.is_none()
             && auth_binding.is_none()
             && keep_alive.is_none()
             && render_metadata.is_none()
@@ -2136,6 +2161,11 @@ impl RuntimeTurnMetadata {
             &mut self.provider_params,
             other.provider_params,
             "provider_params",
+        )?;
+        merge_override(
+            &mut self.reasoning_effort,
+            other.reasoning_effort,
+            "reasoning_effort",
         )?;
         merge_override(&mut self.auth_binding, other.auth_binding, "auth_binding")?;
         merge_scalar(&mut self.keep_alive, other.keep_alive, "keep_alive")?;
@@ -3902,5 +3932,130 @@ mod tests {
                 assert!(parsed.as_set().is_some_and(xhigh), "{spelling}");
             }
         }
+    }
+
+    #[test]
+    fn reasoning_effort_round_trips_through_params_identity_and_wire() {
+        let params = ProviderParamsOverride {
+            temperature: Some(0.5),
+            reasoning_effort: Some(EffortLevel::Xhigh),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&params).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"temperature": 0.5, "reasoning_effort": "xhigh"})
+        );
+        assert_eq!(
+            serde_json::from_value::<ProviderParamsOverride>(json).unwrap(),
+            params
+        );
+
+        // Params written without the level read as no level and write the
+        // same JSON again.
+        let stored = serde_json::json!({"temperature": 0.5});
+        let read: ProviderParamsOverride = serde_json::from_value(stored.clone()).unwrap();
+        assert_eq!(read.reasoning_effort, None);
+        assert_eq!(serde_json::to_value(&read).unwrap(), stored);
+
+        // The level is an explicit reasoning setting, and a params value
+        // that holds only the level is not empty.
+        let level_only = ProviderParamsOverride {
+            reasoning_effort: Some(EffortLevel::Low),
+            ..Default::default()
+        };
+        assert!(level_only.sets_reasoning());
+        assert!(!level_only.is_empty());
+        assert!(!ProviderParamsOverride::default().sets_reasoning());
+        assert!(ProviderParamsOverride::default().is_empty());
+
+        // `x_high` is not a level; the refusal lists the levels.
+        let error = serde_json::from_value::<ProviderParamsOverride>(
+            serde_json::json!({"reasoning_effort": "x_high"}),
+        )
+        .expect_err("`x_high` is not a level")
+        .to_string();
+        assert!(error.contains("`xhigh`"), "{error}");
+
+        // The turn field: set, clear and absent, each through JSON.
+        for (turn, json) in [
+            (
+                Some(TurnMetadataOverride::Set(EffortLevel::Medium)),
+                serde_json::json!({"reasoning_effort": {"action": "set", "value": "medium"}}),
+            ),
+            (
+                Some(TurnMetadataOverride::Clear),
+                serde_json::json!({"reasoning_effort": {"action": "clear"}}),
+            ),
+            (None, serde_json::json!({})),
+        ] {
+            let metadata = RuntimeTurnMetadata {
+                reasoning_effort: turn,
+                ..Default::default()
+            };
+            assert_eq!(serde_json::to_value(&metadata).unwrap(), json);
+            assert_eq!(
+                serde_json::from_value::<RuntimeTurnMetadata>(json).unwrap(),
+                metadata
+            );
+            assert_eq!(metadata.is_empty(), metadata.reasoning_effort.is_none());
+        }
+        let error = serde_json::from_value::<RuntimeTurnMetadata>(
+            serde_json::json!({"reasoning_effort": "x_high"}),
+        )
+        .expect_err("`x_high` is not a level on a turn either")
+        .to_string();
+        assert!(error.contains("`xhigh`"), "{error}");
+    }
+
+    #[test]
+    fn batch_and_join_rules() {
+        let level = |level: Option<TurnMetadataOverride<EffortLevel>>| RuntimeTurnMetadata {
+            reasoning_effort: level,
+            ..Default::default()
+        };
+        let set = |value| Some(TurnMetadataOverride::Set(value));
+        let clear = Some(TurnMetadataOverride::Clear);
+
+        // Two different turn levels in one batch conflict.
+        let mut merged = level(set(EffortLevel::Low));
+        let conflict = merged
+            .merge(level(set(EffortLevel::High)))
+            .expect_err("two levels in one batch conflict");
+        assert_eq!(conflict.field, "reasoning_effort");
+        // A set and a clear conflict too.
+        let mut merged = level(set(EffortLevel::Low));
+        let conflict = merged
+            .merge(level(clear.clone()))
+            .expect_err("a set and a clear in one batch conflict");
+        assert_eq!(conflict.field, "reasoning_effort");
+
+        // Equal levels merge, and an input without the field takes the
+        // other's.
+        let mut merged = level(set(EffortLevel::High));
+        merged.merge(level(set(EffortLevel::High))).unwrap();
+        assert_eq!(merged.reasoning_effort, set(EffortLevel::High));
+        let mut merged = level(None);
+        merged.merge(level(clear.clone())).unwrap();
+        assert_eq!(merged.reasoning_effort, clear);
+        let mut merged = level(set(EffortLevel::High));
+        merged.merge(level(None)).unwrap();
+        assert_eq!(merged.reasoning_effort, set(EffortLevel::High));
+
+        // The level is independent of `provider_params`: a batch may carry
+        // both, each merged by its own field.
+        let mut merged = RuntimeTurnMetadata {
+            provider_params: Some(TurnMetadataOverride::Clear),
+            ..Default::default()
+        };
+        merged.merge(level(set(EffortLevel::High))).unwrap();
+        assert_eq!(merged.provider_params, Some(TurnMetadataOverride::Clear));
+        assert_eq!(merged.reasoning_effort, set(EffortLevel::High));
+
+        // An input that carries the field is model routing: it takes its own
+        // turn and never joins a running one.
+        assert!(level(None).joins_running_turn());
+        assert!(!level(set(EffortLevel::High)).joins_running_turn());
+        assert!(!level(clear).joins_running_turn());
     }
 }

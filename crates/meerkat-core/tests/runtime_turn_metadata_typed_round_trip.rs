@@ -71,6 +71,7 @@ fn sample_metadata() -> RuntimeTurnMetadata {
             })),
             // Request-local and never serialized; the plan lives on the overlay.
             tool_choice: None,
+            reasoning_effort: None,
         })),
         auth_binding: Some(TurnMetadataOverride::Set(AuthBindingRef {
             realm: meerkat_core::connection::RealmId::parse("dev").expect("valid realm"),
@@ -98,6 +99,7 @@ fn sample_metadata() -> RuntimeTurnMetadata {
         request_reasoning: None,
         request_reasoning_disposition: None,
         work_authorization: None,
+        reasoning_effort: None,
     }
 }
 

@@ -367,6 +367,15 @@ impl LlmClientAdapter {
         temperature: Option<f32>,
         provider_params: Option<&ProviderParamsOverride>,
     ) -> Result<PreparedLlmRequest, AgentError> {
+        // A request that still carries the provider-neutral reasoning effort
+        // level was never resolved for the route this client serves. Every
+        // provider request is built here, so a path that forgets to resolve
+        // the level fails loudly instead of sending a request without it.
+        if provider_params.is_some_and(|params| params.reasoning_effort.is_some()) {
+            return Err(AgentError::InternalError(
+                "reasoning_effort reached the provider adapter unresolved".to_string(),
+            ));
+        }
         let effective_params = provider_params
             .and_then(|params| params.provider_tag.clone())
             .or_else(|| self.provider_params.clone());
@@ -1890,5 +1899,128 @@ mod tests {
                 AgentEvent::Retrying { .. } | AgentEvent::RunFailed { .. }
             )));
         }
+    }
+
+    /// Counts what reaches the wire client: replay projections and streams.
+    struct CountingClient {
+        projections: Arc<std::sync::atomic::AtomicUsize>,
+        streams: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    impl LlmClient for CountingClient {
+        fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
+            self.projections
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(&'a self, _request: &'a LlmRequest) -> LlmStream<'a> {
+            self.streams
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(stream::iter([Ok(LlmEvent::Done {
+                outcome: LlmDoneOutcome::success(StopReason::EndTurn),
+            })]))
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    /// A request whose params still carry the provider-neutral level was
+    /// never resolved for a route. The adapter refuses it before it builds
+    /// anything, on every entry that makes a provider request, and the wire
+    /// client sees neither a projection nor a stream.
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn adapter_refuses_an_untranslated_neutral_effort() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let projections = Arc::new(AtomicUsize::new(0));
+        let streams = Arc::new(AtomicUsize::new(0));
+        let adapter = Arc::new(LlmClientAdapter::new(
+            Arc::new(CountingClient {
+                projections: Arc::clone(&projections),
+                streams: Arc::clone(&streams),
+            }),
+            "scripted-model".into(),
+        ));
+        let params = ProviderParamsOverride {
+            reasoning_effort: Some(meerkat_core::model_profile::capabilities::EffortLevel::High),
+            ..Default::default()
+        };
+        let messages = vec![Message::User(UserMessage::text("hello"))];
+        let unresolved = |error: AgentError| {
+            assert!(
+                matches!(
+                    &error,
+                    AgentError::InternalError(message)
+                        if message == "reasoning_effort reached the provider adapter unresolved"
+                ),
+                "unexpected refusal: {error:?}"
+            );
+        };
+
+        unresolved(
+            adapter
+                .build_request(&messages, &[], 1024, None, Some(&params))
+                .map(|_| ())
+                .expect_err("build_request refuses the level"),
+        );
+        unresolved(
+            adapter
+                .stream_response(&messages, &[], 1024, None, Some(&params))
+                .await
+                .map(|_| ())
+                .expect_err("stream_response refuses the level"),
+        );
+        unresolved(
+            adapter
+                .stream_response_authorized(&messages, &[], 1024, None, Some(&params), None)
+                .await
+                .map(|_| ())
+                .expect_err("stream_response_authorized refuses the level"),
+        );
+        unresolved(
+            Arc::clone(&adapter)
+                .prepare_request_attempt(
+                    Arc::new(messages.clone()),
+                    Arc::from(Vec::new()),
+                    1024,
+                    None,
+                    Some(params.clone()),
+                )
+                .map(|_| ())
+                .expect_err("prepare_request_attempt refuses the level"),
+        );
+        unresolved(
+            Arc::clone(&adapter)
+                .prepare_request_attempt_authorized(
+                    Arc::new(messages.clone()),
+                    Arc::from(Vec::new()),
+                    1024,
+                    None,
+                    Some(params),
+                    None,
+                )
+                .map(|_| ())
+                .expect_err("prepare_request_attempt_authorized refuses the level"),
+        );
+        assert_eq!(projections.load(Ordering::SeqCst), 0);
+        assert_eq!(streams.load(Ordering::SeqCst), 0);
+
+        // The same request without the level is built and streamed.
+        adapter
+            .stream_response(&messages, &[], 1024, None, None)
+            .await
+            .expect("a request without the level is served");
+        assert_eq!(projections.load(Ordering::SeqCst), 1);
+        assert_eq!(streams.load(Ordering::SeqCst), 1);
     }
 }

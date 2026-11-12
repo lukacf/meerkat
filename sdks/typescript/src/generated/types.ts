@@ -3932,6 +3932,7 @@ export interface WireProviderParamsOverride {
   max_output_tokens?: number | null;
   provider_tag?: WireProviderTag | null;
   reasoning?: WireReasoningMode | null;
+  reasoning_effort?: unknown | null;
   temperature?: number | null;
   thinking_budget_tokens?: number | null;
   top_p?: number | null;

@@ -1368,6 +1368,12 @@ pub struct WireProviderParamsOverride {
     pub thinking_budget_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_tag: Option<WireProviderTag>,
+    /// Provider-neutral reasoning effort level for the session's requests:
+    /// `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` (one
+    /// spelling each). A session keeps it across a replacement of its other
+    /// provider params.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<meerkat_core::model_profile::capabilities::EffortLevel>,
 }
 
 impl From<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>
@@ -1381,6 +1387,7 @@ impl From<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>
             reasoning: value.reasoning.map(Into::into),
             thinking_budget_tokens: value.thinking_budget_tokens,
             provider_tag: value.provider_tag.map(Into::into),
+            reasoning_effort: value.reasoning_effort,
         }
     }
 }
@@ -1396,6 +1403,7 @@ impl From<WireProviderParamsOverride>
             reasoning: value.reasoning.map(Into::into),
             thinking_budget_tokens: value.thinking_budget_tokens,
             provider_tag: value.provider_tag.map(Into::into),
+            reasoning_effort: value.reasoning_effort,
             // Tool choice is request-local (set by the agent loop from the
             // turn overlay's plan); a params override never carries one.
             tool_choice: None,
@@ -1520,8 +1528,9 @@ impl From<WireTurnInputOptions> for meerkat_core::lifecycle::run_primitive::Runt
 /// Typed wire projection of [`meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata`].
 ///
 /// The per-turn seam between control plane and core is fully typed —
-/// `serde_json::Value` does not appear here. `provider_params` and
-/// `auth_binding` carry the canonical Inherit/Set/Clear tri-state via
+/// `serde_json::Value` does not appear here. `provider_params`,
+/// `reasoning_effort` and `auth_binding` carry the canonical
+/// Inherit/Set/Clear tri-state via
 /// [`WireTurnMetadataOverride`]; unknown fields (including the retired
 /// `clear_*` split wire form) fail closed at the serde boundary.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -1548,6 +1557,14 @@ pub struct WireRuntimeTurnMetadata {
     pub self_hosted_server_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_params: Option<WireTurnMetadataOverride<WireProviderParamsOverride>>,
+    /// Set, clear, or preserve the session's provider-neutral reasoning
+    /// effort level, for this turn and the turns after it. It is its own
+    /// field: a turn that replaces or clears `provider_params` keeps the
+    /// level unless it also names this field, or its new params name the
+    /// nested `reasoning_effort` key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort:
+        Option<WireTurnMetadataOverride<meerkat_core::model_profile::capabilities::EffortLevel>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_binding: Option<WireTurnMetadataOverride<crate::wire::connection::WireAuthBindingRef>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1644,6 +1661,7 @@ impl From<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata> for WireR
             provider: value.provider,
             self_hosted_server_id: value.self_hosted_server_id,
             provider_params: value.provider_params.map(Into::into),
+            reasoning_effort: value.reasoning_effort.map(Into::into),
             auth_binding: value.auth_binding.map(Into::into),
             keep_alive: value.keep_alive.map(Into::into),
             render_metadata: value.render_metadata.map(Into::into),
@@ -1677,6 +1695,7 @@ impl From<WireRuntimeTurnMetadata> for meerkat_core::lifecycle::run_primitive::R
             provider: value.provider,
             self_hosted_server_id: value.self_hosted_server_id,
             provider_params: value.provider_params.map(Into::into),
+            reasoning_effort: value.reasoning_effort.map(Into::into),
             auth_binding: value.auth_binding.map(Into::into),
             keep_alive: value.keep_alive.map(Into::into),
             render_metadata: value.render_metadata.map(Into::into),
@@ -1829,5 +1848,92 @@ mod claude_effort_spelling_tests {
                 assert!(is_claude_xhigh(&params), "{spelling}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)]
+mod reasoning_effort_carrier_tests {
+    use super::{WireProviderParamsOverride, WireRuntimeTurnMetadata, WireTurnMetadataOverride};
+    use meerkat_core::lifecycle::run_primitive::{
+        ProviderParamsOverride, RuntimeTurnMetadata, TurnMetadataOverride,
+    };
+    use meerkat_core::model_profile::capabilities::EffortLevel;
+
+    #[test]
+    fn reasoning_effort_round_trips_through_params_identity_and_wire() {
+        // Params: core to wire to JSON and back, the level kept at each step.
+        let core = ProviderParamsOverride {
+            temperature: Some(0.5),
+            reasoning_effort: Some(EffortLevel::Xhigh),
+            ..Default::default()
+        };
+        let wire: WireProviderParamsOverride = core.clone().into();
+        assert_eq!(wire.reasoning_effort, Some(EffortLevel::Xhigh));
+        let json = serde_json::to_value(&wire).expect("serialize wire params");
+        assert_eq!(
+            json,
+            serde_json::json!({"temperature": 0.5, "reasoning_effort": "xhigh"})
+        );
+        // The core type writes the same JSON: one spelling on every form.
+        assert_eq!(serde_json::to_value(&core).expect("serialize core"), json);
+        let read: WireProviderParamsOverride =
+            serde_json::from_value(json).expect("deserialize wire params");
+        assert_eq!(ProviderParamsOverride::from(read), core);
+
+        // Wire params without the level read as no level and write the same
+        // JSON again.
+        let stored = serde_json::json!({"temperature": 0.5});
+        let read: WireProviderParamsOverride =
+            serde_json::from_value(stored.clone()).expect("params without the level read");
+        assert_eq!(read.reasoning_effort, None);
+        assert_eq!(serde_json::to_value(&read).expect("serialize"), stored);
+
+        // `x_high` is not a level on the wire either.
+        let error = serde_json::from_value::<WireProviderParamsOverride>(
+            serde_json::json!({"reasoning_effort": "x_high"}),
+        )
+        .expect_err("`x_high` is not a level")
+        .to_string();
+        assert!(error.contains("`xhigh`"), "{error}");
+
+        // Turn metadata: set, clear and absent, core to wire to JSON and
+        // back.
+        for (turn, json) in [
+            (
+                Some(TurnMetadataOverride::Set(EffortLevel::Medium)),
+                serde_json::json!({"reasoning_effort": {"action": "set", "value": "medium"}}),
+            ),
+            (
+                Some(TurnMetadataOverride::Clear),
+                serde_json::json!({"reasoning_effort": {"action": "clear"}}),
+            ),
+            (None, serde_json::json!({})),
+        ] {
+            let core = RuntimeTurnMetadata {
+                reasoning_effort: turn,
+                ..Default::default()
+            };
+            let wire: WireRuntimeTurnMetadata = core.clone().into();
+            assert_eq!(serde_json::to_value(&wire).expect("serialize"), json);
+            let read: WireRuntimeTurnMetadata =
+                serde_json::from_value(json).expect("deserialize wire turn metadata");
+            assert_eq!(read, wire);
+            assert_eq!(RuntimeTurnMetadata::from(read), core);
+        }
+        // A bare level is the set form on input.
+        let read: WireRuntimeTurnMetadata =
+            serde_json::from_value(serde_json::json!({"reasoning_effort": "low"}))
+                .expect("a bare level reads");
+        assert_eq!(
+            read.reasoning_effort,
+            Some(WireTurnMetadataOverride::Set(EffortLevel::Low))
+        );
+        let error = serde_json::from_value::<WireRuntimeTurnMetadata>(
+            serde_json::json!({"reasoning_effort": "x_high"}),
+        )
+        .expect_err("`x_high` is not a level on a turn")
+        .to_string();
+        assert!(error.contains("`xhigh`"), "{error}");
     }
 }

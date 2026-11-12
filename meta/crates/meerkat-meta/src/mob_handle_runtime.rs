@@ -17561,6 +17561,140 @@ realm_profile = "worker-v2"
         );
     }
 
+    /// A reasoning route for the forwarding rows below. The trait default
+    /// reports no route, so a wrapper that omits the forward compiles and is
+    /// told apart only by a wrapped client that reports one.
+    fn reported_reasoning_route() -> meerkat_core::ReasoningRouteObservation {
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+        meerkat_core::ReasoningRouteObservation {
+            backend: meerkat_core::ReasoningBackend::OpenAi(
+                meerkat_core::provider_matrix::OpenAiBackendKind::Copilot,
+            ),
+            api: meerkat_core::ModelApi::Responses,
+            account: meerkat_core::AccountLevelStatement::Stated(vec![
+                EffortLevel::Low,
+                EffortLevel::High,
+            ]),
+            operator_levels: None,
+        }
+    }
+
+    /// A raw client that reports the reasoning route it is given, or none.
+    struct RoutedRawClient {
+        route: Option<meerkat_core::ReasoningRouteObservation>,
+    }
+
+    #[async_trait]
+    impl LlmClient for RoutedRawClient {
+        fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+            self.route.clone()
+        }
+
+        fn stream<'a>(&'a self, _request: &'a LlmRequest) -> LlmStream<'a> {
+            Box::pin(futures::stream::iter(Vec::new()))
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::OpenAI
+        }
+
+        async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
+            Ok(())
+        }
+    }
+
+    /// An agent-layer client that reports the reasoning route it is given, or
+    /// none.
+    struct RoutedAgentClient {
+        route: Option<meerkat_core::ReasoningRouteObservation>,
+    }
+
+    #[async_trait]
+    impl meerkat_core::AgentLlmClient for RoutedAgentClient {
+        fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+            self.route.clone()
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::OpenAI
+        }
+
+        fn model(&self) -> &'static str {
+            "gpt-5.5"
+        }
+
+        async fn stream_response(
+            &self,
+            _messages: &[meerkat_core::Message],
+            _tools: &[std::sync::Arc<meerkat_core::ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<
+                &meerkat_core::lifecycle::run_primitive::ProviderParamsOverride,
+            >,
+        ) -> Result<meerkat_core::agent::LlmStreamResult, meerkat_core::AgentError> {
+            unreachable!("route forwarding never streams")
+        }
+    }
+
+    /// The mob-wide default client wrapper reports the reasoning route of the
+    /// client it wraps, and none over a client that reports none.
+    #[test]
+    fn provider_agnostic_client_forwards_the_reasoning_route() {
+        let route = reported_reasoning_route();
+        let wrapped = ProviderAgnosticLlmClient::wrap(Arc::new(RoutedRawClient {
+            route: Some(route.clone()),
+        }));
+        assert_eq!(
+            wrapped.reasoning_route(),
+            Some(route),
+            "the wrapper hid the route of the client it wraps"
+        );
+
+        let wrapped = ProviderAgnosticLlmClient::wrap(Arc::new(RoutedRawClient { route: None }));
+        assert_eq!(wrapped.reasoning_route(), None);
+    }
+
+    /// The raw replay sanitizer reports the reasoning route of the client it
+    /// wraps, and none over a client that reports none.
+    #[test]
+    fn replay_sanitizing_client_forwards_the_reasoning_route() {
+        let route = reported_reasoning_route();
+        let wrapped = ReplaySanitizingLlmClient::new(Arc::new(RoutedRawClient {
+            route: Some(route.clone()),
+        }));
+        assert_eq!(
+            LlmClient::reasoning_route(&wrapped),
+            Some(route),
+            "the sanitizer hid the route of the client it wraps"
+        );
+
+        let wrapped = ReplaySanitizingLlmClient::new(Arc::new(RoutedRawClient { route: None }));
+        assert_eq!(LlmClient::reasoning_route(&wrapped), None);
+    }
+
+    /// The agent-layer replay sanitizer reports the reasoning route of the
+    /// client it wraps, and none over a client that reports none.
+    #[test]
+    fn replay_sanitizing_agent_client_forwards_the_reasoning_route() {
+        let route = reported_reasoning_route();
+        let wrapped = ReplaySanitizingAgentLlmClient::new(Arc::new(RoutedAgentClient {
+            route: Some(route.clone()),
+        }));
+        assert_eq!(
+            meerkat_core::AgentLlmClient::reasoning_route(&wrapped),
+            Some(route),
+            "the sanitizer hid the route of the client it wraps"
+        );
+
+        let wrapped =
+            ReplaySanitizingAgentLlmClient::new(Arc::new(RoutedAgentClient { route: None }));
+        assert_eq!(
+            meerkat_core::AgentLlmClient::reasoning_route(&wrapped),
+            None
+        );
+    }
+
     /// The replay sanitizer forwards the controller surface, and the pinned
     /// controller (the client governed controller requests actually run
     /// through) still sanitizes what it sends.

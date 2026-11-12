@@ -419,6 +419,7 @@ impl SessionRuntime {
                 transcript_identity: Default::default(),
                 request_reasoning: None,
                 request_reasoning_disposition: None,
+                reasoning_effort: None,
             },
         );
         let mut prompt_input =

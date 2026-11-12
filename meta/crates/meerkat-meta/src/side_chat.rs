@@ -195,16 +195,24 @@ pub(crate) struct SideChatRosterRow<'a> {
 /// Every verified side chat among `rows`, one mob's roster, keyed by the side
 /// chat's public alias, with its lineage. A caller builds the rows only when
 /// one carries the marker ([`any_side_chat_marker`]): no other row is one.
+/// `core` answers which rows are identities' members
+/// ([`crate::member_comms_id::resolve_member_identity`]): the roster's mob
+/// handle.
 pub(crate) fn side_chat_lineages(
+    core: &(impl crate::member_comms_id::IdentityEntries + ?Sized),
     rows: &[SideChatRosterRow<'_>],
 ) -> BTreeMap<String, SideChatLineage> {
-    let console_identity_by_alias: BTreeMap<&str, &str> = rows
+    let console_identity_by_alias: BTreeMap<&str, std::borrow::Cow<'_, str>> = rows
         .iter()
         .map(|row| {
             (
                 row.alias.as_str(),
-                crate::member_comms_id::durable_identity_label(row.labels)
-                    .unwrap_or(row.alias.as_str()),
+                crate::member_comms_id::resolve_member_identity(
+                    core,
+                    &crate::member_comms_id::mob_member_id(&row.alias),
+                    row.labels,
+                )
+                .unwrap_or(std::borrow::Cow::Borrowed(row.alias.as_str())),
             )
         })
         .collect();
@@ -215,7 +223,7 @@ pub(crate) fn side_chat_lineages(
             let fork_source = row.fork_source?;
             let source_session_id = fork_source.source_session_id.to_string();
             let source_identity = match console_identity_by_alias.get(source_alias.as_str()) {
-                Some(identity) => String::from(*identity),
+                Some(identity) => identity.to_string(),
                 // A source that left the roster: the durable identity its
                 // roster id names (a legacy `rt:{identity}:{generation}` id
                 // names `{identity}`).
@@ -266,7 +274,7 @@ async fn read_verified_side_chats(
             fork_source: entry.fork_source.as_ref(),
         })
         .collect::<Vec<_>>();
-    let lineages = side_chat_lineages(&rows);
+    let lineages = side_chat_lineages(handle, &rows);
     let marked = entries
         .iter()
         .zip(&rows)
@@ -789,8 +797,12 @@ pub async fn fork_side_chat(
     {
         return Err(SideChatError::BindingRefused(refusal.json_rpc_error()));
     }
-    let source_console_identity = crate::member_comms_id::durable_identity_label(&source.labels)
-        .map_or_else(|| source_alias.clone(), str::to_string);
+    let source_console_identity = crate::member_comms_id::resolve_member_identity(
+        &handle,
+        &source.agent_identity,
+        &source.labels,
+    )
+    .map_or_else(|| source_alias.clone(), std::borrow::Cow::into_owned);
     let display_name = display_name.unwrap_or_else(|| {
         let source_name = source
             .labels
@@ -1637,8 +1649,10 @@ mod tests {
                 fork_source: Some(&source),
             },
         ];
+        // Core holds none of these rows as an identity entry.
+        let no_entries = std::collections::BTreeSet::<meerkat_mob::AgentIdentity>::new();
         assert_eq!(
-            side_chat_lineages(&rows),
+            side_chat_lineages(&no_entries, &rows),
             BTreeMap::from([(
                 "alpha-side".to_string(),
                 SideChatLineage {
@@ -1651,7 +1665,7 @@ mod tests {
             "only the side chat has a lineage, and it names the source's console identity"
         );
         assert_eq!(
-            side_chat_lineages(&rows[1..])
+            side_chat_lineages(&no_entries, &rows[1..])
                 .get("alpha-side")
                 .map(|lineage| lineage.source_identity.as_str()),
             Some("alpha"),
@@ -1660,12 +1674,15 @@ mod tests {
         let legacy_source = fork_source("rt:alpha:0");
         let legacy_labels = marked("rt:alpha:0");
         assert_eq!(
-            side_chat_lineages(&[SideChatRosterRow {
-                alias: "alpha-legacy-side".to_string(),
-                labels: &legacy_labels,
-                spawned_by: None,
-                fork_source: Some(&legacy_source),
-            }])
+            side_chat_lineages(
+                &no_entries,
+                &[SideChatRosterRow {
+                    alias: "alpha-legacy-side".to_string(),
+                    labels: &legacy_labels,
+                    spawned_by: None,
+                    fork_source: Some(&legacy_source),
+                }]
+            )
             .get("alpha-legacy-side")
             .map(|lineage| lineage.source_identity.as_str()),
             Some("alpha"),
@@ -1673,14 +1690,95 @@ mod tests {
         );
         let unmarked = BTreeMap::new();
         assert!(
-            side_chat_lineages(&[SideChatRosterRow {
-                alias: "beta".to_string(),
-                labels: &unmarked,
-                spawned_by: None,
-                fork_source: Some(&source),
-            }])
+            side_chat_lineages(
+                &no_entries,
+                &[SideChatRosterRow {
+                    alias: "beta".to_string(),
+                    labels: &unmarked,
+                    spawned_by: None,
+                    fork_source: Some(&source),
+                }]
+            )
             .is_empty(),
             "a durable fork without the marker has no side chat lineage"
+        );
+    }
+
+    /// A side chat opened on a store-owned agent names its source by the
+    /// agent's identity, as one opened on a configured agent does. Core
+    /// seats a store-owned identity's member with its row's labels, which
+    /// carry no `agent_identity` label: the source resolves through Core's
+    /// identity entry of its member id. A plain worker source keeps its
+    /// alias.
+    #[test]
+    fn a_side_chat_on_a_store_owned_agent_names_its_source_identity() {
+        let unlabelled = BTreeMap::new();
+        let configured_labels =
+            BTreeMap::from([("agent_identity".to_string(), "review:twin".to_string())]);
+        // The member ids Core holds as identity entries: the store-owned
+        // agent's, and one seated under a generated alias of its identity.
+        let entries = std::collections::BTreeSet::from([
+            crate::member_comms_id::mob_member_id("review:keeper"),
+            crate::member_comms_id::mob_member_id("rt:review:elder:3"),
+        ]);
+        let side_chat_of = |source_alias: &str| {
+            let source = fork_source(crate::member_comms_id::mob_member_id(source_alias).as_str());
+            let side_labels = marked(source_alias);
+            let rows = [
+                SideChatRosterRow {
+                    alias: "review:keeper".to_string(),
+                    labels: &unlabelled,
+                    spawned_by: None,
+                    fork_source: None,
+                },
+                SideChatRosterRow {
+                    alias: "rt:review:elder:3".to_string(),
+                    labels: &unlabelled,
+                    spawned_by: None,
+                    fork_source: None,
+                },
+                SideChatRosterRow {
+                    alias: "review:twin".to_string(),
+                    labels: &configured_labels,
+                    spawned_by: None,
+                    fork_source: None,
+                },
+                SideChatRosterRow {
+                    alias: "rt:helper:3".to_string(),
+                    labels: &unlabelled,
+                    spawned_by: None,
+                    fork_source: None,
+                },
+                SideChatRosterRow {
+                    alias: "side".to_string(),
+                    labels: &side_labels,
+                    spawned_by: None,
+                    fork_source: Some(&source),
+                },
+            ];
+            side_chat_lineages(&entries, &rows)
+                .remove("side")
+                .map(|lineage| lineage.source_identity)
+        };
+        assert_eq!(
+            side_chat_of("review:keeper").as_deref(),
+            Some("review:keeper"),
+            "a store-owned source is named by its identity"
+        );
+        assert_eq!(
+            side_chat_of("rt:review:elder:3").as_deref(),
+            Some("review:elder"),
+            "an identity entry's member is named by the identity its member id decodes to"
+        );
+        assert_eq!(
+            side_chat_of("review:twin").as_deref(),
+            Some("review:twin"),
+            "the configured twin is named by its label, as before"
+        );
+        assert_eq!(
+            side_chat_of("rt:helper:3").as_deref(),
+            Some("rt:helper:3"),
+            "a member that is no identity's keeps its alias on the roster"
         );
     }
 

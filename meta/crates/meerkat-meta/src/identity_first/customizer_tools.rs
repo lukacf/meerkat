@@ -563,7 +563,9 @@ impl CustomizerToolsSpawnCustomizer {
     pub(crate) fn watch_identity_entries(&self, bridge: &Arc<dyn SessionBridge>) {
         let _ = self.entries.set(Arc::downgrade(bridge));
     }
+}
 
+impl crate::member_comms_id::IdentityEntries for CustomizerToolsSpawnCustomizer {
     /// Whether Core holds `member` as an identity entry, as the watched
     /// bridge reads it; `false` while no bridge is watched.
     fn holds_identity_entry(&self, member: &MobAgentIdentity) -> bool {
@@ -605,12 +607,12 @@ impl CustomizerToolsSpawnCustomizer {
         // before the runtime registered it.
         let entry = match registry.for_member(&spec.identity) {
             Some(entry) => entry,
-            None if spec
-                .labels
-                .as_ref()
-                .and_then(crate::member_comms_id::durable_identity_label)
-                .is_some()
-                || self.holds_identity_entry(&spec.identity) =>
+            None if crate::member_comms_id::resolve_member_identity(
+                self,
+                &spec.identity,
+                spec.labels.as_ref().unwrap_or(&BTreeMap::new()),
+            )
+            .is_some() =>
             {
                 registry.ensure_member(&spec.identity)
             }

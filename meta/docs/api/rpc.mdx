@@ -381,11 +381,11 @@ schedule fires go through its door, and the lifecycle verbs (`meta/retire`,
 on a configured identity. Its status reads `intent_managed: false`. Through
 0.9.13 those verbs refused it, final, with `-32603` and structured data
 `{kind: "identity_store_owned", identity, retryable: false}`, and its status
-read `intent_managed: true`. Two things still answer that kind:
-`meta/compact_member` with a compaction floor (the rebuild that carries the
-floor to the member is not available for such an identity; nothing is
-changed), and the offline `meta_gateway identity-reset` (reset it with
-`meta/reset` on the running gateway). A delivery, a wake or a grant to one
+read `intent_managed: true`. Nothing answers that kind any more:
+`meta/compact_member` with a compaction floor rebuilds such an identity's
+member as a configured one's, and the offline `meta_gateway identity-reset`
+takes it (the next start gives it its fresh life). A delivery, a wake or a
+grant to one
 that Core archived answers `-32603` with
 `{kind: "identity_archived", identity, remedy: "unarchive_identity", retryable: false}`:
 nothing is delivered until Core's `unarchive_identity` seats it again. A
@@ -1270,9 +1270,27 @@ Every change takes `request_id`, 1 to 256 bytes of text the caller chooses.
 It names the operation: the same caller sending the same request under the
 same `request_id` gets the same answer again and nothing is written twice,
 so a change whose answer was lost is retried as it was. Another request
-under a `request_id` the caller already used is refused `operation_reused`.
-The id is the caller's own: two callers (the stdio host and a person at the
-Console, for example) that pick the same `request_id` name two operations.
+under a `request_id` the caller already used is refused `operation_reused`,
+whatever change it asks for: one `request_id` names one change, and one
+held decision. The id is the caller's own: two callers (the stdio host and
+a person at the Console, for example) that pick the same `request_id` name
+two operations.
+
+A retry is compared with what committed as far as it can be normalized
+again. Two limits follow. A different update sent under the id of a
+committed update with the digest read before it is answered the committed
+outcome, not `operation_reused`: the digest it names is stale, and a stale
+retry is taken for the request that committed. And a retry of a committed
+change that can no longer be normalized for another reason (a peer removed
+since, a profile gone) answers that refusal; `meta/identity/operation`
+reads the committed outcome in both cases.
+
+With every change the mob drives the seats it still owes again (see
+[`meta/identity/create`](#metaidentitycreate)), beside the change: the
+change's answer does not wait for them. That completes a change that
+committed earlier, so it happens whatever becomes of the request that came
+by, and while the mob's changes are held: a hold stops new changes, not
+the completion of a committed one.
 
 A change of one agent also takes `expected_spec_digest`, the agent's
 `spec_digest` as the caller last read it (from `get`, `list` or an
@@ -1280,8 +1298,12 @@ outcome). An agent that changed meanwhile answers `stale_spec` with the
 current digest.
 
 `proposer` (a reference to who drafted the request) and `source_evidence`
-(`{attestor, subject, source_ref, observed_at_ms}`) may accompany any
-change. They are recorded with it and are never authority.
+(`{attestor, subject, source_ref, observed_at_ms}`) are the host's to
+state: host code may send them with any change, and a person at the Console
+or an agent that sends one is refused `invalid_request` at that member.
+They are never authority. A create records them with its agents, and a
+held change shows them to the person who decides it; the other changes
+record neither.
 
 ### Outcomes
 
@@ -1298,8 +1320,8 @@ Each entry of `agents` is `{name, state, spec_digest?, spec_revision?,
 session_id?, seat?, instructions?}`. `state` is `committed`,
 `pending_preparation`, `archiving`, `archived`, `restored`, `retiring` or
 `removed`. `seat`, on a create, is `seated` or `owed` (see
-[`meta/identity/create`](#metaidentitycreate)). `instructions`, on an
-update, says what became of an instructions change (see
+[`meta/identity/create`](#metaidentitycreate)). `instructions` is absent
+unless the launch has an instruction step for updates (see
 [`meta/identity/update`](#metaidentityupdate)).
 
 ### Refusals
@@ -1375,6 +1397,11 @@ seated without a restart when the mob drives its owed seats again, which it
 does at each later change of the family and at its next start, and its
 first message runs once then.
 
+A create with a first message (and a create of an agent whose profile
+starts a run of its own) answers once the new agent's session exists; its
+first run continues after the answer. No other change waits for that run,
+nor for the seats the mob still owes.
+
 A mob whose runtime is governed runs no first message: a first turn has no
 requester its host could govern, so a create that gives `first_message`
 there is refused `unsupported` (`feature: "first_message_in_governed_realm"`)
@@ -1401,19 +1428,12 @@ An update can touch several change classes of the policy at once; each is
 judged by its own rules and the strictest outcome applies to the whole
 update.
 
-The entry of the agent says `instructions` when the update named them:
-
-| `instructions.kind` | Meaning |
-|---------------------|---------|
-| `applies_at_next_run` | The change reaches the agent at its next run |
-| `applies_after_compaction` | The agent's model takes new instructions only at the head of what it reads: the change reaches it after its next compaction |
-| `applies_at_next_session` | The change does not reach the agent as it runs now, for `reason` (`prepared_authorization_required`, `slot_limit_exceeded`, `active_set_budget_exceeded`, `lowering_unavailable`, `body_too_large`, `record_unavailable`): it applies when the agent next starts afresh |
-| `unchanged` | The agent holds these instructions already |
-
-Whatever the kind, the new instructions are in the agent's record at once.
-They reach the agent at its next run; a run that starts within moments of
-the change may still use the earlier instructions; and earlier instructions
-are never rewritten.
+New instructions are in the agent's record at once. What carries them to
+an agent that is running is the launch's instruction step for updates: a
+launch that has one answers what became of the change in the agent's
+`instructions` member, on the first answer of an update that names
+`set.instructions` (a retry states none). A launch without one answers no
+such member.
 
 ### `meta/identity/archive`, `meta/identity/unarchive`, `meta/identity/remove`, `meta/identity/adopt`
 
@@ -1429,7 +1449,10 @@ are never rewritten.
 - **unarchive** brings it back on the session it was archived on.
 - **remove** is permanent: the agent's member retires, its name is never
   available again, and the peers it listed are unwired. Its conversation
-  and memory are kept and no other agent can reach them.
+  and memory are kept and no other agent can reach them. What follows a
+  removal (the instructions kept for the agent end with it) is settled at
+  the removal and settled again at the gateway's next start; a retry of a
+  committed removal answers its outcome and repeats nothing.
 - **adopt** releases an agent the host's configuration declares. It keeps
   its name, member, session and history; nothing restarts and nothing
   wakes. From then on it is changed at run time, and a configuration that
@@ -1467,19 +1490,27 @@ Takes exactly one of `{request_id}` (the caller's own operation) and
 outcome as the change answered it, or `{"outcome": "unknown",
 "operation_id"}` when no change committed under it and no decision is held
 for it: such an operation was never asked or was refused, and asking it
-commits it at most once.
+commits it at most once. An operation whose decision ended without its
+change (rejected, expired, withdrawn, or refused when it was carried out)
+answers a result too: `{"outcome": "refused", "kind", "retryable",
+"detail"}` with the kind's members and no `operation_id`. Such an operation
+is closed for good: ask the change again under a new `request_id`.
 
 ### `meta/identity/withdraw` and `meta/identity/changes_hold`
 
 `meta/identity/withdraw` takes the operation as `meta/identity/operation`
 does and withdraws its held decision; it answers `{operation_id,
-decision_id}`, or `decision_not_found` when none is held.
+decision_id}`, or `decision_not_found` when none is held. The requester
+that asked for the change withdraws it, and so does the host's operator on
+the stdio gateway, for any held change.
 
 `meta/identity/changes_hold` takes `{held, reason?}` and answers `{held}`.
 While changes are held, every change of the family is refused the retryable
-`changes_held` and nothing of it is written. The hold is the host's alone,
-and it is not durable: a host that holds changes across a deploy holds them
-again at its next start.
+`changes_held` and nothing of it is written. The hold is the host's: its
+operator's on the stdio gateway, or a signed-in person's with
+`runtime.admin` on the Console; an agent holds nothing. It is not durable:
+a host that holds changes across a deploy holds them again at its next
+start.
 
 ### `meta/identity/directory` and `meta/identity/plan`
 
@@ -1506,7 +1537,16 @@ actions (see [Access control](/concepts/access-control)):
 `agent.identity.create` for a create, `agent.identity.manage` on the named
 agent for an update, an archive, an unarchive and an adoption, and
 `agent.identity.remove` on the named agent for a removal.
-`meta/identity/changes_hold` needs `runtime.admin`. The reads need
+`meta/identity/changes_hold` needs `runtime.admin`: a signed-in person who
+has it holds and releases the mob's changes, and a caller the Console
+could not verify does not. `meta/identity/plan` needs what the change it
+plans needs, on the agent that change names. `meta/identity/operation`
+answers the caller's own operations; another requester's operation, named
+by its `operation_id`, reads as `unknown` unless the caller has
+`runtime.admin`. `meta/identity/withdraw` is the signed-in person's who
+asked for the change: a caller the Console could not verify withdraws
+nothing. A `get` names the peers the caller may view, and no page's `next`
+names an agent the caller may not view. The reads need
 `agent.view`: `get` on the named agent, and a list and the directory leave
 out the agents the caller may not view. A read-only Console refuses the
 changes.
@@ -1517,8 +1557,11 @@ that signs nobody in. `GET /console/experience` carries `identity_changes:
 {available, can_create, can_change, can_remove}` and, on each listed agent,
 `affordances.can_change_identity` and `affordances.can_remove_identity`, so
 a client offers only what its caller's grants admit; the policy still
-decides each change. A peer the caller may not view (`agent.view`) is
-answered `peer_unknown`, as a name no agent holds. `available` is true
+decides each change. The two per-agent affordances are false for an agent
+the host's configuration declares, whatever the caller's grants: a change
+of it would only be refused `owner_read_only`. A peer the caller may not
+view (`agent.view`) is answered `peer_unknown`, as a name no agent holds.
+`available` is true
 exactly when the launch has an
 enabled identity policy and the Console is not read-only; the other flags
 are false whenever it is false.
@@ -2461,7 +2504,9 @@ A change of an agent whose outcome under the host's identity policy
 when it is asked. It is held as one durable decision and answers
 `pending_decision {operation_id, decision_id, deadline_ms}`; the same request
 id asked again answers the same state, and nothing is written but the
-decision: no agent is created, built or woken while it is held.
+decision: no agent is created, built or woken while it is held. One request
+id names one change: any other request under it, of the same action or
+another, is refused `operation_reused`.
 
 | Kind | The held change |
 |------|-----------------|
@@ -2472,31 +2517,57 @@ decision: no agent is created, built or woken while it is held.
 | `identity.remove` | A removal of one agent |
 | `identity.adopt` | An adoption of one agent |
 
+These kinds are decided by people only: no reviewer stage exists for them,
+and a decision no person decided is never carried out.
+
 The decision's subject key is `{mob id}/{operation id}`, its approver id the
 one the policy's rule names, and its deadline the time of the hold plus the
 policy's timeout for the change (`approval.timeouts_ms`, or the rule's own
 `timeout_ms`). Its rendering (`renderer` `identity.render-v1`) is the whole
 request as canonical text, in this order: who asks and what the request does;
 the structural fields of each agent; the consequences the policy states; the
-host's consequence lines; the tool configuration; then the text the requester
-wrote (display name, instructions, first message, context). The tool
-configuration names each agent with the profile it runs on after the change
-and the digest of what that profile declares for tools, and shows the
-declaration: the tool families it turns on, whether it is read-only, the
-tools it denies, the MCP servers it connects to by name, its tool bundles and
-what it mounts closed until a tool grant. A server's own configuration is
-never rendered; the digest covers it. No agent is built to render a request.
+host's consequence lines; what the agents run on; then the text the requester
+wrote (display name, instructions, first message, context).
+
+What the agents run on names each agent with the profile it runs on after
+the change (for a role change, the profile it moves to) and the digest of
+what the mob declares for that profile, and shows the declaration: the
+model, the auth binding, the names of the skills, the tool families it turns
+on, whether it is read-only, the tools it denies, the MCP servers of the host
+it reaches, the MCP servers it configures itself, its tool bundles and what
+it mounts closed until a tool grant. A profile that names no server of the
+host reaches every MCP server the host offers, and the rendering says so in
+words. The digest covers the whole declaration: the profile, the wiring
+rules that name it, and the definitions of the skills it names. Prompts and
+skill texts are inside the digest and never rendered. A server the profile
+configures itself is shown by its name and its configuration is inside the
+digest only; a server of the host that the profile names is covered by its
+name, and what the host runs behind that name is the host's. A profile bound
+to a realm profile is read from the realm; where the host cannot read it the
+change is refused `unsupported` and nothing is held. No agent is built to
+render a request.
+
 Consequence lines come from a Rust host composition
 (`GatewayHostComposition::identity_consequences`) in this release: the
 decisions of a host that runs behind an SDK render without them.
 
 A person decides through `meta/decisions/decide`, as for any decision: the
 stdio operator, or a person an application attests from its own channel with
-`attestation`. A person cannot approve their own request: a decide by the
-person who asked, or by an identity the approver map links with them in one
-person, is refused `self_approval`, whatever approver id they hold. A person
-who asks for a change is named in the decision by their principal key, the
-same key their decide carries.
+`attestation`. A person cannot approve a request the decision records as
+theirs:
+
+- a request a signed-in Console person asked is that person's;
+- a request a host asks that names a person as its `proposer`, by that
+  person's principal key (`principal:["human", trust domain, id]`, the key
+  their decide carries), is that person's;
+- a decide by that person, or by an identity the approver map links with
+  them in one person, is refused `self_approval`, whatever approver id they
+  hold.
+
+A request a host asks with no proposer, or with a proposer that is any other
+text, is the host's, whoever the application carried it for: any approver
+may decide it. An application that carries a person's request over the host
+methods names the person as the proposer to keep them from approving it.
 
 Once approved, the change is carried out by the gateway, once. Before it
 commits, the request is rendered again from what stands then, and the
@@ -2504,9 +2575,10 @@ rendering must be the one the person was shown:
 
 | What changed after the approval | The decision ends | `execution_refusal` |
 |---------------------------------|-------------------|---------------------|
-| The declared tool configuration of a profile an agent of the request runs on | `execution_refused` | `subject_widened` |
+| What the mob declares for a profile an agent of the request runs on (model, auth binding, skills, wiring rules, tools) | `execution_refused` | `subject_widened` |
+| The profile of the agent the request changes (it moved to another profile) | `execution_refused` | `subject_widened` |
 | The host's consequence lines for the request | `execution_refused` | `subject_widened` |
-| The agent the request changes (its spec is no longer the one the requester read) | `execution_refused` | `stale_spec` |
+| The agent the request changes, in any other way (its spec is no longer the one the requester read) | `execution_refused` | `stale_spec` |
 | The requester's grant, a name taken meanwhile, or any other refusal of the commit that the same request cannot outlive | `execution_refused` | The refusal's kind |
 | Nothing | `executed` | |
 
@@ -2524,12 +2596,24 @@ A decision nobody decided by its deadline ends `expired`, a rejected one
 decision refused when it was carried out answers the kind it was refused
 with where that kind carries nothing but its name (`subject_widened`,
 `grant_revoked`), and `decision_closed` with the state `execution_refused`
-otherwise. An agent that asked is told
-the outcome by a message to its own name once the decision ended. A host
-surface or a person that asked reads the operation's state, or the decision.
+otherwise. An agent that asked is told the outcome by a message to its own
+name once the decision ended.
 
-A candidate launch holds no decision (`candidate_launch`) and carries none
-out; a decision a serving gateway holds is carried out by a serving gateway.
+Limits of this release:
+
+- A host surface or a person that asked gets no pushed notice: it reads the
+  operation's state, or the decision.
+- A decision is carried out only by a gateway whose launch enables the
+  identity policy. On a launch with no enabled policy a held decision can
+  still be read and decided, nothing carries it out, and its requester
+  cannot withdraw it through the identity methods (the host withdraws it
+  with `meta/decisions/withdraw`); a later launch whose policy allows the
+  change carries it out, or it expires at its deadline.
+- A decision that cannot be recorded because the decision store fails
+  answers `approval_unavailable`, with a detail that says to ask again.
+- A candidate launch holds no decision (`candidate_launch`) and carries none
+  out; a decision a serving gateway holds is carried out by a serving
+  gateway.
 
 ### On the Console
 

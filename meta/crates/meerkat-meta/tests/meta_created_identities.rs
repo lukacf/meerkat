@@ -561,6 +561,29 @@ impl Rig {
         .unwrap_or(false)
     }
 
+    /// The whole model requests so far.
+    fn requests(&self) -> Vec<String> {
+        self.requests.lock().unwrap().clone()
+    }
+
+    /// `name`'s row in the mob's identity store, rendered: its revision,
+    /// presence, spec and owned edges.
+    async fn row(&self, name: &str) -> String {
+        match self
+            .runtime
+            .mob_handle()
+            .identity_record(&meerkat_mob::AgentIdentity::from(name))
+            .await
+            .expect("the row reads")
+        {
+            Some(meerkat_mob::CreatedIdentityObservation::Created(record)) => format!(
+                "{} {:?} {:?} {:?}",
+                record.revision, record.presence, record.spec, record.owned_edges
+            ),
+            other => panic!("{name} has a row: {other:?}"),
+        }
+    }
+
     /// The first whole model request that carried `marker`.
     fn request_with(&self, marker: &str) -> Option<String> {
         self.requests
@@ -1241,23 +1264,25 @@ async fn a_member_core_wakes_registers_its_identity_created_at_runtime_from_its_
     rig.shutdown().await;
 }
 
-/// The offline identity reset (`meta_gateway identity-reset`) refuses an
-/// identity created at runtime (`identity_store_owned`) and writes no
-/// first-boot row: the row it leaves is carried out by a roster compile that
-/// lists the identity, and no roster lists this one. The running gateway's
-/// reset verb resets it.
+/// The offline identity reset (`meta_gateway identity-reset`) resets a
+/// store-owned identity as any identity: it leaves its row in the first-boot
+/// manifest, and the next start's roster pass carries it out. After that
+/// start the agent is on a fresh session at the next generation with
+/// nothing built, its name and its row are unchanged, the manifest row is
+/// settled, and its next delivery runs on the fresh session without the old
+/// conversation.
 ///
-/// RED before the reset named store ownership: it refused the identity as
-/// one whose management kind this build does not know.
+/// RED before the pass carried such a row out: the reset refused the
+/// identity (`identity_store_owned`) and wrote nothing.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_offline_identity_reset_refuses_an_identity_created_at_runtime_as_store_owned() {
+async fn an_offline_identity_reset_gives_a_store_owned_identity_a_fresh_life_at_the_next_start() {
     let temp = tempfile::tempdir().unwrap();
     let mob_id = fresh_mob_id();
     let mut rig = boot(temp.path(), &mob_id).await;
     rig.create(CREATED).await;
-    let sent = rig.send(CREATED, "BEFORE-RESET").await;
-    assert!(sent["error"].is_null(), "{sent:#?}");
-    assert!(rig.asked("BEFORE-RESET").await);
+    assert!(rig.turn(CREATED, "BEFORE-OFFLINE-RESET").await);
+    let before = rig.life(CREATED).await;
+    let row_before = rig.row(CREATED).await;
     rig.shutdown_for_reopen().await;
 
     let report = meerkat_meta::storage_migrate_native::reset_identity(
@@ -1265,17 +1290,53 @@ async fn the_offline_identity_reset_refuses_an_identity_created_at_runtime_as_st
             .with_apply(),
     )
     .await;
-    let refusal = serde_json::to_value(report.refusal.as_ref().expect("the reset refuses"))
-        .expect("the refusal renders");
-    assert_eq!(
-        refusal["kind"],
-        json!("identity_store_owned"),
-        "the reset refuses the store-owned identity: {report:?}"
+    assert!(
+        report.refusal.is_none() && report.written,
+        "the offline reset takes the store-owned identity and writes its row: {report:?}"
+    );
+    let manifest = temp.path().join("storage-migrate-native.first-boot.json");
+    assert!(manifest.exists(), "the first-boot manifest holds the row");
+
+    let mut rig = boot(temp.path(), &mob_id).await;
+    let after = rig.life(CREATED).await;
+    assert_ne!(after.session, before.session, "a fresh session");
+    assert!(
+        after.generation > before.generation,
+        "at a later generation: {:?} after {:?}",
+        after.generation,
+        before.generation
     );
     assert!(
-        !report.written,
-        "a refused reset writes nothing: {report:?}"
+        rig.requests().is_empty(),
+        "the start carried the reset out without building a member"
     );
+    assert_eq!(
+        rig.row(CREATED).await,
+        row_before,
+        "the name and the row are unchanged"
+    );
+    assert!(
+        !manifest.exists(),
+        "the start settled the manifest row and removed the empty manifest"
+    );
+    assert!(
+        rig.turn(CREATED, "AFTER-OFFLINE-RESET").await,
+        "the agent takes its next delivery"
+    );
+    let delivered = rig.life(CREATED).await;
+    assert_eq!(
+        (delivered.session, delivered.generation),
+        (after.session, after.generation),
+        "on the fresh session"
+    );
+    let request = rig
+        .request_with("AFTER-OFFLINE-RESET")
+        .expect("the delivery's turn");
+    assert!(
+        !request.contains("BEFORE-OFFLINE-RESET"),
+        "the fresh conversation holds nothing of the old one"
+    );
+    rig.shutdown().await;
 }
 
 /// A created entry whose name the member-id encoding maps to another member
@@ -1729,6 +1790,96 @@ fn tool_names(request: &str) -> Vec<String> {
     names
 }
 
+/// A delivery's completion is observed for a store-owned identity as for a
+/// configured one: `meta/wait_for_completion` on the cursor a send answered
+/// ends `completed` for both.
+///
+/// RED before the identity's event stream was tracked for a member that
+/// carries no `agent_identity` label: the store-owned identity's cursor
+/// never moved, and the wait ended `timed_out`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deliverys_completion_is_observed_for_a_store_owned_identity_as_for_a_configured_one() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut rig = boot(temp.path(), &fresh_mob_id()).await;
+    rig.create(CREATED).await;
+    let mut outcomes = Vec::new();
+    for name in [DECLARED, CREATED] {
+        // The first turn materializes the member; the wait is on the next.
+        assert!(rig.turn(name, &format!("WARM {name}")).await);
+        let cursor = rig
+            .rpc(
+                "meta/wait_for_completion",
+                json!({"identity": name, "timeout_ms": 10_000}),
+            )
+            .await;
+        let sent = rig.send(name, &format!("OBSERVED {name}")).await;
+        assert!(sent["error"].is_null(), "{name}: {sent:#?}");
+        let waited = rig
+            .rpc(
+                "meta/wait_for_completion",
+                json!({
+                    "identity": name,
+                    "after": cursor["result"]["completion_cursor"],
+                    "timeout_ms": 10_000,
+                }),
+            )
+            .await;
+        outcomes.push((
+            name,
+            cursor["result"]["outcome"].clone(),
+            waited["result"]["outcome"].clone(),
+        ));
+    }
+    assert_eq!(
+        outcomes,
+        vec![
+            (DECLARED, json!("completed"), json!("completed")),
+            (CREATED, json!("completed"), json!("completed")),
+        ],
+        "each identity's first turn and its next delivery are observed completed"
+    );
+    rig.shutdown().await;
+}
+
+/// A store-owned identity whose name the member-id encoding changes (the
+/// usual identity shape, with a `:`) is served under its own name: Core
+/// holds it under the comms-safe member id the name encodes to, and its
+/// deliveries, its respawn and its status go through that mapping.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_store_owned_identity_with_an_encoded_name_is_served_under_its_name() {
+    const NAMED: &str = "team:keeper";
+    let temp = tempfile::tempdir().unwrap();
+    let mut rig = boot(temp.path(), &fresh_mob_id()).await;
+    let member = meerkat_meta::member_comms_id::mob_member_id(NAMED);
+    assert_ne!(member.as_str(), NAMED, "the encoding changes the name");
+    rig.create_request(
+        meerkat_mob::CreatedIdentityRequest::new(created_spec(member.as_str())),
+        member.as_str(),
+    )
+    .await;
+    assert!(
+        rig.turn(NAMED, "ENCODED-BEFORE").await,
+        "a delivery to its name runs"
+    );
+    let before = rig.life(NAMED).await;
+    let respawned = rig.verb("meta/respawn", NAMED).await;
+    assert!(
+        respawned["error"].is_null(),
+        "the respawn is served: {respawned:#?}"
+    );
+    let after = rig.life(NAMED).await;
+    assert_eq!(after.session, before.session, "on its own session");
+    assert!(
+        after.generation > before.generation,
+        "at the next generation"
+    );
+    assert!(
+        rig.turn(NAMED, "ENCODED-AFTER").await,
+        "it takes its next delivery"
+    );
+    rig.shutdown().await;
+}
+
 /// The peer rule the rows' owned edges are admitted under.
 fn peer_rule() -> meerkat_mob::OwnedEdgeAdmission {
     meerkat_mob::OwnedEdgeAdmission::rule("row-peers").expect("a peer rule id")
@@ -2036,15 +2187,51 @@ async fn the_managed_topology_keeps_a_rows_owned_edge_and_prunes_an_undeclared_o
 }
 
 /// The first build of a new store-owned identity carries the host
-/// customizer's tools: Core wakes the member of an identity no roster pass
-/// or door named yet, which is its first build, and the turn that build
-/// runs next is offered the tool.
+/// customizer's tools: an identity created with a first message is built by
+/// Core for its kickoff, before any roster pass or door named it, and that
+/// kickoff turn is offered the tool.
 ///
-/// RED before the first build attached the identity's tool dispatcher: that
-/// build offered no customizer tool (only the member's next build carried
-/// it).
+/// RED before Core asked the host's build preparer about that spawn: the
+/// kickoff turn offered no customizer tool (only the member's next build
+/// carried it).
 #[tokio::test(flavor = "multi_thread")]
 async fn the_first_build_of_a_new_identity_carries_customizer_tools() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut rig = boot_with(
+        temp.path(),
+        &fresh_mob_id(),
+        Some(Arc::new(ToolCustomizer) as Arc<dyn AgentCustomizer>),
+    )
+    .await;
+    rig.create_request(
+        meerkat_mob::CreatedIdentityRequest::new(created_spec(CREATED).with_initial_message(
+            meerkat_core::ContentInput::Text("FIRST-MESSAGE".to_string()),
+        )),
+        CREATED,
+    )
+    .await;
+    assert!(
+        rig.asked("FIRST-MESSAGE").await,
+        "the kickoff turn of the new identity runs"
+    );
+    let request = rig
+        .request_with("FIRST-MESSAGE")
+        .expect("the kickoff turn's request");
+    assert!(
+        offers_tool(&request),
+        "the first build's turn is offered the host customizer's tool: {request}"
+    );
+    rig.shutdown().await;
+}
+
+/// The build of a store-owned identity that Core wakes before any roster
+/// pass or door named it carries the host customizer's tools too: the turn
+/// that build runs next is offered the tool.
+///
+/// RED before that build attached the identity's tool dispatcher: it offered
+/// no customizer tool (only the member's next build carried it).
+#[tokio::test(flavor = "multi_thread")]
+async fn the_first_wake_of_a_new_identity_carries_customizer_tools() {
     let temp = tempfile::tempdir().unwrap();
     let mut rig = boot_with(
         temp.path(),
@@ -2340,5 +2527,45 @@ async fn a_held_add_of_a_name_a_store_owned_identity_holds_is_refused_existing_c
                 .map_err(ToString::to_string)
         );
     }
+    rig.shutdown().await;
+}
+
+/// A held add of a name a removed identity held adds nothing either: Core
+/// keeps a removed identity's name (its tombstone), and the add is refused
+/// with Core's own answer for such a name.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_held_add_of_a_removed_identitys_name_is_refused_with_cores_answer() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), &fresh_mob_id()).await;
+    rig.create(CREATED).await;
+    rig.remove(CREATED).await;
+    let context = rig
+        .runtime
+        .identity_first_context()
+        .expect("identity-first context installed");
+    let refused = context
+        .add_member_held(
+            DurableAgentSpec {
+                identity: id(CREATED),
+                ..declared_spec()
+            },
+            tokio::time::Instant::now() + Duration::from_mins(1),
+            |_members, _completion| async { Ok(()) },
+        )
+        .await;
+    assert!(
+        matches!(
+            &refused,
+            Err(IdentityRuntimeError::HeldBootstrapRefused(
+                meerkat_meta::identity_first::HeldBootstrapRefusal::ExistingContinuity { identity }
+            )) if identity.as_str() == CREATED
+        ),
+        "the removed name is still held: the add answers ExistingContinuity: {:?}",
+        refused
+            .as_ref()
+            .map(|_| "started")
+            .map_err(ToString::to_string)
+    );
+    assert!(!rig.seated(CREATED), "nothing is seated under the name");
     rig.shutdown().await;
 }

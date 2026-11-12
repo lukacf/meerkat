@@ -19695,6 +19695,13 @@ external_addressable = true
     // which Meerkat materializes without the spawn customizers, and the
     // durable child mobs agents created, which a restore rebuilds from their
     // stored definitions. An in-memory mob storage starts with none of them.
+    // The mob storage's realm profiles, for the family of the mob's
+    // long-term agents: a held change of an agent on a profile bound to a
+    // realm profile shows what that profile declares.
+    let identity_realm_profiles_db = mob_spec
+        .mob_storage_provenance
+        .persistent_path()
+        .map(std::path::Path::to_path_buf);
     if let Some(binding) = gateway_options.member_auth_binding.as_ref() {
         let booted = launch_definition.as_ref().unwrap_or(&mob_spec.definition);
         if let Some(event_log_db) = mob_spec.mob_storage_provenance.persistent_path() {
@@ -20429,6 +20436,16 @@ external_addressable = true
                 )));
             if let Some(host) = host {
                 options = options.with_host_hooks(Arc::new(HostIdentityHooks(Arc::clone(host))));
+            }
+            if let Some(db) = identity_realm_profiles_db.as_deref() {
+                match meerkat_mob::store::SqliteRealmProfileStore::open(db) {
+                    Ok(store) => options = options.with_realm_profiles(Arc::new(store)),
+                    Err(error) => tracing::warn!(
+                        %error,
+                        "the mob storage's realm profiles cannot be opened: a held change of \
+                         an agent on a profile bound to a realm profile is refused"
+                    ),
+                }
             }
             runtime.attach_identity_policy(policy, options);
         }
@@ -27344,7 +27361,7 @@ mod identity_creation_launch_tests {
         assert!(refused.contains("\"ghost\""), "{refused}");
         let mut known = policy_value();
         known["approval"]["rules"][0]["target"] = json!({"profile": ["default"]});
-        known["preparation"] = json!({"default": {"mode": "required"}});
+        known["preparation"] = json!({"default": {"mode": "none"}});
         assert!(
             launch(
                 None,

@@ -13,7 +13,7 @@
 //!
 //! Before Core is called the seam refuses, for every requester:
 //! - a requester that is not the one the request records
-//!   (`invalid_request`);
+//!   (`invalid_request`, of no field);
 //! - a member private to a person (`private_requester`);
 //! - a change, other than an adoption, of an agent its host configures
 //!   (`owner_read_only`).
@@ -493,7 +493,7 @@ impl IdentityChangeExecutor for CoreChangeExecutor {
         let operation = IdentityOperation::new(commit.operation_id.as_str(), digest.as_str());
         match &commit.request.action {
             RequestAction::Create { identities } => {
-                core_commit::create(&commit, operation, identities).await
+                core_commit::create(self, &commit, operation, identities).await
             }
             RequestAction::Archive {
                 identity,
@@ -549,12 +549,12 @@ impl IdentityChangeExecutor for CoreChangeExecutor {
 /// What the seam refuses before Core is called, for every requester.
 fn refused_before_core(commit: &ChangeCommit<'_>) -> Option<IdentityRefusal> {
     if commit.request.requester != commit.requester.recorded() {
-        return Some(
-            IdentityRefusal::new(IdentityRefusalKind::InvalidRequest {
-                problem: RequestProblem::Conflicting,
-            })
-            .at("requester"),
-        );
+        // The requester is no field of a request as written: a surface
+        // that attributes another requester than the request records has
+        // a defect, and the refusal names no field.
+        return Some(IdentityRefusal::new(IdentityRefusalKind::InvalidRequest {
+            problem: RequestProblem::Conflicting,
+        }));
     }
     if commit.requester.is_private_member() {
         return Some(IdentityRefusal::new(IdentityRefusalKind::PrivateRequester));
@@ -587,11 +587,14 @@ fn refused(refusal: IdentityRefusal) -> Result<ChangeCommitted, ExecutorError> {
 /// placed on a member host, bound to an external process or given a
 /// backend is not changed through this surface.
 ///
-/// After the commit, when the update changed the agent's instructions
-/// text, the instruction step is asked and its answer is the agent's
-/// instruction outcome; an update that left the text as it was answers
-/// `unchanged`. The step takes the agent's lifecycle lock itself: none is
-/// held here. A refusal of Core's goes through [`refusal_of_error`], which
+/// After the commit, when the update named instructions and changed the
+/// agent's text, the instruction step is asked and its answer is the
+/// agent's instruction outcome; one that named the text the record held
+/// before it answers `unchanged`. An update that names no instructions
+/// answers none, and so does an operation Core replays: what became of the
+/// change is part of the answer of the commit that made it, and the step is
+/// not asked again. The step takes the agent's lifecycle lock itself: none
+/// is held here. A refusal of Core's goes through [`refusal_of_error`], which
 /// answers the retryable `admission_unsettled` for a member step in flight.
 async fn commit_update(
     executor: &CoreChangeExecutor,
@@ -714,27 +717,41 @@ async fn commit_update(
     .with_preparation(preparation);
     change.peers_add = peers_add;
     change.peers_remove = peers_remove;
-    match commit
+    let mut committed = match commit
         .mob
         .update_store_owned_identity(change, commit.consent)
         .await
     {
-        Ok(updated) => {
-            let mut committed = core_commit::committed(commit, &updated.change)?;
-            let instructions =
-                match InstructionsChanged::between(update.identity.clone(), previous, now) {
-                    Some(changed) => executor.after_update(commit.mob, &changed).await,
-                    None => Some(InstructionOutcome::Unchanged),
-                };
-            if let Some(instructions) = instructions {
-                committed.outcome = committed
-                    .outcome
-                    .with_instruction_outcome(&update.identity, instructions);
+        Ok(updated) => core_commit::committed(commit, &updated.change)?,
+        // Core's receipt is read first: an update Core committed although
+        // its call erred is answered as committed, and it has changed the
+        // agent's instructions all the same, so the step runs for it too.
+        Err(error) => {
+            let answered = executor.after_core_error(commit, error).await?;
+            if answered.outcome.refusal().is_some() {
+                return Ok(answered);
             }
-            Ok(committed)
+            answered
         }
-        Err(error) => core_commit::not_committed(commit, error),
+    };
+    // An update that names no instructions says nothing of them, and
+    // neither does Core's replay of an operation that committed before
+    // (the record holds its text by now, which is not `unchanged`); one
+    // that names the text the record held leaves it unchanged.
+    let instructions = match &update.additional_instructions {
+        None => None,
+        Some(_) if committed.replayed => None,
+        Some(_) => match InstructionsChanged::between(update.identity.clone(), previous, now) {
+            Some(changed) => executor.after_update(commit.mob, &changed).await,
+            None => Some(InstructionOutcome::Unchanged),
+        },
+    };
+    if let Some(instructions) = instructions {
+        committed.outcome = committed
+            .outcome
+            .with_instruction_outcome(&update.identity, instructions);
     }
+    Ok(committed)
 }
 
 /// Commit an adoption. An adoption releases an agent from configuration:
@@ -798,7 +815,7 @@ async fn commit_adopt(
         .await
     {
         Ok(change) => core_commit::committed(commit, &change),
-        Err(error) => core_commit::not_committed(commit, error),
+        Err(error) => executor.after_core_error(commit, error).await,
     }
 }
 
@@ -811,9 +828,20 @@ pub async fn committed_outcome(
     mob: &MobHandle,
     operation_id: &OperationId,
 ) -> Result<Option<IdentityOutcome>, ExecutorError> {
+    match committed_receipt(mob, operation_id).await? {
+        Some(receipt) => outcome_of_receipt(mob, operation_id, &receipt).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// Core's receipt of the change that committed as `operation_id` in `mob`,
+/// `None` when none did.
+pub(super) async fn committed_receipt(
+    mob: &MobHandle,
+    operation_id: &OperationId,
+) -> Result<Option<IdentityChangeReceipt>, ExecutorError> {
     match mob.identity_operation(operation_id.as_str()).await {
-        Ok(Some(receipt)) => outcome_of_receipt(mob, operation_id, &receipt).map(Some),
-        Ok(None) => Ok(None),
+        Ok(receipt) => Ok(receipt),
         // A storage composition that commits no change holds no receipt.
         Err(MobError::IdentityChangeRefused {
             refusal: IdentityChangeRefusal::StorageUnsupported,
@@ -838,7 +866,7 @@ pub(super) fn outcome_of_change(
 /// change did to it, `pending_preparation` when one of them waits for its
 /// preparation and `done` otherwise. An agent's session is read from
 /// Core's published entry, which wakes nothing.
-fn outcome_of_receipt(
+pub(super) fn outcome_of_receipt(
     mob: &MobHandle,
     operation_id: &OperationId,
     receipt: &IdentityChangeReceipt,
@@ -865,10 +893,7 @@ fn outcome_of_receipt(
         agent.spec_revision = entry.revision;
         let standing = entry_standing(mob, &entry.identity);
         if let Some(meerkat_mob::EntryStanding::Seated(seated)) = &standing {
-            agent.session_id = seated
-                .session_id
-                .as_ref()
-                .map(|session| session.to_string());
+            agent.session_id = seated.session_id.as_ref().map(ToString::to_string);
         }
         if receipt.change == meerkat_mob::IdentityChangeKind::Create
             && state == AgentChangeState::Committed
@@ -914,6 +939,10 @@ fn entry_standing(
     }
 }
 
+/// The correlation of an `admission_unsettled` that answers a member step
+/// in flight.
+const MEMBER_STEP: &str = "member_step";
+
 /// The typed refusal of an error of Core's change path: a refusal of the
 /// change under its own kind ([`refusal_of_core`]), and a member step in
 /// flight as the retryable `admission_unsettled`. Any other error is no
@@ -921,9 +950,11 @@ fn entry_standing(
 pub fn refusal_of_error(error: MobError) -> Result<IdentityRefusal, ExecutorError> {
     match error {
         MobError::IdentityChangeRefused { refusal } => Ok(refusal_of_core(&refusal)),
-        MobError::LifecycleOperationPending { intent } => Ok(IdentityRefusal::new(
+        // Core's sentence for the step in flight is Core's own and stays
+        // off the wire: the correlation names what kind of step it is.
+        MobError::LifecycleOperationPending { .. } => Ok(IdentityRefusal::new(
             IdentityRefusalKind::AdmissionUnsettled {
-                correlation: intent,
+                correlation: MEMBER_STEP.to_owned(),
             },
         )),
         other => Err(ExecutorError::Core(Box::new(other))),
@@ -931,19 +962,18 @@ pub fn refusal_of_error(error: MobError) -> Result<IdentityRefusal, ExecutorErro
 }
 
 /// A refusal of Core's change path in the closed vocabulary, under Core's
-/// own kind token. Its detail is the kind's own sentence: Core's text may
-/// say where an agent's record lives, which no surface does. A malformed
-/// request keeps Core's words for what is malformed.
+/// own kind token. Its detail is the kind's own sentence, for every kind:
+/// Core's text may say where an agent's record lives, which no surface
+/// does, so none of Core's words is written.
 pub fn refusal_of_core(refusal: &IdentityChangeRefusal) -> IdentityRefusal {
     use IdentityChangeRefusal as Core;
     use IdentityRefusalKind as Kind;
     let kind = match refusal {
-        Core::InvalidRequest { problem } => {
-            return IdentityRefusal::new(Kind::InvalidRequest {
-                problem: RequestProblem::Malformed,
-            })
-            .with_detail(format!("The request is malformed: {problem}."));
-        }
+        // Core's words for what is malformed are Core's: they can say
+        // where a record lives, so the kind's own sentence is answered.
+        Core::InvalidRequest { .. } => Kind::InvalidRequest {
+            problem: RequestProblem::Malformed,
+        },
         Core::BatchTooLarge { max } => Kind::BatchTooLarge { max: *max as u64 },
         Core::ProfileUnknown { profile } => Kind::ProfileUnknown {
             profile: profile.as_str().to_owned(),

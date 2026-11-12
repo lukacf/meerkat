@@ -41,7 +41,55 @@ them.
   every store-owned identity that is owed its seat (the spawn of its
   create's kickoff failed), and answers the identities still owed
   afterwards. It runs the pass a start runs, so a host need not restart the
-  mob to seat such an identity; its kickoff then runs once.
+  mob to seat such an identity; its kickoff then runs once. The pass also
+  carries out what the rows keep owed besides: the retirement of a removed
+  or archived identity whose member is not retiring yet.
+
+- Mob: `MobHandle::identity_records` reads the rows of many identities in
+  the mob's identity store at once, in pages of at most
+  `IDENTITY_ENTRY_PAGE_MAX` names, one store read per page, where
+  `identity_record` reads one row per call. A host that serves many
+  store-owned identities reads their rows at a start with a number of store
+  reads that does not grow with their number beyond pages. A name the store
+  holds no row of is absent from the answer. Additive.
+
+- Mob: `MemberRespawn::with_compaction_floor` (and the public field
+  `MemberRespawn::compaction_floor`) seats a member's same-session
+  successor (`MobHandle::respawn_member`) with an auto-compact floor.
+  `Some(floor)` sets the threshold on the profile the successor builds
+  with (the member's own profile override, or its role's profile), which
+  the successor then carries as its override; `None` removes a floor
+  again, and an override that then equals the role's profile is dropped,
+  so the member follows its role as before. A host that rebuilds a member
+  for a maintenance compaction names the floor first and removes it
+  afterwards. A request that names no floor keeps what the member builds
+  with. Additive: `MemberRespawn` is non-exhaustive.
+
+### Changed
+
+- Durable decisions of the kinds `identity.create`, `identity.update`,
+  `identity.archive`, `identity.unarchive`, `identity.remove` and
+  `identity.adopt` (a change of an agent) are decided by people only
+  (`DECIDED_BY_PEOPLE_ONLY`): a hold of one that names a reviewer is refused
+  `ReviewStageNotAllowed`, so an agent never approves a change of an agent.
+  No released surface held a decision of these kinds.
+
+### Fixed
+
+- Mob: Core asks the host's member build preparer
+  (`MobBuilder::with_member_build_preparer`) before the spawn of a
+  store-owned identity's member, as it asks before a wake and a boot
+  restore: the member Core starts at the identity's create to run its first
+  message, and the seat a start owes it. The preparer is asked once, off
+  the actor, before the provision, about the session the spawn names (which
+  no build has created yet), with no wired peers. Through 0.9.13 that
+  member was built and ran its kickoff with nothing the host prepares for a
+  build, for example without the tools it publishes for the member's
+  identity. A refusal, for now or for good, is a failed kickoff spawn: the
+  create stays committed, nothing is built, the identity is owed its seat,
+  and the mob's next start asks again. A hold the host asks for
+  (`HoldUntilReleased`) holds the member's run starts until
+  `release_member_run_starts`. Hosts with no preparer see no change.
 
 ## [0.9.13] - 2026-11-11
 

@@ -8541,7 +8541,8 @@ impl MobBuilder {
     }
 
     /// The host's per-member build preparation, run before a member's
-    /// provision whenever it is materialized (at start or on a wake).
+    /// provision whenever it is materialized (at start or on a wake), and
+    /// before the spawn of a store-owned identity's member.
     #[cfg(feature = "runtime-adapter")]
     pub fn with_member_build_preparer(
         mut self,

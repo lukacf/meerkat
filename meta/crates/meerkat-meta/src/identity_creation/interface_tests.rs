@@ -285,10 +285,11 @@ fn a_name_the_member_id_encoding_maps_elsewhere_is_invalid_for_every_requester()
     assert_ne!(encoded.as_str(), "domain:calendar");
     assert_eq!(identity_name_of_member(&encoded), "domain:calendar");
     // A name in the reserved member-id namespace, which every public door
-    // refuses, and a name of a generated runtime alias's shape, whose
-    // member id stands for another identity: both are agent names in
-    // form, and neither is admitted.
-    const RESERVED: [&str; 2] = ["mk--keeper", "rt:keeper:3"];
+    // refuses, and a name in the namespace of generated runtime aliases
+    // (every name that starts with `rt:`, with or without a generation),
+    // whose public alias would be another agent's: each is an agent name
+    // in form, and none is admitted.
+    const RESERVED: [&str; 4] = ["mk--keeper", "rt:keeper:3", "rt:keeper", "rt:a:b"];
     for name in RESERVED {
         assert!(AgentIdentity::parse(name).is_ok(), "{name}");
         assert_eq!(core_member_name(name), None, "{name}");
@@ -297,14 +298,30 @@ fn a_name_the_member_id_encoding_maps_elsewhere_is_invalid_for_every_requester()
     let requesters = [
         RequesterFacts::agent("helper", "worker", BTreeMap::new()),
         RequesterFacts::host("ops"),
-        RequesterFacts {
-            requester: Requester::Human {
-                principal: "person-1".to_owned(),
-            },
-            profile: None,
-            authority_labels: BTreeMap::new(),
-        },
+        RequesterFacts::human("person-1"),
     ];
+    // An adoption of an agent of such a name is refused the same way: a
+    // configured agent of a reserved name is not released from
+    // configuration under it.
+    let adopting = policy(allow(&["adopt"]));
+    for requester in &requesters {
+        for name in ["rt:keeper", "mk--keeper"] {
+            let refused = normalize_adopt(
+                &adopting,
+                requester,
+                RequestEnvelope::default(),
+                &entry(name),
+                &AdoptIdentitySpec::new(name, digest(name)),
+            )
+            .expect_err("the name is refused");
+            assert_eq!(
+                refused.to_data(),
+                json!({"kind": "invalid_name", "field": "name"}),
+                "{name}: {:?}",
+                requester.requester
+            );
+        }
+    }
     for requester in &requesters {
         for name in RESERVED {
             let refused = create_of(requester, name).expect_err("the name is refused");
@@ -376,24 +393,25 @@ fn an_operation_id_is_namespaced_by_the_requester() {
         );
     }
 
-    let origin = ToolCallOrigin {
-        mob_id: "mob-1",
-        session_id: "session-1",
-        run_id: "run-1",
-        tool_call_id: "call-1",
-    };
+    let origin = ToolCallOrigin::new("mob-1", "session-1", "run-1", "round-1", "call-1");
     let derived = OperationId::for_tool_call(&agent, &origin);
     assert_eq!(derived, OperationId::for_tool_call(&agent, &origin));
     assert_ne!(
         derived,
         OperationId::for_tool_call(
             &agent,
-            &ToolCallOrigin {
-                run_id: "run-2",
-                ..origin
-            }
+            &ToolCallOrigin::new("mob-1", "session-1", "run-2", "round-1", "call-1")
         ),
         "the same tool call id in another run is another operation"
+    );
+    assert_ne!(
+        derived,
+        OperationId::for_tool_call(
+            &agent,
+            &ToolCallOrigin::new("mob-1", "session-1", "run-1", "round-2", "call-1")
+        ),
+        "a model numbers its calls anew in each answer: the same call id in another round of \
+         the same run is another operation"
     );
     assert_ne!(derived, OperationId::for_tool_call(&other_agent, &origin));
 
@@ -604,6 +622,19 @@ fn no_refusal_names_where_a_record_lives() {
             identity: name.clone(),
         },
         Core::NotArchived { identity: name },
+        // Core's own words for a malformed request say where a record
+        // lives; none of them is written.
+        Core::InvalidRequest {
+            problem: "'keeper' holds no store-owned spec to check the expected digest against: \
+                      its host's roster checks its spec"
+                .to_owned(),
+        },
+        Core::InvalidRequest {
+            problem: "its host's roster holds its spec".to_owned(),
+        },
+        Core::InvalidRequest {
+            problem: "apply the roster first".to_owned(),
+        },
     ];
     for refusal in &core {
         let mapped = refusal_of_core(refusal);
@@ -754,6 +785,11 @@ fn a_refusal_of_cores_keeps_its_token_and_whether_it_is_retryable() {
     .expect("a member step in flight is a typed refusal");
     assert_eq!(pending.kind_token(), "admission_unsettled");
     assert!(pending.is_retryable());
+    assert_eq!(
+        pending.to_data(),
+        json!({"kind": "admission_unsettled", "correlation": "member_step"}),
+        "Core's sentence for the step is not written"
+    );
     assert!(
         refusal_of_error(meerkat_mob::MobError::Internal("store".to_owned())).is_err(),
         "an error that is no refusal stays an error"
@@ -791,7 +827,7 @@ fn every_action_has_its_rendering() {
             &host,
             RequestEnvelope::default(),
             &target,
-            &AdoptIdentitySpec::new("keeper", expected.clone()),
+            &AdoptIdentitySpec::new("keeper", expected),
         ),
     ];
     let mut digests = BTreeSet::new();
@@ -1306,24 +1342,84 @@ fn the_closed_vocabularies_list_every_wire_token() {
         NameTakenBy::ALL_TOKENS,
         ["identity", "removed", "worker", "unreadable"]
     );
-    assert_eq!(NotAdoptableReason::ALL_TOKENS.len(), 8);
-    // What a value writes is its listed token.
     assert_eq!(
-        serde_json::to_value(AgentSeat::Owed).expect("a seat"),
-        json!(AgentSeat::Owed.token())
+        NotAdoptableReason::ALL_TOKENS,
+        [
+            "nothing_to_adopt",
+            "not_an_agent",
+            "placed",
+            "no_session",
+            "hosted_on_first_use",
+            "awaiting_held_creation",
+            "awaiting_host_preparation",
+            "profile_override"
+        ]
     );
     assert_eq!(
-        serde_json::to_value(InstructionNextSessionReason::BodyTooLarge).expect("a reason"),
-        json!(InstructionNextSessionReason::BodyTooLarge.token())
+        RequestProblem::ALL_TOKENS,
+        ["empty", "conflicting", "malformed"]
     );
+
+    // Four vocabularies are written by their serde form. Each variant, in
+    // declaration order, writes the token its list holds at that place, and
+    // the list holds no token beyond them: a variant added to one of them
+    // must be listed with its token to compile, which makes its list one
+    // longer than the variants here.
+    fn written<T: serde::Serialize>(value: T) -> serde_json::Value {
+        serde_json::to_value(value).expect("a value")
+    }
+    let seats = [AgentSeat::Seated, AgentSeat::Owed];
+    assert_eq!(seats.len(), AgentSeat::ALL_TOKENS.len());
+    for (seat, token) in seats.into_iter().zip(AgentSeat::ALL_TOKENS) {
+        assert_eq!(written(seat), json!(token));
+        assert_eq!(seat.token(), *token);
+    }
+    let states = [
+        AgentChangeState::Committed,
+        AgentChangeState::PendingPreparation,
+        AgentChangeState::Archiving,
+        AgentChangeState::Archived,
+        AgentChangeState::Restored,
+        AgentChangeState::Retiring,
+        AgentChangeState::Removed,
+    ];
+    assert_eq!(states.len(), AgentChangeState::ALL_TOKENS.len());
+    for (state, token) in states.into_iter().zip(AgentChangeState::ALL_TOKENS) {
+        assert_eq!(written(state), json!(token));
+        assert_eq!(state.token(), *token);
+    }
+    let reasons = [
+        InstructionNextSessionReason::PreparedAuthorizationRequired,
+        InstructionNextSessionReason::SlotLimitExceeded,
+        InstructionNextSessionReason::ActiveSetBudgetExceeded,
+        InstructionNextSessionReason::LoweringUnavailable,
+        InstructionNextSessionReason::BodyTooLarge,
+        InstructionNextSessionReason::RecordUnavailable,
+    ];
     assert_eq!(
-        serde_json::to_value(InstructionOutcome::AppliesAfterCompaction).expect("an outcome"),
-        json!({"kind": InstructionOutcome::AppliesAfterCompaction.token()})
+        reasons.len(),
+        InstructionNextSessionReason::ALL_TOKENS.len()
     );
-    assert_eq!(
-        serde_json::to_value(AgentChangeState::Archived).expect("a state"),
-        json!(AgentChangeState::Archived.token())
-    );
+    for (reason, token) in reasons
+        .into_iter()
+        .zip(InstructionNextSessionReason::ALL_TOKENS)
+    {
+        assert_eq!(written(reason), json!(token));
+        assert_eq!(reason.token(), *token);
+    }
+    let outcomes = [
+        InstructionOutcome::AppliesAtNextRun,
+        InstructionOutcome::AppliesAfterCompaction,
+        InstructionOutcome::AppliesAtNextSession {
+            reason: InstructionNextSessionReason::BodyTooLarge,
+        },
+        InstructionOutcome::Unchanged,
+    ];
+    assert_eq!(outcomes.len(), InstructionOutcome::ALL_TOKENS.len());
+    for (outcome, token) in outcomes.into_iter().zip(InstructionOutcome::ALL_TOKENS) {
+        assert_eq!(written(outcome)["kind"], json!(token));
+        assert_eq!(outcome.token(), *token);
+    }
 }
 
 /// A directory entry writes its verdict flat: `verdict`, with `lines` for

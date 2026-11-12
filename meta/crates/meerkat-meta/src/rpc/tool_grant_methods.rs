@@ -332,6 +332,19 @@ async fn identity_for_grant(
     let unknown = || subject_unknown(format!("no identity '{identity}' is served here"));
     let identity_runtime = surface.identity_runtime.ok_or_else(unknown)?;
     let parsed = AgentIdentity::parse(identity).map_err(|_| unknown())?;
+    // A grant is a door of the identity: one Core holds as an identity
+    // whose record is its row is registered from that row on demand, as
+    // its delivery and control doors register it, so a grant to an
+    // identity created since the last roster pass is not answered unknown.
+    // A name Core holds for no identity, and any refusal of that step, is
+    // the subject this grant does not know.
+    if !identity_runtime
+        .admit_unregistered_name(&parsed)
+        .await
+        .map_err(|_| unknown())?
+    {
+        return Err(unknown());
+    }
     identity_runtime
         .registered_spec(&parsed)
         .await

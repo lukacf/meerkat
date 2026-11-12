@@ -2120,6 +2120,28 @@ impl MobIdentityMemberStore for InMemoryMobIdentityStore {
         Ok(created_row_observation(&aggregate.identity, &(mob_id.clone(), identity.clone()))?.1)
     }
 
+    async fn observe_created_identities(
+        &self,
+        mob_id: &MobId,
+        identities: &[AgentIdentity],
+    ) -> Result<BTreeMap<AgentIdentity, crate::identity::CreatedIdentityObservation>, MobStoreError>
+    {
+        if self.event_tx.is_none() {
+            return Err(MobStoreError::IdentityMemberAtomicPersistenceUnavailable);
+        }
+        // One read of the store for the whole page of names.
+        let aggregate = self.aggregate.read().await;
+        let mut rows = BTreeMap::new();
+        for identity in identities {
+            if let Some(observation) =
+                created_row_observation(&aggregate.identity, &(mob_id.clone(), identity.clone()))?.1
+            {
+                rows.insert(identity.clone(), observation);
+            }
+        }
+        Ok(rows)
+    }
+
     async fn purge_created_identity_rows(
         &self,
         write: &super::CreatedRowsPurgeWrite,

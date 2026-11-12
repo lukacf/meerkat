@@ -39,6 +39,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `meta/identity/list`, `get` and `directory` say `roster_listing_superseded:
+  true` on an agent the host's roster lists while it is served from its
+  record, and `meta/identity/plan` says it on the plan of a change of such
+  an agent: the roster's entry for that name is not applied. The member is
+  written only when it is so. Rust: `identity_creation::AgentSummary`,
+  `DirectoryPeer` and `ChangePlan` gain it.
+- `meta/identity/create` and `meta/identity/update` take `addressability`
+  (`addressable` or `internal_only`) and `runtime_mode_override`
+  (`autonomous_host` or `turn_driven`): on an agent of a create, and in
+  `set` of an update. They say who reaches the agent and how it runs, with
+  the members and the values of a roster row. An update that sets either is
+  of the change class `capability` of the identity policy, which no request
+  touched before. An update sets a runtime mode and cannot return the agent
+  to its profile's. Rust: `identity_creation::AgentSpec` and `AgentSet` gain
+  the two members.
 - `meta/identity/*`: host methods that change a mob's long-term agents while
   it runs, on the stdio gateway and on `POST /console/rpc`: `create` (1 to
   256 agents, all or nothing), `update`, `archive`, `unarchive`, `remove`,
@@ -256,6 +271,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- On the Console, `meta/identity/get` and `meta/identity/plan` answer an
+  agent the caller may not view exactly as a name no agent holds:
+  `identity_unknown` at `name`. A rule that denies viewing the agent
+  answered `access_denied` (`-32030`) before. An agent the caller may view
+  and may not change still answers `access_denied`.
+- The rendering of a change of an agent, which a plan answers and a held
+  change's decision shows and binds, names a person by the id their
+  principal key carries: the person who asked, and a person a host names as
+  the `proposer`. It showed the key. The subject digest of a rendering that
+  names a person is therefore not the one a build before this change gave
+  it; the request digest is unchanged and binds the keys.
 - An access rule with the pattern `agent.*` or `*` covers the three new
   `agent.identity.*` actions, as it covers every action a release adds to a
   family. They only open the methods: the identity policy still judges every

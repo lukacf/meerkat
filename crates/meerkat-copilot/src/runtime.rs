@@ -2164,10 +2164,12 @@ impl CachedCopilotToken {
         self.expires_at = DateTime::<Utc>::MIN_UTC;
     }
 
-    /// An account whose first token exchange failed transiently: no token
-    /// serves, the API base is the default one until a token names the
-    /// account's own, and no model list is known, so the account's routes
-    /// resolve without one. The next use tries the exchange again.
+    /// An account whose sign-in has minted no token yet, because its first
+    /// token exchange failed transiently (the account's first sign-in, or a
+    /// new one after an earlier sign-in's token): no token serves, the API
+    /// base is the default one until a token names the account's own, and
+    /// no model list is known, so the account's routes resolve without one.
+    /// The next use tries the exchange again.
     fn awaiting_first_token(
         generation: u64,
         source_generation: u64,
@@ -2472,23 +2474,24 @@ impl CopilotAuthorizer {
             "Copilot token exchange failed transiently and no valid token is left; the turn fails with the retryable error and is retried"
         );
         if !same_source {
-            // The entry's token was minted from an earlier sign-in. The entry
-            // now speaks for the current one, so a build admitted during the
-            // outage publishes the current sign-in's expiry, and the earlier
-            // sign-in's token is refused so it never serves this one.
-            cached.refuse();
-            cached.source_generation = source_generation;
-            cached.source_published_at_millis = source_published_at_millis;
-            cached.source_expires_at = source.expires_at;
-            // The model list was fetched with the earlier sign-in's token and
-            // states what that sign-in may use, and the API base is the one
-            // that token named. The current sign-in has fetched no list and
-            // named no base, so the account's routes resolve without a list,
-            // on the default base, until its own token brings both (the next
-            // mint replaces the entry whole).
-            cached.models = None;
-            cached.model_discovery_refresh_at = None;
-            cached.api_base = DEFAULT_COPILOT_API_BASE.to_string();
+            // The entry's token was minted from an earlier sign-in, and its
+            // model list and API base are the ones that token fetched and
+            // named. The current sign-in has minted no token yet, so the
+            // account gets the entry of a sign-in that awaits its first
+            // token, under a generation of its own: it holds nothing of the
+            // earlier sign-in (not its token's bytes, its generation, its
+            // list or its base), a build admitted during the outage
+            // publishes the current sign-in's expiry, and the account's
+            // routes resolve without a list, on the default base, until the
+            // current sign-in's own token brings both.
+            *cache = Some(CachedCopilotToken::awaiting_first_token(
+                self.state.next_generation.fetch_add(1, Ordering::Relaxed),
+                source_generation,
+                source_published_at_millis,
+                source.expires_at,
+                unavailable,
+            ));
+            return Err(CopilotTokenError::ExchangeUnavailable(error));
         }
         cached.exchange_unavailable = Some(unavailable);
         Err(CopilotTokenError::ExchangeUnavailable(error))
@@ -15228,6 +15231,15 @@ mod tests {
                 "https://copilot.example.test",
                 "the first sign-in's token named its own API base"
             );
+            let earlier_generation = {
+                let cache = state.cache.read();
+                let entry = cache.as_ref().expect("the account's entry");
+                assert!(
+                    !entry.token.is_empty(),
+                    "the first sign-in's token is the one the entry holds"
+                );
+                entry.generation
+            };
 
             // A new sign-in while the exchange is down: the list the account
             // holds was fetched with the earlier sign-in's token.
@@ -15260,6 +15272,23 @@ mod tests {
                 route.api_base, DEFAULT_COPILOT_API_BASE,
                 "the API base the earlier sign-in's token named is not the new sign-in's: \
                  the default one stands until its own token names one"
+            );
+
+            // The entry is the new sign-in's own: it holds nothing the
+            // earlier sign-in's token brought, the token included.
+            let cache = state.cache.read();
+            let entry = cache
+                .as_ref()
+                .expect("the outage is kept on the account's entry");
+            assert!(
+                entry.token.is_empty(),
+                "the entry must hold no bytes of the earlier sign-in's token"
+            );
+            assert!(
+                entry.generation > earlier_generation,
+                "the entry must carry a generation of its own, not the earlier token's: \
+                 {} after {earlier_generation}",
+                entry.generation
             );
         }
 

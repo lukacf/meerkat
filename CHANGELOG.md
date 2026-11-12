@@ -423,7 +423,9 @@ them.
   holds no list, and the default API base, until the new sign-in's own
   token brings its own, and its routes resolve as they do before a first
   listing. A new sign-in of the same account fetched the same list, so only
-  a sign-in as another account under the same credential was affected.
+  a sign-in as another account under the same credential was affected. The
+  account also no longer holds the earlier sign-in's token in that window
+  (it was refused there and served no request).
 
 ### Known limitations
 

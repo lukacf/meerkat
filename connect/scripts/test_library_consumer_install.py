@@ -9,8 +9,10 @@ import json
 import os
 from pathlib import Path
 import signal
+import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import unittest
@@ -301,7 +303,6 @@ class OfficialReleaseAssetNoticeTests(unittest.TestCase):
         # A Linux selected-reads record is judged as before: the release asset field changes nothing for it.
         elf = bytearray(64 + 56)
         elf[:16] = bytes.fromhex("7f454c46020101000000000000000000")
-        import struct
         struct.pack_into("<HHIQQQIHHHHHH", elf, 16, 2, 62, 1, 0x400000, 64, 0, 0, 64, 56, 1, 0, 0, 0)
         struct.pack_into("<IIQQQQQQ", elf, 64, 1, 5, 0, 0x400000, 0x400000, len(elf), len(elf), 0x1000)
         self.binary = bytes(elf)
@@ -311,6 +312,148 @@ class OfficialReleaseAssetNoticeTests(unittest.TestCase):
             self.read(component, self.notices(1))
         files, _ = self.read(component, self.notices(78))
         self.assertEqual(len([name for name in files if name.startswith("github/notices/")]), 78)
+
+
+class PlaywrightRuntimeNpmTests(unittest.TestCase):
+    """The Playwright route admits the npm that the product's pinned runtime Node archive carries.
+
+    The route is macOS arm64 only, so the platform is stated for the test and both runtimes are stand-ins:
+    no Node, npm, browser or package code runs.
+    """
+
+    def setUp(self):
+        base = "/private/tmp" if os.path.isdir("/private/tmp") else tempfile.gettempdir()
+        self.scratch = tempfile.TemporaryDirectory(prefix="pw-", dir=base)
+        self.addCleanup(self.scratch.cleanup)
+        self.root = Path(self.scratch.name).resolve()
+        versions = {"@playwright/mcp": "0.0.83", "playwright": "1.64.0-alpha-1790635538000",
+                    "playwright-core": "1.64.0-alpha-1790635538000"}
+        project = {"name": "fixture", "version": "0.1.0", "private": True, "dependencies": {"@playwright/mcp": "0.0.83"}}
+        lock = {"name": "fixture", "version": "0.1.0", "lockfileVersion": 3, "packages": {"": project}}
+        files, rows = {}, []
+        for index, (package, version) in enumerate(versions.items()):
+            dependencies = {key: value for key, value in versions.items()
+                            if (package == "@playwright/mcp" and key != package)
+                            or (package == "playwright" and key == "playwright-core")}
+            output = io.BytesIO()
+            members = {"package.json": MODULE.encoded({"name": package, "version": version, "dependencies": dependencies}),
+                       "cli.js": b"throw Error('must not execute');\n", "LICENSE": b"fixture licence\n"}
+            with tarfile.open(fileobj=output, mode="w:gz") as stream:
+                for member, raw in members.items():
+                    row = tarfile.TarInfo("package/" + member)
+                    row.size = len(raw)
+                    stream.addfile(row, io.BytesIO(raw))
+            raw = output.getvalue()
+            parsed = MODULE.npm_archive(raw)
+            path, location = "playwright/archives/%d.tgz" % index, "node_modules/" + package
+            url = "https://registry.example/%d.tgz" % index
+            files[path] = raw
+            rows.append({"id": package, "version": version, "path": path, "url": url, "integrity": parsed["integrity"],
+                         "sha256": MODULE.sha(raw), "bytes": len(raw), "install_path": location,
+                         "payload_files": len(parsed["files"])})
+            lock["packages"][location] = {"version": version, "resolved": url, "integrity": parsed["integrity"],
+                                          "dependencies": dependencies}
+        files["playwright/package.json"] = MODULE.encoded(project)
+        files["playwright/package-lock.json"] = MODULE.encoded(lock)
+        files["playwright/closure.json"] = MODULE.encoded({
+            "packages": rows, "package_json_sha256": MODULE.sha(files["playwright/package.json"]),
+            "package_lock_sha256": MODULE.sha(files["playwright/package-lock.json"])})
+        files["playwright/mcp.template.json"] = MODULE.encoded({"mcpServers": {"playwright-isolated": {
+            "command": "ABS_NODE_EXECUTABLE", "args": MODULE.PLAYWRIGHT_ARGS, "cwd": "ABS_PROCESS_WORKSPACE",
+            "env": {"PATH": "/usr/bin:/bin", "HOME": "ABS_PROCESS_HOME", "TMPDIR": "ABS_PROCESS_TMP",
+                    "PWTEST_SOCKETS_DIR": "ABS_SHORT_PROCESS_SOCKET_DIRECTORY"}}}})
+        files["playwright/UPSTREAM-PROFILE.md"] = b"fixture guide\n"
+        files.update({"playwright/notices/%d" % index: b"fixture notice\n" for index in range(7)})
+        files["delivery.json"] = MODULE.encoded({
+            "format": "meerkat-toolkit.official-consumers.v1", "role": "service_connector", "components": [{
+                "catalog_id": "playwright", "source_revision": "a" * 40,
+                "selected_operations": MODULE.PLAYWRIGHT_OPERATIONS, "whole_endpoint_exposed": True,
+                "browser_distributed": False, "package_json": "playwright/package.json",
+                "package_lock": "playwright/package-lock.json", "closure": "playwright/closure.json",
+                "configuration_template": "playwright/mcp.template.json"}]})
+        self.bundle = self.root / "bundle"
+        for name, raw in files.items():
+            target = self.bundle / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(raw)
+        contents = MODULE.encoded({"format": 1, "files": {
+            name: {"sha256": MODULE.sha(raw), "bytes": len(raw)} for name, raw in files.items()}})
+        (self.bundle / "CONTENTS.json").write_bytes(contents)
+        self.digest = MODULE.sha(contents)
+        chrome = self.root / "chrome"
+        chrome.write_bytes(b"NOT_EXECUTABLE_CHROME")
+        chrome.chmod(0o700)
+        (self.root / "p").mkdir()
+        self.profile = self.root / "host.json"
+        self.profile.write_bytes(MODULE.encoded({
+            "schema_version": 1, "chrome_executable": str(chrome), "chrome_sha256": MODULE.sha(chrome.read_bytes()),
+            "process_parent": str(self.root / "p")}))
+        self.node = self.root / "node"
+        self.node.write_bytes(b"NOT_EXECUTABLE_NODE")
+        self.node.chmod(0o700)
+        self.npm = self.root / "npm.js"
+        self.npm.write_bytes(b"NOT_EXECUTABLE_NPM")
+        self.config = self.root / "config.json"
+        self.config.write_bytes(MODULE.encoded({"profile": MODULE.PLAYWRIGHT_PROFILE,
+                                                "operations": MODULE.PLAYWRIGHT_OPERATIONS, "config": {}}))
+        self.calls = []
+
+    def arguments(self, **changes):
+        values = dict(official_bundle=str(self.bundle), contents_sha256=self.digest, component="playwright",
+                      playwright_host_profile=str(self.profile),
+                      playwright_host_profile_sha256=MODULE.sha(self.profile.read_bytes()),
+                      node=str(self.node), npm_cli=str(self.npm), official_describe=False, check_config_only=False,
+                      verify_existing=False, config=str(self.config), config_sha256=MODULE.sha(self.config.read_bytes()),
+                      server_name="playwright", destination=str(self.root / "install"))
+        values.update(changes)
+        return argparse.Namespace(**values)
+
+    def install(self, npm_version, destination="install"):
+        """Run the route with stand-in runtimes: Node reports macOS arm64, npm prints the given version."""
+        def stand_in(argv, cwd, env, label, **_):
+            self.calls.append(label)
+            if label == "node-runtime":
+                return MODULE.encoded({"version": "v24.19.0", "platform": "darwin", "arch": "arm64"})
+            if label == "npm-runtime":
+                self.assertEqual(argv[:2], [str(self.node), str(self.npm)])
+                return npm_version
+            if label == "npm-install":
+                for archive in (cwd / "inputs/playwright/archives").iterdir():
+                    content = MODULE.npm_archive(archive.read_bytes())
+                    for path, raw in content["files"].items():
+                        target = cwd / "node_modules" / content["name"] / path
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_bytes(raw)
+            return b""
+        with patch.object(MODULE.sys, "platform", "darwin"), patch("platform.machine", return_value="arm64"), \
+                patch.object(MODULE, "run", side_effect=stand_in):
+            return MODULE.official_consumer(self.arguments(destination=str(self.root / destination)))
+
+    def test_npm_of_the_pinned_runtime_node_archive_is_admitted(self):
+        receipt = self.install(b"11.17.0\n")
+        self.assertEqual(receipt["runtime_selection"], {"node": str(self.node), "npm_cli": str(self.npm)})
+        self.assertTrue((self.root / "install/ready/installed.json").is_file())
+        self.assertIn("npm-install", self.calls)
+
+    def test_any_other_npm_is_refused_before_the_offline_install(self):
+        for index, version in enumerate((b"11.12.1\n", b"11.17.1\n", b"12.2.0\n", b"10.9.8\n", b"11.17.0-pre\n",
+                                         b"v11.17.0\n", b"", b"not a version\n")):
+            with self.subTest(version=version):
+                self.calls = []
+                destination = "refused-%d" % index
+                with self.assertRaises(MODULE.InstallError) as refusal:
+                    self.install(version, destination)
+                self.assertEqual(str(refusal.exception), "unsupported selected npm")
+                self.assertEqual(self.calls, ["node-runtime", "npm-runtime"])
+                self.assertFalse((self.root / destination / "ready").exists())
+                self.assertFalse((self.root / destination / "node_modules").exists())
+
+    def test_described_runtime_names_the_admitted_npm(self):
+        described = MODULE.official_consumer(self.arguments(official_describe=True))
+        runtime = next(row["instruction"] for row in described["help"]["prerequisites"] if row["kind"] == "host_runtime")
+        self.assertIn("selected Node 24.19.0/npm 11.17.0", runtime)
+        self.assertNotIn("11.12.1", runtime)
+        self.assertEqual(described["target"], "macos-arm64")
 
 
 class NpmClosureTests(unittest.TestCase):

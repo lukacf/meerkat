@@ -44,6 +44,11 @@ pub enum ModelFallbackSkipReason {
     /// target adapter's own typed refusal), so it is skipped before any
     /// provider call instead of being switched to and refused.
     ToolChoiceUnsupported,
+    // The target's route does not accept the session's provider-neutral
+    // reasoning effort level (unsupported, unknown, unavailable, or in
+    // conflict with the target's own params), so it is skipped before any
+    // switch: a fallback never changes the effort silently.
+    ReasoningEffortUnsupported,
 }
 
 /// Evidence attached even when every configured candidate is rejected.

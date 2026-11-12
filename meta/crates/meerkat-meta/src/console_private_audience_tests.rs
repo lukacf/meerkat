@@ -3176,7 +3176,7 @@ async fn masked_tool_answer(
     >,
     member: &str,
 ) -> String {
-    match tokio::time::timeout(std::time::Duration::from_secs(60), call).await {
+    match tokio::time::timeout(std::time::Duration::from_mins(1), call).await {
         Ok(Ok(outcome)) => format!("ok: {}", outcome.result.text_content()),
         Ok(Err(error)) => format!("error: {}", error.to_transcript_content()),
         Err(_) => "no answer within a minute".to_string(),

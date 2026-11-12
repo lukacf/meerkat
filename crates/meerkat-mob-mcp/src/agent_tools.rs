@@ -8540,7 +8540,7 @@ mod tests {
             name: tool,
             args: &raw,
         });
-        match tokio::time::timeout(std::time::Duration::from_secs(60), call).await {
+        match tokio::time::timeout(std::time::Duration::from_mins(1), call).await {
             Ok(Ok(outcome)) => format!("ok: {}", outcome.result.text_content()),
             Ok(Err(error)) => format!("error: {error:?}"),
             Err(_) => "no answer within a minute".to_string(),

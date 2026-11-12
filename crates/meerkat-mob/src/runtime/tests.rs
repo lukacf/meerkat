@@ -30432,7 +30432,7 @@ async fn owned_member_tools_hand_the_audience_the_roster_labels_of_both_members(
 
     // The lists in full: a member the audience hides from the caller is
     // not in its list at all, with manage scope, and every other member is.
-    let everyone = vec![
+    let everyone = [
         "labels-keeper".to_owned(),
         "labels-kept".to_owned(),
         "labels-other-keeper".to_owned(),

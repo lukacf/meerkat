@@ -1928,7 +1928,7 @@ fn a_candidate_launch_refuses_the_writers_and_serves_the_reads() {
         ("meta/identity/archive", named_scout.clone()),
         ("meta/identity/unarchive", named_scout.clone()),
         ("meta/identity/remove", named_scout.clone()),
-        ("meta/identity/adopt", named_scout.clone()),
+        ("meta/identity/adopt", named_scout),
         (
             "meta/identity/withdraw",
             json!({"request_id": "candidate-1"}),
@@ -2307,9 +2307,13 @@ impl meerkat_client::LlmClient for RecordingClient {
 /// update `applies_at_next_run`.
 #[derive(Default)]
 struct RecordingStep {
-    updated: Mutex<Vec<(String, Vec<String>, Vec<String>)>>,
+    updated: Mutex<Vec<AskedUpdate>>,
     removed: Mutex<Vec<String>>,
 }
+
+/// One update the recording step was asked about: the agent, its
+/// instructions before and its instructions now.
+type AskedUpdate = (String, Vec<String>, Vec<String>);
 
 #[async_trait]
 impl InstructionStep for RecordingStep {

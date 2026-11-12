@@ -1320,7 +1320,7 @@ async fn what_the_seam_does_not_carry_yet_is_refused_unsupported() {
     .expect("the adoption is allowed");
     let adopted = rig.commit(&host(), "adopt-keeper", &adopt).await;
     assert_eq!(
-        adopted.outcome.refusal().map(|refusal| refusal.to_data()),
+        adopted.outcome.refusal().map(IdentityRefusal::to_data),
         Some(json!({"kind": "unsupported", "feature": AGENT_SPECS_NOT_GIVEN})),
         "{adopted:?}"
     );

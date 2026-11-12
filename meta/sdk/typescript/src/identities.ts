@@ -157,7 +157,10 @@ export interface CreateAgents extends IdentityChangeOptions {
 /**
  * What an update sets. A member left out is unchanged. `instructions` and
  * `context` are replaced whole. `labels` sets each key it names and keeps
- * the agent's other labels; `labelsRemove` names keys to remove. `profile`
+ * the agent's other labels; `labelsRemove` names keys to remove. A label
+ * change reaches the agent's member at once while the member is idle, on the
+ * same conversation; a member that held work then takes it at a retry of
+ * the update, at its next update or at its next seat. `profile`
  * moves the agent to that profile's model and tools, on the same
  * conversation. `addressability` and `runtimeModeOverride` take the values
  * they take on a create ({@link AgentSpec}); an update sets a runtime mode

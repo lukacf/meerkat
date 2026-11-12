@@ -375,7 +375,11 @@ await identities.remove("editor", { expectedSpecDigest: digest, requestId: "remo
   read both back, each only when it is not the default.
 - **Update.** `set` names what changes; a member left out is unchanged.
   `instructions` and `context` are replaced whole. `labels` sets the keys it
-  names, and `labels_remove` removes keys. A `profile` change moves the agent
+  names, and `labels_remove` removes keys. A label change reaches the
+  agent's member at once while the member is idle, on the same conversation,
+  with no respawn and no reset; a member that held work then takes it at a
+  retry of the update, at its next update, or at its next seat. A `profile`
+  change moves the agent
   to that profile's model and tools on the same conversation.
   `addressability` and `runtime_mode_override` take the values they take on
   a create and are the change class `capability` of your policy; an update

@@ -262,7 +262,10 @@ class AgentSet:
 
     ``instructions`` and ``context`` are replaced whole. ``labels`` sets each
     key it names and keeps the agent's other labels; ``labels_remove`` names
-    keys to remove. ``profile`` moves the agent to that profile's model and
+    keys to remove. A label change reaches the agent's member at once while
+    the member is idle, on the same conversation; a member that held work
+    then takes it at a retry of the update, at its next update or at its
+    next seat. ``profile`` moves the agent to that profile's model and
     tools, on the same conversation. ``addressability`` and
     ``runtime_mode_override`` take the values they take on a create
     (:class:`AgentSpec`); an update sets a runtime mode and cannot return

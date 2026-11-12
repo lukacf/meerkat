@@ -392,9 +392,30 @@ What to know:
   start: the record of every removed agent is revoked then. Archiving an
   agent keeps the record: the agent comes back on its conversation with its
   instructions as they were. A change made while the agent is archived is
-  recorded and reaches it at its first run after its unarchive. The same
-  holds for an agent the host's configuration dropped and lists again with
-  other instructions: its first run after the listing carries the change.
+  recorded, and so is a change of an agent the host's configuration dropped
+  and lists again with other instructions; when it reaches the agent is the
+  next point.
+- **An agent seated again on its conversation** (after an unarchive, or
+  when the configuration lists it again) may be owed a record that was
+  written while no member held it. A record owed to a local member seated
+  dormant on a conversation it already has is tried at every wake a
+  delivery causes, after the conversation is loaded and before the member
+  is Live. When the member's session takes the write then (it answers
+  within 5 seconds, the mob's journal answers the read of the member's own
+  records within 5 seconds, and no other delivery to the member is in
+  flight past 5 seconds), the record is in that conversation before the run
+  that woke the member starts, and that run carries the entry once. A write
+  that fails or is not answered in time leaves the member owed: the mob
+  tries again at once when the member is Live again and then on its own
+  retry, at most 30 seconds after its previous attempt ended, and the entry
+  reaches the first run that starts after a write succeeded. A write an
+  owner refuses, or a session service that keeps no durable session
+  document, blocks the member: the record is not tried again until a write
+  selects the member again, the member is seated again, or the mob
+  restarts. Three limits: a member the mob brings up itself at a start or a
+  lift with work already queued may start that run before the write is
+  tried; a lift, a start, a warm reload and a placed member do not pass
+  this step; and the wake only tries the write, it does not guarantee it.
 - **Models that take a system instruction only ahead of the conversation**
   apply the change once a compaction at a run's first request carries it,
   or with a fresh conversation. The update's result says

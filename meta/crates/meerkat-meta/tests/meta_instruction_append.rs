@@ -1680,10 +1680,10 @@ async fn a_reset_of_an_edited_agent_revokes_its_record_and_appends_nothing() {
 /// on, and the agent runs on it. The comparison is not tied to the
 /// process's first roster pass.
 ///
-/// The agent's first run after the listing loads its conversation again,
-/// and the mob delivers the record to it then: that run carries the entry
-/// when the delivery lands before it starts, and the run after it carries
-/// it in any case.
+/// The agent is seated dormant on its conversation, and the mob owes it the
+/// record: the send that wakes it has the record written once the
+/// conversation is loaded and before the agent is live, so the run that
+/// woke it carries the entry, once.
 ///
 /// RED while only a replaced registration and the first pass were compared:
 /// the agent came back on its conversation with the dropped text.
@@ -1711,19 +1711,27 @@ async fn an_agent_listed_again_with_other_instructions_runs_on_them() {
         "the listing recorded the listed text: {record:#?}"
     );
 
-    rig.turn(CONFIGURED, "FIRST-AFTER-RELISTING").await;
     assert!(
-        entries(&rig.request_messages("FIRST-AFTER-RELISTING")).len() <= 1,
-        "the first run carries the entry or none"
+        rig.dormant(CONFIGURED),
+        "the listing seats the agent without loading its conversation"
     );
-    rig.recorded(CONFIGURED).await;
-    rig.turn(CONFIGURED, "SECOND-AFTER-RELISTING").await;
-    let request = entries(&rig.request_messages("SECOND-AFTER-RELISTING"));
-    assert_eq!(request.len(), 1, "{request:#?}");
+    rig.turn(CONFIGURED, "FIRST-AFTER-RELISTING").await;
+    let request = entries(&rig.request_messages("FIRST-AFTER-RELISTING"));
+    assert_eq!(
+        request.len(),
+        1,
+        "the run that woke the agent carries the entry: {request:#?}"
+    );
     assert!(
         carries(&request[0], &["Answer in GAMMA style."]),
         "the relisted agent runs on the listed text: {}",
         request[0]
+    );
+    rig.turn(CONFIGURED, "SECOND-AFTER-RELISTING").await;
+    assert_eq!(
+        entries(&rig.request_messages("SECOND-AFTER-RELISTING")).len(),
+        1,
+        "the entry is in the conversation once"
     );
     rig.shutdown().await;
 }
@@ -1758,14 +1766,12 @@ async fn an_agent_listed_again_with_its_first_text_gets_it_recorded() {
         "the listing recorded the listed text: {record:#?}"
     );
     rig.turn(CONFIGURED, "FIRST-AFTER-RELISTING").await;
-    rig.recorded(CONFIGURED).await;
-    rig.turn(CONFIGURED, "SECOND-AFTER-RELISTING").await;
-    let request = entries(&rig.request_messages("SECOND-AFTER-RELISTING"));
+    let request = entries(&rig.request_messages("FIRST-AFTER-RELISTING"));
     assert!(
         request
             .last()
             .is_some_and(|entry| carries(entry, &["Answer in ALPHA style."])),
-        "the relisted agent runs on the listed text: {request:#?}"
+        "the run that woke the relisted agent carries the listed text: {request:#?}"
     );
     rig.shutdown().await;
 }
@@ -1774,10 +1780,10 @@ async fn an_agent_listed_again_with_its_first_text_gets_it_recorded() {
 /// member: the change is recorded, nothing is woken, and the agent runs on
 /// it after its unarchive.
 ///
-/// The agent's first run after the unarchive loads its conversation again,
-/// and the mob delivers the record to it then: that run carries the entry
-/// when the delivery lands before it starts, and the run after it carries
-/// it in any case.
+/// The unarchived agent is seated dormant on its conversation, and the mob
+/// owes it the record: the send that wakes it has the record written once
+/// the conversation is loaded and before the agent is live, so the run that
+/// woke it carries the entry, once.
 ///
 /// RED while an agent with no seated member was read as never built: the
 /// step answered `applies_at_next_run`, wrote nothing, and the unarchived
@@ -1837,19 +1843,27 @@ async fn an_edit_of_an_archived_agent_reaches_it_after_its_unarchive() {
         ),
         "{unarchived:?}"
     );
-    rig.turn(CREATED, "FIRST-AFTER-UNARCHIVE").await;
     assert!(
-        entries(&rig.request_messages("FIRST-AFTER-UNARCHIVE")).len() <= 1,
-        "the first run carries the entry or none"
+        rig.dormant(CREATED),
+        "the unarchive seats the agent without loading its conversation"
     );
-    rig.recorded(CREATED).await;
-    rig.turn(CREATED, "SECOND-AFTER-UNARCHIVE").await;
-    let request = entries(&rig.request_messages("SECOND-AFTER-UNARCHIVE"));
-    assert_eq!(request.len(), 1, "{request:#?}");
+    rig.turn(CREATED, "FIRST-AFTER-UNARCHIVE").await;
+    let request = entries(&rig.request_messages("FIRST-AFTER-UNARCHIVE"));
+    assert_eq!(
+        request.len(),
+        1,
+        "the run that woke the agent carries the entry: {request:#?}"
+    );
     assert!(
         carries(&request[0], &["Keep BETA records."]),
         "the unarchived agent runs on the change: {}",
         request[0]
+    );
+    rig.turn(CREATED, "SECOND-AFTER-UNARCHIVE").await;
+    assert_eq!(
+        entries(&rig.request_messages("SECOND-AFTER-UNARCHIVE")).len(),
+        1,
+        "the entry is in the conversation once"
     );
     rig.shutdown().await;
 }
@@ -1916,10 +1930,12 @@ async fn an_archived_agents_change_made_before_a_stop_is_recorded_at_start() {
         "{unarchived:?}"
     );
     rig.turn(CREATED, "FIRST-AFTER-UNARCHIVE").await;
-    rig.recorded(CREATED).await;
-    rig.turn(CREATED, "SECOND-AFTER-UNARCHIVE").await;
-    let request = entries(&rig.request_messages("SECOND-AFTER-UNARCHIVE"));
-    assert_eq!(request.len(), 1, "{request:#?}");
+    let request = entries(&rig.request_messages("FIRST-AFTER-UNARCHIVE"));
+    assert_eq!(
+        request.len(),
+        1,
+        "the run that woke the agent carries the entry: {request:#?}"
+    );
     assert!(
         carries(&request[0], &["Keep BETA records."]),
         "the unarchived agent runs on the change: {}",

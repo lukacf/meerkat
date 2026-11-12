@@ -228,6 +228,14 @@ replay or incoming message content. This receiver path still awaits native
 validation. See the
 [current development status](https://github.com/lukacf/meerkat-connect/blob/main/docs/releases/follow-up.md#native-collaboration-and-recorder-gap).
 
+<Note>
+Documentation clarification, 2026-11-12: the conditions below clarify the
+peer-delivery limitation recorded under 0.9.11 in the changelog carried
+forward with Connect 0.9.14. This is a documentation correction, not new
+runtime behavior or a guarantee that an operation succeeds. See the
+[dated erratum](https://github.com/lukacf/meerkat/blob/main/connect/CHANGELOG.md).
+</Note>
+
 When a member's governed work sends to another member in the same process (a
 reply, a message or a request), Core carries that work's origin with the
 delivery. Connect binds the receiving work under that work's requester, with

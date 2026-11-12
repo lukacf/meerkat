@@ -61,7 +61,7 @@ them.
   are unchanged. `kind`, `detail`, the JSON-RPC code and the `run_failed`
   event are unchanged, and no field is new: a stored turn error without the
   three fields still reads, and an earlier release reads one that has them.
-  Affects 0.8.0 through 0.9.13.
+  Affects 0.8.0 through 0.9.14.
 
 ## [0.9.14] - 2026-11-11
 

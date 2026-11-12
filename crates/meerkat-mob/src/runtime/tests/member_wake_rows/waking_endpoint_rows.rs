@@ -490,3 +490,91 @@ async fn a_kickoff_notice_that_cannot_be_prepared_for_one_peer_still_reaches_the
     );
     fixture.finish().await;
 }
+
+/// A spawn that already wired a peer whose wake has not bound it, and is
+/// then refused (its next edge cannot be journaled), is rolled back at once:
+/// the rollback's endpoint stage takes that peer by its recorded endpoint.
+/// The member is gone when the spawn answers, no edge of it is left, and a
+/// member spawned afterwards is wired to both peers.
+///
+/// Both of the member's peers are held in the same span, so whichever is
+/// wired first is the one the rollback has to undo. A peer's failed endpoint
+/// fails a spawn rollback only for a peer the spawn had wired, which is why
+/// the journal fault lets one edge through.
+///
+/// RED under the mutant that reads the recorded endpoint for a Dormant
+/// member only in the retirement endpoint stage: the rollback looks the
+/// wired peer's comms runtime up, fails on its unbound operation record,
+/// stays owned for a later attempt, and the spawn answers `rollback remains
+/// owned for retry` with the member seated on its one edge.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_spawn_that_wired_a_peer_whose_wake_has_not_bound_it_is_rolled_back_at_once() {
+    let events = Arc::new(FaultInjectedMobEventStore::new());
+    let fixture = WakeFixture::build_with_storage(
+        "we-rollback-wired",
+        |_| {},
+        |definition| {
+            definition.wiring.role_wiring = vec![RoleWiringRule {
+                a: ProfileName::from("worker"),
+                b: ProfileName::from("worker"),
+            }];
+        },
+        false,
+        None,
+        MobStorage::with_events(events.clone()),
+    )
+    .await;
+    let (first, mut first_hold) = peer_held_before_bind(&fixture, "we-wired-first").await;
+    let (second, mut second_hold) = peer_held_before_bind(&fixture, "we-wired-second").await;
+    let first_wake = start_wake(&fixture, &first);
+    let second_wake = start_wake(&fixture, &second);
+    wait_held_before_bind(&fixture, &first, &mut first_hold).await;
+    wait_held_before_bind(&fixture, &second, &mut second_hold).await;
+
+    // One of the member's two edges is journaled, the next one is refused.
+    events.fail_appends_for_after("MembersWired", 1).await;
+    let (member, spawned) = spawn_worker(&fixture, "we-wired-member").await;
+    events.allow_appends_for("MembersWired").await;
+    let refused = spawned.expect_err("the spawn's second edge cannot be journaled");
+    let text = refused.to_string();
+    assert!(
+        !text.contains("rollback remains owned for retry"),
+        "the rollback completed on its first attempt: {refused:?}"
+    );
+    assert!(
+        !text.contains("missing generated owner operation binding"),
+        "the refusal is the journal's: {refused:?}"
+    );
+    assert!(
+        fixture
+            .handle
+            .get_member(&member)
+            .await
+            .expect("roster read")
+            .is_none(),
+        "the refused member is rolled back when its spawn answers"
+    );
+    assert!(
+        !edge_held(&fixture, &member, &first) && !edge_held(&fixture, &member, &second),
+        "no edge of the refused member is left"
+    );
+
+    finish_held_wake(&fixture, &first, first_hold, first_wake).await;
+    finish_held_wake(&fixture, &second, second_hold, second_wake).await;
+
+    // Nothing of the refused spawn is left behind on either peer: a member
+    // spawned afterwards takes both declared edges, and each edge carries a
+    // message both ways.
+    let (later, spawned) = spawn_worker(&fixture, "we-wired-later").await;
+    assert!(
+        spawned.is_ok(),
+        "a spawn after the rollback is admitted: {spawned:?}"
+    );
+    assert!(
+        edge_held(&fixture, &later, &first) && edge_held(&fixture, &later, &second),
+        "the later member holds both declared edges"
+    );
+    assert_both_directions_deliver(&fixture, &later, &first).await;
+    assert_both_directions_deliver(&fixture, &later, &second).await;
+    fixture.finish().await;
+}

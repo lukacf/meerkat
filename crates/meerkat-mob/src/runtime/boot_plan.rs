@@ -372,6 +372,9 @@ pub(crate) fn domain_member_endpoint_source(
         {
             MemberEndpointSource::Recorded
         }
+        // A Bound member resolves through its comms runtime: its own topology step
+        // resolves its own endpoint and needs it. Read as not materialized, its own
+        // side of every edge would never be realized.
         Some(mob_dsl::MemberMaterializationPhase::Waking) => {
             MemberEndpointSource::RuntimeThenRecorded
         }

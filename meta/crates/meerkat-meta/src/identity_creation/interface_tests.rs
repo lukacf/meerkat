@@ -891,46 +891,40 @@ fn a_plan_that_holds_a_decision_gives_no_consent() {
 }
 
 /// The status read's record facts are additive: a status with none set is
-/// written as before, and one that sets them writes each as a member of the
-/// status.
+/// written as before, and each one that is set is written as a member of
+/// the status. A status carries no other member of an agent's record: its
+/// spec digest and revision, who asked for it and its open operations are
+/// read with a get or a list.
 #[test]
 fn the_status_reads_record_facts_are_additive_members() {
     use crate::identity_first::IdentityRecordFacts;
     let unset = serde_json::to_value(IdentityRecordFacts::default()).expect("facts");
     assert_eq!(unset, json!({}));
-    let set = IdentityRecordFacts {
-        spec_digest: Some(digest("keeper").as_str().to_owned()),
-        spec_revision: Some(2),
-        archived: true,
-        preparation_pending: false,
-        provenance: Some(AgentProvenance {
-            entered: AgentEntered::Created,
-            requester_kind: RequesterKind::Agent,
-            requester: "helper".to_owned(),
-            at_ms: 7,
-            consent: ConsentSummary::Allowed,
-        }),
-        open_operations: vec!["op-1".to_owned()],
-    };
-    let written = serde_json::to_value(&set).expect("facts");
+    for (archived, preparation_pending, written) in [
+        (true, false, json!({"archived": true})),
+        (false, true, json!({"preparation_pending": true})),
+    ] {
+        let set = IdentityRecordFacts {
+            archived,
+            preparation_pending,
+        };
+        assert_eq!(serde_json::to_value(&set).expect("facts"), written);
+        let read: IdentityRecordFacts = serde_json::from_value(written).expect("facts");
+        assert_eq!(read, set);
+    }
+    // Members an earlier build of this release line named are not members
+    // of the status: a reader of the status ignores them.
+    let read: IdentityRecordFacts = serde_json::from_value(json!({
+        "archived": true,
+        "spec_digest": "sha256:0",
+        "spec_revision": 2,
+        "open_operations": ["op-1"],
+    }))
+    .expect("facts");
     assert_eq!(
-        written,
-        json!({
-            "spec_digest": digest("keeper").as_str(),
-            "spec_revision": 2,
-            "archived": true,
-            "provenance": {
-                "entered": "created",
-                "requester_kind": "agent",
-                "requester": "helper",
-                "at_ms": 7,
-                "consent": {"form": "allowed"},
-            },
-            "open_operations": ["op-1"],
-        })
+        serde_json::to_value(&read).expect("facts"),
+        json!({"archived": true})
     );
-    let read: IdentityRecordFacts = serde_json::from_value(written).expect("facts");
-    assert_eq!(read, set);
 }
 
 /// The one wire spelling of the family: a full create request and an update

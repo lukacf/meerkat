@@ -31,6 +31,10 @@
 //! after a removal, so what the step holds for the agent ends with it. An
 //! archive calls nothing: an archived agent keeps what the step holds, so
 //! its unarchive resumes on its current instructions.
+//!
+//! Beside the changes, the seam settles the preparation of an agent that
+//! awaits it ([`IdentityChangeExecutor::settle_preparation`]): one call of
+//! Core's settle, by the host's operator.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -64,8 +68,10 @@ use super::request::{
 };
 
 mod core_commit;
+mod preparation;
 
 pub(crate) use core_commit::row_spec;
+pub use preparation::PreparationSettle;
 
 /// The consent a change commits under, as Core's commit takes it: the
 /// host's rule committed it without a decision (`Policy`, `allow` or
@@ -428,6 +434,23 @@ pub trait IdentityChangeExecutor: Send + Sync {
     /// with nothing written; an error is a commit that ended with no
     /// outcome ([`ExecutorError`]).
     async fn commit(&self, commit: ChangeCommit<'_>) -> Result<ChangeCommitted, ExecutorError>;
+
+    /// Settle the preparation of the agent `settle.name` in `settle.mob`,
+    /// as `settle.requester`: the agent, committed pending its preparation,
+    /// is seated. Only the host's operator settles one (`change_denied`
+    /// otherwise). A typed refusal is an outcome, with nothing written; an
+    /// error is a settle that ended with no outcome. An executor that
+    /// reaches no settle refuses it `unsupported`.
+    async fn settle_preparation(
+        &self,
+        _settle: PreparationSettle<'_>,
+    ) -> Result<ChangeCommitted, ExecutorError> {
+        Ok(ChangeCommitted::refused(IdentityRefusal::new(
+            IdentityRefusalKind::Unsupported {
+                feature: "the settle of an agent's preparation".to_owned(),
+            },
+        )))
+    }
 }
 
 /// What the seam asks its launch about the agents of the mob, beside what
@@ -575,6 +598,13 @@ impl IdentityChangeExecutor for CoreChangeExecutor {
             } => commit_adopt(self, &commit, operation, identity, expected_spec_digest).await,
         }
     }
+
+    async fn settle_preparation(
+        &self,
+        settle: PreparationSettle<'_>,
+    ) -> Result<ChangeCommitted, ExecutorError> {
+        preparation::settle(&settle).await
+    }
 }
 
 /// What the seam refuses before Core is called, for every requester.
@@ -598,6 +628,25 @@ fn refused_before_core(commit: &ChangeCommit<'_>) -> Option<IdentityRefusal> {
         return Some(IdentityRefusal::new(IdentityRefusalKind::OwnerReadOnly).at("name"));
     }
     None
+}
+
+/// The `unsupported` feature of an update that would move an agent into a
+/// profile whose agents the launch's policy says the host prepares.
+pub const MOVE_INTO_PREPARED_PROFILE: &str = "move_into_prepared_profile";
+
+/// The refusal of an update that would move an agent into a profile its
+/// host prepares: one refusal, wherever the move is refused (when it is
+/// asked, and again when it is carried out).
+pub(crate) fn move_into_prepared_profile() -> IdentityRefusal {
+    IdentityRefusal::new(IdentityRefusalKind::Unsupported {
+        feature: MOVE_INTO_PREPARED_PROFILE.to_owned(),
+    })
+    .at("set.profile")
+    .with_detail(
+        "An agent is not moved into a profile its host prepares: the host prepares an agent of \
+         that profile before its first use, and this agent was not. Create the agent in that \
+         profile instead. Nothing was changed.",
+    )
 }
 
 /// The feature an adoption, and an update of labels, answer through an
@@ -668,6 +717,19 @@ async fn commit_update(
     }
     let mut spec = current.clone();
     if let Some(profile) = &update.profile {
+        // The host prepares an agent of a prepared profile before its first
+        // use, which a move cannot give an agent that exists already: it
+        // would run on the profile unprepared. A move out of such a
+        // profile, and every other update, asks for no preparation. The
+        // family refuses such a move when it is asked; this is the same
+        // refusal for a change that reaches the seam any other way (one
+        // held under a launch whose policy prepared nothing, say).
+        if profile.to != current.profile
+            && core_commit::preparation_of(commit, profile.to.as_str())
+                != meerkat_mob::IdentityPreparationMode::None
+        {
+            return refused(move_into_prepared_profile());
+        }
         spec.profile = profile.to.clone();
     }
     if let Some(addressability) = update.addressability {
@@ -738,14 +800,16 @@ async fn commit_update(
     }
     let previous = current.additional_instructions.clone();
     let now = spec.additional_instructions.clone();
-    let preparation = core_commit::preparation_of(commit, spec.profile.as_str());
+    // An update asks no preparation: the host prepares an agent before its
+    // first use, and Core refuses an update that names a mode. The update of
+    // an agent that still awaits its preparation changes its record and
+    // leaves it waiting.
     let mut change = StoreOwnedIdentityUpdate::new(
         operation,
         requester,
         spec,
         update.expected_spec_digest.as_str(),
-    )
-    .with_preparation(preparation);
+    );
     change.peers_add = peers_add;
     change.peers_remove = peers_remove;
     let mut committed = match commit
@@ -914,16 +978,39 @@ pub(super) fn outcome_of_change(
 /// change did to it, `pending_preparation` when one of them waits for its
 /// preparation and `done` otherwise. An agent's session is read from
 /// Core's published entry, which wakes nothing.
+///
+/// An agent the receipt records as pending its preparation is read where
+/// it stands now, as its session and its seat are: the receipt is of the
+/// commit, and the host settles the preparation, or removes the agent,
+/// afterwards. It is still `pending_preparation` while Core holds it for
+/// its preparation, `committed` once it was settled (with its seat, on a
+/// create), and `removed` once it was removed, with no spec digest, as a
+/// removal answers. An entry Core's published state does not read stays as
+/// the receipt says.
 pub(super) fn outcome_of_receipt(
     mob: &MobHandle,
     operation_id: &OperationId,
     receipt: &IdentityChangeReceipt,
 ) -> Result<IdentityOutcome, ExecutorError> {
+    use meerkat_mob::{EntryStanding, IdentityEntryRead, UnseatedEntryCause};
+
     let mut agents = Vec::with_capacity(receipt.identities.len());
     for entry in &receipt.identities {
+        let (standing, removed) = match mob.identity_entry(&entry.identity) {
+            Ok(IdentityEntryRead::Entry(view)) => (Some(view.standing), false),
+            Ok(IdentityEntryRead::Removed) => (None, true),
+            _ => (None, false),
+        };
         let state = match entry.outcome {
             IdentityChangeEntryOutcome::Committed => AgentChangeState::Committed,
-            IdentityChangeEntryOutcome::PendingPreparation => AgentChangeState::PendingPreparation,
+            IdentityChangeEntryOutcome::PendingPreparation => match (&standing, removed) {
+                (Some(EntryStanding::Unseated(UnseatedEntryCause::PreparationPending)), _) => {
+                    AgentChangeState::PendingPreparation
+                }
+                (Some(_), _) => AgentChangeState::Committed,
+                (None, true) => AgentChangeState::Removed,
+                (None, false) => AgentChangeState::PendingPreparation,
+            },
             IdentityChangeEntryOutcome::Archiving => AgentChangeState::Archiving,
             IdentityChangeEntryOutcome::Archived => AgentChangeState::Archived,
             IdentityChangeEntryOutcome::Restored => AgentChangeState::Restored,
@@ -937,20 +1024,30 @@ pub(super) fn outcome_of_receipt(
             }
         };
         let mut agent = AgentOutcome::new(identity_name_of_member(&entry.identity), state);
-        agent.spec_digest = entry.spec_digest.as_deref().and_then(Sha256Digest::parse);
-        agent.spec_revision = entry.revision;
-        let standing = entry_standing(mob, &entry.identity);
-        if let Some(meerkat_mob::EntryStanding::Seated(seated)) = &standing {
+        // An agent removed since it was committed pending has no spec any
+        // more: its entry answers none, as a removal's does.
+        let gone = entry.outcome == IdentityChangeEntryOutcome::PendingPreparation
+            && state == AgentChangeState::Removed;
+        if !gone {
+            agent.spec_digest = entry.spec_digest.as_deref().and_then(Sha256Digest::parse);
+            agent.spec_revision = entry.revision;
+        }
+        if let Some(EntryStanding::Seated(seated)) = &standing {
             agent.session_id = seated.session_id.as_ref().map(ToString::to_string);
         }
-        if receipt.change == meerkat_mob::IdentityChangeKind::Create
-            && state == AgentChangeState::Committed
+        // A create and the settle of a preparation both seat the agent they
+        // commit: each says whether its seat stands.
+        if matches!(
+            receipt.change,
+            meerkat_mob::IdentityChangeKind::Create
+                | meerkat_mob::IdentityChangeKind::SettlePreparation
+        ) && state == AgentChangeState::Committed
         {
             agent.seat = match standing {
-                Some(meerkat_mob::EntryStanding::Seated(_)) => Some(AgentSeat::Seated),
-                Some(meerkat_mob::EntryStanding::Unseated(
-                    meerkat_mob::UnseatedEntryCause::SeatOwed,
-                )) => Some(AgentSeat::Owed),
+                Some(EntryStanding::Seated(_)) => Some(AgentSeat::Seated),
+                Some(EntryStanding::Unseated(UnseatedEntryCause::SeatOwed)) => {
+                    Some(AgentSeat::Owed)
+                }
                 _ => None,
             };
         }
@@ -973,18 +1070,6 @@ pub(super) fn outcome_of_receipt(
             }
         },
     )
-}
-
-/// Where the member of `member` stands, from Core's published entry: no
-/// actor command and no wake. `None` when the name is no readable entry.
-fn entry_standing(
-    mob: &MobHandle,
-    member: &meerkat_mob::AgentIdentity,
-) -> Option<meerkat_mob::EntryStanding> {
-    match mob.identity_entry(member) {
-        Ok(meerkat_mob::IdentityEntryRead::Entry(view)) => Some(view.standing),
-        _ => None,
-    }
 }
 
 /// The correlation of an `admission_unsettled` that answers a member step

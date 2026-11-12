@@ -63,6 +63,14 @@
 //! A read reads the same records and wakes nothing: an agent's member is
 //! read from the state the mob last published, and its record from the
 //! identity store or the identity runtime's registration.
+//!
+//! An agent of a profile the policy says its host prepares
+//! (`preparation.<profile>.mode: "required"`) is committed pending its
+//! preparation: Core holds it with no member, and it runs nothing and wakes
+//! nothing. The host's operator settles the preparation
+//! ([`IdentityFamily::settle_preparation`]), which is Core's settle through
+//! the seam and no rule of the policy's: nobody else settles one. A host
+//! that gives up on such an agent removes it, as any agent is removed.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -80,23 +88,25 @@ use crate::durable_decisions::DecisionExecutorDriver;
 use crate::identity_first::{AgentIdentity, DurableAgentSpec, IdentityRuntime};
 
 use super::approval::{PlanRequest, PlanTarget, PlannedOutcome, plan_approval};
-use super::config::{ChangeClass, RequesterKind};
+use super::config::{ChangeClass, PreparationMode, RequesterKind};
 use super::consequences::{ConsequenceHook, ConsequenceLine, HookRefusal, host_consequences_of};
 use super::decided::{
     HeldChangeHost, HeldIdentityChange, HeldTarget, IdentityDecisionNotices, IdentityDecisions,
 };
 use super::digest::Sha256Digest;
+use super::executor::PreparationSettle;
 use super::executor::{
     AgentSpecs, ChangeCommit, ChangeCommitted, ChangeRequester, CoreChangeExecutor, ExecutorError,
-    IdentityChangeExecutor, InstructionStep, committed_outcome, consent_of_plan, refusal_of_error,
-    row_spec,
+    IdentityChangeExecutor, InstructionStep, committed_outcome, consent_of_plan,
+    move_into_prepared_profile, refusal_of_error, row_spec,
 };
+use super::family::SettlePreparationCall;
 use super::family::{
     AgentEntered, AgentPage, AgentProvenance, AgentReadiness, AgentRecord, AgentSummary,
     ChangePlan, ChangesHold, ChangesHoldRequest, ConsentSummary, DirectoryPage, DirectoryPeer,
     DirectoryProfile, DirectoryVerdict, GetAgent, IdentityChangeCall, IdentityChangeSpec,
     IdentityFamily, IdentityRead, IdentityReadAnswer, ListAgents, OperationState, ReadDirectory,
-    WithdrawRequest, Withdrawn,
+    UpdateAgent, WithdrawRequest, Withdrawn,
 };
 use super::operation::OperationId;
 use super::outcome::IdentityOutcome;
@@ -113,6 +123,10 @@ use super::schedules::{AgentSchedules, ScheduleEffect};
 
 /// The most agents one page of a list or of the directory names.
 const PAGE_MAX: usize = 100;
+
+/// The operations the mob's held changes keep open, by the agent each
+/// names ([`IdentityDecisions::open_operations`]).
+type HeldOperations = BTreeMap<String, Vec<OperationId>>;
 
 /// The `unsupported` feature of a create that gives a first message in a
 /// mob whose runtime is governed.
@@ -350,6 +364,10 @@ struct AgentFacts {
     /// Whether the host's roster lists its name while it is served from its
     /// record: the roster's entry is not applied.
     roster_listing_superseded: bool,
+    /// The operation it waits on its host for: the one that wrote its
+    /// record first (its create), read from that record while Core holds
+    /// the agent with no member for its host's preparation.
+    awaited: Option<OperationId>,
 }
 
 impl AgentFacts {
@@ -389,7 +407,7 @@ impl AgentFacts {
             archived: self.archived,
             readiness: self.readiness,
             provenance: self.provenance.clone(),
-            open_operations: Vec::new(),
+            open_operations: self.awaited.iter().cloned().collect(),
             // Said only when it is not the default, as a roster row's.
             addressability: match self.spec.addressability {
                 meerkat_mob::IdentityAddressability::InternalOnly => {
@@ -841,13 +859,24 @@ impl IdentityGate {
     }
 
     /// `summary` as `requester` is shown it: who asked for the agent is
-    /// left out when that is an agent the requester is not shown.
+    /// left out when that is an agent the requester is not shown, and the
+    /// operations open for it are the one it waits on its host for and the
+    /// ones `held` names for it (the changes of it a person still decides).
+    /// An agent is told no operation id: an id tells who asked.
     async fn shown_summary(
         &self,
         mob: &MobHandle,
         requester: &ChangeRequester,
         mut summary: AgentSummary,
+        held: &HeldOperations,
     ) -> AgentSummary {
+        if matches!(requester, ChangeRequester::Agent { .. }) {
+            summary.open_operations.clear();
+        } else if let Some(held) = held.get(&summary.name) {
+            summary.open_operations.extend(held.iter().cloned());
+            summary.open_operations.sort();
+            summary.open_operations.dedup();
+        }
         let asked_by = summary
             .provenance
             .as_ref()
@@ -861,6 +890,24 @@ impl IdentityGate {
         summary
     }
 
+    /// The operations the mob's held changes keep open, by the agent each
+    /// names, for a read by `requester`: one listing of the decisions that
+    /// are open or approved, nothing written and nobody woken. None is
+    /// read for an agent, which is told no operation id, nor on a launch
+    /// that holds no change.
+    fn held_operations(
+        &self,
+        mob: &MobHandle,
+        requester: &ChangeRequester,
+    ) -> Result<HeldOperations, IdentityRefusal> {
+        match &self.decisions {
+            Some(decisions) if !matches!(requester, ChangeRequester::Agent { .. }) => {
+                decisions.open_operations(mob)
+            }
+            _ => Ok(HeldOperations::new()),
+        }
+    }
+
     /// `record` as `requester` is shown it: its peers are the ones the
     /// requester is shown.
     async fn shown_record(
@@ -868,6 +915,7 @@ impl IdentityGate {
         mob: &MobHandle,
         requester: &ChangeRequester,
         mut record: AgentRecord,
+        held: &HeldOperations,
     ) -> AgentRecord {
         let mut peers = Vec::with_capacity(record.peers.len());
         for peer in std::mem::take(&mut record.peers) {
@@ -876,7 +924,7 @@ impl IdentityGate {
             }
         }
         record.peers = peers;
-        record.agent = self.shown_summary(mob, requester, record.agent).await;
+        record.agent = self.shown_summary(mob, requester, record.agent, held).await;
         record
     }
 
@@ -991,6 +1039,15 @@ impl IdentityGate {
             return Ok(None);
         };
         let roster_listing_superseded = self.roster_listing_superseded(&name).await;
+        // The create of an agent that waits for its host is open until the
+        // host settles it: Core's entry says the agent waits, and its record
+        // names the operation that wrote it first.
+        let awaited = matches!(
+            view.standing,
+            EntryStanding::Unseated(UnseatedEntryCause::PreparationPending)
+        )
+        .then(|| OperationId::from_recorded(&record.provenance.operation_id))
+        .flatten();
         Ok(Some(AgentFacts {
             name,
             spec_digest,
@@ -1006,6 +1063,7 @@ impl IdentityGate {
                 .collect(),
             roster_listing_superseded,
             spec,
+            awaited,
         }))
     }
 
@@ -1048,6 +1106,7 @@ impl IdentityGate {
             peers: Vec::new(),
             // An agent its host configures is served from the roster.
             roster_listing_superseded: false,
+            awaited: None,
         })
     }
 
@@ -1162,6 +1221,34 @@ impl IdentityGate {
         }
     }
 
+    /// A move into a profile its host prepares is refused when it is asked:
+    /// the host prepares an agent of such a profile before its first use,
+    /// which a move cannot give an agent that exists already. The request
+    /// was normalized first, so what its rules deny, and a spec that moved,
+    /// are refused as such; this refusal then comes before anything is
+    /// held, so nobody is asked to decide a move that could only be
+    /// refused, and a plan of the move answers it too. An agent its host
+    /// configures is answered `owner_read_only` further on, as every
+    /// run-time change of it is. The seam refuses the same move again when
+    /// a change is carried out.
+    fn refuse_move_into_prepared_profile(
+        policy: &IdentityCreationPolicy,
+        target: &AgentFacts,
+        update: &UpdateAgent,
+    ) -> Result<(), IdentityRefusal> {
+        let Some(profile) = update.set.profile.as_deref() else {
+            return Ok(());
+        };
+        let prepared = policy
+            .preparations()
+            .get(profile)
+            .is_some_and(|rule| rule.mode() != PreparationMode::None);
+        if prepared && !target.configured && profile != target.spec.profile.as_str() {
+            return Err(move_into_prepared_profile());
+        }
+        Ok(())
+    }
+
     /// `proposer` and `source_evidence` are the host plane's: what a host
     /// attests of a request it relays. A person and an agent state
     /// neither; a request of theirs that carries one is refused at the
@@ -1247,6 +1334,7 @@ impl IdentityGate {
                     &target.entry(policy),
                     &spec,
                 )?;
+                Self::refuse_move_into_prepared_profile(policy, &target, update)?;
                 Ok(Judged::of(normalized, &target))
             }
             IdentityChangeSpec::Archive(agent) => {
@@ -1556,15 +1644,57 @@ impl IdentityGate {
                 )),
             };
         };
+        // How the host prepares an agent of each profile is the launch
+        // executor's to add: a change a person approved commits through
+        // the same executor and gets the same.
         let commit = ChangeCommit::new(mob, &call.operation_id, requester, consent, request)
-            .of_configured_target(judged.configured_target)
-            .with_preparations(policy.preparations());
+            .of_configured_target(judged.configured_target);
         let committed = self
             .executor
             .commit(commit)
             .await
             .map_err(|error| unsettled(&call.operation_id, &error))?;
         Ok(committed.outcome)
+    }
+
+    /// The settle of one agent's preparation: Core's, through the seam.
+    /// A launch without an identity policy settles nothing, as it changes
+    /// nothing. Core says which agent awaits a preparation; for one that
+    /// awaits none, a name no agent holds is told apart here
+    /// (`identity_unknown`), as every change of one agent answers it.
+    async fn settled(
+        &self,
+        mob: &MobHandle,
+        requester: &ChangeRequester,
+        call: &SettlePreparationCall,
+    ) -> Result<IdentityOutcome, IdentityRefusal> {
+        if self.policy.is_none() {
+            return Err(no_policy(ChangeClass::Create));
+        }
+        // One request id names one operation, held or committed: an
+        // operation a decision holds, or held, is that change's, and a
+        // settle is never committed beside it.
+        if let Some(decisions) = &self.decisions
+            && decisions.held(mob, &call.operation_id).await?.is_some()
+        {
+            return Err(IdentityRefusal::new(IdentityRefusalKind::OperationReused));
+        }
+        let settle = PreparationSettle::new(mob, &call.operation_id, requester, &call.name);
+        let committed = self
+            .executor
+            .settle_preparation(settle)
+            .await
+            .map_err(|error| unsettled(&call.operation_id, &error))?;
+        let refusal = match committed.outcome {
+            IdentityOutcome::Refused(refusal) => refusal,
+            outcome => return Ok(outcome),
+        };
+        if matches!(refusal.kind, IdentityRefusalKind::PreparationNotPending)
+            && self.agent(mob, &call.name).await?.is_none()
+        {
+            return Err(unknown_agent("name"));
+        }
+        Err(refusal)
     }
 
     /// The page of the mob's agents `list` names, as `requester` is shown
@@ -1583,6 +1713,7 @@ impl IdentityGate {
         };
         let mut after = after;
         let mut agents: Vec<AgentSummary> = Vec::new();
+        let held = self.held_operations(mob, requester)?;
         // A page of the mob none of whose agents is shown (filtered out, or
         // not the caller's to see) is passed over: the caller's page starts
         // further on.
@@ -1606,7 +1737,10 @@ impl IdentityGate {
                 {
                     continue;
                 }
-                agents.push(self.shown_summary(mob, requester, agent.summary()).await);
+                agents.push(
+                    self.shown_summary(mob, requester, agent.summary(), &held)
+                        .await,
+                );
             }
             match (page.next, agents.last()) {
                 (Some(next), Some(last)) => {
@@ -1920,6 +2054,18 @@ impl IdentityFamily for IdentityGate {
         Ok(ChangesHold::new(request.held))
     }
 
+    async fn settle_preparation(
+        &self,
+        mob: &MobHandle,
+        requester: &ChangeRequester,
+        call: SettlePreparationCall,
+    ) -> IdentityOutcome {
+        match self.settled(mob, requester, &call).await {
+            Ok(outcome) => outcome,
+            Err(refusal) => IdentityOutcome::Refused(refusal),
+        }
+    }
+
     async fn read(
         &self,
         mob: &MobHandle,
@@ -1932,8 +2078,10 @@ impl IdentityFamily for IdentityGate {
             )),
             IdentityRead::Get(GetAgent { name, .. }) => {
                 let agent = self.target(mob, requester, &name).await?;
+                let held = self.held_operations(mob, requester)?;
                 Ok(IdentityReadAnswer::Get(Box::new(
-                    self.shown_record(mob, requester, agent.record()).await,
+                    self.shown_record(mob, requester, agent.record(), &held)
+                        .await,
                 )))
             }
             IdentityRead::Operation(operation_id) => {
@@ -2082,13 +2230,19 @@ impl AgentSpecs for GateSpecs {
     }
 }
 
-/// The launch's executor: Core's change path, and after each change that
+/// The launch's executor: Core's change path, under the preparation the
+/// launch's policy names for each profile, and after each change that
 /// committed, the identity runtime's registration of each agent it wrote
 /// and the launch's schedules following the agent it stopped, brought back
-/// or removed. It is the one place both are asked from, whoever commits:
-/// the gate at once, or the decisions' driver after a person approved.
+/// or removed. It is the one place these are asked from, whoever commits:
+/// the gate at once, or the decisions' driver after a person approved. So a
+/// create a person approved is prepared exactly as one the rules allow at
+/// once.
 struct LaunchExecutor {
     core: CoreChangeExecutor,
+    /// The launch's identity policy, whose `preparation` says how the host
+    /// prepares an agent of each profile before its first use.
+    policy: Option<Arc<IdentityCreationPolicy>>,
     /// A back-edge, as the gate's own.
     identities: Weak<IdentityRuntime>,
     /// The launch's schedules, when it gives the family any.
@@ -2099,6 +2253,13 @@ struct LaunchExecutor {
 impl IdentityChangeExecutor for LaunchExecutor {
     async fn commit(&self, commit: ChangeCommit<'_>) -> Result<ChangeCommitted, ExecutorError> {
         let (mob, request) = (commit.mob, commit.request);
+        // A commit that names no preparation gets the launch's: every
+        // create of the launch commits an agent of a prepared profile
+        // pending its preparation.
+        let commit = match (self.policy.as_deref(), commit.preparations) {
+            (Some(policy), None) => commit.with_preparations(policy.preparations()),
+            _ => commit,
+        };
         let mut committed = self.core.commit(commit).await?;
         // Each agent the change wrote is served from its record from now
         // on: registered, registered again or forgotten, with no wake.
@@ -2119,6 +2280,21 @@ impl IdentityChangeExecutor for LaunchExecutor {
         {
             let followed = schedules.follow(mob.mob_id().as_str(), agent, effect).await;
             committed.outcome = committed.outcome.with_schedules(agent, followed);
+        }
+        Ok(committed)
+    }
+
+    async fn settle_preparation(
+        &self,
+        settle: PreparationSettle<'_>,
+    ) -> Result<ChangeCommitted, ExecutorError> {
+        let committed = self.core.settle_preparation(settle).await?;
+        // The settled agent has a member now: it is served from its record,
+        // registered with no wake.
+        if let Some(identities) = self.identities.upgrade() {
+            for agent in committed.outcome.agents() {
+                identities.note_agent_record_changed(&agent.name).await;
+            }
         }
         Ok(committed)
     }
@@ -2144,6 +2320,7 @@ pub(crate) fn change_executor(
     let step = instruction_step.unwrap_or_else(|| identities.instruction_step());
     Arc::new(LaunchExecutor {
         core: core.with_instruction_step(step),
+        policy: policy.cloned(),
         identities: Arc::downgrade(identities),
         schedules,
     })
@@ -2402,6 +2579,7 @@ mod tests {
             provenance: None,
             peers: Vec::new(),
             roster_listing_superseded,
+            awaited: None,
         }
     }
 

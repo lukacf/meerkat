@@ -1301,13 +1301,21 @@ async fn seeds_served_to(
 }
 
 /// With no runtime registered each caller's own access rules still decide
-/// every stored frame, as they do with one registered: a frame of a member
-/// private to one person is served to that person and to no other signed-in
-/// person, with its captured member attributes and without them, and a frame
-/// of a member the rules deny a caller is not served to that caller. What
-/// the registered runtime's visibility policy alone hides (here a nested
-/// member, on a console that hides nested members) is printed for both
-/// states.
+/// every stored frame, as they do with one registered. The configuration
+/// has access on, one allow rule (`agent.view` on every agent, for every
+/// subject) and one deny rule: effect deny, action `agent.view`, every
+/// subject, selector the agent `alice` by exact identity. A frame of a
+/// member private to one person that holds its captured member attributes
+/// is served to that person and to no other signed-in person, by the
+/// captured private-owner rule. The same member's frame without captured
+/// attributes is served to neither of them: under this deny rule a frame of
+/// any other member is undecidable on its bare name (the denied agent could
+/// be its spawn ancestor). That is this rule's shape, not a property of
+/// every deny rule: with allow rules only such a frame is decided on the
+/// bare name. A frame of the denied agent itself is served to no
+/// non-administrator. What the registered runtime's visibility policy alone
+/// hides (here a nested member, on a console that hides nested members) is
+/// printed for both states.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stored_frames_with_no_runtime_registered_keep_each_callers_access_rules() {
     stored_frames_keep_access_rules(Some(deny_source_by_identity())).await;

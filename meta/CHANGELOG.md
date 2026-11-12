@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Upgrade
+
+- Between two mobs of one process, an edge that `meta/cross_mob/wire`
+  recorded under 0.9.9 through 0.9.14 delivered nothing in those releases
+  (every send over it was refused). Such edges become live at the upgrade:
+  the first send over one is delivered, and builds the recipient when it
+  is not built. Before upgrading, unwire the ones you do not want
+  (`meta/cross_mob/unwire`).
+
 ### Added
 
 - `meta/cross_mob/peer_info` answers two more fields for a local member:
@@ -42,9 +51,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     process from that member's registration.
   - Between two mobs of one process, a caller that did supply each member's
     key got both wires accepted and every send refused with
-    `peer_not_found_or_not_trusted`: only the bilateral same-process wire
-    installed the route by which one mob's namespace reaches a member of
-    the other. `wire_local` (`UnifiedRuntime::wire_local`, stdio and console
+    `peer_not_found_or_not_trusted`: only the managed topology's wire
+    (`meta/topology/apply`) installed the route by which one mob's
+    namespace reaches a member of the other; `meta/cross_mob/wire_local`
+    and `meta/cross_mob/wire` installed none. `wire_local`
+    (`UnifiedRuntime::wire_local`, stdio and console
     RPC) now installs that route with the trust, and `unwire_local` removes
     both, the route once no member of the mob is still wired to that peer.
     A failed wire takes back exactly the route it installed.
@@ -73,7 +84,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   invalid state transition: Running -> Running`. `unwire_local` removes
   the same-process route with the trust also when the caller names the
   peer id of another incarnation of the member, and also a route the
-  bilateral same-process wire installed, once no member of the mob is
+  managed topology's wire installed, once no member of the mob is
   still wired to that peer. A keyless in-process wire to a member of the
   caller's own mob is refused in plain words, and a wire is refused when
   the local mob already holds that key. The keyless refusal for a member
@@ -94,9 +105,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   sender or another key wake nobody, and the sender gets
   `peer_not_found_or_not_trusted`. Only ordinary peer messages and
   requests wake a member this way: a silent lifecycle notice to a member
-  of another mob that is not built is answered as before (not found). An
-  edge of the bilateral same-process wire (`meta/cross_mob/wire`) is held
-  the same way from the wire on, and no longer after its unwire. The
+  of another mob that is not built is answered as before (not found).
+
+  Sends over an in-process `meta/cross_mob/wire` edge
+  (`UnifiedRuntime::wire_cross_mob` between two mobs of one process) were
+  refused `peer_not_found_or_not_trusted` through 0.9.14: that wire
+  recorded the edge in both mobs' state and installed no route. Such an
+  edge now delivers from the wire on, and builds the recipient when it is
+  not built. This holds for an edge an earlier release recorded too: it
+  starts to deliver at the first send after the upgrade, with no new wire
+  (see Upgrade). An unwire of either kind takes the edge's routes with it:
+  after `meta/cross_mob/unwire` neither mob routes the other mob's member,
+  and a later one-sided wire reaches nobody. `meta/cross_mob/wire` and the
+  managed topology's wire refuse, with nothing changed, a member of the
+  other mob whose key a member of the wiring mob is seated under, as
+  `wire_local` does (`inproc alias error: this mob already holds that key
+  ...`).
+
+  The
   in-process form with the member's key (`remote_pubkey_b64` from
   `peer_info`) wires a member that is not built; that wire builds nobody.
   A runtime that shuts down takes the routes of its edges to the other

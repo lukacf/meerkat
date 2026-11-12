@@ -55,6 +55,16 @@ them.
   `publish_wake_route` is marked, so nothing changes for existing
   publishers.
 
+### Changed
+
+- `meerkat-comms`: for a sender with no namespace, two live registrations
+  of the SAME inbox under one key are one route (a member's own, and the
+  route a host that links two namespaces holds to that inbox in the linked
+  one): the envelope is handed to that inbox once. Before, any second
+  registration under the key made it ambiguous and the send was refused.
+  Registrations of different inboxes under one key are still ambiguous:
+  nothing is handed off. Sends scoped to a namespace are unchanged.
+
 ## [0.9.14] - 2026-11-11
 
 ### Highlights

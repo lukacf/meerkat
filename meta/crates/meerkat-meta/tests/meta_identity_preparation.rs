@@ -1777,11 +1777,26 @@ async fn a_create_that_completed_reads_committed_after_its_agents_removal() {
                    "expected_spec_digest": digest}),
         )
         .await;
-    assert_eq!(
-        removed["agents"][0]["state"],
-        json!("removed"),
+    // A seated agent's member retires first: its removal ends then.
+    assert!(
+        removed["agents"][0]["state"] == json!("retiring")
+            || removed["agents"][0]["state"] == json!("removed"),
         "{removed:#}"
     );
+    let deadline = std::time::Instant::now() + TURN_BOUND;
+    loop {
+        let read = rig
+            .rpc("meta/identity/get", json!({"name": "walker"}))
+            .await;
+        if read["error"]["data"]["kind"] == json!("identity_unknown") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the agent was not removed: {read:#}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
     let operation = rig.operation("create-walker").await;
     assert_eq!(operation["outcome"], json!("done"), "{operation:#}");

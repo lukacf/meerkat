@@ -11,8 +11,9 @@
 //!   before MobMachine refused the endpoint) starts again: the row's member is
 //!   listed broken with the reason, the key's holder is untouched, the broken
 //!   member retires through the ordinary verb, and the next start is clean;
-//!   the same holds for the journal of a mob that was stopped before its host
-//!   went away, which starts stopped and lifts;
+//!   the journal of a mob that was stopped before its host went away starts
+//!   stopped with the same listing, the broken member retires while the mob
+//!   is still stopped, and the mob then lifts;
 //! * a member whose recovered session binding comes up, at a start, on the
 //!   key another member holds is listed broken alone, and the mob starts;
 //! * while a spawn's activation has not published the member's trusted peer,
@@ -22,9 +23,12 @@
 //!   key, is built once and then parked: the reconciler builds it again only
 //!   when its declaration changes or a member of the mob is retired.
 //!
-//! One row pins a known limitation: the runtime of a refused member is built
+//! Two rows pin known limitations. The runtime of a refused member is built
 //! before MobMachine judges its endpoint, and building it takes the in-process
-//! route of the key from the member that holds it.
+//! route of the key from the member that holds it. And once a mob that
+//! started stopped has been lifted with a broken member of such a row in it,
+//! that member's retire answers an error and the member stays retiring until
+//! the host restarts, which completes the retirement.
 
 use super::*;
 use crate::machines::mob_machine as dsl;
@@ -1253,8 +1257,9 @@ async fn a_journal_with_a_row_of_another_members_key_starts_and_the_row_is_clean
 /// every mob is that an upgrade finds: the start records the row's member
 /// broken while its seeded MobMachine is no longer Running, and must not fail
 /// on it. The mob starts stopped, twice in a row, with the row's member
-/// listed broken and the holder untouched; it lifts; the broken member
-/// retires through the ordinary verb, and the next start is clean.
+/// listed broken and the holder untouched. The broken member retires through
+/// the ordinary verb while the mob is still stopped; the next start is
+/// clean, the mob lifts, and the start after the lift is clean too.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stopped_mobs_journal_with_a_row_of_another_members_key_starts_and_lifts() {
     let mut mob = KeyMob::new("shared-key-stopped-journal").await;
@@ -1321,25 +1326,108 @@ async fn a_stopped_mobs_journal_with_a_row_of_another_members_key_starts_and_lif
         );
     }
 
-    // What MobMachine holds of the broken member, for the retire's message.
-    let held_of_carol = |mob: &KeyMob| {
-        let state = mob.handle.machine_state_watch_rx.borrow();
-        let carol = dsl::AgentIdentity::from_domain(&id("carol"));
-        format!(
-            "materialization {:?}, restore failure {}, retirements routed archive-only {:?}",
-            state.member_materialization.get(&carol),
-            state.member_restore_failures.contains_key(&carol),
-            state.runtime_retire_archive_only
-        )
-    };
-    let before_the_lift = held_of_carol(&mob);
+    // The way out is the ordinary verb, while the mob is still stopped.
+    tokio::time::timeout(STEP, mob.handle.retire(carol.clone()))
+        .await
+        .expect("the retire answers")
+        .expect("the broken member retires while the mob is stopped");
+    assert!(
+        !mob.machine_holds(&carol),
+        "the retired member is gone from MobMachine"
+    );
+
+    // The next start is clean, and the mob is still stopped.
+    mob.reconstruct(None)
+        .await
+        .expect("the stopped mob starts again after the cleanup");
+    assert_eq!(
+        mob.handle.status().await.expect("the mob answers"),
+        MobState::Stopped
+    );
+    let listed = mob.listed().await;
+    assert!(
+        listed.len() == 1
+            && listed[0].0 == "alice"
+            && listed[0].1 != MobMemberStatus::Broken
+            && listed[0].2.is_none(),
+        "only the holder is left, with no error: {listed:?}"
+    );
+    assert!(
+        !mob.machine_holds(&carol),
+        "the start brings nothing of the retired member back"
+    );
+
+    // The mob lifts, and the start after the lift is clean too.
+    tokio::time::timeout(STEP, mob.handle.resume())
+        .await
+        .expect("the lift answers")
+        .expect("the stopped mob lifts");
+    assert_eq!(
+        mob.listed().await,
+        vec![(alice.to_string(), MobMemberStatus::Active, None)],
+        "after the lift the holder is active"
+    );
+    assert_eq!(
+        mob.recorded_endpoint(&alice),
+        Some(alice_endpoint.clone()),
+        "the lift leaves the holder its endpoint"
+    );
+    mob.reconstruct(None)
+        .await
+        .expect("the lifted mob starts again");
+    assert_eq!(
+        mob.handle.status().await.expect("the mob answers"),
+        MobState::Running
+    );
+    assert_eq!(
+        mob.listed().await,
+        vec![(alice.to_string(), MobMemberStatus::Active, None)],
+        "only the holder is left, with no error"
+    );
+    assert_eq!(mob.recorded_endpoint(&alice), Some(alice_endpoint));
+}
+
+/// A KNOWN LIMITATION, pinned as it is today. The same stopped mob, lifted
+/// with the row's member still in it: the lift works and leaves the holder
+/// untouched, but the broken member's retire then answers an error. The
+/// member is left retiring: a second retire answers the same error, and a
+/// spawn under its name is refused. A restart of the host completes the
+/// retirement by itself; the next start is clean and the name is free again.
+///
+/// The way out without the error is the row above: retire the broken member
+/// before the mob is lifted. A host that lifts a stopped mob when it starts
+/// leaves no room for that, so its way out is this row's: retire the member,
+/// then restart the host. When the retire after a lift is made to complete,
+/// this row changes with it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_broken_member_retired_after_a_stopped_mobs_lift_stays_retiring_until_the_host_restarts()
+{
+    let mut mob = KeyMob::new("shared-key-lifted-journal").await;
+    let (alice, carol) = (id("alice"), id("carol"));
+    let alice_session = mob
+        .spawn_on_shared_key(&alice)
+        .await
+        .expect("the key's first member spawns");
+    let alice_endpoint = mob
+        .recorded_endpoint(&alice)
+        .expect("the first member's endpoint is recorded");
+    let carol_session = SessionId::new();
+    mob.service
+        .replace_live_session(Session::with_id(carol_session.clone()))
+        .await;
+    mob.append_unterminated_row_with_the_key_of(&carol, &carol_session, &alice)
+        .await;
+    tokio::time::timeout(STEP, mob.handle.stop())
+        .await
+        .expect("the stop answers")
+        .expect("the mob stops");
+    mob.reconstruct(None).await.expect("the stopped mob starts");
 
     // The mob lifts with the broken member in it.
     tokio::time::timeout(STEP, mob.handle.resume())
         .await
         .expect("the lift answers")
         .expect("the stopped mob lifts");
-    let after_the_lift = held_of_carol(&mob);
     let listed = mob.listed().await;
     assert_eq!(
         listed
@@ -1358,30 +1446,151 @@ async fn a_stopped_mobs_journal_with_a_row_of_another_members_key_starts_and_lif
         "the lift leaves the holder its endpoint"
     );
 
-    // The way out is the ordinary verb, and the next start is clean.
-    tokio::time::timeout(STEP, mob.handle.retire(carol.clone()))
+    // What MobMachine holds of the broken member, for the messages below.
+    let held_of_carol = |mob: &KeyMob| {
+        let state = mob.handle.machine_state_watch_rx.borrow();
+        let carol = dsl::AgentIdentity::from_domain(&id("carol"));
+        let runtime = state.identity_to_runtime.get(&carol).cloned();
+        format!(
+            "marker {:?}, materialization {:?}, restore failure {}, retirements routed \
+             archive-only {:?}",
+            runtime
+                .as_ref()
+                .and_then(|runtime| state.member_state_markers.get(runtime).cloned()),
+            state.member_materialization.get(&carol),
+            state.member_restore_failures.contains_key(&carol),
+            state.runtime_retire_archive_only
+        )
+    };
+    let retiring = |mob: &KeyMob| {
+        let state = mob.handle.machine_state_watch_rx.borrow();
+        state
+            .identity_to_runtime
+            .get(&dsl::AgentIdentity::from_domain(&id("carol")))
+            .and_then(|runtime| state.member_state_markers.get(runtime).cloned())
+            == Some(dsl::MobMemberState::Retiring)
+    };
+    let assert_stuck = |answer: Result<(), MobError>, which: &str, mob: &KeyMob| {
+        let error = match answer {
+            Ok(()) => panic!(
+                "{which} completed: the limitation is gone, so this row and the texts that state \
+                 it change; MobMachine holds of the member: {}",
+                held_of_carol(mob)
+            ),
+            Err(error) => error,
+        };
+        let text = error.to_string();
+        assert!(
+            text.contains("carol") && text.contains("is stuck at retire-session-archive"),
+            "{which} answers that the member's retirement is stuck at its archive: {text}"
+        );
+    };
+
+    // The limitation: the retire answers an error and leaves the member
+    // retiring.
+    let before_the_retire = held_of_carol(&mob);
+    let first = tokio::time::timeout(STEP, mob.handle.retire(carol.clone()))
         .await
-        .expect("the retire answers")
-        .unwrap_or_else(|error| {
-            panic!(
-                "the broken member retires: {error}; MobMachine held of it before the lift: \
-                 {before_the_lift}; after the lift: {after_the_lift}"
-            )
-        });
+        .expect("the retire answers");
+    assert_stuck(first, "the retire after the lift", &mob);
     assert!(
-        !mob.machine_holds(&carol),
-        "the retired member is gone from MobMachine"
+        retiring(&mob),
+        "MobMachine holds the member retiring; before the retire: {before_the_retire}; after: {}",
+        held_of_carol(&mob)
     );
-    mob.reconstruct(None)
+    // The holder is untouched.
+    assert_eq!(
+        mob.listed().await,
+        vec![(alice.to_string(), MobMemberStatus::Active, None)],
+        "the holder is active with no error, and the retiring member is not listed"
+    );
+    assert_eq!(
+        mob.recorded_endpoint(&alice),
+        Some(alice_endpoint.clone()),
+        "the holder keeps its endpoint"
+    );
+    // With the host up nothing completes it: a second retire answers the
+    // same error, and the name is taken.
+    let second = tokio::time::timeout(STEP, mob.handle.retire(carol.clone()))
         .await
-        .expect("the mob starts again after the cleanup");
-    mob.handle.status().await.expect("the mob answers");
+        .expect("the second retire answers");
+    assert_stuck(second, "a second retire", &mob);
+    let spawned = tokio::time::timeout(
+        STEP,
+        mob.handle.spawn_spec(spec_on(&carol, &SessionId::new())),
+    )
+    .await
+    .expect("the spawn answers");
+    match spawned {
+        Err(error) => assert_eq!(
+            error.to_string(),
+            format!("mob member already exists: {carol}"),
+            "a spawn under the retiring member's name is refused as already existing"
+        ),
+        Ok(_) => panic!("a spawn under the retiring member's name is refused"),
+    }
+    assert!(
+        retiring(&mob),
+        "the member is still retiring: {}",
+        held_of_carol(&mob)
+    );
+
+    // The way out: the host restarts, and the start completes the retirement
+    // by itself.
+    mob.restart_host(&[&alice_session])
+        .await
+        .expect("the mob starts after the host restart");
+    let completed = tokio::time::timeout(STEP, async {
+        while mob.machine_holds(&carol) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(
+        completed.is_ok(),
+        "the start after the host restart completes the retirement by itself; MobMachine holds \
+         of the member: {}",
+        held_of_carol(&mob)
+    );
     assert_eq!(
         mob.listed().await,
         vec![(alice.to_string(), MobMemberStatus::Active, None)],
         "only the holder is left, with no error"
     );
+    assert_eq!(
+        mob.recorded_endpoint(&alice),
+        Some(alice_endpoint.clone()),
+        "the holder keeps its endpoint over the restart"
+    );
+
+    // The next start is clean, and the name is free again.
+    mob.restart_host(&[&alice_session])
+        .await
+        .expect("the mob starts again");
+    mob.handle.status().await.expect("the mob answers");
+    assert_eq!(
+        mob.listed().await,
+        vec![(alice.to_string(), MobMemberStatus::Active, None)],
+        "the next start lists the holder alone, with no error"
+    );
+    assert!(
+        !mob.machine_holds(&carol),
+        "the next start brings nothing of the retired member back"
+    );
     assert_eq!(mob.recorded_endpoint(&alice), Some(alice_endpoint));
+    mob.spawn_on_own_key(&carol).await;
+    assert_eq!(
+        mob.listed()
+            .await
+            .into_iter()
+            .map(|(member, status, _)| (member, status))
+            .collect::<Vec<_>>(),
+        vec![
+            (alice.to_string(), MobMemberStatus::Active),
+            (carol.to_string(), MobMemberStatus::Active)
+        ],
+        "the name is free: the member spawns again on a key of its own"
+    );
 }
 
 // ---------------------------------------------------------------------

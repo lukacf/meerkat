@@ -14,6 +14,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   late-bound reference to the session bridge, through which it asks whether
   Core holds a member as an identity entry, and a session bridge has
   neither trait. No Meerkat code relied on them.
+- Rust API of `meerkat-meta`, `identity_creation`: `ChangeClass` gains the
+  variants `Archive` (an archive and an unarchive) and `Adopt`. A match on it
+  needs both arms.
+- Rust API of `meerkat-meta`, `identity_creation`: `NameTakenBy` loses the
+  variants `Declared` and `Created` and gains `Identity`. A `name_taken`
+  refusal names its holder as `identity`, `removed`, `worker` or `unreadable`.
+- Rust API of `meerkat-meta`: `IdentityStatus` gains the member `record`
+  (`IdentityRecordFacts`), so a struct literal of it needs the member
+  (`record: Default::default()`). The status as written on the wire is
+  unchanged while the record's members are unset.
 
 ### Changed
 
@@ -112,6 +122,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   identity holds through its row answers
   `HeldBootstrapRefusal::ExistingContinuity`, as the add of a configured
   identity that has continuity does. It answered `IdentityStoreOwned`.
+- `runtime_options.identity_creation`: an approval rule may name the change
+  classes `archive` (an archive and an unarchive) and `adopt`, and
+  `approval.timeouts_ms` takes `archive` and `adopt` (4 hours each by
+  default). A launch that names them was refused at init before. Nothing
+  acts on the policy yet.
 
 ### Fixed
 

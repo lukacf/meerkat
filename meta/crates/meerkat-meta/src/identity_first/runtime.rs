@@ -65,6 +65,7 @@ mod build_preparation;
 mod core_views_tests;
 mod created;
 mod declare;
+mod identity_family;
 mod lifecycle_projection;
 mod records;
 #[cfg(test)]
@@ -3757,6 +3758,10 @@ pub struct IdentityRuntime {
     /// Told when a live member moves to a new session under the same
     /// incarnation (a respawn rebind or a delivery-repair rotation).
     session_rotation_observer: StdRwLock<Option<Arc<dyn MemberSessionRotationObserver>>>,
+    /// The family of changes and reads of the mob's long-term agents
+    /// (`meta/identity/*` and the agents' identity tools), attached by a
+    /// launch that has an identity policy (see `runtime/identity_family.rs`).
+    identity_family: crate::identity_creation::IdentityFamilySlot,
     bootstrap_status: watch::Sender<IdentityBootstrapStatus>,
     bootstrap_generation: StdMutex<u64>,
     bootstrap_controller: Mutex<()>,
@@ -4756,6 +4761,7 @@ impl IdentityRuntime {
             retired_member_observer: StdRwLock::new(None),
             actor_loop_health: StdRwLock::new(None),
             session_rotation_observer: StdRwLock::new(None),
+            identity_family: crate::identity_creation::IdentityFamilySlot::default(),
             bootstrap_status,
             bootstrap_generation: StdMutex::new(0),
             bootstrap_controller: Mutex::new(()),
@@ -14019,6 +14025,7 @@ impl IdentityRuntime {
             replaced_session: None,
             session_repair_required,
             customizer_tools_pending: self.customizer_tools_pending_given(identity, tools_held),
+            record: Default::default(),
         })
     }
 

@@ -99,6 +99,11 @@ them.
   and the mob's next start asks again. A hold the host asks for
   (`HoldUntilReleased`) holds the member's run starts until
   `release_member_run_starts`. Hosts with no preparer see no change.
+- `MobHandle::seat_owed_store_owned_identities` seats, while the mob runs,
+  every store-owned identity that is owed its seat (the spawn of its
+  create's kickoff failed), and answers the identities still owed
+  afterwards. It runs the pass a start runs, so a host need not restart the
+  mob to seat such an identity; its kickoff then runs once.
 
 ## [0.9.13] - 2026-11-11
 

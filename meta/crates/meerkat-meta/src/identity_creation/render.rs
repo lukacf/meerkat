@@ -270,12 +270,7 @@ pub fn render_v1(
     let host_lines = host_consequences(request, hook)?;
     let mut text = Text::default();
     text.field(labels::TITLE, labels::VERSION);
-    let action = match request.action {
-        RequestAction::Create { .. } => "create",
-        RequestAction::Update(_) => "update",
-        RequestAction::Remove { .. } => "remove",
-    };
-    text.field(labels::ACTION, action);
+    text.field(labels::ACTION, request.action.token());
     text.field(labels::REQUESTER, &requester_value(&request.requester));
     text.field(
         labels::PROPOSER,
@@ -315,7 +310,21 @@ pub fn render_v1(
             text.block();
             update_text(&mut text, update);
         }
+        // A change of one identity as a whole, named with the spec the
+        // requester read: its removal, archive, unarchive or adoption.
         RequestAction::Remove {
+            identity,
+            expected_spec_digest,
+        }
+        | RequestAction::Archive {
+            identity,
+            expected_spec_digest,
+        }
+        | RequestAction::Unarchive {
+            identity,
+            expected_spec_digest,
+        }
+        | RequestAction::Adopt {
             identity,
             expected_spec_digest,
         } => {

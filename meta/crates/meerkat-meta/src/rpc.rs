@@ -26,6 +26,7 @@ use crate::unified_runtime::{EventQuery, UnifiedRuntime};
 
 mod console_ingress;
 mod gating_methods;
+pub(crate) mod identity_methods;
 pub(crate) mod memory_methods;
 pub(crate) mod mob_methods;
 pub(crate) mod operator_methods;
@@ -41,6 +42,7 @@ pub(crate) mod topology_methods;
 pub(crate) mod workgraph_methods;
 
 pub use console_ingress::handle_console_ingress_json;
+pub use identity_methods::{HOST_RPC_SURFACE, IDENTITY_REFUSED_CODE};
 
 use gating_methods::{
     GatingParamsError, gating_audit_result, gating_decide_rpc_error, gating_withdraw_rpc_error,
@@ -2172,8 +2174,11 @@ pub(crate) const CANDIDATE_LAUNCH_REFUSED_METHODS: &[&str] = &[
 /// ([`tool_grant_methods::is_tool_grant_mutating_method`]), which writes the
 /// runtime's grant rows and can seat a member; a realm MCP write
 /// ([`realm_mcp_methods::is_realm_mcp_mutating_method`]), which writes the
-/// realm's own config document or its credential store; a WorkGraph write
-/// ([`workgraph_methods::is_workgraph_mutating_method`]); the
+/// realm's own config document or its credential store; a change of the
+/// mob's long-term agents
+/// ([`identity_methods::is_identity_family_mutating_method`]), which writes
+/// the mob's identity store, its seats and its held decisions; a WorkGraph
+/// write ([`workgraph_methods::is_workgraph_mutating_method`]); the
 /// host-executing or externally writing arm of a method a candidate
 /// otherwise serves ([`candidate_launch_refuses_host_execution`]); or a
 /// Flow Editor change ([`candidate_launch_refuses_mobpack_change`]). Reads
@@ -2189,6 +2194,7 @@ pub(crate) fn candidate_launch_refuses(
         || mob_methods::is_member_declaration_mutating_method(method)
         || tool_grant_methods::is_tool_grant_mutating_method(method)
         || realm_mcp_methods::is_realm_mcp_mutating_method(method)
+        || identity_methods::is_identity_family_mutating_method(method)
         || workgraph_methods::is_workgraph_mutating_method(method)
         || candidate_launch_refuses_host_execution(method, params)
         || candidate_launch_refuses_mobpack_change(method, params, state_dir)
@@ -2792,6 +2798,16 @@ async fn handle_unified_rpc_json_inner(
             // served and advertised with it.
             if identity_ctx.is_some() || runtime.identity_runtime_ref().is_some() {
                 methods.extend_from_slice(tool_grant_methods::TOOL_GRANT_METHODS);
+            }
+            // The family of changes and reads of the mob's long-term agents,
+            // derived from its registry: served and advertised by a
+            // launch that has an identity policy, which attached it.
+            if identity_ctx
+                .map(|ctx| ctx.runtime.runtime())
+                .or_else(|| runtime.identity_runtime_ref())
+                .is_some_and(|identity_runtime| identity_runtime.identity_family().is_some())
+            {
+                methods.extend_from_slice(identity_methods::IDENTITY_FAMILY_METHODS);
             }
             // The stdio gateway's realm MCP administration, derived from its
             // registry: advertised by the runtime the stdio gateway composed
@@ -4184,6 +4200,55 @@ async fn handle_unified_rpc_json_inner(
                     }),
                 },
             }
+        }
+        // ONE arm for the family of changes and reads of the mob's long-term
+        // agents, from its registry, served by a launch that has an
+        // identity policy, which attached the family. The stdio host is the
+        // operator, on the host surface `rpc`.
+        method
+            if identity_methods::is_identity_family_method(method)
+                && identity_ctx
+                    .map(|ctx| ctx.runtime.runtime())
+                    .or_else(|| runtime.identity_runtime_ref())
+                    .is_some_and(|identity_runtime| {
+                        identity_runtime.identity_family().is_some()
+                    }) =>
+        {
+            let family = identity_ctx
+                .map(|ctx| ctx.runtime.runtime())
+                .or_else(|| runtime.identity_runtime_ref())
+                .and_then(|identity_runtime| identity_runtime.identity_family());
+            let response = match family.as_ref() {
+                Some(family) => {
+                    let handle = runtime.mob_runtime().handle();
+                    let surface = identity_methods::IdentityFamilySurface {
+                        mob: &handle,
+                        family: family.as_ref(),
+                        requester: identity_methods::stdio_requester(),
+                        access: None,
+                    };
+                    identity_methods::handle_identity_family_rpc(
+                        &surface,
+                        method,
+                        response_id.clone(),
+                        &request.params,
+                    )
+                    .await
+                }
+                None => None,
+            };
+            response.unwrap_or_else(|| JsonRpcResponse {
+                jsonrpc: JSONRPC_VERSION.to_string(),
+                id: response_id,
+                result: None,
+                error: Some(JsonRpcError {
+                    code: -32601,
+                    message: format!(
+                        "{method} is registered in the identity family but has no dispatcher arm"
+                    ),
+                    data: None,
+                }),
+            })
         }
         // ONE arm for the realm MCP administration family, from its registry,
         // served by the runtime the stdio gateway composed it on (its SDK host

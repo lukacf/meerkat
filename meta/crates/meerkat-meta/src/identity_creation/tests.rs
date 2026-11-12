@@ -1174,40 +1174,40 @@ fn normalization_refuses_typed() {
         spec_case(
             |spec| set_profile(spec, "ghost"),
             json!({"kind": "profile_unknown", "profile": "ghost",
-                   "field": "identities[0].spec.profile"}),
+                   "field": "agents[0].profile"}),
         ),
         spec_case(
             |spec| set_labels(spec, &[("team", "x")]),
-            json!({"kind": "reserved_key", "key": "team", "field": "identities[0].spec.labels"}),
+            json!({"kind": "reserved_key", "key": "team", "field": "agents[0].labels"}),
         ),
         spec_case(
             |spec| set_labels(spec, &[("role", "x")]),
-            json!({"kind": "reserved_key", "key": "role", "field": "identities[0].spec.labels"}),
+            json!({"kind": "reserved_key", "key": "role", "field": "agents[0].labels"}),
         ),
         spec_case(
             |spec| set_labels(spec, &[("bad key", "x")]),
             json!({"kind": "invalid_request", "problem": "malformed",
-                   "field": "identities[0].spec.labels"}),
+                   "field": "agents[0].labels"}),
         ),
         spec_case(
             |spec| set_labels(spec, &[("", "x")]),
             json!({"kind": "invalid_request", "problem": "malformed",
-                   "field": "identities[0].spec.labels"}),
+                   "field": "agents[0].labels"}),
         ),
         spec_case(
             |spec| set_labels(spec, &[("note\u{202E}", "x")]),
             json!({"kind": "invalid_request", "problem": "malformed",
-                   "field": "identities[0].spec.labels"}),
+                   "field": "agents[0].labels"}),
         ),
         spec_case(
             |spec| set_labels(spec, &[("note", "a\nb")]),
             json!({"kind": "invalid_request", "problem": "malformed",
-                   "field": "identities[0].spec.labels.note"}),
+                   "field": "agents[0].labels.note"}),
         ),
         spec_case(
             |spec| set_labels(spec, &[("clearance", "top")]),
             json!({"kind": "authority_field_invalid", "key": "clearance",
-                   "field": "identities[0].spec.labels"}),
+                   "field": "agents[0].labels"}),
         ),
         spec_case(
             |spec| {
@@ -1220,21 +1220,21 @@ fn normalization_refuses_typed() {
                 );
             },
             json!({"kind": "unsupported", "feature": "a bootstrap token in an identity request",
-                   "field": "identities[0].spec.binding"}),
+                   "field": "agents[0]"}),
         ),
         spec_case(
             |spec| spec.peers = vec!["ghost".to_owned()],
-            json!({"kind": "peer_unknown", "field": "identities[0].peers[0]"}),
+            json!({"kind": "peer_unknown", "field": "agents[0].peers[0]"}),
         ),
         spec_case(
             |spec| spec.peers = vec!["stranger".to_owned()],
             json!({"kind": "peer_not_allowed", "identity": "stranger",
-                   "field": "identities[0].peers[0]"}),
+                   "field": "agents[0].peers[0]"}),
         ),
         spec_case(
             |spec| spec.peers = vec!["helper".to_owned()],
             json!({"kind": "peer_not_allowed", "identity": "helper",
-                   "field": "identities[0].peers[0]"}),
+                   "field": "agents[0].peers[0]"}),
         ),
     ];
     for (change, expected) in cases {
@@ -1249,7 +1249,7 @@ fn normalization_refuses_typed() {
         create(&policy(), &lead(), &[spec("helper"), spec("helper")]).expect_err("a duplicate");
     assert_eq!(
         refusal.to_data(),
-        json!({"kind": "name_taken", "by": "created", "field": "identities[1].spec.identity"})
+        json!({"kind": "name_taken", "by": "identity", "field": "agents[1].name"})
     );
 
     let refusal = create(&policy(), &lead(), &[]).expect_err("nothing to create");
@@ -1289,7 +1289,7 @@ fn normalization_refuses_typed() {
         update(&RequesterFacts::host("gateway"), &entry, &meta_key)
             .unwrap_err()
             .to_data(),
-        json!({"kind": "reserved_key", "key": "role", "field": "set.authority_fields"})
+        json!({"kind": "reserved_key", "key": "role", "field": "set.labels"})
     );
 }
 
@@ -1457,7 +1457,7 @@ fn a_label_key_a_selector_reads_is_reserved() {
         set_labels(&mut request, &[(key, "x")]);
         assert_eq!(
             create(&policy, &host, &[request]).unwrap_err().to_data(),
-            json!({"kind": "reserved_key", "key": key, "field": "identities[0].spec.labels"}),
+            json!({"kind": "reserved_key", "key": key, "field": "agents[0].labels"}),
             "{key}"
         );
         let mut set = json!({"descriptive_labels": {}});
@@ -1467,7 +1467,7 @@ fn a_label_key_a_selector_reads_is_reserved() {
             update_with(&policy, &host, &entry, &relabel)
                 .unwrap_err()
                 .to_data(),
-            json!({"kind": "reserved_key", "key": key, "field": "set.descriptive_labels"}),
+            json!({"kind": "reserved_key", "key": key, "field": "set.labels"}),
             "{key}"
         );
     }
@@ -3239,6 +3239,10 @@ fn every_refusal_kind() -> Vec<IdentityRefusalKind> {
         IdentityRefusalKind::ProfileNotAllowed {
             profile: "p".to_owned(),
         },
+        IdentityRefusalKind::PrivilegedField {
+            field: "backend".to_owned(),
+        },
+        IdentityRefusalKind::GrantRevoked,
         IdentityRefusalKind::ReservedKey {
             key: "k".to_owned(),
         },
@@ -3252,7 +3256,7 @@ fn every_refusal_kind() -> Vec<IdentityRefusalKind> {
         IdentityRefusalKind::ConsequencesUnavailable,
         IdentityRefusalKind::InvalidName,
         IdentityRefusalKind::NameTaken {
-            by: NameTakenBy::Declared,
+            by: NameTakenBy::Identity,
         },
         IdentityRefusalKind::PeerNotAllowed {
             identity: "p".to_owned(),
@@ -3273,16 +3277,26 @@ fn every_refusal_kind() -> Vec<IdentityRefusalKind> {
         },
         IdentityRefusalKind::IdentityUnknown,
         IdentityRefusalKind::SelfChangeRefused,
+        IdentityRefusalKind::PrivateRequester,
         IdentityRefusalKind::StaleSpec {
             current_digest: Sha256Digest::of(b"s"),
             current_revision: Some(1),
         },
         IdentityRefusalKind::OperationReused,
+        IdentityRefusalKind::OwnerReadOnly,
+        IdentityRefusalKind::NotAdoptable {
+            reason: NotAdoptableReason::HostedOnFirstUse,
+        },
+        IdentityRefusalKind::NotArchived,
+        IdentityRefusalKind::DeclaredApplyOpen,
         IdentityRefusalKind::AdmissionUnsettled {
             correlation: "c".to_owned(),
         },
         IdentityRefusalKind::PredecessorMismatch,
         IdentityRefusalKind::ImportRefused,
+        IdentityRefusalKind::PurgeRefused {
+            reason: "changes_not_held".to_owned(),
+        },
         IdentityRefusalKind::PreparationNotPending,
         IdentityRefusalKind::PreparationMismatch,
         IdentityRefusalKind::ConstructionOpen,
@@ -3310,6 +3324,8 @@ fn every_refusal_kind() -> Vec<IdentityRefusalKind> {
         IdentityRefusalKind::CandidateLaunch,
         IdentityRefusalKind::IdentityMember,
         IdentityRefusalKind::StorageUnsupported,
+        IdentityRefusalKind::MobNotRunning,
+        IdentityRefusalKind::Purged,
         IdentityRefusalKind::ConstructionRefused {
             kind: "controller_route_refused".to_owned(),
         },
@@ -3318,6 +3334,8 @@ fn every_refusal_kind() -> Vec<IdentityRefusalKind> {
         match kind {
             IdentityRefusalKind::ProfileUnknown { .. }
             | IdentityRefusalKind::ProfileNotAllowed { .. }
+            | IdentityRefusalKind::PrivilegedField { .. }
+            | IdentityRefusalKind::GrantRevoked
             | IdentityRefusalKind::ReservedKey { .. }
             | IdentityRefusalKind::AuthorityFieldNeedsApproval { .. }
             | IdentityRefusalKind::AuthorityFieldInvalid { .. }
@@ -3334,11 +3352,17 @@ fn every_refusal_kind() -> Vec<IdentityRefusalKind> {
             | IdentityRefusalKind::Unsupported { .. }
             | IdentityRefusalKind::IdentityUnknown
             | IdentityRefusalKind::SelfChangeRefused
+            | IdentityRefusalKind::PrivateRequester
             | IdentityRefusalKind::StaleSpec { .. }
             | IdentityRefusalKind::OperationReused
+            | IdentityRefusalKind::OwnerReadOnly
+            | IdentityRefusalKind::NotAdoptable { .. }
+            | IdentityRefusalKind::NotArchived
+            | IdentityRefusalKind::DeclaredApplyOpen
             | IdentityRefusalKind::AdmissionUnsettled { .. }
             | IdentityRefusalKind::PredecessorMismatch
             | IdentityRefusalKind::ImportRefused
+            | IdentityRefusalKind::PurgeRefused { .. }
             | IdentityRefusalKind::PreparationNotPending
             | IdentityRefusalKind::PreparationMismatch
             | IdentityRefusalKind::ConstructionOpen
@@ -3362,6 +3386,8 @@ fn every_refusal_kind() -> Vec<IdentityRefusalKind> {
             | IdentityRefusalKind::CandidateLaunch
             | IdentityRefusalKind::IdentityMember
             | IdentityRefusalKind::StorageUnsupported
+            | IdentityRefusalKind::MobNotRunning
+            | IdentityRefusalKind::Purged
             | IdentityRefusalKind::ConstructionRefused { .. } => {}
         }
     }
@@ -3378,6 +3404,8 @@ fn every_refusal_token_is_the_closed_vocabulary() {
             // Profile.
             "profile_unknown",
             "profile_not_allowed",
+            "privileged_field",
+            "grant_revoked",
             // Request data.
             "reserved_key",
             "authority_field_needs_approval",
@@ -3399,11 +3427,17 @@ fn every_refusal_token_is_the_closed_vocabulary() {
             // Identities and operations.
             "identity_unknown",
             "self_change_refused",
+            "private_requester",
             "stale_spec",
             "operation_reused",
+            "owner_read_only",
+            "not_adoptable",
+            "not_archived",
+            "declared_apply_open",
             "admission_unsettled",
             "predecessor_mismatch",
             "import_refused",
+            "purge_refused",
             "preparation_not_pending",
             "preparation_mismatch",
             "construction_open",
@@ -3430,12 +3464,14 @@ fn every_refusal_token_is_the_closed_vocabulary() {
             "candidate_launch",
             "identity_member",
             "storage_unsupported",
+            "mob_not_running",
+            "purged",
             "construction_refused",
         ],
         "one vocabulary for every identity: no template, creator or limit kind"
     );
     let distinct: BTreeSet<&str> = tokens.iter().copied().collect();
-    assert_eq!(distinct.len(), 47);
+    assert_eq!(distinct.len(), 57);
     let retryable: BTreeSet<&str> = kinds
         .iter()
         .filter(|kind| kind.is_retryable())
@@ -3444,9 +3480,12 @@ fn every_refusal_token_is_the_closed_vocabulary() {
     assert_eq!(
         retryable,
         BTreeSet::from([
+            "admission_unsettled",
             "changes_held",
             "consequences_unavailable",
+            "declared_apply_open",
             "host_preparation_pending",
+            "not_adoptable",
         ])
     );
     let problems: Vec<&str> = [
@@ -3459,8 +3498,7 @@ fn every_refusal_token_is_the_closed_vocabulary() {
     .collect();
     assert_eq!(problems, ["empty", "conflicting", "malformed"]);
     let takers: Vec<&str> = [
-        NameTakenBy::Declared,
-        NameTakenBy::Created,
+        NameTakenBy::Identity,
         NameTakenBy::Removed,
         NameTakenBy::Worker,
         NameTakenBy::Unreadable,
@@ -3468,10 +3506,7 @@ fn every_refusal_token_is_the_closed_vocabulary() {
     .into_iter()
     .map(NameTakenBy::token)
     .collect();
-    assert_eq!(
-        takers,
-        ["declared", "created", "removed", "worker", "unreadable"]
-    );
+    assert_eq!(takers, ["identity", "removed", "worker", "unreadable"]);
 }
 
 #[test]
@@ -3481,11 +3516,11 @@ fn refusal_data_carries_the_kind_its_field_and_its_payload() {
             IdentityRefusal::new(IdentityRefusalKind::ProfileNotAllowed {
                 profile: "ghost".to_owned(),
             })
-            .at("identities[0].spec.profile"),
+            .at("agents[0].profile"),
             json!({
                 "kind": "profile_not_allowed",
                 "profile": "ghost",
-                "field": "identities[0].spec.profile"
+                "field": "agents[0].profile"
             }),
         ),
         (
@@ -3528,11 +3563,11 @@ fn refusal_data_carries_the_kind_its_field_and_its_payload() {
             IdentityRefusal::new(IdentityRefusalKind::InvalidRequest {
                 problem: RequestProblem::Malformed,
             })
-            .at("identities[0].spec.labels"),
+            .at("agents[0].labels"),
             json!({
                 "kind": "invalid_request",
                 "problem": "malformed",
-                "field": "identities[0].spec.labels"
+                "field": "agents[0].labels"
             }),
         ),
     ];

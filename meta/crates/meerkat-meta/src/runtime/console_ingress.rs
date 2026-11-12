@@ -573,6 +573,76 @@ fn apply_workgraph_to_experience(
     }
 }
 
+/// Append the `identity_changes` affordance section the console reads
+/// before it offers a change of the mob's long-term agents, and each listed
+/// agent's `can_change_identity` and `can_remove_identity` affordances.
+///
+/// `available` says whether this console serves the writers of
+/// `meta/identity/*` to the caller at all: the runtime attached the family
+/// and the console is not read-only. `can_create`, `can_change` and
+/// `can_remove` are `available` intersected with the caller's grants when
+/// access control is enforced (`agent.identity.create`, and
+/// `agent.identity.manage` and `agent.identity.remove` on at least one
+/// agent), and mirror `available` otherwise; an agent's two affordances are
+/// the same two actions judged on that agent. They are advisory: every
+/// method is checked again when it is called, and the host's identity
+/// policy, which the flags do not read, still decides each change.
+pub(crate) fn apply_identity_changes_to_experience(
+    body: &mut Value,
+    view: Option<&AccessView>,
+    available: bool,
+) {
+    let enforced = view.filter(|view| view.enforced());
+    let (can_create, can_change, can_remove) = match enforced {
+        Some(view) => (
+            available && view.allows(crate::access::ACTION_AGENT_IDENTITY_CREATE),
+            available && view.may_perform_anywhere(crate::access::ACTION_AGENT_IDENTITY_MANAGE),
+            available && view.may_perform_anywhere(crate::access::ACTION_AGENT_IDENTITY_REMOVE),
+        ),
+        None => (available, available, available),
+    };
+    if let Some(agents) = body
+        .pointer_mut("/agent_sidebar/live_snapshot/agents")
+        .and_then(Value::as_array_mut)
+    {
+        for agent in agents {
+            let identity = agent
+                .get("identity")
+                .or_else(|| agent.get("member_id"))
+                .or_else(|| agent.get("agent_id"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let allowed = |action: &str| {
+                available && enforced.is_none_or(|view| view.allows_agent(action, &identity))
+            };
+            let can_change_agent = allowed(crate::access::ACTION_AGENT_IDENTITY_MANAGE);
+            let can_remove_agent = allowed(crate::access::ACTION_AGENT_IDENTITY_REMOVE);
+            if let Some(affordances) = agent.get_mut("affordances").and_then(Value::as_object_mut) {
+                affordances.insert(
+                    "can_change_identity".to_string(),
+                    Value::Bool(can_change_agent),
+                );
+                affordances.insert(
+                    "can_remove_identity".to_string(),
+                    Value::Bool(can_remove_agent),
+                );
+            }
+        }
+    }
+    if let Some(object) = body.as_object_mut() {
+        object.insert(
+            "identity_changes".to_string(),
+            serde_json::json!({
+                "available": available,
+                "can_create": can_create,
+                "can_change": can_change,
+                "can_remove": can_remove,
+            }),
+        );
+    }
+}
+
 /// Append the `memory` affordance section (§9.3) the console nav gate
 /// consumes. Coarse by design — `can_read` means "some memory read could
 /// succeed for this caller", mirroring the capabilities intersection;

@@ -1555,6 +1555,81 @@ async fn a_later_build_takes_the_hosts_model_again_and_keeps_its_first_builds_in
     );
 }
 
+/// Row (RED): an identity owed its seat because the spawn of its create's
+/// kickoff failed is seated while the mob runs, by the host's own call:
+/// the call answers which identities stay owed, the identity gets its
+/// member with no restart, and its kickoff runs once. A second call finds
+/// nothing owed and changes nothing.
+///
+/// RED on the old tree: the handle has no such call (the row does not
+/// compile), and only the mob's next start seats the identity.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_identity_owed_its_seat_is_seated_while_the_mob_runs() {
+    let mob = StoreOwnedMob::new("seat-owed-while-running").await;
+    mob.service.set_keep_alive_turns_complete_immediately(true);
+    assert!(
+        mob.handle
+            .seat_owed_store_owned_identities()
+            .await
+            .is_empty(),
+        "nothing is owed a seat on a mob that created nothing"
+    );
+    super::super::identity_change::fail_next_kickoff_spawn_for_test(&mob.mob_id(), &id("waiter"));
+    let created = mob
+        .create_outcome(
+            StoreOwnedIdentityCreate::new(
+                operation("create-waiter"),
+                IdentityChangeRequesterInput::host("console"),
+                vec![CreatedIdentityRequest::new(
+                    spec("waiter", "worker")
+                        .with_runtime_mode_override(crate::MobRuntimeMode::AutonomousHost)
+                        .with_initial_message(meerkat_core::types::ContentInput::from("Wait.")),
+                )],
+            ),
+            ALLOW,
+        )
+        .await
+        .expect("the create commits");
+    assert!(
+        matches!(
+            created.embodied.get(&id("waiter")),
+            Some(crate::runtime::DeclaredEntryOutcome::Failed { .. })
+        ),
+        "{:?}",
+        created.embodied
+    );
+    mob.unseated_for("waiter", UnseatedEntryCause::SeatOwed)
+        .await;
+    assert!(!mob.is_member("waiter").await);
+
+    assert!(
+        mob.handle
+            .seat_owed_store_owned_identities()
+            .await
+            .is_empty(),
+        "the call seats the identity: none stays owed"
+    );
+    assert!(mob.is_member("waiter").await, "seated with no restart");
+    let session = kicked_off(&mob, "waiter", "Wait.").await;
+    assert_eq!(
+        turns_with_prompt(&mob, &session, "Wait.").await,
+        1,
+        "the kickoff runs once"
+    );
+    assert!(
+        mob.handle
+            .seat_owed_store_owned_identities()
+            .await
+            .is_empty(),
+        "nothing is owed any more"
+    );
+    assert_eq!(
+        turns_with_prompt(&mob, &session, "Wait.").await,
+        1,
+        "a second call starts no second kickoff"
+    );
+}
+
 /// Row: a create of more identities than one change commits is refused
 /// `batch_too_large`, and nothing is written.
 #[tokio::test]

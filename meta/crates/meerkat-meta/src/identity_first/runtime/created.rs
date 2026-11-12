@@ -51,7 +51,8 @@ use super::super::bridge::{BridgeError, MemberRuntimeBinding};
 use super::super::first_boot_manifest::{FirstBootRow, FirstBootRowState};
 use super::super::types::{AgentIdentity, DurableAgentSpec};
 use super::{
-    IDENTITY_EVENT_CHANNEL_CAPACITY, IdentityEntry, IdentityRuntime, IdentityRuntimeError,
+    IDENTITY_EVENT_CHANNEL_CAPACITY, IdentityEntriesWriteGuard, IdentityEntry, IdentityRuntime,
+    IdentityRuntimeError,
 };
 
 /// Which record holds an identity's spec (see the module docs).
@@ -86,6 +87,31 @@ pub(super) enum SuccessorCause {
 /// ([`super::binding_spawned_for_identity`]).
 pub(super) fn binding_is_a_rows(binding: &meerkat_mob::MemberBinding) -> bool {
     binding.identity_management() == meerkat_mob::MemberIdentityManagement::CreatedEntry
+}
+
+impl IdentityEntriesWriteGuard<'_> {
+    /// This write made, replaced or dropped `identity`'s registration: the
+    /// row profiles follow what the table holds for it now.
+    pub(super) fn note_registration(&self, identity: &AgentIdentity) {
+        let profile = self
+            .guard
+            .get(identity)
+            .filter(|entry| entry.created)
+            .map(|entry| entry.spec.profile.clone());
+        let mut profiles = self
+            .entries
+            .row_profiles
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match profile {
+            Some(profile) => {
+                profiles.insert(identity.clone(), profile);
+            }
+            None => {
+                profiles.remove(identity);
+            }
+        }
+    }
 }
 
 impl IdentityRuntime {

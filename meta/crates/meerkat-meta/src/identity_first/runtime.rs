@@ -3517,7 +3517,9 @@ struct IdentityEntries {
     /// reads ([`IdentityRuntime::row_registered_members`]). Every write that
     /// registers, re-registers or forgets an identity keeps it in step with
     /// the table, under the table's write lock
-    /// ([`IdentityEntriesWriteGuard::note_registration`]).
+    /// ([`IdentityEntriesWriteGuard::note_registration`], in
+    /// `runtime/created.rs`, the one module that reads which record holds
+    /// an identity's spec).
     row_profiles: StdRwLock<BTreeMap<AgentIdentity, meerkat_mob::ProfileName>>,
     changed: watch::Sender<()>,
     /// Told (an epoch bump) whenever a verb of this runtime woke, retired or
@@ -3600,31 +3602,6 @@ impl IdentityEntries {
 struct IdentityEntriesWriteGuard<'a> {
     guard: tokio::sync::RwLockWriteGuard<'a, BTreeMap<AgentIdentity, IdentityEntry>>,
     entries: &'a IdentityEntries,
-}
-
-impl IdentityEntriesWriteGuard<'_> {
-    /// This write made, replaced or dropped `identity`'s registration: the
-    /// row profiles follow what the table holds for it now.
-    fn note_registration(&self, identity: &AgentIdentity) {
-        let profile = self
-            .guard
-            .get(identity)
-            .filter(|entry| entry.created)
-            .map(|entry| entry.spec.profile.clone());
-        let mut profiles = self
-            .entries
-            .row_profiles
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match profile {
-            Some(profile) => {
-                profiles.insert(identity.clone(), profile);
-            }
-            None => {
-                profiles.remove(identity);
-            }
-        }
-    }
 }
 
 impl std::ops::Deref for IdentityEntriesWriteGuard<'_> {

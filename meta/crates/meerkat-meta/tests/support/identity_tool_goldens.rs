@@ -303,6 +303,27 @@ Each entry of `agents` has `name`, `display_name`, `profile`, `spec_digest` (wha
 }"#,
     ),
     (
+        "identity_get",
+        r"Read one long-term agent of your mob by name: what identity_list says of it (`name`, `display_name`, `profile`, `spec_digest`, `spec_revision`, `archived`, `readiness`) and the rest of what a create or an update sets: its `instructions`, `context`, `labels` and `peers` (the peers its changes listed, among the agents you are shown). An archived agent is read too, and so is your own record. Read only: it never wakes an agent and loads nothing.
+
+You are not shown who asked for the agent, when, or under which consent. A `name` that no agent holds, and an agent you are not shown (one private to a person), both answer `identity_unknown`.
+
+A change of the agent sends its `spec_digest` as `expected_spec_digest`.",
+        r#"{
+  "additionalProperties": false,
+  "properties": {
+    "name": {
+      "description": "The agent to read.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "name"
+  ],
+  "type": "object"
+}"#,
+    ),
+    (
         "identity_directory",
         r"See what you may name before you create or change a long-term agent: `profiles`, the profiles of your mob, each with whether you may create an agent of it, and `peers`, the agents of your mob that are neither archived nor private to a person, each with whether you may list it as a peer. Read only: it never wakes an agent and loads nothing.
 

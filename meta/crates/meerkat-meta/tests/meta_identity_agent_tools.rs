@@ -831,7 +831,7 @@ async fn identity_tools_mount_with_a_policy_and_a_spawn_grant_and_not_without() 
     let asked = rig.send(LEAD, "with-policy", "with-policy").await;
     assert!(
         has_identity_tools(&asked[0]),
-        "with a policy an agent with mob tools is offered the seven tools: {:?}",
+        "with a policy an agent with mob tools is offered the identity tools: {:?}",
         asked[0].tools
     );
     let offered: Vec<&str> = asked[0]
@@ -1672,7 +1672,7 @@ async fn the_familys_outcome_is_the_tools_answer_verbatim() {
     rig.shutdown().await;
 }
 
-/// The reads never wake an agent: after `identity_list` and
+/// The reads never wake an agent: after `identity_list`, `identity_get` and
 /// `identity_directory`, called in a real turn, a dormant agent the mob
 /// holds has still built nothing, and its model was asked nothing.
 #[tokio::test(flavor = "multi_thread")]
@@ -1687,15 +1687,19 @@ async fn identity_list_and_identity_directory_wake_nothing() {
         "a created agent is seated dormant: nothing is built"
     );
 
-    for tool in [IDENTITY_LIST, IDENTITY_DIRECTORY] {
+    for (tool, arguments) in [
+        (IDENTITY_LIST, json!({})),
+        (IDENTITY_GET, json!({"name": "keeper"})),
+        (IDENTITY_DIRECTORY, json!({})),
+    ] {
         let answer = rig
-            .tool(LEAD, &format!("read-{tool}"), tool, json!({}))
+            .tool(LEAD, &format!("read-{tool}"), tool, arguments)
             .await;
         assert!(!answer.is_error, "{tool} answers: {answer:?}");
     }
     assert!(
         unborn(&rig),
-        "after both reads the dormant agent has still built nothing"
+        "after the reads the dormant agent has still built nothing"
     );
     let asked = rig.model.asked.lock().unwrap().clone();
     assert!(
@@ -1735,7 +1739,7 @@ fn the_identity_tools_may_wait_behind_the_deferred_catalog() {
     assert_eq!(
         meerkat_core::select_catalog_mode_from_snapshot(true, &catalog, &[]),
         meerkat_core::ToolCatalogMode::Deferred,
-        "in a session whose catalog is exact, the seven tools alone are deferred"
+        "in a session whose catalog is exact, the identity tools alone are deferred"
     );
 }
 
@@ -2915,5 +2919,27 @@ async fn identity_get_reads_one_agent_and_answers_unknown_for_a_name_it_is_not_s
         nobody, private,
         "nothing tells a member private to a person from a name no agent holds"
     );
+
+    // The caller's own record is read too, and so is an archived agent's.
+    let own = rig
+        .tool(LEAD, "get-own", IDENTITY_GET, json!({"name": LEAD}))
+        .await;
+    assert!(!own.is_error, "{own:?}");
+    assert_eq!(own.content["name"], LEAD);
+    assert_eq!(own.content["profile"], MAKER);
+    let archived = rig
+        .tool(
+            LEAD,
+            "get-archive",
+            IDENTITY_ARCHIVE,
+            json!({"name": "scout", "expected_spec_digest": digest}),
+        )
+        .await;
+    assert_eq!(archived.content["outcome"], "done", "{}", archived.content);
+    let record = rig
+        .tool(LEAD, "get-archived", IDENTITY_GET, json!({"name": "scout"}))
+        .await;
+    assert!(!record.is_error, "{record:?}");
+    assert_eq!(record.content["archived"], true, "{}", record.content);
     rig.shutdown().await;
 }

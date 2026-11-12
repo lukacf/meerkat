@@ -1,9 +1,10 @@
 //! The agent tools of the identity family: what an agent calls to create and
 //! change long-term agents, and every word a model reads about them.
 //!
-//! Seven tools: `identity_create`, `identity_update`, `identity_archive`,
-//! `identity_unarchive`, `identity_remove`, and the reads `identity_list`
-//! and `identity_directory`. They are one more surface of the family
+//! Eight tools: `identity_create`, `identity_update`, `identity_archive`,
+//! `identity_unarchive`, `identity_remove`, and the reads `identity_list`,
+//! `identity_get` and `identity_directory`. They are one more surface of
+//! the family
 //! ([`IdentityFamily`]) and own no meaning: a tool parses its arguments
 //! into the family's wire types, attributes the requester from the session
 //! its call ran in, names the operation and calls the family. It builds no
@@ -11,7 +12,8 @@
 //! seam.
 //!
 //! - **Arguments.** The one wire spelling ([`CreateAgents`],
-//!   [`UpdateAgent`], [`AgentRef`], [`ListAgents`], [`ReadDirectory`]),
+//!   [`UpdateAgent`], [`AgentRef`], [`ListAgents`], [`GetAgent`],
+//!   [`ReadDirectory`]),
 //!   without what only the host plane writes (`proposer`,
 //!   `source_evidence`). Each tool's schema is closed, and the schema is
 //!   what a call is checked against before anything else reads it: an
@@ -31,12 +33,13 @@
 //!   has no such place and must give a `request_id`.
 //! - **Results.** [`IdentityOutcome::to_json`] verbatim for a change; the
 //!   family's answer as it serializes for a read, without each agent's
-//!   provenance, which an agent is not shown; a refused read as a refused
-//!   outcome.
+//!   provenance and open operations, which an agent is not shown; a refused
+//!   read as a refused outcome. Which agents an agent is shown is the
+//!   family's own rule: the tools ask for no view of their own.
 //!
 //! The descriptions and schemas below are product text: an agent knows of
 //! long-term agents only what they say. Each is pinned by a golden
-//! (`tests/fixtures/identity_agent_tools/`).
+//! (`tests/support/identity_tool_goldens.rs`).
 
 use std::sync::{Arc, LazyLock};
 
@@ -49,8 +52,9 @@ use serde_json::{Map, Value, json};
 use super::digest::Sha256Digest;
 use super::executor::ChangeRequester;
 use super::family::{
-    AgentRef, AgentSet, AgentSpec, CreateAgents, IdentityChangeCall, IdentityChangeSpec,
-    IdentityFamily, IdentityRead, IdentityReadAnswer, ListAgents, ReadDirectory, UpdateAgent,
+    AgentRef, AgentSet, AgentSpec, AgentSummary, CreateAgents, GetAgent, IdentityChangeCall,
+    IdentityChangeSpec, IdentityFamily, IdentityRead, IdentityReadAnswer, ListAgents,
+    ReadDirectory, UpdateAgent,
 };
 use super::operation::{OperationId, ToolCallOrigin};
 use super::outcome::IdentityOutcome;
@@ -69,19 +73,20 @@ pub const IDENTITY_UNARCHIVE: &str = "identity_unarchive";
 pub const IDENTITY_REMOVE: &str = "identity_remove";
 /// List the mob's long-term agents, of any profile.
 pub const IDENTITY_LIST: &str = "identity_list";
-/// List what the caller may name in a create or an update.
-pub const IDENTITY_DIRECTORY: &str = "identity_directory";
 /// Read one long-term agent's record by name.
 pub const IDENTITY_GET: &str = "identity_get";
+/// List what the caller may name in a create or an update.
+pub const IDENTITY_DIRECTORY: &str = "identity_directory";
 
 /// The identity tools, in the order a catalog lists them.
-pub const IDENTITY_TOOLS: [&str; 7] = [
+pub const IDENTITY_TOOLS: [&str; 8] = [
     IDENTITY_CREATE,
     IDENTITY_UPDATE,
     IDENTITY_ARCHIVE,
     IDENTITY_UNARCHIVE,
     IDENTITY_REMOVE,
     IDENTITY_LIST,
+    IDENTITY_GET,
     IDENTITY_DIRECTORY,
 ];
 
@@ -274,6 +279,17 @@ fn description(name: &str) -> String {
              `profile` narrows the list to one profile; `include_archived` adds archived \
              agents; when the result has `next`, pass it as `after` to read on."
             .to_owned(),
+        IDENTITY_GET => format!(
+            "Read one long-term agent of your mob by name: what identity_list says of it \
+             (`name`, `display_name`, `profile`, `spec_digest`, `spec_revision`, `archived`, \
+             `readiness`) and the rest of what a create or an update sets: its \
+             `instructions`, `context`, `labels` and `peers` (the peers its changes listed, \
+             among the agents you are shown). An archived agent is read too, and so is your \
+             own record. Read only: it never wakes an agent and loads nothing.\n\n\
+             You are not shown who asked for the agent, when, or under which consent. \
+             {UNKNOWN_NAME}\n\n\
+             A change of the agent sends its `spec_digest` as `expected_spec_digest`."
+        ),
         IDENTITY_DIRECTORY => "See what you may name before you create or change a long-term \
              agent: `profiles`, the profiles of your mob, each with whether you may create \
              an agent of it, and `peers`, the agents of your mob that are neither archived \
@@ -484,6 +500,14 @@ fn input_schema(name: &str) -> Value {
                 },
             },
         }),
+        IDENTITY_GET => json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name"],
+            "properties": {
+                "name": { "type": "string", "description": "The agent to read." },
+            },
+        }),
         IDENTITY_DIRECTORY => json!({
             "type": "object",
             "additionalProperties": false,
@@ -667,6 +691,14 @@ struct OneAgentArguments {
     expected_spec_digest: String,
     #[serde(default)]
     request_id: Option<String>,
+}
+
+/// Which read a tool asked of the family: its answer must be that read's.
+#[derive(Clone, Copy)]
+enum Asked {
+    List,
+    Get,
+    Directory,
 }
 
 fn malformed(detail: String) -> IdentityRefusal {
@@ -912,23 +944,35 @@ impl IdentityAgentTools {
             Ok(read) => read,
             Err(refusal) => return Ok(IdentityToolAnswer::refusal(refusal)),
         };
-        let listed = matches!(read, IdentityRead::List(_));
+        // An agent is not shown who asked for an agent, when, or under
+        // which consent: the host's read keeps it. An open operation's id
+        // tells who asked too, so it stays there as well.
+        let shown = |agent: &mut AgentSummary| {
+            agent.provenance = None;
+            agent.open_operations.clear();
+        };
+        let asked = match &read {
+            IdentityRead::List(_) => Asked::List,
+            IdentityRead::Get(_) => Asked::Get,
+            IdentityRead::Directory(_) => Asked::Directory,
+            // No tool asks any other read of the family.
+            _ => return Err(IdentityToolFault::UnexpectedAnswer),
+        };
         let answer = self.family.read(&self.mob, &caller.requester(), read).await;
-        let content = match answer {
-            Err(refusal) => return Ok(IdentityToolAnswer::refusal(refusal)),
-            Ok(IdentityReadAnswer::List(mut page)) if listed => {
-                // An agent is not shown who asked for an agent, when, or
-                // under which consent: the host's read keeps it. An open
-                // operation's id tells who asked too, so it stays there as
-                // well.
-                for agent in &mut page.agents {
-                    agent.provenance = None;
-                    agent.open_operations.clear();
-                }
+        let content = match (asked, answer) {
+            (_, Err(refusal)) => return Ok(IdentityToolAnswer::refusal(refusal)),
+            (Asked::List, Ok(IdentityReadAnswer::List(mut page))) => {
+                page.agents.iter_mut().for_each(shown);
                 serde_json::to_value(page)
             }
-            Ok(IdentityReadAnswer::Directory(page)) if !listed => serde_json::to_value(page),
-            Ok(_) => return Err(IdentityToolFault::UnexpectedAnswer),
+            (Asked::Get, Ok(IdentityReadAnswer::Get(mut record))) => {
+                shown(&mut record.agent);
+                serde_json::to_value(record)
+            }
+            (Asked::Directory, Ok(IdentityReadAnswer::Directory(page))) => {
+                serde_json::to_value(page)
+            }
+            (_, Ok(_)) => return Err(IdentityToolFault::UnexpectedAnswer),
         };
         content
             .map(|content| IdentityToolAnswer {
@@ -957,6 +1001,13 @@ impl IdentityAgentTools {
                 self.read(
                     caller,
                     parse::<ListAgents>(tool, arguments).map(IdentityRead::List),
+                )
+                .await
+            }
+            IDENTITY_GET => {
+                self.read(
+                    caller,
+                    parse::<GetAgent>(tool, arguments).map(IdentityRead::Get),
                 )
                 .await
             }

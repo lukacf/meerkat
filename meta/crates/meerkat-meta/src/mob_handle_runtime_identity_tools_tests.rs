@@ -5,7 +5,7 @@
 //! changes, its own grant admits spawn tooling and it is private to no
 //! one. The wrapper refuses a private member's call itself
 //! (`private_requester`, as it refuses its council), and answers a surface
-//! whose family takes no changes as it answers any tool it does not have. The seven tools
+//! whose family takes no changes as it answers any tool it does not have. The identity tools
 //! are entries that may wait behind the deferred catalog.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -274,7 +274,7 @@ fn identity_tools_of(surface: &AutoWireParentMobToolDispatcher) -> Vec<String> {
 /// wrapper offers it no identity tool, and a call of one that reaches the
 /// wrapper anyway is refused `private_requester` as a policy denial, the
 /// way its council is, before the family is called. A member private to no
-/// one is offered the seven tools, and its call reaches the family.
+/// one is offered the identity tools, and its call reaches the family.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_private_members_identity_tool_call_is_refused_private_requester() {
     let dir = tempfile::tempdir().expect("state dir");
@@ -319,7 +319,7 @@ async fn a_private_members_identity_tool_call_is_refused_private_requester() {
     assert_eq!(
         identity_tools_of(&shared),
         IDENTITY_TOOLS,
-        "a member private to no one, with a spawn grant, is offered the seven tools"
+        "a member private to no one, with a spawn grant, is offered the identity tools"
     );
     // A member whose build bound no mob authority holds no spawn grant: it
     // is offered none, whoever built a surface for its session.
@@ -464,10 +464,10 @@ async fn identity_list_shows_an_agent_no_provenance() {
     runtime.clear_identity_runtime_authority();
 }
 
-/// The seven tools are the wrapper's own exact catalog entries, after the
+/// The identity tools are the wrapper's own exact catalog entries, after the
 /// inner ones, and may wait behind the deferred catalog: with an exact
 /// inner catalog the session's catalog stays exact, a member's surface
-/// says it may need the catalog's control plane, and the seven are what a
+/// says it may need the catalog's control plane, and they are what a
 /// deferred catalog leaves out of the request until they are loaded.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_identity_tools_are_deferred_entries_of_the_wrappers_catalog() {

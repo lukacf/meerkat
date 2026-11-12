@@ -1,6 +1,6 @@
 ---
 title: "Agents that create agents"
-description: "Let an agent create, change, archive and remove long-term agents under the host's identity policy: the policy, the grant, the seven identity tools and their outcomes."
+description: "Let an agent create, change, archive and remove long-term agents under the host's identity policy: the policy, the grant, the eight identity tools and their outcomes."
 icon: "user-plus"
 ---
 
@@ -107,7 +107,7 @@ it would carry a person's conversation into a shared agent's instructions or
 first message. A call that reaches the tools anyway is refused
 `private_requester`.
 
-## The seven tools
+## The eight tools
 
 | Tool | Arguments | What it does |
 | --- | --- | --- |
@@ -117,6 +117,7 @@ first message. A call that reaches the tools anyway is refused
 | `identity_unarchive` | `name`, `expected_spec_digest`, `request_id?` | Brings an archived agent back on the conversation it had. |
 | `identity_remove` | `name`, `expected_spec_digest`, `request_id?` | Removes an agent for good. Its name is never available again. |
 | `identity_list` | `profile?`, `include_archived?`, `after?` | Lists the mob's long-term agents that are not private to a person, of any profile. Read only. |
+| `identity_get` | `name` | Reads one agent's record: what the list says of it, and its instructions, context, labels and peers. Read only. |
 | `identity_directory` | `query?`, `after?` | Lists the profiles the caller may create agents of and the agents it may name as peers, each `allowed`, `needs_decision` or `not_allowed`. Read only. |
 
 These are the same requests the host methods `meta/identity/*` take, field
@@ -226,20 +227,26 @@ under which consent, nor another requester's open operations; the host's
 `meta/identity/list` shows those. A list is in one stable order, and `after`
 continues it.
 
+`identity_get` reads one agent's record by name: the list entry's members,
+and its `instructions`, `context`, `labels` and `peers` (the peers its
+changes listed, among the agents the caller is shown). It is the host's
+`meta/identity/get` without who asked for the agent, when, or under which
+consent, and without another requester's open operations.
+
 `identity_directory` answers "what may I name" before a create: each profile
 and each possible peer with a verdict. Its peers are the agents that are
 neither archived nor private to a person.
 
-One rule decides which agents an agent is shown, in both reads and in every
-change: an agent is shown no member that is private to a person. A change
-that names such a member answers `identity_unknown` at `name`, exactly as for
-a name no agent holds, so the answer tells nothing about it.
+One rule decides which agents an agent is shown, in every read and in every
+change: an agent is shown no member that is private to a person. A read or a
+change that names such a member answers `identity_unknown` at `name`, exactly
+as for a name no agent holds, so the answer tells nothing about it.
 
-Both are reads: they never wake an agent and load nothing.
+All three are reads: they never wake an agent and load nothing.
 
 ## Tool list size
 
-The seven tools may wait behind the deferred tool catalog. In a session whose
+The eight tools may wait behind the deferred tool catalog. In a session whose
 tool catalog is exact and large enough to defer, their definitions are left
 out of the model request, and the model finds them with `tool_catalog_search`
 and loads them with `tool_catalog_load` before its first call.

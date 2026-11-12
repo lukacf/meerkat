@@ -252,9 +252,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Agents can create and change long-term agents. On a launch that has an
   identity policy (`runtime_options.identity_creation` with `enabled: true`),
   an agent whose profile has mob tools (`tools.mob = true`, its spawn grant)
-  gets seven tools: `identity_create`, `identity_update`, `identity_archive`,
-  `identity_unarchive`, `identity_remove`, and the reads `identity_list` and
-  `identity_directory`. They take the same requests as `meta/identity/*`
+  gets eight tools: `identity_create`, `identity_update`, `identity_archive`,
+  `identity_unarchive`, `identity_remove`, and the reads `identity_list`,
+  `identity_get` and `identity_directory`. They take the same requests as `meta/identity/*`
   (`agents: [{name, profile, display_name?, instructions?, context?, labels?,
   first_message?, peers?}]` for a create; `name` and `expected_spec_digest`
   for a change of one agent) and answer the same typed outcome (`done`,
@@ -279,12 +279,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     host's read, and so do another requester's open operations. A change
     that names a member private to a person answers `identity_unknown`, as
     for a name no agent holds.
-  - The seven tools may wait behind the deferred tool catalog: in a session
+  - `identity_get` reads one agent's record by name: the list entry's
+    members and the agent's instructions, context, labels and peers, the
+    fields of `meta/identity/get` without who asked for the agent and
+    without another requester's open operations. A name the calling agent
+    is shown no agent under answers `identity_unknown`, whether no agent
+    holds it or its member is private to a person.
+  - The eight tools may wait behind the deferred tool catalog: in a session
     whose catalog is exact, their definitions are loaded on demand.
   - Rust API: `identity_creation::{IdentityAgentTools, IdentityToolCaller,
     IdentityToolCallSite, IdentityToolAnswer, IdentityToolFault,
     identity_tool_defs, identity_tool_catalog, identity_tool_provenance,
-    is_identity_tool, IDENTITY_TOOLS}` and the seven tool name constants.
+    is_identity_tool, IDENTITY_TOOLS}` and the eight tool name constants.
 
 ### Changed
 

@@ -71,13 +71,6 @@ them.
   `ReplayPlan::step_admission` (see Added and Fixed). Anthropic and Gemini
   targets are unchanged.
 
-### Security
-
-- Meta console: a timeline frame stored without captured member attributes
-  is no longer served to people other than administrators. See the Meta
-  changelog's 0.9.14 Security entry for what could be read, and its Upgrade
-  note.
-
 ### Added
 
 - `meerkat-core`: `OpenAiContinuityIssuer` (a kind of service,

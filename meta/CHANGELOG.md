@@ -7,55 +7,138 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+A console that can identify a person shows a timeline frame stored without
+member attributes, and the memory steward's conflict signals, to an
+administrator only. See Security, Upgrade and Changed.
+
+### Security
+
+- Console timeline: a frame stored without the attributes of the member it
+  is about is shown to an administrator only, whatever the access rules say
+  and whoever holds the member's name now. In 0.9.11 through 0.9.14 such a
+  frame was decided by its member's name. Records of a member that is
+  private to one person could therefore be shown to other signed-in people
+  when that name was, or later became, the name of a shared member, or
+  while the console did not know the ended member. The records stored
+  without attributes were a member's memory events, the initial message of
+  a spawn, a console send to a member with no session, lifecycle and
+  failure records, and live image records. The initial message, the send,
+  the failure record of a send and the image record carry content; the
+  others carry status and memory metadata. An administrator, here and
+  below, is a person listed under `admins` in the access configuration; a
+  subject that a rule grants the `access.admin` action is not one for this
+  rule. Only a console that can identify nobody is exempt: one that does
+  not require sign-in and has no access controller, or no trusted OIDC
+  configuration to verify a token against. It has one anonymous operator
+  and nobody to keep apart, and that operator reads such frames as before.
+  On every other console only an administrator reads them, and a caller who
+  sends no token is treated like any person who is not an administrator
+  (see Upgrade).
+- A frame's member attributes are now those of the exact member its record
+  names, and never those of whoever holds the member's name: the member of
+  the session the record names; for a console send to a member that has no
+  session yet, the member the send was made to, captured at the send; and
+  for the failure record of such a send, the attributes stored with the
+  send. This also holds when the console projects retained records again
+  (when it starts to read a runtime, or catches up after a lag). A record
+  that names none of these is stored without attributes and is shown to an
+  administrator only (see Changed for the kinds).
+- The initial message of a spawn is no longer copied from the spawning
+  agent's session history under the name the call gave, which in 0.9.11
+  through 0.9.14 could put the text of a private member's call on another
+  member's timeline. A spawn's kickoff record is written only when the
+  spawn tool's own outcome names the session of the member it made
+  (`fork_off`, `delegate`), and a refused call leaves nothing under the name
+  it gave.
+- The memory steward's conflict signals (`memory.conflict.signal` on the
+  system page) are shown to an administrator only. Their text is written by
+  the steward from the records it compared, and could quote a quarantined
+  record or a record of an agent that an access rule keeps from the person
+  reading. Affects 0.9.14 and earlier. On a console that can identify
+  nobody the signal is read as a member's record with no attributes is, so
+  an access deny that matches the anonymous caller also refuses it.
+- With no runtime registered, a console serves no stored frame whose member
+  sat in a nested mob (a mob other than its runtime's own).
+
+### Upgrade
+
+- No backfill is done. Timeline frames that 0.9.11 through 0.9.14 stored
+  without member attributes stay administrator-only: member memory events,
+  spawn initial messages, sends to a member with no session, lifecycle and
+  failure records, live image records. No setting or migration returns them
+  to the view of a person who is not an administrator, the member's owner
+  included. Nothing is removed from the console log, and an administrator
+  reads them as before.
+- The memory steward's conflict signals stored by earlier releases are
+  shown to an administrator only as well.
+- A console that can identify a person and has no access configuration has
+  no administrator: it shows these frames to nobody. A console that can
+  identify nobody is unchanged: its one anonymous operator reads them as
+  before.
+- A console where sign-in is optional, an access controller is installed
+  and tokens are verified changes for a caller who sends no token. That
+  caller no longer reads timeline frames stored without member attributes
+  (the frames 0.9.11 through 0.9.14 stored among them), is no longer shown
+  the memory scopes and memory panel rows of a member the console does not
+  know, and no longer attaches a session whose owner the console does not
+  know or that has no established owner (it is answered as a session that
+  does not exist). An administrator signs in to read them. With the access
+  configuration on, a caller with no token is granted only by an allow rule
+  that names no subject and no group (`subjects: ["*"]` does not grant it),
+  so the visible change is on such consoles whose access configuration is
+  off, or on with such a rule. A console that requires sign-in has no
+  anonymous caller and is unchanged in this respect, and so is the stock
+  console gateway: launched with an auth configuration it requires sign-in,
+  and without one it can identify nobody.
+- Frames written from this release on carry their member's attributes when
+  their record names its session or the console send it belongs to. The
+  kinds listed under Changed are still stored without attributes and stay
+  administrator-only.
+
+### Changed
+
+- People who are not administrators no longer see these records on the
+  console timeline, whether this release or an earlier one wrote them:
+  retire, reset, respawn and delete markers of an agent; memory harvest
+  records; the memory steward's conflict signals; the failure record of a
+  send that the console's log does not hold (a send made through the SDK,
+  or one made before the console log was replaced); a send to an identity
+  that has no member yet; and an image or memory record that names no
+  session. An administrator sees them all.
+- A spawn's kickoff record (`user_input` with
+  `source_event_type: spawn_initial_message`) is written for `fork_off` and
+  `delegate` only, and carries the child's session as `session_id`.
+  `mob_spawn_member`, `spawn_member` and `spawn_many_members` write none:
+  the new member's first message appears on its timeline from its own
+  session history, as a `user_input` frame of its session. The copy derived
+  from the spawning agent's session history
+  (`session_history_spawn_initial_message`) is no longer written. The call,
+  its arguments and its result stay on the spawning agent's own timeline.
+- A member's memory event that names its session (`session_key`) and a live
+  image record carry that session as `session_id` on their timeline frame.
+
+### Known limitations
+
+- Console timeline: memory records on the system page (taint transitions,
+  quarantined writes, promotions) can show the session key, scope key or
+  author name of a member that is private to another person. They carry no
+  message content. A later release judges these records by the member they
+  name.
+- Console: the last-activity time of an agent name is kept per name and is
+  not filtered by who may see the member that acted. A person who can see an
+  agent under a name can therefore see when a member private to another
+  person acted under the same name. No content is shown. A later release
+  decides it with the frame rule.
+
 ## [0.9.14] - 2026-11-11
 
 Meta 0.9.14 is part of Meerkat 0.9.14 (Core 0.9.14, Meta 0.9.14 and Connect
 0.9.14, released together) and pins Core `=0.9.14`.
 
 A mob that a member private to a person creates itself stays private to
-that person after a restart. A console with sign-in shows a timeline frame
-stored without member attributes to an administrator only. See Security and
-Upgrade.
+that person after a restart. See Security.
 
 ### Security
-
-- On a console with sign-in, a timeline frame stored without the attributes
-  of the member that wrote it is shown to an administrator only, whatever
-  the access rules say and whoever holds the member's name now. In 0.9.11
-  through 0.9.13 such a frame was decided by its member's name alone. A
-  deny rule on `agent.view` refused it only when the rule's subject matched
-  the reader and its selector was a role, a label or another named agent;
-  under allow rules, under any other deny rule and with the access
-  configuration off, the console judged it by what it knew of the member
-  holding that name at the read. A signed-in person who was neither an
-  administrator nor the member's owner could therefore be served such a
-  frame of a member private to another person, once that member had left
-  and a shared member held its name, or while the console did not know the
-  ended member. The frames written without attributes were a member's memory
-  events, the initial message of a spawn, a console send to a member with no
-  session, and lifecycle and failure records; the initial message and the
-  send carry text.
-- The initial message of a spawn is written under a member only by the
-  spawn that made that member. In 0.9.11 through 0.9.13 the console also
-  derived it from the spawning agent's session history, under whatever name
-  the call gave and whether or not the call was refused, so a call made in
-  a private member's turn that named a shared member put its text on that
-  member's timeline for everyone who may view it. A refused call now leaves
-  no frame under the name it gave.
-- Frames written from this release on carry their member's attributes
-  wherever the writer can name the member: a member's memory events
-  (one that names its session by that session's member, one that names none
-  by the member seated under the name), a spawn's initial message, a send
-  to a member with no session, lifecycle records, interaction failures and
-  live image records. A frame is still stored without attributes, and is
-  then read by an administrator only, when no member holds its name at the
-  write (a memory harvest or a lifecycle record written after its member
-  left the roster), when it names a session whose member is gone and no
-  earlier frame of that session holds attributes, and when no runtime is
-  registered for it. The console's own frames (`_system`, `__console__`)
-  are decided by those identities, as before.
-- With no runtime registered, a console serves no stored frame whose member
-  sat in a nested mob (a mob other than its runtime's own).
 
 - A mob that a member private to a person creates with its own `mob_create`
   stays private to that person after a restart, so every member spawned into
@@ -78,29 +161,6 @@ Upgrade.
   from then on, and the members already seated in it keep the owner their
   own spawn gave them.
 
-### Upgrade
-
-- Timeline frames that 0.9.13 and earlier stored without member attributes
-  (member memory events, spawn initial messages, sends to a member with no
-  session, lifecycle and failure records) are no longer shown to anyone but
-  an administrator on a console with sign-in: not to another person, and
-  not to the member's owner. A console with sign-in and no access
-  configuration has no administrator, so it shows them to nobody. Frames
-  written from 0.9.14 on are not affected, and nothing is removed from the
-  console log. A console without sign-in shows them as before: it has one
-  anonymous operator and nobody to keep apart.
-
-### Changed
-
-- A spawn's initial message appears once on the spawned member's timeline,
-  as the `user_input` frame the spawn writes
-  (`source_event_type: spawn_initial_message`). The copy derived from the
-  spawning agent's session history
-  (`session_history_spawn_initial_message`) is no longer written. The call,
-  its arguments and its result stay on the spawning agent's own timeline.
-- A member's memory event that names its session (`session_key`) carries
-  the same value as `session_id` on its timeline frame.
-
 ### Known limitations
 
 - `rustix` 1.1.5 in Cargo.lock is named by RUSTSEC-2026-0486, as in 0.9.12
@@ -113,15 +173,6 @@ Upgrade.
   `xattr`, calls it only to set attributes while unpacking, so Meta's own
   use is not known to be affected. `rustix` 1.1.6 has the fix; this release
   still builds with 1.1.5.
-- On a console whose visibility policy includes nested mob members (the
-  policy trait's default; the stock gateway policy does not), a temporary
-  council's participants are still listed as members in this release, and
-  their stored history holds a copy of the source member's earlier turns: a
-  caller denied the source can read them through a participant. Affects
-  0.8.27 through 0.9.14. Keep the stock policy, or deny the participants by
-  name (`council-p0`, ...). The 0.9.13 notes said the release after it would
-  no longer list them; that change is not in 0.9.14 and follows in a later
-  release.
 
 ## [0.9.13] - 2026-11-11
 

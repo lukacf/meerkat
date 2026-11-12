@@ -166,16 +166,6 @@ under `## [0.9.14]`.
   it, and picks none (`MobProvenance::Ambiguous`), no longer comes back
   private to no one: after a restart a spawn into it is refused, and the
   members already seated in it keep the owner their own spawn gave them.
-- Security, and a change in what the console shows: on a console with
-  sign-in, a timeline frame stored without the attributes of the member that
-  wrote it is shown to an administrator only. Frames that 0.9.13 and earlier
-  stored that way (member memory events, spawn initial messages, sends to a
-  member with no session, lifecycle and failure records) are no longer shown
-  to another person or to the member's owner, and a console with sign-in and
-  no access configuration, which has no administrator, shows them to nobody.
-  Frames written from 0.9.14 on are not affected, nothing is removed from
-  the console log, and a console without sign-in shows them as before. See
-  Security and Upgrade under `## [0.9.14]` in `meta/CHANGELOG.md`.
 
 ### Connect 0.9.14
 

@@ -15699,9 +15699,10 @@ impl MobHandle {
         identity: AgentIdentity,
         initial_message: Option<ContentInput>,
     ) -> Result<MemberRespawnReceipt, MobRespawnError> {
-        match self
+        let agent_identity = identity.clone();
+        let reply = match self
             .execute_machine_command(MobMachineCommand::Respawn {
-                agent_identity: identity,
+                agent_identity,
                 initial_message,
                 successor_spec: None,
             })
@@ -15711,7 +15712,15 @@ impl MobHandle {
             _ => Err(MobRespawnError::from(MobError::Internal(
                 "unexpected command result variant".into(),
             ))),
+        };
+        // The member of a store-owned identity is respawned on its own
+        // session with the labels its roster entry reads: its row lets go
+        // of an owed label restamp that seat row settles, as after
+        // `respawn_member`.
+        if reply.is_ok() {
+            self.settle_store_owned_seat_row(&identity).await;
         }
+        reply
     }
 
     /// Atomically retire a member and replace it from a fully lowered spawn spec.

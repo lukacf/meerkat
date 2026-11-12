@@ -25,8 +25,8 @@
 # - one run per reachability witness, with that witness's negation as an
 #   extra invariant (a state goal) or action property (a step goal),
 #   requiring TLC to report exactly that violation;
-# - with --mutants, eighteen defects seeded into a copy of the generated
-#   model: sixteen refused by the property each targets, checked as the
+# - with --mutants, nineteen defects seeded into a copy of the generated
+#   model: seventeen refused by the property each targets, checked as the
 #   run's only property:
 #     profile_check_dropped (the target predicate selects every member for a
 #       profile target) by AuditWriteOwesExactlyTheSelected;
@@ -47,11 +47,15 @@
 #       nothing) by AuditLineageRecordOwesTheGeneration;
 #     lineage_recorded_after_snapshot (the lineage record's guard on a
 #       recorded snapshot dropped) by AuditLineageOnlyBeforeASnapshot;
-#     lineage_names_itself (a lineage record whose root is a fork of the
-#       member itself writes the member as its own root) by the generated
+#     lineage_names_itself (the lineage record's guard on the root being
+#       another name dropped) by the generated
 #       invariant member_instruction_lineage_names_another_member;
-#     lineage_root_unresolved (a lineage record writes a root that is itself
-#       a fork as given) by AuditLineageRecordNamesTheRoot;
+#     lineage_root_looked_up_again (a lineage record whose root holds an
+#       entry itself writes that entry's root instead of the root it was
+#       given) by AuditLineageRecordWritesTheGivenRoot;
+#     seat_drops_lineage (a seat removes the name's lineage entry, so a
+#       second seat of a fork forgets its root) by
+#       AuditLineageKeptUnlessRecordedOrEnded;
 #     lineage_survives_identity_end (the end of an identity keeps its lineage
 #       entry) by AuditIdentityEndLeavesNoLineage;
 #     unborn_seat_delivered (the prepared delivery's born-session guard
@@ -340,9 +344,10 @@ read -r step_index epoch_index life_resets_index life_ends_index <<<"${view_posi
 audit_properties="  AuditWriteOwesExactlyTheSelected
   AuditSeatOwesTheGeneration
   AuditUnseatLeavesNoFact
-  AuditLineageRecordNamesTheRoot
+  AuditLineageRecordWritesTheGivenRoot
   AuditLineageRecordOwesTheGeneration
   AuditIdentityEndLeavesNoLineage
+  AuditLineageKeptUnlessRecordedOrEnded
   AuditRegionWakesNothing"
 audit_invariants="  AuditRecordedWithinGeneration
   AuditOwedIsSeatedAndUnblocked
@@ -520,7 +525,6 @@ for witness in \
   "write:Action property:ForkWriteOwesFork" \
   "write:Action property:MemberWriteSkipsFork" \
   "write:Action property:LineageRecordOwes" \
-  "write:Action property:OwnForkAsRootWritesNoEntry" \
   "write:Invariant:DormantDeliverable" \
   "seat:Action property:SeatAfterWriteOwed" \
   "seat:Action property:UnseatDropsFacts" \
@@ -529,7 +533,12 @@ for witness in \
   "seat:Invariant:UnbornOwedDeferred" \
   "seat:Invariant:UnboundOwedDeferred" \
   "seat:Invariant:RetiringReleasable" \
-  "fork:Action property:ForkOfForkNamesTheRoot" \
+  "fork:Invariant:RootHoldsAnEntry" \
+  "fork:Action property:ForkOfForkFollowsTheFirstMember" \
+  "fork:Action property:ForkRecordSkipsSiblingFork" \
+  "fork:Action property:ReseatKeepsLineage" \
+  "fork:Action property:ReseatedForkOwedByRootRecord" \
+  "fork:Action property:LineageRecordRepeated" \
   "fork:Action property:ForkWriteSkipsBystander"; do
   run="${witness%%:*}"
   rest="${witness#*:}"
@@ -717,16 +726,49 @@ PY
   mutate write lineage_recorded_after_snapshot Invariant AuditLineageOnlyBeforeASnapshot \
     RecordMemberInstructionLineageRunning 'DOMAIN member_instruction_recorded' \
     '    /\ TRUE'
-  # A lineage record whose root is a fork of the member itself writes the
-  # resolved root all the same: the member as its own root.
+  # A lineage is recorded with the member itself as its root: the guard on
+  # the root being another name dropped.
   mutate write lineage_names_itself Invariant member_instruction_lineage_names_another_member \
+    RecordMemberInstructionLineageRunning '(agent_identity # root_identity)' \
+    '    /\ TRUE'
+  # A lineage record whose root holds an entry itself looks that root up
+  # again and writes its root: the entry is no longer the root the record
+  # was given, so a replay could differ from the live record.
+  mutate fork lineage_root_looked_up_again "Action property" AuditLineageRecordWritesTheGivenRoot \
     RecordMemberInstructionLineageRunning "member_instruction_lineage' =" \
-    "    /\\ member_instruction_lineage' = IF ((root_identity \\in DOMAIN member_instruction_lineage) = TRUE) THEN MapSet(member_instruction_lineage, agent_identity, member_instruction_lineage[root_identity]) ELSE MapSet(member_instruction_lineage, agent_identity, root_identity)"
-  # A lineage record writes its root as given: a fork of a fork names the
-  # fork between, not the first member.
-  mutate fork lineage_root_unresolved "Action property" AuditLineageRecordNamesTheRoot \
-    RecordMemberInstructionLineageRunning "member_instruction_lineage' =" \
-    "    /\\ member_instruction_lineage' = MapSet(member_instruction_lineage, agent_identity, root_identity)"
+    "    /\\ member_instruction_lineage' = IF root_identity \\in DOMAIN member_instruction_lineage THEN MapSet(member_instruction_lineage, agent_identity, member_instruction_lineage[root_identity]) ELSE MapSet(member_instruction_lineage, agent_identity, root_identity)"
+  # A seat removes the name's lineage entry: a fork seated again after an
+  # unseat that kept its identity forgets its root. The seat arm leaves the
+  # lineage to its frame, so the edit takes the variable out of the arm's
+  # frame and adds the removal.
+  seed_mutant_frame_variable() {
+    local name="$1" arm="$2" variable="$3" line="$4"
+    local dir="${work_dir}/mutant-${name}"
+    mkdir -p "${dir}"
+    cp "${spec_dir}/model.tla" "${spec_dir}/operator_instruction_delivery_audit.tla" "${dir}/"
+    MODEL="${dir}/model.tla" ARM="${arm}" VARIABLE="${variable}" LINE="${line}" python3 - <<'PY'
+import os, re
+path, arm, variable, line = (os.environ[key] for key in ("MODEL", "ARM", "VARIABLE", "LINE"))
+text = open(path).read()
+start = text.index("\n" + arm + "(") + 1
+end = text.index("\n\n", start)
+lines = text[start:end].split("\n")
+frames = [i for i, current in enumerate(lines) if re.fullmatch(r"    /\\ UnchangedFrame_[0-9a-f]+", current)]
+assert len(frames) == 1, f"expected one frame line in {arm}, found {len(frames)}"
+assert not any(variable + "'" in current for current in lines), f"{arm} already updates {variable}"
+frame = lines[frames[0]][len("    /\\ "):]
+definitions = re.findall(r"(?m)^" + frame + r" == UNCHANGED << (.*) >>$", text)
+assert len(definitions) == 1, f"expected one definition of {frame}, found {len(definitions)}"
+names = [name.strip() for name in definitions[0].split(",")]
+assert names.count(variable) == 1, f"{frame} does not hold {variable} once"
+names.remove(variable)
+lines[frames[0]:frames[0] + 1] = [line, "    /\\ UNCHANGED << " + ", ".join(names) + " >>"]
+open(path, "w").write(text[:start] + "\n".join(lines) + text[end:])
+PY
+  }
+  seed_mutant_frame_variable seat_drops_lineage RecoverRosterMemberRunning member_instruction_lineage \
+    "    /\\ member_instruction_lineage' = MapRemove(member_instruction_lineage, agent_identity)"
+  refuse_mutant fork seat_drops_lineage "Action property" AuditLineageKeptUnlessRecordedOrEnded
   # The end of an identity keeps its lineage entry.
   mutate seat lineage_survives_identity_end "Action property" AuditIdentityEndLeavesNoLineage \
     EndIdentityLifeRunning "member_instruction_lineage' =" \

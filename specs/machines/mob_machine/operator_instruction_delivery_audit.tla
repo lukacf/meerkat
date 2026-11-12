@@ -36,11 +36,13 @@
 \*     record of the current generation, the release verdict of a retiring
 \*     or seated member's session, either member's fork lineage and the end
 \*     of an unseated identity's life.
-\*   fork (AuditForkSpec): three identities seated and unseated around a
+\*   fork (AuditForkSpec): three identities seated, unseated and seated
+\*     again (a second incarnation of the same name) around a
 \*     member target and two member-and-forks targets on one slot (a new
 \*     record, a higher revision, a revoke, a replay), with any of them
-\*     recorded as a fork of any other (so a fork of a fork, two forks of one
-\*     member, and a member that is neither the record's member nor its
+\*     recorded as a fork of any other (so two forks of one member, as a
+\*     fork and its own fork are recorded, a root that itself holds an
+\*     entry, and a member that is neither the record's member nor its
 \*     fork) and the end of an unseated identity's life.
 \*
 \* Properties, in every run, beside every generated invariant of ci.cfg (the
@@ -69,17 +71,22 @@
 \*     fact.
 \*   AuditUnseatLeavesNoFact (action property): an unseat leaves the
 \*     identity no delivery fact.
-\*   AuditLineageRecordNamesTheRoot (action property): a lineage record of a
-\*     member with a root that is itself a fork writes that fork's root (a
-\*     fork of a fork names the first member), with any other root the root
-\*     as given, and writes nothing when the root is a fork of the member
-\*     itself.
+\*   AuditLineageRecordWritesTheGivenRoot (action property): a lineage
+\*     record writes the root it is given as the member's entry, whatever
+\*     entry that root holds itself (the shell names the first member for a
+\*     fork of a fork; the machine looks nothing up), changes no other
+\*     member's entry, and repeated for a member that holds exactly that
+\*     entry leaves the lineage as it was.
 \*   AuditLineageRecordOwesTheGeneration (action property): a lineage record
 \*     owes its member the mob's generation once the mob has one, leaves it
 \*     unblocked, and changes no other member's obligation.
 \*   AuditIdentityEndLeavesNoLineage (action property): a step that moves an
 \*     identity's life marker (the identity ended) leaves it no lineage
 \*     entry.
+\*   AuditLineageKeptUnlessRecordedOrEnded (action property): a member's
+\*     lineage entry changes only by its own lineage record or the end of
+\*     its identity: a seat (a second one of the same name too), an unseat,
+\*     a write and every other step keep it.
 \*   AuditRegionWakesNothing (action property): a step that seats, binds,
 \*     unbinds or unseats no member, or changes its seat session's unborn
 \*     mark (every region step), changes no residency, wake attempt, wake
@@ -91,13 +98,16 @@
 \*   write: ProfileWriteOwesOne, RetargetOwesLeaver, MemberRetargetOwesBoth,
 \*     RecordedReowed,
 \*     BlockedThenUnblocked, RecordCloses, ForkWriteOwesFork,
-\*     MemberWriteSkipsFork, LineageRecordOwes, OwnForkAsRootWritesNoEntry
+\*     MemberWriteSkipsFork, LineageRecordOwes
 \*     (step goals), DormantDeliverable (state goal);
 \*   seat: SeatAfterWriteOwed, UnseatDropsFacts, IdentityEndDropsLineage,
 \*     ForkOwedWithoutSeatedRoot (step goals),
 \*     UnbornOwedDeferred, UnboundOwedDeferred, RetiringReleasable (state
 \*     goals);
-\*   fork: ForkOfForkNamesTheRoot, ForkWriteSkipsBystander (step goals).
+\*   fork: ForkWriteSkipsBystander, ForkOfForkFollowsTheFirstMember,
+\*     ForkRecordSkipsSiblingFork, ReseatKeepsLineage,
+\*     ReseatedForkOwedByRootRecord,
+\*     LineageRecordRepeated (step goals), RootHoldsAnEntry (state goal).
 \* With --mutants the runner seeds defects into a copy of the generated
 \* model and requires TLC to refuse each with its target as the run's only
 \* property (see the runner).
@@ -159,6 +169,14 @@ AuditSeatOf(ids) ==
         RecoverRosterMemberRunning(id, AuditRuntime(id), 1, 1, AuditProfile(id), AuditMode, FALSE)
 
 AuditSeat == AuditSeatOf(AuditIds)
+
+\* The fork run's seat: a name's first seat is its first incarnation, and a
+\* seat after an unseat (which kept the identity) is its second, so a member
+\* of incarnation 2 was seated before.
+AuditForkSeat ==
+    \E id \in AuditForkIds, g \in {1, 2} :
+        /\ g = IF id \in DOMAIN identity_runtime_generations THEN 2 ELSE 1
+        /\ RecoverRosterMemberRunning(id, AuditRuntime(id), 1, g, AuditProfile(id), AuditMode, FALSE)
 
 \* A retiring member is not bound, made unborn or born again here: after its
 \* retire only its delivery, its records, its release verdict and its unseat
@@ -382,9 +400,11 @@ AuditSeatSpec == Init /\ [][AuditSeatNext]_vars
 AuditSeatConstraint == operator_instruction_generation <= AuditMaxSeatGeneration
 
 \* The fork run binds no member: its members are owed and never prepared,
-\* and the write and seat runs cover the delivery of a fork.
+\* and the write and seat runs cover the delivery of a fork. A name is
+\* seated as its first or its second incarnation, so an unseated member that
+\* kept its identity is seated again.
 AuditForkNext ==
-    \/ AuditSeatOf(AuditForkIds)
+    \/ AuditForkSeat
     \/ AuditUnseatOf(AuditForkIds)
     \/ AuditLineage(AuditForkIds)
     \/ AuditEndLife(AuditForkIds)
@@ -514,16 +534,19 @@ AuditUnseatLeavesNoFact ==
       ]_vars
 
 \* The step is the lineage record of `id` with `root` (the arm as the
-\* generated model defines it); what it leaves is stated independently.
-AuditLineageRecordNamesTheRoot ==
+\* generated model defines it); what it leaves is stated independently. The
+\* entry is the root as given, whatever entry the root holds itself; a
+\* record repeated for a member that holds exactly that entry changes
+\* nothing in the lineage.
+AuditLineageRecordWritesTheGivenRoot ==
     [][\A id \in AuditForkIds :
          \A root \in AuditForkIds :
              RecordMemberInstructionLineageRunning(id, root) =>
-                 IF root \in DOMAIN member_instruction_lineage
-                 THEN IF member_instruction_lineage[root] = id
-                      THEN AuditSameFact(member_instruction_lineage, member_instruction_lineage', id)
-                      ELSE AuditFactAt(member_instruction_lineage', id, member_instruction_lineage[root])
-                 ELSE AuditFactAt(member_instruction_lineage', id, root)
+                 /\ AuditFactAt(member_instruction_lineage', id, root)
+                 /\ \A other \in AuditForkIds \ {id} :
+                        AuditSameFact(member_instruction_lineage, member_instruction_lineage', other)
+                 /\ AuditFactAt(member_instruction_lineage, id, root) =>
+                        member_instruction_lineage' = member_instruction_lineage
       ]_vars
 
 AuditLineageRecordOwesTheGeneration ==
@@ -549,6 +572,15 @@ AuditIdentityEnded(id) ==
 AuditIdentityEndLeavesNoLineage ==
     [][\A id \in AuditForkIds :
          AuditIdentityEnded(id) => id \notin DOMAIN member_instruction_lineage'
+      ]_vars
+
+\* Each disjunct is evaluated on its own (TLC evaluates every disjunct of an
+\* action-level disjunction): none reads a map outside its domain.
+AuditLineageKeptUnlessRecordedOrEnded ==
+    [][\A id \in AuditForkIds :
+         \/ AuditSameFact(member_instruction_lineage, member_instruction_lineage', id)
+         \/ AuditIdentityEnded(id)
+         \/ \E root \in AuditForkIds : RecordMemberInstructionLineageRunning(id, root)
       ]_vars
 
 AuditRegionWakesNothing ==
@@ -649,16 +681,6 @@ AuditWitnessLineageRecordOwesStep ==
         /\ operator_instruction_generation > 0
         /\ AuditFactAt(member_instruction_owed', id, operator_instruction_generation)
 
-\* Write run: a lineage record whose root is a fork of the member itself
-\* (the name lives again as a fork of one of its earlier forks) writes no
-\* entry.
-AuditWitnessOwnForkAsRootWritesNoEntryStep ==
-    \E id \in AuditForkIds :
-        \E root \in DOMAIN member_instruction_lineage :
-            /\ member_instruction_lineage[root] = id
-            /\ RecordMemberInstructionLineageRunning(id, root)
-            /\ id \notin DOMAIN member_instruction_lineage'
-
 \* Write run: a Dormant member's delivery can be prepared (store-only, no
 \* wake).
 AuditWitnessDormantDeliverable ==
@@ -724,14 +746,68 @@ AuditWitnessRetiringReleasable ==
         /\ ENABLED ResolveMemberInstructionReleaseAuthorizedRunning(
                id, AuditSession(id), "RuntimeReleasedOnlyHostOwned")
 
-\* Fork run: the lineage record of a member with a root that is itself a
-\* fork of a third name writes that fork's root.
-AuditWitnessForkOfForkNamesTheRootStep ==
-    \E id \in AuditForkIds :
-        \E root \in DOMAIN member_instruction_lineage :
-            /\ member_instruction_lineage[root] # id
-            /\ RecordMemberInstructionLineageRunning(id, root)
-            /\ AuditFactAt(member_instruction_lineage', id, member_instruction_lineage[root])
+\* Fork run: a member may hold a root that itself holds an entry for a third
+\* name (a root is a name: the name of a fork's root lives again as a fork
+\* of another member). The machine keeps both entries as given.
+AuditWitnessRootHoldsAnEntry ==
+    \E id \in DOMAIN member_instruction_lineage :
+        /\ member_instruction_lineage[id] \in DOMAIN member_instruction_lineage
+        /\ member_instruction_lineage[member_instruction_lineage[id]] # id
+
+\* Fork run: a fork of a fork is recorded with the first member, as the
+\* fork between is, so a record written for the first member and its forks
+\* owes both of them.
+AuditWitnessForkOfForkFollowsTheFirstMemberStep ==
+    /\ AuditCommittedWrite
+    /\ \E s \in AuditChangedSlots :
+           /\ operator_instruction_target_kind'[s] = "MemberAndForks"
+           /\ \E id \in DOMAIN member_instruction_lineage :
+                  \E other \in DOMAIN member_instruction_lineage \ {id} :
+                      /\ AuditForkOwedBy(s, id)
+                      /\ AuditForkOwedBy(s, other)
+
+\* Fork run: a new record written for a member that is itself a fork, and
+\* its forks, owes that member and leaves a seated member whose root is the
+\* same first member as it was: no entry names the fork between as a root.
+AuditWitnessForkRecordSkipsSiblingForkStep ==
+    /\ AuditCommittedWrite
+    /\ \E s \in AuditChangedSlots :
+           /\ s \notin DOMAIN operator_instruction_revision
+           /\ operator_instruction_target_kind'[s] = "MemberAndForks"
+           /\ operator_instruction_target_member'[s] \in DOMAIN member_instruction_lineage
+           /\ AuditFactAt(member_instruction_owed', operator_instruction_target_member'[s],
+                          operator_instruction_generation')
+           /\ \E other \in DOMAIN member_instruction_lineage \ {operator_instruction_target_member'[s]} :
+                  /\ other \in DOMAIN identity_to_runtime
+                  /\ member_instruction_lineage[other] =
+                         member_instruction_lineage[operator_instruction_target_member'[s]]
+                  /\ ~AuditFactAt(member_instruction_owed', other, operator_instruction_generation')
+
+\* Fork run: a seat of a name that holds a lineage entry (its unseat kept
+\* its identity, so the entry stayed) keeps the entry.
+AuditWitnessReseatKeepsLineageStep ==
+    \E id \in DOMAIN member_instruction_lineage :
+        /\ id \notin DOMAIN identity_to_runtime
+        /\ id \in DOMAIN identity_to_runtime'
+        /\ AuditFactAt(member_instruction_lineage', id, member_instruction_lineage[id])
+
+\* Fork run: a fork seated as its second incarnation is owed by a new
+\* record written for its root and its forks.
+AuditWitnessReseatedForkOwedByRootRecordStep ==
+    /\ AuditCommittedWrite
+    /\ \E s \in AuditChangedSlots :
+           /\ s \notin DOMAIN operator_instruction_revision
+           /\ operator_instruction_target_kind'[s] = "MemberAndForks"
+           /\ \E id \in DOMAIN member_instruction_lineage :
+                  /\ AuditForkOwedBy(s, id)
+                  /\ id \in DOMAIN identity_runtime_generations
+                  /\ identity_runtime_generations[id] = 2
+
+\* Fork run: a lineage record repeated for a member that holds exactly that
+\* entry.
+AuditWitnessLineageRecordRepeatedStep ==
+    \E id \in DOMAIN member_instruction_lineage :
+        RecordMemberInstructionLineageRunning(id, member_instruction_lineage[id])
 
 \* Fork run: a new record written for a seated member and its forks owes the
 \* member's seated fork and leaves a third seated member, neither the
@@ -756,7 +832,6 @@ NotAuditWitnessRecordCloses == [][~AuditWitnessRecordClosesStep]_vars
 NotAuditWitnessForkWriteOwesFork == [][~AuditWitnessForkWriteOwesForkStep]_vars
 NotAuditWitnessMemberWriteSkipsFork == [][~AuditWitnessMemberWriteSkipsForkStep]_vars
 NotAuditWitnessLineageRecordOwes == [][~AuditWitnessLineageRecordOwesStep]_vars
-NotAuditWitnessOwnForkAsRootWritesNoEntry == [][~AuditWitnessOwnForkAsRootWritesNoEntryStep]_vars
 NotAuditWitnessDormantDeliverable == ~AuditWitnessDormantDeliverable
 NotAuditWitnessSeatAfterWriteOwed == [][~AuditWitnessSeatAfterWriteOwedStep]_vars
 NotAuditWitnessUnseatDropsFacts == [][~AuditWitnessUnseatDropsFactsStep]_vars
@@ -765,6 +840,11 @@ NotAuditWitnessForkOwedWithoutSeatedRoot == [][~AuditWitnessForkOwedWithoutSeate
 NotAuditWitnessUnbornOwedDeferred == ~AuditWitnessUnbornOwedDeferred
 NotAuditWitnessUnboundOwedDeferred == ~AuditWitnessUnboundOwedDeferred
 NotAuditWitnessRetiringReleasable == ~AuditWitnessRetiringReleasable
-NotAuditWitnessForkOfForkNamesTheRoot == [][~AuditWitnessForkOfForkNamesTheRootStep]_vars
+NotAuditWitnessRootHoldsAnEntry == ~AuditWitnessRootHoldsAnEntry
+NotAuditWitnessForkOfForkFollowsTheFirstMember == [][~AuditWitnessForkOfForkFollowsTheFirstMemberStep]_vars
+NotAuditWitnessForkRecordSkipsSiblingFork == [][~AuditWitnessForkRecordSkipsSiblingForkStep]_vars
+NotAuditWitnessReseatKeepsLineage == [][~AuditWitnessReseatKeepsLineageStep]_vars
+NotAuditWitnessReseatedForkOwedByRootRecord == [][~AuditWitnessReseatedForkOwedByRootRecordStep]_vars
+NotAuditWitnessLineageRecordRepeated == [][~AuditWitnessLineageRecordRepeatedStep]_vars
 NotAuditWitnessForkWriteSkipsBystander == [][~AuditWitnessForkWriteSkipsBystanderStep]_vars
 ====

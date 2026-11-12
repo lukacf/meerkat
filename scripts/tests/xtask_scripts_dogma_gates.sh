@@ -425,8 +425,8 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # coverage block in which each covered action of every run generated a state
 # (the replay and the end of an identity's life read under their wrappers'
 # names, AuditReplay and AuditEndLife, by the runner's closed alias table),
-# its sixteen step witnesses and four state witnesses violated, and with
-# --mutants each of sixteen seeded defects' target invariant or action
+# its nineteen step witnesses and five state witnesses violated, and with
+# --mutants each of seventeen seeded defects' target invariant or action
 # property violated and its live-only delivery and bound-only release
 # mutants' runs to end without an error (the success line above).
 # superseded_ack_retention_audit.sh (schedule_lifecycle) requires its three
@@ -1304,13 +1304,17 @@ printf '%s\n' \
   'echo "Error: Action property NotAuditWitnessForkWriteOwesFork is violated."' \
   'echo "Error: Action property NotAuditWitnessMemberWriteSkipsFork is violated."' \
   'echo "Error: Action property NotAuditWitnessLineageRecordOwes is violated."' \
-  'echo "Error: Action property NotAuditWitnessOwnForkAsRootWritesNoEntry is violated."' \
   'echo "Error: Action property NotAuditWitnessSeatAfterWriteOwed is violated."' \
   'echo "Error: Action property NotAuditWitnessUnseatDropsFacts is violated."' \
   'echo "Error: Action property NotAuditWitnessIdentityEndDropsLineage is violated."' \
   'echo "Error: Action property NotAuditWitnessForkOwedWithoutSeatedRoot is violated."' \
-  'echo "Error: Action property NotAuditWitnessForkOfForkNamesTheRoot is violated."' \
+  'echo "Error: Action property NotAuditWitnessForkOfForkFollowsTheFirstMember is violated."' \
+  'echo "Error: Action property NotAuditWitnessForkRecordSkipsSiblingFork is violated."' \
+  'echo "Error: Action property NotAuditWitnessReseatKeepsLineage is violated."' \
+  'echo "Error: Action property NotAuditWitnessReseatedForkOwedByRootRecord is violated."' \
+  'echo "Error: Action property NotAuditWitnessLineageRecordRepeated is violated."' \
   'echo "Error: Action property NotAuditWitnessForkWriteSkipsBystander is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRootHoldsAnEntry is violated."' \
   'echo "Error: Invariant NotAuditWitnessDormantDeliverable is violated."' \
   'echo "Error: Invariant NotAuditWitnessUnbornOwedDeferred is violated."' \
   'echo "Error: Invariant NotAuditWitnessUnboundOwedDeferred is violated."' \
@@ -1320,7 +1324,8 @@ printf '%s\n' \
   'echo "Error: Action property AuditLineageRecordOwesTheGeneration is violated."' \
   'echo "Error: Invariant AuditLineageOnlyBeforeASnapshot is violated."' \
   'echo "Error: Invariant member_instruction_lineage_names_another_member is violated."' \
-  'echo "Error: Action property AuditLineageRecordNamesTheRoot is violated."' \
+  'echo "Error: Action property AuditLineageRecordWritesTheGivenRoot is violated."' \
+  'echo "Error: Action property AuditLineageKeptUnlessRecordedOrEnded is violated."' \
   'echo "Error: Action property AuditIdentityEndLeavesNoLineage is violated."' \
   'echo "Error: Invariant AuditDeliversOnlyToBoundBornMembers is violated."' \
   'echo "Error: Action property AuditSeatOwesTheGeneration is violated."' \

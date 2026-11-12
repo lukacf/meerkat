@@ -10954,6 +10954,7 @@ fn where_an_identitys_record_lives_is_asked_in_one_module() {
             "MemberIdentityManagement::CreatedEntry",
             ".created_identities()",
             ".created_identity(",
+            ".created_identities_of(",
             ".created_identity_names()",
         ] {
             assert!(

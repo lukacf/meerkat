@@ -20744,6 +20744,9 @@ model = "gpt-5.5"
                 ManagedPeerEdge::new(planner.clone(), helper.clone())?,
             ])
             .await?;
+        // Both wires landed: the live graph holds them.
+        bridge.land_wire(&planner_rt, &member_rt);
+        bridge.land_wire(&planner_rt, &helper_rt);
 
         // The topology withdraws both edges. The member's row has come to
         // declare its edge; the helper's row does not read.

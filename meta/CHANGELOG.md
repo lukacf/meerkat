@@ -80,13 +80,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   one.
 
 - A roster pass reads no row of an identity it serves already: it reads
-  the names from Core's identity entries and one row for each name it has
-  not registered yet. Through 0.9.13 every pass read every row. A row Core
-  changed is read again at the identity's next delivery, as before.
+  the names from Core's identity entries and the rows of the names it has
+  not registered yet in pages (one store read per page of names, through
+  Core's `MobHandle::identity_records`), so a cold start makes no store
+  read per identity. Through 0.9.13 every pass read every row, one read
+  each. A row Core changed is read again at the identity's next delivery,
+  as before, and status and list reads answer the same before any door of
+  the identity opened.
 
-- Rust: `SessionBridge` has four new methods, each with a default:
+- Rust: `SessionBridge` has five new methods, each with a default:
   `created_identity_names` (the names of the identities whose record is
-  their row; default `BridgeError::Unsupported`), `owned_peers` (the peer
+  their row; default `BridgeError::Unsupported`), `created_identities_of`
+  (the rows of many such identities at once; the default asks
+  `created_identity` for each), `owned_peers` (the peer
   edges an identity's row declares; default none), `holds_identity_entry`
   (whether Core holds a member id as an identity entry; default `false`)
   and `respawn_member_on_own_session` (Core's same-session successor;

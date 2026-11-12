@@ -6095,6 +6095,27 @@ pub trait SessionBridge: Send + Sync {
         })
     }
 
+    /// [`SessionBridge::created_identity`] for many identities at once: the
+    /// spec of each of `names` whose record is its row, absent from the
+    /// answer when [`SessionBridge::created_identity`] would answer `None`.
+    /// A bridge over Core reads the rows in pages, one store read per page
+    /// of names, so a roster pass over many identities it has not
+    /// registered yet makes no read per identity. The default asks
+    /// [`SessionBridge::created_identity`] for each name, which answers the
+    /// same; a bridge that wraps another forwards it.
+    async fn created_identities_of(
+        &self,
+        names: &[AgentIdentity],
+    ) -> Result<BTreeMap<AgentIdentity, DurableAgentSpec>, BridgeError> {
+        let mut specs = BTreeMap::new();
+        for name in names {
+            if let Some(spec) = self.created_identity(name).await? {
+                specs.insert(name.clone(), spec);
+            }
+        }
+        Ok(specs)
+    }
+
     /// The names of the identities whose record is their row in the mob's
     /// identity store, in identity order, read from Core's identity entry
     /// pages (`MobHandle::identity_entries`): the machine state the mob's
@@ -8698,22 +8719,32 @@ impl MobSessionBridge {
             .identity_record(member)
             .await
             .map_err(|error| created_identity_read_error("created_identity", error))?;
-        let Some(meerkat_mob::CreatedIdentityObservation::Created(record)) = observation else {
-            return Ok(None);
-        };
-        if record.presence == meerkat_mob::CreatedIdentityPresence::Removed {
-            return Ok(None);
-        }
-        let (Some(identity), Some(spec)) = (served_identity_of_member(member), record.spec) else {
-            tracing::warn!(
-                %member,
-                "a created entry's row carries no spec, or its member id names no identity this \
-                 runtime serves: the identity runtime does not serve it"
-            );
-            return Ok(None);
-        };
-        Ok(Some(durable_spec_of_created(identity, spec)))
+        Ok(created_spec_of_observation(member, observation))
     }
+}
+
+/// The spec this runtime serves from `observation`, the row of `member` in
+/// the mob's identity store as Core read it: see
+/// [`MobSessionBridge::created_identity_of_member`].
+fn created_spec_of_observation(
+    member: &MobAgentIdentity,
+    observation: Option<meerkat_mob::CreatedIdentityObservation>,
+) -> Option<DurableAgentSpec> {
+    let Some(meerkat_mob::CreatedIdentityObservation::Created(record)) = observation else {
+        return None;
+    };
+    if record.presence == meerkat_mob::CreatedIdentityPresence::Removed {
+        return None;
+    }
+    let (Some(identity), Some(spec)) = (served_identity_of_member(member), record.spec) else {
+        tracing::warn!(
+            %member,
+            "a created entry's row carries no spec, or its member id names no identity this \
+             runtime serves: the identity runtime does not serve it"
+        );
+        return None;
+    };
+    Some(durable_spec_of_created(identity, spec))
 }
 
 /// The identity this runtime serves a store-owned entry's member id as: the
@@ -10847,6 +10878,44 @@ impl SessionBridge for MobSessionBridge {
         self.created_identity_of_member(&member).await
     }
 
+    async fn created_identities_of(
+        &self,
+        names: &[AgentIdentity],
+    ) -> Result<BTreeMap<AgentIdentity, DurableAgentSpec>, BridgeError> {
+        // The names Core holds as created entries (published machine state,
+        // no store read), then their rows in pages: one store read per page.
+        let mut members = Vec::with_capacity(names.len());
+        for name in names {
+            let member = member_id_for_identity(name);
+            match self.handle.identity_entry(&member) {
+                Ok(meerkat_mob::IdentityEntryRead::Entry(view))
+                    if view.origin == meerkat_mob::IdentityEntryOrigin::Created =>
+                {
+                    members.push((name.clone(), member));
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    return Err(created_identity_read_error("created_identities_of", error));
+                }
+            }
+        }
+        let asked = members
+            .iter()
+            .map(|(_, member)| member.clone())
+            .collect::<Vec<_>>();
+        let mut rows = self
+            .handle
+            .identity_records(&asked)
+            .await
+            .map_err(|error| created_identity_read_error("created_identities_of", error))?;
+        Ok(members
+            .into_iter()
+            .filter_map(|(name, member)| {
+                created_spec_of_observation(&member, rows.remove(&member)).map(|spec| (name, spec))
+            })
+            .collect())
+    }
+
     async fn created_identity_names(&self) -> Result<Vec<AgentIdentity>, BridgeError> {
         let mut names = Vec::new();
         let mut after: Option<MobAgentIdentity> = None;
@@ -12160,6 +12229,13 @@ impl SessionBridge for super::PublicSessionBridge {
         identity: &AgentIdentity,
     ) -> Result<Option<DurableAgentSpec>, BridgeError> {
         self.bridge.created_identity(identity).await
+    }
+
+    async fn created_identities_of(
+        &self,
+        names: &[AgentIdentity],
+    ) -> Result<BTreeMap<AgentIdentity, DurableAgentSpec>, BridgeError> {
+        self.bridge.created_identities_of(names).await
     }
 
     async fn created_identity_names(&self) -> Result<Vec<AgentIdentity>, BridgeError> {

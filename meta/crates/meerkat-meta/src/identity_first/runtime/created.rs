@@ -78,17 +78,6 @@ pub(super) enum SuccessorCause {
     CompactionFloor(Option<std::num::NonZeroU64>),
 }
 
-impl SuccessorCause {
-    /// The compaction floor change the successor's seat carries, if the
-    /// cause is one.
-    fn compaction_floor(self) -> Option<Option<std::num::NonZeroU64>> {
-        match self {
-            Self::CompactionFloor(floor) => Some(floor),
-            Self::Respawn | Self::Reload => None,
-        }
-    }
-}
-
 /// Whether `binding` is the member of an identity whose record is its row in
 /// the mob's identity store, by Core's typed identity management of its name
 /// as the binding's read answered it. Under such a name Core seats the
@@ -303,8 +292,14 @@ impl IdentityRuntime {
         let ended = match row_spec.as_ref() {
             None => bridge.retire_member(&live.agent_runtime_id).await,
             Some(spec) => {
+                // The compaction floor change the successor's seat carries,
+                // when the cause is one.
+                let floor_change = match cause {
+                    SuccessorCause::CompactionFloor(floor) => Some(floor),
+                    SuccessorCause::Respawn | SuccessorCause::Reload => None,
+                };
                 bridge
-                    .respawn_member_on_own_session(identity, spec, cause.compaction_floor())
+                    .respawn_member_on_own_session(identity, spec, floor_change)
                     .await
             }
         };
@@ -358,36 +353,53 @@ impl IdentityRuntime {
             match bridge.created_identity_names().await {
                 Ok(names) => {
                     let held = names.iter().cloned().collect::<BTreeSet<_>>();
-                    for name in names {
-                        let registered = self
-                            .entries
-                            .read()
-                            .await
-                            .get(&name)
-                            .map(|entry| entry.created);
-                        if registered == Some(true) {
-                            continue;
-                        }
-                        match bridge.created_identity(&name).await {
-                            // A name not registered yet waits on no lock:
-                            // nothing is replaced.
-                            Ok(Some(spec)) if registered.is_none() => {
-                                self.register_created_if_absent(spec).await;
+                    // The names not registered from their rows yet, each
+                    // with whether the roster registered it.
+                    let unregistered = {
+                        let entries = self.entries.read().await;
+                        names
+                            .into_iter()
+                            .filter_map(|name| {
+                                match entries.get(&name).map(|entry| entry.created) {
+                                    Some(true) => None,
+                                    registered => Some((name, registered.is_some())),
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                    };
+                    if !unregistered.is_empty() {
+                        let asked = unregistered
+                            .iter()
+                            .map(|(name, _)| name.clone())
+                            .collect::<Vec<_>>();
+                        // Their rows in one read, in pages: a cold start
+                        // makes no store read per identity.
+                        match bridge.created_identities_of(&asked).await {
+                            Ok(mut rows) => {
+                                for (name, registered_by_roster) in unregistered {
+                                    let Some(spec) = rows.remove(&name) else {
+                                        continue;
+                                    };
+                                    if registered_by_roster {
+                                        // The roster's registration of a
+                                        // name a row holds gives way to the
+                                        // row's.
+                                        let lifecycle_lock = self.lifecycle_lock_for(&name).await;
+                                        let _lifecycle_guard = lifecycle_lock.lock().await;
+                                        self.register_created_locked(spec).await;
+                                    } else {
+                                        // A name not registered yet waits on
+                                        // no lock: nothing is replaced.
+                                        self.register_created_if_absent(spec).await;
+                                    }
+                                }
                             }
-                            // The roster's registration of a name a row
-                            // holds gives way to the row's.
-                            Ok(Some(spec)) => {
-                                let lifecycle_lock = self.lifecycle_lock_for(&name).await;
-                                let _lifecycle_guard = lifecycle_lock.lock().await;
-                                self.register_created_locked(spec).await;
-                            }
-                            Ok(None) | Err(BridgeError::Unsupported { .. }) => {}
+                            Err(BridgeError::Unsupported { .. }) => {}
                             Err(error) => tracing::warn!(
-                                identity = %name,
                                 %error,
-                                "the roster pass could not read an identity's row in the mob's \
-                                 identity store; the next pass, or a door that names it, \
-                                 registers it"
+                                "the roster pass could not read the rows of the identities it \
+                                 has not registered yet; the next pass, or a door that names \
+                                 one, registers it"
                             ),
                         }
                     }

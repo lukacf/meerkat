@@ -18,7 +18,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   crate calls them. Of the crates Connect builds with only `xattr` does,
   and `tar`, the one crate that uses `xattr`, calls it only to set
   attributes while unpacking, so Connect's own use is not known to be
-  affected.
+  affected. The library kits built before this change hold tools built
+  with `rustix` 1.1.5; the kits are rebuilt at the next Connect release.
 
 ## [0.9.13] - 2026-11-11
 

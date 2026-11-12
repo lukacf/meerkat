@@ -2715,6 +2715,10 @@ pub fn spawn_schedule_claim_watchdog(
 }
 
 #[cfg(test)]
+#[path = "schedule_wiring_follow_tests.rs"]
+mod follow_tests;
+
+#[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;

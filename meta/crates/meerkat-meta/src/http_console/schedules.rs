@@ -183,6 +183,8 @@ async fn create(
     let trigger = trigger_param(call.params)?.ok_or_else(|| invalid("trigger is required"))?;
     let name = optional_string(call.params, "name")?;
     let target = sendable_target(call, schedules, identity).await?;
+    #[cfg(test)]
+    schedules.wait_at_write_hold().await;
     let send = ConsoleScheduledSend::new(target, content, sender, now_epoch_seconds());
     caller_current(call)?;
     let schedule = schedules

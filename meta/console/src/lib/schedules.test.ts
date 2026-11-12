@@ -11,6 +11,7 @@ import {
   describeFormerSender,
   describeInterval,
   describeLatestTakeover,
+  describeSchedulePause,
   describeScheduleSender,
   describeScheduleSenderHistory,
   describeScheduleTakeover,
@@ -479,4 +480,33 @@ test("a schedule's earlier senders read in words, the latest takeover first", ()
     describeFormerSender({ sender: "identity:alpha", definedAt: null, replacedAt: null }, (key) => (key === "identity:alpha" ? "Alpha" : undefined)),
     "Sent as Alpha",
   );
+});
+
+test("a schedule paused because its agent is archived says so, and a pause by name does not", () => {
+  const forAgent = parseConsoleSchedule(item({ phase: "paused", paused_for_target: true }));
+  const byName = parseConsoleSchedule(item({ phase: "paused" }));
+  const active = parseConsoleSchedule(item());
+  assert.equal(forAgent?.pausedForTarget, true);
+  assert.equal(byName?.pausedForTarget, false);
+  assert.equal(active?.pausedForTarget, false);
+  // Only the gateway's `true` says so.
+  assert.equal(parseConsoleSchedule(item({ phase: "paused", paused_for_target: "yes" }))?.pausedForTarget, false);
+  assert.equal(
+    describeSchedulePause(forAgent!),
+    "Paused because its agent is archived. It resumes when the agent is unarchived.",
+  );
+  assert.equal(describeSchedulePause(byName!), null);
+  assert.equal(describeSchedulePause(active!), null);
+  // An active schedule is never described as paused, whatever the answer carries.
+  assert.equal(describeSchedulePause(parseConsoleSchedule(item({ paused_for_target: true }))!), null);
+});
+
+test("a schedule refused because its agent is archived reads in the console's words", () => {
+  const archived = rpcError(-32603, { kind: "identity_archived", identity: "alpha" }, "identity alpha is archived: internal words");
+  for (const command of [CONSOLE_SCHEDULE_COMMANDS.create, CONSOLE_SCHEDULE_COMMANDS.update]) {
+    assert.equal(
+      scheduleErrorMessage(archived, command),
+      "This agent is archived, so its schedules cannot be created or changed until it is unarchived.",
+    );
+  }
 });

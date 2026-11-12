@@ -19820,7 +19820,7 @@ async fn unseated_agent_access_attributes(
             if roster_identities.contains(&name) {
                 continue;
             }
-            if view.origin == meerkat_mob::IdentityEntryOrigin::Created {
+            if crate::identity_first::IdentityRuntime::entry_record_is_row(view) {
                 created_names.insert(name.clone());
                 created.push((name, view.identity.clone()));
             } else {

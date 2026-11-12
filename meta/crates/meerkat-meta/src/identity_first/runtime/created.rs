@@ -89,6 +89,30 @@ pub(super) fn binding_is_a_rows(binding: &meerkat_mob::MemberBinding) -> bool {
 }
 
 impl IdentityRuntime {
+    /// Whether the record of the agent the entry `view` names is its row in
+    /// the mob's identity store, asked of one of Core's published entries.
+    /// The Console's access priming asks it, to read each agent's
+    /// attributes from the record that holds them.
+    pub(crate) fn entry_record_is_row(view: &meerkat_mob::IdentityEntryView) -> bool {
+        view.origin == meerkat_mob::IdentityEntryOrigin::Created
+    }
+
+    /// `read` of every registration that was not read from a row (an agent
+    /// the host's roster holds), as registered now. No read of Core or of a
+    /// record, and nothing is kept.
+    pub(crate) async fn roster_registrations<T>(
+        &self,
+        read: impl Fn(&AgentIdentity, &DurableAgentSpec) -> T,
+    ) -> Vec<T> {
+        self.entries
+            .read()
+            .await
+            .iter()
+            .filter(|(_, entry)| !entry.created)
+            .map(|(identity, entry)| read(identity, &entry.spec))
+            .collect()
+    }
+
     /// Which record holds `identity`'s spec, from Core's typed identity
     /// management of its name: the host's roster, or its row in the mob's
     /// identity store. An identity a host adopted through an identity intent

@@ -340,21 +340,18 @@ impl IdentityRuntime {
     /// serves is not answered, and a registration that changed is answered
     /// as it is.
     pub(crate) async fn configured_records(&self) -> BTreeMap<String, UnseatedRecord> {
-        self.entries
-            .read()
-            .await
-            .iter()
-            .filter(|(_, entry)| !entry.created)
-            .map(|(identity, entry)| {
-                (
-                    identity.as_str().to_owned(),
-                    UnseatedRecord {
-                        profile: entry.spec.profile.as_str().to_owned(),
-                        labels: entry.spec.labels.clone(),
-                    },
-                )
-            })
-            .collect()
+        self.roster_registrations(|identity, spec| {
+            (
+                identity.as_str().to_owned(),
+                UnseatedRecord {
+                    profile: spec.profile.as_str().to_owned(),
+                    labels: spec.labels.clone(),
+                },
+            )
+        })
+        .await
+        .into_iter()
+        .collect()
     }
 }
 

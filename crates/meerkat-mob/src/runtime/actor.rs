@@ -36937,6 +36937,17 @@ impl MobActor {
             } = &spec.launch_mode
         {
             let source = source_member_id.clone();
+            // A source the member tools marked (the host's member tool
+            // audience hides it from the calling member) is answered here
+            // as a source the roster does not hold: this is the place a fork
+            // source is first looked up, so both get the same answer after
+            // the same earlier refusals.
+            if spec.fork_source_answered_absent {
+                reject_spawn_before_custody!(
+                    "prompt_fork_dispatch_admission",
+                    MobError::MemberNotFound(source)
+                );
+            }
             match self.prompt_fork_dispatch_lineage(&source, &spec).await {
                 Ok(lineage) => spec.dispatch_admission_lineage = lineage,
                 Err(error) => {
@@ -37194,6 +37205,8 @@ impl MobActor {
             // whose lineage carries an admission: the seat's membership
             // commit records it in MobMachine, and the spawn row persists it.
             dispatch_admission_lineage,
+            // Answered at the fork source's first lookup; nothing else reads it.
+            fork_source_answered_absent: _,
         } = spec;
         let dispatch_admission = super::fork_build::SpawnDispatchAdmissionFacts {
             lineage: dispatch_admission_lineage,
@@ -39724,6 +39737,8 @@ impl MobActor {
             // Refused below: a placed member cannot carry a process-local
             // admission, which such a lineage needs at every build.
             dispatch_admission_lineage,
+            // Answered at the fork source's first lookup; nothing else reads it.
+            fork_source_answered_absent: _,
         } = spec;
         let Some(host) = placement else {
             fail!(MobError::Internal(
@@ -41463,6 +41478,7 @@ impl MobActor {
             created_custody: _,
             // A policy auto-spawn is fresh: it continues no lineage.
             dispatch_admission_lineage: _,
+            fork_source_answered_absent: _,
         } = member_spec;
 
         if agent_identity.is_system_reserved() {
@@ -48405,6 +48421,8 @@ impl MobActor {
         local: AgentIdentity,
         target: super::handle::PeerTarget,
     ) -> Result<wiring_io::WireHandled, MobError> {
+        self.refuse_member_edge_naming_unheld_member(&local, &target, false)
+            .await?;
         self.refuse_approval_branch_control(Self::wiring_endpoints(&local, &target))
             .await?;
         match self
@@ -48417,6 +48435,47 @@ impl MobActor {
                 self.dispatch_prepared_wiring(*prepared, None),
             )),
         }
+    }
+
+    /// A wire or unwire command between two members answers a name the
+    /// roster does not hold as member not found before it refuses the call
+    /// for what the other member is (an open approval branch, a Broken
+    /// member), so the answer for such a name never depends on the other
+    /// end. The member tools answer a member the host's member tool
+    /// audience hides from the caller by the same order
+    /// (`MobHandle::wire_end_answered_absent`): the local member first,
+    /// then the peer. Keep the two in step.
+    ///
+    /// Left to the command itself: a call that names one member twice, a
+    /// wire in a mob that is not running (its lifecycle refusal comes
+    /// first), and an unwire of an external peer by its name.
+    async fn refuse_member_edge_naming_unheld_member(
+        &self,
+        local: &AgentIdentity,
+        target: &super::handle::PeerTarget,
+        unwire: bool,
+    ) -> Result<(), MobError> {
+        let super::handle::PeerTarget::Local(peer) = target else {
+            return Ok(());
+        };
+        if local == peer || (!unwire && self.state() != MobState::Running) {
+            return Ok(());
+        }
+        let roster = self.roster.read().await;
+        if roster.get(local).is_none() {
+            return Err(MobError::MemberNotFound(local.clone()));
+        }
+        if roster.get(peer).is_some() {
+            return Ok(());
+        }
+        let external_peer = unwire
+            && meerkat_core::comms::PeerName::new(peer.as_str().to_string())
+                .ok()
+                .is_some_and(|name| self.external_peer_edge_for_name(local, &name).is_some());
+        if external_peer {
+            return Ok(());
+        }
+        Err(MobError::MemberNotFound(peer.clone()))
     }
 
     /// The members a wire or unwire command between `local` and `target`
@@ -50586,6 +50645,8 @@ impl MobActor {
         local: AgentIdentity,
         target: super::handle::PeerTarget,
     ) -> Result<wiring_io::WireHandled, MobError> {
+        self.refuse_member_edge_naming_unheld_member(&local, &target, true)
+            .await?;
         self.refuse_approval_branch_control(Self::wiring_endpoints(&local, &target))
             .await?;
         // An owned edge takes no plain unwire (0.9.11): MobMachine's
@@ -51566,14 +51627,23 @@ impl MobActor {
         }
         let edge = Self::external_peer_edge(&local_identity, &spec);
         let key = Self::external_peer_key_for_edge(&edge);
-        self.probe_command_admission(
+        let refusal = match self.probe_command_admission(
             mob_dsl::MobMachineInput::WireExternalPeer {
                 key: key.clone(),
                 edge: edge.clone(),
             },
             MobState::Running,
             "wire_external_peer_command_admission",
-        )?;
+        ) {
+            Ok(()) => None,
+            // A mob that is not running answers the machine's lifecycle
+            // refusal before any member lookup.
+            Err(refusal) if self.state() != MobState::Running => return Err(refusal),
+            // In a running mob a member the roster does not hold answers
+            // MemberNotFound before the machine's refusal of an edge from an
+            // identity that is not seated, as a member edge does.
+            Err(refusal) => Some(refusal),
+        };
 
         // Look up the local member's roster entry and session binding.
         let (member_ref, local_incarnation) = {
@@ -51586,6 +51656,9 @@ impl MobActor {
                 MemberIncarnationFence::from_entry(entry),
             )
         };
+        if let Some(refusal) = refusal {
+            return Err(refusal);
+        }
 
         // MobMachine's verdict says what the local member's runtime is owed:
         // a member that is not materialized is owed no trust row now (its

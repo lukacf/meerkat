@@ -8558,7 +8558,11 @@ mod tests {
         let handle = host_mob_with_kept_members(
             &state,
             "council-audience",
-            &[("council-kept", Some("ann")), ("council-convener", None)],
+            &[
+                ("council-kept", Some("ann")),
+                ("council-keeper", Some("ann")),
+                ("council-convener", None),
+            ],
         )
         .await;
         let tools = member_mob_tools(
@@ -8594,6 +8598,134 @@ mod tests {
         assert_eq!(
             hidden, absent,
             "a participant hidden from the convener answers as a name the mob does not hold"
+        );
+
+        // A convener the member is not hidden from convenes it: the audience
+        // is asked about the convener itself.
+        let keeper = member_mob_tools(
+            &state,
+            &handle,
+            "council-keeper",
+            create_and_manage_authority(&handle),
+        )
+        .await;
+        let convened =
+            masked_mob_tool_answer(&keeper, "council", council("council-kept"), "council-kept")
+                .await;
+        assert!(
+            !convened.contains("mob member not found"),
+            "a convener the participant is not hidden from is not answered that the mob does \
+             not hold it: {convened}"
+        );
+    }
+
+    /// `mob_wire` to an external binding asks the host's member tool audience
+    /// about the member it names: a member it hides from the caller answers
+    /// exactly as a name the mob does not hold, for a well-formed binding.
+    #[tokio::test]
+    async fn mob_wire_to_an_external_binding_answers_a_member_hidden_from_the_caller_as_absent() {
+        let state = MobMcpState::new_in_memory();
+        let handle = host_mob_with_kept_members(
+            &state,
+            "external-wire-audience",
+            &[("external-kept", Some("ann")), ("external-caller", None)],
+        )
+        .await;
+        let caller = member_mob_tools(
+            &state,
+            &handle,
+            "external-caller",
+            scope_only_authority("external-wire-audience", handle.live_incarnation()),
+        )
+        .await;
+        let wire = |member: &str| {
+            json!({
+                "mob_id": "external-wire-audience",
+                "member_id": member,
+                "peer": {
+                    "external_binding": {
+                        "name": "external-worker",
+                        "address": "inproc://external-worker",
+                        "identity": {
+                            "kind": "ed25519_public_key",
+                            "public_key": ED25519_PUBLIC_KEY_7,
+                        },
+                    },
+                },
+            })
+        };
+        let absent =
+            masked_mob_tool_answer(&caller, "mob_wire", wire("external-gone"), "external-gone")
+                .await;
+        let hidden =
+            masked_mob_tool_answer(&caller, "mob_wire", wire("external-kept"), "external-kept")
+                .await;
+        assert!(
+            absent.starts_with("error:"),
+            "a name the mob does not hold is refused: {absent}"
+        );
+        assert_eq!(
+            hidden, absent,
+            "a member hidden from the caller answers as a name the mob does not hold"
+        );
+    }
+
+    /// The report `mob_destroy` answers with names no member the host's
+    /// member tool audience hides from the caller: not in a member list of
+    /// the report, not in the text of an error, not in the refusal of an
+    /// incomplete destroy. A member the caller is shown is named as before.
+    #[tokio::test]
+    async fn mob_destroy_report_names_no_member_hidden_from_the_caller() {
+        let (state, archives) = MobMcpState::new_in_memory_with_archive_failure_control();
+        let home =
+            host_mob_with_kept_members(&state, "destroy-home", &[("destroy-caller", None)]).await;
+        // One mob per case: the teardown of its member fails, so the
+        // destroy's report has an entry for that member.
+        let mut answers = Vec::new();
+        for (mob_id, member, keeper) in [
+            ("destroy-audience-a", "destroy-kept", Some("ann")),
+            ("destroy-audience-b", "destroy-shown", None),
+        ] {
+            let handle = host_mob_with_kept_members(&state, mob_id, &[(member, keeper)]).await;
+            let session = handle
+                .resolve_bridge_session_id(&AgentIdentity::from(member))
+                .await
+                .expect("the member's session");
+            archives
+                .fail_archive(session, "the archive is refused")
+                .await;
+            let caller = member_mob_tools(
+                &state,
+                &home,
+                "destroy-caller",
+                scope_only_authority(mob_id, handle.live_incarnation()),
+            )
+            .await;
+            answers.push(
+                masked_mob_tool_answer(&caller, "mob_destroy", json!({ "mob_id": mob_id }), mob_id)
+                    .await,
+            );
+        }
+        let [hidden, shown] = answers.as_slice() else {
+            panic!("two destroys were asked");
+        };
+        assert!(
+            shown.contains("destroy-shown"),
+            "the report names a member the caller is shown whose teardown failed: {shown}"
+        );
+        assert!(
+            hidden.starts_with("error:") && !hidden.contains("destroy-kept"),
+            "the report names no member hidden from the caller, in the refusal's message or \
+             in its data: {hidden}"
+        );
+        assert!(
+            hidden.contains("mob destroy incomplete") && hidden.contains("mob_destroy_incomplete"),
+            "a destroy whose only failure is a hidden member's is still answered as \
+             incomplete: {hidden}"
+        );
+        assert!(
+            !hidden.contains("the archive is refused"),
+            "no text of the hidden member's failure is answered: {hidden}"
         );
     }
 

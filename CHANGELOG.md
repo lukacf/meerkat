@@ -52,10 +52,12 @@ them.
   (`MobBuilder::with_member_tool_audience`) hides from a calling member.
   It is the one place the audience is asked, and the member tools that
   name or list members ask through it: `member_status`, `retire_member`,
-  `force_cancel_member`, `wire_members`, `unwire_members` and
-  `list_members`, and the mob tools' `mob_check_member`,
-  `mob_retire_member`, `mob_wire`, `mob_unwire`, `mob_list_members` and
-  `council`. A target the roster holds no row for is handed to the
+  `force_cancel_member`, `wire_members`, `unwire_members`, `list_members`,
+  `spawn_member` and `spawn_many_members` (the source of a fork launch,
+  and the member a resumed session is bound to), and the mob tools'
+  `mob_check_member`, `mob_retire_member`, `mob_wire`, `mob_unwire`,
+  `mob_list_members`, `council` and `mob_destroy` (the members its report
+  names). A target the roster holds no row for is handed to the
   audience without labels, and the host decides from its own record.
   Empty when the host installed no audience.
 
@@ -96,6 +98,12 @@ them.
   `ReviewStageNotAllowed`, so an agent never approves a change of an agent.
   No released surface held a decision of these kinds.
 
+- Mob: a wire or unwire between two members, and a wire of a member to an
+  external peer, answer a name the mob does not hold as member not found
+  before any refusal about the other member or about the edge; before,
+  such a call could answer that other refusal (an open approval branch, a
+  Broken member, an edge MobMachine does not admit) instead.
+
 ### Fixed
 
 - Mob: the member lists a member's own tools answer (`list_members`, and
@@ -113,29 +121,36 @@ them.
   `wire_members`, `unwire_members`, `mob_wire` and `mob_unwire` answer a
   member it hides from the caller (as either end), exactly as a name the
   mob does not hold, and fork, wire or unwire nothing. Through 0.9.14 a
-  member with manage scope over the mob (and, for a council, the capability
-  to create mobs) could have a member hidden from it take part in its
-  council and receive the council's result, could wire a member to a
-  hidden one, and could tell a hidden member's name from a name the mob
-  does not hold. Hosts with no audience see no change.
+  member with manage scope over the mob could learn that a member hidden
+  from it exists and reach it through these tools. Hosts with no audience
+  see no change.
 
 - Mob: the mob tools' `mob_check_member` and `mob_retire_member` ask the
   host's member tool audience themselves, before the caller's scope or
   ownership is looked at, and answer a member it hides from the caller
-  exactly as a name the mob does not hold. Through 0.9.14 they did not
-  ask: with a host that had not wrapped the two tools, a member with
-  manage scope over the mob could read the status and output preview of a
-  member hidden from it and retire it, and a member without manage scope
-  could tell a hidden member's name from a name the mob does not hold.
+  exactly as a name the mob does not hold. Through 0.9.14, with a host that
+  had not wrapped the two tools, a member could learn that a member hidden
+  from it exists, and one with manage scope over the mob could read its
+  status and retire it.
+
+- Mob: a resume launch of `spawn_member` or `spawn_many_members` that names
+  a session bound to a member the host's member tool audience hides from
+  the caller is refused exactly as a resume of a session nobody holds.
+  Through 0.9.14 the refusal told a member with manage scope over the mob
+  which member the session is bound to.
+
+- Mob: the report `mob_destroy` answers an agent with names no member the
+  host's member tool audience hides from that agent: not in its member
+  lists, not in an error text, not in the refusal of an incomplete destroy.
+  Through 0.9.14 it could name such a member.
 
 - Mob: a placed member's operator calls (`member_status`, `retire_member`,
   `force_cancel_member`, `wire_members`, `unwire_members`, `list_members`)
-  reach the host's member tool audience as that member's. Through 0.9.14
-  the audience was asked about them as about a call no member made
-  (`caller` `None`): an audience that shows a member to such a call showed
-  it to every placed member, and one that hides a member from such a call
-  hid a placed member's own. An absent caller is now a call made by no
-  member of the mob.
+  reach the host's member tool audience as that member's.
+  Through 0.9.14 the audience was asked about them as about a call no
+  member made (`caller` `None`), so a placed member was shown what such a
+  call is shown, not what the member itself is shown. An absent caller is
+  now a call made by no member of the mob.
 
 - Mob: Core asks the host's member build preparer
   (`MobBuilder::with_member_build_preparer`) before the spawn of a
@@ -151,6 +166,15 @@ them.
   and the mob's next start asks again. A hold the host asks for
   (`HoldUntilReleased`) holds the member's run starts until
   `release_member_run_starts`. Hosts with no preparer see no change.
+
+### Security
+
+- Mob: a fork launch of `spawn_member` or `spawn_many_members` (a placed
+  member's included) answers a source the host's member tool audience
+  (`MobBuilder::with_member_tool_audience`) hides from the caller as a
+  source the mob does not hold, where a member with manage scope over the
+  mob could before start a member of its own from the conversation of a
+  member hidden from it. Affects 0.9.11 through 0.9.14.
 
 ## [0.9.13] - 2026-11-11
 

@@ -337,14 +337,14 @@ impl OperatorInstructionDeliveryShared {
         Arc::clone(locks.entry(agent_identity.clone()).or_default())
     }
 
-    fn record_failure(&self, agent_identity: &AgentIdentity, failure: String) {
+    pub(crate) fn record_failure(&self, agent_identity: &AgentIdentity, failure: String) {
         self.last_failures
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(agent_identity.clone(), failure);
     }
 
-    fn clear_failure(&self, agent_identity: &AgentIdentity) {
+    pub(crate) fn clear_failure(&self, agent_identity: &AgentIdentity) {
         self.last_failures
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -684,9 +684,40 @@ pub(crate) enum MemberInstructionDeliveryOutcome {
 }
 
 /// How the delivery owner reads a session's answer.
-enum DeliveryResult {
+pub(crate) enum DeliveryResult {
     Settled(MemberInstructionDeliveryOutcome),
     Retry(String),
+}
+
+/// Record one member's prepared snapshot in its local session and classify
+/// the answer, as the delivery owner does: under the member's delivery lock,
+/// and only while the member's release epoch is still `epoch`, the one read
+/// before the snapshot was prepared (a release that landed since moved it
+/// on, and nothing is written after it: `None`). A member's wake records
+/// what the member is owed through this before the member is Live.
+pub(crate) async fn record_prepared_member_instruction_target(
+    session_service: Arc<dyn super::session_service::MobSessionService>,
+    lock: Arc<tokio::sync::Mutex<u64>>,
+    epoch: u64,
+    agent_identity: AgentIdentity,
+    delivery: MemberInstructionDelivery,
+) -> Option<DeliveryResult> {
+    let session_id = delivery.session_id().clone();
+    let generation = delivery.generation();
+    let held = lock.lock().await;
+    if *held != epoch {
+        return None;
+    }
+    let result = classify_delivery_result(
+        &agent_identity,
+        &session_id,
+        generation,
+        session_service
+            .record_member_instruction_target(delivery)
+            .await,
+    );
+    drop(held);
+    Some(result)
 }
 
 fn classify_delivery_result(

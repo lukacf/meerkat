@@ -1655,7 +1655,15 @@ old or new target selects it) is owed it, and the mob records the member's
 whole snapshot in the member's session, through the session while it is
 live and store-only while it is dormant. Nothing wakes or materializes a
 member to deliver. A member born on a new session (a spawn, a rotation, an
-unborn seat's first wake) carries the snapshot from its first build. Each
+unborn seat's first wake) carries the snapshot from its first build. A
+dormant member that is still owed its snapshot when it wakes has it
+recorded during the wake, after its conversation is loaded and before its
+run starts. So a record owed to a member at its seat is in effect at the
+first run after the seat, unless the session refuses the write; then at the
+first run that starts after the mob has been able to write it (the mob tries
+again at every wake of the member and on its own retry, at most 30 seconds
+apart). A member that stays live between runs is not tried at each run
+start. Each
 session applies its target at its next fresh run start, never inside a run.
 Dormant members are recorded at most 16 at a time by default
 (`MobBuilder::with_member_instruction_delivery_concurrency`); deliveries

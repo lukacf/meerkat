@@ -174,7 +174,13 @@ struct WakeTopology {
 /// One step of a wake turn, carried back to the actor.
 enum WakeStep {
     Planned(Box<Result<WakePlan, MobError>>),
-    Ready(Result<(), MobError>),
+    /// Readiness: the member's comms drain, and the answer of its session
+    /// to the operator instruction snapshot the member was owed (`None`:
+    /// nothing was owed, or nothing was written).
+    Ready {
+        readiness: Result<(), MobError>,
+        instructions: Option<super::super::operator_instruction_delivery::DeliveryResult>,
+    },
     Topology {
         topology: WakeTopology,
         peer: RespawnTopologyPeerId,
@@ -724,9 +730,18 @@ impl MobActor {
                 }
                 Err(error) => self.fail_member_wake(&run, None, &error).await,
             },
-            WakeStep::Ready(result) => {
-                self.member_wake_ready(run, rollback, settlement.fence.is_current(), result)
-                    .await;
+            WakeStep::Ready {
+                readiness,
+                instructions,
+            } => {
+                self.member_wake_ready(
+                    run,
+                    rollback,
+                    settlement.fence.is_current(),
+                    readiness,
+                    instructions,
+                )
+                .await;
             }
             WakeStep::Topology {
                 mut topology,
@@ -1112,7 +1127,11 @@ impl MobActor {
     }
 
     /// Readiness: the woken member's comms drain, as every readiness path
-    /// requires it ([`super::member_requires_comms_drain`]).
+    /// requires it ([`super::member_requires_comms_drain`]), and then the
+    /// operator instruction snapshot the member is owed, recorded in its
+    /// session before the member is Live: its conversation is loaded and no
+    /// run of it has started, so the run that woke it applies the record at
+    /// its start.
     async fn dispatch_member_wake_readiness(
         &mut self,
         run: WakeRun,
@@ -1126,6 +1145,8 @@ impl MobActor {
         let readiness = self.detached_member_readiness_context();
         let identity = run.identity.clone();
         let member_ref = entry.member_ref.clone();
+        let owed_instructions = self.prepare_owed_member_instructions(&run.identity).await;
+        let session_service = Arc::clone(&self.session_service);
         self.dispatch_member_wake_step(
             run,
             MemberFence::exact(&entry),
@@ -1134,13 +1155,74 @@ impl MobActor {
             async move {
                 #[cfg(test)]
                 wait_for_wake_readiness_release_for_test(&identity).await;
-                WakeStep::Ready(
-                    readiness
-                        .ensure_member_comms_drain(&identity, &member_ref, drain_required)
-                        .await,
-                )
+                let readiness = readiness
+                    .ensure_member_comms_drain(&identity, &member_ref, drain_required)
+                    .await;
+                let instructions = match (&readiness, owed_instructions) {
+                    (Ok(()), Some((delivery, lock, epoch))) => {
+                        super::super::operator_instruction_delivery::record_prepared_member_instruction_target(
+                            session_service,
+                            lock,
+                            epoch,
+                            identity.clone(),
+                            delivery,
+                        )
+                        .await
+                    }
+                    _ => None,
+                };
+                WakeStep::Ready {
+                    readiness,
+                    instructions,
+                }
             },
         );
+    }
+
+    /// The delivery of the operator instruction snapshot a waking member is
+    /// owed, as MobMachine prepares it now
+    /// (`PrepareMemberInstructionDelivery`), with the member's delivery lock
+    /// and the release epoch read before the preparation. `None` when the
+    /// member is owed nothing, when the machine delivers nothing now, for a
+    /// placed member (its session is on its member host), and when the
+    /// snapshot cannot be prepared: the member then stays owed, and the
+    /// mob's delivery owner goes on trying.
+    async fn prepare_owed_member_instructions(
+        &mut self,
+        identity: &AgentIdentity,
+    ) -> Option<(
+        crate::operator_instruction::MemberInstructionDelivery,
+        Arc<tokio::sync::Mutex<u64>>,
+        u64,
+    )> {
+        use super::super::operator_instruction_delivery::MemberInstructionPreparation;
+        if !self
+            .dsl_authority
+            .state()
+            .member_instruction_owed
+            .contains_key(&mob_dsl::AgentIdentity::from_domain(identity))
+        {
+            return None;
+        }
+        let lock = self.operator_instructions.delivery.member_lock(identity);
+        let epoch = *lock.lock().await;
+        match self.prepare_member_instruction_delivery(identity).await {
+            Ok(MemberInstructionPreparation::Deliver(delivery)) => Some((delivery, lock, epoch)),
+            Ok(
+                MemberInstructionPreparation::DeliverPlaced { .. }
+                | MemberInstructionPreparation::NotNow,
+            ) => None,
+            Err(error) => {
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    agent_identity = %identity,
+                    %error,
+                    "a waking member's owed operator instruction snapshot could not be prepared; \
+                     the member stays owed"
+                );
+                None
+            }
+        }
     }
 
     async fn member_wake_ready(
@@ -1149,6 +1231,7 @@ impl MobActor {
         rollback: Option<WakeRollback>,
         fence_current: bool,
         result: Result<(), MobError>,
+        instructions: Option<super::super::operator_instruction_delivery::DeliveryResult>,
     ) {
         if !fence_current || !self.member_wake_attempt_is_open(&run.identity, run.attempt) {
             self.roll_back_member_wake(run, rollback);
@@ -1166,6 +1249,8 @@ impl MobActor {
             .await;
             return;
         }
+        self.settle_member_instructions_recorded_at_wake(&run.identity, instructions)
+            .await;
         let plan = match self.machine_restore_wiring_plan(&run.identity) {
             Ok(plan) => plan,
             Err(error) => {
@@ -1237,6 +1322,63 @@ impl MobActor {
             },
         )
         .await;
+    }
+
+    /// Feed the answer of a waking member's session to the operator
+    /// instruction snapshot it was owed back to MobMachine
+    /// (`RecordMemberInstructionTarget`, `RefuseMemberInstructionTarget`),
+    /// before the member is Live. A record the session refused or could not
+    /// take never fails the wake: the member goes Live and stays owed or
+    /// blocked, as MobMachine holds it and the status read shows it, and one
+    /// warning names the member and the failure, never an instruction's
+    /// text. The mob's delivery owner goes on trying an owed member.
+    async fn settle_member_instructions_recorded_at_wake(
+        &mut self,
+        identity: &AgentIdentity,
+        instructions: Option<super::super::operator_instruction_delivery::DeliveryResult>,
+    ) {
+        use super::super::operator_instruction_delivery::{
+            DeliveryResult, MemberInstructionDeliveryOutcome,
+        };
+        match instructions {
+            None => {}
+            Some(DeliveryResult::Settled(outcome)) => {
+                if let MemberInstructionDeliveryOutcome::Blocked { block, .. } = &outcome {
+                    tracing::warn!(
+                        mob_id = %self.definition.id,
+                        agent_identity = %identity,
+                        refusal = ?block,
+                        "a woken member's session refused the operator instruction snapshot it \
+                         is owed; the member goes Live and its delivery is blocked"
+                    );
+                }
+                self.operator_instructions.delivery.clear_failure(identity);
+                if let Err(error) = self
+                    .settle_member_instruction_deliveries(vec![outcome])
+                    .await
+                {
+                    tracing::warn!(
+                        mob_id = %self.definition.id,
+                        agent_identity = %identity,
+                        %error,
+                        "a woken member's operator instruction record could not be settled with \
+                         MobMachine; the member goes Live and stays owed"
+                    );
+                }
+            }
+            Some(DeliveryResult::Retry(failure)) => {
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    agent_identity = %identity,
+                    failure = %failure,
+                    "a woken member's session could not take the operator instruction snapshot \
+                     it is owed; the member goes Live and stays owed"
+                );
+                self.operator_instructions
+                    .delivery
+                    .record_failure(identity, failure);
+            }
+        }
     }
 
     /// Topology: restore the woken member's wiring over the machine's edges,

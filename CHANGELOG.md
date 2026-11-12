@@ -107,6 +107,24 @@ them.
   not grow with other members' records, and a mob load pays a constant per
   record.
 
+### Fixed
+
+- `meerkat-mob`: a member that is owed the mob's operator instruction
+  snapshot when it wakes has it recorded during the wake, after its
+  conversation is loaded and before it is Live. A record written while an
+  agent had a conversation but no seated member is therefore in effect at
+  the first run after the seat, unless the session refuses the write; then
+  at the first run that starts after the mob has been able to write it (the
+  mob tries again at every wake of the member and on its own retry, at most
+  30 seconds apart). Before, the record reached the session whenever the
+  mob's delivery next landed, and where the store-only record could not
+  reach the conversation until the member's wake had loaded it, the run that
+  woke the member started without the record and the agent got it one run
+  late (0.9.9 to 0.9.13). A record the session refuses never fails the wake:
+  the member goes Live and stays owed or blocked, and
+  `mob/instruction_status` shows why. A member that stays Live between runs
+  is not tried at each run start.
+
 ### Upgrade notes
 
 - Rolling back to 0.9.13 or earlier: an earlier release cannot serve a mob

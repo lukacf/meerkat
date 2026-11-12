@@ -19652,7 +19652,17 @@ async fn prime_access_cache_from_runtime_in_namespace(
         .filter_map(|member| member.agent_id.as_deref())
         .map(crate::member_comms_id::logical_memory_identity)
         .collect();
-    let mut known_members = runtime.private_owners().memory_members();
+    // A first read of that record that is still on its first attempt is
+    // waited for, a bounded time; whether a read is still owed is taken
+    // before the record itself, so a record read as complete is complete.
+    // While a read is owed the controller keeps every caller who is not
+    // an admin apart: an ended private member is not known as one yet.
+    let owners = runtime.private_owners();
+    owners
+        .first_attempts_settled(crate::private_owners::FIRST_READ_WAIT)
+        .await;
+    access.record_private_owner_record(namespace, owners.first_read_pending());
+    let mut known_members = owners.memory_members();
     known_members.retain(|identity, _| !live_rows.contains(identity));
     record_live_and_registered_attributes(
         access,

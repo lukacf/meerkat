@@ -150,6 +150,10 @@ struct AccessControllerInner {
     state: RwLock<AccessState>,
     persist_path: RwLock<Option<PathBuf>>,
     attributes: RwLock<BTreeMap<String, Arc<AgentResourceAttributes>>>,
+    /// The console namespaces whose runtime still owes the first read of
+    /// who its members are private to, as the last priming of each found
+    /// it ([`AccessController::record_private_owner_record`]).
+    unread_private_owner_records: RwLock<BTreeSet<String>>,
     /// The runtime alias of each durable identity's current incarnation,
     /// keyed like `attributes` (console namespace included).
     current_runtime_aliases: RwLock<BTreeMap<String, String>>,
@@ -234,6 +238,7 @@ impl AccessController {
                 }),
                 persist_path: RwLock::new(None),
                 attributes: RwLock::new(BTreeMap::new()),
+                unread_private_owner_records: RwLock::new(BTreeSet::new()),
                 current_runtime_aliases: RwLock::new(BTreeMap::new()),
                 mutation: Mutex::new(()),
                 publication: OnceLock::new(),
@@ -708,6 +713,36 @@ impl AccessController {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         cache.insert(attributes.identity.clone(), Arc::new(attributes));
+    }
+
+    /// Record whether the runtime primed under the console `namespace`
+    /// still owes the first read of who its members are private to
+    /// (`first_read_pending`), as the priming that reads that record found
+    /// it. While any runtime's read is pending, this controller's views
+    /// keep every caller who is not an admin apart from other people
+    /// ([`AccessView::kept_apart_from_other_people`]): the attributes it
+    /// holds cannot yet tell an ended private member from any other name.
+    pub(crate) fn record_private_owner_record(&self, namespace: &str, first_read_pending: bool) {
+        let recorded = self
+            .inner
+            .unread_private_owner_records
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(namespace);
+        if recorded == first_read_pending {
+            return;
+        }
+        let _published = self.publish_owner_change();
+        let mut unread = self
+            .inner
+            .unread_private_owner_records
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if first_read_pending {
+            unread.insert(namespace.to_string());
+        } else {
+            unread.remove(namespace);
+        }
     }
 
     /// Record which runtime alias is each durable identity's current
@@ -1614,8 +1649,10 @@ impl AccessView {
     }
 
     /// Whether the console keeps this caller apart from other people: the
-    /// console can identify a person ([`Self::on_console`]) and the caller
-    /// is not an admin. Such a console tells its people apart and holds
+    /// caller is not an admin, and the console can identify a person
+    /// ([`Self::on_console`]) or has not yet read who its runtimes' members
+    /// are private to ([`AccessController::record_private_owner_record`]).
+    /// A console that can identify a person tells its people apart and holds
     /// members private to one of them, so what it cannot attribute it shows
     /// to none of them, and a caller it did not identify (one who sent no
     /// token where sign-in is optional) is one of them all the same: the
@@ -1625,9 +1662,25 @@ impl AccessView {
     /// member rule ([`Self::withholds_unknown_member`]), the rule for a
     /// record with no captured member attributes
     /// ([`Self::can_view_uncaptured_member`]) and the console's rule for a
-    /// session with no established owner all decide by it.
+    /// session with no established owner all decide by it. Until a console
+    /// has read who its members are private to (right after a start, and
+    /// for as long as that read fails) it cannot tell an ended private
+    /// member from any other name, so it keeps that one operator apart as
+    /// well: a member private to a person may have been carried over from
+    /// a console that could identify one.
     pub(crate) fn kept_apart_from_other_people(&self) -> bool {
-        self.console_identifies_people && !self.is_admin
+        !self.is_admin && (self.console_identifies_people || self.awaits_private_owner_record())
+    }
+
+    /// Whether a runtime this view's controller was primed from still owes
+    /// the first read of who its members are private to.
+    fn awaits_private_owner_record(&self) -> bool {
+        !self
+            .inner
+            .unread_private_owner_records
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty()
     }
 
     /// Can this principal read and edit the access configuration?
@@ -2802,6 +2855,44 @@ mod tests {
                 .can_view_uncaptured_member("anyone"),
             "an admin reads it on every console"
         );
+    }
+
+    /// While a runtime a console reads still owes the first read of who its
+    /// members are private to, the console keeps every caller who is not an
+    /// admin apart, the one operator of a console that identifies nobody
+    /// included: a record with no captured attributes and a member the
+    /// console does not know are withheld. It ends when every runtime's read
+    /// has succeeded. An admin reads throughout.
+    #[test]
+    fn a_console_that_has_not_read_who_members_are_private_to_keeps_every_caller_apart() {
+        let controller = AccessController::disabled();
+        let operator = controller.view_for_subject(None).on_console(false);
+        assert!(!operator.kept_apart_from_other_people());
+        assert!(operator.can_view_uncaptured_member("anyone"));
+
+        controller.record_private_owner_record("", true);
+        assert!(
+            operator.kept_apart_from_other_people(),
+            "a view decides by what its console knows now"
+        );
+        assert!(!operator.can_view_uncaptured_member("anyone"));
+        assert!(operator.withholds_unknown_member("anyone"));
+        assert!(operator.refreshed().kept_apart_from_other_people());
+
+        // Two runtimes: kept apart until both have been read.
+        controller.record_private_owner_record("team", true);
+        controller.record_private_owner_record("", false);
+        assert!(operator.kept_apart_from_other_people());
+        controller.record_private_owner_record("team", false);
+        assert!(!operator.kept_apart_from_other_people());
+        assert!(operator.can_view_uncaptured_member("anyone"));
+        assert!(!operator.withholds_unknown_member("anyone"));
+
+        let configured = AccessController::new(enabled_config()).expect("controller");
+        configured.record_private_owner_record("", true);
+        let root = configured.view_for_subject(Some("root@example.test"));
+        assert!(!root.kept_apart_from_other_people());
+        assert!(root.can_view_uncaptured_member("anyone"));
     }
 
     #[test]

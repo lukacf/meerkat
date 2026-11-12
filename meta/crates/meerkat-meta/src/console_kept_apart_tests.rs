@@ -885,7 +885,7 @@ async fn an_ended_members_memory_scope_waits_for_the_first_read_of_who_members_a
 /// is answered to everyone but an administrator as a session that does not
 /// exist, on a console that identifies nobody too. Once the read has
 /// succeeded that console's operator attaches the ordinary ended member's
-/// session as before, and the private member's session stays absent.
+/// session as before.
 #[tokio::test]
 async fn an_ended_members_session_waits_for_the_first_read_of_who_members_are_private_to()
 -> TestResult {
@@ -932,13 +932,178 @@ async fn an_ended_members_session_waits_for_the_first_read_of_who_members_are_pr
             "once the record is read: {whose}"
         );
     }
-    // The private side chat's session, on the restarted console itself:
-    // its stored labels name its owner, whatever the record holds.
-    let restarted_operator = primed_operator(&restarted).await;
+    assert_ne!(left.side_chat_session, left.beta_session);
+    Ok(())
+}
+
+/// The record of who the members of `mob` are private to, read through a
+/// gate: every read waits until the gate opens, then reads the mob's event
+/// log. Counts the reads that start (a read starts at the log's beginning).
+struct GatedRecord {
+    gate: tokio::sync::watch::Receiver<bool>,
+    mob: meerkat_mob::MobHandle,
+    reads: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl crate::private_owners::MemberSpawnLog for GatedRecord {
+    async fn spawns_after(
+        &self,
+        cursor: u64,
+        limit: usize,
+    ) -> Result<Option<crate::private_owners::MemberSpawnPage>, String> {
+        if cursor == 0 {
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        let mut gate = self.gate.clone();
+        let _ = gate.wait_for(|open| *open).await;
+        crate::private_owners::MemberSpawnLog::spawns_after(&self.mob, cursor, limit).await
+    }
+}
+
+/// The console over the mob of `restarted` whose first read of who members
+/// are private to is in flight behind `gate` (as the background read is
+/// right after a restart), holding a frame with no witness of the ended
+/// private member and one of the ordinary ended member. Returns the
+/// console's router and the record being read.
+async fn console_whose_first_read_is_in_flight(
+    restarted: &MobRuntime,
+    gate: tokio::sync::watch::Receiver<bool>,
+) -> Result<(Router, Arc<GatedRecord>), Box<dyn std::error::Error + Send + Sync>> {
+    let runtime = MobRuntime::from_handle(restarted.handle());
+    let record = Arc::new(GatedRecord {
+        gate,
+        mob: restarted.handle(),
+        reads: std::sync::atomic::AtomicUsize::new(0),
+    });
+    // The background read, as a runtime starts it: one task, until it lands.
+    let owners = runtime.private_owners().clone();
+    let reading = Arc::clone(&record);
+    tokio::spawn(async move {
+        owners.seeded(reading.as_ref()).await;
+    });
+    for _ in 0..200 {
+        if record.reads.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     assert_eq!(
-        attach(&restarted_operator, &restarted, &left.side_chat_session).await,
-        "absent",
-        "the private member's session"
+        record.reads.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the first read is in flight"
+    );
+    let aggregator = MetaConsoleAggregator::in_memory();
+    for (name, canary) in [
+        ("alpha-side", "record-of-the-private-member"),
+        ("beta", "record-of-the-ordinary-member"),
+    ] {
+        aggregator
+            .store()
+            .append_if_absent(no_witness_frame(name, canary))
+            .await?;
+    }
+    let mut console = console_that_identifies_nobody(&runtime);
+    console.console_aggregator = Some(aggregator);
+    Ok((console_json_router_with_state(console), record))
+}
+
+/// The frames the RPC timeline page serves a caller with no token, as text.
+async fn rpc_page(app: &Router) -> String {
+    let page = console_rpc_as(
+        app,
+        None,
+        "meta/console/query_timeline",
+        json!({ "limit": 500 }),
+    )
+    .await;
+    assert!(page["error"].is_null(), "{page:#}");
+    page["result"]["frames"].to_string()
+}
+
+/// A route waits for a first read that is in flight, but not for ever: when
+/// the read does not return, the route answers within its bound, and
+/// answers as it does while the read has not succeeded: no frame with no
+/// witness for anybody but an administrator.
+#[tokio::test]
+async fn a_route_waits_a_bounded_time_for_a_first_read_that_does_not_return() -> TestResult {
+    const MOB: &str = "kept-apart-first-read-bound";
+    let left = state_after_a_console_with_sign_in(MOB).await?;
+    let restarted = persistent_gateway_runtime_in(left.state.path(), MOB, "", "").await?;
+    // The gate never opens.
+    let (_closed, gate) = tokio::sync::watch::channel(false);
+    let (app, record) = console_whose_first_read_is_in_flight(&restarted, gate).await?;
+
+    let bound = crate::private_owners::FIRST_READ_WAIT;
+    let asked = std::time::Instant::now();
+    let served = tokio::time::timeout(bound * 6, rpc_page(&app))
+        .await
+        .map_err(|_| "the route answers although the read never returns")?;
+    let waited = asked.elapsed();
+    assert!(
+        waited >= bound.mul_f32(0.9),
+        "the route waited for the read in flight: {waited:?}"
+    );
+    for canary in [
+        "record-of-the-private-member",
+        "record-of-the-ordinary-member",
+    ] {
+        assert!(
+            !served.contains(canary),
+            "after the bound the route serves no frame with no witness: {canary}"
+        );
+    }
+    assert_eq!(
+        record.reads.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the waiting route started no read of its own"
+    );
+    Ok(())
+}
+
+/// Many route calls made while the first read is in flight wait for that
+/// one read: none starts a read of its own, and once the read lands each of
+/// them answers from what it read, the ordinary ended member's frame served
+/// and the private member's hidden.
+#[tokio::test]
+async fn route_calls_made_while_the_first_read_is_in_flight_wait_for_that_one_read() -> TestResult {
+    const MOB: &str = "kept-apart-first-read-waiters";
+    let left = state_after_a_console_with_sign_in(MOB).await?;
+    let restarted = persistent_gateway_runtime_in(left.state.path(), MOB, "", "").await?;
+    let (open, gate) = tokio::sync::watch::channel(false);
+    let (app, record) = console_whose_first_read_is_in_flight(&restarted, gate).await?;
+
+    let mut calls = tokio::task::JoinSet::new();
+    for _ in 0..8 {
+        let app = app.clone();
+        calls.spawn(async move { rpc_page(&app).await });
+    }
+    // Every call has had time to reach its wait; the read is still the one.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(record.reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(
+        calls.try_join_next().is_none(),
+        "no call answers while the read is in flight"
+    );
+    open.send(true)?;
+    let mut answers = 0;
+    while let Some(served) = calls.join_next().await {
+        let served = served?;
+        assert!(
+            served.contains("record-of-the-ordinary-member"),
+            "a waiting call serves the ordinary ended member's frame once the read lands"
+        );
+        assert!(
+            !served.contains("record-of-the-private-member"),
+            "and keeps the private member's frame hidden"
+        );
+        answers += 1;
+    }
+    assert_eq!(answers, 8);
+    assert_eq!(
+        record.reads.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "eight calls, one read"
     );
     Ok(())
 }

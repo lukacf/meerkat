@@ -18639,6 +18639,139 @@ mod tests {
         ));
     }
 
+    /// A `MemberSpawned` row of `identity` (generation 0) whose endpoint
+    /// carries the key `key` under the member's own name and address.
+    fn member_spawned_row_with_key(
+        definition: &MobDefinition,
+        cursor: u64,
+        identity: &AgentIdentity,
+        key: [u8; 32],
+    ) -> MobEvent {
+        let comms_name = format!("{}/worker/{identity}", definition.id);
+        let endpoint = meerkat_core::comms::TrustedPeerDescriptor {
+            peer_id: meerkat_comms::PubKey::new(key).to_peer_id(),
+            name: meerkat_core::comms::PeerName::new(comms_name.clone()).expect("a peer name"),
+            address: meerkat_core::comms::PeerAddress::parse(format!("inproc://{comms_name}"))
+                .expect("an address"),
+            pubkey: key,
+        };
+        MobEvent {
+            cursor,
+            timestamp: Utc::now(),
+            mob_id: definition.id.clone(),
+            kind: MobEventKind::MemberSpawned(
+                MemberSpawnedEvent::new(
+                    identity.clone(),
+                    Generation::INITIAL,
+                    FenceToken::new(cursor),
+                    AgentRuntimeId::initial(identity.clone()),
+                    ProfileName::from("worker"),
+                )
+                .with_member_peer_endpoint(Some(endpoint)),
+            ),
+        }
+    }
+
+    /// A journal whose second `MemberSpawned` row carries the endpoint key
+    /// of the first row's member (an earlier release wrote the row before
+    /// MobMachine refused the endpoint) replays: the first member keeps the
+    /// endpoint, and the second is recorded a restore failure, with no
+    /// endpoint.
+    #[test]
+    fn seeded_authority_replays_a_row_of_another_members_key_as_a_restore_failure() {
+        let definition = MobDefinition::explicit("test-shared-key-mob");
+        let (holder, second) = (AgentIdentity::from("alice"), AgentIdentity::from("carol"));
+        let key = [7u8; 32];
+        let events = vec![
+            member_spawned_row_with_key(&definition, 1, &holder, key),
+            member_spawned_row_with_key(&definition, 2, &second, key),
+        ];
+        let mut authority = seed_mob_authority();
+
+        seed_mob_authority_sync_from_events(
+            &mut authority,
+            &events,
+            &definition,
+            false,
+            &BTreeSet::new(),
+        )
+        .expect("a row that carries another member's key must not fail the replay");
+
+        let state = authority.state();
+        let (dsl_holder, dsl_second) = (
+            mob_dsl::AgentIdentity::from_domain(&holder),
+            mob_dsl::AgentIdentity::from_domain(&second),
+        );
+        assert!(
+            state.member_peer_endpoints.contains_key(&dsl_holder),
+            "the first member keeps its endpoint"
+        );
+        assert!(!state.member_restore_failures.contains_key(&dsl_holder));
+        assert!(
+            state.identity_to_runtime.contains_key(&dsl_second),
+            "the second member stays a member"
+        );
+        assert!(
+            !state.member_peer_endpoints.contains_key(&dsl_second)
+                && !state.member_peer_ids.contains_key(&dsl_second),
+            "the second member holds no endpoint"
+        );
+        let reason = state
+            .member_restore_failures
+            .get(&dsl_second)
+            .expect("the second member is recorded a restore failure");
+        assert!(
+            reason.contains("alice") && reason.contains("carol"),
+            "the reason names both members: {reason}"
+        );
+    }
+
+    /// Every other refusal of a row's endpoint still fails the replay: a row
+    /// whose endpoint generation is not its incarnation's is refused by
+    /// MobMachine with no other member holding its key, and with one holding
+    /// a different key.
+    #[test]
+    fn seeded_authority_still_fails_on_an_endpoint_row_refused_for_another_reason() {
+        let definition = MobDefinition::explicit("test-endpoint-refusal-mob");
+        let (holder, second) = (AgentIdentity::from("alice"), AgentIdentity::from("carol"));
+        let mismatched = |cursor: u64, key: [u8; 32]| {
+            let mut row = member_spawned_row_with_key(&definition, cursor, &second, key);
+            let MobEventKind::MemberSpawned(spawned) = &mut row.kind else {
+                unreachable!("a MemberSpawned row");
+            };
+            // The endpoint signal carries the row's generation; the
+            // incarnation it names was recovered at generation 0.
+            spawned.generation = Generation::new(1);
+            row
+        };
+        for (label, events) in [
+            ("no other member", vec![mismatched(1, [9u8; 32])]),
+            (
+                "another member with its own key",
+                vec![
+                    member_spawned_row_with_key(&definition, 1, &holder, [7u8; 32]),
+                    mismatched(2, [9u8; 32]),
+                ],
+            ),
+        ] {
+            let mut authority = seed_mob_authority();
+            let error = seed_mob_authority_sync_from_events(
+                &mut authority,
+                &events,
+                &definition,
+                false,
+                &BTreeSet::new(),
+            )
+            .expect_err(label);
+            assert!(
+                error
+                    .to_string()
+                    .contains("recover_member_spawned_peer_endpoint"),
+                "{label}: the endpoint signal's own refusal fails the replay: {error}"
+            );
+        }
+    }
+
     #[test]
     fn seeded_authority_reset_requires_exact_event_tuple_and_clears_old_kickoff() {
         let definition = MobDefinition::explicit("test-reset-mob");

@@ -862,6 +862,55 @@ async fn a_spawned_member_shows_its_first_message_from_its_own_history() -> Test
     Ok(())
 }
 
+/// A memory conflict signal is a record on the system page that names no
+/// member and carries text the memory steward wrote from the records it
+/// compared. Nothing says whose records the text speaks of, so it is decided
+/// as a record with no member witness: an administrator reads it, no other
+/// person does. The other records on the system page stay readable by every
+/// person who may view it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_memory_conflict_signal_is_shown_to_an_administrator_only() -> TestResult {
+    use crate::memory::events::MemoryTimelineEvent;
+
+    let (_state, runtime, aggregator) = runtime_and_aggregator("witness-conflict").await?;
+    let sink = runtime.memory_event_sink();
+    sink.emit(MemoryTimelineEvent::ConflictSignal {
+        realm: "witness-conflict".to_string(),
+        entity: "ledger".to_string(),
+        topic: "balance".to_string(),
+        reason: "conflict-finding-text".to_string(),
+    });
+    sink.emit(MemoryTimelineEvent::DreamSkipped {
+        realm: "witness-conflict".to_string(),
+        reason: "dream-skipped-record".to_string(),
+    });
+    let system = crate::console_contracts::SYSTEM_EVENT_IDENTITY;
+    let conflict = stored_frame(&aggregator, system, "conflict-finding-text")
+        .await
+        .ok_or("the conflict signal is stored on the system page")?;
+    let skipped = stored_frame(&aggregator, system, "dream-skipped-record")
+        .await
+        .ok_or("the skipped dream record is stored on the system page")?;
+    let readers = readers();
+    for (reader, view, reads_conflict) in [
+        ("a person", &readers.alice, false),
+        ("another person", &readers.bob, false),
+        ("an administrator", &readers.root, true),
+    ] {
+        assert_eq!(
+            timeline_frame_visible_to(view, &conflict),
+            reads_conflict,
+            "a memory conflict signal, read by {reader}"
+        );
+        assert!(
+            timeline_frame_visible_to(view, &skipped),
+            "another record on the system page is served to {reader}"
+        );
+    }
+    let _ = runtime.shutdown().await;
+    Ok(())
+}
+
 /// Both RPC timeline pages (`meta/console/query_timeline` of a console with
 /// its own runtime, and of one that only aggregates) decide each frame by the
 /// caller: a frame with no witness is on an administrator's page and on no

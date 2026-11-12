@@ -2172,7 +2172,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.11",
+        "CARGO_PKG_VERSION": "0.9.14",
         "CARGO_BIN_NAME": "run_json_failure_document",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-cli",
     },

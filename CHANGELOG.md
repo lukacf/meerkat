@@ -98,12 +98,13 @@ them.
   `ReviewStageNotAllowed`, so an agent never approves a change of an agent.
   No released surface held a decision of these kinds.
 
-- Mob: a wire or unwire between two members, and a wire or unwire of a
-  member and an external peer, answer a name the mob does not hold as
-  member not found before any refusal about the other member, about the
-  external peer's binding or about the edge; before, such a call could
-  answer that other refusal (an open approval branch, a Broken member, a
-  binding the mob refuses, an edge MobMachine does not admit) instead.
+- Mob: in a running mob a wire, and in every state an unwire, between two
+  members or of a member and an external peer answers a name the mob does
+  not hold as member not found before any refusal about the other member,
+  about the external peer's binding or about the edge; before, such a call
+  could answer that other refusal (an open approval branch, a Broken
+  member, an identity entry an agent may not wire, a binding the mob
+  refuses, an edge MobMachine does not admit) instead.
 
 ### Fixed
 
@@ -184,9 +185,8 @@ them.
 
 ### Known limitations
 
-- Mob: a schedule whose target forks a member's session is not checked
-  against the member tool audience on a host that mounts the schedule
-  tools itself.
+- Mob: the schedule tools are not checked against the member tool audience
+  on a host that mounts them itself.
 
 ## [0.9.13] - 2026-11-11
 

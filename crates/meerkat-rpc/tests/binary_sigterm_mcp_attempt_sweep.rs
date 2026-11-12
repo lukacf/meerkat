@@ -16,8 +16,10 @@
 //! save was still running and reached its write (it was not dropped with the
 //! runtime). They do not prove its sync, its rename, any compensation, or the
 //! credential coordinator's settlement. The FIFO cannot be synced, so this
-//! save fails and its compensating save opens the FIFO again, which the
-//! reader also drains until the process exits.
+//! save fails and removes its temporary file, which unlinks the FIFO. The
+//! test's reader therefore opens the FIFO once, without blocking, and reads
+//! that one descriptor until the process has exited: it never opens the path
+//! a second time, so it cannot be left waiting on a FIFO that has no path.
 
 #![cfg(unix)]
 #![allow(
@@ -30,6 +32,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -255,6 +258,55 @@ fn mkfifo(path: &Path) {
     assert!(status.success(), "mkfifo {}", path.display());
 }
 
+/// `O_NONBLOCK` for `open(2)`, which Linux and macOS number differently.
+const O_NONBLOCK: i32 = if cfg!(target_os = "linux") {
+    0o4000
+} else {
+    0x4
+};
+
+/// The read end of the FIFO at `path`, opened without blocking: the open
+/// returns at once whether or not a writer is there, and it releases a writer
+/// blocked in its own open of the FIFO.
+fn open_fifo_reader(path: &Path) -> std::fs::File {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NONBLOCK)
+        .open(path)
+        .unwrap_or_else(|error| panic!("open the FIFO {} to read: {error}", path.display()))
+}
+
+/// Counts the bytes that arrive on `fifo`, a read end opened without
+/// blocking, until `stop` is set and nothing is left to read. No read here
+/// blocks: an empty FIFO answers 0 with no writer and `WouldBlock` with one.
+fn count_fifo_bytes_until(mut fifo: std::fs::File, stop: &AtomicBool) -> usize {
+    let mut total = 0;
+    let mut chunk = [0_u8; 4096];
+    loop {
+        // Load the flag before the read: it is set once every writer is
+        // gone, so an empty read after it means the FIFO is drained.
+        let stopping = stop.load(Ordering::Acquire);
+        match fifo.read(&mut chunk) {
+            Ok(read) if read > 0 => {
+                total += read;
+                continue;
+            }
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                ) => {}
+            Err(error) => panic!("read the held save's FIFO: {error}"),
+        }
+        if stopping {
+            return total;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn wait_exit(child: &mut Child, deadline: Duration) -> Option<ExitStatus> {
     let until = Instant::now() + deadline;
     loop {
@@ -405,55 +457,28 @@ async fn sigterm_with_a_held_credential_save_reports_the_attempt_unresolved() {
             "rkat-rpc exited while its credential save was still held; stderr:\n{}",
             server.stderr_text()
         );
-        // The reader receives whatever the save writes once it may proceed.
-        let fifo = fifo.clone();
-        // Drain every write: a FIFO cannot be synced, so the released save
-        // fails and its compensating save opens the FIFO again. The reader
-        // stops once the process has exited.
-        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // Release the held save: this open gives its FIFO a reader. The
+        // reader then receives whatever the save writes, on this one
+        // descriptor. A FIFO cannot be synced, so the released save fails and
+        // removes its temporary file, which unlinks the FIFO; the descriptor
+        // still reaches it, and the path is never opened again. (A reader
+        // that opened the path for each write could enter a blocking open
+        // just before the unlink, and no later open of the path could
+        // release it.)
+        let save_fifo = open_fifo_reader(&fifo);
+        let stop = Arc::new(AtomicBool::new(false));
         let reader_stop = Arc::clone(&stop);
-        let reader_fifo = fifo.clone();
-        let save_reader = std::thread::spawn(move || {
-            let mut total = 0;
-            while !reader_stop.load(std::sync::atomic::Ordering::Acquire) {
-                let mut written = Vec::new();
-                if std::fs::File::open(&reader_fifo)
-                    .and_then(|mut f| f.read_to_end(&mut written))
-                    .is_err()
-                {
-                    break;
-                }
-                total += written.len();
-            }
-            total
-        });
+        let save_reader =
+            std::thread::spawn(move || count_fifo_bytes_until(save_fifo, &reader_stop));
         // SIGTERM ended the server while its stdin is still open, so stdin
         // EOF must not be what lets the process exit.
         let status = exit_with_stdin_open(&mut server);
-        // Unblock a reader still waiting in its open. It may enter its open
-        // only after a first non-blocking writer found no reader, so retry
-        // until the reader has finished (bounded).
-        stop.store(true, std::sync::atomic::Ordering::Release);
-        let unblock_until = Instant::now() + EXIT_DEADLINE;
-        while !save_reader.is_finished() && Instant::now() < unblock_until {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            let _ = std::fs::OpenOptions::new()
-                .write(true)
-                .custom_flags(if cfg!(target_os = "linux") {
-                    0o4000
-                } else {
-                    0x4
-                })
-                .open(&fifo);
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        assert!(
-            save_reader.is_finished(),
-            "the FIFO reader did not stop after the process exited"
-        );
+        // The process has exited, so the FIFO has no writer left: the reader
+        // takes what is still buffered and ends. None of its reads can block.
+        stop.store(true, Ordering::Release);
+        let saved_bytes = save_reader.join().unwrap();
         // Let the stderr thread take the last lines.
         std::thread::sleep(Duration::from_millis(200));
-        let saved_bytes = save_reader.join().unwrap();
         (status, server.stderr_text(), saved_bytes)
     });
 

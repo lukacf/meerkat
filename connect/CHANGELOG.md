@@ -5,6 +5,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.9.14] - 2026-11-11
+
+Meerkat Connect 0.9.14 is part of Meerkat 0.9.14 (Core 0.9.14, Meta 0.9.14
+and Connect 0.9.14, released together): GitHub release `connect-v0.9.14`, a
+full release that is never the repository's latest.
+
+`@rkat/toolkit` accepts its optional peers `@rkat/sdk` and `@rkat/meta-sdk`
+from 0.9.14, and its source builds and tests run against the SDKs of the
+same commit. See Changed.
+
+### Changed
+
+- `@rkat/toolkit` accepts its optional peers `@rkat/sdk` and `@rkat/meta-sdk`
+  from 0.9.14 below 0.10.0 (`>=0.9.14 <0.10.0`; it accepted them from 0.9.10):
+  the package is built and tested with the SDKs of its own release, and each
+  release moves the floor to its version; a release that reaches the ceiling
+  also moves the ceiling, to the next minor release on the 0.x line (at
+  0.10.0 the peers become `>=0.10.0 <0.11.0`). Its development dependencies link
+  `@rkat/sdk` and `@rkat/meta-sdk` from the same checkout instead of
+  installing the published 0.9.10 packages, so source builds and tests run
+  against the SDKs of the same commit; build the repository's
+  `sdks/typescript` and `meta/sdk/typescript` first (see BUILDING.md).
+
 ## [0.9.13] - 2026-11-11
 
 Meerkat Connect 0.9.13 is part of Meerkat 0.9.13 (Core 0.9.13, Meta 0.9.13

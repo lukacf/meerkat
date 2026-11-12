@@ -9043,6 +9043,151 @@ mod tests {
         );
     }
 
+    /// One name given as both ends of `mob_wire` or `mob_unwire`: an
+    /// identity entry the host's audience hides from the caller answers
+    /// exactly as a name the mob does not hold, member not found. A member
+    /// the caller is shown still answers that the call needs two different
+    /// members. (The mob's own row asks a hidden approval branch too.)
+    #[tokio::test]
+    async fn mob_wire_and_unwire_answer_a_hidden_name_given_twice_as_absent() {
+        let state = MobMcpState::new_in_memory();
+        let handle = host_mob_with_kept_members(
+            &state,
+            "twice-audience",
+            &[("twice-shown", None), ("twice-caller", None)],
+        )
+        .await;
+        let mut entry = SpawnMemberSpec::new(
+            ProfileName::from("worker"),
+            AgentIdentity::from("twice-entry"),
+        )
+        .with_entry_custody(true)
+        .with_labels(std::collections::BTreeMap::from([(
+            "kept_for".to_string(),
+            "ann".to_string(),
+        )]));
+        entry.runtime_mode = Some(meerkat_mob::MobRuntimeMode::TurnDriven);
+        handle
+            .spawn_spec(entry)
+            .await
+            .expect("the host seats its identity entry");
+        let caller = member_mob_tools(
+            &state,
+            &handle,
+            "twice-caller",
+            scope_only_authority("twice-audience", handle.live_incarnation()),
+        )
+        .await;
+
+        // Every name is asked on both tools before any answer is judged, so
+        // one run shows each answer that tells a hidden name from an unheld
+        // one.
+        let mut told_apart = Vec::new();
+        for tool in ["mob_wire", "mob_unwire"] {
+            let mut answers = Vec::new();
+            for name in ["twice-gone", "twice-entry", "twice-shown"] {
+                answers.push(
+                    masked_mob_tool_answer(
+                        &caller,
+                        tool,
+                        json!({ "mob_id": "twice-audience", "member_id": name, "peer": { "local": name } }),
+                        name,
+                    )
+                    .await,
+                );
+            }
+            let [absent, hidden_entry, shown] = answers.as_slice() else {
+                panic!("three names were asked");
+            };
+            if !(absent.starts_with("error:") && absent.contains("mob member not found")) {
+                told_apart.push(format!(
+                    "{tool}: a name the mob does not hold, given twice, is not answered as \
+                     one: {absent}"
+                ));
+            }
+            if hidden_entry != absent {
+                told_apart.push(format!(
+                    "{tool}: an identity entry hidden from the caller, given twice, answers \
+                     {hidden_entry}"
+                ));
+            }
+            if !(shown.starts_with("error:")
+                && shown.contains("requires distinct")
+                && !shown.contains("mob member not found"))
+            {
+                told_apart.push(format!(
+                    "{tool}: a member the caller is shown, given twice, does not answer that \
+                     the call needs two different members: {shown}"
+                ));
+            }
+        }
+        assert!(
+            told_apart.is_empty(),
+            "a hidden name given twice answers as a name the mob does not hold, member not \
+             found:\n{}",
+            told_apart.join("\n")
+        );
+    }
+
+    /// In a stopped mob an agent's `mob_wire` or `mob_unwire` that names an
+    /// identity entry is still refused for the entry: beside a member the
+    /// caller is shown, and for a wire also beside a name the mob does not
+    /// hold (a stopped mob looks no member up for a wire). An unwire beside
+    /// such a name answers member not found, as in a running mob.
+    #[tokio::test]
+    async fn mob_wire_and_unwire_refuse_an_identity_entry_in_a_stopped_mob() {
+        let state = MobMcpState::new_in_memory();
+        let handle = host_mob_with_kept_members(
+            &state,
+            "stopped-audience",
+            &[("stopped-shown", None), ("stopped-caller", None)],
+        )
+        .await;
+        let mut entry = SpawnMemberSpec::new(
+            ProfileName::from("worker"),
+            AgentIdentity::from("stopped-entry"),
+        )
+        .with_entry_custody(true);
+        entry.runtime_mode = Some(meerkat_mob::MobRuntimeMode::TurnDriven);
+        handle
+            .spawn_spec(entry)
+            .await
+            .expect("the host seats its identity entry");
+        let caller = member_mob_tools(
+            &state,
+            &handle,
+            "stopped-caller",
+            scope_only_authority("stopped-audience", handle.live_incarnation()),
+        )
+        .await;
+        handle.stop().await.expect("stop the mob");
+
+        for (tool, peer, refused_for_the_entry) in [
+            ("mob_wire", "stopped-shown", true),
+            ("mob_wire", "stopped-gone", true),
+            ("mob_unwire", "stopped-shown", true),
+            ("mob_unwire", "stopped-gone", false),
+        ] {
+            let answer = masked_mob_tool_answer(
+                &caller,
+                tool,
+                json!({ "mob_id": "stopped-audience", "member_id": "stopped-entry", "peer": { "local": peer } }),
+                "stopped-entry",
+            )
+            .await;
+            let expected = if refused_for_the_entry {
+                "member '<member>' is an identity entry"
+            } else {
+                "mob member not found: stopped-gone"
+            };
+            assert!(
+                answer.starts_with("error:") && answer.contains(expected),
+                "{tool} of the entry and '{peer}' in a stopped mob answers \"{expected}\": \
+                 {answer}"
+            );
+        }
+    }
+
     /// The rows `mob_list_members` answers `tools` for the mob `mob_id`.
     async fn listed_member_rows(
         tools: &Arc<dyn AgentToolDispatcher>,

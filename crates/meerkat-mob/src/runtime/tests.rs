@@ -30547,12 +30547,41 @@ async fn owned_member_tools_answer_a_member_hidden_from_the_caller_as_absent() {
 /// ([`HideKeptMembers`]), with `members` seated: each with the keeper its
 /// row's `kept_for` label names, if any.
 async fn mob_with_kept_members(members: &[(&str, Option<&str>)]) -> MobHandle {
+    mob_with_audience(members, Arc::new(HideKeptMembers)).await
+}
+
+/// [`HideKeptMembers`], and every open approval branch is hidden from every
+/// caller as well.
+struct HideKeptMembersAndBranches;
+
+impl MemberToolAudience for HideKeptMembersAndBranches {
+    fn hides(
+        &self,
+        mob_id: &MobId,
+        caller: Option<&AgentIdentity>,
+        caller_labels: Option<&BTreeMap<String, String>>,
+        target: &AgentIdentity,
+        target_labels: Option<&BTreeMap<String, String>>,
+    ) -> bool {
+        target
+            .as_str()
+            .starts_with(crate::runtime::approval_branch::APPROVAL_BRANCH_IDENTITY_PREFIX)
+            || HideKeptMembers.hides(mob_id, caller, caller_labels, target, target_labels)
+    }
+}
+
+/// [`mob_with_kept_members`] with `audience` as the host's member tool
+/// audience.
+async fn mob_with_audience(
+    members: &[(&str, Option<&str>)],
+    audience: Arc<dyn MemberToolAudience>,
+) -> MobHandle {
     let service = Arc::new(MockSessionService::new());
     let _ = service.enable_runtime_adapter();
     service.set_return_exact_run_result(true);
     let handle = MobBuilder::new(sample_definition_with_mob_tools(), MobStorage::in_memory())
         .with_session_service(service)
-        .with_member_tool_audience(Arc::new(HideKeptMembers))
+        .with_member_tool_audience(audience)
         .create()
         .await
         .expect("create mob");
@@ -31516,6 +31545,150 @@ async fn wire_members_answer_a_hidden_member_beside_an_identity_entry_as_absent(
             .is_empty(),
         "no edge reaches the identity entry"
     );
+}
+
+/// One name given as both ends of a wire or unwire: a member the host's
+/// audience hides from the caller (an identity entry, an open approval
+/// branch) answers exactly as a name the mob does not hold, member not
+/// found. A member the caller is shown still answers that a wire needs two
+/// different members.
+#[tokio::test]
+async fn wire_members_answer_a_hidden_name_given_twice_as_absent() {
+    let handle = mob_with_audience(
+        &[("twice-shown", None), ("twice-caller", None)],
+        Arc::new(HideKeptMembersAndBranches),
+    )
+    .await;
+    let mut entry = SpawnMemberSpec::new(
+        ProfileName::from("worker"),
+        AgentIdentity::from("twice-entry"),
+    )
+    .with_entry_custody(true)
+    .with_labels(BTreeMap::from([(
+        "kept_for".to_string(),
+        "ann".to_string(),
+    )]));
+    entry.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    handle
+        .spawn_spec(entry)
+        .await
+        .expect("the host seats its identity entry");
+    let grantee = AgentIdentity::from("twice-grantee");
+    let mut spec = SpawnMemberSpec::new(ProfileName::from("worker"), grantee.clone());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    handle.spawn_spec(spec).await.expect("spawn the grantee");
+    let decision = meerkat_core::approval::decision::DecisionId::derive(
+        &meerkat_core::approval::decision::DecisionKind::new("grant.child").expect("kind"),
+        &meerkat_core::approval::decision::DecisionSubjectKey::new("twice-target")
+            .expect("subject key"),
+    );
+    let (branch, _) = handle
+        .open_approval_branch(&grantee, &decision)
+        .await
+        .expect("the approval branch opens");
+    let branch = branch.to_string();
+    let caller = manage_scope_tools(&handle, "twice-caller").await;
+
+    // Every name is asked on both tools before any answer is judged, so one
+    // run shows each answer that tells a hidden name from an unheld one.
+    let mut told_apart = Vec::new();
+    for tool in ["wire_members", "unwire_members"] {
+        let mut answers = Vec::new();
+        for name in ["twice-gone", "twice-entry", branch.as_str(), "twice-shown"] {
+            answers.push(masked_tool_answer(
+                &dispatch_operator_tool(
+                    &caller,
+                    tool,
+                    serde_json::json!({ "member_id": name, "peer_member_id": name }),
+                )
+                .await,
+                name,
+            ));
+        }
+        let [absent, hidden_entry, hidden_branch, shown] = answers.as_slice() else {
+            panic!("four names were asked");
+        };
+        if !(absent.starts_with("error:") && absent.contains("mob member not found")) {
+            told_apart.push(format!(
+                "{tool}: a name the mob does not hold, given twice, is not answered as one: \
+                 {absent}"
+            ));
+        }
+        if hidden_entry != absent {
+            told_apart.push(format!(
+                "{tool}: an identity entry hidden from the caller, given twice, answers \
+                 {hidden_entry}"
+            ));
+        }
+        if hidden_branch != absent {
+            told_apart.push(format!(
+                "{tool}: an approval branch hidden from the caller, given twice, answers \
+                 {hidden_branch}"
+            ));
+        }
+        if !(shown.starts_with("error:")
+            && shown.contains("requires distinct")
+            && !shown.contains("mob member not found"))
+        {
+            told_apart.push(format!(
+                "{tool}: a member the caller is shown, given twice, does not answer that the \
+                 call needs two different members: {shown}"
+            ));
+        }
+    }
+    assert!(
+        told_apart.is_empty(),
+        "a hidden name given twice answers as a name the mob does not hold, member not found:\n{}",
+        told_apart.join("\n")
+    );
+}
+
+/// In a stopped mob an agent's wire or unwire that names an identity entry
+/// is still refused for the entry: beside a member the caller is shown, and
+/// for a wire also beside a name the mob does not hold (a stopped mob looks
+/// no member up for a wire). An unwire beside such a name answers member
+/// not found, as in a running mob.
+#[tokio::test]
+async fn wire_members_refuse_an_identity_entry_in_a_stopped_mob() {
+    let handle = mob_with_kept_members(&[("stopped-shown", None), ("stopped-caller", None)]).await;
+    let mut entry = SpawnMemberSpec::new(
+        ProfileName::from("worker"),
+        AgentIdentity::from("stopped-entry"),
+    )
+    .with_entry_custody(true);
+    entry.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    handle
+        .spawn_spec(entry)
+        .await
+        .expect("the host seats its identity entry");
+    let caller = manage_scope_tools(&handle, "stopped-caller").await;
+    handle.stop().await.expect("stop the mob");
+
+    for (tool, peer, refused_for_the_entry) in [
+        ("wire_members", "stopped-shown", true),
+        ("wire_members", "stopped-gone", true),
+        ("unwire_members", "stopped-shown", true),
+        ("unwire_members", "stopped-gone", false),
+    ] {
+        let answer = masked_tool_answer(
+            &dispatch_operator_tool(
+                &caller,
+                tool,
+                serde_json::json!({ "member_id": "stopped-entry", "peer_member_id": peer }),
+            )
+            .await,
+            "stopped-entry",
+        );
+        let expected = if refused_for_the_entry {
+            "member '<member>' is an identity entry"
+        } else {
+            "mob member not found: stopped-gone"
+        };
+        assert!(
+            answer.starts_with("error:") && answer.contains(expected),
+            "{tool} of the entry and '{peer}' in a stopped mob answers \"{expected}\": {answer}"
+        );
+    }
 }
 
 /// The end a wire tool answers as a member the mob does not hold

@@ -724,9 +724,15 @@ composition without the built-in identity and member store commits no change
   its last build in the process and its session's own context and
   instructions) and an explicit resume of a stopped mob (each member is
   rebuilt from its seat as the host's spawn customizer makes it, labels
-  included); neither of the last two asks the host for the seat. A host
-  whose build step is not ready to answer refuses retryably: until the
-  host's preparer is composed the seat is not built. A seat an earlier
+  included, and takes those labels into the rebuilt member without the
+  comparison: a known limit); neither of the last two asks the host for
+  the seat. Core asks the preparer the mob was built with from the mob's
+  start on and waits for no composition of the host's own: a host that
+  composes its preparer after the mob starts must refuse a fresh
+  store-owned seat, retryably, until it is composed, and must call
+  `MobHandle::seat_owed_store_owned_identities` once it is; until that
+  call or the mob's next start the identity stays owed its seat. A seat an
+  earlier
   release left with other labels than its row
   (`IdentityRecordCensus::seats_stale` above zero after an upgrade) is
   respawned with its row's labels before its host adopts the seat
@@ -752,14 +758,26 @@ composition without the built-in identity and member store commits no change
   respawn with `MemberRespawn::with_labels`), since every build of a
   store-owned member must carry exactly its seat's labels: the member
   keeps its identity entry, session, conversation and edges, nothing is
-  built or woken, and no kickoff runs again. A member that holds work is
+  built or woken, and no kickoff runs again. The restamp is triggered by
+  the comparison, at any update of a seated store-owned identity, of its
+  seat's labels with the labels the update declares, not by the update's
+  own label change: an update that moves no label still restamps a seat
+  that carries other labels than the row, so a seat an earlier release
+  left stale is corrected by the identity's next update, and a label a
+  host-written spawn seated outside the row is dropped by it (for a
+  member a same-session successor can serve). A member that holds work is
   not interrupted: the update answers `Deferred`, the restamp is owed
   until the update is retried (a retry replays and carries it out), the
   seat counts in `IdentityRecordCensus::seats_stale` until then, and a
   cold build of the member in between is refused naming the changed key.
   A member a same-session successor cannot serve (placed, wired to a
   placed member, or on a session service that keeps no durable sessions)
-  keeps its seat and labels (`Kept`). A roster-owned identity's label
+  answers `Kept` and keeps its seat and the labels it was seated with; its
+  release is tried before the respawn that is then refused (in these three
+  cases it releases nothing; a member whose session cannot be kept is
+  released and then kept), and its seat stays stale, so its next cold
+  build is still refused under a host that answers its seat from the row.
+  A roster-owned identity's label
   change keeps its member: the declared apply stores no labels. A
   runtime-mode
   change restamps the member on its own session; a profile change is the

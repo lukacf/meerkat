@@ -2074,6 +2074,10 @@ impl super::MobHandle {
     /// owed until its update is retried. A member a same-session successor
     /// cannot serve (a placed one, one wired to a placed member, one on a
     /// service that keeps no durable sessions) keeps its seat and labels.
+    /// Its release is tried first all the same (the respawn is what is
+    /// refused): in those three cases it releases nothing, and a member
+    /// whose session cannot be kept is released and then kept. Either way
+    /// the seat stays stale.
     async fn restamp_store_owned_seat_labels(
         &self,
         entry: &DeclaredEntry,

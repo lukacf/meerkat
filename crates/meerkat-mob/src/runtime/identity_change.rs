@@ -3724,7 +3724,13 @@ impl super::MobHandle {
     /// with [`super::MemberRespawn::with_labels`]): every build of a
     /// store-owned member must carry exactly its seat's labels
     /// ([`super::MemberBuildPreparer::prepare_store_owned_seat`]), so a
-    /// seat that trailed its row would be refused its next build. The
+    /// seat that trailed its row would be refused its next build. What
+    /// triggers the restamp is the comparison, at any update of a seated
+    /// store-owned identity, of its seat's labels with the labels the
+    /// update declares, not the update's own label change: an update that
+    /// moves no label restamps a seat that carries other labels than the
+    /// row (a seat an earlier release left stale, or a label a
+    /// host-written spawn seated outside the row, which is dropped). The
     /// member keeps its identity entry, session, conversation and edges;
     /// nothing is built or woken, and no kickoff runs again. A member that
     /// holds work is not interrupted: the update commits and answers
@@ -3734,8 +3740,13 @@ impl super::MobHandle {
     /// ([`Self::identity_record_census`]) and a cold build of the member is
     /// refused naming the changed key. A member a same-session successor
     /// cannot serve (a placed one, one wired to a placed member, one on a
-    /// session service that keeps no durable sessions) keeps its seat and
-    /// its labels ([`super::DeclaredEntryOutcome::Kept`]). A runtime-mode
+    /// session service that keeps no durable sessions) answers
+    /// [`super::DeclaredEntryOutcome::Kept`] and keeps its seat and the
+    /// labels it was seated with. Its release is tried before the respawn
+    /// that is then refused (in these three cases it releases nothing; a
+    /// member whose session cannot be kept is released and then kept), and
+    /// its seat stays stale: its next cold build is still refused under a
+    /// host that answers its seat from the row. A runtime-mode
     /// change is a restamp on
     /// the member's own session; a profile change is the declared migration
     /// from the member's current role, kept in the row until the restamp

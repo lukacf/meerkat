@@ -15017,6 +15017,15 @@ mod tests {
                 "https://copilot.example.test",
                 "the first sign-in's token named its own API base"
             );
+            let earlier_generation = {
+                let cache = state.cache.read();
+                let entry = cache.as_ref().expect("the account's entry");
+                assert!(
+                    !entry.token.is_empty(),
+                    "the first sign-in's token is the one the entry holds"
+                );
+                entry.generation
+            };
 
             // A new sign-in while the exchange is down: the list the account
             // holds was fetched with the earlier sign-in's token.
@@ -15049,6 +15058,23 @@ mod tests {
                 route.api_base, DEFAULT_COPILOT_API_BASE,
                 "the API base the earlier sign-in's token named is not the new sign-in's: \
                  the default one stands until its own token names one"
+            );
+
+            // The entry is the new sign-in's own: it holds nothing the
+            // earlier sign-in's token brought, the token included.
+            let cache = state.cache.read();
+            let entry = cache
+                .as_ref()
+                .expect("the outage is kept on the account's entry");
+            assert!(
+                entry.token.is_empty(),
+                "the entry must hold no bytes of the earlier sign-in's token"
+            );
+            assert!(
+                entry.generation > earlier_generation,
+                "the entry must carry a generation of its own, not the earlier token's: \
+                 {} after {earlier_generation}",
+                entry.generation
             );
         }
 

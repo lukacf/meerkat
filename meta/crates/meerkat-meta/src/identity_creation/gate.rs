@@ -336,6 +336,9 @@ struct AgentFacts {
     provenance: Option<AgentProvenance>,
     /// The peers its changes listed.
     peers: Vec<String>,
+    /// Whether the host's roster lists its name while it is served from its
+    /// record: the roster's entry is not applied.
+    roster_listing_superseded: bool,
 }
 
 impl AgentFacts {
@@ -376,6 +379,7 @@ impl AgentFacts {
             readiness: self.readiness,
             provenance: self.provenance.clone(),
             open_operations: Vec::new(),
+            roster_listing_superseded: self.roster_listing_superseded,
         }
     }
 
@@ -528,6 +532,9 @@ struct Judged {
     normalized: NormalizedRequest,
     /// Whether the agent the request changes is one its host configures.
     configured_target: bool,
+    /// Whether the host's roster lists the agent the request changes while
+    /// it is served from its record.
+    roster_listing_superseded: bool,
 }
 
 impl Judged {
@@ -536,6 +543,7 @@ impl Judged {
         Self {
             normalized,
             configured_target: target.configured,
+            roster_listing_superseded: target.roster_listing_superseded,
         }
     }
 }
@@ -892,6 +900,7 @@ impl IdentityGate {
         let Some(spec_digest) = digest_of(&spec) else {
             return Ok(None);
         };
+        let roster_listing_superseded = self.roster_listing_superseded(&name).await;
         Ok(Some(AgentFacts {
             name,
             spec_digest,
@@ -905,8 +914,22 @@ impl IdentityGate {
                 .iter()
                 .map(|edge| identity_name_of_member(&edge.peer))
                 .collect(),
+            roster_listing_superseded,
             spec,
         }))
+    }
+
+    /// Whether the host's roster lists `name` while the agent is served
+    /// from its record, as the identity runtime says: the roster's entry
+    /// is not applied. It is the runtime's fact, read and never decided
+    /// here; `false` once the runtime is gone.
+    async fn roster_listing_superseded(&self, name: &str) -> bool {
+        let (Some(identities), Ok(identity)) =
+            (self.identities.upgrade(), AgentIdentity::parse(name))
+        else {
+            return false;
+        };
+        identities.roster_listing_superseded(&identity).await
     }
 
     /// The agent `name` as its host's configuration declares it: the spec
@@ -933,6 +956,8 @@ impl IdentityGate {
             archived,
             provenance: None,
             peers: Vec::new(),
+            // An agent its host configures is served from the roster.
+            roster_listing_superseded: false,
         })
     }
 
@@ -1114,6 +1139,7 @@ impl IdentityGate {
                 Ok(Judged {
                     normalized,
                     configured_target: false,
+                    roster_listing_superseded: false,
                 })
             }
             IdentityChangeSpec::Update(update) => {
@@ -1625,6 +1651,7 @@ impl IdentityGate {
             display_name: agent.spec.display_name.clone(),
             profile: agent.spec.profile.as_str().to_owned(),
             verdict,
+            roster_listing_superseded: agent.roster_listing_superseded,
         }
     }
 
@@ -1688,6 +1715,7 @@ impl IdentityGate {
             request_digest,
             subject_digest: rendering.subject_digest(),
             rendering: rendering.into_string(),
+            roster_listing_superseded: judged.roster_listing_superseded,
         })
     }
 }
@@ -2147,5 +2175,110 @@ impl crate::UnifiedRuntime {
     pub fn identity_changes_enabled(&self) -> bool {
         self.identity_runtime_ref()
             .is_some_and(|identities| identities.identity_changes_enabled())
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::*;
+    use crate::identity_creation::{ArchiveIdentitySpec, RequestEnvelope};
+    use crate::identity_first::AgentAddressability;
+
+    /// A created agent as the gate read it, with what the roster pass says
+    /// of its name.
+    fn agent(roster_listing_superseded: bool) -> AgentFacts {
+        let spec = row_spec(&DurableAgentSpec {
+            identity: AgentIdentity::parse("scout").expect("a name"),
+            profile: meerkat_mob::ProfileName::from("worker"),
+            addressability: AgentAddressability::Addressable,
+            display_name: None,
+            labels: BTreeMap::new(),
+            context: None,
+            additional_instructions: Vec::new(),
+            initial_message: None,
+            runtime_mode_override: None,
+            backend: None,
+            binding: None,
+            placement: None,
+        })
+        .expect("a row spec");
+        AgentFacts {
+            name: "scout".to_owned(),
+            spec_digest: digest_of(&spec).expect("a digest"),
+            spec,
+            revision: Some(1),
+            configured: false,
+            readiness: AgentReadiness::Dormant,
+            archived: false,
+            provenance: None,
+            peers: Vec::new(),
+            roster_listing_superseded,
+        }
+    }
+
+    /// An agent the host's roster lists while it is served from its record
+    /// says so on every read of the family, under one member that is
+    /// written only when it is so: the agent of a list and of a get, its
+    /// directory entry, and the plan of a change of it.
+    #[test]
+    fn an_agent_its_roster_lists_and_its_record_serves_says_so_on_every_read() {
+        let policy = IdentityCreationPolicy::parse(&json!({
+            "enabled": true,
+            "approval": {"rules": [{"change": ["archive"], "outcome": {"kind": "allow"}}]},
+        }))
+        .expect("the policy parses")
+        .expect("the policy is enabled");
+        for listed in [true, false] {
+            let agent = agent(listed);
+            let member = |value: Value| value.get("roster_listing_superseded").cloned();
+            let expected = listed.then(|| json!(true));
+            assert_eq!(
+                member(serde_json::to_value(agent.summary()).expect("a list entry")),
+                expected,
+                "the agent of a list"
+            );
+            assert_eq!(
+                member(serde_json::to_value(agent.record()).expect("a get")),
+                expected,
+                "the agent of a get"
+            );
+            assert_eq!(
+                member(
+                    serde_json::to_value(IdentityGate::directory_peer(Some(&policy), &agent))
+                        .expect("a directory entry")
+                ),
+                expected,
+                "its directory entry"
+            );
+            // The plan of a change of it carries what the judged change
+            // read of its target.
+            let normalized = normalize_archive(
+                &policy,
+                &RequesterFacts::host("ops"),
+                RequestEnvelope::default(),
+                &agent.entry(&policy),
+                &ArchiveIdentitySpec::new("scout", agent.spec_digest.clone()),
+            )
+            .expect("the archive normalizes");
+            let judged = Judged::of(normalized, &agent);
+            assert_eq!(judged.roster_listing_superseded, listed);
+            let mut plan = ChangePlan::new(
+                judged.normalized.plan.kind(),
+                judged.normalized.plan.change,
+                judged.normalized.plan.timeout_ms,
+                agent.spec_digest.clone(),
+                agent.spec_digest.clone(),
+                "",
+            );
+            plan.roster_listing_superseded = judged.roster_listing_superseded;
+            assert_eq!(
+                member(serde_json::to_value(plan).expect("a plan")),
+                expected,
+                "the plan of a change of it"
+            );
+        }
     }
 }

@@ -746,6 +746,11 @@ pub struct AgentSummary {
     /// answer an agent reads leaves this empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub open_operations: Vec<OperationId>,
+    /// Whether the host's roster lists this name while the agent is served
+    /// from its record: the roster's entry is not applied. Written only
+    /// when it is so.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub roster_listing_superseded: bool,
 }
 
 impl AgentSummary {
@@ -768,6 +773,7 @@ impl AgentSummary {
             readiness,
             provenance: None,
             open_operations: Vec::new(),
+            roster_listing_superseded: false,
         }
     }
 }
@@ -957,6 +963,11 @@ pub struct DirectoryPeer {
     /// entry: `verdict`, with `lines` or `reason` beside it.
     #[serde(flatten)]
     pub verdict: DirectoryVerdict,
+    /// Whether the host's roster lists this name while the agent is served
+    /// from its record: the roster's entry is not applied. Written only
+    /// when it is so.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub roster_listing_superseded: bool,
 }
 
 impl DirectoryPeer {
@@ -972,6 +983,7 @@ impl DirectoryPeer {
             display_name: None,
             profile: profile.into(),
             verdict,
+            roster_listing_superseded: false,
         }
     }
 }
@@ -1020,6 +1032,12 @@ pub struct ChangePlan {
     pub subject_digest: Sha256Digest,
     /// The canonical rendering a decider would be shown, whole.
     pub rendering: String,
+    /// Whether the host's roster lists the agent the change names while
+    /// the agent is served from its record: the roster's entry is not
+    /// applied, so the change is of the record alone. Written only when it
+    /// is so.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub roster_listing_superseded: bool,
 }
 
 impl ChangePlan {
@@ -1042,6 +1060,7 @@ impl ChangePlan {
             request_digest,
             subject_digest,
             rendering: rendering.into(),
+            roster_listing_superseded: false,
         }
     }
 }

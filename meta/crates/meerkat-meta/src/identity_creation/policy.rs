@@ -482,8 +482,10 @@ impl IdentityCreationPolicy {
     /// `constructed`, whose held construction no method of this release
     /// asks for or activates. Each would otherwise do less than it says:
     /// the refusal names the policy path and what a host writes instead.
-    /// The preparation `required` is served: the host settles an agent's
-    /// preparation with `meta/identity/settle_preparation`.
+    /// The preparation modes `none` and `required` are the ones served (the
+    /// host settles a required preparation with
+    /// `meta/identity/settle_preparation`); any other mode is refused, so a
+    /// mode added later is not served by default.
     pub fn check_served(&self) -> Result<(), PolicyRefusal> {
         let refused = |path: String, feature: &str| {
             refusal(
@@ -493,11 +495,9 @@ impl IdentityCreationPolicy {
                 },
             )
         };
-        if let Some((profile, rule)) = self
-            .preparation
-            .iter()
-            .find(|(_, rule)| rule.mode == PreparationMode::Constructed)
-        {
+        if let Some((profile, rule)) = self.preparation.iter().find(|(_, rule)| {
+            !matches!(rule.mode, PreparationMode::None | PreparationMode::Required)
+        }) {
             return Err(refused(
                 format!("preparation.{profile}.mode"),
                 &format!(
@@ -632,13 +632,16 @@ pub fn resolve_launch_policy(
         (None, RuntimeOptionPolicy::Disabled) => return Ok(None),
     };
     policy.check_mob_profiles(profiles)?;
+    // What no launch of this release serves is refused first, on every
+    // host, so the refusal a host reads names what it can write instead. A
+    // construction also needs a native host, which is asked after it.
+    policy.check_served()?;
     if !has_native_host && let Some(profile) = policy.constructed_profile() {
         return Err(PolicyRefusal::new(
             format!("preparation.{profile}"),
             PolicyRefusalKind::NeedsNativeHost,
         ));
     }
-    policy.check_served()?;
     Ok(Some(Arc::new(policy)))
 }
 

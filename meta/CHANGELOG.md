@@ -624,8 +624,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   interrupted run of it resumes. Before, each of these covered such an
   agent only on a `durable = true` profile. An agent seated by an earlier
   build, or adopted into the store from a plain member, gets them from its
-  next seat: a reset, an unarchive, or a respawn (`meta/respawn`), which
-  keeps its conversation.
+  next seat: a reset, an unarchive, a seat a start owes, or a respawn
+  (`meta/respawn`), which keeps its conversation.
 
 ### Known limitations
 

@@ -2892,7 +2892,9 @@ def compose_official(inputs: Inputs, rows: list, pinned_inputs: Path) -> tuple[d
         files[name] = (inputs.read(RUN_TEXTS + "/official/" + name), 0o644)
     # The GitHub server: exactly the pinned upstream release archive of the declared version.
     selected = [row for row in rows if row["kind"] == "release-download" and row["use"] == "official github"]
-    if len(selected) != 1 or selected[0]["file"] != github["asset"] or selected[0]["version"] != github["version"]:
+    # The pin row names the release by its version or by its tag (the version with a leading "v").
+    if (len(selected) != 1 or selected[0]["file"] != github["asset"]
+            or selected[0]["version"] not in (github["version"], "v" + github["version"])):
         raise PackageError("official_pin_mismatch")
     asset_file = selected[0]["file"]
     asset = run_pinned(pinned_inputs, selected[0])

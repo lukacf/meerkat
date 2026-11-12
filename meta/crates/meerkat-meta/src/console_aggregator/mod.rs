@@ -821,7 +821,10 @@ pub(crate) enum FrameWitness {
     /// ([`crate::access::AccessView::can_view_uncaptured_member`]). A
     /// runtime-plane frame ([`NoMemberReason::RuntimePlane`]) is no
     /// member's: every caller who may view its runtime-plane identity reads
-    /// it, whatever its payload names.
+    /// it, whatever its payload names, except a record that carries text
+    /// written from memory records
+    /// ([`crate::memory::events::carries_record_text_with_no_member`]),
+    /// which is decided as a member's frame with no witness.
     NoMember(NoMemberReason),
 }
 
@@ -10377,6 +10380,13 @@ pub(crate) fn timeline_frame_visible_to(
         }
     }
     if crate::console_contracts::is_runtime_plane_identity(&frame.identity) {
+        // A runtime-plane record names no member. One that carries text
+        // written from memory records (a memory conflict signal) is decided
+        // as a record with no member witness: nothing says whose records the
+        // text speaks of.
+        if crate::memory::events::carries_record_text_with_no_member(&frame.kind) {
+            return view.can_view_uncaptured_member(&frame.identity);
+        }
         return view.can_view_agent(&frame.identity);
     }
     match frame
@@ -14070,13 +14080,16 @@ comms = true
             json!({"role": "user", "content": "Exact public content."}),
         )
         .expect("frame");
+        // The witness of a member of the runtime's own mob: with no runtime
+        // registered, as here, a console serves no stored frame of a member
+        // of a nested mob.
         frame.source.member_provenance = Some(serde_json::from_value(json!({
             "identity": {"identity":"member", "display_name":"Member", "runtime_key":"runtime-a",
                 "runtime_member_id":"member", "session_id":"session", "visibility":"addressable",
                 "addressable":true, "health":"ready", "labels":{"private-label":"private"}},
             "member": {"agent_identity":"member", "role":"delegate", "state":"running",
                 "session_id":"session", "wired_to":[], "labels":{"private-label":"private"}},
-            "primary_mob_id":"primary", "source_mob_id":"lower"
+            "primary_mob_id":"primary", "source_mob_id":"primary"
         }))?);
         let stored = append_and_emit(&aggregator.inner, frame.clone())
             .await?

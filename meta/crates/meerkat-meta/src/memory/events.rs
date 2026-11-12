@@ -23,6 +23,19 @@
 
 use serde_json::{Value, json};
 
+/// The `event_type` of a conflict signal
+/// ([`MemoryTimelineEvent::ConflictSignal`]).
+pub(crate) const CONFLICT_SIGNAL_EVENT_TYPE: &str = "memory.conflict.signal";
+
+/// Whether a console record of `event_type` carries text written from
+/// memory records while it names no member: a conflict signal, whose
+/// `entity`, `topic` and `reason` the memory steward writes from the records
+/// it compared. Nothing says whose records the text speaks of, so the
+/// console decides such a record as one with no member witness.
+pub(crate) fn carries_record_text_with_no_member(event_type: &str) -> bool {
+    event_type == CONFLICT_SIGNAL_EVENT_TYPE
+}
+
 /// One typed memory-plane timeline event. Payload fields are stable wire
 /// contract for the console Memory panel (P3b).
 #[derive(Debug, Clone, PartialEq)]
@@ -171,7 +184,7 @@ impl MemoryTimelineEvent {
             Self::RecordPromoted { .. } => "memory.record.promoted",
             Self::QuarantineVerdict { .. } => "memory.quarantine.verdict",
             Self::QuarantineReleaseBlocked { .. } => "memory.quarantine.release_blocked",
-            Self::ConflictSignal { .. } => "memory.conflict.signal",
+            Self::ConflictSignal { .. } => CONFLICT_SIGNAL_EVENT_TYPE,
             Self::QuarantinedWrite { .. } => "memory.write.quarantined",
             Self::TaintTransition { .. } => "memory.taint.transition",
             Self::BudgetDenied { .. } => "memory.budget.denied",

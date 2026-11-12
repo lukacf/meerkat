@@ -877,6 +877,29 @@ describe("identity family: one refusal error, a closed vocabulary", () => {
     assert.equal(candidate.kind, "candidate_launch");
   });
 
+  // A send to an archived agent, and a schedule that would target one, are
+  // refused `identity_archived` on the gateway-wide `-32603`. It is no kind
+  // of the family: the closed vocabulary stays as it is, and the caller
+  // reads the kind, the agent and the remedy from the error's data.
+  it("an archived agent's refusal is the gateway-wide error, with its data", async () => {
+    const data = {
+      kind: "identity_archived",
+      identity: "scout",
+      remedy: "unarchive_identity",
+      retryable: false,
+    };
+    const { identities } = await scripted([
+      { error: { code: -32603, message: "identity scout is archived", data } },
+    ]);
+    const error = await rejection(identities.get("scout"));
+    assert.ok(error instanceof RpcError);
+    assert.ok(!(error instanceof IdentityRefusedError));
+    assert.equal(error.code, -32603);
+    assert.deepEqual(error.data, data);
+    assert.ok(!IDENTITY_REFUSAL_KINDS.has("identity_archived"));
+    assert.equal(IDENTITY_REFUSAL_KINDS.size, 57);
+  });
+
   it("a kind newer than this SDK is still the typed error", async () => {
     const { identities } = await scripted([
       refusal("quota_exceeded", { field: "agents", retryable: true, quota: 3 }),

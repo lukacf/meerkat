@@ -925,6 +925,33 @@ def test_only_the_family_code_with_a_kind_is_an_identity_refusal():
         assert isinstance(no_kind, RpcError)
 
 
+def test_an_archived_agents_refusal_is_the_gateway_wide_error_with_its_data():
+    """A send to an archived agent, and a schedule that would target one,
+    are refused ``identity_archived`` on the gateway-wide ``-32603``. It is
+    no kind of the family: the closed vocabulary stays as it is, and the
+    caller reads the kind, the agent and the remedy from the error's
+    data."""
+    from meerkat_meta import IDENTITY_REFUSAL_KINDS, IdentityRefusedError
+
+    data = {
+        "kind": "identity_archived",
+        "identity": "scout",
+        "remedy": "unarchive_identity",
+        "retryable": False,
+    }
+    error = _rpc_error_from_payload(
+        {"code": -32603, "message": "identity scout is archived", "data": data},
+        request_id="1",
+        method="meta/delivery/send",
+    )
+    assert isinstance(error, RpcError)
+    assert not isinstance(error, IdentityRefusedError)
+    assert error.code == -32603
+    assert error.data == data
+    assert "identity_archived" not in IDENTITY_REFUSAL_KINDS
+    assert len(IDENTITY_REFUSAL_KINDS) == 57
+
+
 def test_params_the_gateway_cannot_read_are_the_same_typed_error():
     """Params that do not parse (an unknown member, a wrong type) are refused
     ``invalid_request`` with problem ``malformed`` and no field on the

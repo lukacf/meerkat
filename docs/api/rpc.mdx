@@ -1526,7 +1526,13 @@ its `delivery` reads `owed` until the new snapshot is recorded) the `desired`,
 member's session could not be read, and the page still answers; a placed
 member's session is on its member host, which the read does not reach) and
 `live_channel_open` (operator instructions apply to the member's turns, not
-to a live channel). The read never wakes or materializes a member. Writes
+to a live channel). The read never wakes or materializes a member. A
+member's `delivery` is `blocked` with reason `owned_by_session`,
+`owned_by_other_mob`, `slot_managed_by_activation` or
+`member_host_unsupported`; `durability_unavailable` stays in the vocabulary
+and is no longer reported for a member (a store that cannot take the record
+leaves the member `owed`, and the record is tried again). `last_failure` is
+diagnostic and is not kept across a restart. Writes
 need the `AdminHost` scope, the read `ReadHistory`.
 
 A refused write answers `INVALID_PARAMS` (a malformed instruction history

@@ -107,23 +107,49 @@ them.
   not grow with other members' records, and a mob load pays a constant per
   record.
 
+- `meerkat-mob`: a member whose session cannot take the mob's operator
+  instruction record because its store is unavailable
+  (`durability_unavailable`) stays owed and is tried again, as after any
+  failed write. Before, the member was blocked until a new write selected
+  it, it was seated again or the mob restarted, although a store comes back.
+  Behaviour change: `mob/instruction_status`
+  (`MobHandle::operator_instruction_status`) no longer reports a member
+  `blocked` with reason `durability_unavailable`; such a member reads `owed`
+  with the failure as its `last_failure`. The reason stays in the vocabulary
+  (`MemberInstructionBlockReason::DurabilityUnavailable`, the wire value)
+  and nothing produces it for a member any more. A `MobSessionService`
+  wrapper that does not forward `record_member_instruction_target` therefore
+  leaves its members owed, tried at most 30 seconds apart, where they were
+  reported blocked. A member's `last_failure` is diagnostic: it is kept in
+  the mob's process and not across a restart.
+
 ### Fixed
 
 - `meerkat-mob`: a member that is owed the mob's operator instruction
-  snapshot when it wakes has it recorded during the wake, after its
-  conversation is loaded and before it is Live. A record written while an
-  agent had a conversation but no seated member is therefore in effect at
-  the first run after the seat, unless the session refuses the write; then
-  at the first run that starts after the mob has been able to write it (the
-  mob tries again at every wake of the member and on its own retry, at most
-  30 seconds apart). Before, the record reached the session whenever the
+  snapshot when a delivery wakes it has it recorded during the wake, after
+  its conversation is loaded and before it is Live. A record owed to a
+  member seated dormant on a conversation it already has is therefore in
+  effect at the first run after the seat when the member's session takes the
+  write then. A write that fails stays owed: the mob tries again at every
+  wake of the member and on its own retry, at most 30 seconds apart, and the
+  entry reaches the first run that starts after a write succeeded. A write
+  the session refuses because its target or a slot belongs to another owner
+  (`owned_by_session`, `owned_by_other_mob`, `slot_managed_by_activation`)
+  is blocked: the status shows it with its kind, and it is not tried again
+  until a write selects the member again, the member is seated again, or
+  the mob restarts. Before, the record reached the session whenever the
   mob's delivery next landed, and where the store-only record could not
   reach the conversation until the member's wake had loaded it, the run that
   woke the member started without the record and the agent got it one run
-  late (0.9.9 to 0.9.13). A record the session refuses never fails the wake:
-  the member goes Live and stays owed or blocked, and
-  `mob/instruction_status` shows why. A member that stays Live between runs
-  is not tried at each run start.
+  late (0.9.9 to 0.9.14). The wake never holds the mob for the record: the
+  mob answers other commands meanwhile, and a session that does not answer
+  the write within 5 seconds leaves the member Live and owed. Limits: only
+  the wake a delivery causes orders the record before the member's run. A
+  member seated eagerly on a conversation (a spawn with a Resume launch) and
+  a member the mob materializes itself at a start or a lift are recorded by
+  the mob's own delivery, tried at once when the member is Live and not
+  ordered before a run of it; a member that stays Live between runs is not
+  tried at each run start.
 
 ### Upgrade notes
 

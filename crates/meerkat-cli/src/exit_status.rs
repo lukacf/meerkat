@@ -107,8 +107,10 @@ pub(crate) fn failure_exit_status(error: &anyhow::Error) -> u8 {
 /// - A failed turn: the shared turn-failure code of its cause kind, and the
 ///   typed turn error as `details.error`.
 /// - Another typed owner with a public code: that code, and the owner's wire
-///   data when it has any (a session error's data, a mob error's typed
-///   console detail).
+///   data when it has any, as the other surfaces report it (a session
+///   error's data, a refused or not-ready input's admission detail, a
+///   hosting or teardown refusal's session data, a refused help-session
+///   resume's data, a mob error's typed console detail).
 /// - A typed owner without a public code, and a failure with no typed owner:
 ///   `INTERNAL_ERROR`, no details.
 pub(crate) fn failure_document(error: &anyhow::Error) -> WireRunFailure {
@@ -135,10 +137,21 @@ pub(crate) fn failure_document(error: &anyhow::Error) -> WireRunFailure {
     WireRunFailure { error: wire }
 }
 
-/// The wire data of the typed owner that decided the code.
+/// The wire data of the typed owner that decided the code, read from the
+/// projection the other surfaces report the same error with: a session
+/// error's data, a runtime driver error's native admission detail or the
+/// data of its teardown or hosting session error, a refused help-session
+/// resume's data, and a mob error's typed console detail. No data is built
+/// here, so the document holds what those surfaces hold and nothing more.
 fn owner_details(owner: &(dyn std::error::Error + 'static)) -> Option<serde_json::Value> {
     if let Some(error) = owner.downcast_ref::<meerkat_core::SessionError>() {
         return session_error_details(error);
+    }
+    if let Some(error) = owner.downcast_ref::<meerkat_runtime::RuntimeDriverError>() {
+        return runtime_driver_error_details(error);
+    }
+    if let Some(refusal) = owner.downcast_ref::<meerkat::help::HelpSessionNotResumable>() {
+        return Some(refusal.data());
     }
     #[cfg(feature = "mob")]
     if let Some(detail) = mob_wire_detail(owner) {
@@ -308,10 +321,31 @@ fn runtime_driver_error_code(error: &meerkat_runtime::RuntimeDriverError) -> Opt
     if let Some(detail) = meerkat::surface::native_admission_error_detail(error) {
         return Some(detail.code());
     }
+    runtime_driver_session_error(error)
+        .map(|session_error| session_transport_error_code(&session_error))
+}
+
+/// The wire data of the runtime classes that carry a public code: the
+/// details of the shared native admission envelope, or the data of the
+/// teardown or hosting session error the code is read from.
+fn runtime_driver_error_details(
+    error: &meerkat_runtime::RuntimeDriverError,
+) -> Option<serde_json::Value> {
+    if let Some(detail) = meerkat::surface::native_admission_error_detail(error) {
+        return detail.to_wire_error().ok().and_then(|wire| wire.details);
+    }
+    runtime_driver_session_error(error)
+        .and_then(|session_error| session_error_details(&session_error))
+}
+
+/// The typed session error of a teardown still in progress or of a session
+/// this runtime owner may not host.
+fn runtime_driver_session_error(
+    error: &meerkat_runtime::RuntimeDriverError,
+) -> Option<meerkat_core::SessionError> {
     error
         .teardown_in_progress_session_error()
         .or_else(|| error.hosting_session_error())
-        .map(|session_error| session_transport_error_code(&session_error))
 }
 
 #[cfg(feature = "mob")]

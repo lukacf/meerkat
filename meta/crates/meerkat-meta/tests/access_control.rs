@@ -1161,6 +1161,62 @@ async fn gating_audit_cursor_is_filtered_by_origin_audience() {
     assert_eq!(empty["error"]["code"], json!(-32602), "{empty:#}");
 }
 
+/// A gating entry names the agent it came from, and a caller reads it only
+/// when it may view that agent. An origin the console does not know (an
+/// agent that ended, whom nothing the console has read names) may have been
+/// private to a person, so a console that can identify a person shows such
+/// an entry to an administrator only, in the audit and on the pending list,
+/// like every other record it cannot attribute. An entry whose origin is a
+/// member the console knows is read as before.
+#[tokio::test]
+async fn a_gating_entry_of_an_origin_the_console_does_not_know_is_for_an_administrator_only() {
+    const UNKNOWN: &str = "ended-origin";
+    let (_temp_dir, mut runtime) = build_access_runtime_fixture().await;
+    // Rules off: every agent is viewed by everyone, so nothing but the rule
+    // for what the console cannot attribute decides here.
+    let controller = AccessController::new(AccessControlConfig {
+        enabled: false,
+        admins: vec!["root@example.test".to_string()],
+        ..AccessControlConfig::default()
+    })
+    .expect("controller");
+    runtime.set_access_controller(controller);
+    let app = runtime.build_reference_app_router(decision_state(false));
+    gate_with_origin(&runtime, "router").await;
+    gate_with_origin(&runtime, UNKNOWN).await;
+
+    let bob = person_token("bob@example.test");
+    let root = person_token("root@example.test");
+    for (reader, token, reads_unknown) in [
+        ("a person who is not an administrator", Some(&bob), false),
+        ("a caller with no token", None, false),
+        ("an administrator", Some(&root), true),
+    ] {
+        for method in ["meta/gating/audit", "meta/gating/pending"] {
+            let answer = match token {
+                Some(token) => rpc_as(&app, token, method, json!({})).await,
+                None => rpc(&app, method, json!({})).await,
+            };
+            assert!(
+                answer["error"].is_null(),
+                "{method} for {reader}: {answer:#}"
+            );
+            let text = answer["result"].to_string();
+            assert!(
+                text.contains("release for router"),
+                "{method}: {reader} reads the entry of a member the console knows: {answer:#}"
+            );
+            assert_eq!(
+                text.contains(UNKNOWN),
+                reads_unknown,
+                "{method}: {reader} and the entry of an origin the console does not know: \
+                 {answer:#}"
+            );
+        }
+    }
+    let _ = runtime.mob_handle().stop().await;
+}
+
 /// An action gating blocks on a memory conflict leaves an audit entry that
 /// carries the conflict. The conflict's reason text is written from the
 /// records that conflict, which a reader of the entry may not be allowed to

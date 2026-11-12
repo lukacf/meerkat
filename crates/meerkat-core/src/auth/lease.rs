@@ -492,6 +492,59 @@ mod tests {
         );
     }
 
+    /// A token can start with the token it replaced. The history is visited
+    /// oldest first, and a response that repeats the newer token still
+    /// loses it whole: nothing of it stays beside the marker. The same
+    /// holds when the longer token is the older one.
+    #[test]
+    fn default_redaction_removes_a_token_that_starts_with_an_earlier_one() {
+        struct Rotating {
+            signed: SignedCredentials,
+        }
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl HttpAuthorizer for Rotating {
+            async fn authorize(
+                &self,
+                _req: &mut HttpAuthorizationRequest<'_>,
+            ) -> Result<(), AuthError> {
+                Ok(())
+            }
+
+            fn visit_signed_credentials(&self, visit: &mut dyn FnMut(&str)) {
+                self.signed.visit(visit);
+            }
+
+            fn label(&self) -> &'static str {
+                "rotating"
+            }
+        }
+
+        // (Assembled here so no scanner reads the source as a secret.)
+        let shorter = "madeupfirsttoken".repeat(2);
+        let longer = format!("{shorter}{}", ["XYZ", "next", "99"].concat());
+        for (order, signed_with) in [
+            ("the shorter token is the older", [&shorter, &longer]),
+            ("the longer token is the older", [&longer, &shorter]),
+        ] {
+            let authorizer = Rotating {
+                signed: SignedCredentials::new(),
+            };
+            for token in signed_with {
+                authorizer.signed.record(token);
+            }
+            let mut diagnostic =
+                format!("upstream echo: credential {longer} was refused, like {shorter} before it");
+            authorizer.redact_response_diagnostic(&mut diagnostic);
+            assert_eq!(
+                diagnostic,
+                "upstream echo: credential [REDACTED] was refused, like [REDACTED] before it",
+                "{order}"
+            );
+        }
+    }
+
     /// The history keeps the last distinct values, drops the oldest past
     /// its bound, ignores an empty value, and prints none of them.
     #[test]

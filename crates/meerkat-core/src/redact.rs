@@ -862,6 +862,152 @@ mod tests {
         );
     }
 
+    /// `text` after `redact_credentials` with `named` visited in that
+    /// order.
+    fn redacted_naming(text: &str, named: &[&str]) -> String {
+        let mut redacted = text.to_string();
+        redact_credentials(&mut redacted, |visit| {
+            for value in named {
+                visit(value);
+            }
+        });
+        redacted
+    }
+
+    /// One named value can be part of another: a token and the token that
+    /// took its place, a key and a key derived from it. A response that
+    /// repeats the longer one loses it whole in either visiting order: the
+    /// marker stands where it stood and no byte of it stays beside the
+    /// marker. That holds where the shorter value starts the longer one,
+    /// ends it or stands inside it, and where the response repeats the
+    /// longer one as an encoder wrote it.
+    #[test]
+    fn redact_credentials_replaces_a_value_that_holds_another_named_value_whole() {
+        // (Assembled here so no scanner reads the source as a secret.)
+        let shorter = format!("madeup{}", "innervalue".repeat(2));
+        let more = ["XYZ", "more", "99"].concat();
+        let rewritten = ["/more", "+XYZ", "99="].concat();
+        let mut left = Vec::new();
+        for (place, longer, echoed) in [
+            ("at its start", format!("{shorter}{more}"), None),
+            ("at its end", format!("{more}{shorter}"), None),
+            ("inside it", format!("{more}{shorter}{more}"), None),
+            (
+                "at its start, the rest rewritten by an encoder",
+                format!("{shorter}{rewritten}"),
+                Some(format!(
+                    "{shorter}{}",
+                    rewritten.replace('/', "\\/").replace('+', "%2B")
+                )),
+            ),
+        ] {
+            let echoed = echoed.unwrap_or_else(|| longer.clone());
+            for (order, named) in [
+                ("shorter first", [shorter.as_str(), longer.as_str()]),
+                ("longer first", [longer.as_str(), shorter.as_str()]),
+            ] {
+                for (text, expected) in [
+                    (
+                        format!("credential {echoed} was refused"),
+                        "credential [REDACTED] was refused",
+                    ),
+                    (
+                        format!("credential {echoed} was refused, like {shorter} before it"),
+                        "credential [REDACTED] was refused, like [REDACTED] before it",
+                    ),
+                ] {
+                    let redacted = redacted_naming(&text, &named);
+                    if redacted != expected {
+                        left.push(format!("the shorter value {place}, {order}: {redacted}"));
+                    }
+                }
+            }
+        }
+        assert!(
+            left.is_empty(),
+            "part of a named value stayed beside the marker:\n{}",
+            left.join("\n")
+        );
+    }
+
+    /// A header value named with its scheme (`Bearer <token>`) is also
+    /// replaced without the scheme. A second named value that holds the
+    /// token and more bytes is still replaced whole, in either visiting
+    /// order: the header value's token never takes a piece out of it.
+    #[test]
+    fn redact_credentials_replaces_a_value_that_holds_a_named_header_values_token_whole() {
+        // (Assembled here so no scanner reads the source as a secret.)
+        let token = format!("madeup{}", "schemetoken".repeat(2));
+        let header = format!("Bearer {token}");
+        let more = ["XYZ", "99"].concat();
+        let mut left = Vec::new();
+        for (place, other) in [
+            ("at its start", format!("{token}{more}")),
+            ("at its end", format!("{more}{token}")),
+        ] {
+            // The header value is the longer of the two named values, and
+            // its token the shorter.
+            assert!(token.len() < other.len() && other.len() < header.len());
+            for (order, named) in [
+                ("header value first", [header.as_str(), other.as_str()]),
+                ("header value second", [other.as_str(), header.as_str()]),
+            ] {
+                for (text, expected) in [
+                    (
+                        format!("credential {other} was refused"),
+                        "credential [REDACTED] was refused",
+                    ),
+                    (
+                        format!("credential {other} was refused, like {header} before it"),
+                        "credential [REDACTED] was refused, like [REDACTED] before it",
+                    ),
+                    (
+                        format!("credential {other} was refused, like {token} before it"),
+                        "credential [REDACTED] was refused, like [REDACTED] before it",
+                    ),
+                ] {
+                    let redacted = redacted_naming(&text, &named);
+                    if redacted != expected {
+                        left.push(format!("the token {place}, {order}: {redacted}"));
+                    }
+                }
+            }
+        }
+        assert!(
+            left.is_empty(),
+            "part of a named value stayed beside the marker:\n{}",
+            left.join("\n")
+        );
+    }
+
+    /// Outside that case nothing depends on the visiting order: one named
+    /// value, and two named values that share no text, in either order,
+    /// leave these outputs byte for byte.
+    #[test]
+    fn redact_credentials_replaces_unrelated_values_the_same_in_either_order() {
+        // (Assembled here so no scanner reads the source as a secret.)
+        let token = format!("madeup{}", "bearertoken".repeat(3));
+        let header = format!("Bearer {token}");
+        let key = ["madeUP0", "/slash", "+plusTail99", "=="].concat();
+        let header_echo =
+            format!("rejected request with header authorization: Bearer {token}; retried {token}");
+        let header_gone =
+            "rejected request with header authorization: [REDACTED]; retried [REDACTED]";
+        let key_echo = format!(
+            "GET http://upstream.invalid/v1/models?session={}&page=2 failed with {key}",
+            key.replace('/', "%2F")
+                .replace('+', "%2B")
+                .replace('=', "%3D")
+        );
+        let key_gone = "GET http://upstream.invalid/v1/models?session=[REDACTED]&page=2 failed with [REDACTED]";
+        assert_eq!(redacted_naming(&header_echo, &[&header]), header_gone);
+        assert_eq!(redacted_naming(&key_echo, &[&key]), key_gone);
+        let text = format!("{header_echo}, then {key_echo}");
+        let both_gone = format!("{header_gone}, then {key_gone}");
+        assert_eq!(redacted_naming(&text, &[&header, &key]), both_gone);
+        assert_eq!(redacted_naming(&text, &[&key, &header]), both_gone);
+    }
+
     /// A value shorter than the minimum is not replaced by exact match: a
     /// placeholder key equal to an ordinary word would otherwise mangle
     /// every text that uses the word. At the minimum it is replaced.

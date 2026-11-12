@@ -1496,7 +1496,7 @@ fn an_archive_keeps_an_agent_an_unarchive_restores_it_and_a_removal_retires_its_
         json!({"effect": "paused", "count": 0, "schedules": []}),
         "{archived:#}"
     );
-    let mut first = archived.clone();
+    let mut first = archived;
     first["agents"][0]
         .as_object_mut()
         .expect("an agent")
@@ -4314,8 +4314,7 @@ async fn a_create_and_an_update_set_addressability_and_runtime_mode_as_a_roster_
         let identities = rig
             .runtime
             .identity_runtime()
-            .expect("the identity runtime")
-            .clone();
+            .expect("the identity runtime");
         async move {
             identities
                 .registered_spec(&AgentIdentity::parse(name).unwrap())

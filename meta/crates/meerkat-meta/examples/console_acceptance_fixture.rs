@@ -216,6 +216,9 @@ image_generation = {live_images}
             .scratch_dir(scratch.path())
             .ephemeral_runtime_store(true);
     }
+    // The host's roster, kept so that `/__fixture/roster` can list a name in
+    // it while the runtime runs.
+    let mut host_roster: Option<Arc<MutableRosterProvider>> = None;
     if identity_mode {
         let specs = identities
             .iter()
@@ -242,8 +245,10 @@ image_generation = {live_images}
             }
             None => LocalContinuityStore::in_memory()?,
         };
+        let roster = Arc::new(MutableRosterProvider::new(specs));
+        host_roster = Some(roster.clone());
         builder = builder
-            .roster_provider(Arc::new(MutableRosterProvider::new(specs)))
+            .roster_provider(roster)
             .continuity_store(Arc::new(continuity))
             .lease_provider(Arc::new(LocalLeaseProvider::new()));
     }
@@ -389,6 +394,7 @@ image_generation = {live_images}
     let approval_runtime = runtime.clone();
     let history_runtime = runtime.clone();
     let settle_runtime = runtime.clone();
+    let roster_runtime = runtime.clone();
     let created_schedules = schedules.clone();
     let listed_schedules = schedules;
     let controls = Router::new()
@@ -469,6 +475,47 @@ image_generation = {live_images}
                         (axum::http::StatusCode::OK, Json(outcome.to_json()))
                     }
                     Err(refusal) => (axum::http::StatusCode::BAD_REQUEST, Json(json!({"error": refusal.to_string()}))),
+                }
+            }
+        }))
+        // The host's roster lists the agent `name` too, as a configuration
+        // that names an agent created at run time does: POST {name} adds an
+        // entry for the name to the roster and runs a roster pass. The
+        // agent stays served from its record; the answer names the
+        // listings the pass found superseded.
+        .route("/roster", post(move |Json(value): Json<Value>| {
+            let roster = host_roster.clone();
+            let runtime = roster_runtime.clone();
+            async move {
+                let name = value.get("name").and_then(Value::as_str).unwrap_or_default();
+                let (Some(roster), Some(context)) = (roster, runtime.identity_first_context()) else {
+                    return (axum::http::StatusCode::BAD_REQUEST, Json(json!({"error": "the runtime has no roster of long-term agents"})));
+                };
+                let (Ok(identity), Ok(display_name)) = (
+                    AgentIdentity::parse(name),
+                    DisplayName::parse(&format!("Listed {name}")),
+                ) else {
+                    return (axum::http::StatusCode::BAD_REQUEST, Json(json!({"error": "name is required"})));
+                };
+                roster.upsert(DurableAgentSpec {
+                    identity,
+                    profile: ProfileName::from("lead"),
+                    addressability: AgentAddressability::Addressable,
+                    display_name: Some(display_name),
+                    labels: BTreeMap::new(),
+                    context: None,
+                    additional_instructions: vec![],
+                    initial_message: None,
+                    runtime_mode_override: Some(meerkat_mob::MobRuntimeMode::TurnDriven),
+                    backend: None,
+                    binding: None,
+                    placement: None,
+                });
+                match context.refresh_desired_topology().await {
+                    Ok(pass) => (axum::http::StatusCode::OK, Json(json!({
+                        "superseded": pass.roster_listings_superseded.iter().map(|listed| listed.as_str().to_owned()).collect::<Vec<_>>(),
+                    }))),
+                    Err(error) => (axum::http::StatusCode::BAD_REQUEST, Json(json!({"error": error.to_string()}))),
                 }
             }
         }))

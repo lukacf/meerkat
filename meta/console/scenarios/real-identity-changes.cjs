@@ -257,6 +257,8 @@ async function fullStory() {
     assert.equal(facts.includes(record.provenance.requester), false, "the person's key is no text of the record");
     assert.equal(/principal:/.test(await scoutRecord.innerHTML()), false, "the person's key is in no attribute of the record");
     assert.equal(await scoutRecord.getByText(/created|configured|adopted|imported|origin/i).count(), 0);
+    // The host's configuration does not list this agent's name: no note.
+    assert.equal(await page.getByTestId("inspect-roster-superseded:scout").count(), 0);
     await page.screenshot({ path: path.join(evidence, "real-identity-story-created-details.png"), fullPage: true });
     // The details opened beside the roster: close them, and the story goes
     // on in the roster.
@@ -360,12 +362,33 @@ async function fullStory() {
     assert.equal(Object.hasOwn(clerk, "addressability"), false, "an agent that can be messaged says nothing");
     assert.equal(clerk.runtime_mode_override, "autonomous_host");
     await page.getByTestId("identity-cancel").click();
-    // Its Record says how it runs, in words.
+    // The host's configuration now lists the name of this agent too, as a
+    // host does that names in its configuration an agent that was created
+    // at run time. The agent stays served from its record, and its record
+    // says so; the record of an agent the configuration does not list says
+    // nothing.
+    const listed = await fixture.control("roster", { name: "clerk" });
+    assert.deepEqual(listed.superseded, ["clerk"]);
+    clerk = (await call("meta/identity/get", { name: "clerk" })).result;
+    assert.equal(clerk.roster_listing_superseded, true);
+    assert.equal(clerk.display_name, "Clerk", "the record serves, not the configuration's entry");
+    assert.equal(Object.hasOwn((await call("meta/identity/get", { name: "scout" })).result, "roster_listing_superseded"), false);
+    // Its Record says how it runs, in words, and the pane says at the
+    // agent's status, in words, that the configuration's entry is not
+    // applied.
     await openAgent("clerk");
     await page.getByTestId("roster-detail:clerk").getByRole("button", { name: "Details", exact: true }).click();
     const clerkRecord = page.getByTestId("inspect-record:clerk");
     await clerkRecord.waitFor();
     assert.match(await clerkRecord.locator(".cc-kv").first().textContent(), /How it runs\s*On its own/);
+    const listedNote = page.getByTestId("inspect-roster-superseded:clerk");
+    await listedNote.waitFor();
+    assert.equal(
+      await listedNote.textContent(),
+      "The host's configuration lists an agent of this name too. That entry is not applied: this agent runs from its own record, and a change made here changes that record.",
+    );
+    assert.equal(await page.getByTestId("inspect-roster-superseded:clerk").count(), 1);
+    await page.screenshot({ path: path.join(evidence, "real-identity-story-listed-by-the-host.png"), fullPage: true });
     await page.locator('[data-testid^="pane:"]').filter({ has: page.getByTestId("inspect-panel:clerk") })
       .locator('[data-testid^="pane-close:"]').click();
     await gone(page.getByTestId("inspect-panel:clerk"), "the closed details");

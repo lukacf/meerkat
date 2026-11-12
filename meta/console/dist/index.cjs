@@ -75412,8 +75412,11 @@ function parseIdentityOutcome(value) {
   }
 }
 function parseChangePlan(value) {
-  const outcome = textOf6(rawOf(value)?.outcome);
-  return outcome ? { outcome } : null;
+  const raw = rawOf(value);
+  const outcome = textOf6(raw?.outcome);
+  if (!raw || !outcome) return null;
+  const schedules = schedulesOf(raw.schedules);
+  return { outcome, ...schedules ? { schedules } : {} };
 }
 function planWords(plan) {
   switch (plan.outcome) {
@@ -75630,10 +75633,24 @@ function runModeWords(runtimeMode) {
 function scheduleCount(count2) {
   return count2 === 1 ? "schedule" : "".concat(count2, " schedules");
 }
+function schedulesSentence(followed, done) {
+  const count2 = Math.max(followed.count, followed.schedules.length);
+  if (count2 <= 0) return null;
+  const named = followed.schedules.flatMap((schedule) => schedule.name ? [schedule.name] : []);
+  const unnamed = followed.schedules.length - named.length;
+  const unlisted = count2 - followed.schedules.length;
+  if (count2 === 1) return "Its schedule".concat(named.length ? " ".concat(named[0]) : "", " ").concat(done, ".");
+  if (named.length === 0) return "Its ".concat(scheduleCount(count2), " ").concat(done, ".");
+  const rest = [
+    ...unnamed > 0 ? ["".concat(unnamed, " without a name")] : [],
+    ...unlisted > 0 ? ["".concat(unlisted, " more")] : []
+  ];
+  const list5 = rest.length === 0 ? named.join(", ") : rest.length === 1 ? "".concat(named.join(", "), " and ").concat(rest[0]) : "".concat(named.join(", "), ", ").concat(rest[0], " and ").concat(rest[1]);
+  return "Its ".concat(scheduleCount(count2), " ").concat(done, ": ").concat(list5, ".");
+}
 function schedulesWords(followed) {
   if (!followed) return [];
-  const count2 = Math.max(followed.count, followed.schedules.length);
-  const one3 = count2 === 1;
+  const one3 = Math.max(followed.count, followed.schedules.length) === 1;
   let done;
   switch (followed.effect) {
     case "paused":
@@ -75649,31 +75666,29 @@ function schedulesWords(followed) {
       return [];
   }
   const lines = [];
-  if (count2 > 0) {
-    const named = followed.schedules.flatMap((schedule) => schedule.name ? [schedule.name] : []);
-    const unnamed = followed.schedules.length - named.length;
-    const unlisted = count2 - followed.schedules.length;
-    if (one3) {
-      lines.push("Its schedule".concat(named.length ? " ".concat(named[0]) : "", " ").concat(done, "."));
-    } else if (named.length === 0) {
-      lines.push("Its ".concat(scheduleCount(count2), " ").concat(done, "."));
-    } else {
-      const rest = [
-        ...unnamed > 0 ? ["".concat(unnamed, " without a name")] : [],
-        ...unlisted > 0 ? ["".concat(unlisted, " more")] : []
-      ];
-      const list5 = rest.length === 0 ? named.join(", ") : rest.length === 1 ? "".concat(named.join(", "), " and ").concat(rest[0]) : "".concat(named.join(", "), ", ").concat(rest[0], " and ").concat(rest[1]);
-      lines.push("Its ".concat(scheduleCount(count2), " ").concat(done, ": ").concat(list5, "."));
-    }
-  }
+  const sentence3 = schedulesSentence(followed, done);
+  if (sentence3) lines.push(sentence3);
   if (followed.incomplete) {
     if (followed.askedAgain) {
       lines.push("Not every schedule could be changed at first. The team was asked again to follow the rest.");
     } else {
-      lines.push(count2 > 0 ? "Not every schedule could be changed. Try again to follow the rest." : "Its schedules could not be changed. Try again to follow them.");
+      lines.push(sentence3 ? "Not every schedule could be changed. Try again to follow the rest." : "Its schedules could not be changed. Try again to follow them.");
     }
   }
   return lines;
+}
+function plannedSchedulesWords(planned) {
+  if (!planned) return null;
+  switch (planned.effect) {
+    case "paused":
+      return schedulesSentence(planned, "will be paused until it is unarchived");
+    case "resumed":
+      return schedulesSentence(planned, "will run again");
+    case "ended":
+      return schedulesSentence(planned, "will be ended");
+    default:
+      return null;
+  }
 }
 function schedulesOweRetry(outcome) {
   return "agents" in outcome && outcome.agents.some((agent) => agent.schedules?.incomplete === true && !agent.schedules.askedAgain);
@@ -75853,6 +75868,7 @@ function requesterWords(provenance, personName) {
   return { kind: "host", words: Object.hasOwn(HOST_SURFACE_WORDS, provenance.requester) ? HOST_SURFACE_WORDS[provenance.requester] : "The host (".concat(provenance.requester, ")") };
 }
 var HARVEST_WORDS = "Its last conversation is harvested and distilled, as for any agent that leaves the team.";
+var HARVESTED_AT_ARCHIVE_WORDS = "Its last conversation was already harvested and distilled when it was archived.";
 function agentChangeConfirmWords(change, name2, state = {}) {
   if (change === "remove" && state.waiting === true) {
     return {
@@ -75873,6 +75889,13 @@ function agentChangeConfirmWords(change, name2, state = {}) {
       question: "Unarchive ".concat(name2, "?"),
       consequence: "It comes back on the conversation it had and takes messages again.",
       confirm: "Unarchive"
+    };
+  }
+  if (state.archived === true) {
+    return {
+      question: "Remove ".concat(name2, " for good?"),
+      consequence: "Its name can never be used again, and this cannot be undone. ".concat(HARVESTED_AT_ARCHIVE_WORDS, " Left archived, it keeps its name, its record, its conversation and its memory, and you can bring it back."),
+      confirm: "Remove for good"
     };
   }
   return {
@@ -76579,20 +76602,60 @@ function AgentChangeConfirm({
   name: name2,
   displayName,
   waiting,
+  archived,
   onClose,
   onArchiveInstead
 }) {
-  const words2 = agentChangeConfirmWords(change, displayName, { waiting });
+  const words2 = agentChangeConfirmWords(change, displayName, { waiting, archived });
   const sender = useChangeSender(api, change, displayName);
   const request = import_react81.default.useRef(null);
   const [reading, setReading] = import_react81.default.useState(false);
+  const [schedules, setSchedules] = import_react81.default.useState(null);
+  const [asked, setAsked] = import_react81.default.useState(0);
+  const opening = import_react81.default.useRef(null);
+  const loadRecord = import_react81.default.useRef(api.loadRecord);
+  loadRecord.current = api.loadRecord;
+  const plan = import_react81.default.useRef(api.plan);
+  plan.current = api.plan;
   const questionId = import_react81.default.useId();
   const consequenceId = import_react81.default.useId();
+  import_react81.default.useEffect(() => {
+    setSchedules(null);
+    opening.current = null;
+    if (waiting) return void 0;
+    let active = true;
+    const read = loadRecord.current(name2).then(
+      (record10) => {
+        if (!active) return null;
+        request.current = agentRefRequest(record10);
+        return request.current;
+      },
+      // A read that fails here is not said: Confirm reads the record itself,
+      // and says so when it cannot.
+      () => null
+    );
+    opening.current = read;
+    void read.then(async (asks) => {
+      if (!asks) return;
+      let answer;
+      try {
+        answer = await plan.current(change, asks);
+      } catch {
+        return;
+      }
+      if (active && answer.kind === "plan") setSchedules(plannedSchedulesWords(answer.plan.schedules));
+    });
+    return () => {
+      active = false;
+    };
+  }, [name2, change, waiting, asked]);
   const confirm = async () => {
     if (!request.current) {
       setReading(true);
       try {
-        request.current = agentRefRequest(await api.loadRecord(name2));
+        const opened = opening.current;
+        opening.current = null;
+        request.current = (opened ? await opened : null) ?? agentRefRequest(await api.loadRecord(name2));
       } catch (error48) {
         const said = readFailure(error48);
         sender.setResult({ kind: "note", message: said.sentence, detail: said.detail, alert: true });
@@ -76606,6 +76669,7 @@ function AgentChangeConfirm({
   const reload = () => {
     request.current = null;
     sender.setResult(null);
+    setAsked((count2) => count2 + 1);
   };
   const busy = reading || sender.busy;
   const open = keepsForm(sender.result);
@@ -76632,7 +76696,16 @@ function AgentChangeConfirm({
             /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(StatusMark, { tone: change === "remove" ? "crit" : "warn" }),
             words2.question
           ] }),
-          /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("p", { className: "lifecycle-confirm__consequence", id: consequenceId, children: words2.consequence })
+          /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)("p", { className: "lifecycle-confirm__consequence", id: consequenceId, children: [
+            words2.consequence,
+            schedules ? (
+              // Part of what the dialog is described by, on a line of its own.
+              /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)(import_jsx_runtime107.Fragment, { children: [
+                " ",
+                /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-confirm__schedules", "data-testid": "identity-confirm-schedules", children: schedules })
+              ] })
+            ) : null
+          ] })
         ] }) : null,
         sender.result ? /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(
           IdentityResultNotice,
@@ -76662,6 +76735,7 @@ function AgentChangePanel({
   displayName,
   controls,
   waiting,
+  archived,
   onClose,
   onSwitch
 }) {
@@ -76674,6 +76748,7 @@ function AgentChangePanel({
       name: name2,
       displayName,
       waiting,
+      archived,
       onClose,
       onArchiveInstead: change === "remove" && controls.archive ? () => onSwitch("archive") : void 0
     },
@@ -77251,6 +77326,7 @@ function RosterPanel({
           displayName: agentChange.displayName,
           controls: agentChange.controls,
           waiting: agentChange.waiting,
+          archived: agentChange.archived,
           onClose: () => setAgentChange(null),
           onSwitch: (change) => setAgentChange({ ...agentChange, change })
         }
@@ -77429,7 +77505,8 @@ function RosterPanel({
                   displayName: agentShownName(agent),
                   change,
                   controls: { archive: false },
-                  waiting: waitsForItsHost(agent)
+                  waiting: waitsForItsHost(agent),
+                  archived: agent.archived
                 });
               }
             }

@@ -18324,6 +18324,10 @@ svg[data-svg=fit],
   border-color: var(--_cc-border-strong);
   background: var(--_cc-surface-soft);
 }
+.identity-confirm__schedules {
+  display: block;
+  margin-top: 4px;
+}
 .identity-pending {
   display: flex;
   flex-direction: column;

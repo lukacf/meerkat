@@ -10269,6 +10269,8 @@ impl MobHandle {
     pub async fn rotate_member(&self, mut spec: SpawnMemberSpec) -> Result<SessionId, MobError> {
         use super::dormant_seat::DormantSeatCommitEntry;
 
+        let rotated = spec.identity.clone();
+
         if matches!(
             self.command_authority_kind(),
             crate::control_policy::CommandAuthorityKind::AgentLane
@@ -10349,7 +10351,12 @@ impl MobHandle {
         match outcome {
             super::DormantSeatOutcome::Seated { session_id, .. }
             | super::DormantSeatOutcome::AlreadySeated { session_id, .. }
-            | super::DormantSeatOutcome::Embodied { session_id, .. } => Ok(session_id),
+            | super::DormantSeatOutcome::Embodied { session_id, .. } => {
+                // A store-owned identity's row lets go of what this seat
+                // row settles (an owed label restamp, say).
+                self.settle_store_owned_seat_row(&rotated).await;
+                Ok(session_id)
+            }
             other => Err(other.into_unseated_error()),
         }
     }
@@ -11030,10 +11037,16 @@ impl MobHandle {
         // labels and profile are kept, against their member's last seat row
         // below.
         let mut seats = Vec::new();
+        let mut label_restamps_owed = 0;
         let rows = super::IdentityRecordRows::scan(
             store.as_ref(),
             self.mob_id(),
             |identity, observation| {
+                if let crate::identity::CreatedIdentityObservation::Created(record) = observation
+                    && record.label_restamp_owed
+                {
+                    label_restamps_owed += 1;
+                }
                 if let crate::identity::CreatedIdentityObservation::Created(record) = observation
                     && record.presence == crate::identity::CreatedIdentityPresence::Present
                     && seated.contains(identity)
@@ -11048,6 +11061,7 @@ impl MobHandle {
         census.archived = rows.archived;
         census.tombstones = rows.tombstones;
         census.unreadable = rows.unreadable;
+        census.label_restamps_owed = label_restamps_owed;
         if !seats.is_empty() {
             let rows = self.last_spawn_rows().await?;
             census.seats_stale = seats
@@ -15840,6 +15854,10 @@ impl MobHandle {
                 MobRespawnError::Mob(error) => error,
                 other => MobError::Internal(other.to_string()),
             })?;
+        // A store-owned identity's row lets go of what this seat row
+        // settles: a respawn with the row's labels is how a host carries
+        // out an owed label restamp itself.
+        self.settle_store_owned_seat_row(&identity).await;
         let mut receipt = receipt;
         if wake && let Err(error) = self.ensure_member_live(&identity).await {
             receipt.wake_error = Some(std::sync::Arc::new(error));

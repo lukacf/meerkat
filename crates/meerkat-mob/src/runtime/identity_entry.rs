@@ -540,10 +540,21 @@ pub struct IdentityRecordCensus {
     /// their row's labels or profile: the seat row keeps its labels until
     /// the member is seated again, restamped or respawned with the row's
     /// labels (Apply now, [`super::MemberRespawn::with_labels`]), and its
-    /// role until its restamp. The mob's roster reads the row's labels
-    /// meanwhile, and the member's builds carry them; a downgrade rebuilds
-    /// such a member from its seat row.
+    /// role until its restamp. A seat whose row records its owed label
+    /// restamp ([`Self::label_restamps_owed`]) reads the row's labels on the
+    /// mob's roster and at its builds meanwhile; any other stale seat keeps
+    /// its seat's labels there. A downgrade rebuilds such a member from its
+    /// seat row.
     pub seats_stale: usize,
+    /// Rows that record their seat is owed a label restamp
+    /// (`CreatedIdentityRecord::label_restamp_owed`): an update committed
+    /// while the member's seat row carried other labels, and no seat row
+    /// has carried the row's labels since. A retry of the update or the
+    /// identity's next update while the member is idle, or a respawn with
+    /// the row's labels, settles it. A release before 0.9.15 reads such a
+    /// row as unreadable, for its identity alone: settle them before a
+    /// rollback.
+    pub label_restamps_owed: usize,
 }
 
 /// The row counts of [`IdentityRecordCensus`]: one mob's rows of schema

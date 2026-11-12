@@ -2169,8 +2169,9 @@ async fn a_label_update_of_a_member_that_holds_work_defers_its_restamp() {
 
 /// Row: a label restamp an update left owed (the update stopped after its
 /// commit, here; a member that held work at the update defers it the same
-/// way) is carried out by the update's retry: the retry replays, and the
-/// member is restamped with its row's labels on its own session.
+/// way) is carried out by the update's retry once the member is idle: the
+/// retry replays, the member is restamped with its row's labels on its own
+/// session, and the row lets the owed restamp go.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_owed_label_restamp_is_carried_out_by_the_updates_retry() {
     let mob = StoreOwnedMob::new("label-restamp-owed").await;
@@ -2203,6 +2204,7 @@ async fn an_owed_label_restamp_is_carried_out_by_the_updates_retry() {
     assert_eq!(mob.generation("desk").await, generation.next());
     assert_eq!(mob.session("desk").await, session, "the same session");
     assert_eq!(seats_stale(&mob).await, 0, "no seat is stale");
+    assert!(!label_restamp_owed(&mob, "desk").await);
 }
 
 /// Row (RED for the roster entry): a member a same-session successor cannot
@@ -2512,15 +2514,16 @@ async fn builds_with_labels(
     }
 }
 
-/// Row (RED): a seat that trails its row takes its row's labels at its next
-/// build. `quiet` is a Dormant seat no build created; `built` was built and
-/// released. Each row's labels moved with no member step after the update's
-/// commit, so each seat trails its row. The host answers each seat from the
-/// identity's row: the seat takes the row's labels before the answer is
-/// compared, and the member is built with them on its own session and
-/// generation. No seat row is written at a build: the journal's seat row
-/// follows at the member's next restamp, and the census counts it until
-/// then.
+/// Row (RED): a seat that trails its row and is owed its restamp takes its
+/// row's labels at its next build. `quiet` is a Dormant seat no build
+/// created; `built` was built and released. Each row's labels moved with no
+/// member step after the update's commit, so each seat trails its row and
+/// each row records the owed restamp. The host answers each seat from the
+/// identity's row: the build is compared with the row's labels, and the
+/// member is built with them on its own session and generation. No seat
+/// row is written at a build, so a build settles nothing: the row keeps
+/// the restamp owed, the journal's seat row follows at the member's next
+/// restamp, and the census counts it until then.
 ///
 /// RED on the old tree: the build is refused for good naming the changed
 /// key, and the member is Broken.
@@ -2566,6 +2569,88 @@ async fn a_seat_that_trails_its_row_takes_the_rows_labels_at_its_next_build() {
         2,
         "the census counts the seat rows until a restamp writes them"
     );
+    for name in names {
+        assert!(
+            label_restamp_owed(&mob, name).await,
+            "{name}: a build settles nothing: the restamp stays owed"
+        );
+    }
+    assert_eq!(
+        mob.handle
+            .identity_record_census()
+            .await
+            .expect("the census answers")
+            .label_restamps_owed,
+        2,
+        "the census counts the rows that owe a restamp"
+    );
+}
+
+/// Row: a seat that trails its row with no restamp owed is compared with
+/// its seat, as before this release. An earlier release's label update
+/// moved `quiet`'s and `closed`'s rows and left their seats and no record
+/// of it. A start leaves each roster entry with its seat's labels. A host
+/// that leaves the seat as given builds `quiet` with the seat's labels; a
+/// host that answers from the row is refused `closed`'s build for good,
+/// naming the changed key: the seat is brought up to date first, by a
+/// respawn with the row's labels or the identity's next update.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_seat_that_trails_its_row_with_no_restamp_owed_is_compared_with_its_seat() {
+    let preparer = ScriptedPreparer::new();
+    let mut mob = seat_composing_mob("trailing-seat-earlier-release", &preparer).await;
+    let names = ["quiet", "closed"];
+    committed(mob.create(host_create("create-desks", &names), ALLOW).await);
+    for name in names {
+        commit_update_transaction_of_an_earlier_release(
+            &mob.handle,
+            &format!("relabel-{name}"),
+            spec(name, "worker").with_labels(moved_team(name)),
+        )
+        .await;
+        assert!(!label_restamp_owed(&mob, name).await, "{name}");
+    }
+    assert_eq!(seats_stale(&mob).await, 2, "both seats trail their rows");
+    mob.restart_configured(MobCompositionAuthority::Authoritative, {
+        let preparer = preparer.clone();
+        move |builder| builder.with_member_build_preparer(preparer)
+    })
+    .await;
+    mob.service.set_keep_alive_turns_complete_immediately(true);
+    for name in names {
+        assert_eq!(
+            seat(&mob, name).await.labels,
+            spec(name, "worker").labels,
+            "{name}: the start leaves the seat's labels on the roster"
+        );
+    }
+
+    let session = mob.session("quiet").await;
+    builds_with_labels(&mob, "quiet", &session, &spec("quiet", "worker").labels).await;
+
+    preparer.compose_seats(host_answers_moved_team(&names));
+    let refused = wake(&mob, "closed").await;
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|error| error.to_string().contains("changed [team]")),
+        "a host that answers the row is refused, naming the changed key: {refused:?}"
+    );
+    assert!(!serves(&mob, "closed"), "the member is Broken");
+
+    // The remedy: a respawn with the row's labels brings the seat up to
+    // date, and the next incarnation builds.
+    tokio::time::timeout(
+        STEP,
+        mob.handle.respawn_member(
+            id("closed"),
+            crate::runtime::MemberRespawn::new().with_labels(moved_team("closed")),
+        ),
+    )
+    .await
+    .expect("the respawn answers")
+    .expect("the respawn seats the row's labels");
+    let session = mob.session("closed").await;
+    builds_with_labels(&mob, "closed", &session, &moved_team("closed")).await;
 }
 
 /// Row (RED): a label update that found its member busy does not break the
@@ -2651,15 +2736,21 @@ async fn a_label_update_a_busy_member_deferred_does_not_refuse_its_build_after_r
             spec("desk", "worker").labels,
             "{restart} restart: no restamp wrote a seat row"
         );
+        assert!(
+            label_restamp_owed(&mob, "desk").await,
+            "{restart} restart: a build writes no seat row, so the restamp stays owed"
+        );
     }
 }
 
-/// Row (RED): a start seats each store-owned identity's row labels on its
-/// roster entry. The rows of `quiet` (a Dormant seat no build created) and
-/// `built` (built before the restart) moved past their seats. After the
-/// restart each roster entry reads its row's labels at once, with nothing
-/// built, no member woken and the host asked nothing: the start reads the
-/// rows anyway. The journal's seat rows are as they were.
+/// Row (RED): a start seats the row's labels on the roster entry of each
+/// store-owned identity whose row records an owed label restamp. The rows
+/// of `quiet` (a Dormant seat no build created) and `built` (built before
+/// the restart) moved past their seats in an update's commit, which
+/// recorded the restamp as owed. After the restart each roster entry reads
+/// its row's labels at once, with nothing built, no member woken and the
+/// host asked nothing: the start reads the rows anyway. The journal's seat
+/// rows are as they were, and the rows still record the owed restamp.
 ///
 /// RED on the old tree: the restarted roster reads the labels of the
 /// journal's seat rows until a build or a restamp.
@@ -2702,6 +2793,10 @@ async fn a_start_seats_a_store_owned_identitys_row_labels_on_its_roster_entry() 
             mob.spawn_row(name).await.labels,
             spec(name, "worker").labels,
             "{name}: the journal's seat row is as it was"
+        );
+        assert!(
+            label_restamp_owed(&mob, name).await,
+            "{name}: a start settles nothing: the restamp stays owed"
         );
     }
     assert_eq!(mob.builds().await, 0, "the restart built nothing");
@@ -2847,6 +2942,7 @@ async fn a_deferred_label_restamp_is_carried_out_by_a_retry_once_the_member_is_i
         "the roster follows the row at once"
     );
     assert_eq!(seats_stale(&mob).await, 1, "the seat row trails the row");
+    assert!(label_restamp_owed(&mob, "desk").await);
 
     // The member's work ends; the retry finds it idle.
     mob.service.set_keep_alive_turns_complete_immediately(true);
@@ -2883,11 +2979,16 @@ async fn a_deferred_label_restamp_is_carried_out_by_a_retry_once_the_member_is_i
     assert_eq!(mob.session("desk").await, session, "the same session");
     assert_eq!(now.labels, moved);
     assert_eq!(seats_stale(&mob).await, 0, "no seat row counts stale");
+    assert!(
+        !label_restamp_owed(&mob, "desk").await,
+        "the restamp's seat row settles what was owed"
+    );
 }
 
 /// Row (guard, passes before and after): the label rule stands on a build
-/// that seats a trailing seat's row labels. `quiet`'s row moved past its
-/// seat (the update's transaction with no member step after it). A host
+/// of a seat owed its label restamp, which is compared with the row's
+/// labels. `quiet`'s row moved past its seat (the update's transaction
+/// with no member step after it, which records the owed restamp). A host
 /// whose spawn customizer sets a label the row lacks, and a host whose seat
 /// composition adds one, are each refused that build for good, naming the
 /// added key and no other: nothing is built.
@@ -3646,6 +3747,128 @@ async fn a_row_the_store_cannot_serve_at_a_build_ends_it_retryable_as_a_store_fa
     }
     assert_eq!(mob.builds().await, 1, "the next wake built the member");
     assert_eq!(preparer.seats().len(), composed + 1, "the host was asked");
+}
+
+/// Row: an archive and a removal let an owed label restamp go. `filed` and
+/// `gone` each hold work at a label update, so each row records the owed
+/// restamp. The archive of the one and the removal of the other retire the
+/// member: no seat is owed anything, and the archived row and the
+/// tombstone carry no such record. `filed`'s unarchive seats the row's
+/// labels, with nothing owed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_archive_or_a_removal_lets_an_owed_label_restamp_go() {
+    let mob = StoreOwnedMob::new("label-owed-archive-removal").await;
+    committed(
+        mob.create(host_create("create-desks", &["filed", "gone"]), ALLOW)
+            .await,
+    );
+    for name in ["filed", "gone"] {
+        mob.commit_update_transaction(
+            &format!("relabel-{name}"),
+            spec(name, "worker").with_labels(moved_team(name)),
+        )
+        .await;
+        assert!(label_restamp_owed(&mob, name).await, "{name}");
+    }
+    mob.archive("archive-filed", "filed")
+        .await
+        .expect("the archive commits");
+    mob.unseated_for("filed", UnseatedEntryCause::Archived)
+        .await;
+    assert!(
+        !label_restamp_owed(&mob, "filed").await,
+        "an archived identity's row owes no seat a restamp"
+    );
+    mob.remove("remove-gone", "gone")
+        .await
+        .expect("the removal commits");
+    mob.removed("gone").await;
+    assert!(
+        !label_restamp_owed(&mob, "gone").await,
+        "a tombstone owes no seat a restamp"
+    );
+
+    mob.unarchive("unarchive-filed", "filed")
+        .await
+        .expect("the unarchive commits");
+    assert_eq!(mob.spawn_row("filed").await.labels, moved_team("filed"));
+    assert!(!label_restamp_owed(&mob, "filed").await);
+}
+
+/// A host's spawn customizer that names no labels on any build: it leaves
+/// the seat's.
+struct ClearingCustomizer;
+
+impl crate::runtime::SpawnMemberCustomizer for ClearingCustomizer {
+    fn customize_spawn(
+        &self,
+        _ctx: &crate::runtime::SpawnCustomizationContext,
+        spec: &mut SpawnMemberSpec,
+    ) -> Result<(), MobError> {
+        spec.labels = None;
+        Ok(())
+    }
+}
+
+/// Row: a build of a seat owed its label restamp carries the row's labels,
+/// whatever its seat carries and whatever the host's customizer leaves.
+/// `quiet`'s row moved in an update's commit, which recorded the restamp as
+/// owed; its host then respawned it with labels of its own, so its seat
+/// row and its roster entry carry those, and the restamp stays owed (no
+/// seat row carries the row's labels). Its host's customizer names no
+/// labels. The build is compared with the row's labels and carries them,
+/// not the seat's; and the build settles nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_build_of_a_seat_owed_its_restamp_carries_the_rows_labels() {
+    let mob = StoreOwnedMob::build(
+        store_owned_definition("owed-seat-build-labels"),
+        MobStorage::in_memory(),
+        |builder| builder.with_spawn_member_customizer(Arc::new(ClearingCustomizer)),
+    )
+    .await;
+    mob.service.set_keep_alive_turns_complete_immediately(true);
+    committed(
+        mob.create(host_create("create-quiet", &["quiet"]), ALLOW)
+            .await,
+    );
+    mob.commit_update_transaction(
+        "relabel-quiet",
+        spec("quiet", "worker").with_labels(moved_team("quiet")),
+    )
+    .await;
+    let host_labels = BTreeMap::from([("team".to_string(), "gamma".to_string())]);
+    tokio::time::timeout(
+        STEP,
+        mob.handle.respawn_member(
+            id("quiet"),
+            crate::runtime::MemberRespawn::new().with_labels(host_labels.clone()),
+        ),
+    )
+    .await
+    .expect("the respawn answers")
+    .expect("the host's respawn commits");
+    assert_eq!(mob.spawn_row("quiet").await.labels, host_labels);
+    assert!(
+        label_restamp_owed(&mob, "quiet").await,
+        "no seat row carries the row's labels: the restamp stays owed"
+    );
+
+    let session = mob.session("quiet").await;
+    wake(&mob, "quiet").await.expect("the build is accepted");
+    assert!(serves(&mob, "quiet"), "the member is not Broken");
+    let builds = builds_on(&mob, &session).await;
+    let built = builds.last().expect("the wake's build");
+    for (key, value) in &moved_team("quiet") {
+        assert_eq!(
+            built.peer_meta_labels.get(key),
+            Some(value),
+            "the build carries the row's labels: {built:?}"
+        );
+    }
+    assert!(
+        label_restamp_owed(&mob, "quiet").await,
+        "a build settles nothing"
+    );
 }
 
 /// A host's spawn customizer that sets one label on every build it is asked
@@ -6972,6 +7195,7 @@ async fn an_approved_store_owned_profile_change_survives_a_restart_before_its_re
         .updated(
             spec.clone(),
             Some(crate::identity::PendingRoleMigration::new("worker")),
+            false,
         )
         .expect("the updated row");
     let receipt = crate::IdentityChangeReceipt::sealed(
@@ -7042,7 +7266,9 @@ async fn an_approved_store_owned_profile_change_survives_a_restart_before_its_re
 impl StoreOwnedMob {
     /// Write the transaction of a store-owned update of `spec`'s identity to
     /// `spec` as the update's commit step writes it (the row at its next
-    /// revision and the receipt), with nothing after it.
+    /// revision, with the label restamp the update owes a seat that carries
+    /// other labels, and the receipt; the roster entry then reads the row's
+    /// labels), with nothing after it.
     async fn commit_update_transaction(&self, operation_id: &str, spec: CreatedIdentitySpec) {
         commit_update_transaction_of(&self.handle, operation_id, spec).await;
     }
@@ -7051,11 +7277,37 @@ impl StoreOwnedMob {
 /// [`StoreOwnedMob::commit_update_transaction`] through `handle`'s own
 /// identity store: the update of a mob that stopped after the update's
 /// commit and before its member step (a label update's restamp, say), so
-/// the seat keeps the labels it was seated with.
+/// the seat keeps the labels it was seated with and the row records the
+/// restamp as owed.
 async fn commit_update_transaction_of(
     handle: &MobHandle,
     operation_id: &str,
     spec: CreatedIdentitySpec,
+) {
+    write_update_transaction(handle, operation_id, spec, true).await;
+}
+
+/// The row of an update an earlier release committed: the row at its next
+/// revision and the receipt, with no record of what the seat is owed, and
+/// the roster entry left as it was. Releases 0.9.9 through 0.9.13 left a
+/// seat so at every label update.
+async fn commit_update_transaction_of_an_earlier_release(
+    handle: &MobHandle,
+    operation_id: &str,
+    spec: CreatedIdentitySpec,
+) {
+    write_update_transaction(handle, operation_id, spec, false).await;
+}
+
+/// The store transaction of an update of `spec`'s identity, and, with
+/// `as_this_release`, what this release's commit step does with it: the row
+/// records the label restamp a seat with other labels is owed, and the
+/// roster entry reads the row's labels.
+async fn write_update_transaction(
+    handle: &MobHandle,
+    operation_id: &str,
+    spec: CreatedIdentitySpec,
+    as_this_release: bool,
 ) {
     let store = handle
         .identity_member
@@ -7073,9 +7325,16 @@ async fn commit_update_transaction_of(
         other => panic!("{} has no readable row: {other:?}", spec.identity),
     };
     {
+        let seat_trails = as_this_release
+            && handle
+                .roster
+                .read()
+                .await
+                .seat_row_labels(&spec.identity)
+                .is_some_and(|seat| *seat != spec.labels);
         let after = before
             .clone()
-            .updated(spec.clone(), None)
+            .updated(spec.clone(), None, before.label_restamp_owed || seat_trails)
             .expect("the updated row");
         let receipt = crate::IdentityChangeReceipt::sealed(
             handle.mob_id().clone(),
@@ -7111,6 +7370,13 @@ async fn commit_update_transaction_of(
             written,
             crate::store::IdentityChangeCommit::Committed { .. }
         ));
+        if as_this_release {
+            handle
+                .roster
+                .write()
+                .await
+                .set_store_owned_seat_labels(&spec.identity, &spec.labels);
+        }
     }
 }
 
@@ -9655,21 +9921,53 @@ async fn rb_cl2_4b_apply_now_writes_the_rows_labels_into_the_seat_row() {
     assert_eq!(seats_stale(&mob).await, 0, "no seat is stale");
 }
 
-/// Row: a respawn that names no labels keeps the member's own, even after
-/// an update moved its row's labels: Apply now is the respawn with the
-/// row's labels, never a default, so the seat stays stale.
+/// Row: a respawn that names no labels keeps the member's own, the labels
+/// its roster entry reads. After an earlier release's label update (the
+/// row moved, the entry did not) the respawn keeps the labels the member
+/// was seated with: Apply now is the respawn with the row's labels, never
+/// a default, so the seat stays stale. After this release's label update
+/// the entry reads the row's labels from the update's commit on, so the
+/// same respawn seats them, and the row lets the owed restamp go.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_respawn_without_labels_keeps_the_members_labels() {
     let mob = StoreOwnedMob::new("respawn-keeps-labels").await;
     committed(
-        mob.create(host_create("create-desk", &["desk"]), ALLOW)
+        mob.create(host_create("create-desks", &["desk", "owed"]), ALLOW)
             .await,
     );
-    let seated_with = mob.spawn_row("desk").await.labels;
     let moved = BTreeMap::from([("team".to_string(), "beta".to_string())]);
+    mob.commit_update_transaction(
+        "relabel-owed",
+        spec("owed", "worker").with_labels(moved.clone()),
+    )
+    .await;
+    assert!(label_restamp_owed(&mob, "owed").await);
+    tokio::time::timeout(
+        STEP,
+        mob.handle
+            .respawn_member(id("owed"), crate::runtime::MemberRespawn::new()),
+    )
+    .await
+    .expect("the respawn answers")
+    .expect("the respawn commits");
+    assert_eq!(
+        mob.spawn_row("owed").await.labels,
+        moved,
+        "the respawn seats the labels the roster entry reads: the row's"
+    );
+    assert!(
+        !label_restamp_owed(&mob, "owed").await,
+        "a seat row carries the row's labels: the row lets the owed restamp go"
+    );
+
+    let seated_with = mob.spawn_row("desk").await.labels;
     assert_ne!(moved, seated_with, "the update moves the labels");
-    mob.commit_update_transaction("relabel-desk", spec("desk", "worker").with_labels(moved))
-        .await;
+    commit_update_transaction_of_an_earlier_release(
+        &mob.handle,
+        "relabel-desk",
+        spec("desk", "worker").with_labels(moved),
+    )
+    .await;
     assert_eq!(
         seats_stale(&mob).await,
         1,

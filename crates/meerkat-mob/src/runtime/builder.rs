@@ -9606,15 +9606,24 @@ impl MobBuilder {
             // Roster is a projection only. Build it after the authoritative
             // carrier/event reconciliation and machine recovery have succeeded.
             let mut roster = Roster::project(&mob_events);
-            // A store-owned identity's row is its record. Its seat carries
-            // the row's labels, whatever its last seat row holds (a label
-            // update that no restamp followed left that row behind): the
-            // rows are read already, so the roster follows them here, with
-            // no build, no wake and no row written. Its seat whose session
-            // no build created also takes its descriptive inputs from the
-            // row: an update after the seat applies at the first build.
+            // A store-owned identity whose row records that its seat is
+            // owed a label restamp (an update committed while its member's
+            // seat row carried other labels, and no seat row has carried
+            // the row's labels since) reads the row's labels on its roster
+            // entry, as it did from that update's commit on: the rows are
+            // read already, and nothing is built, woken or written. Every
+            // other seat is left as the journal projected it, with every
+            // label it carries: a difference no update made is not the
+            // start's to settle. A seat whose session no build created
+            // also takes its descriptive inputs from the row: an update
+            // after the seat applies at the first build.
             for (identity, spec) in &recovered_created_rows.specs {
-                roster.set_store_owned_seat_labels(identity, &spec.labels);
+                if recovered_created_rows
+                    .label_restamps_owed
+                    .contains(identity)
+                {
+                    roster.set_store_owned_seat_labels(identity, &spec.labels);
+                }
                 if super::boot_plan::domain_member_seat_session_unborn(
                     initial_dsl_authority.state(),
                     identity,
@@ -12422,6 +12431,11 @@ pub(super) struct SeatedMemberRestore {
     /// member's provision ends with it, as with a refused build
     /// preparation, before anything is built.
     pub(super) seat_refusal: Option<super::MemberBuildPreparationRefusal>,
+    /// Why the row of a store-owned identity could not be read for this
+    /// build: the member's provision ends retryable with it, as a store
+    /// that cannot serve the member now, before its host is asked and
+    /// before anything is built.
+    pub(super) row_unavailable: Option<String>,
 }
 
 /// What a member's restore writes once its request is settled, whatever
@@ -12435,10 +12449,6 @@ pub(super) struct MemberRestoreSeating {
     dispatch_admission: bool,
     profile_override: Option<crate::profile::Profile>,
     model_override: Option<String>,
-    /// The labels of a store-owned identity's row, when the seat trailed
-    /// them at this build: its roster entry takes them
-    /// ([`Roster::set_store_owned_seat_labels`]).
-    row_labels: Option<BTreeMap<String, String>>,
 }
 
 /// How far a member's restore got before its turn, and what its turn writes.
@@ -12529,7 +12539,9 @@ pub(super) enum RetryableRestoreCause {
     /// with its session unborn, and a later delivery wakes it again.
     SeatCreateUnavailable,
     /// The restore met work still in flight on the member's session, or a
-    /// store that could not serve it now ([`restore_error_is_retryable`]):
+    /// store that could not serve it now ([`restore_error_is_retryable`];
+    /// the identity store that could not serve a store-owned member's row
+    /// for this build, or holds a row of it this build cannot read):
     /// the member stays Dormant with its boot obligation owed, and its retry
     /// joins the work still in flight.
     RestoreUnavailable,
@@ -13369,43 +13381,59 @@ pub(super) async fn restore_resumed_member(
         && entry.fork_source.is_none()
         && super::created_identity::host_composes_seat(base.state(), &entry.agent_identity);
     let mut seat_refusal = None;
-    // A store-owned seat carries its row's labels and no others. A seat
-    // that trails its row (no restamp seated the row's labels: the mob
-    // stopped after a label update's commit, say) takes them here, before
-    // its host is asked: the host answers from the row, and this build
-    // carries what the row holds. The comparison below is then made with
-    // the row's labels, so a label the row lacks is refused as ever. The
-    // roster entry takes them in the member's turn; a build writes no seat
-    // row. Read at every such build: nothing but the row and the seat
-    // decides it. A row the store cannot serve now ends this build for a
-    // retry, as a host that cannot answer yet does: the member is never
-    // built, or refused for good, on labels its row may not hold.
-    let mut row_labels = None;
+    // A build of a store-owned member must carry exactly its seat's labels.
+    // Which labels are the seat's is read here, in one point read of the
+    // identity's row at every such build. A row that records its seat is
+    // owed a label restamp (an update committed while the member's seat
+    // row carried other labels, and no seat row has carried the row's
+    // labels since) makes the row's labels the seat's: the host is asked
+    // with them, and the comparison below is made with them, so a host
+    // that answers the row is not refused and a label the row lacks is
+    // refused as ever. The record stays as it is: a build writes no seat
+    // row, so it settles nothing, and the next build after a restart reads
+    // the same. Any other row leaves the seat's labels the member's own,
+    // as its last seat row seated them: a label only the seat carries is
+    // kept or refused by the comparison, never dropped here. A row the
+    // store cannot serve now, or holds in a form this build cannot read,
+    // ends this build for a retry as a store that cannot serve the member
+    // (never as its host's refusal): the member is not built, or refused
+    // for good, on labels its row may not hold, and its host is not asked.
+    let mut row_unavailable = None;
+    let mut owed_row_labels = None;
     if store_owned_seat && let Some(store) = ctx.tool_handle.identity_member.as_ref() {
-        match super::identity_change::store_owned_row_labels(
+        use super::identity_change::StoreOwnedSeatRow;
+        match super::identity_change::store_owned_seat_row(
             store.as_ref(),
             &definition.id,
             &entry.agent_identity,
         )
         .await
         {
-            Ok(labels) => row_labels = labels.filter(|labels| *labels != entry.labels),
+            Ok(StoreOwnedSeatRow::Row {
+                labels,
+                label_restamp_owed: true,
+            }) => owed_row_labels = Some(labels),
+            Ok(StoreOwnedSeatRow::Row { .. } | StoreOwnedSeatRow::Absent) => {}
+            Ok(StoreOwnedSeatRow::Unreadable) => {
+                row_unavailable = Some(format!(
+                    "the identity store holds a row of store-owned '{}' that this build cannot                      read, so the member's build waits until the row reads again",
+                    entry.agent_identity
+                ));
+            }
             Err(error) => {
-                seat_refusal = Some(super::MemberBuildPreparationRefusal::Retryable {
-                    reason: format!(
-                        "the row of store-owned '{}' could not be read: {error}",
-                        entry.agent_identity
-                    ),
-                });
+                row_unavailable = Some(format!(
+                    "the identity store could not serve the row of store-owned '{}' now, so                      the member's build waits for the store and is tried again: {error}",
+                    entry.agent_identity
+                ));
             }
         }
     }
-    let seat_labels = row_labels.as_ref().unwrap_or(&entry.labels);
-    if let Some(labels) = &row_labels {
-        restore_request.labels = Some(labels.clone());
+    let seat_labels = owed_row_labels.as_ref().unwrap_or(&entry.labels);
+    if owed_row_labels.is_some() {
+        restore_request.labels = Some(seat_labels.clone());
     }
     if store_owned_seat
-        && seat_refusal.is_none()
+        && row_unavailable.is_none()
         && let Some(preparer) = ctx.member_build_preparer
         && let Err(refusal) = Box::pin(super::member_build_preparer::compose_store_owned_seat(
             preparer.as_ref(),
@@ -13421,7 +13449,7 @@ pub(super) async fn restore_resumed_member(
     // this member's restore with the refusal as its diagnostic; the rest of
     // the mob still comes up, and the member is restored once the customizer
     // admits it.
-    let restore_spec = match super::fork_build::customize_seat_resume_request(
+    let mut restore_spec = match super::fork_build::customize_seat_resume_request(
         &definition.id,
         spawn_member_customizer.as_ref(),
         entry,
@@ -13447,12 +13475,18 @@ pub(super) async fn restore_resumed_member(
     // host's spawn customizer ran, so a label the customizer set, dropped
     // or changed is refused as one its composition answered is, for good,
     // whether or not a build preparer is configured.
-    if store_owned_seat && seat_refusal.is_none() {
+    if store_owned_seat && row_unavailable.is_none() && seat_refusal.is_none() {
         seat_refusal = super::MemberBuildPreparationRefusal::seat_labels_differ(
             &entry.agent_identity,
             seat_labels,
             restore_spec.labels.as_ref().unwrap_or(seat_labels),
         );
+        // A customizer that named no labels left the seat's: the build
+        // carries the labels the comparison was made with, the row's for a
+        // seat owed its restamp, never the roster entry's by a fallback.
+        if owed_row_labels.is_some() && restore_spec.labels.is_none() {
+            restore_spec.labels = Some(seat_labels.clone());
+        }
     }
     if restore_spec.role_name != entry.role {
         return Err(MobError::Internal(format!(
@@ -13619,13 +13653,13 @@ pub(super) async fn restore_resumed_member(
         dispatch_admission: restore_spec.tool_dispatch_admission.is_some(),
         profile_override: restore_spec.override_profile.clone(),
         model_override: restore_spec.model_override.clone(),
-        row_labels,
     };
     let seated = SeatedMemberRestore {
         restore_spec,
         restore_resume_from_role,
         restore_overlay,
         seat_refusal,
+        row_unavailable,
     };
 
     let outcome = if matches!(entry.member_ref, MemberRef::Session { .. })
@@ -13751,15 +13785,26 @@ async fn unstage_member_build_hold(ctx: &ResumeMemberRestoreContext<'_>, session
 /// refusal ends the member's restore with. `seat_refusal`, the host's
 /// refusal to compose the seat of a store-owned identity's member for this
 /// build, ends the restore the same way, and the host is not asked to
-/// prepare a build it refused to compose.
+/// prepare a build it refused to compose. `row_unavailable`, a row of a
+/// store-owned identity that could not be read for this build, ends the
+/// restore retryable first, as a store that cannot serve the member now
+/// ([`RetryableRestoreCause::RestoreUnavailable`]): the host was asked
+/// nothing and is asked nothing.
 #[cfg(feature = "runtime-adapter")]
 async fn prepare_member_build_before_provision(
     ctx: &ResumeMemberRestoreContext<'_>,
     entry: &RosterEntry,
     bridge_session_id: &SessionId,
     authority: &crate::machines::mob_machine::MobMachineAuthority,
-    seat_refusal: Option<&super::MemberBuildPreparationRefusal>,
+    seated: &SeatedMemberRestore,
 ) -> Result<Option<MemberRestoreProvisionOutcome>, MobError> {
+    if let Some(reason) = &seated.row_unavailable {
+        return Ok(Some(MemberRestoreProvisionOutcome::Retryable {
+            reason: reason.clone(),
+            cause: RetryableRestoreCause::RestoreUnavailable,
+        }));
+    }
+    let seat_refusal = seated.seat_refusal.as_ref();
     let refused = |refusal: super::MemberBuildPreparationRefusal| match refusal {
         super::MemberBuildPreparationRefusal::Retryable { reason } => {
             MemberRestoreProvisionOutcome::Retryable {
@@ -14005,14 +14050,9 @@ pub(super) async fn provision_durable_member_restore(
         }
     };
     // The host prepares the member's build before its provision.
-    if let Some(outcome) = prepare_member_build_before_provision(
-        ctx,
-        entry,
-        bridge_session_id,
-        &authority,
-        seated.seat_refusal.as_ref(),
-    )
-    .await?
+    if let Some(outcome) =
+        prepare_member_build_before_provision(ctx, entry, bridge_session_id, &authority, seated)
+            .await?
     {
         return Ok(MemberRestoreProvision {
             profile,
@@ -14429,7 +14469,7 @@ async fn provision_fresh_member_session(
         entry,
         &admitted_bridge_session_id,
         &authority,
-        seated.seat_refusal.as_ref(),
+        seated,
     )
     .await?
     {
@@ -14536,20 +14576,6 @@ pub(super) async fn apply_member_restore_plan(
     if let Some(roster_entry) = commit.roster.get_by_identity_mut(&entry.agent_identity) {
         roster_entry.effective_profile_override = seating.profile_override;
         roster_entry.effective_model_override = seating.model_override;
-    }
-    // The row's labels the build took, unless the roster entry's labels
-    // moved since the restore read them (a label update that landed while
-    // the member was being built set them from the row itself, which is
-    // newer than this build's read).
-    if let Some(labels) = &seating.row_labels
-        && commit
-            .roster
-            .get(&entry.agent_identity)
-            .is_some_and(|current| current.labels == entry.labels)
-    {
-        commit
-            .roster
-            .set_store_owned_seat_labels(&entry.agent_identity, labels);
     }
     let provision = match outcome {
         SeatedMemberRestoreOutcome::Refused(diagnostic) => {

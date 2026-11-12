@@ -104,13 +104,17 @@ fn last_bound_sessions(mob_id: &MobId, events: &[MobEvent]) -> BTreeMap<AgentIde
 /// What a start carries out from the store-owned rows it recovered: each
 /// present identity's spec (a seat whose session no build created takes its
 /// descriptive inputs from it), the identities whose row keeps a role
-/// migration its restamp has not committed, and the identities whose row
-/// is pending a `constructed` preparation (one whose construction a crash
-/// published before its row was settled is seated: its row is settled).
+/// migration its restamp has not committed, the identities whose row
+/// records its seat is owed a label restamp (their roster entry reads the
+/// row's labels; nothing is restamped, built or woken at a start), and the
+/// identities whose row is pending a `constructed` preparation (one whose
+/// construction a crash published before its row was settled is seated:
+/// its row is settled).
 #[derive(Debug, Default)]
 pub(super) struct RecoveredCreatedRows {
     pub(super) specs: BTreeMap<AgentIdentity, crate::identity::CreatedIdentitySpec>,
     pub(super) role_migrations_owed: std::collections::BTreeSet<AgentIdentity>,
+    pub(super) label_restamps_owed: std::collections::BTreeSet<AgentIdentity>,
     pub(super) pending_constructions: std::collections::BTreeSet<AgentIdentity>,
 }
 
@@ -158,6 +162,9 @@ pub(super) async fn recover_created_identity_entries(
                 recovered.specs.insert(identity.clone(), spec.clone());
                 if record.pending_role_migration.is_some() {
                     recovered.role_migrations_owed.insert(identity.clone());
+                }
+                if record.label_restamp_owed {
+                    recovered.label_restamps_owed.insert(identity.clone());
                 }
             }
             if let CreatedIdentityObservation::Created(record) = observation

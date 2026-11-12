@@ -247,9 +247,13 @@ pub trait MemberBuildPreparer: Send + Sync {
     /// fails as a [`MemberBuildPreparationRefusal::Final`] refusal does.
     ///
     /// The seat's labels are its row's labels: Core lowers them from the
-    /// row at a fresh spawn, and at a wake or a restore they are the
-    /// member's seat labels, which a seat that trails its row takes from
-    /// the row before this is called. The answer
+    /// row at a fresh spawn; at a wake or a restore they are the labels the
+    /// member was last seated with, or the row's labels while the row
+    /// records that the seat is owed a label restamp (an update committed
+    /// while the member held work, say: `label_restamp_owed`), read from
+    /// the row before this is called. A row the identity store cannot
+    /// serve then ends the build for a retry as a store that cannot serve
+    /// the member, and this is not called. The answer
     /// must leave them as given: what decides on a member's labels reads
     /// its seat. An answer whose labels are not exactly the seat's (a key
     /// added, a key dropped, a key given another value) is refused for

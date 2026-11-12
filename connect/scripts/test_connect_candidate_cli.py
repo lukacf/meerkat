@@ -680,12 +680,26 @@ def lane(tmp_path, monkeypatch):
 
 def test_committed_macos_selection_is_pending_and_refuses_every_step(tmp_path, monkeypatch):
     committed = p.read_json(CONNECT / "release/connect-release-inputs-macos-arm64.json")
-    assert committed["library"]["state"] == "pending" and committed["library"]["pins"]["sha256"] is None
-    assert committed["library"]["reason"].startswith("PENDING")
+    state = committed["library"]["state"]
+    assert state in ("pending", "selected")
+    if state == "pending":
+        assert committed["library"]["pins"]["sha256"] is None
+        assert committed["library"]["reason"].startswith("PENDING")
+    else:
+        # Completed at integration: the committed pin file is exactly the one the selection names.
+        assert p.checked_macos_inputs(copy.deepcopy(committed)) == committed
+        assert committed["library"]["pins"]["sha256"] == p.digest(CONNECT / committed["library"]["pins"]["path"])
+    # A pending record refuses everything, whatever the committed file says today.
+    pending = copy.deepcopy(committed)
+    pending["library"]["state"] = "pending"
+    pending["library"]["pins"]["sha256"] = None
     with pytest.raises(ValueError, match="unbound macOS producer inputs"):
-        p.checked_macos_inputs(committed)
+        p.checked_macos_inputs(pending)
     # The legacy candidate preflight reads the same file and refuses it as unbound, as it always did.
-    assert p.unbound(committed)
+    assert p.unbound(pending)
+    selection = tmp_path / "pending-selection.json"
+    dump(selection, pending)
+    monkeypatch.setattr(p, "macos_input_file", lambda: selection)
     monkeypatch.setattr(p, "require_native_host", lambda target: None)
     monkeypatch.setattr(p, "macos_checkout", lambda: (REVISION, TREE))
     work = tmp_path / "cw"

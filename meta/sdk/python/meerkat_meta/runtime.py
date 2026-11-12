@@ -991,9 +991,13 @@ class IdentitiesHandle:
         """Hold the mob's changes of agents (``held=True``) or release them.
 
         While held, every change is refused the retryable ``changes_held``
-        and nothing of it is written. The hold is not durable: a host that
-        holds changes holds them again at its next start. ``reason`` is for
-        the host's own record.
+        and nothing of it is written. The hold does not survive a restart of
+        the host: a host that means to keep changes held sets the hold again
+        as soon as its start has answered, before it serves callers. The
+        start itself is not held: what a launch carries out before this call
+        (a held change that was approved, a change asked by an agent a
+        schedule wakes) is carried out. ``reason`` is for the host's own
+        record.
         """
         params: dict[str, Any] = {"held": held}
         if reason is not None:

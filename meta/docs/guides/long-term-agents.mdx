@@ -419,13 +419,22 @@ await identities.remove("editor", { expectedSpecDigest: digest, requestId: "remo
   paused for the agent; after an unarchive, the agent's schedules that are
   active after the call, one somebody resumed by name while it was archived
   included; after a removal, the ended ones. A schedule somebody paused by
-  name is on neither of the first two lists. A replay of the request and a
+  name is on neither of the first two lists. The `effect` and the `count`
+  are told to every caller of the change; the list is your host's. These
+  calls are given it, and so is a Console caller with `runtime.admin`. An
+  agent that asks for the change through its tools, and any other Console
+  caller, is answered without the list, since a schedule that targets an
+  agent may be anybody's. A replay of the request and a
   later `operation` read state no `schedules`, so do not compare a retry's
   answer whole with the first one. `plan` of those changes carries the list
   the change would answer. While an agent is archived no schedule is pointed
   at it through Meta: the agents' schedule tools and the Console refuse a
   create or an update that would (`identity_archived`); a pause, a resume
-  and a delete by name stay.
+  and a delete by name stay. Two limits hold for a schedule that names only
+  a session: a removal of the session's agent does not end it, and one
+  created, or resumed by name, while that agent is archived is active. Each
+  of its fires ends as a missing target and no turn runs; after a removal,
+  end it by hand ([Agent changes](/api/rpc#agent-changes)).
 - **Host preparation.** When your policy names a profile's preparation
   `required`, a create of an agent of that profile answers
   `pending_preparation`: the agent reads `readiness` `preparation_pending`,
@@ -445,8 +454,11 @@ peers, each with the verdict your rules give it (`allowed`, `needs_decision`
 with the lines the decision shows, or `not_allowed`). `plan` answers the outcome
 and the rendering a change would get, and holds and writes nothing.
 `changes_hold` holds every change for a while, for example during a deploy:
-each change is refused the retryable `changes_held`. The hold is not durable,
-so hold again after a restart.
+each change is refused the retryable `changes_held`. The hold does not
+survive a restart of the host: set it again as soon as the start has
+answered, before you serve callers. The start itself is not held: what a
+launch carries out before your call (a held change that was approved, a
+change asked by an agent a schedule wakes) is carried out.
 
 ## 5. Handle a refusal
 

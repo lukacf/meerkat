@@ -34,7 +34,10 @@ All notable changes to the Python SDK are documented here.
   (`SchedulesFollowed`, `ScheduleRef`): how the schedules that target an
   agent stand after its archive, unarchive or removal, on the first
   answer of the change, and the list a planned change would answer. A
-  replay of the request and an `operation` read state none.
+  replay of the request and an `operation` read state none. The list is
+  the host's (the stdio gateway gives it); an answer told without it, as
+  an agent and a Console caller without `runtime.admin` are answered,
+  reads as an empty `schedules` with its `count` kept.
 - `IdentitiesHandle.settle_preparation(name, request_id=...)` calls
   `meta/identity/settle_preparation`: the host has prepared an agent whose
   create answered `IdentityPendingPreparation`.

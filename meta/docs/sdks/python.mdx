@@ -527,7 +527,10 @@ the agent's `schedules` (`SchedulesFollowed`: `effect`, `count`,
 agent's schedules stand after the change. After an archive the list is the
 schedules paused for the agent; after an unarchive, its schedules that are
 active after the call (one somebody resumed by name meanwhile included);
-after a removal, the ended ones. A
+after a removal, the ended ones. The gateway gives your host the list; a
+caller that is not given it (an agent that asks for the change, a Console
+caller without `runtime.admin`) is told the `effect` and the `count` only,
+and such an answer reads as an empty `schedules` with its `count` kept. A
 replay of the request and an `operation` read state none, so compare a
 retry by `operation_id` and each agent's `state` and `spec_digest`, not
 whole. `IdentityChangePlan.schedules` carries the list a planned change

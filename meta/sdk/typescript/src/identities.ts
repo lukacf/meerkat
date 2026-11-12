@@ -435,6 +435,15 @@ export interface ScheduleRef {
  * removal the ended ones. A schedule somebody paused by name is on neither
  * of the first two lists. `incomplete` is `true` when a schedule could not
  * be read or changed: the same request asked again follows the rest.
+ *
+ * `effect` and `count` are told to every caller of the change. The list is
+ * the host's: the stdio gateway, which this SDK calls, gives it, and the
+ * Console gives it to a caller that administers the runtime
+ * (`runtime.admin`). An agent that asks for the change through its tools,
+ * and any other Console caller, is answered without the list, since a
+ * schedule that targets an agent may be anybody's. An answer without the
+ * list reads here as an empty `schedules`, and `count` still says how many:
+ * do not take the list's length for the count.
  */
 export interface SchedulesFollowed {
   readonly effect: string;

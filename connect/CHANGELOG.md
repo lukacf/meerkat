@@ -33,6 +33,45 @@ guides give the conditional wording for Connect 0.9.14.
 
 ## [Unreleased]
 
+### Added
+
+- macOS executables in the Connect release. The release workflow builds
+  `meerkat-connect` and `toolkit_gateway` for Apple Silicon macOS
+  (`aarch64-apple-darwin`) on a GitHub-hosted macOS runner, the way Core's
+  and Meta's macOS binaries are built there: Cargo, an architecture check, a
+  `--version` run, the same ad-hoc signing step, one archive per executable
+  and build provenance. A tag's release gets
+  `meerkat-connect-<version>-aarch64-apple-darwin.tar.gz` and
+  `meerkat-connect-gateway-<version>-aarch64-apple-darwin.tar.gz`, each
+  holding one executable, with a `.sha256` file beside each and the build's
+  provenance bundle. They are added after the release's gates and never
+  replace an asset. A `macos-build` dispatch of the workflow builds and
+  checks them without publishing anything; a `macos-assets` dispatch builds
+  an existing tag and adds them to its release.
+
+### Known limitations
+
+- The macOS archives hold the executables only: they are not the complete
+  installation the Linux archives are. They carry no bundled Python,
+  Node/npm, integration library or setup resources, and an executable built
+  without them refuses every step that needs them with "Installed Connect
+  resources are unavailable or changed; reinstall the complete product. No
+  setup command was started." That includes the interactive
+  `meerkat-connect` setup conversation, which stops at startup, and every
+  step that prepares, installs or reads back an integration. These paths
+  read no bundled resource, so its absence does not stop them: `--version`
+  and `--help`, the `credentials` commands for services a realm already has,
+  the provider sign-in adapter (`--provider-stdio`), the paired-host and
+  Forge bindings of `--stdio`, and gateway startup for an application whose
+  setup supplies no bundled helper. The release build runs `--version` on
+  the macOS runner and nothing else: no other path is exercised on macOS by
+  the release checks.
+  The complete Apple Silicon macOS archive
+  (`meerkat-connect-<version>-macos-arm64.tar.gz`) is still not built.
+- The protected service host, the library entry a Linux application started
+  by a root launcher uses, is not part of the macOS build. An application
+  cannot use it on macOS, and nothing runs in its place.
+
 ## [0.9.14] - 2026-11-11
 
 Meerkat Connect 0.9.14 is part of Meerkat 0.9.14 (Core 0.9.14, Meta 0.9.14

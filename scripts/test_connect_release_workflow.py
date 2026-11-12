@@ -10,23 +10,36 @@ gate's real JavaScript under a fake clock, the wait's real shell with stub
 curl, date and sleep (and the real jq), the declared-versions step with a
 stub cargo, and the job graph under GitHub's status semantics. No network.
 Modeled on meta/scripts/test_release_workflow.py.
+
+The macOS executables are built the way Meta's gateways are (Cargo on a
+hosted macos-15 runner, checked, ad-hoc signed, archived, attested) and are
+added to the release only after its gates, add-only. The tests run the
+resolver's real shell, the build job's portable steps (source check, smoke
+run, packaging) with stand-in executables, and the publisher
+(scripts/connect_release_macos_assets.py) against a stub `gh`; the steps
+that need Apple's tools (lipo, file, codesign) are read, not run.
 """
 
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/connect-release.yml"
-JOBS = ("resolve", "require_ci_green", "floor_check", "create_release", "build", "attest", "accept", "publish")
+PUBLISHER = ROOT / "scripts/connect_release_macos_assets.py"
+JOBS = ("resolve", "require_ci_green", "floor_check", "create_release", "build_macos", "publish_macos",
+        "recover_macos", "build", "attest", "accept", "publish")
 
 
 def job_block(name: str) -> str:
@@ -152,7 +165,8 @@ class ConnectJobGraphTests(unittest.TestCase):
     def test_a_tag_push_waits_for_ci_then_the_floor_then_creates_the_release(self):
         outcome = results("push", "tag")
         self.assertEqual({job for job, result in outcome.items() if result == "success"},
-                         {"resolve", "require_ci_green", "floor_check", "create_release"})
+                         {"resolve", "require_ci_green", "floor_check", "create_release",
+                          "build_macos", "publish_macos"})
         self.assertEqual(job_needs("require_ci_green"), ["resolve"])
         self.assertEqual(job_needs("floor_check"), ["resolve", "require_ci_green"])
         self.assertEqual(job_needs("create_release"), ["resolve", "require_ci_green", "floor_check"])
@@ -163,16 +177,62 @@ class ConnectJobGraphTests(unittest.TestCase):
                 with self.subTest(job=job, status=status):
                     outcome = results("push", "tag", {job: status})
                     self.assertEqual(outcome["create_release"], "skipped")
+                    self.assertEqual(outcome["publish_macos"], "skipped")
                     if job == "require_ci_green":
                         self.assertEqual(outcome["floor_check"], "skipped")
 
     def test_dispatch_modes_run_only_their_jobs(self):
         for mode, expected in (("candidate", {"build", "attest"}), ("accept", {"accept"}),
-                               ("publish", {"publish"})):
+                               ("publish", {"publish"}), ("macos-build", {"build_macos"}),
+                               ("macos-assets", {"build_macos", "recover_macos"})):
             with self.subTest(mode=mode):
                 outcome = results("workflow_dispatch", mode)
                 ran = {job for job, result in outcome.items() if result == "success"} - {"resolve"}
                 self.assertEqual(ran, expected)
+
+    def test_the_macos_build_runs_beside_the_gates_and_is_published_only_after_them(self):
+        # The build waits for no gate (it takes hours and writes nothing
+        # outside its run); the publisher waits for the release object, which
+        # exists only after green CI and the floor check, and for the build.
+        self.assertEqual(job_needs("build_macos"), ["resolve"])
+        self.assertEqual(job_needs("publish_macos"), ["resolve", "create_release", "build_macos"])
+        self.assertEqual(job_ancestors("publish_macos"),
+                         ["resolve", "require_ci_green", "floor_check", "create_release", "build_macos"])
+        for status in ("failure", "cancelled", "skipped"):
+            with self.subTest(status=status):
+                outcome = results("push", "tag", {"build_macos": status})
+                self.assertEqual(outcome["create_release"], "success")
+                self.assertEqual(outcome["publish_macos"], "skipped")
+
+    def test_a_build_only_dispatch_publishes_nothing(self):
+        outcome = results("workflow_dispatch", "macos-build")
+        for job in ("create_release", "publish_macos", "recover_macos", "publish"):
+            self.assertEqual(outcome[job], "skipped")
+        # Only the two publishers and the release creator may write the
+        # repository's contents; the build job cannot.
+        writers = {job for job in JOBS if "contents: write" in job_block(job)}
+        self.assertEqual(writers, {"create_release", "publish_macos", "recover_macos", "publish"})
+
+    def test_an_asset_recovery_adds_only_after_its_own_build(self):
+        self.assertEqual(job_needs("recover_macos"), ["resolve", "build_macos"])
+        for status in ("failure", "cancelled", "skipped"):
+            with self.subTest(status=status):
+                outcome = results("workflow_dispatch", "macos-assets", {"build_macos": status})
+                self.assertEqual(outcome["recover_macos"], "skipped")
+
+    def test_both_publishers_run_the_same_steps(self):
+        def steps(job):
+            lines = job_block(job).splitlines()
+            body = []
+            for line in lines[lines.index("    steps:") + 1:]:
+                if line and not line.startswith("      "):
+                    break
+                body.append(line)
+            return "\n".join(body).rstrip()
+        self.assertTrue(steps("publish_macos"))
+        self.assertEqual(steps("publish_macos"), steps("recover_macos"))
+        self.assertIn("python3 scripts/connect_release_macos_assets.py", steps("publish_macos"))
+        self.assertNotIn("--clobber", WORKFLOW.read_text())
 
     def test_the_floor_waits_for_the_crates_before_it_builds(self):
         block = job_block("floor_check")
@@ -322,15 +382,19 @@ STUB = (
 )
 
 
-def run_step(step: str, *, core=(), meta=(), index=None, after=None, env=None):
-    """Run one floor_check step's shell, verbatim, in a fixture checkout with
-    stub cargo, curl, date and sleep. Returns the process result, the index
-    paths read, the sleeps and the GITHUB_OUTPUT text."""
-    script = indented_body(step, "floor_check", "run", 10)
+def run_step(step: str, *, core=(), meta=(), index=None, after=None, env=None, job="floor_check"):
+    """Run one step's shell (floor_check's unless `job` names another),
+    verbatim, in a fixture checkout with stub cargo, curl, date and sleep.
+    Returns the process result, the index paths read, the sleeps and the
+    GITHUB_OUTPUT text."""
+    script = indented_body(step, job, "run", 10)
     with TempDir() as root:
         (root / "bin").mkdir()
         (root / "scripts").mkdir()
         (root / "ci").mkdir()
+        manifest = root / "connect/crates/meerkat-connect/Cargo.toml"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text(f'[package]\nname = "meerkat-connect"\nversion = "{TREE_VERSION}"\n')
         listing = root / "scripts/release-rust-crates.sh"
         listing.write_text("#!/usr/bin/env bash\n" + "".join(f"echo {name}\n" for name in core))
         listing.chmod(0o755)
@@ -355,6 +419,9 @@ WAIT = "Wait until every Core and Meta crate is on crates.io at the declared ver
 CORE_CRATES = ("meerkat-core", "meerkat", "rkat")
 META_CRATES = ("meta-extension-state", "meerkat-meta")
 VERSIONS = {"CORE_VERSION": "0.9.12", "META_VERSION": "0.9.13"}
+# The Connect version of the fixture checkout every step runs in.
+TREE_VERSION = "0.9.15"
+TARGET = "aarch64-apple-darwin"
 
 
 class ConnectFloorWaitTests(unittest.TestCase):
@@ -446,6 +513,481 @@ class ConnectDeclaredVersionsTests(unittest.TestCase):
                 self.assertEqual(output, "")
         result, _, _, _ = self.declared([("meerkat-meta", "meta/crates/meerkat-meta", [("meerkat-core", "=0.9.11")])])
         self.assertIn("no Connect package", result.stderr)
+
+
+class ConnectResolveTests(unittest.TestCase):
+    """The resolver's real shell: a tag push names the tag's own commit; a
+    build-only dispatch names the dispatched commit; an asset recovery names
+    an existing tag and takes the version from it, not from the dispatched
+    tree."""
+
+    SHA = "1" * 40
+
+    def resolve(self, event, *, ref="", mode="", release_tag=""):
+        result, _, _, output = run_step("Resolve", job="resolve", env={
+            "EVENT": event, "REF": ref, "MODE": mode, "RELEASE_TAG": release_tag, "GITHUB_SHA": self.SHA})
+        return result, dict(line.split("=", 1) for line in output.splitlines())
+
+    def test_a_tag_push_builds_the_tag(self):
+        result, output = self.resolve("push", ref=f"refs/tags/connect-v{TREE_VERSION}")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(output, {"mode": "tag", "version": TREE_VERSION, "tag": f"connect-v{TREE_VERSION}",
+                                  "source_ref": f"refs/tags/connect-v{TREE_VERSION}"})
+
+    def test_a_tag_that_does_not_name_the_version_fails(self):
+        result, output = self.resolve("push", ref="refs/tags/connect-v0.9.14")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(output, {})
+
+    def test_a_build_only_dispatch_builds_the_dispatched_commit(self):
+        result, output = self.resolve("workflow_dispatch", mode="macos-build")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(output, {"mode": "macos-build", "version": TREE_VERSION,
+                                  "tag": f"connect-v{TREE_VERSION}", "source_ref": self.SHA})
+
+    def test_an_asset_recovery_builds_the_named_tag_at_its_own_version(self):
+        result, output = self.resolve("workflow_dispatch", mode="macos-assets", release_tag="connect-v0.9.14")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(output, {"mode": "macos-assets", "version": "0.9.14", "tag": "connect-v0.9.14",
+                                  "source_ref": "refs/tags/connect-v0.9.14"})
+
+    def test_an_asset_recovery_refuses_anything_but_a_connect_release_tag(self):
+        for tag in ("", "v0.9.14", "meta-v0.9.14", "connect-v0.9", "connect-v0.9.14-rc1", "connect-v0.9.14 x",
+                    "connect-v0.9.14;id", "refs/tags/connect-v0.9.14", "main"):
+            with self.subTest(tag=tag):
+                result, output = self.resolve("workflow_dispatch", mode="macos-assets", release_tag=tag)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(output, {})
+
+    def test_a_release_tag_is_refused_in_every_other_mode(self):
+        for mode in ("candidate", "accept", "publish", "macos-build"):
+            with self.subTest(mode=mode):
+                result, output = self.resolve("workflow_dispatch", mode=mode, release_tag="connect-v0.9.14")
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(output, {})
+
+    def test_the_candidate_modes_resolve_as_before(self):
+        for mode in ("candidate", "accept", "publish"):
+            with self.subTest(mode=mode):
+                result, output = self.resolve("workflow_dispatch", mode=mode)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual((output["mode"], output["version"], output["tag"]),
+                                 (mode, TREE_VERSION, f"connect-v{TREE_VERSION}"))
+
+
+BUILD_STEPS = (
+    "Checkout the release source",
+    "Check that the checkout is the release source at the release version",
+    "Install Rust",
+    "Build the executables",
+    "Verify macOS binary architecture",
+    "Smoke-run the executables",
+    "Ad-hoc codesign macOS binaries",
+    "Package artifacts",
+    "Attest build provenance",
+    "Retain original provenance bundle",
+    "Upload artifacts",
+)
+ARCHIVES = {"meerkat-connect": f"meerkat-connect-{TREE_VERSION}-{TARGET}.tar.gz",
+            "toolkit_gateway": f"meerkat-connect-gateway-{TREE_VERSION}-{TARGET}.tar.gz"}
+
+
+def run_build_step(step: str, root: Path, env: dict):
+    script = indented_body(step, "build_macos", "run", 10)
+    return subprocess.run(["bash", "-c", script], cwd=root, capture_output=True, text=True,
+                          env={**os.environ, "TARGET": TARGET, "VERSION": TREE_VERSION, **env})
+
+
+def stand_in_executables(root: Path, outputs: dict):
+    """target/<triple>/release/<bin> stand-ins that print `outputs[bin]` for
+    --version, as the smoke run and the packager read the real ones."""
+    release = root / "target" / TARGET / "release"
+    release.mkdir(parents=True)
+    for name, output in outputs.items():
+        path = release / name
+        path.write_text(f"#!/bin/sh\necho '{output}'\n")
+        path.chmod(0o755)
+    return release
+
+
+class ConnectMacosBuildTests(unittest.TestCase):
+    """The build job is Meta's gateway leg for Connect's two executables:
+    one hosted macos-15 row, Cargo through the repository wrapper, then
+    architecture check, smoke run, ad-hoc signing, one archive per
+    executable with its checksum, provenance, artifact."""
+
+    def test_one_hosted_apple_silicon_row(self):
+        block = job_block("build_macos")
+        self.assertIn("    runs-on: ${{ matrix.runs-on }}\n", block)
+        rows = re.findall(r"(?m)^          - runs-on: (\S+)\n            target: (\S+)$", block)
+        self.assertEqual(rows, [("macos-15", TARGET)])
+
+    def test_the_steps_run_in_metas_order(self):
+        block = job_block("build_macos")
+        named = re.findall(r"(?m)^      - name: (.+)$", block)
+        self.assertEqual(tuple(named), BUILD_STEPS)
+
+    def test_the_build_is_the_linux_lanes_cargo_selection_without_a_resource_digest(self):
+        body = indented_body("Build the executables", "build_macos", "run", 10)
+        command = " ".join(line.strip().rstrip("\\").strip() for line in body.splitlines()
+                           if line.strip() and not line.strip().startswith("#"))
+        self.assertIn(
+            "env -u MEERKAT_CONNECT_RESOURCES_SHA256 ./scripts/repo-cargo build --locked --release "
+            '--target "${TARGET}" -p meerkat-connect '
+            "--features meerkat-connect/console,toolkit-mobkit/native-host "
+            "--bin meerkat-connect --bin toolkit_gateway", command)
+        self.assertIn("uses: dtolnay/rust-toolchain@f08ac54821369508305fcb9e0121ec6e30ae9ada # 1.97.0",
+                      step_block("Install Rust", "build_macos"))
+        self.assertIn("targets: ${{ matrix.target }}", step_block("Install Rust", "build_macos"))
+
+    def test_both_executables_are_checked_and_ad_hoc_signed_with_apples_tools(self):
+        arch = indented_body("Verify macOS binary architecture", "build_macos", "run", 10)
+        sign = indented_body("Ad-hoc codesign macOS binaries", "build_macos", "run", 10)
+        for body in (arch, sign):
+            self.assertIn("for bin in meerkat-connect toolkit_gateway; do", body)
+        self.assertIn('aarch64-apple-darwin) expected="arm64" ;;', arch)
+        self.assertIn('/usr/bin/lipo -archs "${path}"', arch)
+        self.assertIn('/usr/bin/file -b "${path}"', arch)
+        self.assertIn('/usr/bin/codesign --force --sign - "target/${TARGET}/release/${bin}"', sign)
+        # No other signing identity, notarization or stapling anywhere.
+        text = WORKFLOW.read_text()
+        for word in ("notarytool", "stapler", "altool", "Developer ID", "--sign \""):
+            self.assertNotIn(word, text)
+
+    def test_the_build_job_cannot_write_the_repository(self):
+        block = job_block("build_macos")
+        permissions = block[block.index("    permissions:"):block.index("    strategy:")]
+        self.assertEqual(sorted(line.strip() for line in permissions.splitlines()[1:]),
+                         ["attestations: write", "contents: read", "id-token: write"])
+        self.assertNotIn("GH_TOKEN", block)
+        self.assertIn("persist-credentials: false", step_block("Checkout the release source", "build_macos"))
+        self.assertIn("ref: ${{ needs.resolve.outputs.source_ref }}",
+                      step_block("Checkout the release source", "build_macos"))
+
+    def test_the_smoke_run_requires_both_executables_to_print_the_release_version(self):
+        good = {"meerkat-connect": f"meerkat-connect {TREE_VERSION}",
+                "toolkit_gateway": f"toolkit_gateway {TREE_VERSION} (local Toolkit host over MobKit SDK RPC)"}
+        with TempDir() as root:
+            stand_in_executables(root, good)
+            result = run_build_step("Smoke-run the executables", root, {})
+            self.assertEqual(result.returncode, 0, result.stderr)
+        for name, output in (("meerkat-connect", "meerkat-connect 0.9.14"),
+                             ("meerkat-connect", f"meerkat-connect {TREE_VERSION}0"),
+                             ("toolkit_gateway", f"toolkit_gateway {TREE_VERSION}1 (host)"),
+                             ("toolkit_gateway", f"gateway {TREE_VERSION} (host)")):
+            with self.subTest(name=name, output=output), TempDir() as root:
+                stand_in_executables(root, {**good, name: output})
+                result = run_build_step("Smoke-run the executables", root, {})
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(f"{name} --version printed", result.stderr)
+
+    def test_packaging_writes_one_archive_per_executable_with_its_checksum(self):
+        with TempDir() as root:
+            stand_in_executables(root, {"meerkat-connect": "a", "toolkit_gateway": "b"})
+            result = run_build_step("Package artifacts", root, {})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            dist = root / "dist"
+            self.assertEqual(sorted(path.name for path in dist.iterdir()),
+                             sorted([*ARCHIVES.values(), *(f"{name}.sha256" for name in ARCHIVES.values())]))
+            for member, archive in ARCHIVES.items():
+                listing = subprocess.run(["tar", "-tzf", str(dist / archive)], check=True, capture_output=True,
+                                         text=True).stdout.split()
+                self.assertEqual(listing, [member])
+                digest = subprocess.run(["sha256sum", archive], cwd=dist, check=True, capture_output=True,
+                                        text=True).stdout
+                self.assertEqual((dist / f"{archive}.sha256").read_text(), digest)
+
+    def test_packaging_fails_without_an_executable(self):
+        with TempDir() as root:
+            stand_in_executables(root, {"meerkat-connect": "a"})
+            result = run_build_step("Package artifacts", root, {})
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("missing expected binary", result.stderr)
+
+    def source_check(self, *, mode, head_is_expected=True, version=TREE_VERSION):
+        git = ["git", "-c", "user.name=test", "-c", "user.email=test@example.invalid",
+               "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"]
+        with TempDir() as root:
+            manifest = root / "connect/crates/meerkat-connect/Cargo.toml"
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text(f'[package]\nname = "meerkat-connect"\nversion = "{version}"\n')
+            for command in (["init", "-q", "-b", "main"], ["add", "-A"], ["commit", "-q", "-m", "release"],
+                            ["tag", "-a", "-m", "release", f"connect-v{TREE_VERSION}"]):
+                subprocess.run([*git, *command], cwd=root, check=True, capture_output=True)
+            released = subprocess.run([*git, "rev-parse", "HEAD"], cwd=root, check=True, capture_output=True,
+                                      text=True).stdout.strip()
+            if not head_is_expected:
+                (root / "later").write_text("later\n")
+                for command in (["add", "-A"], ["commit", "-q", "-m", "later"]):
+                    subprocess.run([*git, *command], cwd=root, check=True, capture_output=True)
+            return run_build_step("Check that the checkout is the release source at the release version", root,
+                                  {"MODE": mode, "TAG": f"connect-v{TREE_VERSION}", "GITHUB_SHA": released})
+
+    def test_the_build_refuses_a_checkout_that_is_not_the_release_source(self):
+        for mode in ("tag", "macos-assets", "macos-build"):
+            with self.subTest(mode=mode):
+                self.assertEqual(self.source_check(mode=mode).returncode, 0)
+                wrong = self.source_check(mode=mode, head_is_expected=False)
+                self.assertEqual(wrong.returncode, 1)
+                self.assertIn("is not", wrong.stderr)
+                stale = self.source_check(mode=mode, version="0.9.14")
+                self.assertEqual(stale.returncode, 1)
+                self.assertIn("0.9.14", stale.stderr)
+
+
+GH_STUB = (
+    f"#!{sys.executable}\n"
+    "import json, os, shutil, sys\n"
+    "state_path, store = os.environ['GH_STATE'], os.environ['GH_STORE']\n"
+    "state = json.load(open(state_path))\n"
+    "args = sys.argv[1:]\n"
+    "state['calls'].append(args)\n"
+    "def save():\n"
+    "    json.dump(state, open(state_path, 'w'))\n"
+    "save()\n"
+    "def value(flag):\n"
+    "    return args[args.index(flag) + 1]\n"
+    "if '--clobber' in args or args[:2] not in (['release', 'view'], ['release', 'download'], ['release', 'upload']):\n"
+    "    print('stub gh: refused ' + ' '.join(args), file=sys.stderr)\n"
+    "    sys.exit(97)\n"
+    "if value('--repo') != 'lukacf/meerkat':\n"
+    "    sys.exit(96)\n"
+    "release = state['release']\n"
+    "if release is None:\n"
+    "    print('release not found', file=sys.stderr)\n"
+    "    sys.exit(1)\n"
+    "if args[1] == 'view':\n"
+    "    assert value('--json') == 'tagName,isDraft,assets', args\n"
+    "    hidden = set(state.get('hidden', []))\n"
+    "    print(json.dumps({**release, 'assets': [{'name': name} for name in sorted(os.listdir(store))\n"
+    "                                            if name not in hidden]}))\n"
+    "elif args[1] == 'download':\n"
+    "    source = os.path.join(store, value('--pattern'))\n"
+    "    if not os.path.isfile(source):\n"
+    "        print('no assets match the file pattern', file=sys.stderr)\n"
+    "        sys.exit(1)\n"
+    "    shutil.copyfile(source, os.path.join(value('--dir'), value('--pattern')))\n"
+    "else:\n"
+    "    path = args[3]\n"
+    "    name = os.path.basename(path)\n"
+    "    if os.path.exists(os.path.join(store, name)):\n"
+    "        print('asset under the same name already exists', file=sys.stderr)\n"
+    "        sys.exit(1)\n"
+    "    shutil.copyfile(path, os.path.join(store, name))\n"
+    "    state['uploads'].append(name)\n"
+    "    save()\n"
+)
+
+
+def write_archive(path: Path, members: dict):
+    """A gzip tar of `members` (name to bytes), each an executable file."""
+    with tarfile.open(path, "w:gz") as archive:
+        for name, data in members.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            info.mode = 0o755
+            archive.addfile(info, io.BytesIO(data))
+
+
+def sha256_line(path: Path) -> str:
+    return f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n"
+
+
+def macos_names(version=TREE_VERSION):
+    archives = [f"meerkat-connect-{version}-{TARGET}.tar.gz", f"meerkat-connect-gateway-{version}-{TARGET}.tar.gz"]
+    return [archives[0], f"{archives[0]}.sha256", archives[1], f"{archives[1]}.sha256",
+            f"connect-{TARGET}-provenance.jsonl"]
+
+
+def write_artifact(download: Path, *, attempt=1, version=TREE_VERSION, payload=b"built"):
+    """What one build_macos attempt uploads: two archives, their checksum
+    files and the provenance bundle."""
+    folder = download / f"connect-macos-binaries-{TARGET}-{attempt}"
+    folder.mkdir(parents=True)
+    names = macos_names(version)
+    write_archive(folder / names[0], {"meerkat-connect": payload + b" cli"})
+    write_archive(folder / names[2], {"toolkit_gateway": payload + b" gateway"})
+    for archive in (names[0], names[2]):
+        (folder / f"{archive}.sha256").write_text(sha256_line(folder / archive))
+    (folder / names[4]).write_text('{"bundle": 1}\n')
+    return folder
+
+
+class ConnectMacosPublisherTests(unittest.TestCase):
+    """scripts/connect_release_macos_assets.py adds exactly the archives one
+    build attempt uploaded (with their checksum files and provenance) to an
+    existing, published release: every file is checked first, an asset
+    already there with the same bytes is left, one with other bytes fails the
+    run before anything is uploaded, and nothing is ever replaced."""
+
+    TAG = f"connect-v{TREE_VERSION}"
+    # What the release holds before: the release owner's own files.
+    OWNER_ASSETS = {"SHA256SUMS": b"owner sums\n", "RELEASE-MANIFEST.json": b"{}\n",
+                    f"meerkat-connect-{TREE_VERSION}-linux-x86_64.tar.gz": b"linux\n"}
+
+    def publish(self, prepare=None, *, release="published", existing=None, tag=None, version=TREE_VERSION,
+                hidden=()):
+        with TempDir() as root:
+            download, store, work = root / "download", root / "store", root / "work"
+            download.mkdir()
+            store.mkdir()
+            (root / "bin").mkdir()
+            (root / "bin/gh").write_text(GH_STUB)
+            (root / "bin/gh").chmod(0o755)
+            artifact = write_artifact(download)
+            if prepare:
+                prepare(download, artifact)
+            for name, data in {**self.OWNER_ASSETS, **(existing or {})}.items():
+                (store / name).write_bytes(data)
+            state = root / "state.json"
+            state.write_text(json.dumps({
+                "calls": [], "uploads": [], "hidden": list(hidden),
+                "release": None if release is None else {"tagName": tag or self.TAG,
+                                                         "isDraft": release == "draft"}}))
+            result = subprocess.run(
+                [sys.executable, str(PUBLISHER), "--tag", self.TAG, "--version", version,
+                 "--download", str(download), "--work", str(work)],
+                capture_output=True, text=True,
+                env={**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}", "GH_STATE": str(state),
+                     "GH_STORE": str(store), "GITHUB_REPOSITORY": "lukacf/meerkat"})
+            recorded = json.loads(state.read_text())
+            stored = {path.name: path.read_bytes() for path in store.iterdir()}
+            built = {path.name: path.read_bytes() for path in artifact.iterdir()} if artifact.exists() else {}
+            return result, recorded, stored, built
+
+    def assert_refused(self, result, recorded, stored, message):
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(message, result.stderr)
+        self.assertEqual(recorded["uploads"], [])
+        for name, data in self.OWNER_ASSETS.items():
+            self.assertEqual(stored[name], data)
+
+    def test_a_published_release_gets_exactly_the_built_files(self):
+        result, recorded, stored, built = self.publish()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(recorded["uploads"], macos_names())
+        self.assertEqual(set(stored), set(self.OWNER_ASSETS) | set(macos_names()))
+        for name in macos_names():
+            self.assertEqual(stored[name], built[name])
+        for name, data in self.OWNER_ASSETS.items():
+            self.assertEqual(stored[name], data)
+        self.assertFalse([call for call in recorded["calls"] if "--clobber" in call])
+
+    def test_a_second_run_leaves_the_same_bytes_and_uploads_nothing(self):
+        captured = {}
+
+        def keep(download, artifact):
+            captured.update({path.name: path.read_bytes() for path in artifact.iterdir()})
+        result, recorded, stored, _ = self.publish(keep, existing=None)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # The same bytes again, already on the release.
+        again, recorded, stored, _ = self.publish(
+            lambda download, artifact: [(artifact / name).write_bytes(data) for name, data in captured.items()],
+            existing=captured)
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertEqual(recorded["uploads"], [])
+        self.assertIn("already on the release with the same bytes", again.stdout)
+
+    def test_only_the_missing_files_are_added(self):
+        captured = {}
+
+        def keep(download, artifact):
+            captured.update({path.name: path.read_bytes() for path in artifact.iterdir()})
+        self.publish(keep)
+        present = {name: captured[name] for name in macos_names()[:2]}
+        result, recorded, stored, _ = self.publish(
+            lambda download, artifact: [(artifact / name).write_bytes(data) for name, data in captured.items()],
+            existing=present)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(recorded["uploads"], macos_names()[2:])
+
+    def test_an_asset_with_other_bytes_fails_before_any_upload(self):
+        for name in macos_names():
+            with self.subTest(name=name):
+                result, recorded, stored, _ = self.publish(existing={name: b"other bytes\n"})
+                self.assert_refused(result, recorded, stored, "other bytes")
+                self.assertEqual(stored[name], b"other bytes\n")
+
+    def test_no_release_a_draft_or_another_tag_is_refused(self):
+        for kwargs, message in (({"release": None}, "no release"), ({"release": "draft"}, "draft"),
+                                ({"tag": "connect-v0.9.14"}, "connect-v0.9.14")):
+            with self.subTest(**kwargs):
+                result, recorded, stored, _ = self.publish(**kwargs)
+                self.assert_refused(result, recorded, stored, message)
+
+    def test_an_incomplete_or_changed_artifact_is_refused(self):
+        names = macos_names()
+
+        def remove(name):
+            return lambda download, artifact: (artifact / name).unlink()
+
+        def extra(download, artifact):
+            (artifact / "SHA256SUMS").write_text("x\n")
+
+        def changed(download, artifact):
+            with open(artifact / names[0], "ab") as archive:
+                archive.write(b"\0")
+
+        def wrong_name(download, artifact):
+            (artifact / f"{names[2]}.sha256").write_text(
+                sha256_line(artifact / names[2]).replace(names[2], names[0]))
+
+        def two_members(download, artifact):
+            write_archive(artifact / names[0], {"meerkat-connect": b"a", "extra": b"b"})
+            (artifact / f"{names[0]}.sha256").write_text(sha256_line(artifact / names[0]))
+
+        def wrong_member(download, artifact):
+            write_archive(artifact / names[2], {"meerkat-connect": b"a"})
+            (artifact / f"{names[2]}.sha256").write_text(sha256_line(artifact / names[2]))
+
+        def empty_bundle(download, artifact):
+            (artifact / names[4]).write_text("")
+
+        def no_artifact(download, artifact):
+            shutil.rmtree(artifact)
+
+        cases = [(f"without {name}", remove(name), name) for name in names]
+        cases += [("an extra file", extra, "SHA256SUMS"), ("changed archive bytes", changed, "checksum"),
+                  ("a checksum file naming another archive", wrong_name, "checksum"),
+                  ("two members", two_members, "exactly one"), ("another member", wrong_member, "toolkit_gateway"),
+                  ("an empty provenance bundle", empty_bundle, "empty"),
+                  ("no artifact", no_artifact, "no built macOS archives")]
+        for case, prepare, message in cases:
+            with self.subTest(case=case):
+                result, recorded, stored, _ = self.publish(prepare)
+                self.assert_refused(result, recorded, stored, message)
+                # Refused before the release is even read.
+                self.assertEqual(recorded["calls"], [])
+
+    def test_the_newest_build_attempt_is_the_one_published(self):
+        def rerun(download, artifact):
+            write_artifact(download, attempt=10, payload=b"rebuilt")
+        result, recorded, stored, _ = self.publish(rerun)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with TempDir() as scratch:
+            expected = write_artifact(scratch, attempt=10, payload=b"rebuilt")
+            with tarfile.open(expected / macos_names()[0]) as archive:
+                wanted = archive.extractfile("meerkat-connect").read()
+        with tarfile.open(fileobj=io.BytesIO(stored[macos_names()[0]])) as archive:
+            self.assertEqual(archive.extractfile("meerkat-connect").read(), wanted)
+
+    def test_archives_of_another_version_are_refused(self):
+        result, recorded, stored, _ = self.publish(version="0.9.16")
+        self.assert_refused(result, recorded, stored, "0.9.16")
+
+    def test_an_upload_the_release_does_not_show_fails_the_run(self):
+        result, recorded, stored, _ = self.publish(hidden=[macos_names()[4]])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("does not list", result.stderr)
+
+    def test_the_workflow_passes_the_resolved_tag_and_version(self):
+        step = step_block("Add exactly the built archives (never replacing one)", "publish_macos")
+        self.assertIn("TAG: ${{ needs.resolve.outputs.tag }}", step)
+        self.assertIn("VERSION: ${{ needs.resolve.outputs.version }}", step)
+        self.assertIn('--tag "${TAG}" --version "${VERSION}"', step)
+        download = step_block("Download this run's macOS archives", "publish_macos")
+        self.assertIn('gh run download "${GITHUB_RUN_ID}"', download)
+        self.assertIn("--pattern 'connect-macos-binaries-*'", download)
 
 
 if __name__ == "__main__":

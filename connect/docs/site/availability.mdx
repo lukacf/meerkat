@@ -22,8 +22,21 @@ unqualified opt-in, available only when an application starts the gateway with
 | macOS | Apple Silicon, macOS 13.5 or later |
 | Linux | x86_64, glibc 2.39 |
 
-The 0.9.14 release has Linux x86_64 archives only. No Apple Silicon macOS
-archive is published in this release.
+The 0.9.14 release has complete archives for Linux x86_64 only. No complete
+Apple Silicon macOS archive is published in this release.
+
+The release workflow also builds the `meerkat-connect` and `toolkit_gateway`
+executables for Apple Silicon macOS and adds them to a release as
+`meerkat-connect-<version>-aarch64-apple-darwin.tar.gz` and
+`meerkat-connect-gateway-<version>-aarch64-apple-darwin.tar.gz`, each holding
+one executable, with a `.sha256` file beside it. Check a release's asset list
+for them. They are not a complete installation: they carry no Python,
+Node/npm, integration library or setup resources, and an executable built
+without them refuses every step that needs them. The interactive
+`meerkat-connect` setup conversation stops at startup, and no integration can
+be prepared, installed or read back; gateway startup for an application
+whose setup supplies no bundled helper reads no bundled resource. Intel macOS
+is not built.
 
 The CLI archives include Python, Node/npm, the integration library and setup resources. Extract and retain the complete directory, including executable permissions and `libexec` contents.
 

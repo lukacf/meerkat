@@ -946,10 +946,13 @@ impl IdentityAgentTools {
         };
         // An agent is not shown who asked for an agent, when, or under
         // which consent: the host's read keeps it. An open operation's id
-        // tells who asked too, so it stays there as well.
+        // tells who asked too, so it stays there as well. Nor is an agent
+        // shown where an agent's record lives (whether the host's roster
+        // lists the name as well): that, too, is the host's to read.
         let shown = |agent: &mut AgentSummary| {
             agent.provenance = None;
             agent.open_operations.clear();
+            agent.roster_listing_superseded = false;
         };
         let asked = match &read {
             IdentityRead::List(_) => Asked::List,
@@ -969,7 +972,10 @@ impl IdentityAgentTools {
                 shown(&mut record.agent);
                 serde_json::to_value(record)
             }
-            (Asked::Directory, Ok(IdentityReadAnswer::Directory(page))) => {
+            (Asked::Directory, Ok(IdentityReadAnswer::Directory(mut page))) => {
+                for peer in &mut page.peers {
+                    peer.roster_listing_superseded = false;
+                }
                 serde_json::to_value(page)
             }
             (_, Ok(_)) => return Err(IdentityToolFault::UnexpectedAnswer),

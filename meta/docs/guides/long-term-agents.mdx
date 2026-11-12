@@ -231,6 +231,12 @@ A change answers one of three outcomes, or is refused:
 | `pending_decision` | A person must decide. Nothing but the decision is written. This is a normal answer, not an error. |
 | `pending_preparation` | The change committed, and an agent is not usable until your host has prepared it and called `settle_preparation` (see Host preparation in section 4). A create answers it for an agent of a profile whose preparation your policy names `required`. |
 
+An agent's `open_operations` (`get` and `list`) are the ids of the operations
+open for it: its create while it waits for your host's preparation, and each
+change of it that is held for a person's decision or approved and not yet
+carried out. The gateway leaves the member out when nothing is open; the SDKs
+then read an empty list.
+
 `pending_decision` carries the `operation_id`, the `decision_id` and the
 decision's `deadline_ms`. Do not repeat the change under a new `request_id`.
 The SDK does not poll: read the operation when you want its state, by your
@@ -376,7 +382,9 @@ await identities.remove("editor", { expectedSpecDigest: digest, requestId: "remo
 - **Archive and unarchive.** An archived agent keeps its name, record,
   conversation and memory (the agent's last conversation is harvested as
   for any agent that leaves), and messages to it are refused. Unarchive
-  brings it back on the same conversation.
+  brings it back on the same conversation. While it is archived the
+  identity's status (`runtime.status(name)`) reads `archived` true; the
+  member is left out otherwise.
 - **Remove.** Removal is permanent: the name is never available again
   (`name_taken`). The agent's conversation and memory are kept (the agent's
   last conversation is harvested as for any agent that leaves), and no
@@ -397,6 +405,8 @@ await identities.remove("editor", { expectedSpecDigest: digest, requestId: "remo
   `required`, a create of an agent of that profile answers
   `pending_preparation`: the agent reads `readiness` `preparation_pending`,
   takes no delivery (a retryable refusal), runs nothing and wakes nothing.
+  Its status reads `preparation_pending` true (`preparationPending`), and
+  its `open_operations` name its create until the settle.
   Prepare what it needs, then call
   `identities.settle_preparation(name, request_id=...)`
   (`settlePreparation(name, { requestId })`): the agent is seated dormant

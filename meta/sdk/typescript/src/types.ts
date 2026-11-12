@@ -4059,6 +4059,19 @@ export interface IdentityStatus {
    * parser reads `false` otherwise.
    */
   readonly rosterListingSuperseded?: boolean;
+  /**
+   * `true` when the agent is archived: it has no member, and deliveries to
+   * it are refused until its unarchive. The gateway writes it only when it
+   * is so; the parser reads `false` otherwise.
+   */
+  readonly archived?: boolean;
+  /**
+   * `true` when the agent waits for its host's preparation: it has no
+   * member yet, and `runtime.identities.settlePreparation` seats it. The
+   * gateway writes it only when it is so; the parser reads `false`
+   * otherwise.
+   */
+  readonly preparationPending?: boolean;
 }
 
 export interface DeliveryScopeUnavailable {
@@ -4109,6 +4122,8 @@ export function parseIdentityStatus(raw: unknown): IdentityStatus {
         ? { ...asRecord(d.customizer_tools_pending) }
         : null,
     rosterListingSuperseded: d.roster_listing_superseded === true,
+    archived: d.archived === true,
+    preparationPending: d.preparation_pending === true,
     ...parseIdentityViewParts(d),
   };
 }

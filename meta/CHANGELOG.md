@@ -287,7 +287,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `runtime.identities.settle_preparation(name, request_id)`
   (`settlePreparation`) calls `meta/identity/settle_preparation`. The
   identity status type reads `roster_listing_superseded`
-  (`rosterListingSuperseded`).
+  (`rosterListingSuperseded`), `archived` and `preparation_pending`
+  (`preparationPending`), each false when the gateway leaves it out.
 
 ### Changed
 

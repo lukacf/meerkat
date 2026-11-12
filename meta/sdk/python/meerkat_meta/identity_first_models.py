@@ -1149,6 +1149,14 @@ class IdentityStatus:
     #: a change of the agent is a change of its record. Written by the
     #: gateway only when it is so.
     roster_listing_superseded: bool = False
+    #: ``True`` when the agent is archived: it has no member, and
+    #: deliveries to it are refused until its unarchive. Written by the
+    #: gateway only when it is so.
+    archived: bool = False
+    #: ``True`` when the agent waits for its host's preparation: it has no
+    #: member yet, and ``runtime.identities.settle_preparation`` seats it.
+    #: Written by the gateway only when it is so.
+    preparation_pending: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -1186,6 +1194,10 @@ class IdentityStatus:
             result["delivery_scope_unavailable"] = dict(self.delivery_scope_unavailable)
         if self.roster_listing_superseded:
             result["roster_listing_superseded"] = True
+        if self.archived:
+            result["archived"] = True
+        if self.preparation_pending:
+            result["preparation_pending"] = True
         return result
 
     @classmethod
@@ -1230,6 +1242,8 @@ class IdentityStatus:
             delivery_scope=delivery_scope,
             delivery_scope_unavailable=delivery_scope_unavailable,
             roster_listing_superseded=data.get("roster_listing_superseded") is True,
+            archived=data.get("archived") is True,
+            preparation_pending=data.get("preparation_pending") is True,
         )
 
 

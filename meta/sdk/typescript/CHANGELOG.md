@@ -35,6 +35,9 @@
   create answered `pending_preparation`.
 - `IdentityStatus.rosterListingSuperseded`: `true` when the host's roster
   lists a name whose agent is served from its record.
+- `IdentityStatus.archived` and `IdentityStatus.preparationPending`: `true`
+  while the agent is archived, and while it waits for its host's
+  preparation. The gateway writes each only when it is so.
 
 ## 0.9.13
 

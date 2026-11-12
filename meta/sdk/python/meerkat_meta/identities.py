@@ -773,8 +773,11 @@ class AgentSummary:
     ``spec_digest`` is what a change names as ``expected_spec_digest``.
     ``readiness`` says where its member stands (advisory; today ``dormant``,
     ``live``, ``broken``, ``preparation_pending``, ``retiring``,
-    ``unseated``). ``open_operations`` are the operations open for it: held
-    decisions and pending preparation. ``addressability`` and
+    ``unseated``). ``open_operations`` are the ids of the operations open
+    for it: its create while it waits for its host's preparation (until the
+    settle), and each change of it that is held for a person's decision or
+    approved and not yet carried out; empty when nothing is open. Read one
+    with ``identities.operation(operation_id=...)``. ``addressability`` and
     ``runtime_mode_override`` read back what a create or an update set,
     each only when it is not the default: ``addressability`` is
     ``internal_only`` or ``None`` (the agent is addressable), and

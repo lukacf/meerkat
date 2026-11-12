@@ -713,7 +713,10 @@ function parseAgentProvenance(raw: unknown): AgentProvenance {
  * `specDigest` is what a change names as `expectedSpecDigest`. `readiness`
  * says where its member stands (advisory; today `dormant`, `live`, `broken`,
  * `preparation_pending`, `retiring`, `unseated`). `openOperations` are the
- * operations open for it: held decisions and pending preparation.
+ * ids of the operations open for it: its create while it waits for its
+ * host's preparation (until the settle), and each change of it that is held
+ * for a person's decision or approved and not yet carried out; empty when
+ * nothing is open. Read one with `identities.operation({ operationId })`.
  * `addressability` and `runtimeModeOverride` read back what a create or an
  * update set, each only when it is not the default: `addressability` is
  * `internal_only` or `null` (the agent is addressable), and

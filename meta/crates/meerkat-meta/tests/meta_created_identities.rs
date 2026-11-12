@@ -118,12 +118,12 @@ fn declared_spec() -> DurableAgentSpec {
 
 /// The host's roster: the declared identity alone. It never lists an
 /// identity created at runtime.
-struct DeclaredRoster;
+struct DeclaredRoster(DurableAgentSpec);
 
 #[async_trait]
 impl RosterProvider for DeclaredRoster {
     async fn roster(&self, _context: &RosterContext) -> Result<Vec<DurableAgentSpec>, RosterError> {
-        Ok(vec![declared_spec()])
+        Ok(vec![self.0.clone()])
     }
 }
 
@@ -150,16 +150,19 @@ fn controller() -> meerkat_core::ControllerModelSelection {
 
 /// The members' model: each request's last message (past Core's system
 /// notices) is sent on the row's channel, each whole request is kept, and
-/// every request answers.
+/// every request answers. A `pinned` client reports [`controller`] as its
+/// selection; one that is not reports none, so each request names the model
+/// its member was built with.
 #[derive(Clone)]
 struct RecordingClient {
     asked: mpsc::UnboundedSender<String>,
     requests: Arc<Mutex<Vec<String>>>,
+    pinned: bool,
 }
 
 impl meerkat_client::LlmClient for RecordingClient {
     fn controller_model_selection(&self) -> Option<meerkat_core::ControllerModelSelection> {
-        Some(controller())
+        self.pinned.then(controller)
     }
 
     fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
@@ -280,6 +283,8 @@ struct Rig {
     runtime: meerkat_meta::UnifiedRuntime,
     asked: mpsc::UnboundedReceiver<String>,
     requests: Arc<Mutex<Vec<String>>>,
+    /// The identity the host's roster declares.
+    declared: DurableAgentSpec,
 }
 
 /// Boot the gateway's runtime composition on `state` for the mob `mob_id`.
@@ -303,19 +308,43 @@ async fn boot_composed(
     customizer: Option<Arc<dyn AgentCustomizer>>,
     topology: Option<Arc<dyn TopologyProvider>>,
 ) -> Rig {
+    boot_host(
+        state,
+        definition(mob_id),
+        declared_spec(),
+        customizer,
+        topology,
+        true,
+    )
+    .await
+}
+
+/// Boot the gateway's runtime composition on `state` for `definition`, with
+/// a roster that declares `declared` alone, the host's `customizer` and
+/// `topology` provider when it composes them, and a members' model that is
+/// `pinned` to [`controller`] or not.
+async fn boot_host(
+    state: &Path,
+    definition: MobDefinition,
+    declared: DurableAgentSpec,
+    customizer: Option<Arc<dyn AgentCustomizer>>,
+    topology: Option<Arc<dyn TopologyProvider>>,
+    pinned: bool,
+) -> Rig {
     let (asked_tx, asked) = mpsc::unbounded_channel();
     let requests = Arc::new(Mutex::new(Vec::new()));
     let mut builder = UnifiedRuntimeBuilder::default()
-        .definition(definition(mob_id))
+        .definition(definition)
         .persistent_state(state)
         .continuity_from_state_dir(state)
         .await
         .expect("open the state-dir identity substrate")
-        .roster_provider(Arc::new(DeclaredRoster))
+        .roster_provider(Arc::new(DeclaredRoster(declared.clone())))
         .identity_runtime_instance_id("meta-created-identities")
         .default_llm_client(Arc::new(RecordingClient {
             asked: asked_tx,
             requests: Arc::clone(&requests),
+            pinned,
         }));
     if let Some(customizer) = customizer {
         builder = builder.agent_customizer(customizer);
@@ -330,6 +359,7 @@ async fn boot_composed(
         runtime,
         asked,
         requests,
+        declared,
     }
 }
 
@@ -375,7 +405,7 @@ impl Rig {
                 .runtime
                 .identity_runtime()
                 .expect("identity runtime installed"),
-            roster_provider: Arc::new(MutableRosterProvider::new(vec![declared_spec()])),
+            roster_provider: Arc::new(MutableRosterProvider::new(vec![self.declared.clone()])),
             topology_provider: None,
             customizer: None,
             agent_memory_provider: None,
@@ -2567,5 +2597,438 @@ async fn a_held_add_of_a_removed_identitys_name_is_refused_with_cores_answer() {
             .map_err(ToString::to_string)
     );
     assert!(!rig.seated(CREATED), "nothing is seated under the name");
+    rig.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// One host build step: a store-owned agent is built from the host's inputs
+// as a configured one
+// ---------------------------------------------------------------------------
+
+/// The model the host's customizer of the build rows gives every build.
+const HOST_MODEL: &str = "gpt-5.4";
+/// The system prompt it gives every build.
+const HOST_PROMPT: &str = "HOST-SYSTEM-PROMPT: keep the desk's record.";
+/// The instruction section it appends to every build.
+const HOST_INSTRUCTION: &str = "HOST-INSTRUCTION: cite the workspace record.";
+/// The profile of the build rows whose resume mask names the model.
+const MASKED: &str = "masked";
+
+/// The application context the host's customizer gives every build.
+fn host_context() -> Value {
+    json!({"desk": "north", "host": true})
+}
+
+/// The provider parameters the host's customizer gives every build. The
+/// routing key is the host's own, so no identity's default is derived.
+fn host_provider_params() -> meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+    use meerkat_core::lifecycle::run_primitive::{
+        OpenAiProviderTag, ProviderParamsOverride, ProviderTag,
+    };
+    ProviderParamsOverride {
+        temperature: Some(0.25),
+        provider_tag: Some(ProviderTag::OpenAi(OpenAiProviderTag {
+            prompt_cache_key: Some("host-build-rows".to_string()),
+            ..Default::default()
+        })),
+        ..Default::default()
+    }
+}
+
+/// The host's customizer of the build rows: it sets every field of the
+/// draft, the same for every identity, and records each build it composes
+/// by the identity's name.
+#[derive(Default)]
+struct ComposingCustomizer {
+    builds: Mutex<Vec<String>>,
+}
+
+impl ComposingCustomizer {
+    /// How many builds of `name` the customizer composed.
+    fn builds_of(&self, name: &str) -> usize {
+        self.builds
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|built| built.as_str() == name)
+            .count()
+    }
+}
+
+#[async_trait]
+impl AgentCustomizer for ComposingCustomizer {
+    async fn customize_build(
+        &self,
+        _context: &AgentBuildContext,
+        spec: &DurableAgentSpec,
+        draft: &mut AgentBuildDraft,
+    ) -> Result<(), CustomizerError> {
+        self.builds
+            .lock()
+            .unwrap()
+            .push(spec.identity.as_str().to_string());
+        draft.model = Some(HOST_MODEL.to_string());
+        draft.system_prompt = Some(HOST_PROMPT.to_string());
+        draft
+            .additional_instructions
+            .push(HOST_INSTRUCTION.to_string());
+        draft
+            .labels
+            .insert("host_tier".to_string(), "gold".to_string());
+        draft.app_context = Some(host_context());
+        draft.provider_params = Some(host_provider_params());
+        draft.local_external_tools = LocalExternalToolOverlay::new(Arc::new(HostTools));
+        Ok(())
+    }
+}
+
+/// The build rows' definition: the worker profile, and a profile whose
+/// resume mask names the model, so a rebuild on a durable session takes the
+/// profile's model over the session's own.
+fn build_rows_definition(mob_id: &str) -> MobDefinition {
+    MobDefinition::from_toml(&format!(
+        r#"
+[mob]
+id = "{mob_id}"
+
+[profiles.worker]
+model = "gpt-5.5"
+external_addressable = true
+runtime_mode = "turn_driven"
+
+[profiles.worker.tools]
+comms = true
+
+[profiles.masked]
+model = "gpt-5.5"
+resume_overrides = ["model", "provider"]
+external_addressable = true
+runtime_mode = "turn_driven"
+
+[profiles.masked.tools]
+comms = true
+"#
+    ))
+    .expect("parse the definition")
+}
+
+/// Boot the build rows' host on `state`: the configured identity on
+/// `profile`, the customizer that sets every draft field, and a members'
+/// model that reports no selection of its own, so each request names the
+/// model its member was built with.
+async fn boot_build_rows(
+    state: &Path,
+    mob_id: &str,
+    profile: &str,
+) -> (Rig, Arc<ComposingCustomizer>) {
+    let customizer = Arc::new(ComposingCustomizer::default());
+    let rig = boot_host(
+        state,
+        build_rows_definition(mob_id),
+        DurableAgentSpec {
+            profile: ProfileName::from(profile),
+            ..declared_spec()
+        },
+        Some(Arc::clone(&customizer) as Arc<dyn AgentCustomizer>),
+        None,
+        false,
+    )
+    .await;
+    (rig, customizer)
+}
+
+/// What one build of an identity's member took from the host's build step,
+/// read from the facts that carry it: the turn's model request, Core's
+/// roster entry and the session's durable build state.
+#[derive(Debug, Clone, PartialEq)]
+struct BuildInputs {
+    /// The model the build's turn asked.
+    model: Value,
+    /// The model override Core's roster entry holds for the member.
+    model_override: Option<String>,
+    /// The model and the provider parameters of the profile override Core's
+    /// roster entry holds for the member.
+    profile_override: Option<(String, Value)>,
+    /// Whether the turn's request carries the host's system prompt.
+    system_prompt: bool,
+    /// Whether it carries the host's instruction section.
+    instruction: bool,
+    /// The sampling temperature and the provider parameters it carries.
+    temperature: Value,
+    provider_params: Value,
+    /// The application context the session's durable build state holds.
+    context: Option<Value>,
+    /// Whether the turn was offered the host's tool.
+    tool: bool,
+}
+
+impl Rig {
+    /// The inputs the build that ran the turn `marker` of `name` took.
+    async fn build_inputs(&self, name: &str, marker: &str) -> BuildInputs {
+        let rendered = self
+            .request_with(marker)
+            .unwrap_or_else(|| panic!("{name}: the turn {marker:?} was asked"));
+        let request: Value = serde_json::from_str(&rendered).expect("a rendered model request");
+        let entry = self
+            .runtime
+            .mob_handle()
+            .get_member(&meerkat_meta::member_comms_id::mob_member_id(name))
+            .await
+            .expect("Core's roster reads")
+            .unwrap_or_else(|| panic!("Core holds a member of {name}"));
+        let session = self
+            .life(name)
+            .await
+            .session
+            .unwrap_or_else(|| panic!("{name} is bound to a session"));
+        let session_id =
+            meerkat_core::types::SessionId::parse(&session).expect("the member's session id");
+        let stored = meerkat_mob::MobSessionService::load_persisted_session(
+            &**self
+                .runtime
+                .mob_runtime()
+                .session_service()
+                .expect("the runtime's session service"),
+            &session_id,
+        )
+        .await
+        .expect("the member's session reads")
+        .unwrap_or_else(|| panic!("{name}: the session {session} is stored"));
+        BuildInputs {
+            model: request["model"].clone(),
+            model_override: entry.effective_model_override.clone(),
+            profile_override: entry.effective_profile_override.as_ref().map(|profile| {
+                (
+                    profile.model.clone(),
+                    serde_json::to_value(&profile.provider_params)
+                        .expect("the profile's provider parameters render"),
+                )
+            }),
+            system_prompt: rendered.contains(HOST_PROMPT),
+            instruction: rendered.contains(HOST_INSTRUCTION),
+            temperature: request["temperature"].clone(),
+            provider_params: request["provider_params"].clone(),
+            context: stored
+                .try_build_state()
+                .expect("the session's build state reads")
+                .and_then(|state| state.app_context),
+            tool: offers_tool(&rendered),
+        }
+    }
+}
+
+/// Fail unless `inputs`, a build of `name`, took every input the host's
+/// customizer sets.
+fn assert_host_inputs(name: &str, inputs: &BuildInputs) {
+    assert_eq!(
+        inputs.model,
+        json!(HOST_MODEL),
+        "{name}: the build runs the host's model: {inputs:#?}"
+    );
+    assert!(
+        inputs.system_prompt && inputs.instruction,
+        "{name}: the build carries the host's system prompt and instruction: {inputs:#?}"
+    );
+    assert_eq!(
+        inputs.context,
+        Some(host_context()),
+        "{name}: the build carries the host's context: {inputs:#?}"
+    );
+    assert_eq!(
+        inputs
+            .profile_override
+            .as_ref()
+            .map(|(_, params)| params["temperature"].clone()),
+        Some(json!(0.25)),
+        "{name}: the build carries the host's provider parameters: {inputs:#?}"
+    );
+    assert!(
+        inputs.tool,
+        "{name}: the build is offered the host's tool: {inputs:#?}"
+    );
+}
+
+/// A store-owned agent is built from the host's build step as a configured
+/// agent on the same profile is: the model, the system prompt and its
+/// instruction section, the provider parameters, the context and the tools
+/// the host's customizer sets reach the first build of an agent created
+/// with a first message (its kickoff spawn) and of one created Dormant and
+/// then sent to, and each equals the configured agent's field by field. The
+/// host's customizer composes each of those first builds once.
+///
+/// It does not compare the members' roster labels.
+///
+/// RED before Core asked the host to compose a store-owned seat: both
+/// created agents were built on the profile's own model with no host system
+/// prompt, instruction, provider parameters or context (only the host's tool
+/// reached them).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_store_owned_agent_is_built_from_the_hosts_inputs_as_a_configured_one() {
+    const KICKED: &str = "keeper-kicked";
+    const SEATED: &str = "keeper-seated";
+    let temp = tempfile::tempdir().unwrap();
+    let (mut rig, customizer) = boot_build_rows(temp.path(), &fresh_mob_id(), "worker").await;
+
+    assert!(
+        rig.turn(DECLARED, "BUILD-CONFIGURED").await,
+        "the configured agent runs a turn"
+    );
+    let configured = rig.build_inputs(DECLARED, "BUILD-CONFIGURED").await;
+    assert_host_inputs(DECLARED, &configured);
+
+    rig.create_request(
+        meerkat_mob::CreatedIdentityRequest::new(created_spec(KICKED).with_initial_message(
+            meerkat_core::ContentInput::Text("BUILD-KICKOFF".to_string()),
+        )),
+        KICKED,
+    )
+    .await;
+    assert!(
+        rig.asked("BUILD-KICKOFF").await,
+        "the kickoff turn of the agent created with a first message runs"
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let kicked = rig.build_inputs(KICKED, "BUILD-KICKOFF").await;
+
+    rig.create(SEATED).await;
+    assert!(
+        rig.turn(SEATED, "BUILD-SEATED").await,
+        "the agent created Dormant runs its first turn"
+    );
+    let seated = rig.build_inputs(SEATED, "BUILD-SEATED").await;
+
+    assert_eq!(
+        kicked, configured,
+        "an agent created with a first message is built from the host's inputs as the \
+         configured agent is"
+    );
+    assert_eq!(
+        seated, configured,
+        "an agent created Dormant and then sent to is built from the host's inputs as the \
+         configured agent is"
+    );
+    assert_eq!(
+        (customizer.builds_of(KICKED), customizer.builds_of(SEATED)),
+        (1, 1),
+        "the host's customizer composes each first build once"
+    );
+    rig.shutdown().await;
+}
+
+/// A reset leaves a store-owned agent's build inputs as they were: the
+/// first build of its fresh life takes from the host's build step what the
+/// first build of its first life took, field by field, on a new session.
+///
+/// It does not compare the member's roster labels.
+///
+/// RED before Core asked the host to compose a store-owned seat: neither
+/// life took the host's model, system prompt, instruction, provider
+/// parameters or context.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reset_store_owned_agent_is_built_from_the_host_inputs_of_its_first_life() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut rig, _customizer) = boot_build_rows(temp.path(), &fresh_mob_id(), "worker").await;
+    rig.create(CREATED).await;
+    assert!(
+        rig.turn(CREATED, "FIRST-LIFE").await,
+        "the first life runs a turn"
+    );
+    let first = rig.build_inputs(CREATED, "FIRST-LIFE").await;
+    assert_host_inputs(CREATED, &first);
+    let before = rig.life(CREATED).await;
+
+    let reset = rig.verb("meta/reset", CREATED).await;
+    assert!(reset["error"].is_null(), "the reset is served: {reset:#?}");
+    let after = rig.life(CREATED).await;
+    assert!(
+        after.session.is_some() && after.session != before.session,
+        "the reset seats a fresh session: {before:?} -> {after:?}"
+    );
+    assert!(
+        rig.turn(CREATED, "SECOND-LIFE").await,
+        "the fresh life runs a turn"
+    );
+    let second = rig.build_inputs(CREATED, "SECOND-LIFE").await;
+    assert_eq!(
+        second, first,
+        "the fresh life is built from the host's inputs as the first life was"
+    );
+    rig.shutdown().await;
+}
+
+/// Under a profile whose resume mask names the model, a store-owned agent
+/// and a configured agent on that profile build with the same model, the
+/// host's, in the process that first built them and again after a restart
+/// of the runtime on the same state directory, where each is rebuilt on its
+/// durable session and the mask takes the profile's model over the
+/// session's own.
+///
+/// RED before Core asked the host to compose a store-owned seat at every
+/// build: the created agent was built on the profile's own model.
+#[tokio::test(flavor = "multi_thread")]
+async fn under_a_resume_model_mask_a_store_owned_agent_builds_with_the_configured_agents_model() {
+    let temp = tempfile::tempdir().unwrap();
+    let mob_id = fresh_mob_id();
+    let (mut rig, _customizer) = boot_build_rows(temp.path(), &mob_id, MASKED).await;
+    rig.create_request(
+        meerkat_mob::CreatedIdentityRequest::new(
+            meerkat_mob::CreatedIdentitySpec::new(CREATED, MASKED)
+                .with_display_name(format!("Created {CREATED}"))
+                .with_labels(created_labels()),
+        ),
+        CREATED,
+    )
+    .await;
+    assert!(rig.turn(DECLARED, "MASK-CONFIGURED-FIRST").await);
+    assert!(rig.turn(CREATED, "MASK-CREATED-FIRST").await);
+    let configured = rig.build_inputs(DECLARED, "MASK-CONFIGURED-FIRST").await;
+    let created = rig.build_inputs(CREATED, "MASK-CREATED-FIRST").await;
+    assert_eq!(
+        configured.model,
+        json!(HOST_MODEL),
+        "the configured agent's first build runs the host's model: {configured:#?}"
+    );
+    assert_eq!(
+        (
+            &created.model,
+            &created.model_override,
+            &created.profile_override
+        ),
+        (
+            &configured.model,
+            &configured.model_override,
+            &configured.profile_override
+        ),
+        "the created agent's first build runs the configured agent's model"
+    );
+    rig.shutdown_for_reopen().await;
+
+    let (mut rig, customizer) = boot_build_rows(temp.path(), &mob_id, MASKED).await;
+    assert!(rig.turn(DECLARED, "MASK-CONFIGURED-AGAIN").await);
+    assert!(rig.turn(CREATED, "MASK-CREATED-AGAIN").await);
+    let configured = rig.build_inputs(DECLARED, "MASK-CONFIGURED-AGAIN").await;
+    let created = rig.build_inputs(CREATED, "MASK-CREATED-AGAIN").await;
+    assert_eq!(
+        configured.model,
+        json!(HOST_MODEL),
+        "the configured agent's rebuild runs the host's model: {configured:#?}"
+    );
+    assert_eq!(
+        (
+            &created.model,
+            &created.model_override,
+            &created.profile_override
+        ),
+        (
+            &configured.model,
+            &configured.model_override,
+            &configured.profile_override
+        ),
+        "the created agent's rebuild after the restart runs the configured agent's model"
+    );
+    assert!(
+        customizer.builds_of(CREATED) >= 1,
+        "the host is asked again at the rebuild of the created agent"
+    );
     rig.shutdown().await;
 }

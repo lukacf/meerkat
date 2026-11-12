@@ -142,6 +142,13 @@ struct AttachedFamily {
 pub trait PeerVisibility: Send + Sync {
     /// Whether the caller may see the agent `name`.
     fn sees(&self, name: &str) -> bool;
+
+    /// Whether the caller is one its host shows every agent of the mob (an
+    /// administrator of the runtime): a refusal may then say what holds a
+    /// name. A view says so itself; by default it does not.
+    fn sees_every_agent(&self) -> bool {
+        false
+    }
 }
 
 impl IdentityFamilySlot {
@@ -686,20 +693,69 @@ impl IdentityGate {
         }
     }
 
-    /// Whether `requester` is shown the agent `name`: the one rule every
-    /// read of the family goes through, and every peer a change names. A
-    /// caller is shown the agents its view of the mob shows it (every
-    /// agent, for a call that has no view), and an agent is shown no member
-    /// that is private to a person, whatever view its call has.
-    fn sees(&self, mob: &MobHandle, requester: &ChangeRequester, name: &str) -> bool {
-        if self.seen.as_ref().is_some_and(|seen| !seen.sees(name)) {
-            return false;
-        }
-        !(matches!(requester, ChangeRequester::Agent { .. }) && self.is_private_member(mob, name))
+    /// Whether `requester` is shown every agent of the mob: the host, and
+    /// a caller whose view says so. An agent never is (an agent private
+    /// to a person is hidden from it), and neither is a caller with any
+    /// other view.
+    fn shown_every_agent(&self, requester: &ChangeRequester) -> bool {
+        !matches!(requester, ChangeRequester::Agent { .. })
+            && self
+                .seen
+                .as_ref()
+                .is_none_or(|seen| seen.sees_every_agent())
     }
 
-    /// Whether the agent `name` is a member private to a person, as the
-    /// mob's own record of its members says.
+    /// `outcome` as `requester` reads it. A taken name cannot be created,
+    /// whoever asks, so a refused create always says that much; what holds
+    /// the name (an agent, a removed agent's name, a worker member) is
+    /// told only to a requester that is shown every agent. To any other
+    /// the holder reads `identity` whatever it is, so the refusal of a
+    /// name an agent it is not shown holds is the refusal of any taken
+    /// name.
+    fn shown_outcome(
+        &self,
+        requester: &ChangeRequester,
+        mut outcome: IdentityOutcome,
+    ) -> IdentityOutcome {
+        if !self.shown_every_agent(requester)
+            && let IdentityOutcome::Refused(refusal) = &mut outcome
+            && let IdentityRefusalKind::NameTaken { by } = &mut refusal.kind
+        {
+            *by = super::NameTakenBy::Identity;
+        }
+        outcome
+    }
+
+    /// Whether the caller's view of the mob shows the agent `name`: every
+    /// agent, for a call that has no view. It is asked by name and first,
+    /// so nothing is read of an agent the view hides.
+    fn view_shows(&self, name: &str) -> bool {
+        self.seen.as_ref().is_none_or(|seen| seen.sees(name))
+    }
+
+    /// Whether `requester` is shown `agent`: the one rule every read of the
+    /// family goes through, and every target of a change. A caller is shown
+    /// the agents its view of the mob shows it, and an agent is shown no
+    /// agent that is private to a person, whatever view its call has.
+    fn sees(&self, mob: &MobHandle, requester: &ChangeRequester, agent: &AgentFacts) -> bool {
+        self.view_shows(&agent.name)
+            && !(matches!(requester, ChangeRequester::Agent { .. })
+                && self.is_private_agent(mob, agent))
+    }
+
+    /// Whether `agent` is private to a person. Its own record says so: the
+    /// labels of its spec name its person. The mob's record of the members
+    /// this process built can only add to that (a build may name a person
+    /// the spec does not); it never makes an agent whose record names a
+    /// person less private, and it is never the only thing asked.
+    fn is_private_agent(&self, mob: &MobHandle, agent: &AgentFacts) -> bool {
+        crate::access::private_owner(&agent.spec.labels).is_some()
+            || self.is_private_member(mob, &agent.name)
+    }
+
+    /// Whether the mob's record of the members this process built says the
+    /// agent `name` is private to a person. The record knows only what was
+    /// built or read here: what it does not know is not thereby public.
     fn is_private_member(&self, mob: &MobHandle, name: &str) -> bool {
         self.private_members.as_ref().is_some_and(|members| {
             core_member_name(name)
@@ -707,18 +763,41 @@ impl IdentityGate {
         })
     }
 
+    /// Whether `requester` is shown the agent `name`, for the places that
+    /// hold a name and no record: the same rule, after a read of the
+    /// agent's record. A requester that is no agent is shown every agent
+    /// its view shows, so nothing of the record decides and it is not
+    /// read. For an agent, a name whose record cannot be read is not
+    /// shown.
+    async fn sees_named(&self, mob: &MobHandle, requester: &ChangeRequester, name: &str) -> bool {
+        if !self.view_shows(name) {
+            return false;
+        }
+        if !matches!(requester, ChangeRequester::Agent { .. }) {
+            return true;
+        }
+        match self.agent(mob, name).await {
+            Ok(Some(agent)) => self.sees(mob, requester, &agent),
+            _ => false,
+        }
+    }
+
     /// `summary` as `requester` is shown it: who asked for the agent is
     /// left out when that is an agent the requester is not shown.
-    fn shown_summary(
+    async fn shown_summary(
         &self,
         mob: &MobHandle,
         requester: &ChangeRequester,
         mut summary: AgentSummary,
     ) -> AgentSummary {
-        if summary.provenance.as_ref().is_some_and(|asked| {
-            asked.requester_kind == RequesterKind::Agent
-                && !self.sees(mob, requester, &asked.requester)
-        }) {
+        let asked_by = summary
+            .provenance
+            .as_ref()
+            .filter(|asked| asked.requester_kind == RequesterKind::Agent)
+            .map(|asked| asked.requester.clone());
+        if let Some(asked_by) = asked_by
+            && !self.sees_named(mob, requester, &asked_by).await
+        {
             summary.provenance = None;
         }
         summary
@@ -726,14 +805,20 @@ impl IdentityGate {
 
     /// `record` as `requester` is shown it: its peers are the ones the
     /// requester is shown.
-    fn shown_record(
+    async fn shown_record(
         &self,
         mob: &MobHandle,
         requester: &ChangeRequester,
         mut record: AgentRecord,
     ) -> AgentRecord {
-        record.peers.retain(|peer| self.sees(mob, requester, peer));
-        record.agent = self.shown_summary(mob, requester, record.agent);
+        let mut peers = Vec::with_capacity(record.peers.len());
+        for peer in std::mem::take(&mut record.peers) {
+            if self.sees_named(mob, requester, &peer).await {
+                peers.push(peer);
+            }
+        }
+        record.peers = peers;
+        record.agent = self.shown_summary(mob, requester, record.agent).await;
         record
     }
 
@@ -753,13 +838,6 @@ impl IdentityGate {
         } else {
             identity_name_of_member(next)
         }
-    }
-
-    /// Whether `requester` may name the agent `name` as a peer: one it is
-    /// shown, that is no member private to a person (such a member is
-    /// nobody's peer).
-    fn may_name(&self, mob: &MobHandle, requester: &ChangeRequester, name: &str) -> bool {
-        self.sees(mob, requester, name) && !self.is_private_member(mob, name)
     }
 
     /// This family, of a mob whose runtime is governed when `governed`.
@@ -785,15 +863,25 @@ impl IdentityGate {
     }
 
     /// Whether `requester` is a member private to a person: what its
-    /// transport said, or what the mob's own record of its member says.
-    fn is_private(&self, mob: &MobHandle, requester: &ChangeRequester) -> bool {
+    /// transport said, or what the requesting agent's own record says
+    /// (the same rule its being shown to others goes by). A requester
+    /// whose name no agent holds is private only when the mob's record of
+    /// built members says so; it is refused for its name further on.
+    async fn is_private(
+        &self,
+        mob: &MobHandle,
+        requester: &ChangeRequester,
+    ) -> Result<bool, IdentityRefusal> {
         if requester.is_private_member() {
-            return true;
+            return Ok(true);
         }
         let ChangeRequester::Agent { identity, .. } = requester else {
-            return false;
+            return Ok(false);
         };
-        self.is_private_member(mob, identity)
+        Ok(match self.agent(mob, identity).await? {
+            Some(agent) => self.is_private_agent(mob, &agent),
+            None => self.is_private_member(mob, identity),
+        })
     }
 
     /// The agent `name`, as its record reads; `None` for a name no agent
@@ -890,8 +978,10 @@ impl IdentityGate {
 
     /// The agent a read or a change of one agent names, or
     /// `identity_unknown` at `name`: for a name no agent holds, and for an
-    /// agent `requester` is not shown, which nothing tells apart. A name
-    /// that is no agent name is `invalid_name`.
+    /// agent `requester` is not shown, which nothing tells apart; an agent
+    /// whose record cannot be read answers the same. A name the caller's
+    /// view hides is not read. A name that is no agent name is
+    /// `invalid_name`.
     async fn target(
         &self,
         mob: &MobHandle,
@@ -901,12 +991,13 @@ impl IdentityGate {
         if core_member_name(name).is_none() {
             return Err(IdentityRefusal::new(IdentityRefusalKind::InvalidName).at("name"));
         }
-        if !self.sees(mob, requester, name) {
+        if !self.view_shows(name) {
             return Err(unknown_agent("name"));
         }
-        self.agent(mob, name)
-            .await?
-            .ok_or_else(|| unknown_agent("name"))
+        match self.agent(mob, name).await? {
+            Some(agent) if self.sees(mob, requester, &agent) => Ok(agent),
+            _ => Err(unknown_agent("name")),
+        }
     }
 
     /// What normalization knows of `requester`: an agent's profile and
@@ -941,21 +1032,23 @@ impl IdentityGate {
 
     /// What normalization knows of the existing agents `names` name as
     /// peers: a name no agent holds is left out, and refused `peer_unknown`
-    /// there. So is a name the caller may not see: its record is not read,
-    /// and nothing tells it from a name no agent holds.
+    /// there. So is a name the caller's view hides, whose record is not
+    /// read, and an agent that is private to a person, which is nobody's
+    /// peer whoever asks: nothing tells either from a name no agent holds.
     async fn peer_facts(
         &self,
         mob: &MobHandle,
         policy: &IdentityCreationPolicy,
-        requester: &ChangeRequester,
         names: &[String],
     ) -> Result<BTreeMap<String, PeerFacts>, IdentityRefusal> {
         let mut peers = BTreeMap::new();
         for name in names {
-            if peers.contains_key(name) || !self.may_name(mob, requester, name) {
+            if peers.contains_key(name) || !self.view_shows(name) {
                 continue;
             }
-            if let Some(agent) = self.agent(mob, name).await? {
+            if let Some(agent) = self.agent(mob, name).await?
+                && !self.is_private_agent(mob, &agent)
+            {
                 peers.insert(name.clone(), agent.peer(policy));
             }
         }
@@ -1047,7 +1140,7 @@ impl IdentityGate {
                         .cloned()
                         .collect()
                 };
-                let peers = self.peer_facts(mob, policy, requester, &named).await?;
+                let peers = self.peer_facts(mob, policy, &named).await?;
                 let normalized = normalize_create(
                     policy,
                     &RequestContext {
@@ -1066,9 +1159,7 @@ impl IdentityGate {
             IdentityChangeSpec::Update(update) => {
                 let target = self.target(mob, requester, &update.name).await?;
                 let spec = update.to_update_spec(policy, &target.spec.labels)?;
-                let peers = self
-                    .peer_facts(mob, policy, requester, &update.peers_add)
-                    .await?;
+                let peers = self.peer_facts(mob, policy, &update.peers_add).await?;
                 let normalized = normalize_update(
                     policy,
                     &RequestContext {
@@ -1316,8 +1407,14 @@ impl IdentityGate {
         let Some(policy) = self.policy.as_deref() else {
             return Err(no_policy(class_of(&call.change)));
         };
-        if self.is_private(mob, requester) {
+        if self.is_private(mob, requester).await? {
             return Err(IdentityRefusal::new(IdentityRefusalKind::PrivateRequester));
+        }
+        // A call attributed to another agent than its session's member is
+        // refused here, before a receipt is read and before anything is
+        // held: nobody is asked to decide it.
+        if let Some(refusal) = requester.refused_by_its_session(mob).await {
+            return Err(refusal);
         }
         self.drive_owed_seats(mob);
         if let Some(receipt) = Self::receipt(mob, &call.operation_id).await? {
@@ -1417,8 +1514,7 @@ impl IdentityGate {
                     unreadable(view);
                     continue;
                 };
-                if !self.sees(mob, requester, &agent.name)
-                    || (agent.archived && !list.include_archived)
+                if !self.sees(mob, requester, &agent) || (agent.archived && !list.include_archived)
                 {
                     continue;
                 }
@@ -1429,7 +1525,7 @@ impl IdentityGate {
                 {
                     continue;
                 }
-                agents.push(self.shown_summary(mob, requester, agent.summary()));
+                agents.push(self.shown_summary(mob, requester, agent.summary()).await);
             }
             match (page.next, agents.last()) {
                 (Some(next), Some(last)) => {
@@ -1523,7 +1619,7 @@ impl IdentityGate {
                     continue;
                 };
                 if agent.archived
-                    || !self.sees(mob, requester, &agent.name)
+                    || !self.sees(mob, requester, &agent)
                     || !query_selects(query, &agent.name, agent.spec.display_name.as_deref())
                 {
                     continue;
@@ -1584,8 +1680,11 @@ impl IdentityGate {
         let Some(policy) = self.policy.as_deref() else {
             return Err(no_policy(class_of(&call.change)));
         };
-        if self.is_private(mob, requester) {
+        if self.is_private(mob, requester).await? {
             return Err(IdentityRefusal::new(IdentityRefusalKind::PrivateRequester));
+        }
+        if let Some(refusal) = requester.refused_by_its_session(mob).await {
+            return Err(refusal);
         }
         let judged = self.judge(mob, policy, requester, &call.change).await?;
         let request = &judged.normalized.request;
@@ -1641,10 +1740,11 @@ impl IdentityFamily for IdentityGate {
         requester: &ChangeRequester,
         call: IdentityChangeCall,
     ) -> IdentityOutcome {
-        match self.changed(mob, requester, &call).await {
+        let outcome = match self.changed(mob, requester, &call).await {
             Ok(outcome) => outcome,
             Err(refusal) => IdentityOutcome::Refused(refusal),
-        }
+        };
+        self.shown_outcome(requester, outcome)
     }
 
     async fn withdraw(
@@ -1655,6 +1755,33 @@ impl IdentityFamily for IdentityGate {
     ) -> Result<Withdrawn, IdentityRefusal> {
         if self.policy.is_none() {
             return Err(no_policy(ChangeClass::Create));
+        }
+        // A withdrawal is admitted as a change is: a member private to a
+        // person asks for none, and a call attributed to another agent
+        // than its session's member withdraws nothing of that agent's.
+        if self.is_private(mob, requester).await? {
+            return Err(IdentityRefusal::new(IdentityRefusalKind::PrivateRequester));
+        }
+        if let Some(refusal) = requester.refused_by_its_session(mob).await {
+            return Err(refusal);
+        }
+        // Of the host only its operator withdraws another requester's
+        // change. A host surface that is not the operator (a Console caller
+        // that is no verified person) is neither the requester nor the
+        // host, whatever surface the call came through.
+        if matches!(
+            requester,
+            ChangeRequester::Host {
+                operator: false,
+                ..
+            }
+        ) {
+            return Err(
+                IdentityRefusal::new(IdentityRefusalKind::DecisionNotFound).with_detail(
+                    "A held change is withdrawn by the requester that asked for it, or by the \
+                     host's operator: this caller is neither, and nothing was withdrawn.",
+                ),
+            );
         }
         match &self.decisions {
             Some(decisions) => decisions.withdraw(mob, requester, &request),
@@ -1712,13 +1839,19 @@ impl IdentityFamily for IdentityGate {
             )),
             IdentityRead::Get(GetAgent { name, .. }) => {
                 let agent = self.target(mob, requester, &name).await?;
-                Ok(IdentityReadAnswer::Get(Box::new(self.shown_record(
-                    mob,
-                    requester,
-                    agent.record(),
-                ))))
+                Ok(IdentityReadAnswer::Get(Box::new(
+                    self.shown_record(mob, requester, agent.record()).await,
+                )))
             }
             IdentityRead::Operation(operation_id) => {
+                // An agent reads its own operations only: another
+                // requester's reads to it as one nobody asked. The host and
+                // a person read what their surface admits them to.
+                if matches!(requester, ChangeRequester::Agent { .. })
+                    && !operation_id.is_of(&requester.recorded())
+                {
+                    return Ok(IdentityReadAnswer::Operation(OperationState::Unknown));
+                }
                 let state = match committed_outcome(mob, &operation_id).await {
                     Ok(Some(outcome)) => OperationState::Outcome(outcome),
                     // No change committed under it: a decision may hold it.

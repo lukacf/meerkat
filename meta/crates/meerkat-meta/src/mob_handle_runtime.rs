@@ -2305,13 +2305,36 @@ impl MobToolCaller {
         };
         match state.member_for_bridge_session(&self.session_id).await {
             Ok(Some((mob_id, member))) => Ok(self
-                .private_owners
-                .owner_of(mob_id.as_str(), member.as_str())),
+                .member_owner(&state, mob_id.as_str(), member.as_str())
+                .await),
             Ok(None) => Ok(None),
             Err(error) => Err(meerkat_core::ToolError::execution_failed(format!(
                 "tool '{tool}' could not read its caller: {error}"
             ))),
         }
+    }
+
+    /// The person member `member` of mob `mob_id` is private to. Its own
+    /// roster row says so first: the labels the member holds. The record
+    /// of the members this process built only adds to that, for a member
+    /// whose row names nobody or cannot be read (one that left the roster,
+    /// say): what the record does not know is not thereby private to no
+    /// one.
+    async fn member_owner(
+        &self,
+        state: &meerkat_mob_mcp::MobMcpState,
+        mob_id: &str,
+        member: &str,
+    ) -> Option<String> {
+        if let Ok(handle) = state.handle_for(&meerkat_mob::MobId::from(mob_id)).await
+            && let Ok(Some(entry)) = handle
+                .get_member(&meerkat_mob::AgentIdentity::from(member))
+                .await
+            && let Some(owner) = crate::access::private_owner(&entry.labels)
+        {
+            return Some(owner.to_string());
+        }
+        self.private_owners.owner_of(mob_id, member)
     }
 
     /// Whether member `member` of mob `mob_id` is hidden from the caller:
@@ -2322,7 +2345,12 @@ impl MobToolCaller {
         mob_id: &str,
         member: &str,
     ) -> Result<bool, meerkat_core::ToolError> {
-        let Some(owner) = self.private_owners.owner_of(mob_id, member) else {
+        let Some(state) = self.state.upgrade() else {
+            return Err(meerkat_core::ToolError::execution_failed(format!(
+                "tool '{tool}': the mob tool state of its caller is gone"
+            )));
+        };
+        let Some(owner) = self.member_owner(&state, mob_id, member).await else {
             return Ok(false);
         };
         Ok(self.owner(tool).await?.as_deref() != Some(owner.as_str()))
@@ -2428,6 +2456,27 @@ pub(crate) fn agent_mob_tool_wrapper_as_member_for_test(
     runtime: &MobRuntime,
     session: meerkat_core::types::SessionId,
 ) -> Arc<dyn meerkat_core::AgentToolDispatcher> {
+    agent_mob_tool_wrapper_as_member_with_owners_for_test(
+        inner,
+        overrides,
+        runtime,
+        session,
+        runtime.private_owners().clone(),
+    )
+}
+
+/// [`agent_mob_tool_wrapper_as_member_for_test`] with `private_owners` as
+/// the process's record of whom its built members are private to: an empty
+/// one is a process that built none of the mob's members and has not read
+/// its event log yet.
+#[cfg(test)]
+pub(crate) fn agent_mob_tool_wrapper_as_member_with_owners_for_test(
+    inner: Arc<dyn meerkat_core::AgentToolDispatcher>,
+    overrides: ImplicitDelegateRetirementOverrides,
+    runtime: &MobRuntime,
+    session: meerkat_core::types::SessionId,
+    private_owners: crate::private_owners::PrivateOwners,
+) -> Arc<dyn meerkat_core::AgentToolDispatcher> {
     Arc::new(AutoWireParentMobToolDispatcher {
         inner,
         implicit_delegate_retirement_overrides: overrides,
@@ -2440,7 +2489,7 @@ pub(crate) fn agent_mob_tool_wrapper_as_member_for_test(
         realm_profiles: None,
         caller: Some(MobToolCaller::new(
             session,
-            runtime.private_owners().clone(),
+            private_owners,
             runtime
                 .agent_mob_mcp_state()
                 .as_ref()

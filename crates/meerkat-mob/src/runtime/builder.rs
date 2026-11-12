@@ -8542,7 +8542,12 @@ impl MobBuilder {
 
     /// The host's per-member build preparation, run before a member's
     /// provision whenever it is materialized (at start or on a wake), and
-    /// before the spawn of a store-owned identity's member.
+    /// before the spawn of a store-owned identity's member. It also composes
+    /// the seat of a store-owned identity's member at every build of it
+    /// ([`super::MemberBuildPreparer::prepare_store_owned_seat`]): such a
+    /// member is seated from its row with no host step, so this is where
+    /// its host gives it the build inputs it gives a member it spawns
+    /// itself.
     #[cfg(feature = "runtime-adapter")]
     pub fn with_member_build_preparer(
         mut self,
@@ -9745,6 +9750,7 @@ impl MobBuilder {
                     .unwrap_or_default(),
                 member_grant_mint: wiring.member_residency.member_grant_mint.clone(),
                 member_tool_audience: wiring.member_residency.member_tool_audience.clone(),
+                member_build_preparer: wiring.member_residency.build_preparer.clone(),
             };
             // An identity a replayed respawn abandonment ended loses its
             // scoped tool grants, and those of the sessions MobMachine held
@@ -11476,6 +11482,7 @@ impl MobBuilder {
                     .unwrap_or_default(),
                 member_grant_mint: member_residency.member_grant_mint.clone(),
                 member_tool_audience: member_residency.member_tool_audience.clone(),
+                member_build_preparer: member_residency.build_preparer.clone(),
             };
             if let Some(hook) = before_activation {
                 hook(handle.read_handle()).await?;
@@ -12404,6 +12411,12 @@ pub(super) struct SeatedMemberRestore {
     pub(super) restore_resume_from_role: Option<ProfileName>,
     /// The per-spawn overlay the member is restored with.
     pub(super) restore_overlay: Option<Arc<dyn AgentToolDispatcher>>,
+    /// The host's refusal to compose the seat of a store-owned identity's
+    /// member for this build
+    /// ([`super::MemberBuildPreparer::prepare_store_owned_seat`]): the
+    /// member's provision ends with it, as with a refused build
+    /// preparation, before anything is built.
+    pub(super) seat_refusal: Option<super::MemberBuildPreparationRefusal>,
 }
 
 /// What a member's restore writes once its request is settled, whatever
@@ -13322,18 +13335,52 @@ pub(super) async fn restore_resumed_member(
     } else {
         super::handle::ResumedMemberView::new(bridge_session_id.clone(), None)
     };
+    // A seat that built nothing named a session no build has created yet:
+    // its first materialization creates that session, as a spawn creates
+    // its own, under the id the seat named.
+    let seat_session_unborn =
+        super::boot_plan::domain_member_seat_session_unborn(base.state(), &entry.agent_identity);
+    // A seat's build inputs are set on the request before the customizer,
+    // as a spawn's caller sets a spawn's: the customizer runs over them.
+    let mut restore_request = super::fork_build::seat_resume_request(
+        entry,
+        &restore_view.session_id,
+        candidate.seat_build.as_deref(),
+    );
+    // A store-owned identity's member is seated from its row, with no host
+    // step: its host composes this build's request first, as it composes
+    // the spec of a member it spawns itself. Every build asks it; the first
+    // build of the member's session takes everything it composed, a later
+    // one only its profile and model overrides. A refusal ends this
+    // member's restore where a refused build preparation does, before its
+    // provision (`prepare_member_build_before_provision`), with the request
+    // left as it was. A live actor that is kept builds nothing and asks
+    // nothing.
+    let mut seat_refusal = None;
+    if !keeps_live_actor
+        && entry.fork_source.is_none()
+        && let Some(preparer) = ctx.member_build_preparer
+        && super::created_identity::host_composes_seat(base.state(), &entry.agent_identity)
+        && let Err(refusal) = Box::pin(super::member_build_preparer::compose_store_owned_seat(
+            preparer.as_ref(),
+            ctx.host_read_handle.clone(),
+            &mut restore_request,
+            seat_session_unborn,
+        ))
+        .await
+    {
+        seat_refusal = Some(refusal);
+    }
     // A customizer refusal (a host policy that is not configured, say) fails
     // this member's restore with the refusal as its diagnostic; the rest of
     // the mob still comes up, and the member is restored once the customizer
     // admits it.
-    // A seat's build inputs are set on the request before the customizer,
-    // as a spawn's caller sets a spawn's: the customizer runs over them.
-    let restore_spec = match super::fork_build::rebuild_seat_resume_spec(
+    let restore_spec = match super::fork_build::customize_seat_resume_request(
         &definition.id,
         spawn_member_customizer.as_ref(),
         entry,
         &restore_view,
-        candidate.seat_build.as_deref(),
+        restore_request,
     ) {
         Ok(spec) => spec,
         Err(error) => {
@@ -13519,13 +13566,9 @@ pub(super) async fn restore_resumed_member(
         restore_spec,
         restore_resume_from_role,
         restore_overlay,
+        seat_refusal,
     };
 
-    // A seat that built nothing named a session no build has created yet:
-    // its first materialization creates that session, as a spawn creates
-    // its own, under the id the seat named.
-    let seat_session_unborn =
-        super::boot_plan::domain_member_seat_session_unborn(base.state(), &entry.agent_identity);
     let outcome = if matches!(entry.member_ref, MemberRef::Session { .. })
         && session_service.supports_persistent_sessions()
     {
@@ -13646,14 +13689,35 @@ async fn unstage_member_build_hold(ctx: &ResumeMemberRestoreContext<'_>, session
 /// Ask the host's build preparer, when one is configured, before a member's
 /// provision. `Ok(None)` proceeds (a requested hold is staged on the member's
 /// next registration first); `Ok(Some(outcome))` is the provision outcome a
-/// refusal ends the member's restore with.
+/// refusal ends the member's restore with. `seat_refusal`, the host's
+/// refusal to compose the seat of a store-owned identity's member for this
+/// build, ends the restore the same way, and the host is not asked to
+/// prepare a build it refused to compose.
 #[cfg(feature = "runtime-adapter")]
 async fn prepare_member_build_before_provision(
     ctx: &ResumeMemberRestoreContext<'_>,
     entry: &RosterEntry,
     bridge_session_id: &SessionId,
     authority: &crate::machines::mob_machine::MobMachineAuthority,
+    seat_refusal: Option<&super::MemberBuildPreparationRefusal>,
 ) -> Result<Option<MemberRestoreProvisionOutcome>, MobError> {
+    let refused = |refusal: super::MemberBuildPreparationRefusal| match refusal {
+        super::MemberBuildPreparationRefusal::Retryable { reason } => {
+            MemberRestoreProvisionOutcome::Retryable {
+                reason,
+                cause: RetryableRestoreCause::BuildPreparation,
+            }
+        }
+        super::MemberBuildPreparationRefusal::Final { reason } => {
+            MemberRestoreProvisionOutcome::Failed(member_restore_failure(
+                bridge_session_id,
+                format!("the host refused to prepare the member's build: {reason}"),
+            ))
+        }
+    };
+    if let Some(refusal) = seat_refusal {
+        return Ok(Some(refused(refusal.clone())));
+    }
     let Some(preparer) = ctx.member_build_preparer else {
         return Ok(None);
     };
@@ -13677,18 +13741,7 @@ async fn prepare_member_build_before_provision(
                 .await?;
             Ok(None)
         }
-        Err(super::MemberBuildPreparationRefusal::Retryable { reason }) => {
-            Ok(Some(MemberRestoreProvisionOutcome::Retryable {
-                reason,
-                cause: RetryableRestoreCause::BuildPreparation,
-            }))
-        }
-        Err(super::MemberBuildPreparationRefusal::Final { reason }) => Ok(Some(
-            MemberRestoreProvisionOutcome::Failed(member_restore_failure(
-                bridge_session_id,
-                format!("the host refused to prepare the member's build: {reason}"),
-            )),
-        )),
+        Err(refusal) => Ok(Some(refused(refusal))),
     }
 }
 
@@ -13893,8 +13946,14 @@ pub(super) async fn provision_durable_member_restore(
         }
     };
     // The host prepares the member's build before its provision.
-    if let Some(outcome) =
-        prepare_member_build_before_provision(ctx, entry, bridge_session_id, &authority).await?
+    if let Some(outcome) = prepare_member_build_before_provision(
+        ctx,
+        entry,
+        bridge_session_id,
+        &authority,
+        seated.seat_refusal.as_ref(),
+    )
+    .await?
     {
         return Ok(MemberRestoreProvision {
             profile,
@@ -14306,9 +14365,14 @@ async fn provision_fresh_member_session(
             "resume_fresh_member_session_provision_owner",
         )?);
     // The host prepares the member's build before its provision.
-    if let Some(outcome) =
-        prepare_member_build_before_provision(ctx, entry, &admitted_bridge_session_id, &authority)
-            .await?
+    if let Some(outcome) = prepare_member_build_before_provision(
+        ctx,
+        entry,
+        &admitted_bridge_session_id,
+        &authority,
+        seated.seat_refusal.as_ref(),
+    )
+    .await?
     {
         return Ok(outcome);
     }

@@ -1954,6 +1954,14 @@ fn the_descriptions_say_what_a_model_must_know() {
             ),
             "{tool} says what a name it is shown no agent under answers"
         );
+        // `an_agent_changes_no_agent_the_hosts_configuration_declares`.
+        assert!(
+            text(tool).contains(
+                "An agent that the host's configuration declares is changed there, not here \
+                 (`owner_read_only`)."
+            ),
+            "{tool} says a configured agent takes no change here"
+        );
     }
     assert!(
         text(IDENTITY_DIRECTORY)
@@ -2559,5 +2567,77 @@ async fn identity_list_shows_an_agent_of_a_profile_the_caller_may_not_create() {
         );
         assert!(answer.is_error, "{tool} of {name}");
     }
+    rig.shutdown().await;
+}
+
+/// An agent its host's configuration declares takes no run-time change from
+/// an agent's tools, though the host's rules allow the change for its
+/// profile: an update, an archive, an unarchive and a removal each answer
+/// `owner_read_only` at the name, and the agent is unchanged.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_changes_no_agent_the_hosts_configuration_declares() {
+    let state = tempfile::tempdir().unwrap();
+    let rig = boot(state.path(), &fresh_mob_id()).await;
+    assert!(
+        rig.runtime
+            .attach_identity_policy(policy(), IdentityFamilyOptions::new())
+    );
+    let digest_of = |listed: &ToolAnswer| {
+        listed.content["agents"]
+            .as_array()
+            .expect("the agents")
+            .iter()
+            .find(|entry| entry["name"] == PLAIN)
+            .unwrap_or_else(|| panic!("the declared agent is listed: {}", listed.content))["spec_digest"]
+            .clone()
+    };
+    let listed = rig
+        .tool(LEAD, "declared-list", IDENTITY_LIST, json!({}))
+        .await;
+    let digest = digest_of(&listed);
+
+    let changes = [
+        (
+            IDENTITY_UPDATE,
+            json!({
+                "name": PLAIN,
+                "expected_spec_digest": digest,
+                "set": {"display_name": "Renamed"},
+            }),
+        ),
+        (
+            IDENTITY_ARCHIVE,
+            json!({"name": PLAIN, "expected_spec_digest": digest}),
+        ),
+        (
+            IDENTITY_UNARCHIVE,
+            json!({"name": PLAIN, "expected_spec_digest": digest}),
+        ),
+        (
+            IDENTITY_REMOVE,
+            json!({"name": PLAIN, "expected_spec_digest": digest}),
+        ),
+    ];
+    for (tool, arguments) in changes {
+        let answer = rig
+            .tool(LEAD, &format!("declared-{tool}"), tool, arguments)
+            .await;
+        assert_eq!(
+            (
+                answer.content["outcome"].as_str(),
+                answer.content["kind"].as_str(),
+                answer.content["field"].as_str(),
+            ),
+            (Some("refused"), Some("owner_read_only"), Some("name")),
+            "{tool} of an agent the configuration declares: {}",
+            answer.content
+        );
+        assert!(answer.is_error, "{tool}");
+    }
+
+    let after = rig
+        .tool(LEAD, "declared-after", IDENTITY_LIST, json!({}))
+        .await;
+    assert_eq!(digest_of(&after), digest, "the declared agent is unchanged");
     rig.shutdown().await;
 }

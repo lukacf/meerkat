@@ -154,6 +154,9 @@ const AS_FOR_CREATE: &str = "and `request_id` works, as for identity_create.";
 const UNKNOWN_NAME: &str = "A `name` that no agent holds, and an agent you are not shown (one \
     private to a person), both answer `identity_unknown`.";
 
+const CONFIGURED_AGENT: &str = "An agent that the host's configuration declares is changed \
+    there, not here (`owner_read_only`).";
+
 /// The description of the identity tool `name`, as a model reads it.
 fn description(name: &str) -> String {
     match name {
@@ -216,8 +219,7 @@ fn description(name: &str) -> String {
              its next compaction); `applies_at_next_session` with a `reason` (the change \
              does not reach the agent as it runs now, and applies when it next starts a new \
              conversation); `unchanged`.\n\n\
-             You cannot change yourself (`self_change_refused`). An agent that the host's \
-             configuration declares is changed there, not here (`owner_read_only`).\n\n\
+             You cannot change yourself (`self_change_refused`). {CONFIGURED_AGENT}\n\n\
              The result's `outcome` is `done`, `pending_decision`, `pending_preparation` or \
              `refused`, {AS_FOR_CREATE}"
         ),
@@ -228,7 +230,8 @@ fn description(name: &str) -> String {
              agent may be needed later; identity_remove is for good.\n\n\
              Send the agent's `name` and `expected_spec_digest` (its `spec_digest` from \
              identity_list; a changed agent answers `stale_spec` with `current_digest`). \
-             {UNKNOWN_NAME} You cannot archive yourself (`self_change_refused`).\n\n\
+             {UNKNOWN_NAME} You cannot archive yourself (`self_change_refused`). \
+             {CONFIGURED_AGENT}\n\n\
              The result's `outcome` is `done` (the agent's `state` is `archiving` while its \
              member stops, then `archived`), `pending_decision` or `refused`, \
              {AS_FOR_CREATE}"
@@ -239,7 +242,7 @@ fn description(name: &str) -> String {
              Send the agent's `name` and `expected_spec_digest` (its `spec_digest` from \
              identity_list with `include_archived: true`). An agent that is not archived \
              answers `not_archived`. {UNKNOWN_NAME} You cannot unarchive yourself \
-             (`self_change_refused`).\n\n\
+             (`self_change_refused`). {CONFIGURED_AGENT}\n\n\
              The result's `outcome` is `done` (the agent's `state` is `restored`), \
              `pending_decision` or `refused`, {AS_FOR_CREATE}"
         ),
@@ -250,7 +253,8 @@ fn description(name: &str) -> String {
              when the agent may be needed later.\n\n\
              Send the agent's `name` and `expected_spec_digest` (its `spec_digest` from \
              identity_list; a changed agent answers `stale_spec` with `current_digest`). \
-             {UNKNOWN_NAME} You cannot remove yourself (`self_change_refused`).\n\n\
+             {UNKNOWN_NAME} You cannot remove yourself (`self_change_refused`). \
+             {CONFIGURED_AGENT}\n\n\
              The result's `outcome` is `done` (the agent's `state` is `retiring` while its \
              member stops, then `removed`), `pending_decision` or `refused`, \
              {AS_FOR_CREATE}"

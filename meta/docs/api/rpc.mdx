@@ -1469,16 +1469,56 @@ An agent the host's configuration declares answers `owner_read_only` to an
 update, an archive, an unarchive and a removal: change it in the
 configuration, or adopt it first.
 
+The schedules that target the agent follow these three changes, so that no
+schedule keeps firing at an agent that takes no delivery:
+
+- an **archive** pauses the Active schedules that target the agent, for
+  their target;
+- an **unarchive** resumes exactly the schedules that are paused for their
+  target. A schedule somebody paused by name before the archive stays
+  paused;
+- a **removal** ends every schedule that targets the agent.
+
+The agent's entry of the answer says what was done, on the first answer of
+the change: `schedules: {effect, count, schedules, incomplete?}`, where
+`effect` is `paused`, `resumed` or `ended` and each schedule is
+`{schedule_id, name?}`. `incomplete: true` is written when a schedule could
+not be read or changed; the same request asked again follows the rest. A
+plan of the change (`meta/identity/plan`) carries the same member with the
+schedules the change would take with it, as they are when the plan is
+made; it is no part of the rendering.
+
+A schedule a person resumes by name while its agent is archived is theirs
+from then on: it stays Active, its fires end as delivery failures while the
+agent is archived, and the unarchive leaves it as it is. A person's pause
+by name of a schedule paused for its target takes it over the same way: the
+unarchive does not resume it. A change asked again under the same
+`request_id` follows its schedules again where the agent still stands by
+the change (an archive while it is archived, an unarchive while it is not,
+a removal), which is how a caller that got no answer makes the schedules
+converge; a schedule taken over by name in between follows the agent
+again. A schedule created for an agent while it is archived is not paused.
+A launch whose host gives the family no schedules (an embedded Rust host
+that attaches the policy without them) changes no schedule and answers no
+such member; the stdio gateway gives them.
+
 ### `meta/identity/list` and `meta/identity/get`
 
 `meta/identity/list` takes `{profile?, include_archived?, after?}` and
 answers `{agents, next?}`, in one stable order, at most 100 agents a page; pass
 `next` as `after` for the following page. Each agent is `{name,
 display_name?, profile, spec_digest, spec_revision?, archived, readiness,
-provenance?, open_operations?, roster_listing_superseded?}`.
+provenance?, open_operations?, roster_listing_superseded?, addressability?,
+runtime_mode_override?}`.
 `meta/identity/get` takes `{name}` and
 answers the same members and `instructions`, `context?`, `labels` and
 `peers`.
+
+`addressability` and `runtime_mode_override` read back what a create or an
+update set, each only when it is not the default: `addressability` is
+written as `internal_only` and left out for an addressable agent, and
+`runtime_mode_override` is left out for an agent that runs as its profile
+says. A configured agent reads the same way from its roster row.
 
 `roster_listing_superseded` is `true`, and written only then, for an agent
 the host's roster lists while it is served from its record (an adopted
@@ -1539,7 +1579,8 @@ change itself is judged when it is asked.
 `meta/identity/plan` takes a change's own params and `change` (`create`,
 `update`, `archive`, `unarchive`, `remove` or `adopt`) and answers what the
 host's rules would give it: `{outcome, change, approver_id?, timeout_ms,
-request_digest, subject_digest, rendering}`. `outcome` is `allow` or
+request_digest, subject_digest, rendering, roster_listing_superseded?,
+schedules?}`. `outcome` is `allow` or
 `require_approval`, `change` the change class whose rule decided, and
 `rendering` the whole text a decider would be shown. The rendering names a
 person who asked, and a person a host names as the proposer, by the id
@@ -1565,11 +1606,12 @@ asked for the change: a caller the Console could not verify withdraws
 nothing. A `get` names the peers the caller may view, and no page's `next`
 names an agent the caller may not view. The reads need
 `agent.view`: `get` on the named agent, and a list and the directory leave
-out the agents the caller may not view. A `get` and a `plan` that name an
+out the agents the caller may not view. A `get`, a `plan` and a change of
+one agent (`update`, `archive`, `unarchive`, `remove`, `adopt`) that name an
 agent the caller may not view answer exactly as for a name no agent holds
-(`identity_unknown` at `name`); an agent the caller may view and may not
-change answers `access_denied`. A read-only Console refuses the
-changes.
+(`identity_unknown` at `name`), and nothing is changed; an agent the caller
+may view and may not change answers `access_denied`. A read-only Console
+refuses the changes.
 
 The caller is the requester the policy judges: a signed-in person
 (`{"kind": "human"}`), or the host on its `console` surface for a Console

@@ -52,8 +52,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the members and the values of a roster row. An update that sets either is
   of the change class `capability` of the identity policy, which no request
   touched before. An update sets a runtime mode and cannot return the agent
-  to its profile's. Rust: `identity_creation::AgentSpec` and `AgentSet` gain
-  the two members.
+  to its profile's. `meta/identity/get` and each agent of
+  `meta/identity/list` read both back under the same names, each only when
+  it is not the default (`addressability` only as `internal_only`). Rust:
+  `identity_creation::AgentSpec`, `AgentSet` and `AgentSummary` gain the two
+  members.
+- The schedules that target an agent follow its archive, its unarchive and
+  its removal (`meta/identity/archive`, `unarchive`, `remove`, and the
+  agents' tools over them): an archive pauses the Active schedules that
+  target the agent, an unarchive resumes exactly the ones that archive
+  paused, and a removal ends every one. Before, such a schedule kept firing
+  and each fire ended as a delivery failure or a missing target. A schedule
+  somebody paused by name stays paused through the unarchive, and a pause or
+  a resume by name of a schedule the archive paused takes it over. The
+  agent's entry of the change's first answer says what was done
+  (`schedules: {effect, count, schedules, incomplete?}`, `effect` one of
+  `paused`, `resumed`, `ended`), and a plan of the change carries the same
+  member with what it would do. Whose pause a pause is, the schedule's own
+  lifecycle records (Core: `ScheduleService::pause_for_target`,
+  `resume_for_target`). The stdio gateway gives the family its schedules; a
+  Rust host does with `IdentityFamilyOptions::with_schedules`
+  (`identity_creation::AgentSchedules`, implemented over a schedule service
+  by `schedule_wiring::MobAgentSchedules`), and a launch that gives none
+  changes no schedule. Rust: `identity_creation::AgentOutcome` and
+  `ChangePlan` gain `schedules`.
 - `meta/identity/*`: host methods that change a mob's long-term agents while
   it runs, on the stdio gateway and on `POST /console/rpc`: `create` (1 to
   256 agents, all or nothing), `update`, `archive`, `unarchive`, `remove`,
@@ -271,11 +293,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- On the Console, `meta/identity/get` and `meta/identity/plan` answer an
-  agent the caller may not view exactly as a name no agent holds:
-  `identity_unknown` at `name`. A rule that denies viewing the agent
-  answered `access_denied` (`-32030`) before. An agent the caller may view
-  and may not change still answers `access_denied`.
+- On the Console, a read, a plan and a change of one agent
+  (`meta/identity/get`, `plan`, `update`, `archive`, `unarchive`, `remove`
+  and `adopt`) answer an agent the caller may not view exactly as a name no
+  agent holds: `identity_unknown` at `name`, and nothing is changed. A rule
+  that denies viewing the agent answered `access_denied` (`-32030`) before.
+  An agent the caller may view and may not change still answers
+  `access_denied`.
 - The rendering of a change of an agent, which a plan answers and a held
   change's decision shows and binds, names a person by the id their
   principal key carries: the person who asked, and a person a host names as

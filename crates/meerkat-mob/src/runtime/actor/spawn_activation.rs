@@ -2025,6 +2025,9 @@ impl MobActor {
             spawn_source,
             reply_tx,
         } = route;
+        // The note a refusal for a held transport key left in this turn. It
+        // is taken at every settle, so it never outlives its spawn.
+        let refused_for_held_key = self.take_spawn_refused_for_held_key(&agent_identity);
         let reply = match outcome {
             Ok(outcome) => {
                 let mut receipt = outcome.receipt;
@@ -2096,7 +2099,7 @@ impl MobActor {
             }
         }
         if let Some(authority) = identity_reconcile.as_ref() {
-            let disposition = identity_member_actuation_disposition(&reply);
+            let disposition = identity_member_spawn_disposition(&reply, refused_for_held_key);
             self.record_identity_reconcile_disposition(&agent_identity, authority, disposition)
                 .await;
         }

@@ -484,6 +484,13 @@ pub(in crate::runtime) struct MemberWakes {
     /// transport key (refused member, holder): one warning per pair in this
     /// actor's life, however often the spawn is retried. A log bound only.
     key_refusals_logged: BTreeSet<(AgentIdentity, AgentIdentity)>,
+    /// Members whose spawn was just refused because another member holds
+    /// their transport key, between the refusal and the settle of that spawn
+    /// in the same actor turn. The settle takes the entry, whatever its
+    /// outcome, and a reconciled member's settle parks its reconcile for it
+    /// ([`MobActor::take_spawn_refused_for_held_key`]). It carries the
+    /// refusal's cause to the reconcile bookkeeping and decides nothing.
+    spawns_refused_for_held_key: BTreeSet<AgentIdentity>,
     /// Callers waiting on each attempt, with the attempt's member.
     waiters: BTreeMap<MemberWakeAttempt, (AgentIdentity, Vec<MemberWakeReply>)>,
     /// Attempts this actor is resolving right now: their callers are
@@ -564,6 +571,7 @@ impl MemberWakes {
             routes: BTreeMap::new(),
             key_routes_held_back: BTreeSet::new(),
             key_refusals_logged: BTreeSet::new(),
+            spawns_refused_for_held_key: BTreeSet::new(),
             waiters: BTreeMap::new(),
             resolving: BTreeSet::new(),
             closed: BTreeMap::new(),
@@ -947,6 +955,30 @@ impl MobActor {
                 "a member whose comms endpoint carries another member's transport key is refused again"
             );
         }
+    }
+
+    /// Note that the spawn of `agent_identity` is being refused because
+    /// another member holds its transport key. The spawn's settle, in this
+    /// actor turn, takes the note.
+    pub(in crate::runtime) fn note_spawn_refused_for_held_key(
+        &mut self,
+        agent_identity: &AgentIdentity,
+    ) {
+        self.member_wakes
+            .spawns_refused_for_held_key
+            .insert(agent_identity.clone());
+    }
+
+    /// Whether the spawn of `agent_identity` that settles now was refused
+    /// because another member holds its transport key. Every settle of a
+    /// spawn asks, and the note is gone once it did.
+    pub(in crate::runtime) fn take_spawn_refused_for_held_key(
+        &mut self,
+        agent_identity: &AgentIdentity,
+    ) -> bool {
+        self.member_wakes
+            .spawns_refused_for_held_key
+            .remove(agent_identity)
     }
 
     /// How many incarnations have their key route held back.

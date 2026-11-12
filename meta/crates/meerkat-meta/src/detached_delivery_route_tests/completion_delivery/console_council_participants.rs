@@ -398,7 +398,15 @@ async fn served(
     subject: Option<&str>,
     names: &[&str],
 ) -> Vec<ConsoleFrame> {
-    let view = controller.view_for_subject(subject);
+    served_to(aggregator, controller.view_for_subject(subject), names).await
+}
+
+/// [`served`] for a caller's own access view.
+async fn served_to(
+    aggregator: &MetaConsoleAggregator,
+    view: crate::access::AccessView,
+    names: &[&str],
+) -> Vec<ConsoleFrame> {
     let decider = TimelineFrameDecider::new(view);
     let filter: &TimelineFrameFilter<'_> = &|frame: &ConsoleFrame| decider.visible(frame);
     let mut frames = Vec::new();
@@ -692,18 +700,36 @@ fn captured(
 }
 
 /// A history frame as a console stored it for a nested member: `key` names
-/// it, and its text is `text`.
+/// it, and its text is `text`. Its time is long past.
 fn stored_frame(
     key: &str,
     text: &str,
     provenance: ConsoleFrameMemberProvenance,
+) -> NewConsoleFrame {
+    stored_frame_at(key, text, provenance, 1)
+}
+
+/// The wall clock, as a frame's time.
+fn frame_time_now() -> u64 {
+    let since_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("a clock after the epoch");
+    u64::try_from(since_epoch.as_millis()).expect("a frame time")
+}
+
+/// [`stored_frame`] stored at `timestamp_ms`.
+fn stored_frame_at(
+    key: &str,
+    text: &str,
+    provenance: ConsoleFrameMemberProvenance,
+    timestamp_ms: u64,
 ) -> NewConsoleFrame {
     let identity = provenance.identity.identity.clone();
     let session = provenance.identity.session_id.clone();
     NewConsoleFrame {
         id: None,
         dedupe_key: key.to_string(),
-        timestamp_ms: 1,
+        timestamp_ms,
         runtime_key: RUNTIME.to_string(),
         identity: identity.clone(),
         conversation_id: Some(identity),
@@ -751,6 +777,7 @@ async fn frames_stored_for_a_council_participant_are_not_served() {
     let council = Council::convene(&realm.fixture, &realm.gate).await;
     let fork_session = council.source_fork_session(&realm.fixture).await;
     council.end(&realm.fixture, &realm.gate).await;
+    council.settled(&realm.fixture).await;
     let primary = realm.fixture.runtime.handle().mob_id().to_string();
     let lost_mob = format!(
         "{}{}",
@@ -821,6 +848,25 @@ async fn frames_stored_for_a_council_participant_are_not_served() {
             .await
             .expect("seeded frame");
     }
+    // A frame under the settled council's mob id that no seat wrote and that
+    // is newer than the council: the runtime holds no mob under the id, so
+    // it is the council's too.
+    aggregator
+        .store()
+        .append_if_absent(stored_frame_at(
+            "council-record-present-not-a-seat",
+            SOURCE_TURN,
+            captured(
+                "council-helper",
+                "council-helper-session",
+                "general",
+                &primary,
+                &council.mob,
+            ),
+            frame_time_now(),
+        ))
+        .await
+        .expect("seeded frame");
     register(
         &aggregator,
         &realm.fixture.runtime,
@@ -829,7 +875,7 @@ async fn frames_stored_for_a_council_participant_are_not_served() {
     let _ = listed(&aggregator).await;
 
     let mut names = realm.names();
-    names.push("gone-worker");
+    names.extend(["gone-worker", "council-helper"]);
     let ordinary = BTreeSet::from([
         "lookalike-live".to_string(),
         "nested-live".to_string(),
@@ -876,6 +922,7 @@ async fn frames_stored_for_a_council_participant_are_not_served_with_no_runtime_
     council.end(&realm.fixture, &realm.gate).await;
     let primary = realm.fixture.runtime.handle().mob_id().to_string();
     let gone_mob = unique("nested-gone");
+    let form_primary = lost_council_mob();
 
     let aggregator = MetaConsoleAggregator::in_memory();
     let seeds = [
@@ -929,6 +976,19 @@ async fn frames_stored_for_a_council_participant_are_not_served_with_no_runtime_
                 &gone_mob,
             ),
         ),
+        // A frame whose runtime's own primary mob had an id of the council
+        // form: with no runtime registered the captured primary mob is no
+        // council's, so it is served then.
+        (
+            "primary-with-council-form",
+            captured(
+                "primary-worker",
+                "primary-worker-session",
+                "general",
+                &form_primary,
+                &form_primary,
+            ),
+        ),
     ];
     for (key, provenance) in seeds {
         aggregator
@@ -945,7 +1005,7 @@ async fn frames_stored_for_a_council_participant_are_not_served_with_no_runtime_
     let _ = listed(&aggregator).await;
 
     let mut names = realm.names();
-    names.push("gone-worker");
+    names.extend(["gone-worker", "primary-worker"]);
     // While the runtime is registered the ordinary frames are served, so the
     // reads below are of frames a console does serve.
     assert_eq!(
@@ -965,7 +1025,11 @@ async fn frames_stored_for_a_council_participant_are_not_served_with_no_runtime_
     );
 
     aggregator.unregister_runtime(RUNTIME);
-    let ordinary = BTreeSet::from(["nested-live".to_string(), "nested-gone".to_string()]);
+    let ordinary = BTreeSet::from([
+        "nested-live".to_string(),
+        "nested-gone".to_string(),
+        "primary-with-council-form".to_string(),
+    ]);
     for deny in [deny_source_by_identity(), deny_source_by_role()] {
         let by_role = !deny.roles.is_empty();
         let controller = controller(deny);
@@ -998,7 +1062,9 @@ async fn frames_stored_for_a_council_participant_are_not_served_with_no_runtime_
 /// no council's: its member is listed and resolved by name, its history is
 /// read, and its frames are served, a stored one included. The frames a
 /// console stored for the settled council's own seats stay unserved, whoever
-/// asks: by the seat's fork session and by the seat's name.
+/// asks: by the seat's fork session and by the seat's name. So does every
+/// frame stored under the id before the council settled, whoever wrote it:
+/// the mob the runtime holds now did not exist then.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_ordinary_mob_under_a_settled_councils_mob_id_is_listed_and_its_frames_served() {
     const REUSE_TURN: &str = "META-REUSE-TURN";
@@ -1006,6 +1072,8 @@ async fn an_ordinary_mob_under_a_settled_councils_mob_id_is_listed_and_its_frame
     let aggregator = console(&realm.fixture, Arc::new(AllowAllConsoleVisibilityPolicy));
     let council = Council::convene(&realm.fixture, &realm.gate).await;
     let fork_session = council.source_fork_session(&realm.fixture).await;
+    // A moment while the council runs.
+    let during_council = frame_time_now();
     council.end(&realm.fixture, &realm.gate).await;
     council.settled(&realm.fixture).await;
     let primary = realm.fixture.runtime.handle().mob_id().to_string();
@@ -1018,11 +1086,16 @@ async fn an_ordinary_mob_under_a_settled_councils_mob_id_is_listed_and_its_frame
         .await
         .expect("the ordinary mob under the council's mob id");
     turn_on(&realm.fixture, &reused, REUSE_MEMBER, REUSE_TURN).await;
+    // A moment after the ordinary mob exists.
+    let after_reuse = frame_time_now();
+    assert!(during_council < after_reuse, "the council ended in between");
 
-    // What a console holds under that mob id: frames stored for the
-    // council's seats (the second under a session the record never held,
-    // the third on a seat's fork session under a name the record never
-    // held), and one stored for the ordinary mob's member.
+    // What a console holds under that mob id. Stored while the council ran:
+    // a seat's frame, and a frame of a member of the council's mob that was
+    // no seat. Stored after the ordinary mob exists: a frame under a seat's
+    // name on a session the record never held, a frame on a seat's fork
+    // session under a name the record never held, and a frame of the
+    // ordinary mob's member.
     let seeds = [
         (
             "settled-council-seat",
@@ -1033,6 +1106,18 @@ async fn an_ordinary_mob_under_a_settled_councils_mob_id_is_listed_and_its_frame
                 &primary,
                 &council.mob,
             ),
+            during_council,
+        ),
+        (
+            "settled-council-not-a-seat",
+            captured(
+                "council-helper",
+                "council-helper-session",
+                "general",
+                &primary,
+                &council.mob,
+            ),
+            during_council,
         ),
         (
             "settled-council-seat-by-name",
@@ -1043,6 +1128,7 @@ async fn an_ordinary_mob_under_a_settled_councils_mob_id_is_listed_and_its_frame
                 &primary,
                 &council.mob,
             ),
+            after_reuse,
         ),
         (
             "settled-council-seat-by-session",
@@ -1053,6 +1139,7 @@ async fn an_ordinary_mob_under_a_settled_councils_mob_id_is_listed_and_its_frame
                 &primary,
                 &council.mob,
             ),
+            after_reuse,
         ),
         (
             "ordinary-member",
@@ -1063,12 +1150,13 @@ async fn an_ordinary_mob_under_a_settled_councils_mob_id_is_listed_and_its_frame
                 &primary,
                 &council.mob,
             ),
+            after_reuse,
         ),
     ];
-    for (key, provenance) in seeds {
+    for (key, provenance, stored_at) in seeds {
         aggregator
             .store()
-            .append_if_absent(stored_frame(key, SOURCE_TURN, provenance))
+            .append_if_absent(stored_frame_at(key, SOURCE_TURN, provenance, stored_at))
             .await
             .expect("seeded frame");
     }
@@ -1098,7 +1186,7 @@ async fn an_ordinary_mob_under_a_settled_councils_mob_id_is_listed_and_its_frame
     backfill(&aggregator).await;
 
     let mut names = realm.names();
-    names.extend([REUSE_MEMBER, "unrecorded-seat-name"]);
+    names.extend([REUSE_MEMBER, "unrecorded-seat-name", "council-helper"]);
     let ordinary = BTreeSet::from(["ordinary-member".to_string()]);
     let controller = controller(deny_source_by_identity());
     let administrator = served(&aggregator, &controller, Some(ROOT), &names).await;
@@ -1121,6 +1209,49 @@ async fn an_ordinary_mob_under_a_settled_councils_mob_id_is_listed_and_its_frame
     assert!(
         wrong.is_empty(),
         "an ordinary mob under a settled council's mob id is decided as the council's: {wrong:#?}"
+    );
+    realm.fixture.stop().await;
+}
+
+/// A council's record that reads settled but holds no cleanup receipt saying
+/// its temporary mob is destroyed (no council writes one) still owns its mob
+/// id: a mob held under it stays unlisted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_settled_record_without_a_destroyed_receipt_keeps_its_mob_id() {
+    let realm = Realm::start().await;
+    let aggregator = console(&realm.fixture, Arc::new(AllowAllConsoleVisibilityPolicy));
+    let council = Council::convene(&realm.fixture, &realm.gate).await;
+    council.end(&realm.fixture, &realm.gate).await;
+    council.settled(&realm.fixture).await;
+
+    let state = mob_tools(&realm.fixture);
+    let store = state.temporary_council_store_for_tests();
+    let council_id = meerkat_mob::temporary_council::TemporaryCouncilId::new(&council.id)
+        .expect("council identity");
+    let mut record = store
+        .load(&council_id)
+        .await
+        .expect("read council custody")
+        .expect("council record");
+    assert!(
+        record
+            .cleanup
+            .as_ref()
+            .is_some_and(|cleanup| cleanup.temporary_mob_destroyed),
+        "a settled council's receipt says its temporary mob is destroyed"
+    );
+    record.cleanup = None;
+    let record = store.commit(&record).await.expect("rewrite the record");
+    assert!(
+        !record.is_unfinished(),
+        "the record still reads settled without its receipt"
+    );
+
+    seat_nested_mob(&state, &council.mob, REUSE_MEMBER).await;
+    let identities = listed(&aggregator).await;
+    assert!(
+        !identities.contains(REUSE_MEMBER),
+        "a mob under the id of a record with no destroyed receipt stays unlisted: {identities:?}"
     );
     realm.fixture.stop().await;
 }

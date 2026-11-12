@@ -29,10 +29,10 @@ ARCHIVE = "rkat-toolkit-activepieces-0.1.0.tgz"
 EPOCH = 1794000000
 
 # A stand-in for the pinned backend: it packs the staged tree the way a wheel is laid out and records which
-# backend version built it and whether the helper wheels were importable beside it.
+# backend version built it and whether any other pinned wheel was importable beside it. The real backend
+# wheels carry their own dependencies, so the hook's import path holds the backend alone.
 BACKEND = '''
-import os, pathlib, re, time, zipfile
-import packaging, wheel
+import importlib.util, os, pathlib, re, time, zipfile
 VERSION = %(version)r
 UNSTABLE = %(unstable)r
 
@@ -44,11 +44,12 @@ def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
     version = re.search(r'^version = "([^"]+)"', text, re.M)[1]
     stamp = time.gmtime(int(os.environ["SOURCE_DATE_EPOCH"]))[:6]
     filename = "%%s-%%s-py3-none-any.whl" %% (name, version)
+    beside = [module for module in ("packaging", "wheel", "build") if importlib.util.find_spec(module) is not None]
     with zipfile.ZipFile(os.path.join(wheel_directory, filename), "w") as archive:
         for path in sorted(pathlib.Path("src").rglob("*")):
             if path.is_file():
                 archive.writestr(zipfile.ZipInfo(path.relative_to("src").as_posix(), stamp), path.read_bytes())
-        note = "Backend: %%s\\nHelpers: %%s %%s\\n" %% (VERSION, packaging.MARK, wheel.MARK)
+        note = "Backend: %%s\\nBeside-The-Backend: %%s\\n" %% (VERSION, ",".join(beside) or "nothing")
         if UNSTABLE:
             note += "Built-At: %%d\\n" %% time.time_ns()
         archive.writestr(zipfile.ZipInfo("%%s-%%s.dist-info/METADATA" %% (name, version), stamp),
@@ -158,8 +159,9 @@ class ComponentBuildTests(unittest.TestCase):
         self.backend("82.0.0")
         self.backend("84.2.1", use=("component build tool",))
         for name in ("packaging", "wheel"):
-            # As in the committed pin file, one row can serve two readers: `use` is a sorted list of labels.
-            self.pin(*pure_wheel(name, "1.0", {name + "/__init__.py": "MARK = %r\n" % (name + "-helper")}),
+            # Rows of other readers, as the committed pin file has them (`use` is a sorted list of labels; one
+            # row can serve two readers). The component build must not take them.
+            self.pin(*pure_wheel(name, "1.0", {name + "/__init__.py": ""}),
                      name=name, version="1.0",
                      use=("agno closure", "component build tool") if name == "packaging" else ("component build tool",))
         self.write_pins()
@@ -235,7 +237,7 @@ class ComponentBuildTests(unittest.TestCase):
         self.assertEqual(sorted(path.name for path in self.output.iterdir()),
                          sorted([AGNO, SERVICES, ARCHIVE, "components.json", "logs"]))
         self.assertTrue(any((self.output / "logs").iterdir()))
-        # Each wheel was built by the backend version its own project names, with the helper wheels beside it.
+        # Each wheel was built by the backend version its own project names, with nothing else on its path.
         for family, filename, version in (("agno", AGNO, "84.0.0"), ("services", SERVICES, "82.0.0")):
             backend = record["components"][family]["backend"]
             row = next(row for row in self.rows if row["name"] == "setuptools" and row["version"] == version)
@@ -244,7 +246,7 @@ class ComponentBuildTests(unittest.TestCase):
             with zipfile.ZipFile(self.output / filename) as archive:
                 metadata = archive.read(next(name for name in archive.namelist() if name.endswith("METADATA"))).decode()
                 self.assertIn("Backend: " + version + "\n", metadata)
-                self.assertIn("Helpers: packaging-helper wheel-helper\n", metadata)
+                self.assertIn("Beside-The-Backend: nothing\n", metadata)
                 self.assertEqual({info.date_time for info in archive.infolist()}, {tuple(time.gmtime(EPOCH)[:6])})
         # The staged trees are the checkout's own staging scripts' output.
         with zipfile.ZipFile(self.output / AGNO) as archive:
@@ -315,18 +317,6 @@ class ComponentBuildTests(unittest.TestCase):
             self.write_pins()
             self.refused()
             self.assertFalse(self.output.exists())
-        with self.subTest("helper missing"):
-            self.rows = [row for row in saved if row["name"] != "packaging"]
-            self.write_pins()
-            self.refused()
-        with self.subTest("helper under another use label"):
-            self.rows = [dict(row, use=["agno closure"]) if row["name"] == "wheel" else row for row in saved]
-            self.write_pins()
-            self.refused()
-        with self.subTest("label as a string, not the pin file's list"):
-            self.rows = [dict(row, use="component build tool") if row["name"] == "wheel" else row for row in saved]
-            self.write_pins()
-            self.refused()
         with self.subTest("pin file schema"):
             self.pins_path.write_text(json.dumps({"schema": "connect-library-pins/2", "target": "macos-arm64", "pins": saved}))
             self.refused()

@@ -187,6 +187,8 @@ single-approval and Hold/Requeue/Resume controls.
 
 Work retains its authenticated requester or explicit service mandate, acting agent, tenant, selected account, audience and actual permissions across peers, forks and continuations. Each hop preserves or narrows the incoming authority and intersects it with local grants.
 
+Between members in one process, a delivery that governed work sends carries that work's origin, which Core establishes. The receiving work keeps that work's requester, names the sending member as its ingress actor and the sending work as its contributors, and each of its operations is narrowed by the sending work's current grants for that target. A delivery over a network carries no governed origin. When Connect can bind it to a sender in the receiving member's local mob roster, it uses the receiving member's own standing grants; an unresolved sender is refused. These are the rules of Connect's selected member composition, not a general rule for all Core hosts.
+
 An immediate sender, session ID, objective ID or signed piece of model prose does not replace that association. Missing or unverifiable context cannot fall back to the receiving agent owner's private access. Use the native authority APIs to preserve that association.
 
 ## Resource boundaries

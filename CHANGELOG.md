@@ -52,6 +52,23 @@ them.
 
 ### Added
 
+- `meerkat-core`, `meerkat-llm-core`: for embedders that sign provider
+  requests themselves (see Security).
+  `meerkat_core::redact::redact_credentials` removes credentials from text
+  read from a response: the values it is given, by exact match (as sent and
+  as an encoder rewrites them), then values that look like credentials in
+  known positions;
+  `redact::MIN_REDACTED_CREDENTIAL_BYTES` is the shortest value it replaces
+  by exact match. `HttpAuthorizer::visit_signed_credentials` is a provided
+  method through which an authorizer names the secret values it signs with;
+  the default `redact_response_diagnostic` now removes them, and an
+  authorizer that overrides `redact_response_diagnostic` behaves as before.
+  `meerkat_core::auth::SignedCredentials` keeps the last values an
+  authorizer with a rotating token signed with.
+  `meerkat_llm_core::streaming::redact_stream_errors` redacts the error a
+  stream ends with through any redaction, for a client that signs with a
+  key of its own.
+
 - `meerkat-mob`: `MobSessionService::recorded_build_instructions(session_id)`
   (a provided trait method) reads the instruction sections a session was
   built with (`additional_instructions`), from the session's committed build
@@ -83,6 +100,33 @@ them.
   committed build state, from the metadata alone), and the decoders
   `meerkat_core::try_session_build_state_from_map` and
   `SessionMetadataDocument::try_build_state`.
+
+### Changed
+
+- Provider error text (see Security): in the errors of the OpenAI
+  Responses, OpenAI-compatible, Anthropic and Gemini clients, of the OpenAI
+  realtime clients (the text client for realtime-capable models and live
+  sessions) and of the Google Code Assist setup requests (GitHub Copilot
+  routes keep their error text as before), a value that looks like a
+  credential (at least 8 credential characters with a digit among them, or
+  at least 32) is now replaced by `[REDACTED]` where it follows `Bearer` or
+  `Basic`, is the value of an `authorization` header, or is assigned to a
+  secret-looking key (`api_key=`, `x-api-key:`, `token:`); so are tokens
+  with a well-known prefix (`sk-`, `ghp_`, `AKIA` and similar), JSON web
+  tokens, URL userinfo and PEM private-key blocks. A JSON web token is
+  replaced where it ends at a separator; one directly followed by `.`, `/`,
+  `+` or `=` (the full stop of a sentence, a path) is not, which is how the
+  rule already read a process's stderr.
+  The value is replaced and the text around it is kept, with two
+  exceptions: a private-key block goes with its lines, so a block inside a
+  one-line body takes that line, and in a SigV4 `Authorization` value the
+  scheme word (`AWS4-HMAC-SHA256`) is replaced along with the `Credential=`
+  scope. The rules read positions, not meaning, so a value in such a
+  position that is no secret is replaced too: a cache or idempotency key
+  (`prompt_cache_key: <value>`), a model id written after `key:`, a word
+  that begins with a token prefix (`sk-learn-compatible`). Text outside
+  those positions is unchanged. A rejection is classified from the body as
+  received and then redacted, so the rules do not change an error's class.
 
 ### Fixed
 
@@ -216,6 +260,87 @@ them.
   and a key file that already exists is made 0600 before the key is written
   to it. `Keypair::load_or_generate`, which the stock hosts use, already
   created the file 0600. Affects 0.3.0 through 0.9.14.
+
+- `meerkat-openai`, `meerkat-anthropic`, `meerkat-gemini`,
+  `meerkat-auth-core`, `meerkat-core`: when a provider, or a proxy or
+  gateway in front of one, answered a request with an error that repeated
+  the request's credential (its `Authorization` or API-key header, or the
+  bare value), the credential stayed in the error text. It reached the turn
+  failure message (`rkat run` prints it on stderr), the typed turn error's
+  `detail` and `reason.provider_error.message` in RPC error data and events,
+  retry events, and whatever stores or shows them. Since 0.9.9 the clients
+  ask the route's authorizer to remove it, but only the GitHub Copilot
+  authorizers did; a route whose client signs with a key of its own (an API
+  key, a self-hosted server's static bearer) asked no one, and the Gemini
+  client had no such step.
+
+  What is removed now: the credential a request was signed with, by exact
+  value, from the error text of that request. That covers the API-key and
+  static-bearer routes of the OpenAI, OpenAI-compatible (self-hosted),
+  Anthropic and Gemini clients; routes signed by the static-bearer,
+  static-header, AWS, Azure AD, Google and managed OAuth authorizers (with
+  the last four values of a token that refreshes); the failure of an
+  OpenAI or Gemini image request, the Gemini Files API registration
+  included; the Google Code Assist setup requests; and the OpenAI realtime
+  clients: the errors of the text client for realtime-capable models and,
+  for a live session, an error's message, code and param, a failed
+  response's reason and error, and the opt-in frame trace. The value is
+  matched as sent, without its `Bearer` or `Basic` scheme, and as an
+  encoder rewrites it: `/` as `\/`, a character as its JSON `\u00XX`
+  escape, or percent-encoded (`%XX`), alone or mixed. A second step then
+  replaces values that look like credentials in known positions (see
+  Changed).
+
+  What is not removed:
+
+  - A value shorter than 8 bytes (a placeholder such as `none`) is not
+    matched by value. A placeholder of 8 bytes or more (`not-needed`,
+    `lm-studio`) is the route's credential: the word is replaced wherever
+    an error uses it.
+  - A value the response repeats in another form: base64 of it, the
+    decoded user and password of a `Basic` pair, a copy cut short or
+    masked, an HTML entity, a doubly escaped copy.
+  - Two named values that overlap without one containing the other (the
+    end of one is the start of the other) are replaced independently,
+    longest first: where a response runs them together, what the second
+    holds beyond the overlap stays.
+  - The second step is a second line only. It leaves a secret no route
+    names when the secret stands outside the positions listed under
+    Changed, is made of letters only and shorter than 32 bytes, is a JSON
+    web token directly followed by `.`, `/`, `+` or `=`, stands in a
+    quoted header dump without a `Bearer` or `Basic` scheme
+    (`{"authorization":"<value>"}`, `"authorization":"Token <value>"`), or
+    stands in JSON nested inside a JSON string (`{\"api_key\":\"<value>\"}`).
+  - URL userinfo is replaced up to the `@` of its URL. Text that quotes a
+    URL closes it, so in a response the second step reads a quoting byte
+    (`'`, `"`, `\`, `<` or `>`) as the end of a URL when what stands before
+    it is a bare host (not empty, and no `:` or a `:` followed by one or
+    more digits and nothing else) and a second quoting byte follows before
+    the `@`. Userinfo of that shape is left: one that starts like a host
+    with a port (`app:1234're'st@db`), or one with no `:` before its first
+    quoting byte (`o'bri'en:pass@db`). A password or a user name wrapped
+    in quotes (`app:'pass'@db`, `'root':'pass'@db`) is replaced.
+  - The same rule replaces some text that is no userinfo, which costs
+    readability only: a bare host followed by one quoting byte and a later
+    `@` (`'https://host',help@host`), and a bracketed IPv6 host followed
+    by a later `@`.
+  - A static-header route names the value of `authorization`,
+    `proxy-authorization` and `cookie`, and of a header whose name contains
+    `key`, `token`, `secret`, `auth`, `password`, `credential`, `signature`
+    or `session`. A secret under any other header name is left to the
+    second step.
+  - SigV4: the session token and the signed `Authorization` value and
+    signature of the two most recent requests are removed. With more
+    requests in flight, the `Signature=` of an older one can stay; it is
+    bound to its request and expires in minutes.
+  - GitHub Copilot routes keep their own redaction, as before: the last
+    four bearers by exact value as sent, shown as `<redacted>`, without the
+    encoded forms and without the second step.
+  - Requests that obtain a credential are not covered: a refused token,
+    device-code, cloud identity or API-key provisioning request reports the
+    body as received at sign-in and when a route resolves.
+
+  Affects 0.3.0 through 0.9.14.
 
 ### Upgrade notes
 

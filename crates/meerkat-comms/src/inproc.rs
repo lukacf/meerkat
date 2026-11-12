@@ -745,23 +745,28 @@ impl InprocRegistry {
     /// Look up an inproc peer by pubkey across all namespaces.
     ///
     /// Cross-namespace delivery has no typed target namespace. If the same
-    /// canonical identity is live in more than one namespace, fail closed
-    /// rather than choosing whichever namespace the map happens to yield first.
+    /// canonical identity is live in more than one namespace with different
+    /// inboxes, fail closed rather than choosing whichever namespace the map
+    /// happens to yield first. Registrations of the SAME inbox are one
+    /// route: a member's own registration, and the route a host that links
+    /// two namespaces holds to that inbox in the linked one, deliver to the
+    /// same place whichever is taken.
     pub(crate) fn get_by_pubkey_any_namespace(&self, pubkey: &PubKey) -> Option<InboxSender> {
         if pubkey.is_zero() {
             return None;
         }
         let state = self.state.read();
-        let mut found = None;
+        let mut found: Option<&InboxSender> = None;
         for namespace_state in state.namespaces.values() {
             if let Some(peer) = namespace_state.peers.get(pubkey) {
-                if found.is_some() {
-                    return None;
+                match found {
+                    Some(first) if !first.same_inbox(&peer.sender) => return None,
+                    Some(_) => {}
+                    None => found = Some(&peer.sender),
                 }
-                found = Some(peer.sender.clone());
             }
         }
-        found
+        found.cloned()
     }
 
     /// Look up an inproc peer name by public key.
@@ -939,8 +944,9 @@ impl InprocRegistry {
     /// (`mob_unavailable`).
     ///
     /// The answer is for forwarding a wake to the owner and for nothing
-    /// else: it is never passed to [`Self::retract_wake_route`] or
-    /// [`Self::publish_wake_route`].
+    /// else: it is never passed to [`Self::retract_wake_route`],
+    /// [`Self::publish_wake_route`] or
+    /// [`Self::publish_forwarder_wake_route`].
     pub fn wake_route_owner_in_namespace(
         &self,
         namespace: &str,
@@ -965,7 +971,8 @@ impl InprocRegistry {
     /// `Err(())` when the key has a route whose owner is gone (its mob actor
     /// exited without retracting it): the member exists, but nothing in this
     /// process can wake it. In any namespace, a key routed in more than one
-    /// namespace fails closed as no route, exactly as live routes do; a
+    /// namespace fails closed as no route, as live routes to different
+    /// inboxes do; a
     /// forwarder's route is not counted and never answered there, so a key
     /// with its owner's route and forwarders' routes resolves to the owner.
     fn wake_route(

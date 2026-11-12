@@ -30,7 +30,8 @@ use meerkat_core::Message;
 use meerkat_core::types::StopReason;
 use meerkat_meta::UnifiedRuntimeBuilder;
 use meerkat_meta::identity_creation::{
-    InstructionNextSessionReason, InstructionOutcome, InstructionsChanged,
+    IdentityCreationPolicy, IdentityFamilyOptions, InstructionNextSessionReason,
+    InstructionOutcome, InstructionsChanged,
 };
 use meerkat_meta::identity_first::{
     AgentAddressability, AgentIdentity, DurableAgentSpec, MutableRosterProvider,
@@ -2692,6 +2693,142 @@ async fn a_helper_fork_of_an_edited_agent_carries_neither_text() {
         ),
         (false, false, 0),
         "the helper holds none of the source's instructions"
+    );
+    rig.shutdown().await;
+}
+
+/// The identity policy a row's launch is given: host code may change agents
+/// on the profile `worker`.
+fn identity_policy() -> Arc<IdentityCreationPolicy> {
+    Arc::new(
+        IdentityCreationPolicy::parse(&json!({
+            "enabled": true,
+            "peers": {"default": "allow"},
+            "approval": {"rules": [{
+                "change": ["create", "descriptive", "capability", "peers", "profile",
+                           "archive", "remove", "adopt"],
+                "requester": {"kind": "host"},
+                "target": {"profile": ["worker"]},
+                "outcome": {"kind": "allow"},
+            }]},
+        }))
+        .expect("the policy parses")
+        .expect("the policy is enabled"),
+    )
+}
+
+/// Boot a launch whose host gives an identity policy and no instruction
+/// step of its own, and create the store-owned agent with `instructions`
+/// through `meta/identity/create`.
+async fn boot_with_identity_methods(state: &Path, instructions: &[&str]) -> Rig {
+    let rig = boot(state, &fresh_mob_id(), vec![configured_spec(&[])]).await;
+    assert!(
+        rig.runtime
+            .attach_identity_policy(identity_policy(), IdentityFamilyOptions::new()),
+        "the runtime serves identities and takes the policy"
+    );
+    let created = rig
+        .rpc(
+            "meta/identity/create",
+            json!({"request_id": "create-1", "agents": [
+                {"name": CREATED, "profile": "worker", "instructions": instructions},
+            ]}),
+        )
+        .await;
+    assert_eq!(created["result"]["outcome"], json!("done"), "{created:#}");
+    rig
+}
+
+/// An update of an agent through the launch's identity methods needs no
+/// step from its host: the launch's own step records the changed
+/// instructions, the update's answer says when they apply, and the agent's
+/// next run carries the entry once. A store-owned agent changed through the
+/// methods is served as one changed through Core's handle is.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_update_through_the_identity_methods_says_when_it_applies_and_reaches_the_agent() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut rig = boot_with_identity_methods(temp.path(), &["Keep ALPHA records."]).await;
+    rig.turn(CREATED, "FIRST-TURN").await;
+    let before = rig.transcript(CREATED).await;
+
+    let read = rig.rpc("meta/identity/get", json!({"name": CREATED})).await;
+    let digest = read["result"]["spec_digest"].clone();
+    assert!(digest.is_string(), "the agent reads: {read:#}");
+    let updated = rig
+        .rpc(
+            "meta/identity/update",
+            json!({"request_id": "update-1", "name": CREATED, "expected_spec_digest": digest,
+                   "set": {"instructions": ["Keep BETA records."]}}),
+        )
+        .await;
+    assert_eq!(updated["result"]["outcome"], json!("done"), "{updated:#}");
+    assert_eq!(
+        updated["result"]["agents"][0]["instructions"],
+        json!({"kind": "applies_at_next_run"}),
+        "the update says when the changed instructions apply: {updated:#}"
+    );
+    let record = rig.record(CREATED).await.expect("the mob holds the record");
+    assert_eq!(
+        (record["revision"].clone(), record["effect"].clone()),
+        (json!(1), json!("active")),
+        "one record, written once: {record:#?}"
+    );
+
+    rig.recorded(CREATED).await;
+    rig.turn(CREATED, "SECOND-TURN").await;
+    let request = entries(&rig.request_messages("SECOND-TURN"));
+    assert_eq!(
+        request.len(),
+        1,
+        "one entry reaches the model: {request:#?}"
+    );
+    assert!(
+        carries(&request[0], &["Keep BETA records."]),
+        "the entry carries the whole current text: {}",
+        request[0]
+    );
+    let after = rig.transcript(CREATED).await;
+    assert_eq!(
+        after[..before.len()],
+        before[..],
+        "every earlier row is byte-identical"
+    );
+    rig.shutdown().await;
+}
+
+/// A removal of an agent through the launch's identity methods revokes the
+/// agent's instruction record, with no step from the host.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_removal_through_the_identity_methods_revokes_the_record() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut rig = boot_with_identity_methods(temp.path(), &["Keep ALPHA records."]).await;
+    rig.turn(CREATED, "FIRST-TURN").await;
+    let read = rig.rpc("meta/identity/get", json!({"name": CREATED})).await;
+    let digest = read["result"]["spec_digest"].clone();
+    let updated = rig
+        .rpc(
+            "meta/identity/update",
+            json!({"request_id": "update-1", "name": CREATED, "expected_spec_digest": digest,
+                   "set": {"instructions": ["Keep BETA records."]}}),
+        )
+        .await;
+    assert_eq!(updated["result"]["outcome"], json!("done"), "{updated:#}");
+    let record = rig.record(CREATED).await.expect("the mob holds the record");
+    assert_eq!(record["effect"], json!("active"), "{record:#?}");
+
+    let digest = updated["result"]["agents"][0]["spec_digest"].clone();
+    let removed = rig
+        .rpc(
+            "meta/identity/remove",
+            json!({"request_id": "remove-1", "name": CREATED, "expected_spec_digest": digest}),
+        )
+        .await;
+    assert_eq!(removed["result"]["outcome"], json!("done"), "{removed:#}");
+    let record = rig.record(CREATED).await.expect("the revoked record");
+    assert_eq!(
+        (record["revision"].clone(), record["effect"].clone()),
+        (json!(2), json!("absent")),
+        "the removal revoked the record: {record:#?}"
     );
     rig.shutdown().await;
 }

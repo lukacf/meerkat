@@ -1008,6 +1008,15 @@ Kickoff status notices are different. A member's kickoff progress reaches its wi
 
 They are visible because they tell the parent or wired peers how a helper's initial autonomous turn is going, including a failure before the helper could reliably report for itself. They are still one-way notices, not requests: the receiving agent sees a `lifecycle` comms notice naming the kind, no inbound request is recorded, and no `send_response` reply is expected.
 
+Kickoff notices are progress hints, not a guaranteed record. The member's kickoff phase in its status is the fact; a peer can miss a notice:
+
+- Order: the notices of one member reach one peer one at a time, in the order the kickoff went through its phases. A notice to a peer that is not live wakes it and is delivered once the peer is live. Notices to different peers, and of different members, are independent.
+- Bound: at most eight notices of one member are pending for one peer, the one being sent included. A notice owed beyond that takes the place of the oldest one still waiting (never of the one being sent), so the latest phase, a failure or a cancellation included, survives. The bound is per pair of members; there is none across peers or members.
+- No retry: a notice whose send fails, or whose send budget ends (the sending member's comms ack timeout, 30 seconds by default), is not sent again. The next notice of that member to that peer is attempted when that budget has ended.
+- Cancel: a stop, a complete, a reset, a shutdown or a destroy of the mob, an unwire of the edge, a retirement of either member and the rollback of a failed spawn cancel the notices that are pending when they start. A notice such a command emits itself (the cancellation of a kickoff that a stop closes) is still handed off and ends within its send budget; the stop does not wait for it, and nothing is delivered after a destroy.
+
+Every notice that is not delivered is logged at WARN with the member (`from`), the peer (`to`), the kind (`intent`) and a `class`: `preparation_failed`, `send_failed`, `pending_bound` or `cancelled`.
+
 Batched peer lifecycle updates are presentation-only: the underlying comms stream remains one event per peer change.
 
 You can control whether these peer lifecycle updates are inlined by peer-count threshold using `max_inline_peer_notifications`:

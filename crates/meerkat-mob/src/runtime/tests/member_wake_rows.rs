@@ -5138,6 +5138,100 @@ async fn a_kickoff_notice_of_a_member_released_to_dormant_is_still_delivered_and
     fixture.finish().await;
 }
 
+/// A stop cancels the kickoff notices that are pending when it starts, not
+/// the ones it emits itself: a stop of a mob whose member's kickoff is in
+/// flight closes that kickoff, and MobMachine's cancelled notice for it is
+/// handed to the lane after the stop's own cancel. The stop does not wait
+/// for that notice (here its send is held): it answers within the actor's
+/// bound once the member's run has ended. A destroy then cancels the notice,
+/// which is recorded, and nothing of it is sent after the mob is destroyed.
+///
+/// The member's kickoff run is held at its model request, so the stop finds
+/// the kickoff in flight; the run is let go once the stop has handed the
+/// notice off, because a stop waits for the run it interrupts.
+///
+/// A current-thread runtime, so the delivery's warning reaches this thread's
+/// capture.
+#[tokio::test]
+async fn a_stop_with_a_kickoff_in_flight_does_not_wait_for_the_notice_it_emits_and_a_destroy_cancels_it()
+ {
+    let (warnings, _capture) = capture_warnings();
+    // A second registered dispatch keeps callsite interest per thread.
+    let _anchor = tracing::Dispatch::new(tracing_subscriber::Registry::default());
+    let fixture = kickoff_notice_fixture("kickoff-notice-stop-emits").await;
+    let cancelled = crate::runtime::actor::kickoff_notice::hold_kickoff_notice_send_for_test(
+        fixture.handle.mob_id(),
+        "mob.kickoff_cancelled",
+    );
+    let peer = fixture.spawn("notice-stop-emits-peer").await;
+
+    fixture.client.block();
+    let member = spawn_kickoff_member(&fixture, "notice-stop-emits-member").await;
+    fixture.client.wait_started(1).await;
+    let pending_before_stop = cancelled.arrived();
+
+    let mut stop = {
+        let handle = fixture.handle.clone();
+        tokio::spawn(async move { handle.stop().await.map(|_| ()) })
+    };
+    // The stop closes the kickoff: its cancelled notice reaches the lane
+    // while the stop is still running.
+    let handed_off = tokio::time::timeout(WAIT, async {
+        while cancelled.arrived() == 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .is_ok();
+    let stop_still_running = !stop.is_finished();
+    fixture.client.release();
+    let asked = Instant::now();
+    let stopped = tokio::time::timeout(ACTOR_HELD_CAP, &mut stop).await;
+    let stop_answered_after = asked.elapsed();
+    let held_at_stop = (cancelled.arrived(), cancelled.passed());
+    let recorded_at_stop =
+        kickoff_notice_records(&warnings, &member, &peer, "mob.kickoff_cancelled").len();
+
+    let asked = Instant::now();
+    let destroyed = tokio::time::timeout(ACTOR_HELD_CAP, fixture.handle.destroy())
+        .await
+        .map(|destroyed| destroyed.is_ok());
+    let destroy_answered_after = asked.elapsed();
+    let records = kickoff_notice_records(&warnings, &member, &peer, "mob.kickoff_cancelled");
+    cancelled.release();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let sent_after_destroy = cancelled.passed();
+    assert!(
+        pending_before_stop == 0
+            && handed_off
+            && stop_still_running
+            && matches!(stopped, Ok(Ok(Ok(()))))
+            && stop_answered_after < ACTOR_ANSWER_BOUND
+            && held_at_stop == (1, 0)
+            && recorded_at_stop == 0
+            && destroyed == Ok(true)
+            && destroy_answered_after < ACTOR_ANSWER_BOUND
+            && sent_after_destroy == 0,
+        "a stop with a kickoff in flight waited for the notice it emitted, or the notice \
+         outlived a destroy: {pending_before_stop} cancelled notice(s) before the stop (0 \
+         expected); the stop handed its cancelled notice to the lane while it ran: {handed_off} \
+         (still running then: {stop_still_running}); it answered {stopped:?} \
+         {stop_answered_after:?} after the member's run ended (bound {ACTOR_ANSWER_BOUND:?}) \
+         with the notice (arrived, sent) {held_at_stop:?} ((1, 0) expected) and \
+         {recorded_at_stop} record(s) of it (0 expected); the destroy answered {destroyed:?} \
+         after {destroy_answered_after:?}; {sent_after_destroy} send(s) of the notice went on \
+         after the destroy (0 expected)"
+    );
+    assert!(
+        records.len() == 1
+            && records.iter().all(|record| {
+                field(record, "class") == Some("cancelled")
+                    && field(record, "error").is_some_and(|error| error.contains("canceled"))
+            }),
+        "the notice the destroy cancelled is recorded once with its class: {records:?}"
+    );
+}
+
 /// The declared apply on a durable store: an identity a complete roster
 /// unlisted, then lists again, comes back as the same identity with its
 /// history. The unlisted retirement archives the member's session and

@@ -49,19 +49,39 @@ them.
   was woken without it. The actor now prepares each kickoff notice and hands
   its send to a task it owns on the peer delivery lane, for live recipients
   and recipients that are not live alike, so the peer's wake is served while
-  the notice waits for it. The notices of one member to one peer are sent one
-  at a time, in the order the kickoff went through its phases; at most eight
-  may be pending for one member and one peer, and a notice beyond that is
-  refused and logged. A notice that cannot be delivered is logged as before
-  (`a kickoff notice to a peer that was not materialized was not delivered`,
-  or `failed to emit kickoff lifecycle notice` for a live recipient), now
-  with the recipient and the notice's kind. A failed send to one live peer no
-  longer skips the member's remaining peers. A notice behind one that cannot
-  be delivered is attempted when that one's 30 second budget has ended. A
-  stop, a complete, a reset, a destroy or a shutdown of the mob, an unwire of
-  the edge and a retirement of either member cancel a pending notice as they
-  cancel a pending peer message. A kickoff notice still wakes a peer that is
-  not live.
+  the notice waits for it. A kickoff notice still wakes a peer that is not
+  live. What holds for the notices now:
+  - Order: the notices of one member to one peer are sent one at a time, in
+    the order the kickoff went through its phases. Notices to different
+    peers, and of different members, are independent, so a peer that cannot
+    be reached delays only the notices owed to it. A notice behind one that
+    cannot be delivered is attempted when that one's send budget has ended.
+    The budget is the sending member's comms ack timeout (30 seconds by
+    default), not a constant of the lane.
+  - Bound: at most eight notices of one member are pending for one peer, the
+    one being sent included. A notice owed beyond that takes the place of the
+    oldest one still queued, never of the one being sent, so the latest phase
+    (a failure or a cancellation included) reaches the peer and the notices
+    that stay keep their order. There is no bound across peers or members:
+    the lane holds at most eight notices for every wired pair of members.
+  - A notice that is not delivered is logged at WARN with the member
+    (`from`), the peer (`to`), the notice's kind (`intent`) and a `class`
+    (`preparation_failed`, `send_failed`, `pending_bound` or `cancelled`),
+    and is not sent again. The messages are `a kickoff notice to a peer that
+    was not materialized was not delivered`, `a kickoff notice to a live peer
+    was not delivered` (before: `failed to emit kickoff lifecycle notice`,
+    without the peer) and `a kickoff notice could not be prepared for a peer
+    and was not delivered`. A notice whose preparation or send fails for one
+    peer no longer skips the member's remaining peers.
+  - Cancel: a stop, a complete, a reset, a destroy or a shutdown of the mob,
+    an unwire of the edge, a retirement of either member and the rollback of
+    a failed spawn cancel the notices that are pending when they start, as
+    they cancel a pending peer message. A notice such a command emits itself
+    (the cancellation of a kickoff that a stop closes) is handed to the lane
+    after that cancel and ends within its send budget; the stop does not
+    wait for it, and nothing is delivered after a destroy. A member released
+    to Dormant keeps its pending notices: they are still true of it, and
+    their send wakes nothing.
 
 ## [0.9.14] - 2026-11-11
 

@@ -353,6 +353,23 @@ impl MobActor {
         &mut self,
         agent_identity: &AgentIdentity,
     ) -> Result<MemberInstructionPreparation, MobError> {
+        self.prepare_member_instruction_delivery_with(agent_identity, None)
+            .await
+    }
+
+    /// [`Self::prepare_member_instruction_delivery`] over bodies the caller
+    /// already holds for the member (`own_bodies`: the shared records' and
+    /// the member's own, read from their journal rows off the actor), so
+    /// this step reads no journal row. A record of the member written since
+    /// those rows were read has no body there: the snapshot cannot be built,
+    /// the step answers the error, and the member stays owed.
+    pub(super) async fn prepare_member_instruction_delivery_with(
+        &mut self,
+        agent_identity: &AgentIdentity,
+        own_bodies: Option<
+            crate::runtime::operator_instruction_delivery::OperatorInstructionBodies,
+        >,
+    ) -> Result<MemberInstructionPreparation, MobError> {
         let transition = self.apply_dsl_signal_collect_transition(
             mob_dsl::MobMachineSignal::PrepareMemberInstructionDelivery {
                 agent_identity: mob_dsl::AgentIdentity::from_domain(agent_identity),
@@ -376,7 +393,10 @@ impl MobActor {
                  {agent_identity} on a session id that is not one: {error}"
             ))
         })?;
-        let bodies = self.member_instruction_bodies(agent_identity).await?;
+        let bodies = match own_bodies {
+            Some(bodies) => bodies,
+            None => self.member_instruction_bodies(agent_identity).await?,
+        };
         let state = self.dsl_authority.state();
         let mut record = member_instruction_record(
             state,
@@ -703,7 +723,7 @@ impl MobActor {
                 }
                 // A service that keeps no durable document holds no target to
                 // release; so does a session service wrapper that does not
-                // forward the release (its members' deliveries were blocked
+                // forward the release (its members' deliveries stayed owed
                 // the same way).
                 Err(meerkat_core::service::SessionInstructionError::DurabilityUnavailable) => {
                     tracing::warn!(

@@ -651,3 +651,79 @@ async fn an_eager_seat_on_a_conversation_is_recorded_by_the_mobs_delivery() {
     );
     fixture.finish().await;
 }
+
+/// A release of the member that lands between the preparation of its wake's
+/// record and the write moves the member's release epoch on: the write does
+/// not reach the session, and nothing is fed back. With the epoch that
+/// stands, the write reaches the session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_release_between_the_preparation_and_the_write_writes_nothing() {
+    use crate::operator_instruction::MemberInstructionDelivery;
+    use crate::runtime::operator_instruction_delivery::{
+        OperatorInstructionDeliveryShared, WAKE_INSTRUCTION_RECORD_BOUND, WakeInstructionRecord,
+        member_release_epoch, record_owed_snapshot_at_wake,
+    };
+    let (fixture, session_id) = Fixture::unseated(ServiceDouble::RecordsNeedALiveActor, None).await;
+    let shared = OperatorInstructionDeliveryShared::new(1);
+    let prepared_at =
+        member_release_epoch(&shared, &fixture.identity, WAKE_INSTRUCTION_RECORD_BOUND)
+            .await
+            .expect("no delivery holds the member's lock");
+    // The release: under the member's lock, its epoch moves on.
+    let released_at = {
+        let lock = shared.member_lock(&fixture.identity);
+        let mut epoch = lock.lock().await;
+        *epoch = epoch.wrapping_add(1);
+        *epoch
+    };
+    let delivery = || {
+        MemberInstructionDelivery::authorized(
+            session_id.clone(),
+            meerkat_core::InstructionTargetRecord {
+                mob_id: "a-mob".to_string(),
+                agent_identity: fixture.identity.to_string(),
+                generation: 1,
+                slots: Vec::new(),
+            },
+        )
+    };
+
+    let record = record_owed_snapshot_at_wake(
+        Arc::clone(&shared),
+        Arc::clone(&fixture.mob_service),
+        fixture.identity.clone(),
+        delivery(),
+        prepared_at,
+        WAKE_INSTRUCTION_RECORD_BOUND,
+    )
+    .await;
+    assert!(
+        matches!(record, WakeInstructionRecord::NotWritten),
+        "a record prepared before the member's release writes nothing"
+    );
+    assert_eq!(
+        fixture.records.calls(),
+        0,
+        "the session saw no record after the release"
+    );
+
+    let record = record_owed_snapshot_at_wake(
+        shared,
+        Arc::clone(&fixture.mob_service),
+        fixture.identity.clone(),
+        delivery(),
+        released_at,
+        WAKE_INSTRUCTION_RECORD_BOUND,
+    )
+    .await;
+    assert_eq!(
+        fixture.records.calls(),
+        1,
+        "with the epoch that stands the record reaches the session"
+    );
+    assert!(
+        matches!(record, WakeInstructionRecord::Failed { .. }),
+        "the session has no live actor: the record fails and the member stays owed"
+    );
+    fixture.finish().await;
+}

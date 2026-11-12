@@ -345,14 +345,14 @@ impl OperatorInstructionDeliveryShared {
         Arc::clone(locks.entry(agent_identity.clone()).or_default())
     }
 
-    pub(crate) fn record_failure(&self, agent_identity: &AgentIdentity, failure: String) {
+    fn record_failure(&self, agent_identity: &AgentIdentity, failure: String) {
         self.last_failures
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(agent_identity.clone(), failure);
     }
 
-    pub(crate) fn clear_failure(&self, agent_identity: &AgentIdentity) {
+    fn clear_failure(&self, agent_identity: &AgentIdentity) {
         self.last_failures
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -697,35 +697,135 @@ pub(crate) enum DeliveryResult {
     Retry(String),
 }
 
-/// Record one member's prepared snapshot in its local session and classify
-/// the answer, as the delivery owner does: under the member's delivery lock,
-/// and only while the member's release epoch is still `epoch`, the one read
-/// before the snapshot was prepared (a release that landed since moved it
-/// on, and nothing is written after it: `None`). A member's wake records
-/// what the member is owed through this before the member is Live.
-pub(crate) async fn record_prepared_member_instruction_target(
+/// How long one wait of a member's wake for its operator instruction record
+/// may take off the mob's actor: the wait for a delivery in flight for the
+/// member, and the session's answer to the write. Past it the wake goes on
+/// and the member stays owed. A write still under way ends on its own.
+pub(crate) const WAKE_INSTRUCTION_RECORD_BOUND: Duration = Duration::from_secs(5);
+
+/// What a member's wake did with the snapshot the member is owed.
+pub(crate) enum WakeInstructionRecord {
+    /// Nothing was written: the member's release moved on since the snapshot
+    /// was prepared.
+    NotWritten,
+    /// The session answered: the snapshot is recorded, or the session
+    /// refused it for a cause that blocks the member.
+    Settled(MemberInstructionDeliveryOutcome),
+    /// The session already holds a later generation under this mob's id.
+    SessionAhead { session_generation: u64 },
+    /// The write failed or did not answer within the bound: the member stays
+    /// owed. `class` is the typed class of the failure, for the log.
+    Failed { class: String },
+}
+
+/// The typed class of a failed record: the closed refusal code, or the
+/// session error's stable code. Never an error's text.
+fn record_failure_class(error: &SessionInstructionError) -> String {
+    match error {
+        SessionInstructionError::Refused(refusal) => format!("{:?}", refusal.code()),
+        SessionInstructionError::DurabilityUnavailable => "DurabilityUnavailable".to_string(),
+        SessionInstructionError::Session(error) => error.code().to_string(),
+    }
+}
+
+/// `agent_identity`'s release epoch, read under the member's delivery lock,
+/// off the mob's actor: a delivery in flight for the member holds the lock
+/// while it writes the member's session, and is waited for here, at most
+/// `bound`. `None` past the bound.
+pub(crate) async fn member_release_epoch(
+    shared: &OperatorInstructionDeliveryShared,
+    agent_identity: &AgentIdentity,
+    bound: Duration,
+) -> Option<u64> {
+    let lock = shared.member_lock(agent_identity);
+    tokio::time::timeout(bound, async move { *lock.lock().await })
+        .await
+        .ok()
+}
+
+/// Record one member's prepared snapshot in its local session at the
+/// member's wake, off the mob's actor, as the delivery owner records it:
+/// under the member's delivery lock, and only while the member's release
+/// epoch is still `epoch`, the one read before the snapshot was prepared (a
+/// release that landed since moved it on, and nothing is written after it).
+///
+/// The write runs on a task of its own and is waited for at most `bound`:
+/// a session that is waiting for its turn boundary or its store does not
+/// hold the wake, and the write, still under the member's lock, ends on its
+/// own. The last failure the status read shows is kept here, by the module
+/// that made the write: set for a failure that leaves the member owed,
+/// cleared when the session answered.
+pub(crate) async fn record_owed_snapshot_at_wake(
+    shared: Arc<OperatorInstructionDeliveryShared>,
     session_service: Arc<dyn super::session_service::MobSessionService>,
-    lock: Arc<tokio::sync::Mutex<u64>>,
-    epoch: u64,
     agent_identity: AgentIdentity,
     delivery: MemberInstructionDelivery,
-) -> Option<DeliveryResult> {
+    epoch: u64,
+    bound: Duration,
+) -> WakeInstructionRecord {
     let session_id = delivery.session_id().clone();
     let generation = delivery.generation();
-    let held = lock.lock().await;
-    if *held != epoch {
-        return None;
-    }
-    let result = classify_delivery_result(
-        &agent_identity,
-        &session_id,
-        generation,
-        session_service
+    let lock = shared.member_lock(&agent_identity);
+    let write = crate::tokio::spawn(async move {
+        let held = lock.lock().await;
+        if *held != epoch {
+            return None;
+        }
+        let answer = session_service
             .record_member_instruction_target(delivery)
-            .await,
-    );
-    drop(held);
-    Some(result)
+            .await;
+        drop(held);
+        Some(answer)
+    });
+    let answer = match tokio::time::timeout(bound, write).await {
+        Ok(Ok(Some(answer))) => answer,
+        Ok(Ok(None)) => return WakeInstructionRecord::NotWritten,
+        Ok(Err(_)) => {
+            shared.record_failure(
+                &agent_identity,
+                "the record's task ended without an answer".to_string(),
+            );
+            return WakeInstructionRecord::Failed {
+                class: "record_task_ended".to_string(),
+            };
+        }
+        Err(_) => {
+            shared.record_failure(
+                &agent_identity,
+                format!(
+                    "the member's session did not answer the record within {} s",
+                    bound.as_secs()
+                ),
+            );
+            return WakeInstructionRecord::Failed {
+                class: "timed_out".to_string(),
+            };
+        }
+    };
+    match answer {
+        Ok(receipt) if receipt.target_generation > generation => {
+            WakeInstructionRecord::SessionAhead {
+                session_generation: receipt.target_generation,
+            }
+        }
+        answer => {
+            let class = answer
+                .as_ref()
+                .err()
+                .map(record_failure_class)
+                .unwrap_or_default();
+            match classify_delivery_result(&agent_identity, &session_id, generation, answer) {
+                DeliveryResult::Settled(outcome) => {
+                    shared.clear_failure(&agent_identity);
+                    WakeInstructionRecord::Settled(outcome)
+                }
+                DeliveryResult::Retry(failure) => {
+                    shared.record_failure(&agent_identity, failure);
+                    WakeInstructionRecord::Failed { class }
+                }
+            }
+        }
+    }
 }
 
 fn classify_delivery_result(
@@ -759,9 +859,6 @@ fn classify_delivery_result(
             session_id: session_id.clone(),
             generation,
         }),
-        Err(SessionInstructionError::DurabilityUnavailable) => {
-            blocked(mob_dsl::MemberInstructionBlock::DurabilityUnavailable)
-        }
         Err(SessionInstructionError::Refused(InstructionWriteError::OwnedBySession)) => {
             blocked(mob_dsl::MemberInstructionBlock::OwnedBySession)
         }
@@ -771,6 +868,11 @@ fn classify_delivery_result(
         Err(SessionInstructionError::Refused(InstructionWriteError::SlotManagedByActivation {
             ..
         })) => blocked(mob_dsl::MemberInstructionBlock::SlotManagedByActivation),
+        // Every other failure leaves the member owed and is tried again: a
+        // session whose store cannot take the record now
+        // (`durability_unavailable`) included, since a store comes back.
+        // Only the three refusals above, which an operator has to clear,
+        // block the member.
         Err(other) => DeliveryResult::Retry(other.to_string()),
     }
 }
@@ -819,9 +921,6 @@ fn classify_placed_delivery_result(
             InstructionSetErrorCode::PreparedAuthorizationRequired => {
                 blocked(mob_dsl::MemberInstructionBlock::MemberHostUnsupported)
             }
-            InstructionSetErrorCode::DurabilityUnavailable => {
-                blocked(mob_dsl::MemberInstructionBlock::DurabilityUnavailable)
-            }
             InstructionSetErrorCode::OwnedBySession => {
                 blocked(mob_dsl::MemberInstructionBlock::OwnedBySession)
             }
@@ -831,6 +930,8 @@ fn classify_placed_delivery_result(
             InstructionSetErrorCode::SlotManagedByActivation => {
                 blocked(mob_dsl::MemberInstructionBlock::SlotManagedByActivation)
             }
+            // `durability_unavailable` included: the member stays owed and
+            // the record is tried again, as for a local session.
             other => DeliveryResult::Retry(format!(
                 "the member's session on its member host refused the record: {other:?}"
             )),
@@ -857,6 +958,36 @@ struct RetryState {
     owed_generation: u64,
     delay: Duration,
     next_attempt: Instant,
+    /// A scan saw the member not Live since this retry was armed. When the
+    /// member is Live again its retry starts over, so every wake of an owed
+    /// member is an attempt, by whichever path the member was materialized.
+    seen_not_live: bool,
+}
+
+/// Whether `identity` is materialized Live in `state`.
+fn member_is_live(state: &mob_dsl::MobMachineState, identity: &AgentIdentity) -> bool {
+    matches!(
+        state
+            .member_materialization
+            .get(&mob_dsl::AgentIdentity::from_domain(identity)),
+        Some(mob_dsl::MemberMaterializationPhase::Live)
+    )
+}
+
+/// Follow one member's materialization in its retry: answer whether the
+/// retry still stands. A retry stands for the obligation it was armed for
+/// (`owed_generation`: a later generation, or a member no longer owed, starts
+/// over) until the member wakes: one that a scan saw not Live and that is
+/// Live now starts over, and is tried at once.
+fn retry_stands(state: &mut RetryState, owed_generation: Option<u64>, live: bool) -> bool {
+    if owed_generation != Some(state.owed_generation) {
+        return false;
+    }
+    if !live {
+        state.seen_not_live = true;
+        return true;
+    }
+    !state.seen_not_live
 }
 
 /// The members a scan may deliver to now, from one published machine state:
@@ -1050,17 +1181,21 @@ impl OperatorInstructionDeliveryReconciler {
             {
                 return super::RECONCILE_SAFETY_INTERVAL;
             }
-            deliverable_members(&state)
+            let candidates = deliverable_members(&state);
+            let owed = candidates
+                .iter()
+                .map(|(identity, generation, _)| (identity, *generation))
+                .collect::<BTreeMap<_, _>>();
+            // A retry is for one obligation, until the member wakes.
+            lanes.retry.retain(|identity, retry| {
+                retry_stands(
+                    retry,
+                    owed.get(identity).copied(),
+                    member_is_live(&state, identity),
+                )
+            });
+            candidates
         };
-        let owed = candidates
-            .iter()
-            .map(|(identity, generation, _)| (identity.clone(), *generation))
-            .collect::<BTreeMap<_, _>>();
-        // A retry is for one obligation: a later generation, or a member no
-        // longer owed, starts over.
-        lanes
-            .retry
-            .retain(|identity, state| owed.get(identity) == Some(&state.owed_generation));
         let now = Instant::now();
         for (identity, generation, lane) in candidates {
             if lanes.in_flight.contains(&identity) || lanes.feeding.contains(&identity) {
@@ -1226,6 +1361,7 @@ fn back_off(
         owed_generation,
         delay: FIRST_RETRY_DELAY,
         next_attempt: now,
+        seen_not_live: false,
     });
     if state.owed_generation != owed_generation {
         state.owed_generation = owed_generation;
@@ -2246,6 +2382,32 @@ mod tests {
                 "{shown} leaves the member owed"
             );
         }
+    }
+
+    /// A member's retry stands for the obligation it was armed for until the
+    /// member wakes: one a scan saw not Live starts over when it is Live
+    /// again, so the mob tries its record at once. A member that stayed
+    /// Live keeps its back-off, and another obligation starts over.
+    #[test]
+    fn a_members_retry_starts_over_when_it_wakes() {
+        let armed = || RetryState {
+            owed_generation: 4,
+            delay: FIRST_RETRY_DELAY,
+            next_attempt: Instant::now(),
+            seen_not_live: false,
+        };
+        // Live all along: the back-off stands.
+        let mut retry = armed();
+        assert!(retry_stands(&mut retry, Some(4), true));
+        assert!(retry_stands(&mut retry, Some(4), true));
+        // Dormant or waking, then Live again: it starts over.
+        let mut retry = armed();
+        assert!(retry_stands(&mut retry, Some(4), false));
+        assert!(retry_stands(&mut retry, Some(4), false));
+        assert!(!retry_stands(&mut retry, Some(4), true));
+        // Another obligation, or none, starts over whatever the residency.
+        assert!(!retry_stands(&mut armed(), Some(5), true));
+        assert!(!retry_stands(&mut armed(), None, false));
     }
 
     /// A receipt whose target generation is above the delivery's is never

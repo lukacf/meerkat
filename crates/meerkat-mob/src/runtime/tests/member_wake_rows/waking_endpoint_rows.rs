@@ -138,7 +138,7 @@ async fn assert_both_directions_deliver(
     b: &AgentIdentity,
 ) {
     for (from, to) in [(a, b), (b, a)] {
-        let body = token("we-both-ways");
+        let body = token("endpoint-both-ways");
         fixture
             .raw_peer_send(from, to, &body)
             .await
@@ -162,12 +162,12 @@ async fn assert_both_directions_deliver(
 /// operation binding")`, the member rolled back.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_spawn_wired_by_role_to_a_peer_whose_wake_has_not_bound_it_takes_its_declared_edge() {
-    let fixture = kickoff_notice_fixture("we-spawn-unbound").await;
-    let (peer, mut hold) = peer_held_before_bind(&fixture, "we-spawn-peer").await;
+    let fixture = kickoff_notice_fixture("endpoint-spawn-unbound").await;
+    let (peer, mut hold) = peer_held_before_bind(&fixture, "endpoint-spawn-peer").await;
     let wake = start_wake(&fixture, &peer);
     wait_held_before_bind(&fixture, &peer, &mut hold).await;
 
-    let (member, spawned) = spawn_worker(&fixture, "we-spawn-member").await;
+    let (member, spawned) = spawn_worker(&fixture, "endpoint-spawn-member").await;
     assert!(
         spawned.is_ok(),
         "a spawn wired by role to a peer whose wake has not bound it is admitted: {spawned:?}"
@@ -201,12 +201,12 @@ async fn a_spawn_wired_by_role_to_a_peer_whose_wake_has_not_bound_it_takes_its_d
 /// was dropped with a record; the peer held only the starting notice.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_kickoff_notice_to_a_peer_whose_wake_has_not_bound_it_is_delivered_once() {
-    let fixture = kickoff_notice_fixture("we-notice-unbound").await;
-    let (peer, mut hold) = peer_held_before_bind(&fixture, "we-notice-peer").await;
+    let fixture = kickoff_notice_fixture("endpoint-notice-unbound").await;
+    let (peer, mut hold) = peer_held_before_bind(&fixture, "endpoint-notice-peer").await;
 
     // The member's starting notice wakes the peer; the wake holds at its bind.
     fixture.client.block();
-    let member = spawn_kickoff_member(&fixture, "we-notice-member").await;
+    let member = spawn_kickoff_member(&fixture, "endpoint-notice-member").await;
     wait_held_before_bind(&fixture, &peer, &mut hold).await;
 
     // The kickoff resolves while the peer is held: its started notice is
@@ -249,16 +249,16 @@ async fn a_kickoff_notice_to_a_peer_whose_wake_has_not_bound_it_is_delivered_onc
 /// owner operation binding")` and nothing was sent.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_host_peer_message_to_a_peer_whose_wake_has_not_bound_it_is_delivered_once() {
-    let fixture = WakeFixture::new("we-send-unbound").await;
-    let sender = fixture.spawn("we-send-sender").await;
-    let peer = fixture.spawn("we-send-peer").await;
+    let fixture = WakeFixture::new("endpoint-send-unbound").await;
+    let sender = fixture.spawn("endpoint-send-sender").await;
+    let peer = fixture.spawn("endpoint-send-peer").await;
     fixture.wire(&sender, &peer).await;
     fixture.release(&peer).await;
     let mut hold = provision_finish_test_hooks::hold_before_bind(&fixture.session(&peer).await);
     let wake = start_wake(&fixture, &peer);
     wait_held_before_bind(&fixture, &peer, &mut hold).await;
 
-    let body = token("we-send");
+    let body = token("endpoint-send");
     let mut send = {
         let handle = fixture.handle.clone();
         let (from, to, body) = (sender.clone(), peer.clone(), body.clone());
@@ -309,7 +309,7 @@ async fn a_host_peer_message_to_a_peer_whose_wake_has_not_bound_it_is_delivered_
 async fn a_spawn_rollback_beside_a_peer_whose_wake_has_not_bound_it_completes_at_once() {
     let events = Arc::new(FaultInjectedMobEventStore::new());
     let fixture = WakeFixture::build_with_storage(
-        "we-rollback-unbound",
+        "endpoint-rollback-unbound",
         |_| {},
         |definition| {
             definition.wiring.role_wiring = vec![RoleWiringRule {
@@ -322,12 +322,12 @@ async fn a_spawn_rollback_beside_a_peer_whose_wake_has_not_bound_it_completes_at
         MobStorage::with_events(events.clone()),
     )
     .await;
-    let (peer, mut hold) = peer_held_before_bind(&fixture, "we-rollback-peer").await;
+    let (peer, mut hold) = peer_held_before_bind(&fixture, "endpoint-rollback-peer").await;
     let wake = start_wake(&fixture, &peer);
     wait_held_before_bind(&fixture, &peer, &mut hold).await;
 
     events.fail_appends_for("MembersWired").await;
-    let (member, spawned) = spawn_worker(&fixture, "we-rollback-member").await;
+    let (member, spawned) = spawn_worker(&fixture, "endpoint-rollback-member").await;
     events.allow_appends_for("MembersWired").await;
     let refused = spawned.expect_err("the spawn's edge cannot be journaled");
     let text = refused.to_string();
@@ -365,9 +365,9 @@ async fn a_spawn_rollback_beside_a_peer_whose_wake_has_not_bound_it_completes_at
 /// binding` and MobMachine recorded the edge as owing a repair.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_members_woken_together_realize_their_edge_with_no_repair_owed() {
-    let fixture = WakeFixture::new("we-pair-unbound").await;
-    let first = fixture.spawn("we-pair-first").await;
-    let second = fixture.spawn("we-pair-second").await;
+    let fixture = WakeFixture::new("endpoint-pair-unbound").await;
+    let first = fixture.spawn("endpoint-pair-first").await;
+    let second = fixture.spawn("endpoint-pair-second").await;
     fixture.wire(&first, &second).await;
     fixture.release(&first).await;
     fixture.release(&second).await;
@@ -406,12 +406,12 @@ async fn two_members_woken_together_realize_their_edge_with_no_repair_owed() {
 /// never treated as not materialized.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_spawn_wired_to_a_peer_whose_wake_is_bound_installs_both_sides_before_the_wake_ends() {
-    let fixture = kickoff_notice_fixture("we-spawn-bound").await;
-    let (peer, readiness) = peer_held_at_wake_readiness(&fixture, "we-bound-peer").await;
+    let fixture = kickoff_notice_fixture("endpoint-spawn-bound").await;
+    let (peer, readiness) = peer_held_at_wake_readiness(&fixture, "endpoint-bound-peer").await;
     let wake = start_wake(&fixture, &peer);
     wait_wake_bound(&fixture, &peer).await;
 
-    let (member, spawned) = spawn_worker(&fixture, "we-bound-member").await;
+    let (member, spawned) = spawn_worker(&fixture, "endpoint-bound-member").await;
     assert!(
         spawned.is_ok(),
         "a spawn wired to a Bound waking peer is admitted: {spawned:?}"
@@ -468,7 +468,7 @@ async fn a_spawn_wired_to_a_peer_whose_wake_is_bound_installs_both_sides_before_
 async fn a_spawn_that_wired_a_peer_whose_wake_has_not_bound_it_is_rolled_back_at_once() {
     let events = Arc::new(FaultInjectedMobEventStore::new());
     let fixture = WakeFixture::build_with_storage(
-        "we-rollback-wired",
+        "endpoint-rollback-wired",
         |_| {},
         |definition| {
             definition.wiring.role_wiring = vec![RoleWiringRule {
@@ -481,8 +481,8 @@ async fn a_spawn_that_wired_a_peer_whose_wake_has_not_bound_it_is_rolled_back_at
         MobStorage::with_events(events.clone()),
     )
     .await;
-    let (first, mut first_hold) = peer_held_before_bind(&fixture, "we-wired-first").await;
-    let (second, mut second_hold) = peer_held_before_bind(&fixture, "we-wired-second").await;
+    let (first, mut first_hold) = peer_held_before_bind(&fixture, "endpoint-wired-first").await;
+    let (second, mut second_hold) = peer_held_before_bind(&fixture, "endpoint-wired-second").await;
     let first_wake = start_wake(&fixture, &first);
     let second_wake = start_wake(&fixture, &second);
     wait_held_before_bind(&fixture, &first, &mut first_hold).await;
@@ -490,7 +490,7 @@ async fn a_spawn_that_wired_a_peer_whose_wake_has_not_bound_it_is_rolled_back_at
 
     // One of the member's two edges is journaled, the next one is refused.
     events.fail_appends_for_after("MembersWired", 1).await;
-    let (member, spawned) = spawn_worker(&fixture, "we-wired-member").await;
+    let (member, spawned) = spawn_worker(&fixture, "endpoint-wired-member").await;
     events.allow_appends_for("MembersWired").await;
     let refused = spawned.expect_err("the spawn's second edge cannot be journaled");
     let text = refused.to_string();
@@ -522,7 +522,7 @@ async fn a_spawn_that_wired_a_peer_whose_wake_has_not_bound_it_is_rolled_back_at
     // Nothing of the refused spawn is left behind on either peer: a member
     // spawned afterwards takes both declared edges, and each edge carries a
     // message both ways.
-    let (later, spawned) = spawn_worker(&fixture, "we-wired-later").await;
+    let (later, spawned) = spawn_worker(&fixture, "endpoint-wired-later").await;
     assert!(
         spawned.is_ok(),
         "a spawn after the rollback is admitted: {spawned:?}"

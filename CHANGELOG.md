@@ -134,7 +134,7 @@ them.
   record reached the session whenever the mob's delivery next landed, and
   where the store-only record could not reach the conversation until the
   member's wake had loaded it, the run that woke the member started without
-  the record and the agent got it one run late (0.9.9 to 0.9.14). The mob
+  the record and the agent got it one run late (0.9.9 through 0.9.14). The mob
   answers other commands while a wake tries its record. Limits: a lift, a
   start, a warm reload and a placed member do not pass the wake step. A
   member seated eagerly on a conversation (a spawn with a Resume launch)

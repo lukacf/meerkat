@@ -590,9 +590,11 @@ fn refused(refusal: IdentityRefusal) -> Result<ChangeCommitted, ExecutorError> {
 /// After the commit, when the update named instructions and changed the
 /// agent's text, the instruction step is asked and its answer is the
 /// agent's instruction outcome; one that named the text the record held
-/// answers `unchanged`, and an update that names no instructions answers
-/// none. The step takes the agent's lifecycle lock itself: none is
-/// held here. A refusal of Core's goes through [`refusal_of_error`], which
+/// before it answers `unchanged`. An update that names no instructions
+/// answers none, and so does an operation Core replays: what became of the
+/// change is part of the answer of the commit that made it, and the step is
+/// not asked again. The step takes the agent's lifecycle lock itself: none
+/// is held here. A refusal of Core's goes through [`refusal_of_error`], which
 /// answers the retryable `admission_unsettled` for a member step in flight.
 async fn commit_update(
     executor: &CoreChangeExecutor,
@@ -732,10 +734,13 @@ async fn commit_update(
             answered
         }
     };
-    // An update that names no instructions says nothing of them;
-    // one that names the text the record holds leaves it unchanged.
+    // An update that names no instructions says nothing of them, and
+    // neither does Core's replay of an operation that committed before
+    // (the record holds its text by now, which is not `unchanged`); one
+    // that names the text the record held leaves it unchanged.
     let instructions = match &update.additional_instructions {
         None => None,
+        Some(_) if committed.replayed => None,
         Some(_) => match InstructionsChanged::between(update.identity.clone(), previous, now) {
             Some(changed) => executor.after_update(commit.mob, &changed).await,
             None => Some(InstructionOutcome::Unchanged),

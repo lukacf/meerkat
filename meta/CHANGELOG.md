@@ -54,7 +54,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   on a host that does not keep council records across a restart. Limits: an
   ordinary mob whose id has that form is treated as a council's where the
   console cannot tell the two apart, so with no runtime registered its
-  stored frames are not served, under the id of a council that settled a
+  stored frames are not served unless it is the primary mob of the runtime
+  that recorded them, under the id of a council that settled a
   member named like one of that council's seats is listed while its stored
   frames are not served, under that id every frame dated up to the time
   the council settled stays unserved, whoever wrote it (the frames of a

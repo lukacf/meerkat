@@ -34,7 +34,9 @@ use meerkat_meta::identity_creation::{
     InstructionOutcome, InstructionsChanged,
 };
 use meerkat_meta::identity_first::{
-    AgentAddressability, AgentIdentity, DurableAgentSpec, MutableRosterProvider,
+    AgentAddressability, AgentIdentity, BoundGovernedInput, DurableAgentSpec, GovernedBindContext,
+    GovernedBindError, GovernedBindRefusal, GovernedInputBinder, GovernedInputError,
+    GovernedSettlement, IdentityRuntimeError, MutableRosterProvider,
 };
 use meerkat_mob::{MobDefinition, ProfileName};
 use serde_json::{Value, json};
@@ -2345,6 +2347,238 @@ async fn a_start_compares_no_store_owned_agent_and_a_delivery_compares_its_own()
         "the delivery's run is asked"
     );
     rig.settled("row-b", "DELIVERY-TO-ROW-B").await;
+    rig.shutdown().await;
+}
+
+/// Wait until `identity`'s durable transcript holds `marker` and an
+/// assistant row after it, whatever role the door stored the delivery
+/// under: the run that delivery woke has ended.
+async fn run_ended(rig: &Rig, identity: &str, marker: &str) {
+    let deadline = tokio::time::Instant::now() + TURN_BOUND;
+    loop {
+        let transcript = rig.transcript(identity).await;
+        let asked = transcript
+            .iter()
+            .position(|row| row["role"] != "block_assistant" && row.to_string().contains(marker));
+        if asked.is_some_and(|asked| {
+            transcript[asked..]
+                .iter()
+                .any(|row| row["role"] == "block_assistant")
+        }) {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the run asked {marker} is in {identity}'s transcript: {transcript:#?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// What a delivery door owes the store-owned agent whose change nothing
+/// recorded before the stop, once the door admitted the agent's first
+/// delivery after the start (`marker`): the record exists when the door
+/// answers, the run that delivery wakes carries the entry with the current
+/// text, and the change is recorded once (a later run through the send
+/// door, which finds the agent compared, writes nothing: the same revision,
+/// and one entry in the agent's conversation).
+async fn first_delivery_recorded_the_change_once(rig: &mut Rig, marker: &str) {
+    assert_eq!(
+        record_revision(rig, CREATED).await,
+        Some(json!(1)),
+        "the record exists when the agent's first delivery answers"
+    );
+    assert!(rig.asked(marker).await, "the delivery's run is asked");
+    run_ended(rig, CREATED, marker).await;
+    let request = entries(&rig.request_messages(marker));
+    assert_eq!(
+        request.len(),
+        1,
+        "the run that delivery woke carries the entry: {request:#?}"
+    );
+    assert!(
+        carries(&request[0], &["Keep BETA records."]),
+        "the entry carries the whole current text: {}",
+        request[0]
+    );
+
+    rig.turn(CREATED, "LATER-TURN").await;
+    assert_eq!(
+        record_revision(rig, CREATED).await,
+        Some(json!(1)),
+        "a later delivery writes nothing more"
+    );
+    assert_eq!(
+        entries(&rig.transcript(CREATED).await).len(),
+        1,
+        "the agent's conversation holds the entry once"
+    );
+}
+
+/// The keyed send is a delivery door of its own (`meta/send` with an
+/// `idempotency_key`, committed as a continuation): after a start it is the
+/// first use of an agent whose change nothing recorded before the stop, so
+/// it records the change before the continuation is committed, and the run
+/// it wakes carries the entry.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_store_owned_agents_unrecorded_change_is_recorded_at_its_first_keyed_send_after_a_start()
+{
+    let temp = tempfile::tempdir().unwrap();
+    let mob = store_owned_agent_changed_before_a_stop(temp.path()).await;
+
+    let mut rig = boot(temp.path(), &mob, vec![configured_spec(&[])]).await;
+    assert_eq!(
+        record_revision(&rig, CREATED).await,
+        None,
+        "the start alone records nothing"
+    );
+    assert!(rig.dormant(CREATED), "the start woke nothing");
+
+    let sent = rig
+        .rpc(
+            "meta/send",
+            json!({"identity": CREATED, "content": "KEYED-TURN", "idempotency_key": "keyed-1"}),
+        )
+        .await;
+    assert!(
+        sent["result"]["continuation"].is_object(),
+        "the keyed send is committed: {sent:#?}"
+    );
+    first_delivery_recorded_the_change_once(&mut rig, "KEYED-TURN").await;
+    rig.shutdown().await;
+}
+
+/// The dispatch is a delivery door of its own (`meta/dispatch`; a schedule
+/// fire addressed to the agent passes the same door, with the scheduler's
+/// origin): after a start it is the first use of an agent whose change
+/// nothing recorded before the stop, so it records the change before the
+/// work is submitted, and the run it wakes carries the entry.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_store_owned_agents_unrecorded_change_is_recorded_at_its_first_dispatch_after_a_start() {
+    let temp = tempfile::tempdir().unwrap();
+    let mob = store_owned_agent_changed_before_a_stop(temp.path()).await;
+
+    let mut rig = boot(temp.path(), &mob, vec![configured_spec(&[])]).await;
+    assert_eq!(
+        record_revision(&rig, CREATED).await,
+        None,
+        "the start alone records nothing"
+    );
+    assert!(rig.dormant(CREATED), "the start woke nothing");
+
+    let dispatched = rig
+        .rpc(
+            "meta/dispatch",
+            json!({"identity": CREATED,
+                   "dispatch_input": {"content": "DISPATCHED-TURN", "origin": "scheduler"}}),
+        )
+        .await;
+    assert!(
+        dispatched["error"].is_null() && dispatched["result"]["fencing_token"].is_number(),
+        "the dispatch is admitted: {dispatched:#?}"
+    );
+    first_delivery_recorded_the_change_once(&mut rig, "DISPATCHED-TURN").await;
+    rig.shutdown().await;
+}
+
+/// What the governed row's host answers every bind with.
+const BIND_REFUSED: &str = "the row's host binds nothing";
+
+/// The trusted host's binder of the governed row: it refuses every bind, so
+/// nothing is submitted through the governed door.
+struct RefusingBinder;
+
+#[async_trait::async_trait]
+impl GovernedInputBinder for RefusingBinder {
+    async fn try_bind(
+        &self,
+        _context: &GovernedBindContext,
+        _input: meerkat_runtime::Input,
+    ) -> Result<BoundGovernedInput, GovernedBindError> {
+        Err(GovernedBindRefusal::denied(BIND_REFUSED).into())
+    }
+
+    fn retain_unresolved(&self, _settlement: Box<dyn GovernedSettlement>, _detail: &str) {
+        panic!("nothing is submitted, so no admission is left unresolved");
+    }
+}
+
+/// The governed send is a delivery door of its own (a trusted host's
+/// governed input): after a start it is the first use of an agent whose
+/// change nothing recorded before the stop, so it records the change before
+/// the input reaches the host's bind. This row's host refuses the bind, so
+/// the door submits nothing and wakes no run: a launch that takes
+/// instruction records binds no governed input in this rig, and a governed
+/// launch takes no instruction record. The record the door wrote reaches
+/// the agent's next run, once.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_store_owned_agents_unrecorded_change_is_recorded_at_its_first_governed_send_after_a_start()
+ {
+    let temp = tempfile::tempdir().unwrap();
+    let mob = store_owned_agent_changed_before_a_stop(temp.path()).await;
+
+    let mut rig = boot(temp.path(), &mob, vec![configured_spec(&[])]).await;
+    assert_eq!(
+        record_revision(&rig, CREATED).await,
+        None,
+        "the start alone records nothing"
+    );
+
+    let sent = rig
+        .runtime
+        .identity_runtime()
+        .expect("identity runtime installed")
+        .send_governed_with_turn_ticket(
+            &AgentIdentity::parse(CREATED).expect("the agent's name"),
+            None,
+            meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
+                "GOVERNED-INPUT",
+                None,
+            )),
+            Arc::new(RefusingBinder),
+        )
+        .await;
+    assert!(
+        matches!(
+            &sent,
+            Err(IdentityRuntimeError::GovernedInput(GovernedInputError::Refused(refusal)))
+                if refusal.detail == BIND_REFUSED
+        ),
+        "the governed send reaches the host's bind, which refuses it: {sent:?}"
+    );
+    assert_eq!(
+        record_revision(&rig, CREATED).await,
+        Some(json!(1)),
+        "the record exists when the governed door answers"
+    );
+    assert!(
+        rig.requests.lock().unwrap().is_empty(),
+        "the refused governed input ran nothing"
+    );
+
+    rig.recorded(CREATED).await;
+    rig.turn(CREATED, "AFTER-GOVERNED").await;
+    let request = entries(&rig.request_messages("AFTER-GOVERNED"));
+    assert_eq!(
+        request.len(),
+        1,
+        "the agent's next run carries the entry: {request:#?}"
+    );
+    assert!(
+        carries(&request[0], &["Keep BETA records."]),
+        "the entry carries the whole current text: {}",
+        request[0]
+    );
+    assert_eq!(
+        record_revision(&rig, CREATED).await,
+        Some(json!(1)),
+        "the send door after it writes nothing more"
+    );
+    assert_eq!(
+        entries(&rig.transcript(CREATED).await).len(),
+        1,
+        "the agent's conversation holds the entry once"
+    );
     rig.shutdown().await;
 }
 

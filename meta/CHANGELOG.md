@@ -23,7 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   start, and a holder that does not run this check itself (a release before
   0.9.4, or a Core-only tool on the directory). Under heavy file-lock churn
   on the host a read could miss a held lock; on a quiet host it did not.
-  Meta 0.9.4 through 0.9.13. The check now reads the table up to three
+  Meta 0.9.4 through 0.9.14. The check now reads the table up to three
   times, each read split at other entries, and refuses the start as soon as
   any read names another holder; it admits the start only when no read
   does. That makes a miss far less likely, not impossible: after a read

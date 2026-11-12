@@ -41,8 +41,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   prompt). The Distiller reads those rows in a call of their own and reads
   the whole window in a second call, whose records are unknown evidence. In
   plain words:
-  - Fewer records are quarantined where a person typed the fact: a person's
-    own typed statement is stored active even when the session read
+  - Fewer records are quarantined where a person typed the fact, but only
+    for rows a host stamps with the typing person: a console sign-in send is
+    stamped today, while a host that relays a person's text through
+    `meta/send` is stamped only together with the companion requester-route
+    change. Such a statement is stored active even when the session read
     untrusted content earlier.
   - More records are quarantined elsewhere. Records distilled from the
     agent's own replies and from tool results were ACTIVE before in sessions
@@ -62,22 +65,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     so every one of its distilled records quarantines.
   - No existing quarantined record is released by an upgrade; review and the
     steward keep deciding those.
-  - Quarantined records now carry a durable class, `unproven` (nothing proved
-    the input clean) or `tainted` (a taint fact was detected); records
-    quarantined before this release read as `tainted`. The Hygienist's span
-    hard block and the steward's dream read each class with its own bound,
-    so a volume of `unproven` records can no longer push a `tainted` record
-    out of review.
+  - Quarantined records now carry a class set at write time: `tainted` when a
+    taint fact was known then (a row the extraction call read whose persisted
+    facts declare it tainted, a tracker fact, a reset boundary, or a tainted
+    author), otherwise `unproven`, which means only that no taint fact was
+    known, not that the input was benign. Records quarantined before this
+    release read as `tainted`. The Hygienist's span hard block reads up to
+    256 records of each class, and the steward's dream window of 16 gives
+    each class half while the other can fill it, so `unproven` volume does
+    not push a `tainted` record out of those windows.
   Agent recorder writes and steward writes are unchanged. Reset boundaries
   still quarantine every distillate over the session. The cited range stays
   provenance only, and a clean record keeps a cited range only when every
   row in it is a row its call read. Struct and trait changes:
   `memory::records::EvidenceRef` gains `clean_input:
-  Option<CleanExtractionInput>`, and `memory::records::MemoryProvenance`
-  gains `quarantine_class: Option<QuarantineClass>` (both serde-defaulted,
-  omitted when `None`); `memory::distiller::TranscriptMessage` gains
-  `proven_clean: bool`; new `memory::records::CleanExtractionInput`,
-  `QuarantineClass` and `QuarantineVerdict`, `memory::distiller::proven_clean_row`
+  Option<CleanExtractionInput>` and `declared_tainted_input: bool`, and `memory::records::MemoryProvenance`
+  gains `quarantine_class: Option<QuarantineClass>` (all three
+  serde-defaulted, omitted when `None` or `false`); `memory::distiller::TranscriptMessage` gains
+  `proven_clean: bool` and `declared_tainted: bool`; new `memory::records::CleanExtractionInput`,
+  `QuarantineClass` and `QuarantineVerdict`, `memory::distiller::proven_clean_row`,
+  `memory::distiller::declared_tainted_row`
   and `memory::capabilities::quarantine_review_window`;
   `StewardStore::quarantined_records` takes a `QuarantineClass`; and
   `LlmWriteGate` gains `quarantine_verdict` (defaulted). The

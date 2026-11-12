@@ -786,11 +786,16 @@ pub trait LlmWriteGate: Send + Sync {
 
 /// The taint/posture gate: `llm_writes = "quarantined"` forces every
 /// first-pass LLM-authored write (Agent, Distiller, and the steward's own
-/// consolidate/harvest/rank output) into quarantine regardless of taint;
-/// agent-authored writes quarantine when the author's session is tainted;
-/// and ANY LLM-authored write (Steward and Distiller included) quarantines
-/// when its evidence cites a tainted session or a reset boundary
-/// (§8.4/§10.1 — coarse: session-tainted ⇒ range-tainted).
+/// consolidate/harvest/rank output) into quarantine regardless of taint.
+/// Otherwise:
+/// - agent-authored writes quarantine when the author's session is tainted;
+/// - steward writes quarantine when their evidence cites a tainted session
+///   or a reset boundary (session-sticky: session-tainted means
+///   range-tainted);
+/// - distilled writes are evidence-scoped (§10.1, see
+///   [`distilled_evidence_verdict`]): clean only with a well-formed clean
+///   input and no reset boundary, decided with or without a tracker, and
+///   classed tainted when a persisted declaration or a tracker fact says so.
 ///
 /// Review-verdict batches (`StagedBatchKind::ReviewVerdict`) are exempt
 /// from the *posture* branch only: a review verdict IS the review the
@@ -877,10 +882,13 @@ impl LlmWriteGate for TaintLlmWriteGate {
 /// a missing or malformed trust fact is never clean, with or without a
 /// tracker. A reset boundary quarantines every distillate over the session,
 /// clean input included (§8.4). A write that cites no evidence quarantines.
-/// The class is [`QuarantineClass::Tainted`] when the tracker holds a taint
+/// The class is [`QuarantineClass::Tainted`] when the call's input held a
+/// row whose persisted facts declare it tainted
+/// ([`EvidenceRef::declared_tainted_input`]) or the tracker holds a taint
 /// fact for the evidence (the session-sticky fallback), and
-/// [`QuarantineClass::Unproven`] when nothing but the missing proof put the
-/// record there.
+/// [`QuarantineClass::Unproven`] when no taint fact was known at write time:
+/// nothing but the missing proof put the record there, which is not a
+/// finding that the input was benign.
 fn distilled_evidence_verdict(
     tracker: Option<&SessionTaintTracker>,
     evidence: &[EvidenceRef],
@@ -897,6 +905,16 @@ fn distilled_evidence_verdict(
             tracker.and_then(|tracker| tracker.reset_boundary_reason(&evidence_ref.session_id))
         {
             return Some(QuarantineVerdict::new(reason, QuarantineClass::Tainted));
+        }
+        // A persisted taint declaration among the rows the call read: the
+        // class is known from the rows themselves, with or without a tracker
+        // and across a process restart.
+        if evidence_ref.declared_tainted_input {
+            return Some(QuarantineVerdict::new(
+                "the extraction call read a row whose persisted facts declare it \
+                 tainted (evidence-scoped taint)",
+                QuarantineClass::Tainted,
+            ));
         }
         if evidence_ref
             .clean_input
@@ -1964,6 +1982,7 @@ mod tests {
             revision: None,
             range: Some((0, 4)),
             clean_input: None,
+            declared_tainted_input: false,
         }]
     }
 

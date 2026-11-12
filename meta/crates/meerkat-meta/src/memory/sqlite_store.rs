@@ -5701,6 +5701,7 @@ mod tests {
             revision: None,
             range: None,
             clean_input: None,
+            declared_tainted_input: false,
         }]
     }
 
@@ -6342,6 +6343,7 @@ mod tests {
                 revision: None,
                 range: Some((0, 3)),
                 clean_input: None,
+                declared_tainted_input: false,
             }],
             ..payload(title, "Distilled body")
         };
@@ -6787,6 +6789,7 @@ mod tests {
                 revision: None,
                 range: Some((4, 7)),
                 clean_input: None,
+                declared_tainted_input: false,
             }],
             ..payload(title, body)
         }

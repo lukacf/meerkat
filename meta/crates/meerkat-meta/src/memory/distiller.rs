@@ -585,6 +585,11 @@ pub struct TranscriptMessage {
     /// a user prompt). Every other row is unknown or tainted, and an
     /// extraction call that reads it produces quarantined records.
     pub proven_clean: bool,
+    /// Evidence-scoped taint (§10.1): whether this row's PERSISTED facts
+    /// declare it tainted ([`declared_tainted_row`]). An extraction call that
+    /// reads such a row stamps its records `declared_tainted_input`, which the
+    /// write gate classes tainted with or without a taint tracker.
+    pub declared_tainted: bool,
 }
 
 /// The evidence window: messages `[start_index, end_index)` of the session
@@ -680,6 +685,7 @@ impl TranscriptSource for SessionStoreTranscriptSource {
                         MAX_TRANSCRIPT_MESSAGE_BYTES,
                     ),
                     proven_clean: proven_clean_row(message),
+                    declared_tainted: declared_tainted_row(message),
                 })
             })
             .collect();
@@ -762,6 +768,42 @@ pub fn proven_clean_row(message: &Message) -> bool {
             .render_metadata
             .as_ref()
             .is_none_or(|render| render.class == meerkat_core::types::RenderClass::UserPrompt)
+}
+
+/// Whether a transcript row's persisted facts declare it tainted (§10.1): a
+/// Comms notice whose sender declared its content tainted, or an assistant
+/// row carrying provider server-tool content (always untrusted). These facts
+/// are part of the committed row, so they read the same after a process
+/// restart as in the process that observed them.
+pub fn declared_tainted_row(message: &Message) -> bool {
+    match message {
+        Message::SystemNotice(notice) => notice.blocks.iter().any(|block| {
+            matches!(
+                block,
+                meerkat_core::types::SystemNoticeBlock::Comms {
+                    sender_taint: Some(meerkat_core::comms::SenderContentTaint::Tainted),
+                    ..
+                }
+            )
+        }),
+        Message::BlockAssistant(assistant) => assistant.blocks.iter().any(|block| {
+            matches!(
+                block,
+                meerkat_core::types::AssistantBlock::ServerToolContent { .. }
+            )
+        }),
+        _ => false,
+    }
+}
+
+/// Which extraction call produced the ops being written (§10.1): the clean
+/// call (its proven-clean input is stamped on every record), or the
+/// whole-window call (its records are unknown evidence, and carry whether
+/// its input held a row whose persisted facts declare it tainted).
+#[derive(Debug, Clone, Copy)]
+enum ExtractionInput<'a> {
+    Clean(&'a CleanCall),
+    Whole { declared_tainted: bool },
 }
 
 /// One proven-clean extraction call over a window (§10.1): the rendered
@@ -1813,104 +1855,128 @@ impl DistillerEngine {
 
         // Evidence read comes before the budget gate: an empty window must
         // not burn a budgeted run.
-        let (evidence_text, evidence_range, window_end, head_revision, clean_call, whole_call) =
-            match cause {
-                DistillCause::Compaction => {
-                    let entries = match discards {
-                        // A batch Core's cold settle published and answered:
-                        // the discards are its records themselves.
-                        Some(entries) => entries,
-                        None => {
-                            let Some(compaction) = self.compaction.as_ref() else {
+        let (
+            evidence_text,
+            evidence_range,
+            window_end,
+            head_revision,
+            clean_call,
+            whole_call,
+            whole_tainted,
+        ) = match cause {
+            DistillCause::Compaction => {
+                let entries = match discards {
+                    // A batch Core's cold settle published and answered:
+                    // the discards are its records themselves.
+                    Some(entries) => entries,
+                    None => {
+                        let Some(compaction) = self.compaction.as_ref() else {
+                            return Ok(DistillOutcome::Skipped {
+                                reason: SKIP_NO_DISCARD_SOURCE.to_string(),
+                            });
+                        };
+                        match compaction
+                            .read_discards(session_key, COMPACTION_HARVEST_LIMIT)
+                            .await
+                        {
+                            Ok(entries) => entries,
+                            Err(err) => {
+                                tracing::warn!(
+                                    identity,
+                                    session_key,
+                                    error = %err,
+                                    "agent memory distiller: compaction harvest failed"
+                                );
                                 return Ok(DistillOutcome::Skipped {
-                                    reason: SKIP_NO_DISCARD_SOURCE.to_string(),
+                                    reason: format!("compaction harvest failed: {err}"),
                                 });
-                            };
-                            match compaction
-                                .read_discards(session_key, COMPACTION_HARVEST_LIMIT)
-                                .await
-                            {
-                                Ok(entries) => entries,
-                                Err(err) => {
-                                    tracing::warn!(
-                                        identity,
-                                        session_key,
-                                        error = %err,
-                                        "agent memory distiller: compaction harvest failed"
-                                    );
-                                    return Ok(DistillOutcome::Skipped {
-                                        reason: format!("compaction harvest failed: {err}"),
-                                    });
-                                }
                             }
                         }
-                    };
-                    if entries.is_empty() {
-                        return Ok(DistillOutcome::Skipped {
-                            reason: SKIP_NO_DISCARDS.to_string(),
-                        });
                     }
-                    let range = discard_evidence_range(&entries);
-                    // Discards predate the current transcript head (they were
-                    // evicted at compaction), so there is no head revision to pin.
-                    // Their rows carry no typed facts: no clean call, and the
-                    // harvest is unknown evidence (§10.1 rule 4).
-                    (render_discards(&entries), range, None, None, None, true)
+                };
+                if entries.is_empty() {
+                    return Ok(DistillOutcome::Skipped {
+                        reason: SKIP_NO_DISCARDS.to_string(),
+                    });
                 }
-                _ => {
-                    let slice = match self.transcripts.read(session_key, cursor).await {
-                        Ok(Some(slice)) => slice,
-                        Ok(None) => {
-                            return Ok(DistillOutcome::Skipped {
-                                reason: "session not found in the session store".to_string(),
-                            });
-                        }
-                        Err(err) => {
-                            tracing::warn!(
-                                identity,
-                                session_key,
-                                error = %err,
-                                "agent memory distiller: transcript read failed"
-                            );
-                            return Ok(DistillOutcome::Skipped {
-                                reason: format!("transcript read failed: {err}"),
-                            });
-                        }
-                    };
-                    if slice.messages.is_empty() {
+                let range = discard_evidence_range(&entries);
+                // Discards predate the current transcript head (they were
+                // evicted at compaction), so there is no head revision to pin.
+                // Their rows carry no typed facts: no clean call, and the
+                // harvest is unknown evidence (§10.1 rule 4).
+                (
+                    render_discards(&entries),
+                    range,
+                    None,
+                    None,
+                    None,
+                    true,
+                    false,
+                )
+            }
+            _ => {
+                let slice = match self.transcripts.read(session_key, cursor).await {
+                    Ok(Some(slice)) => slice,
+                    Ok(None) => {
                         return Ok(DistillOutcome::Skipped {
-                            reason: "empty evidence window".to_string(),
+                            reason: "session not found in the session store".to_string(),
                         });
                     }
-                    if cause == DistillCause::Interactions && recorder_wrote {
-                        // CC's mutual-exclusion trick: the agent already curated
-                        // this window itself; skip and advance the cursor.
-                        self.with_window(identity, session_key, |state| {
-                            state.cursor = slice.end_index;
-                            state.recorder_wrote = false;
-                            state.completed_runs = 0;
-                        });
+                    Err(err) => {
+                        tracing::warn!(
+                            identity,
+                            session_key,
+                            error = %err,
+                            "agent memory distiller: transcript read failed"
+                        );
                         return Ok(DistillOutcome::Skipped {
-                            reason: "recorder wrote in window (mutual exclusion)".to_string(),
+                            reason: format!("transcript read failed: {err}"),
                         });
                     }
-                    let range = Some((slice.start_index, slice.end_index.saturating_sub(1)));
-                    let head_revision = slice.head_revision.clone();
-                    // Evidence-scoped taint (§10.1): the proven-clean rows get a
-                    // call of their own; any other row in the window is read by
-                    // the whole-window call, whose records are unknown evidence.
-                    let clean_call = CleanCall::of(&slice);
-                    let whole_call = slice.messages.iter().any(|message| !message.proven_clean);
-                    (
-                        render_transcript(&slice),
-                        range,
-                        Some(slice.end_index),
-                        head_revision,
-                        clean_call,
-                        whole_call,
-                    )
+                };
+                if slice.messages.is_empty() {
+                    return Ok(DistillOutcome::Skipped {
+                        reason: "empty evidence window".to_string(),
+                    });
                 }
-            };
+                if cause == DistillCause::Interactions && recorder_wrote {
+                    // CC's mutual-exclusion trick: the agent already curated
+                    // this window itself; skip and advance the cursor.
+                    self.with_window(identity, session_key, |state| {
+                        state.cursor = slice.end_index;
+                        state.recorder_wrote = false;
+                        state.completed_runs = 0;
+                    });
+                    return Ok(DistillOutcome::Skipped {
+                        reason: "recorder wrote in window (mutual exclusion)".to_string(),
+                    });
+                }
+                let range = Some((slice.start_index, slice.end_index.saturating_sub(1)));
+                let head_revision = slice.head_revision.clone();
+                // Evidence-scoped taint (§10.1): the proven-clean rows get a
+                // call of their own; any other row in the window is read by
+                // the whole-window call, whose records are unknown evidence.
+                let clean_call = CleanCall::of(&slice);
+                let whole_call = slice.messages.iter().any(|message| !message.proven_clean);
+                // A persisted taint declaration among the rows the
+                // whole-window call reads travels with its records, so
+                // their class does not depend on the running process
+                // having observed the taint.
+                let whole_tainted = slice
+                    .messages
+                    .iter()
+                    .any(|message| message.declared_tainted);
+                (
+                    render_transcript(&slice),
+                    range,
+                    Some(slice.end_index),
+                    head_revision,
+                    clean_call,
+                    whole_call,
+                    whole_tainted,
+                )
+            }
+        };
 
         // §8.1 resource guard: consulted before every run, unless a wait
         // took the run for the caller already. A denial is the caller's:
@@ -2027,7 +2093,7 @@ impl DistillerEngine {
                     generation,
                     None,
                     head_revision.as_deref(),
-                    Some(clean),
+                    ExtractionInput::Clean(clean),
                 )
                 .await;
             written += clean_written;
@@ -2049,7 +2115,9 @@ impl DistillerEngine {
                     generation,
                     evidence_range,
                     head_revision.as_deref(),
-                    None,
+                    ExtractionInput::Whole {
+                        declared_tainted: whole_tainted,
+                    },
                 )
                 .await;
             written += whole_written;
@@ -2059,7 +2127,7 @@ impl DistillerEngine {
         self.with_window(identity, session_key, |state| {
             // Interaction-window bookkeeping is consumed only by runs that
             // actually covered the window [cursor, end). A compaction-cause
-            // harvest reads the discard ledger (window_end=None) — clearing
+            // harvest reads the discard ledger (window_end=None); clearing
             // `recorder_wrote` there would defeat the §8.4 mutual exclusion
             // for a window the agent already curated, and zeroing
             // `completed_runs` would silently defer the interaction trigger.
@@ -2123,8 +2191,8 @@ impl DistillerEngine {
     }
 
     /// Validate and write one call's ops through the authored seam. Returns
-    /// (written, quarantined). `clean` is the call's proven-clean input, set
-    /// only for the clean call.
+    /// (written, quarantined). `input` says which call produced the ops: the
+    /// clean call's proven-clean input, or the whole-window call.
     #[allow(clippy::too_many_arguments)]
     async fn write_ops(
         &self,
@@ -2137,7 +2205,7 @@ impl DistillerEngine {
         generation: u64,
         window_range: Option<(u64, u64)>,
         revision: Option<&str>,
-        clean: Option<&CleanCall>,
+        input: ExtractionInput<'_>,
     ) -> (usize, usize) {
         let manifest_ids: Vec<String> = manifest.iter().map(|meta| meta.id.clone()).collect();
         let mut written = 0usize;
@@ -2151,7 +2219,7 @@ impl DistillerEngine {
                 }
             };
             let record =
-                self.build_record(&op, session_key, generation, window_range, revision, clean);
+                self.build_record(&op, session_key, generation, window_range, revision, input);
             let result = match &op.action {
                 ProposedAction::Remember => {
                     self.provider
@@ -2192,8 +2260,12 @@ impl DistillerEngine {
         generation: u64,
         window_range: Option<(u64, u64)>,
         revision: Option<&str>,
-        clean: Option<&CleanCall>,
+        input: ExtractionInput<'_>,
     ) -> NewMemoryRecord {
+        let (clean, declared_tainted_input) = match input {
+            ExtractionInput::Clean(clean) => (Some(clean), false),
+            ExtractionInput::Whole { declared_tainted } => (None, declared_tainted),
+        };
         let mut tags = op.tags.clone();
         if op.epistemic == Epistemic::OperatorSaid
             && !tags.iter().any(|tag| tag == "epistemic:operator_said")
@@ -2235,6 +2307,7 @@ impl DistillerEngine {
                 revision: revision.map(str::to_string),
                 range,
                 clean_input: clean.map(|clean| clean.input.clone()),
+                declared_tainted_input,
             }],
             verification: None,
         }
@@ -3088,6 +3161,7 @@ mod tests {
                     role,
                     text: text.to_string(),
                     proven_clean: false,
+                    declared_tainted: false,
                 })
                 .collect(),
             head_revision: Some("rev-head".to_string()),

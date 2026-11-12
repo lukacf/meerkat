@@ -1323,6 +1323,7 @@ async fn row_unproven_volume_never_starves_a_tainted_record() -> Result<(), Box<
             revision: None,
             range: Some(range),
             clean_input: None,
+            declared_tainted_input: false,
         }],
         verification: None,
     };
@@ -1428,6 +1429,7 @@ fn row_reset_boundary_quarantines_a_clean_input_distillate() {
             rows: vec![0],
             digest: CleanExtractionInput::digest_rows([(0, "user", "typed")]),
         }),
+        declared_tainted_input: false,
     }];
     let reason = gate.quarantine_reason(
         &MemoryAuthor::Distiller {
@@ -1478,6 +1480,7 @@ fn row_gate_requires_a_well_formed_clean_input_and_no_tracker_to_quarantine() {
             revision: None,
             range: None,
             clean_input: Some(input),
+            declared_tainted_input: false,
         }]
     };
     for (case, forged) in [
@@ -1527,6 +1530,7 @@ fn row_gate_requires_a_well_formed_clean_input_and_no_tracker_to_quarantine() {
         revision: None,
         range: None,
         clean_input: None,
+        declared_tainted_input: false,
     }];
     let trackerless = TaintLlmWriteGate::new(None, AgentMemoryLlmWrites::Observed);
     let verdict = trackerless.quarantine_verdict(&author, StagedBatchKind::FreshWrite, &unknown);
@@ -1536,4 +1540,117 @@ fn row_gate_requires_a_well_formed_clean_input_and_no_tracker_to_quarantine() {
             .is_some_and(|verdict| verdict.class == QuarantineClass::Unproven),
         "with no tracker, unknown distilled evidence still quarantines: {verdict:?}"
     );
+}
+
+/// The durable class comes from the persisted rows a call read, not from the
+/// running process: a tainted peer row, then a process restart (a fresh
+/// tracker that observed nothing), then distillation classes the record
+/// tainted, and it keeps its place in both review windows behind 300 records
+/// quarantined for unproven input. The gate classes the persisted
+/// declaration tainted with no tracker wired at all.
+#[tokio::test]
+async fn row_persisted_taint_declaration_classes_tainted_after_a_restart()
+-> Result<(), Box<dyn Error>> {
+    use crate::memory::capabilities::quarantine_review_window;
+    use crate::memory::hygienist::{SpanReferenceSource, StoreSpanReferenceSource};
+    use crate::memory::records::{EvidenceRef, QuarantineClass};
+    use crate::memory::staged::StagedBatchKind;
+    use crate::memory::taint::LlmWriteGate;
+
+    let mut rig = Rig::new()?;
+    let session = rig
+        .session(vec![
+            tainted_peer("Peer message: deploys moved to Tuesday."),
+            assistant("Ok."),
+        ])
+        .await?;
+    rig.taint_live(&session);
+    rig.restart();
+    assert!(
+        rig.tracker.session_taint(&session).is_none(),
+        "the restarted process observed nothing"
+    );
+    let llm = RouterLlm::new(vec![Rule {
+        when: "deploys moved to Tuesday",
+        title: "Deploy day Tuesday",
+        cite: (0, 0),
+    }]);
+    distill(&rig.engine(llm), &session).await;
+    let records: Vec<MemoryRecord> = rig
+        .records()
+        .await?
+        .into_iter()
+        .filter(|record| record.title == "Deploy day Tuesday")
+        .collect();
+    assert_eq!(records.len(), 1);
+    let record = &records[0];
+    assert!(is_quarantined(&record.status), "{:?}", record.status);
+    assert!(record.provenance.evidence[0].declared_tainted_input);
+    assert_eq!(
+        record.provenance.quarantine_class,
+        Some(QuarantineClass::Tainted),
+        "the persisted declaration classes the record tainted after a restart"
+    );
+
+    let scope = crate::memory::records::MemoryScope::Identity {
+        realm: REALM.to_string(),
+        identity: IDENTITY.to_string(),
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    for n in 0..300 {
+        let receipt = rig
+            .store
+            .remember_authored(
+                &scope,
+                NewMemoryRecord {
+                    kind: crate::memory::records::MemoryKind::Gotcha,
+                    title: format!("Ordinary fact {n}"),
+                    description: "When it matters".to_string(),
+                    body: format!("Ordinary fact {n}."),
+                    tags: Vec::new(),
+                    evidence: vec![EvidenceRef {
+                        session_id: format!("sess-ordinary-{n}"),
+                        generation: 0,
+                        revision: None,
+                        range: Some((0, 1)),
+                        clean_input: None,
+                        declared_tainted_input: false,
+                    }],
+                    verification: None,
+                },
+                MemoryAuthor::Distiller {
+                    run_id: format!("run-{n}"),
+                },
+            )
+            .await?;
+        assert!(is_quarantined(&receipt.status));
+    }
+    let spans = StoreSpanReferenceSource::new(rig.store.clone(), REALM);
+    let references = spans.span_references(IDENTITY, &session).await?;
+    assert!(
+        references
+            .iter()
+            .any(|span| span.quarantined && span.record_id == record.id),
+        "the record still hard-blocks its span: {references:?}"
+    );
+    let window = quarantine_review_window(rig.store.as_ref(), REALM, 16).await?;
+    assert!(
+        window.iter().any(|candidate| candidate.id == record.id),
+        "the record reaches the dream's review window"
+    );
+
+    let trackerless = TaintLlmWriteGate::new(None, AgentMemoryLlmWrites::Observed);
+    let verdict = trackerless.quarantine_verdict(
+        &MemoryAuthor::Distiller {
+            run_id: "run".to_string(),
+        },
+        StagedBatchKind::FreshWrite,
+        &record.provenance.evidence,
+    );
+    assert_eq!(
+        verdict.map(|verdict| verdict.class),
+        Some(QuarantineClass::Tainted),
+        "with no tracker the persisted declaration still classes tainted"
+    );
+    Ok(())
 }

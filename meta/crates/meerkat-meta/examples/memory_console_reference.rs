@@ -307,6 +307,7 @@ async fn seed_store(store: &SqliteAgentMemoryStore) -> SeededIds {
         revision: None,
         range: Some((3, 9)),
         clean_input: None,
+        declared_tainted_input: false,
     }];
     let chain_tip = store
         .supersede_authored(
@@ -596,10 +597,11 @@ async fn verify_seeded_store(store: &SqliteAgentMemoryStore, ids: &SeededIds) {
     assert_eq!(superseded, 2, "superseded chain records");
     assert_eq!(quarantined_count, 1, "quarantined record");
 
-    let quarantined = store
-        .quarantined_records(REALM, 10)
-        .await
-        .expect("quarantined records");
+    // Both quarantine classes, each with its own share of the bound.
+    let quarantined =
+        meerkat_meta::memory::capabilities::quarantine_review_window(store, REALM, 10)
+            .await
+            .expect("quarantined records");
     assert_eq!(quarantined.len(), 1);
     assert_eq!(quarantined[0].id, ids.quarantined);
 

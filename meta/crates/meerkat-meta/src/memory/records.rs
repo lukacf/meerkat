@@ -302,6 +302,14 @@ pub struct EvidenceRef {
     /// record citing it quarantines.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clean_input: Option<CleanExtractionInput>,
+    /// Evidence-scoped taint (§10.1): the extraction call that produced this
+    /// record read at least one row whose PERSISTED facts declare it tainted
+    /// (a Comms row whose sender declared its content tainted, or provider
+    /// server-tool content). Set by the Distiller from the rows themselves,
+    /// so it holds across a process restart; the write gate classes such a
+    /// record [`QuarantineClass::Tainted`] with or without a taint tracker.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub declared_tainted_input: bool,
 }
 
 /// What one proven-clean extraction call read: the absolute transcript row
@@ -914,6 +922,7 @@ mod tests {
                     revision: None,
                     range: Some((3, 9)),
                     clean_input: None,
+                    declared_tainted_input: false,
                 }],
                 author: MemoryAuthor::Agent {
                     identity: "identity:luka".to_string(),

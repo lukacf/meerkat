@@ -5127,6 +5127,7 @@ mod tests {
                         role: "user",
                         text: text.clone(),
                         proven_clean: false,
+                        declared_tainted: false,
                     })
                     .collect(),
             }))
@@ -5306,6 +5307,7 @@ mod tests {
             revision: None,
             range: None,
             clean_input: None,
+            declared_tainted_input: false,
         }];
         let receipt = store
             .remember_authored(
@@ -7250,6 +7252,7 @@ mod tests {
             revision: None,
             range: None,
             clean_input: None,
+            declared_tainted_input: false,
         }];
         let update = fixture
             .store
@@ -7705,6 +7708,7 @@ mod tests {
             revision: None,
             range: None,
             clean_input: None,
+            declared_tainted_input: false,
         }];
         let proposal_id = fixture
             .store
@@ -8162,6 +8166,7 @@ mod tests {
                 revision: None,
                 range: Some((0, 1)),
                 clean_input: None,
+                declared_tainted_input: false,
             }],
         });
         let receipt = store
@@ -8212,6 +8217,7 @@ mod tests {
                 revision: None,
                 range: Some((0, 9)),
                 clean_input: None,
+                declared_tainted_input: false,
             }],
         });
         let receipt = store

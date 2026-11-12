@@ -12,7 +12,7 @@
 //! ```
 //!
 //! and writes `{"ops": [...], "quarantined": bool, "clean_call": null |
-//! {"rows": [...], "quarantined": bool}}` on stdout — the parsed, validated
+//! {"rows": [...], "quarantined": bool}}` on stdout: the parsed, validated
 //! op list of the whole-window call plus the deterministic write-gate
 //! verdicts (the gate law is deterministic, so the harness can score it
 //! without a store). Evidence-scoped taint (§10.1): `quarantined` is the
@@ -239,6 +239,9 @@ async fn main() {
                 role: role_label(&message.role),
                 text: message.text.clone(),
                 proven_clean: message.attested_person && role_label(&message.role) == "user",
+                // Fixtures carry no persisted taint declarations; the
+                // fixture's tracker taint drives the session fact instead.
+                declared_tainted: false,
             })
             .collect(),
     };
@@ -334,6 +337,7 @@ async fn main() {
                     revision: None,
                     range: Some(range),
                     clean_input,
+                    declared_tainted_input: false,
                 }],
             )
             .is_some()

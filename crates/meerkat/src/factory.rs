@@ -23140,6 +23140,11 @@ mod tests {
     /// client, so the session reports no route, also when the operator
     /// declared levels: nothing guesses a route the connection does not
     /// name, and a level asked for there has nothing to be checked against.
+    ///
+    /// This arm is a fail-closed default. The shipped self-hosted runtime
+    /// resolves a connection on the binding's own backend, so no shipped
+    /// route reaches it; the row drives it with a test runtime that answers
+    /// with another family's backend.
     #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
     #[tokio::test]
     async fn a_self_hosted_model_on_another_familys_connection_reports_no_route() {

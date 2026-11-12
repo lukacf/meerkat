@@ -225,11 +225,7 @@ mod operation_refusal_wire {
 /// until the quota resets or request a quota increase." The neighbouring
 /// per-minute codes on that table (`rate_limit_exceeded`, `too_many_requests`)
 /// are deliberately absent so they keep the retryable rate-limit class.
-///
-/// [`LlmError::code_signals_quota_exhausted`] decides on exactly this list.
-/// It is public so that a client that rewrites provider text (credential
-/// redaction) can check that every code here passes through unchanged.
-pub const QUOTA_EXHAUSTED_ERROR_CODES: &[&str] = &[
+const QUOTA_EXHAUSTED_ERROR_CODES: &[&str] = &[
     "insufficient_quota",
     "credit_balance_exhausted",
     "organization_spend_limit_exceeded",
@@ -1757,6 +1753,25 @@ mod tests {
         let body = r#"{"error":{"code":"quota_exceeded","message":"You have exceeded your daily quota."}}"#;
         let err = LlmError::from_http_status(429, body.to_string(), None);
         assert_quota_exhausted_is_terminal(&err, "gemini");
+    }
+
+    /// A provider client redacts an error's code before it classifies on
+    /// it (a realtime error's `code` is provider text). Every code this
+    /// crate decides on must come through that redaction unchanged, with
+    /// and without a credential named, or an exhausted quota would stop
+    /// being one. A code added to the list is covered here.
+    #[test]
+    fn quota_codes_pass_credential_redaction_unchanged() {
+        let key = format!("realtime-{}", "madeupcredential".repeat(3));
+        assert!(!QUOTA_EXHAUSTED_ERROR_CODES.is_empty());
+        for code in QUOTA_EXHAUSTED_ERROR_CODES {
+            let mut redacted = (*code).to_string();
+            meerkat_core::redact::redact_credentials(&mut redacted, |visit| visit(&key));
+            assert_eq!(&redacted, code, "a named credential");
+            meerkat_core::redact::redact_credentials(&mut redacted, |_| {});
+            assert_eq!(&redacted, code, "no named credential");
+            assert!(LlmError::code_signals_quota_exhausted(&redacted));
+        }
     }
 
     #[test]

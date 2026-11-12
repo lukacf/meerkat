@@ -53,10 +53,6 @@ them.
   `meerkat_llm_core::streaming::redact_stream_errors` redacts the error a
   stream ends with through any redaction, for a client that signs with a
   key of its own.
-- `meerkat-llm-core`: `error::QUOTA_EXHAUSTED_ERROR_CODES`, the provider
-  error codes `LlmError::code_signals_quota_exhausted` decides on, is
-  public, so that a client that rewrites provider text can check that each
-  of them passes through unchanged.
 
 ### Changed
 

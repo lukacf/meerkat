@@ -7312,13 +7312,29 @@ mod tests {
                 response: failed,
             })),
         ]);
-        // Every fixed value the session decides on: the quota codes, read
-        // from the one list its classification uses
-        // (`LlmError::code_signals_quota_exhausted`), then the two context
-        // codes and the two reasons this file matches on.
-        let decided_on: Vec<&str> = meerkat_llm_core::error::QUOTA_EXHAUSTED_ERROR_CODES
-            .iter()
-            .copied()
+        // Every fixed value the session decides on. The quota codes are
+        // typed here, each one checked against the product's own list
+        // (private to meerkat-llm-core, where a row walks that list through
+        // the same redaction); then the two context codes and the two
+        // reasons this file matches on.
+        let quota_codes = [
+            "insufficient_quota",
+            "credit_balance_exhausted",
+            "organization_spend_limit_exceeded",
+            "project_spend_limit_exceeded",
+            "organization_usage_limit_exceeded",
+            "billing_hard_limit_reached",
+            "enforced_spend_limit_reached",
+            "quota_exceeded",
+        ];
+        for code in quota_codes {
+            assert!(
+                LlmError::code_signals_quota_exhausted(code),
+                "not a quota code the session decides on: {code}"
+            );
+        }
+        let decided_on: Vec<&str> = quota_codes
+            .into_iter()
             .chain([
                 "context_length_exceeded",
                 "context_window_exceeded",

@@ -721,7 +721,12 @@ function parseAgentProvenance(raw: unknown): AgentProvenance {
  * update set, each only when it is not the default: `addressability` is
  * `internal_only` or `null` (the agent is addressable), and
  * `runtimeModeOverride` is `null` for an agent that runs as its profile
- * says.
+ * says. `rosterListingSuperseded` is `true` when the host's roster lists
+ * this name while the agent is served from its record (an adopted agent
+ * whose roster still lists it, for one): the roster's entry for the name is
+ * not applied, and a change of the agent is a change of its record. The
+ * gateway writes it only when it is so; an answer this SDK parsed always
+ * carries it, `false` when the gateway left it out.
  */
 export interface AgentSummary {
   readonly name: string;
@@ -735,6 +740,7 @@ export interface AgentSummary {
   readonly openOperations: readonly string[];
   readonly addressability: AgentAddressability | (string & {}) | null;
   readonly runtimeModeOverride: AgentRuntimeMode | (string & {}) | null;
+  readonly rosterListingSuperseded?: boolean;
 }
 
 function parseAgentSummaryOf(data: Record<string, unknown>, what: string): AgentSummary {
@@ -756,6 +762,7 @@ function parseAgentSummaryOf(data: Record<string, unknown>, what: string): Agent
     openOperations: strings(data.open_operations),
     addressability: optionalText(data, "addressability"),
     runtimeModeOverride: optionalText(data, "runtime_mode_override"),
+    rosterListingSuperseded: data.roster_listing_superseded === true,
   };
 }
 
@@ -830,6 +837,7 @@ export interface DirectoryProfile {
 /**
  * One agent of the directory, with what the host's rules give listing it as
  * a peer: `verdict`, `lines` and `reason` as on a {@link DirectoryProfile}.
+ * `rosterListingSuperseded` is as on an {@link AgentSummary}.
  */
 export interface DirectoryPeer {
   readonly name: string;
@@ -838,6 +846,7 @@ export interface DirectoryPeer {
   readonly verdict: string;
   readonly lines: readonly string[];
   readonly reason: string | null;
+  readonly rosterListingSuperseded?: boolean;
 }
 
 /**
@@ -877,6 +886,7 @@ export function parseAgentDirectoryPage(raw: unknown): AgentDirectoryPage {
         verdict: text(peer, "verdict", what),
         lines: strings(peer.lines),
         reason: optionalText(peer, "reason"),
+        rosterListingSuperseded: peer.roster_listing_superseded === true,
       };
     }),
     next: optionalText(data, "next"),
@@ -895,7 +905,10 @@ export function parseAgentDirectoryPage(raw: unknown): AgentDirectoryPage {
  * decision would bind. `schedules` is on the plan of an archive, an
  * unarchive and a removal: the schedules the change would take with it
  * ({@link SchedulesFollowed}), as they are when the plan is made; it is no
- * part of the rendering.
+ * part of the rendering. `rosterListingSuperseded` is `true` when the
+ * host's roster lists the agent the change names while the agent is served
+ * from its record, so the change is of the record alone; the gateway writes
+ * it only when it is so, and a parsed plan always carries it.
  */
 export interface IdentityChangePlan {
   readonly outcome: string;
@@ -906,6 +919,7 @@ export interface IdentityChangePlan {
   readonly subjectDigest: string;
   readonly rendering: string;
   readonly schedules: SchedulesFollowed | null;
+  readonly rosterListingSuperseded?: boolean;
 }
 
 /** @internal */
@@ -921,6 +935,7 @@ export function parseIdentityChangePlan(raw: unknown): IdentityChangePlan {
     subjectDigest: text(data, "subject_digest", what),
     rendering: text(data, "rendering", what),
     schedules: parseSchedulesFollowed(data),
+    rosterListingSuperseded: data.roster_listing_superseded === true,
   };
 }
 

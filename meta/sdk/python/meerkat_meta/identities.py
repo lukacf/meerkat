@@ -762,6 +762,7 @@ def _summary_members(data: Mapping[str, Any], what: str) -> dict[str, Any]:
         "open_operations": _strings(data.get("open_operations")),
         "addressability": _optional(data, "addressability", str),
         "runtime_mode_override": _optional(data, "runtime_mode_override", str),
+        "roster_listing_superseded": data.get("roster_listing_superseded") is True,
     }
 
 
@@ -782,7 +783,11 @@ class AgentSummary:
     each only when it is not the default: ``addressability`` is
     ``internal_only`` or ``None`` (the agent is addressable), and
     ``runtime_mode_override`` is ``None`` for an agent that runs as its
-    profile says.
+    profile says. ``roster_listing_superseded`` is ``True`` when the host's
+    roster lists this name while the agent is served from its record (an
+    adopted agent whose roster still lists it, for one): the roster's entry
+    for the name is not applied, and a change of the agent is a change of
+    its record. The gateway writes it only when it is so.
     """
 
     name: str
@@ -796,6 +801,7 @@ class AgentSummary:
     open_operations: tuple[str, ...] = ()
     addressability: str | None = None
     runtime_mode_override: str | None = None
+    roster_listing_superseded: bool = False
 
     @classmethod
     def from_dict(cls, raw: Any) -> AgentSummary:
@@ -880,7 +886,8 @@ class DirectoryProfile:
 class DirectoryPeer:
     """One agent of the directory, with what the host's rules give listing
     it as a peer: ``verdict``, ``lines`` and ``reason`` as on a
-    :class:`DirectoryProfile`."""
+    :class:`DirectoryProfile`. ``roster_listing_superseded`` is as on an
+    :class:`AgentSummary`."""
 
     name: str
     profile: str
@@ -888,6 +895,7 @@ class DirectoryPeer:
     display_name: str | None = None
     lines: tuple[str, ...] = ()
     reason: str | None = None
+    roster_listing_superseded: bool = False
 
     @classmethod
     def from_dict(cls, raw: Any) -> DirectoryPeer:
@@ -900,6 +908,7 @@ class DirectoryPeer:
             display_name=_optional(data, "display_name", str),
             lines=_strings(data.get("lines")),
             reason=_optional(data, "reason", str),
+            roster_listing_superseded=data.get("roster_listing_superseded") is True,
         )
 
 
@@ -945,6 +954,10 @@ class IdentityChangePlan:
     is on the plan of an archive, an unarchive and a removal: the schedules
     the change would take with it (:class:`SchedulesFollowed`), as they are
     when the plan is made; it is no part of the rendering.
+    ``roster_listing_superseded`` is ``True`` when the host's roster lists
+    the agent the change names while the agent is served from its record,
+    so the change is of the record alone; the gateway writes it only when
+    it is so.
     """
 
     outcome: str
@@ -955,6 +968,7 @@ class IdentityChangePlan:
     rendering: str
     approver_id: str | None = None
     schedules: SchedulesFollowed | None = None
+    roster_listing_superseded: bool = False
 
     @classmethod
     def from_dict(cls, raw: Any) -> IdentityChangePlan:
@@ -969,6 +983,7 @@ class IdentityChangePlan:
             rendering=_required(data, "rendering", str, what),
             approver_id=_optional(data, "approver_id", str),
             schedules=_schedules(data),
+            roster_listing_superseded=data.get("roster_listing_superseded") is True,
         )
 
 

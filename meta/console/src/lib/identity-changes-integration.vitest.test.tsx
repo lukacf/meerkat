@@ -1512,7 +1512,7 @@ describe("long-term agents in the console", () => {
       { schedule_id: "sched-0002", name: "Weekly digest" },
       { schedule_id: "sched-0003" },
     ]);
-    const harvest = "Its last conversation is harvested, as for any agent that leaves the team.";
+    const harvest = "Its last conversation is harvested and distilled, as for any agent that leaves the team.";
     const { view } = await openRoster(family);
     const states = () => family.schedulesOf("scout").map((schedule: { state: string }) => schedule.state);
 
@@ -1525,6 +1525,10 @@ describe("long-term agents in the console", () => {
     fireEvent.click(within(confirm).getByTestId("identity-confirm-yes"));
     let notice = await find(view, "identity-notice");
     expect(noticeWords(notice)).toContain("Scout is archived");
+    // The answer says what the agent keeps and, with it, that its last
+    // conversation is harvested and distilled.
+    expect(noticeWords(notice)).toContain("It keeps its name, its record, its conversation and its memory.");
+    expect(noticeWords(notice)).toContain(harvest);
     expect(noticeWords(notice)).toContain("Its 3 schedules are paused until it is unarchived: Morning report, Weekly digest and 1 without a name.");
     // A schedule's id is no primary text: it is among the technical details.
     expect(noticeWords(notice)).not.toContain("sched-000");
@@ -1759,6 +1763,55 @@ describe("long-term agents in the console", () => {
     }
   }, 60_000);
 
+  it("an_agent_whose_record_says_its_hosts_configuration_also_lists_it_says_so_at_its_status", async () => {
+    // The agent's record (`meta/identity/get`) says it with
+    // `roster_listing_superseded: true`, and only then. The details pane
+    // reads that record for its Record section, and says it once, in plain
+    // words, at the agent's status: the details answer need not say it.
+    const details = { identity: "warden", state: "active", role: "worker", addressability: "addressable", display_name: "The warden", labels: {}, continuity: {}, topology_peers: [] };
+    const open = async (family: Family, answer: Record<string, unknown> = details): Promise<View> => {
+      window.localStorage.clear();
+      seedDock({ id: "inspect:warden", kind: "identity-inspect", title: "The warden details", identity: "warden", memberId: "warden" });
+      const pane = render(<ConsoleApp baseUrl="" transport={transport(family, { inspect: () => answer })} />);
+      await find(pane, "inspect-state:warden");
+      await find(pane, "inspect-record:warden");
+      return pane;
+    };
+
+    const listed = createScriptedIdentityFamily();
+    listed.agents.get("warden").roster_listing_superseded = true;
+    let view = await open(listed);
+    const note = await find(view, "inspect-roster-superseded:warden");
+    expect(note.textContent).toBe(
+      "The host's configuration lists an agent of this name too. That entry is not applied: this agent runs from its own record, and a change made here changes that record.",
+    );
+    expect(note.textContent || "").not.toMatch(/_|superseded|roster.listing/i);
+    // At the status, in the pane's overview: not in the Record section.
+    expect(note.parentElement?.querySelector("[data-testid='inspect-state:warden']") === null).toBe(false);
+    expect(view.getByTestId("inspect-record:warden").textContent || "").not.toContain("That entry is not applied");
+    view.unmount();
+    cleanup();
+
+    // Said by the record and by the details answer alike: one note.
+    view = await open(listed, { ...details, roster_listing_superseded: true });
+    await find(view, "inspect-roster-superseded:warden");
+    expect(view.getAllByTestId("inspect-roster-superseded:warden")).toHaveLength(1);
+    view.unmount();
+    cleanup();
+
+    // A record that does not say so, or says it another way than `true`,
+    // shows no note.
+    for (const said of [undefined, false, "true"]) {
+      const family = createScriptedIdentityFamily();
+      if (said !== undefined) family.agents.get("warden").roster_listing_superseded = said;
+      view = await open(family);
+      await settle(50);
+      expect(present(view, "inspect-roster-superseded:warden")).toBe(false);
+      view.unmount();
+      cleanup();
+    }
+  }, 60_000);
+
   it("what_a_hosts_preparation_refuses_reads_in_the_consoles_own_words", async () => {
     const family = createScriptedIdentityFamily();
     // A profile whose agents the host prepares takes no agent that was not
@@ -1849,7 +1902,7 @@ describe("long-term agents in the console", () => {
     // An archived agent is asked as before: it had a conversation.
     fireEvent.click(view.getByTestId("roster-archived-action:oldhand:remove"));
     const archived = await find(view, "identity-confirm:oldhand:remove");
-    expect(archived.textContent).toContain("Its last conversation is harvested, as for any agent that leaves the team.");
+    expect(archived.textContent).toContain("Its last conversation is harvested and distilled, as for any agent that leaves the team.");
     expect(archived.textContent || "").not.toContain("It never started");
     view.unmount();
     cleanup();

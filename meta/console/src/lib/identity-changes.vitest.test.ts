@@ -310,6 +310,28 @@ describe("reading the family's answers", () => {
     expect(page.next).toBeUndefined();
   });
 
+  it("reads from a record and a page that the host's configuration also lists the agent, only where it says true", () => {
+    // The gateway writes `roster_listing_superseded` on a record and on a
+    // page's agent only when it is true: the host's configuration lists the
+    // name while the agent is served from its own record.
+    const family = createScriptedIdentityFamily();
+    family.seed({ name: "keeper", display_name: "The keeper", roster_listing_superseded: true });
+    const keeper = family.handle("meta/identity/get", { name: "keeper" }).result;
+    expect(keeper.roster_listing_superseded).toBe(true);
+    expect(parseAgentRecord(keeper)?.rosterListingSuperseded).toBe(true);
+    const page = parseAgentPage(family.handle("meta/identity/list", {}).result);
+    expect(page.agents.map((agent) => [agent.name, agent.rosterListingSuperseded === true]))
+      .toEqual([["helper", false], ["warden", false], ["keeper", true]]);
+    // A record that does not say so, or says it another way than `true`,
+    // reads without it.
+    const warden = family.handle("meta/identity/get", { name: "warden" }).result;
+    expect("roster_listing_superseded" in warden).toBe(false);
+    for (const said of [undefined, false, "true", 1, null]) {
+      const read = parseAgentRecord(said === undefined ? warden : { ...warden, roster_listing_superseded: said });
+      expect(read !== null && !("rosterListingSuperseded" in read)).toBe(true);
+    }
+  });
+
   it("reads the directory's flat verdict and says each in words", () => {
     const directory = parseIdentityDirectory(createScriptedIdentityFamily().handle("meta/identity/directory", {}).result);
     expect(directory.profiles).toEqual([
@@ -525,11 +547,27 @@ describe("an outcome in words", () => {
 
   it("says before an archive and a removal that the agent's last conversation is harvested", () => {
     // An agent that is archived or removed leaves as any agent leaves: its
-    // last conversation is harvested. An unarchive harvests nothing.
-    const harvest = "Its last conversation is harvested, as for any agent that leaves the team.";
+    // last conversation is harvested and distilled. An unarchive harvests
+    // nothing.
+    const harvest = "Its last conversation is harvested and distilled, as for any agent that leaves the team.";
     expect(agentChangeConfirmWords("archive", "Scout").consequence).toContain(harvest);
     expect(agentChangeConfirmWords("remove", "Scout").consequence).toContain(harvest);
     expect(agentChangeConfirmWords("unarchive", "Scout").consequence).not.toContain("harvest");
+  });
+
+  it("says after an archive, beside what the agent keeps, that its last conversation is harvested", () => {
+    // The result of an archive says what the agent keeps. It never says
+    // that alone: the conversation it keeps is harvested and distilled as
+    // the agent leaves the team.
+    const harvest = "Its last conversation is harvested and distilled, as for any agent that leaves the team.";
+    const archived = outcomeWords("archive", done("archived"), "Scout");
+    expect(archived.lines[0]).toBe("It keeps its name, its record, its conversation and its memory. Messages to it are refused until it is unarchived.");
+    expect(archived.lines).toContain(harvest);
+    // No other outcome says that anything is kept, and none says a harvest.
+    for (const [change, state] of [["archive", "archiving"], ["unarchive", "restored"], ["remove", "retiring"], ["remove", "removed"], ["update", "committed"]] as const) {
+      const words = outcomeWords(change, done(state), "Scout");
+      expect(words.lines.join(" ")).not.toMatch(/harvest|keeps its/);
+    }
   });
 
   it("says before the removal of an agent that waits for its host that it never started", () => {
@@ -663,6 +701,30 @@ describe("what a change did to an agent's schedules", () => {
     expect(schedulesWords(followed("rescheduled", [morning]))).toEqual([]);
     const plain = parseIdentityOutcome({ outcome: "done", operation_id: "x", agents: [{ name: "scout", state: "archived" }] });
     expect(plain && plain.outcome === "done" ? "schedules" in plain.agents[0]! : true).toBe(false);
+  });
+
+  it("says the count where the answer lists no schedule, or fewer than it counts", () => {
+    // An answer may state the effect and the count and list no schedule, or
+    // not every one it counts: the count is said, a name only where the
+    // answer gives one, and a schedule that is not listed is never said to
+    // have no name.
+    const counted = (effect: string, count: number, schedules?: Array<{ schedule_id: string; name?: string }>) => {
+      const outcome = parseIdentityOutcome({
+        outcome: "done",
+        operation_id: "human.x.r",
+        agents: [{ name: "scout", state: "archived", schedules: { effect, count, ...(schedules ? { schedules } : {}) } }],
+      });
+      return outcome && outcome.outcome === "done" ? outcome.agents[0]!.schedules : undefined;
+    };
+    expect(counted("paused", 3)).toEqual({ effect: "paused", count: 3, schedules: [], incomplete: false });
+    expect(schedulesWords(counted("paused", 3))).toEqual(["Its 3 schedules are paused until it is unarchived."]);
+    expect(schedulesWords(counted("paused", 3, []))).toEqual(["Its 3 schedules are paused until it is unarchived."]);
+    expect(schedulesWords(counted("resumed", 1))).toEqual(["Its schedule runs again."]);
+    expect(schedulesWords(counted("ended", 2))).toEqual(["Its 2 schedules are ended."]);
+    expect(schedulesWords(counted("ended", 3, [morning]))).toEqual(["Its 3 schedules are ended: Morning report and 2 more."]);
+    expect(schedulesWords(counted("ended", 4, [morning, unnamed])))
+      .toEqual(["Its 4 schedules are ended: Morning report, 1 without a name and 2 more."]);
+    expect(schedulesWords(counted("paused", 3, [unnamed]))).toEqual(["Its 3 schedules are paused until it is unarchived."]);
   });
 
   it("says when not every schedule could be followed", () => {

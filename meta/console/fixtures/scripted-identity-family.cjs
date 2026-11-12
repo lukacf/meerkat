@@ -127,6 +127,10 @@ function createScriptedIdentityFamily(options = {}) {
       // (`autonomous_host`, `turn_driven`, or nothing: as its profile says).
       addressability: agent.addressability || "addressable",
       runtime_mode_override: agent.runtime_mode_override,
+      // Whether the host's configuration lists this name while the agent is
+      // served from its record. The gateway writes it only when it is true;
+      // a test may set another value to see how it is read.
+      roster_listing_superseded: agent.roster_listing_superseded,
       // Scripted only, never written: a change of this agent is refused
       // `owner_read_only`.
       configured: agent.configured === true,
@@ -166,6 +170,10 @@ function createScriptedIdentityFamily(options = {}) {
       // agent, and one that runs as its profile says, say nothing.
       ...(agent.addressability === "internal_only" ? { addressability: "internal_only" } : {}),
       ...(agent.runtime_mode_override ? { runtime_mode_override: agent.runtime_mode_override } : {}),
+      // Written only when the host's configuration also lists the name.
+      ...(agent.roster_listing_superseded !== undefined && agent.roster_listing_superseded !== false
+        ? { roster_listing_superseded: agent.roster_listing_superseded }
+        : {}),
     };
   }
 

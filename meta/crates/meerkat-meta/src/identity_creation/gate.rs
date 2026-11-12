@@ -109,6 +109,7 @@ use super::request::{
     normalize_adopt, normalize_archive, normalize_create, normalize_remove, normalize_unarchive,
     normalize_update,
 };
+use super::schedules::{AgentSchedules, ScheduleEffect};
 
 /// The most agents one page of a list or of the directory names.
 const PAGE_MAX: usize = 100;
@@ -294,6 +295,9 @@ pub(crate) struct IdentityGate {
     decision_rows: Option<meerkat_runtime::decision::DurableDecisionService>,
     /// Whether a drive of the mob's owed seats is under way: one at a time.
     seat_drive: Arc<AtomicBool>,
+    /// The launch's schedules, which follow an agent's archive, unarchive
+    /// and removal: `None` on a launch that gives the family none.
+    schedules: Option<Arc<dyn AgentSchedules>>,
 }
 
 /// Ends a drive of the owed seats, however its task ends.
@@ -343,6 +347,9 @@ struct AgentFacts {
     provenance: Option<AgentProvenance>,
     /// The peers its changes listed.
     peers: Vec<String>,
+    /// Whether the host's roster lists its name while it is served from its
+    /// record: the roster's entry is not applied.
+    roster_listing_superseded: bool,
 }
 
 impl AgentFacts {
@@ -383,6 +390,15 @@ impl AgentFacts {
             readiness: self.readiness,
             provenance: self.provenance.clone(),
             open_operations: Vec::new(),
+            // Said only when it is not the default, as a roster row's.
+            addressability: match self.spec.addressability {
+                meerkat_mob::IdentityAddressability::InternalOnly => {
+                    Some(crate::identity_first::AgentAddressability::InternalOnly)
+                }
+                _ => None,
+            },
+            runtime_mode_override: self.spec.runtime_mode_override,
+            roster_listing_superseded: self.roster_listing_superseded,
         }
     }
 
@@ -535,6 +551,9 @@ struct Judged {
     normalized: NormalizedRequest,
     /// Whether the agent the request changes is one its host configures.
     configured_target: bool,
+    /// Whether the host's roster lists the agent the request changes while
+    /// it is served from its record.
+    roster_listing_superseded: bool,
 }
 
 impl Judged {
@@ -543,6 +562,7 @@ impl Judged {
         Self {
             normalized,
             configured_target: target.configured,
+            roster_listing_superseded: target.roster_listing_superseded,
         }
     }
 }
@@ -613,6 +633,44 @@ impl IdentityGate {
             _driver: None,
             decision_rows: None,
             seat_drive: Arc::new(AtomicBool::new(false)),
+            schedules: None,
+        }
+    }
+
+    /// This family, with the launch's schedules `schedules`: a plan says
+    /// which of them a change would take with it, and a change asked again
+    /// has them follow it again.
+    #[must_use]
+    pub(crate) fn with_schedules(mut self, schedules: Arc<dyn AgentSchedules>) -> Self {
+        self.schedules = Some(schedules);
+        self
+    }
+
+    /// Have the schedules that target the agent of `change` follow it
+    /// again, when `change` is asked again after it committed: a caller
+    /// that got no answer asks again, and the schedules converge. They
+    /// follow only a change the agent still stands by: an archive while the
+    /// agent is archived, an unarchive while it is not, a removal once the
+    /// agent is gone. So a request that is asked again after a later change
+    /// undid it moves no schedule.
+    async fn follow_schedules_again(&self, mob: &MobHandle, change: &IdentityChangeSpec) {
+        let Some(schedules) = &self.schedules else {
+            return;
+        };
+        let (effect, name) = match change {
+            IdentityChangeSpec::Archive(agent) => (ScheduleEffect::Paused, &agent.name),
+            IdentityChangeSpec::Unarchive(agent) => (ScheduleEffect::Resumed, &agent.name),
+            IdentityChangeSpec::Remove(agent) => (ScheduleEffect::Ended, &agent.name),
+            _ => return,
+        };
+        let stands = match (effect, self.agent(mob, name).await) {
+            (ScheduleEffect::Paused, Ok(Some(agent))) => agent.archived,
+            (ScheduleEffect::Resumed, Ok(Some(agent))) => !agent.archived,
+            (ScheduleEffect::Ended, Ok(None)) => true,
+            _ => false,
+        };
+        if stands {
+            let _ = schedules.follow(mob.mob_id().as_str(), name, effect).await;
         }
     }
 
@@ -932,6 +990,7 @@ impl IdentityGate {
         let Some(spec_digest) = digest_of(&spec) else {
             return Ok(None);
         };
+        let roster_listing_superseded = self.roster_listing_superseded(&name).await;
         Ok(Some(AgentFacts {
             name,
             spec_digest,
@@ -945,8 +1004,22 @@ impl IdentityGate {
                 .iter()
                 .map(|edge| identity_name_of_member(&edge.peer))
                 .collect(),
+            roster_listing_superseded,
             spec,
         }))
+    }
+
+    /// Whether the host's roster lists `name` while the agent is served
+    /// from its record, as the identity runtime says: the roster's entry
+    /// is not applied. It is the runtime's fact, read and never decided
+    /// here; `false` once the runtime is gone.
+    async fn roster_listing_superseded(&self, name: &str) -> bool {
+        let (Some(identities), Ok(identity)) =
+            (self.identities.upgrade(), AgentIdentity::parse(name))
+        else {
+            return false;
+        };
+        identities.roster_listing_superseded(&identity).await
     }
 
     /// The agent `name` as its host's configuration declares it: the spec
@@ -973,6 +1046,8 @@ impl IdentityGate {
             archived,
             provenance: None,
             peers: Vec::new(),
+            // An agent its host configures is served from the roster.
+            roster_listing_superseded: false,
         })
     }
 
@@ -1154,6 +1229,7 @@ impl IdentityGate {
                 Ok(Judged {
                     normalized,
                     configured_target: false,
+                    roster_listing_superseded: false,
                 })
             }
             IdentityChangeSpec::Update(update) => {
@@ -1388,8 +1464,13 @@ impl IdentityGate {
         match committed_outcome(mob, &call.operation_id).await {
             // The outcome as Core's receipt holds it. What became of an
             // update's instructions is part of the first answer only: a
-            // replay states none.
-            Ok(Some(outcome)) => Ok(outcome),
+            // replay states none. The schedules that target the agent
+            // follow the change again, and the replay states none of them
+            // either.
+            Ok(Some(outcome)) => {
+                self.follow_schedules_again(mob, &call.change).await;
+                Ok(outcome)
+            }
             Ok(None) => Err(reused()),
             Err(error) => Err(unsettled(&call.operation_id, &error)),
         }
@@ -1665,6 +1746,7 @@ impl IdentityGate {
             display_name: agent.spec.display_name.clone(),
             profile: agent.spec.profile.as_str().to_owned(),
             verdict,
+            roster_listing_superseded: agent.roster_listing_superseded,
         }
     }
 
@@ -1720,6 +1802,15 @@ impl IdentityGate {
                 feature: format!("a request this build cannot digest: {error}"),
             })
         })?;
+        // The schedules the change would take with it, as they are now.
+        let schedules = match (&self.schedules, ScheduleEffect::of_action(&request.action)) {
+            (Some(schedules), Some((effect, agent))) => Some(
+                schedules
+                    .planned(mob.mob_id().as_str(), agent, effect)
+                    .await,
+            ),
+            _ => None,
+        };
         Ok(ChangePlan {
             outcome: plan.kind(),
             change: plan.change,
@@ -1728,6 +1819,8 @@ impl IdentityGate {
             request_digest,
             subject_digest: rendering.subject_digest(),
             rendering: rendering.into_string(),
+            roster_listing_superseded: judged.roster_listing_superseded,
+            schedules,
         })
     }
 }
@@ -1895,6 +1988,10 @@ pub struct IdentityFamilyOptions {
     /// change of an agent on such a profile shows what the realm profile
     /// declares; without the store it is refused `unsupported`.
     pub realm_profiles: Option<Arc<dyn meerkat_mob::RealmProfileStore>>,
+    /// The launch's schedules, which follow an agent's archive, unarchive
+    /// and removal. Without them a change of an agent changes no schedule,
+    /// and its answers and plans say nothing of schedules.
+    pub schedules: Option<Arc<dyn AgentSchedules>>,
 }
 
 impl IdentityFamilyOptions {
@@ -1926,6 +2023,15 @@ impl IdentityFamilyOptions {
         self
     }
 
+    /// These options, with the launch's schedules `schedules`: the
+    /// schedules that target an agent are paused by its archive, resumed by
+    /// its unarchive and ended by its removal.
+    #[must_use]
+    pub fn with_schedules(mut self, schedules: Arc<dyn AgentSchedules>) -> Self {
+        self.schedules = Some(schedules);
+        self
+    }
+
     /// These options, reading the realm's profiles from `realm_profiles`.
     #[must_use]
     pub fn with_realm_profiles(
@@ -1945,6 +2051,7 @@ impl std::fmt::Debug for IdentityFamilyOptions {
             .field("instruction_step", &self.instruction_step.is_some())
             .field("decision_notices", &self.decision_notices.is_some())
             .field("realm_profiles", &self.realm_profiles.is_some())
+            .field("schedules", &self.schedules.is_some())
             .finish()
     }
 }
@@ -1974,25 +2081,42 @@ impl AgentSpecs for GateSpecs {
 }
 
 /// The launch's executor: Core's change path, and after each change that
-/// committed, the identity runtime's registration of each agent it wrote.
-/// It is the one place that registration is asked from, whoever commits:
+/// committed, the identity runtime's registration of each agent it wrote
+/// and the launch's schedules following the agent it stopped, brought back
+/// or removed. It is the one place both are asked from, whoever commits:
 /// the gate at once, or the decisions' driver after a person approved.
 struct LaunchExecutor {
     core: CoreChangeExecutor,
     /// A back-edge, as the gate's own.
     identities: Weak<IdentityRuntime>,
+    /// The launch's schedules, when it gives the family any.
+    schedules: Option<Arc<dyn AgentSchedules>>,
 }
 
 #[async_trait]
 impl IdentityChangeExecutor for LaunchExecutor {
     async fn commit(&self, commit: ChangeCommit<'_>) -> Result<ChangeCommitted, ExecutorError> {
-        let committed = self.core.commit(commit).await?;
+        let (mob, request) = (commit.mob, commit.request);
+        let mut committed = self.core.commit(commit).await?;
         // Each agent the change wrote is served from its record from now
         // on: registered, registered again or forgotten, with no wake.
         if let Some(identities) = self.identities.upgrade() {
             for agent in committed.outcome.agents() {
                 identities.note_agent_record_changed(&agent.name).await;
             }
+        }
+        // The schedules that target an agent this change archived,
+        // unarchived or removed follow it, and its answer says which. A
+        // change Core answers from its receipt committed before: the family
+        // has its schedules follow it again where the agent still stands
+        // by it.
+        if let Some(schedules) = &self.schedules
+            && !committed.replayed
+            && !committed.outcome.agents().is_empty()
+            && let Some((effect, agent)) = ScheduleEffect::of_action(&request.action)
+        {
+            let followed = schedules.follow(mob.mob_id().as_str(), agent, effect).await;
+            committed.outcome = committed.outcome.with_schedules(agent, followed);
         }
         Ok(committed)
     }
@@ -2005,6 +2129,7 @@ pub(crate) fn change_executor(
     policy: Option<&Arc<IdentityCreationPolicy>>,
     identities: &Arc<IdentityRuntime>,
     instruction_step: Option<Arc<dyn InstructionStep>>,
+    schedules: Option<Arc<dyn AgentSchedules>>,
 ) -> Arc<dyn IdentityChangeExecutor> {
     let core = CoreChangeExecutor::new().with_agent_specs(Arc::new(GateSpecs {
         policy: policy.cloned(),
@@ -2016,6 +2141,7 @@ pub(crate) fn change_executor(
             None => core,
         },
         identities: Arc::downgrade(identities),
+        schedules,
     })
 }
 
@@ -2140,12 +2266,20 @@ impl crate::UnifiedRuntime {
         options: IdentityFamilyOptions,
     ) {
         let changes_enabled = policy.is_some();
-        let executor = change_executor(policy.as_ref(), identities, options.instruction_step);
+        let executor = change_executor(
+            policy.as_ref(),
+            identities,
+            options.instruction_step,
+            options.schedules.clone(),
+        );
         let mut gate = IdentityGate::new(policy, identities, Arc::clone(&executor))
             .with_private_members(Arc::new(self.mob_runtime().private_owners().clone()))
             .on_governed_runtime(self.mob_runtime().native_work_governed());
         if let Some(hooks) = options.hooks.clone() {
             gate = gate.with_host_hooks(hooks);
+        }
+        if let Some(schedules) = options.schedules.clone() {
+            gate = gate.with_schedules(schedules);
         }
         if changes_enabled {
             // The changes a person decides: held in the runtime's durable
@@ -2223,5 +2357,110 @@ impl crate::UnifiedRuntime {
     pub fn identity_changes_enabled(&self) -> bool {
         self.identity_runtime_ref()
             .is_some_and(|identities| identities.identity_changes_enabled())
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::*;
+    use crate::identity_creation::{ArchiveIdentitySpec, RequestEnvelope};
+    use crate::identity_first::AgentAddressability;
+
+    /// A created agent as the gate read it, with what the roster pass says
+    /// of its name.
+    fn agent(roster_listing_superseded: bool) -> AgentFacts {
+        let spec = row_spec(&DurableAgentSpec {
+            identity: AgentIdentity::parse("scout").expect("a name"),
+            profile: meerkat_mob::ProfileName::from("worker"),
+            addressability: AgentAddressability::Addressable,
+            display_name: None,
+            labels: BTreeMap::new(),
+            context: None,
+            additional_instructions: Vec::new(),
+            initial_message: None,
+            runtime_mode_override: None,
+            backend: None,
+            binding: None,
+            placement: None,
+        })
+        .expect("a row spec");
+        AgentFacts {
+            name: "scout".to_owned(),
+            spec_digest: digest_of(&spec).expect("a digest"),
+            spec,
+            revision: Some(1),
+            configured: false,
+            readiness: AgentReadiness::Dormant,
+            archived: false,
+            provenance: None,
+            peers: Vec::new(),
+            roster_listing_superseded,
+        }
+    }
+
+    /// An agent the host's roster lists while it is served from its record
+    /// says so on every read of the family, under one member that is
+    /// written only when it is so: the agent of a list and of a get, its
+    /// directory entry, and the plan of a change of it.
+    #[test]
+    fn an_agent_its_roster_lists_and_its_record_serves_says_so_on_every_read() {
+        let policy = IdentityCreationPolicy::parse(&json!({
+            "enabled": true,
+            "approval": {"rules": [{"change": ["archive"], "outcome": {"kind": "allow"}}]},
+        }))
+        .expect("the policy parses")
+        .expect("the policy is enabled");
+        for listed in [true, false] {
+            let agent = agent(listed);
+            let member = |value: Value| value.get("roster_listing_superseded").cloned();
+            let expected = listed.then(|| json!(true));
+            assert_eq!(
+                member(serde_json::to_value(agent.summary()).expect("a list entry")),
+                expected,
+                "the agent of a list"
+            );
+            assert_eq!(
+                member(serde_json::to_value(agent.record()).expect("a get")),
+                expected,
+                "the agent of a get"
+            );
+            assert_eq!(
+                member(
+                    serde_json::to_value(IdentityGate::directory_peer(Some(&policy), &agent))
+                        .expect("a directory entry")
+                ),
+                expected,
+                "its directory entry"
+            );
+            // The plan of a change of it carries what the judged change
+            // read of its target.
+            let normalized = normalize_archive(
+                &policy,
+                &RequesterFacts::host("ops"),
+                RequestEnvelope::default(),
+                &agent.entry(&policy),
+                &ArchiveIdentitySpec::new("scout", agent.spec_digest.clone()),
+            )
+            .expect("the archive normalizes");
+            let judged = Judged::of(normalized, &agent);
+            assert_eq!(judged.roster_listing_superseded, listed);
+            let mut plan = ChangePlan::new(
+                judged.normalized.plan.kind(),
+                judged.normalized.plan.change,
+                judged.normalized.plan.timeout_ms,
+                agent.spec_digest.clone(),
+                agent.spec_digest.clone(),
+                "",
+            );
+            plan.roster_listing_superseded = judged.roster_listing_superseded;
+            assert_eq!(
+                member(serde_json::to_value(plan).expect("a plan")),
+                expected,
+                "the plan of a change of it"
+            );
+        }
     }
 }

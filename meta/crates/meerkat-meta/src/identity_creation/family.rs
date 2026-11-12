@@ -27,7 +27,7 @@ use std::collections::BTreeMap;
 
 use async_trait::async_trait;
 use meerkat_core::ContentInput;
-use meerkat_mob::{MobHandle, ProfileName};
+use meerkat_mob::{MobHandle, MobRuntimeMode, ProfileName};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -45,6 +45,7 @@ use super::request::{
     RequestEnvelope, UnarchiveIdentitySpec, UpdateIdentitySpec,
 };
 use super::request::{Requester, SourceEvidence, UpdateSetSpec};
+use super::schedules::SchedulesFollowed;
 
 fn malformed(field: impl Into<String>) -> IdentityRefusal {
     IdentityRefusal::new(IdentityRefusalKind::InvalidRequest {
@@ -83,6 +84,14 @@ pub struct AgentSpec {
     /// agents of the same create. Nothing else is wired to it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub peers: Vec<String>,
+    /// Who reaches it: `addressable`, which an absent member means, or
+    /// `internal_only`. The member and the values of a roster row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub addressability: Option<AgentAddressability>,
+    /// How it runs: `autonomous_host` or `turn_driven`; absent, as its
+    /// profile says. The member and the values of a roster row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_mode_override: Option<MobRuntimeMode>,
 }
 
 impl AgentSpec {
@@ -97,6 +106,8 @@ impl AgentSpec {
             labels: BTreeMap::new(),
             first_message: None,
             peers: Vec::new(),
+            addressability: None,
+            runtime_mode_override: None,
         }
     }
 
@@ -118,13 +129,13 @@ impl AgentSpec {
         let mut spec = CreateIdentitySpec::new(DurableAgentSpec {
             identity,
             profile: ProfileName::from(self.profile.as_str()),
-            addressability: AgentAddressability::default(),
+            addressability: self.addressability.unwrap_or_default(),
             display_name,
             labels: self.labels.clone(),
             context: self.context.clone(),
             additional_instructions: self.instructions.clone(),
             initial_message: self.first_message.clone(),
-            runtime_mode_override: None,
+            runtime_mode_override: self.runtime_mode_override,
             backend: None,
             binding: None,
             placement: None,
@@ -216,6 +227,13 @@ pub struct AgentSet {
     /// The profile: the agent moves to it, on the same conversation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
+    /// Who reaches it: `addressable` or `internal_only`, as on a create.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub addressability: Option<AgentAddressability>,
+    /// How it runs: `autonomous_host` or `turn_driven`, as on a create. An
+    /// update sets it and cannot return the agent to its profile's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_mode_override: Option<MobRuntimeMode>,
 }
 
 /// An update of one agent, as every surface writes it.
@@ -284,6 +302,8 @@ impl UpdateAgent {
             labels,
             labels_remove,
             profile,
+            addressability,
+            runtime_mode_override,
         } = &self.set;
         let display_name = display_name
             .as_deref()
@@ -339,8 +359,8 @@ impl UpdateAgent {
             expected_spec_digest: self.expected_spec_digest.clone(),
             set: UpdateSetSpec {
                 profile: profile.as_deref().map(ProfileName::from),
-                addressability: None,
-                runtime_mode_override: None,
+                addressability: *addressability,
+                runtime_mode_override: *runtime_mode_override,
                 display_name,
                 additional_instructions: instructions.clone(),
                 context: context.clone(),
@@ -736,6 +756,20 @@ pub struct AgentSummary {
     /// answer an agent reads leaves this empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub open_operations: Vec<OperationId>,
+    /// Who reaches it, when that is not the default: `internal_only`. An
+    /// addressable agent says nothing. What a create and an update set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub addressability: Option<AgentAddressability>,
+    /// How it runs, when its record says so: `autonomous_host` or
+    /// `turn_driven`. An agent that runs as its profile says says nothing.
+    /// What a create and an update set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_mode_override: Option<MobRuntimeMode>,
+    /// Whether the host's roster lists this name while the agent is served
+    /// from its record: the roster's entry is not applied. Written only
+    /// when it is so.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub roster_listing_superseded: bool,
 }
 
 impl AgentSummary {
@@ -758,6 +792,9 @@ impl AgentSummary {
             readiness,
             provenance: None,
             open_operations: Vec::new(),
+            addressability: None,
+            runtime_mode_override: None,
+            roster_listing_superseded: false,
         }
     }
 }
@@ -947,6 +984,11 @@ pub struct DirectoryPeer {
     /// entry: `verdict`, with `lines` or `reason` beside it.
     #[serde(flatten)]
     pub verdict: DirectoryVerdict,
+    /// Whether the host's roster lists this name while the agent is served
+    /// from its record: the roster's entry is not applied. Written only
+    /// when it is so.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub roster_listing_superseded: bool,
 }
 
 impl DirectoryPeer {
@@ -962,6 +1004,7 @@ impl DirectoryPeer {
             display_name: None,
             profile: profile.into(),
             verdict,
+            roster_listing_superseded: false,
         }
     }
 }
@@ -1010,6 +1053,19 @@ pub struct ChangePlan {
     pub subject_digest: Sha256Digest,
     /// The canonical rendering a decider would be shown, whole.
     pub rendering: String,
+    /// Whether the host's roster lists the agent the change names while
+    /// the agent is served from its record: the roster's entry is not
+    /// applied, so the change is of the record alone. Written only when it
+    /// is so.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub roster_listing_superseded: bool,
+    /// The schedules that target the agent and that the change would take
+    /// with it: paused by an archive, resumed by an unarchive, ended by a
+    /// removal. Present on the plan of those three changes, on a launch
+    /// whose family is given its schedules. It is what the schedules are
+    /// when the plan is made, and no part of the rendering.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schedules: Option<SchedulesFollowed>,
 }
 
 impl ChangePlan {
@@ -1032,6 +1088,8 @@ impl ChangePlan {
             request_digest,
             subject_digest,
             rendering: rendering.into(),
+            roster_listing_superseded: false,
+            schedules: None,
         }
     }
 }

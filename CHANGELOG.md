@@ -305,6 +305,14 @@ them.
   permissions the manifest had). Keep the directories that hold them closed
   to other accounts, or run under a umask of 077.
 
+- `meerkat-mob`: a spawn rollback that is still owed when the mob is
+  stopped (the refused spawn answered `rollback remains owned for retry`)
+  is finished by a later resume, and it can take more than one, because a
+  resume can answer `LifecycleOperationProgressStalled` before a later one
+  succeeds and the member is removed; and a mob that is restarted from its
+  storage before the rollback has recorded its start has the member seated
+  with part of its edges and does not remove it by itself.
+
 ## [0.9.14] - 2026-11-11
 
 ### Highlights

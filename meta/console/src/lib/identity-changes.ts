@@ -1214,14 +1214,22 @@ export function requesterWords(provenance: AgentProvenance, personName: (key: st
  * keeps says this with it. */
 const HARVEST_WORDS = "Its last conversation is harvested and distilled, as for any agent that leaves the team.";
 
+/** What the removal of an archived agent says in the harvest's place: the
+ * agent left the team at its archive, its last conversation was harvested
+ * and distilled then, and its removal harvests nothing. */
+const HARVESTED_AT_ARCHIVE_WORDS = "Its last conversation was already harvested and distilled when it was archived.";
+
 /** What the confirmation of a change of one agent as a whole says.
  * `state.waiting` is an agent that still waits for its host's preparation:
  * it has no member and never started, so its removal harvests nothing and
- * an archive is no choice for it. */
+ * an archive is no choice for it. `state.archived` is an agent that is
+ * archived already: its removal says that the harvest ran at its archive,
+ * and names no archive as a choice (what it keeps while it stays archived
+ * is said instead). */
 export function agentChangeConfirmWords(
   change: "archive" | "unarchive" | "remove",
   name: string,
-  state: { waiting?: boolean } = {},
+  state: { waiting?: boolean; archived?: boolean } = {},
 ): { question: string; consequence: string; confirm: string } {
   if (change === "remove" && state.waiting === true) {
     return {
@@ -1242,6 +1250,13 @@ export function agentChangeConfirmWords(
       question: `Unarchive ${name}?`,
       consequence: "It comes back on the conversation it had and takes messages again.",
       confirm: "Unarchive",
+    };
+  }
+  if (state.archived === true) {
+    return {
+      question: `Remove ${name} for good?`,
+      consequence: `Its name can never be used again, and this cannot be undone. ${HARVESTED_AT_ARCHIVE_WORDS} Left archived, it keeps its name, its record, its conversation and its memory, and you can bring it back.`,
+      confirm: "Remove for good",
     };
   }
   return {

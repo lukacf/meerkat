@@ -116,6 +116,8 @@ interface RosterAgentChange {
   controls: Pick<AgentIdentityControls, "archive">;
   /** The agent still waits for its host: it never started. */
   waiting?: boolean;
+  /** The agent is archived already: it left the team at its archive. */
+  archived?: boolean;
 }
 
 const AGENT_CHANGE_WORDS: Record<OpenAgentChange, string> = {
@@ -582,6 +584,7 @@ export function RosterPanel({
         displayName={agentChange.displayName}
         controls={agentChange.controls}
         waiting={agentChange.waiting}
+        archived={agentChange.archived}
         onClose={() => setAgentChange(null)}
         onSwitch={(change) => setAgentChange({ ...agentChange, change })}
       />
@@ -726,6 +729,7 @@ export function RosterPanel({
                   setAgentChange({
                     name: agent.name, displayName: agentShownName(agent), change, controls: { archive: false },
                     waiting: waitsForItsHost(agent),
+                    archived: agent.archived,
                   });
                 }}
               />

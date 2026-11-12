@@ -980,6 +980,7 @@ export function AgentChangeConfirm({
   name,
   displayName,
   waiting,
+  archived,
   onClose,
   onArchiveInstead,
 }: {
@@ -989,11 +990,13 @@ export function AgentChangeConfirm({
   displayName: string;
   /** The agent still waits for its host: it never started. */
   waiting?: boolean;
+  /** The agent is archived already: it left the team at its archive. */
+  archived?: boolean;
   onClose: () => void;
   /** Offered beside a removal when the viewer may archive the agent. */
   onArchiveInstead?: () => void;
 }): React.JSX.Element {
-  const words = agentChangeConfirmWords(change, displayName, { waiting });
+  const words = agentChangeConfirmWords(change, displayName, { waiting, archived });
   const sender = useChangeSender(api, change, displayName);
   const request = React.useRef<Record<string, unknown> | null>(null);
   const [reading, setReading] = React.useState(false);
@@ -1090,6 +1093,7 @@ export function AgentChangePanel({
   displayName,
   controls,
   waiting,
+  archived,
   onClose,
   onSwitch,
 }: {
@@ -1100,6 +1104,8 @@ export function AgentChangePanel({
   controls: Pick<AgentIdentityControls, "archive">;
   /** The agent still waits for its host: it never started. */
   waiting?: boolean;
+  /** The agent is archived already: it left the team at its archive. */
+  archived?: boolean;
   onClose: () => void;
   onSwitch: (change: OpenAgentChange) => void;
 }): React.JSX.Element {
@@ -1113,6 +1119,7 @@ export function AgentChangePanel({
       name={name}
       displayName={displayName}
       waiting={waiting}
+      archived={archived}
       onClose={onClose}
       onArchiveInstead={change === "remove" && controls.archive ? () => onSwitch("archive") : undefined}
     />

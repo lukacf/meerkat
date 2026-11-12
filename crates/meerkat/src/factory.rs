@@ -26624,7 +26624,7 @@ mod prompt_tests {
                         .collect()
                 })
                 .unwrap_or_default();
-            (message.content.to_string(), shown, mounted)
+            (message.content.clone(), shown, mounted)
         }
 
         let (exact_prompt, exact_shown, exact_mounted) = build(true).await;

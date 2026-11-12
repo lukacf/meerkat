@@ -161,7 +161,15 @@ fn session_tool(name: &str, description: &str) -> Arc<ToolDef> {
 #[tokio::test]
 async fn agent_boundary_routes_tool_catalog_load_authority_from_control_plane() {
     let deferred = session_tool("deferred_mcp_tool", "Deferred MCP tool");
-    let deferred_two = session_tool("deferred_mcp_tool_two", "Second deferred MCP tool");
+    // The second tool alone is over the catalog's byte budget, so the
+    // session defers both.
+    let deferred_two = session_tool(
+        "deferred_mcp_tool_two",
+        &format!(
+            "Second deferred MCP tool {}",
+            "x".repeat(meerkat_core::tool_catalog::DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD)
+        ),
+    );
     let session_dispatcher: Arc<dyn AgentToolDispatcher> = Arc::new(ExactCatalogDispatcher {
         tools: vec![Arc::clone(&deferred), Arc::clone(&deferred_two)].into(),
         catalog: vec![

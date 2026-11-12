@@ -957,7 +957,7 @@ async fn a_session_created_before_any_registration_defers_only_once_it_is_over_t
     let seen = client.seen_tools();
     assert_eq!(seen.len(), 3, "expected three LLM calls, got {seen:?}");
     assert_eq!(
-        seen[2].iter().filter(|name| is_control(*name)).count(),
+        seen[2].iter().filter(|name| is_control(name)).count(),
         2,
         "over the budget both catalog control tools are in the request, got {:?}",
         seen[2]

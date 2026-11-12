@@ -68848,7 +68848,7 @@ mod runtime_observation_tests {
             binding_generation: 2,
         };
         assert!(
-            pending_host_revoke_anchors(&[
+            pending_host_revoke_anchors(&vec![
                 event(1, started.clone()),
                 event(2, started.clone()),
                 event(3, confirmed.clone()),

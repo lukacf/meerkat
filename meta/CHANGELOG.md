@@ -521,7 +521,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   only a session: such a schedule for an archived agent is active and each
   of its fires is refused at the delivery (one that names only the session
   ends each fire as a missing target instead: `misfired`, failure class
-  `target_missing`). A schedule that names only a
+  `target_missing`, under the default missing-target policy; `skipped` for
+  a schedule created with `skip`). A schedule that names only a
   session and is created while the session's agent is archived is active
   the same way; a later archive of the agent is followed. An agent's
   schedule tool call

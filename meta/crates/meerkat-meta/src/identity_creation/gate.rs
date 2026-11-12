@@ -1950,7 +1950,9 @@ impl IdentityFamilyOptions {
 
     /// These options, with the launch's schedules `schedules`: the
     /// schedules that target an agent are paused by its archive, resumed by
-    /// its unarchive and ended by its removal.
+    /// its unarchive and ended by its removal. The answers then carry the
+    /// list of those schedules: see [`SchedulesFollowed`] for who is given
+    /// it and what a host that serves other callers withholds itself.
     #[must_use]
     pub fn with_schedules(mut self, schedules: Arc<dyn AgentSchedules>) -> Self {
         self.schedules = Some(schedules);

@@ -30339,6 +30339,75 @@ default_model = "gemma"
         );
     }
 
+    /// `/dev/shm` is the exception to the `/dev` rule: it is a memory file
+    /// system for ordinary files and a usual place for a short-lived secret,
+    /// so a binding path there is written like any other. The row writes the
+    /// binding into a directory under `/dev/shm` that does not exist yet:
+    /// the file holds the binding and is 0600. What stands at the path is
+    /// still judged there: a named pipe in `/dev/shm` is refused and stays.
+    /// Where `/dev/shm` is absent or cannot be written, the row says so on
+    /// standard error and does not run. RED before: the path was refused
+    /// like every path in `/dev`.
+    #[cfg(all(target_os = "linux", feature = "comms"))]
+    #[tokio::test]
+    async fn comms_binding_out_writes_into_dev_shm() {
+        use std::os::unix::fs::{FileTypeExt as _, PermissionsExt as _};
+        let Ok(temp) = tempfile::Builder::new()
+            .prefix("rkat-binding-out-row-")
+            .tempdir_in("/dev/shm")
+        else {
+            eprintln!(
+                "comms_binding_out_writes_into_dev_shm: NOT exercised: /dev/shm is absent or \
+                 not writable here"
+            );
+            return;
+        };
+        let runtime = TestCommsRuntime::new("binding-out-dev-shm");
+
+        let path = temp.path().join("fresh").join("binding.json");
+        write_comms_binding_out(&path, &runtime)
+            .await
+            .expect("a binding path in /dev/shm is written");
+        let written = std::fs::symlink_metadata(&path).expect("the binding file");
+        assert!(written.file_type().is_file());
+        assert_eq!(written.permissions().mode() & 0o7777, 0o600);
+        let binding: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("read the binding"))
+                .expect("binding JSON");
+        assert_eq!(binding["kind"], "external");
+
+        let pipe = temp.path().join("binding.pipe");
+        #[allow(clippy::disallowed_methods)] // the test's own mkfifo
+        let made = std::process::Command::new("mkfifo")
+            .arg(&pipe)
+            .status()
+            .expect("run mkfifo");
+        assert!(made.success(), "mkfifo {}", pipe.display());
+        let error = write_comms_binding_out(&pipe, &runtime)
+            .await
+            .expect_err("a named pipe in /dev/shm is refused");
+        assert!(
+            matches!(
+                error.downcast_ref::<PrivateFileError>(),
+                Some(PrivateFileError::NotReplaceable {
+                    found: NotAFile {
+                        entry: PathEntry::NamedPipe,
+                        through_link: false
+                    },
+                    ..
+                })
+            ),
+            "the typed refusal of the named pipe: {error:#}"
+        );
+        assert!(
+            std::fs::symlink_metadata(&pipe)
+                .expect("the named pipe")
+                .file_type()
+                .is_fifo(),
+            "the named pipe is still there"
+        );
+    }
+
     /// `rkat init` writes the project document only into a file it creates:
     /// a symbolic link at the document's path, here one whose target does not
     /// exist (which the "already exists" check before the write does not

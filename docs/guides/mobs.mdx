@@ -1729,11 +1729,9 @@ leading prefix, or one that cannot carry them at all). It reads committed
 session state and never wakes a member; a member whose session cannot be
 read is reported with the reason, and the page still answers. A member is
 blocked for one of `owned_by_session`, `owned_by_other_mob`,
-`slot_managed_by_activation` or `member_host_unsupported`.
-`durability_unavailable` stays in the vocabulary and is no longer reported
-for a member: a store that cannot take the record leaves the member owed,
-and the record is tried again. The last failure is diagnostic and is not
-kept across a restart. The reasons
+`slot_managed_by_activation`, `durability_unavailable` (its session service
+keeps no durable session document) or `member_host_unsupported`. The last
+failure is diagnostic and is not kept across a restart. The reasons
 and the residency are advisory and may grow: the SDKs keep a value they do
 not know as `{"unknown": <the value>}`. A member's session also publishes an
 `operator_instructions_applied` event for each entry it applies (an

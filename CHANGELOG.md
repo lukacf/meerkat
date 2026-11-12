@@ -107,23 +107,11 @@ them.
   not grow with other members' records, and a mob load pays a constant per
   record.
 
-- `meerkat-mob`: a member whose session cannot take the mob's operator
-  instruction record because its store is unavailable
-  (`durability_unavailable`) stays owed and is tried again, as after any
-  failed write. Before, the member was blocked until a new write selected
-  it, it was seated again or the mob restarted, although a store comes back.
-  Behaviour change: `mob/instruction_status`
-  (`MobHandle::operator_instruction_status`) no longer reports a member
-  `blocked` with reason `durability_unavailable`; such a member reads `owed`
-  with the failure as its `last_failure`. The reason stays in the vocabulary
-  (`MemberInstructionBlockReason::DurabilityUnavailable`, the wire value)
-  and nothing produces it for a member any more. A `MobSessionService`
-  wrapper that does not forward `record_member_instruction_target` therefore
-  leaves its members owed, tried at most 30 seconds apart, where they were
-  reported blocked. The mob logs one warning for a member's failed record,
-  at its first failure, and again only when the failure's class changes or
-  after a record landed, never one per retry; the warning names the member
-  and the class. A member's `last_failure` is diagnostic: it is kept in
+- `meerkat-mob`: the mob logs one warning for a member's failed operator
+  instruction record, at its first failure, and again only when the
+  failure's class changes or after a record landed, never one per retry;
+  the warning names the mob, the member and the class. A member's
+  `last_failure` in `mob/instruction_status` is diagnostic: it is kept in
   the mob's process and not across a restart.
 
 ### Fixed

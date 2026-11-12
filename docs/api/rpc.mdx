@@ -1528,10 +1528,9 @@ member's session is on its member host, which the read does not reach) and
 `live_channel_open` (operator instructions apply to the member's turns, not
 to a live channel). The read never wakes or materializes a member. A
 member's `delivery` is `blocked` with reason `owned_by_session`,
-`owned_by_other_mob`, `slot_managed_by_activation` or
-`member_host_unsupported`; `durability_unavailable` stays in the vocabulary
-and is no longer reported for a member (a store that cannot take the record
-leaves the member `owed`, and the record is tried again). `last_failure` is
+`owned_by_other_mob`, `slot_managed_by_activation`, `durability_unavailable`
+(its session service keeps no durable session document) or
+`member_host_unsupported`. `last_failure` is
 diagnostic and is not kept across a restart. Writes
 need the `AdminHost` scope, the read `ReadHistory`.
 

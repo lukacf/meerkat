@@ -37,41 +37,6 @@ them.
 
 ### Breaking
 
-- `meerkat-meta`: distilled memory taint is now decided by what each
-  extraction call read, not by the whole history of the session. A distilled
-  record lands clean only when every transcript row its extraction call read
-  is proven clean from typed facts, and the only rows proven clean are a
-  person's own typed input: a conversational user row whose turn input is
-  typed text and whose host-stamped direct requester is a person (render
-  class absent or a user prompt). The Distiller reads those rows in a call of
-  their own; the rest of the window is read by a second call whose records
-  are unknown evidence. In practice:
-  - FEWER records are quarantined: a person's own typed statement is stored
-    active even when the session read untrusted content earlier.
-  - These are STILL quarantined: anything drawn from a peer message, a tool
-    result, provider server-tool content, the agent's own replies, a
-    compaction summary or compaction discards, or user text without the
-    host's person attestation, and every record of a call that read any such
-    row. Unknown evidence always quarantines; a missing trust fact is never
-    clean. This also holds for a session whose taint the running process
-    never observed (an earlier process, a member not yet woken).
-  - A host whose sends carry no person requester (a host-relayed message,
-    for example) gets no clean rows and so keeps quarantining every
-    distilled record, more often than before for sessions that never read
-    untrusted content.
-  - No existing quarantined record is released by an upgrade; review and the
-    steward keep deciding those.
-  Agent recorder writes and steward writes are unchanged. Reset boundaries
-  still quarantine every distillate over the session. The cited range stays
-  provenance only and is clamped to the clean call's input. Struct changes:
-  `memory::records::EvidenceRef` gains `clean_input:
-  Option<CleanExtractionInput>` (serde-defaulted, omitted when `None`) and
-  `memory::distiller::TranscriptMessage` gains `proven_clean: bool`; new
-  `memory::records::CleanExtractionInput` (`rows`, `digest`,
-  `digest_rows`) and `memory::distiller::proven_clean_row`. The
-  `distiller-eval` binary reports a `clean_call` verdict, and distiller
-  fixtures accept `attested_person` on user rows.
-
 - Behaviour-only (not measured by the gate): `meerkat-core`:
   `ReplayPlan::build` with an OpenAI-wire `ReplayTarget`, and
   `ReplayWireFamily::OpenAi.strip_foreign_metadata`, no longer keep

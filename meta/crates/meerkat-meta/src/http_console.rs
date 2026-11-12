@@ -8382,7 +8382,9 @@ async fn handle_memory_panel_quarantine(
     let mut records = Vec::new();
     let mut pending = Vec::new();
     for realm in &realms {
-        match store.quarantined_records(realm, limit).await {
+        // Both quarantine classes, each with its own share of the bound
+        // (§10.1), so one class's volume never hides the other.
+        match crate::memory::capabilities::quarantine_review_window(store, realm, limit).await {
             Ok(rows) => records.extend(rows),
             Err(err) => return memory_panel_store_error(response_id, err),
         }

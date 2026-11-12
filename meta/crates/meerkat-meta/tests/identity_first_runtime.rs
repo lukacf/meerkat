@@ -6701,10 +6701,13 @@ async fn reset_distillation_quarantine_case() {
     release.add_permits(10);
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     let distillate = loop {
-        let mut quarantined = memory_store
-            .quarantined_records("default", 10)
-            .await
-            .unwrap();
+        let mut quarantined = meerkat_meta::memory::capabilities::quarantine_review_window(
+            memory_store.as_ref(),
+            "default",
+            10,
+        )
+        .await
+        .unwrap();
         if let Some(found) = quarantined.pop() {
             break found;
         }
@@ -6735,8 +6738,18 @@ async fn reset_distillation_quarantine_case() {
         "the reset distillation must cite the OUTGOING session"
     );
 
-    // A later LLM-authored write citing the NEW session passes the same
-    // gate cleanly: the boundary quarantines the outgoing session only.
+    // A later distilled write citing the NEW session with a proven-clean
+    // extraction input passes the same gate cleanly: the boundary
+    // quarantines the outgoing session only. (Under evidence-scoped taint a
+    // distilled write with no clean input is unknown evidence and
+    // quarantines on any session, so the clean input is what this checks
+    // the boundary against.)
+    let clean_input = meerkat_meta::memory::records::CleanExtractionInput {
+        rows: vec![0],
+        digest: meerkat_meta::memory::records::CleanExtractionInput::digest_rows([(
+            0, "user", "typed",
+        )]),
+    };
     let receipt = meerkat_meta::AgentMemoryProvider::remember_authored(
         memory_store.as_ref(),
         &meerkat_meta::memory::records::MemoryScope::Identity {
@@ -6754,7 +6767,7 @@ async fn reset_distillation_quarantine_case() {
                 generation: new_binding.generation().get(),
                 revision: None,
                 range: None,
-                clean_input: None,
+                clean_input: Some(clean_input),
             }],
             verification: None,
         },
@@ -7296,10 +7309,13 @@ async fn a_reset_harvests_an_owed_compaction_before_its_transcript_distillation(
         !events.iter().any(|event| event.starts_with("follow-up")),
         "the retirement's harvest of the settled batch fires no compaction follow-up: {events:?}"
     );
-    let quarantined = memory_store
-        .quarantined_records("default", 10)
-        .await
-        .unwrap();
+    let quarantined = meerkat_meta::memory::capabilities::quarantine_review_window(
+        memory_store.as_ref(),
+        "default",
+        10,
+    )
+    .await
+    .unwrap();
     assert!(
         quarantined.iter().any(|record| record
             .provenance
@@ -8426,10 +8442,13 @@ async fn a_reset_of_a_live_identity_harvests_its_session_s_compactions_before_it
         !events.iter().any(|event| event.starts_with("follow-up")),
         "the retirement's read of the session's memory fires no compaction follow-up: {events:?}"
     );
-    let quarantined = memory_store
-        .quarantined_records("default", 10)
-        .await
-        .unwrap();
+    let quarantined = meerkat_meta::memory::capabilities::quarantine_review_window(
+        memory_store.as_ref(),
+        "default",
+        10,
+    )
+    .await
+    .unwrap();
     assert!(
         quarantined.iter().any(|record| record
             .provenance

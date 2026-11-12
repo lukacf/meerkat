@@ -2129,10 +2129,15 @@ impl StewardEngine {
             proposals
                 .into_iter()
                 .partition(|proposal| matches!(proposal.scope, MemoryScope::Operator { .. }));
-        let mut quarantine = self
-            .store
-            .quarantined_records(&self.realm, MAX_QUARANTINE_PER_DREAM)
-            .await?;
+        // The dream's quarantine window is bounded per class (§10.1), so
+        // records quarantined for unproven input cannot starve the records
+        // that carry a taint signal, nor the reverse.
+        let mut quarantine = crate::memory::capabilities::quarantine_review_window(
+            self.store.as_ref(),
+            &self.realm,
+            MAX_QUARANTINE_PER_DREAM,
+        )
+        .await?;
         quarantine.retain(|record| partition.covers(&record.scope));
         // A person's operator-scope records are never shown to the dream:
         // their ids are kept for the shell's typed refusals only.
@@ -4091,11 +4096,13 @@ impl StewardEngine {
         // Quarantined records of this identity are shown (labeled) so the
         // dream can judge retention, but promote verdicts on them are
         // shell-downgraded to keep — gating owns quarantine promotion.
-        let quarantined = self
-            .store
-            .quarantined_records(&self.realm, MAX_QUARANTINE_PER_DREAM)
-            .await
-            .map_err(store_err)?;
+        let quarantined = crate::memory::capabilities::quarantine_review_window(
+            self.store.as_ref(),
+            &self.realm,
+            MAX_QUARANTINE_PER_DREAM,
+        )
+        .await
+        .map_err(store_err)?;
         records.extend(
             quarantined
                 .into_iter()

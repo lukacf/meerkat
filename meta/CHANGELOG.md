@@ -30,6 +30,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   from then on, and the members already seated in it keep the owner their
   own spawn gave them.
 
+### Breaking
+
+- Distilled memory taint is now decided by what each extraction call read,
+  not by the whole history of the session. A distilled record lands clean
+  only when every transcript row its extraction call read is proven clean
+  from typed facts, and the only rows proven clean are a person's own typed
+  input: a conversational user row whose turn input is typed text and whose
+  host-stamped direct requester is a person (render class absent or a user
+  prompt). The Distiller reads those rows in a call of their own and reads
+  the whole window in a second call, whose records are unknown evidence. In
+  plain words:
+  - Fewer records are quarantined where a person typed the fact: a person's
+    own typed statement is stored active even when the session read
+    untrusted content earlier.
+  - More records are quarantined elsewhere. Records distilled from the
+    agent's own replies and from tool results were ACTIVE before in sessions
+    that read nothing untrusted, and are QUARANTINED now, because such rows
+    are never proven clean.
+  - Still quarantined: anything drawn from a peer message, a tool result,
+    provider server-tool content, the agent's own replies, a compaction
+    summary or compaction discards, or user text without the host's person
+    attestation, and every record of a call that read any such row. Unknown
+    evidence always quarantines, with or without a session taint tracker; a
+    missing, empty or malformed trust fact is never clean.
+  - A window that holds both proven-clean rows and other rows now costs two
+    extraction calls instead of one. A window of only one kind is one call,
+    as before. Both calls complete before anything is written: if either
+    fails, nothing is stored and the window is read again on the next run.
+  - A host whose sends carry no person requester gets no proven-clean rows,
+    so every one of its distilled records quarantines.
+  - No existing quarantined record is released by an upgrade; review and the
+    steward keep deciding those.
+  - Quarantined records now carry a durable class, `unproven` (nothing proved
+    the input clean) or `tainted` (a taint fact was detected); records
+    quarantined before this release read as `tainted`. The Hygienist's span
+    hard block and the steward's dream read each class with its own bound,
+    so a volume of `unproven` records can no longer push a `tainted` record
+    out of review.
+  Agent recorder writes and steward writes are unchanged. Reset boundaries
+  still quarantine every distillate over the session. The cited range stays
+  provenance only, and a clean record keeps a cited range only when every
+  row in it is a row its call read. Struct and trait changes:
+  `memory::records::EvidenceRef` gains `clean_input:
+  Option<CleanExtractionInput>`, and `memory::records::MemoryProvenance`
+  gains `quarantine_class: Option<QuarantineClass>` (both serde-defaulted,
+  omitted when `None`); `memory::distiller::TranscriptMessage` gains
+  `proven_clean: bool`; new `memory::records::CleanExtractionInput`,
+  `QuarantineClass` and `QuarantineVerdict`, `memory::distiller::proven_clean_row`
+  and `memory::capabilities::quarantine_review_window`;
+  `StewardStore::quarantined_records` takes a `QuarantineClass`; and
+  `LlmWriteGate` gains `quarantine_verdict` (defaulted). The
+  `distiller-eval` binary reports a `clean_call` verdict, and distiller
+  fixtures accept `attested_person` on user rows.
+
 ## [0.9.13] - 2026-11-11
 
 Meta 0.9.13 is part of Meerkat 0.9.13 (Core 0.9.13, Meta 0.9.13 and Connect

@@ -1053,9 +1053,16 @@ as a deliverable rather than asserting "the runtime knows":
   host-stamped direct requester is a person (render class absent or a user
   prompt). The Distiller reads those rows in a call of their own and stamps
   its records with that call's input (`EvidenceRef::clean_input`: the row
-  indices and a digest of the rows); the rest of the window is read by a second
-  call whose records quarantine. The cited range stays provenance only and is
-  clamped to the clean call's input. Compaction discards carry no row facts,
+  indices and a digest of the rows, naming only rows the render budget kept);
+  the whole window is read by a second call whose records quarantine. Both
+  calls complete before any write, so a failure of either writes nothing and
+  leaves the cursor. The cited range stays provenance only; a clean record
+  keeps it only when every row in it is a row its call read. The gate accepts
+  only a well-formed clean input and decides distilled writes with or without
+  a tracker wired. Quarantined records carry a durable class, `unproven` or
+  `tainted` (legacy rows read as `tainted`), and the Hygienist's span hard
+  block and the steward's dream read each class with its own bound, so routine
+  `unproven` volume cannot starve the review of a `tainted` record. Compaction discards carry no row facts,
   so a compaction harvest always quarantines. Tool results, peer messages,
   server-tool content, the agent's own replies and compaction summaries are
   never proven clean by this rule; proving any of them would need its own

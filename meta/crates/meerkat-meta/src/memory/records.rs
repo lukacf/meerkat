@@ -334,6 +334,61 @@ impl CleanExtractionInput {
         }
         hex
     }
+
+    /// Whether this input names at least one row and carries a digest of
+    /// the form [`Self::digest_rows`] produces. The write gate accepts only
+    /// a well-formed input as clean; an empty or malformed one is unknown.
+    pub fn is_well_formed(&self) -> bool {
+        !self.rows.is_empty()
+            && self.digest.len() == 7 + 64
+            && self.digest.starts_with("sha256:")
+            && self.digest[7..]
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    }
+}
+
+/// Why a record landed quarantined, as a durable typed class (§10.1). The
+/// review readers (the Hygienist's span hard block and the steward's dream)
+/// read each class with its own bound, so a volume of one class cannot push
+/// the other out of view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuarantineClass {
+    /// No taint fact is known: the write was quarantined only because
+    /// nothing proved its input clean (unknown evidence, no evidence, or a
+    /// quarantine-everything posture).
+    Unproven,
+    /// A taint fact was detected: a tainted session or evidence, a reset
+    /// boundary, or a tainted author. Records quarantined before this class
+    /// existed read as this class.
+    Tainted,
+}
+
+impl QuarantineClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unproven => "unproven",
+            Self::Tainted => "tainted",
+        }
+    }
+}
+
+/// The write gate's quarantine verdict: the reason recorded as the row's
+/// status detail, and its durable [`QuarantineClass`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuarantineVerdict {
+    pub reason: String,
+    pub class: QuarantineClass,
+}
+
+impl QuarantineVerdict {
+    pub fn new(reason: impl Into<String>, class: QuarantineClass) -> Self {
+        Self {
+            reason: reason.into(),
+            class,
+        }
+    }
 }
 
 /// Calibration profile reference (§11). All strings for now: the calibration
@@ -367,6 +422,11 @@ pub struct MemoryProvenance {
     pub profile: Option<CalibrationRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verification: Option<VerificationClaim>,
+    /// Set when the record landed quarantined: why, as a durable class
+    /// (§10.1). Absent on active records and on records quarantined before
+    /// the class existed (those read as [`QuarantineClass::Tainted`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quarantine_class: Option<QuarantineClass>,
 }
 
 /// Usage ledger counters (§9.2). Deterministic side only; judged-useful
@@ -860,6 +920,7 @@ mod tests {
                 },
                 profile: None,
                 verification: None,
+                quarantine_class: None,
             },
             trust: TrustTier::AgentObserved,
             status: RecordStatus::Superseded {

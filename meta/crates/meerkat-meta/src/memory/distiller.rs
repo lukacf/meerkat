@@ -765,17 +765,18 @@ pub fn proven_clean_row(message: &Message) -> bool {
 }
 
 /// One proven-clean extraction call over a window (§10.1): the rendered
-/// clean rows, which rows they are, their digest, and the input window a
-/// record's citation is clamped to.
+/// clean rows and the input stamp naming exactly the rows that prompt
+/// carries, with their digest.
 #[derive(Debug, Clone)]
 struct CleanCall {
     text: String,
     input: crate::memory::records::CleanExtractionInput,
-    window: (u64, u64),
 }
 
 impl CleanCall {
-    /// The clean call over `slice`'s proven-clean rows, if it has any.
+    /// The clean call over `slice`'s proven-clean rows, if it has any. The
+    /// stamp names only the rows the render budget kept: a row the prompt
+    /// dropped was never read, so it is never named.
     fn of(slice: &TranscriptSlice) -> Option<Self> {
         let rows: Vec<TranscriptMessage> = slice
             .messages
@@ -783,24 +784,39 @@ impl CleanCall {
             .filter(|message| message.proven_clean)
             .cloned()
             .collect();
-        let first = rows.first()?.index;
-        let last = rows.last()?.index;
-        let digest = crate::memory::records::CleanExtractionInput::digest_rows(
-            rows.iter()
-                .map(|row| (row.index, row.role, row.text.as_str())),
-        );
-        let text = render_transcript(&TranscriptSlice {
+        if rows.is_empty() {
+            return None;
+        }
+        let (text, kept) = render_transcript_rows(&TranscriptSlice {
             messages: rows.clone(),
             ..slice.clone()
         });
+        let read: Vec<&TranscriptMessage> = rows
+            .iter()
+            .filter(|row| kept.contains(&row.index))
+            .collect();
+        if read.is_empty() {
+            return None;
+        }
+        let digest = crate::memory::records::CleanExtractionInput::digest_rows(
+            read.iter()
+                .map(|row| (row.index, row.role, row.text.as_str())),
+        );
         Some(Self {
             text,
             input: crate::memory::records::CleanExtractionInput {
-                rows: rows.iter().map(|row| row.index).collect(),
+                rows: read.iter().map(|row| row.index).collect(),
                 digest,
             },
-            window: (first, last),
         })
+    }
+
+    /// A cited range is kept only when every row in it is a row this call
+    /// read; otherwise the record stores no range (§10.1). The clean rows
+    /// need not be contiguous, so a range between two clean rows can name
+    /// a row the call never read.
+    fn accepts(&self, (start, end): (u64, u64)) -> bool {
+        start <= end && (start..=end).all(|index| self.input.rows.contains(&index))
     }
 }
 
@@ -1123,7 +1139,15 @@ pub fn render_prompt(
 /// transcript byte budget (oldest messages drop first — the window's tail
 /// is the freshest evidence).
 pub fn render_transcript(slice: &TranscriptSlice) -> String {
+    render_transcript_rows(slice).0
+}
+
+/// [`render_transcript`] with the indices of the rows the byte budget kept,
+/// oldest first: the rows the prompt actually carries (§10.1). The newest
+/// rows are kept; the oldest are dropped first.
+fn render_transcript_rows(slice: &TranscriptSlice) -> (String, Vec<u64>) {
     let mut lines: Vec<String> = Vec::new();
+    let mut kept: Vec<u64> = Vec::new();
     let mut total = 0usize;
     for message in slice.messages.iter().rev() {
         let line = format!("[{}] {}: {}", message.index, message.role, message.text);
@@ -1133,9 +1157,11 @@ pub fn render_transcript(slice: &TranscriptSlice) -> String {
         }
         total += line.len() + 1;
         lines.push(line);
+        kept.push(message.index);
     }
     lines.reverse();
-    lines.join("\n")
+    kept.reverse();
+    (lines.join("\n"), kept)
 }
 
 fn render_discards(entries: &[DiscardEntry]) -> String {
@@ -1951,59 +1977,29 @@ impl DistillerEngine {
             run_id: run_id.clone(),
         };
         let mut client = client;
-        let mut manifest = manifest;
         let mut written = 0usize;
         let mut quarantined = 0usize;
         // Evidence-scoped taint (§10.1): the decision is what each call READ.
         // The clean call reads only proven-clean rows, so its records carry
-        // that input and land clean whatever they cite; the whole-window
-        // call reads the rest too, so its records are unknown evidence and
-        // quarantine at the store's gate. A window of only proven-clean rows
-        // is one (clean) call; a window with none is one whole-window call.
-        if let Some(clean) = clean_call.as_ref() {
-            let raw_ops = match self
+        // that input and land clean; the whole-window call reads the rest
+        // too, so its records are unknown evidence and quarantine at the
+        // store's gate. A window of only proven-clean rows is one (clean)
+        // call; a window with none is one whole-window call. Both calls of a
+        // mixed window complete before anything is written: a failure of
+        // either writes nothing and leaves the cursor where it was, so a
+        // retry reads the same window afresh.
+        let clean_ops = match clean_call.as_ref() {
+            Some(clean) => match self
                 .extract_with_reauth(identity, &mut client, &manifest, &tombstones, &clean.text)
                 .await
             {
-                Ok(ops) => ops,
+                Ok(ops) => Some(ops),
                 Err(reason) => return Ok(DistillOutcome::Skipped { reason }),
-            };
-            let (clean_written, clean_quarantined) = self
-                .write_ops(
-                    raw_ops,
-                    &manifest,
-                    &scope,
-                    &author,
-                    &run_id,
-                    session_key,
-                    generation,
-                    Some(clean.window),
-                    head_revision.as_deref(),
-                    Some(clean),
-                )
-                .await;
-            written += clean_written;
-            quarantined += clean_quarantined;
-            if whole_call {
-                // The whole-window call sees what the clean call stored, so
-                // the existing manifest handling covers its duplicates.
-                manifest = match self
-                    .provider
-                    .manifest(std::slice::from_ref(&scope), ManifestTier::Full)
-                    .await
-                {
-                    Ok(manifest) => manifest,
-                    Err(err) => {
-                        tracing::warn!(identity, error = %err, "agent memory distiller: manifest re-read failed");
-                        return Ok(DistillOutcome::Skipped {
-                            reason: format!("manifest read failed: {err}"),
-                        });
-                    }
-                };
-            }
-        }
-        if whole_call {
-            let raw_ops = match self
+            },
+            None => None,
+        };
+        let whole_ops = if whole_call {
+            match self
                 .extract_with_reauth(
                     identity,
                     &mut client,
@@ -2013,9 +2009,35 @@ impl DistillerEngine {
                 )
                 .await
             {
-                Ok(ops) => ops,
+                Ok(ops) => Some(ops),
                 Err(reason) => return Ok(DistillOutcome::Skipped { reason }),
-            };
+            }
+        } else {
+            None
+        };
+        if let (Some(clean), Some(raw_ops)) = (clean_call.as_ref(), clean_ops) {
+            let (clean_written, clean_quarantined) = self
+                .write_ops(
+                    raw_ops,
+                    &manifest,
+                    &scope,
+                    &author,
+                    &run_id,
+                    session_key,
+                    generation,
+                    None,
+                    head_revision.as_deref(),
+                    Some(clean),
+                )
+                .await;
+            written += clean_written;
+            quarantined += clean_quarantined;
+        }
+        if let Some(raw_ops) = whole_ops {
+            // Both calls read the same manifest; a fact both calls report
+            // lands once clean and once quarantined, and the existing
+            // duplicate handling (content-hash dedupe, steward
+            // consolidation) applies. No matcher compares the two calls.
             let (whole_written, whole_quarantined) = self
                 .write_ops(
                     raw_ops,
@@ -2182,17 +2204,21 @@ impl DistillerEngine {
         }
         // Model-cited range wins when it stays inside the window; a range
         // outside the evidence the model was shown is a hallucinated
-        // citation and falls back to the window bounds. For the clean call
-        // the window is its input's, so a citation never widens past what
-        // the call read. The range is provenance only: the taint decision
-        // reads `clean_input`.
-        let range = match (op.evidence_range, window_range) {
-            (Some((start, end)), Some((window_start, window_end)))
-                if start >= window_start && end <= window_end =>
-            {
-                Some((start, end))
-            }
-            (_, window) => window,
+        // citation and falls back to the window bounds. For the clean call a
+        // cited range is kept only when every row in it is a row the call
+        // read; otherwise no range is stored (its rows need not be
+        // contiguous, so no window bound is safe). The range is provenance
+        // only: the taint decision reads `clean_input`.
+        let range = match clean {
+            Some(clean) => op.evidence_range.filter(|range| clean.accepts(*range)),
+            None => match (op.evidence_range, window_range) {
+                (Some((start, end)), Some((window_start, window_end)))
+                    if start >= window_start && end <= window_end =>
+                {
+                    Some((start, end))
+                }
+                (_, window) => window,
+            },
         };
         NewMemoryRecord {
             kind: op.kind,

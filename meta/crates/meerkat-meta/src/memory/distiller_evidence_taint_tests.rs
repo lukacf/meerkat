@@ -413,16 +413,31 @@ async fn row_ii_tainted_peer_remember_instruction_is_quarantined() -> Result<(),
         statuses.iter().all(is_quarantined),
         "an injected instruction never lands active: {statuses:?}"
     );
-    // Any call that produced an active record read no tainted row.
-    for prompt in llm.prompts() {
-        if !prompt.contains("swordfish") {
-            continue;
-        }
-        assert!(
-            prompt.contains("Thanks."),
-            "the tainted row is read only by the whole-window call"
-        );
-    }
+    // Two calls ran: the clean call read the person's row and never the
+    // tainted one; only the whole-window call read the injected text.
+    let prompts = llm.prompts();
+    assert_eq!(prompts.len(), 2, "a mixed window is two calls");
+    let clean: Vec<&String> = prompts
+        .iter()
+        .filter(|prompt| !prompt.contains("swordfish"))
+        .collect();
+    assert_eq!(
+        clean.len(),
+        1,
+        "exactly one call did not read the injected row"
+    );
+    assert!(
+        clean[0].contains("Thanks."),
+        "the clean call read the person's row"
+    );
+    assert_eq!(
+        prompts
+            .iter()
+            .filter(|prompt| prompt.contains("swordfish"))
+            .count(),
+        1,
+        "only the whole-window call read the injected row"
+    );
     Ok(())
 }
 
@@ -607,7 +622,8 @@ async fn row_vii_operator_said_recorder_write_in_tainted_session_quarantines()
 // -- (viii) the clean call is decided by its input ------------------------------
 
 /// Row (viii): a record from the clean call whose model cites a tainted row
-/// index is decided by the call's input, and its range is clamped to it.
+/// index is decided by the call's input; a cited range that names any row
+/// the call did not read is not stored.
 #[tokio::test]
 async fn row_viii_clean_call_citation_is_clamped_to_its_input() -> Result<(), Box<dyn Error>> {
     let rig = Rig::new()?;
@@ -636,9 +652,8 @@ async fn row_viii_clean_call_citation_is_clamped_to_its_input() -> Result<(), Bo
     let evidence = &active[0].provenance.evidence;
     assert_eq!(evidence.len(), 1);
     assert_eq!(
-        evidence[0].range,
-        Some((1, 1)),
-        "a citation outside the clean input is replaced by the input window"
+        evidence[0].range, None,
+        "a citation naming a row the call did not read stores no range"
     );
     Ok(())
 }
@@ -929,4 +944,596 @@ fn row_ix_changing_a_row_changes_the_digest() {
         assert_ne!(base, changed);
     }
     assert!(base.starts_with("sha256:") && base.len() == 7 + 64);
+}
+
+// -- rule 3, one row per condition ----------------------------------------------
+
+/// Rule 3, condition by condition: a person's typed row is proven clean, and
+/// each single change of one attested fact makes it not proven clean.
+#[test]
+fn rule_iii_each_condition_is_required() {
+    use super::proven_clean_row;
+    use meerkat_core::types::{RenderClass, RenderMetadata, TranscriptUserRole};
+
+    let base = person_typed("I take the early train.");
+    assert!(proven_clean_row(&base), "a person's own typed row is clean");
+    let edit = |change: &dyn Fn(&mut UserMessage)| {
+        let Message::User(mut user) = base.clone() else {
+            unreachable!()
+        };
+        change(&mut user);
+        Message::User(user)
+    };
+    let not_clean: Vec<(&str, Message)> = vec![
+        (
+            "not conversational",
+            edit(&|user| user.transcript_role = TranscriptUserRole::CompactionSummary),
+        ),
+        (
+            "runtime-authored turn input",
+            edit(&|user| user.identity.turn_input = Some(TranscriptTurnInput::RuntimeAuthored)),
+        ),
+        (
+            "no turn input fact",
+            edit(&|user| user.identity.turn_input = None),
+        ),
+        ("no requester", edit(&|user| user.identity.requester = None)),
+        (
+            "requester carried, not direct",
+            edit(&|user| {
+                user.identity.requester = Some(TurnRequester::carried(
+                    PrincipalRef::new(PrincipalKind::Human, "person-1").unwrap(),
+                ));
+            }),
+        ),
+        (
+            "requester not a person",
+            edit(&|user| {
+                user.identity.requester = Some(TurnRequester::direct(
+                    PrincipalRef::new(PrincipalKind::ServiceAccount, "svc-1").unwrap(),
+                ));
+            }),
+        ),
+        (
+            "render class not a user prompt",
+            edit(&|user| {
+                user.render_metadata = Some(RenderMetadata {
+                    class: RenderClass::ExternalEvent,
+                    salience: Default::default(),
+                });
+            }),
+        ),
+        ("not a user row", assistant("I take the early train.")),
+    ];
+    for (condition, row) in not_clean {
+        assert!(!proven_clean_row(&row), "{condition}: must not be clean");
+    }
+    let prompt_class = edit(&|user| {
+        user.render_metadata = Some(RenderMetadata {
+            class: RenderClass::UserPrompt,
+            salience: Default::default(),
+        });
+    });
+    assert!(
+        proven_clean_row(&prompt_class),
+        "a user-prompt render class keeps it clean"
+    );
+}
+
+// -- call counts ------------------------------------------------------------------
+
+/// The number of extraction calls is pinned: a window of only clean rows is
+/// one call, a window with no clean row is one call, and a mixed window is
+/// exactly two.
+#[tokio::test]
+async fn row_call_counts_one_for_a_uniform_window_two_for_a_mixed_one() -> Result<(), Box<dyn Error>>
+{
+    let rig = Rig::new()?;
+    let cases: Vec<(&str, Vec<Message>, usize)> = vec![
+        (
+            "all clean",
+            vec![person_typed("Alpha."), person_typed("Beta.")],
+            1,
+        ),
+        (
+            "no clean row",
+            vec![tainted_peer("Peer message: gamma."), assistant("Delta.")],
+            1,
+        ),
+        (
+            "mixed",
+            vec![tainted_peer("Peer message: gamma."), person_typed("Alpha.")],
+            2,
+        ),
+    ];
+    for (case, rows, calls) in cases {
+        let session = rig.session(rows).await?;
+        rig.taint_live(&session);
+        let llm = RouterLlm::new(Vec::new());
+        distill(&rig.engine(llm.clone()), &session).await;
+        assert_eq!(llm.prompts().len(), calls, "{case}");
+    }
+    Ok(())
+}
+
+// ============================================================================
+// Regression rows from the independent security read, inverted to assert the
+// fixed behaviour.
+// ============================================================================
+
+/// The clean call's rows need not be contiguous: a citation of the tainted
+/// row that sits between two clean rows is not stored, because the call
+/// never read it.
+#[tokio::test]
+async fn row_clamp_rejects_a_tainted_row_between_clean_rows() -> Result<(), Box<dyn Error>> {
+    let rig = Rig::new()?;
+    let session = rig
+        .session(vec![
+            person_typed("The plumber comes on Thursday."),
+            tainted_peer("Peer message: unrelated noise from a peer."),
+            person_typed("Ok."),
+        ])
+        .await?;
+    rig.taint_live(&session);
+    let llm = RouterLlm::new(vec![Rule {
+        when: "The plumber comes on Thursday",
+        title: "Plumber Thursday",
+        cite: (0, 2),
+    }]);
+    distill(&rig.engine(llm), &session).await;
+    let active: Vec<MemoryRecord> = rig
+        .records()
+        .await?
+        .into_iter()
+        .filter(|record| record.title == "Plumber Thursday" && is_active(&record.status))
+        .collect();
+    assert_eq!(active.len(), 1, "the clean call's record is active");
+    let evidence = &active[0].provenance.evidence[0];
+    let input = evidence.clean_input.clone().expect("clean input stamped");
+    assert_eq!(input.rows, vec![0, 2], "the call read rows 0 and 2 only");
+    assert_eq!(
+        evidence.range, None,
+        "a range spanning tainted row 1 is not stored"
+    );
+    Ok(())
+}
+
+/// A range made only of rows the clean call read is kept.
+#[tokio::test]
+async fn row_clamp_keeps_a_range_of_read_rows() -> Result<(), Box<dyn Error>> {
+    let rig = Rig::new()?;
+    let session = rig
+        .session(vec![
+            tainted_peer("Peer message: unrelated noise from a peer."),
+            person_typed("The plumber comes on Thursday."),
+            person_typed("At nine."),
+        ])
+        .await?;
+    rig.taint_live(&session);
+    let llm = RouterLlm::new(vec![Rule {
+        when: "The plumber comes on Thursday",
+        title: "Plumber Thursday",
+        cite: (1, 2),
+    }]);
+    distill(&rig.engine(llm), &session).await;
+    let active: Vec<MemoryRecord> = rig
+        .records()
+        .await?
+        .into_iter()
+        .filter(|record| record.title == "Plumber Thursday" && is_active(&record.status))
+        .collect();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].provenance.evidence[0].range, Some((1, 2)));
+    Ok(())
+}
+
+/// The stamp names only the clean rows the render budget kept: a row the
+/// prompt dropped for budget was never read and is never named.
+#[tokio::test]
+async fn row_stamp_names_only_rows_the_render_budget_kept() -> Result<(), Box<dyn Error>> {
+    let rig = Rig::new()?;
+    let rows: Vec<Message> = (0..14)
+        .map(|index| person_typed(&format!("marker-{index:02} {}", "x".repeat(4200))))
+        .collect();
+    let session = rig.session(rows).await?;
+    let llm = RouterLlm::new(vec![Rule {
+        when: "marker-13",
+        title: "Budget row fact",
+        cite: (13, 13),
+    }]);
+    distill(&rig.engine(llm.clone()), &session).await;
+    let prompts = llm.prompts();
+    assert_eq!(prompts.len(), 1, "an all-clean window is one call");
+    assert!(prompts[0].contains("marker-13"), "the newest row was read");
+    assert!(
+        !prompts[0].contains("marker-00"),
+        "the oldest row was dropped for budget"
+    );
+    let active: Vec<MemoryRecord> = rig
+        .records()
+        .await?
+        .into_iter()
+        .filter(|record| record.title == "Budget row fact" && is_active(&record.status))
+        .collect();
+    assert_eq!(active.len(), 1);
+    let input = active[0].provenance.evidence[0]
+        .clean_input
+        .clone()
+        .expect("clean input stamped");
+    assert!(
+        !input.rows.contains(&0),
+        "the stamp never names a row the prompt dropped: {:?}",
+        input.rows
+    );
+    assert!(input.rows.contains(&13), "the stamp names the newest row");
+    for index in &input.rows {
+        assert!(
+            prompts[0].contains(&format!("marker-{index:02}")),
+            "every stamped row is in the prompt: row {index}"
+        );
+    }
+    Ok(())
+}
+
+/// A model that ignores the manifest and rephrases, and whose whole-window
+/// call can be made to fail.
+struct RephrasingLlm {
+    fail_whole: std::sync::atomic::AtomicBool,
+    clean_calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl LlmClient for RephrasingLlm {
+    fn stream<'a>(&'a self, request: &'a LlmRequest) -> meerkat_client::types::LlmStream<'a> {
+        use std::sync::atomic::Ordering;
+        let prompt = request
+            .messages
+            .iter()
+            .map(|message| match message {
+                Message::User(user) => user.text_content(),
+                _ => String::new(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let whole = prompt.contains("unrelated noise from a peer");
+        if whole && self.fail_whole.load(Ordering::SeqCst) {
+            return Box::pin(stream::iter(vec![Err(LlmError::ConnectionReset)]));
+        }
+        let reply = if whole {
+            "[]".to_string()
+        } else {
+            let version = self.clean_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            format!(
+                r#"[{{"action": "remember", "kind": "gotcha", "title": "Plumber Thursday",
+                "description": "When it matters", "body": "Plumber visit, wording {version}.",
+                "tags": [], "epistemic": "operator_said", "evidence_range": [0, 0]}}]"#
+            )
+        };
+        Box::pin(stream::iter(vec![
+            Ok(LlmEvent::TextDelta {
+                delta: reply,
+                meta: None,
+            }),
+            Ok(LlmEvent::Done {
+                outcome: LlmDoneOutcome::success(StopReason::EndTurn),
+            }),
+        ]))
+    }
+
+    fn provider(&self) -> Provider {
+        Provider::Other
+    }
+
+    async fn health_check(&self) -> Result<(), LlmError> {
+        Ok(())
+    }
+}
+
+struct RephrasingHandle(Arc<RephrasingLlm>);
+
+#[async_trait]
+impl DistillerClientHandle for RephrasingHandle {
+    async fn client(&self) -> Result<Arc<dyn LlmClient>, DistillerError> {
+        Ok(self.0.clone())
+    }
+    fn invalidate(&self) {}
+}
+
+/// Both calls of a mixed window complete before any write: when the
+/// whole-window call fails, nothing is stored and the run is skipped; the
+/// retry then stores the fact once, even when the model rephrases it.
+#[tokio::test]
+async fn row_both_calls_complete_before_any_write() -> Result<(), Box<dyn Error>> {
+    use std::sync::atomic::Ordering;
+    let rig = Rig::new()?;
+    let session = rig
+        .session(vec![
+            person_typed("The plumber comes on Thursday."),
+            tainted_peer("Peer message: unrelated noise from a peer."),
+        ])
+        .await?;
+    rig.taint_live(&session);
+    let llm = Arc::new(RephrasingLlm {
+        fail_whole: std::sync::atomic::AtomicBool::new(true),
+        clean_calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let provider: Arc<dyn AgentMemoryProvider> = rig.store.clone();
+    let engine = Arc::new(DistillerEngine::new(
+        DistillerProfile::embedded_default(),
+        DistillerConfig {
+            enabled: true,
+            ..DistillerConfig::default()
+        },
+        Arc::new(RephrasingHandle(llm.clone())),
+        provider,
+        rig.store.clone(),
+        Arc::new(SessionStoreTranscriptSource::new(rig.sessions.clone())),
+        None,
+        Some(rig.tracker.clone()),
+        REALM,
+    ));
+    let first = distill(&engine, &session).await;
+    assert!(
+        matches!(&first, DistillOutcome::Skipped { reason } if reason.contains("extraction failed")),
+        "the run is skipped: {first:?}"
+    );
+    assert!(
+        rig.status_of("Plumber Thursday").await?.is_empty(),
+        "a failed whole-window call means the clean call's ops are not written"
+    );
+    llm.fail_whole.store(false, Ordering::SeqCst);
+    let second = distill(&engine, &session).await;
+    assert!(
+        matches!(second, DistillOutcome::Completed { .. }),
+        "the retry completes: {second:?}"
+    );
+    let after = rig.status_of("Plumber Thursday").await?;
+    assert_eq!(
+        after.iter().filter(|status| is_active(status)).count(),
+        1,
+        "the retry read the same window once and stored the fact once: {after:?}"
+    );
+    Ok(())
+}
+
+/// The review readers bound each quarantine class on its own: more than
+/// 256 records quarantined for unproven input, written after a record that
+/// carries a taint signal, leave that record hard-blocking its span and in
+/// the dream's review window.
+#[tokio::test]
+async fn row_unproven_volume_never_starves_a_tainted_record() -> Result<(), Box<dyn Error>> {
+    use crate::memory::capabilities::quarantine_review_window;
+    use crate::memory::hygienist::{SpanReferenceSource, StoreSpanReferenceSource};
+    use crate::memory::records::{EvidenceRef, QuarantineClass};
+
+    let rig = Rig::new()?;
+    let scope = crate::memory::records::MemoryScope::Identity {
+        realm: REALM.to_string(),
+        identity: IDENTITY.to_string(),
+    };
+    let record = |title: String, session: &str, range: (u64, u64)| NewMemoryRecord {
+        kind: crate::memory::records::MemoryKind::Gotcha,
+        body: format!("{title}."),
+        title,
+        description: "When it matters".to_string(),
+        tags: Vec::new(),
+        evidence: vec![EvidenceRef {
+            session_id: session.to_string(),
+            generation: 0,
+            revision: None,
+            range: Some(range),
+            clean_input: None,
+        }],
+        verification: None,
+    };
+    // The record that documents a real injection: a tainted session, row 2.
+    rig.taint_live("sess-injected");
+    let injected = rig
+        .store
+        .remember_authored(
+            &scope,
+            record("Injected instruction".to_string(), "sess-injected", (2, 2)),
+            MemoryAuthor::Distiller {
+                run_id: "run-injected".to_string(),
+            },
+        )
+        .await?;
+    assert!(is_quarantined(&injected.status));
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    // Ordinary distillates over sessions that never read untrusted content.
+    for n in 0..300 {
+        let receipt = rig
+            .store
+            .remember_authored(
+                &scope,
+                record(
+                    format!("Ordinary fact {n}"),
+                    &format!("sess-ordinary-{n}"),
+                    (0, 1),
+                ),
+                MemoryAuthor::Distiller {
+                    run_id: format!("run-{n}"),
+                },
+            )
+            .await?;
+        assert!(
+            is_quarantined(&receipt.status),
+            "an ordinary distillate quarantines as unknown evidence: {:?}",
+            receipt.status
+        );
+    }
+    let tainted = rig
+        .store
+        .quarantined_records(REALM, QuarantineClass::Tainted, 10)
+        .await?;
+    assert_eq!(
+        tainted
+            .iter()
+            .map(|record| record.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![injected.memory_id.as_str()],
+        "the injection record is the one tainted-class record"
+    );
+    let unproven = rig
+        .store
+        .quarantined_records(REALM, QuarantineClass::Unproven, 400)
+        .await?;
+    assert_eq!(
+        unproven.len(),
+        300,
+        "every ordinary distillate is unproven-class"
+    );
+    let spans = StoreSpanReferenceSource::new(rig.store.clone(), REALM);
+    let after = spans.span_references(IDENTITY, "sess-injected").await?;
+    assert!(
+        after
+            .iter()
+            .any(|span| span.quarantined && span.record_id == injected.memory_id),
+        "the injection record still hard-blocks its span: {after:?}"
+    );
+    let window = quarantine_review_window(rig.store.as_ref(), REALM, 16).await?;
+    assert_eq!(window.len(), 16, "the dream window stays bounded");
+    assert!(
+        window.iter().any(|record| record.id == injected.memory_id),
+        "the injection record reaches the dream's review window"
+    );
+    assert!(
+        window
+            .iter()
+            .filter(|record| record.provenance.quarantine_class == Some(QuarantineClass::Unproven))
+            .count()
+            >= 8,
+        "unproven records keep their half of the window"
+    );
+    Ok(())
+}
+
+/// A reset boundary quarantines a distillate even when it carries a clean
+/// input (correct behaviour, confirmed by the security read).
+#[test]
+fn row_reset_boundary_quarantines_a_clean_input_distillate() {
+    use crate::memory::records::{CleanExtractionInput, EvidenceRef};
+    use crate::memory::staged::StagedBatchKind;
+    use crate::memory::taint::LlmWriteGate;
+
+    let tracker = SessionTaintTracker::new(ContentTrustConfig::default());
+    tracker.mark_reset_boundary("sess-reset");
+    let gate = TaintLlmWriteGate::new(Some(tracker), AgentMemoryLlmWrites::Observed);
+    let evidence = vec![EvidenceRef {
+        session_id: "sess-reset".to_string(),
+        generation: 0,
+        revision: None,
+        range: Some((0, 0)),
+        clean_input: Some(CleanExtractionInput {
+            rows: vec![0],
+            digest: CleanExtractionInput::digest_rows([(0, "user", "typed")]),
+        }),
+    }];
+    let reason = gate.quarantine_reason(
+        &MemoryAuthor::Distiller {
+            run_id: "run".to_string(),
+        },
+        StagedBatchKind::FreshWrite,
+        &evidence,
+    );
+    assert!(
+        reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("reset boundary")),
+        "{reason:?}"
+    );
+}
+
+/// The gate accepts only a well-formed clean input (at least one row and a
+/// digest of the stamped form), and decides distilled writes with or without
+/// a tracker: an empty or malformed input is unknown, and unknown evidence
+/// quarantines even when no tracker is wired.
+#[test]
+fn row_gate_requires_a_well_formed_clean_input_and_no_tracker_to_quarantine() {
+    use crate::memory::records::{CleanExtractionInput, EvidenceRef, QuarantineClass};
+    use crate::memory::staged::StagedBatchKind;
+    use crate::memory::taint::LlmWriteGate;
+
+    let tracker = SessionTaintTracker::new(ContentTrustConfig::default());
+    tracker.note_current_session(IDENTITY, "sess-tainted");
+    tracker.observe_agent_event(
+        IDENTITY,
+        &meerkat_core::event::AgentEvent::PeerContentIngested {
+            kind: CommsNoticeKind::Message,
+            peer: None,
+            request_id: None,
+            sender_taint: Some(SenderContentTaint::Tainted),
+            delivery_id: None,
+        },
+    );
+    assert!(tracker.session_taint("sess-tainted").is_some());
+    let gate = TaintLlmWriteGate::new(Some(tracker), AgentMemoryLlmWrites::Observed);
+    let author = MemoryAuthor::Distiller {
+        run_id: "run".to_string(),
+    };
+    let with_input = |input: CleanExtractionInput| {
+        vec![EvidenceRef {
+            session_id: "sess-tainted".to_string(),
+            generation: 0,
+            revision: None,
+            range: None,
+            clean_input: Some(input),
+        }]
+    };
+    for (case, forged) in [
+        (
+            "empty rows and digest",
+            CleanExtractionInput {
+                rows: Vec::new(),
+                digest: String::new(),
+            },
+        ),
+        (
+            "rows with a malformed digest",
+            CleanExtractionInput {
+                rows: vec![0],
+                digest: "sha256:not-a-digest".to_string(),
+            },
+        ),
+        (
+            "a digest with no rows",
+            CleanExtractionInput {
+                rows: Vec::new(),
+                digest: CleanExtractionInput::digest_rows([(0, "user", "typed")]),
+            },
+        ),
+    ] {
+        let verdict =
+            gate.quarantine_verdict(&author, StagedBatchKind::FreshWrite, &with_input(forged));
+        assert!(
+            verdict
+                .as_ref()
+                .is_some_and(|verdict| verdict.class == QuarantineClass::Tainted),
+            "{case}: a malformed clean input is unknown and the tainted session quarantines it: {verdict:?}"
+        );
+    }
+    let well_formed = with_input(CleanExtractionInput {
+        rows: vec![0],
+        digest: CleanExtractionInput::digest_rows([(0, "user", "typed")]),
+    });
+    assert!(
+        gate.quarantine_verdict(&author, StagedBatchKind::FreshWrite, &well_formed)
+            .is_none(),
+        "a well-formed clean input is clean"
+    );
+    let unknown = vec![EvidenceRef {
+        session_id: "sess-tainted".to_string(),
+        generation: 0,
+        revision: None,
+        range: None,
+        clean_input: None,
+    }];
+    let trackerless = TaintLlmWriteGate::new(None, AgentMemoryLlmWrites::Observed);
+    let verdict = trackerless.quarantine_verdict(&author, StagedBatchKind::FreshWrite, &unknown);
+    assert!(
+        verdict
+            .as_ref()
+            .is_some_and(|verdict| verdict.class == QuarantineClass::Unproven),
+        "with no tracker, unknown distilled evidence still quarantines: {verdict:?}"
+    );
 }

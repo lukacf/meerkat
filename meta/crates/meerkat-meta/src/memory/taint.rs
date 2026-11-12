@@ -84,7 +84,7 @@ use meerkat_core::types::{ServerToolKind, ToolProvenance, ToolSourceKind};
 use serde::{Deserialize, Serialize};
 
 use crate::identity_first::agent_memory::AgentMemoryLlmWrites;
-use crate::memory::records::{EvidenceRef, MemoryAuthor};
+use crate::memory::records::{EvidenceRef, MemoryAuthor, QuarantineClass, QuarantineVerdict};
 use crate::memory::staged::StagedBatchKind;
 
 /// Builtin web-facing tool names: ALWAYS untrusted for memory purposes, not
@@ -768,6 +768,20 @@ pub trait LlmWriteGate: Send + Sync {
         kind: StagedBatchKind,
         evidence: &[EvidenceRef],
     ) -> Option<String>;
+
+    /// The verdict the store records: [`Self::quarantine_reason`] with its
+    /// durable [`QuarantineClass`]. A gate that does not classify reports
+    /// every quarantine as [`QuarantineClass::Tainted`], the conservative
+    /// class the review readers always keep in view.
+    fn quarantine_verdict(
+        &self,
+        author: &MemoryAuthor,
+        kind: StagedBatchKind,
+        evidence: &[EvidenceRef],
+    ) -> Option<QuarantineVerdict> {
+        self.quarantine_reason(author, kind, evidence)
+            .map(|reason| QuarantineVerdict::new(reason, QuarantineClass::Tainted))
+    }
 }
 
 /// The taint/posture gate: `llm_writes = "quarantined"` forces every
@@ -811,26 +825,45 @@ impl LlmWriteGate for TaintLlmWriteGate {
         kind: StagedBatchKind,
         evidence: &[EvidenceRef],
     ) -> Option<String> {
+        self.quarantine_verdict(author, kind, evidence)
+            .map(|verdict| verdict.reason)
+    }
+
+    fn quarantine_verdict(
+        &self,
+        author: &MemoryAuthor,
+        kind: StagedBatchKind,
+        evidence: &[EvidenceRef],
+    ) -> Option<QuarantineVerdict> {
         if !author.is_llm() {
             return None;
         }
         if self.llm_writes == AgentMemoryLlmWrites::Quarantined
             && kind != StagedBatchKind::ReviewVerdict
         {
-            return Some("llm_writes=quarantined policy".to_string());
+            return Some(QuarantineVerdict::new(
+                "llm_writes=quarantined policy",
+                QuarantineClass::Unproven,
+            ));
+        }
+        // A distilled write is decided by its evidence whether or not a
+        // tracker is wired: unknown evidence quarantines either way, and a
+        // tracker only adds the session facts it holds (§10.1).
+        if matches!(author, MemoryAuthor::Distiller { .. }) {
+            return distilled_evidence_verdict(self.tracker.as_ref(), evidence);
         }
         let tracker = self.tracker.as_ref()?;
         if let MemoryAuthor::Agent { identity } = author
             && let Some(state) = tracker.identity_taint(identity)
         {
-            return Some(format!("session tainted by {}", state.source));
-        }
-        if matches!(author, MemoryAuthor::Distiller { .. }) {
-            return distilled_evidence_quarantine_reason(tracker, evidence);
+            return Some(QuarantineVerdict::new(
+                format!("session tainted by {}", state.source),
+                QuarantineClass::Tainted,
+            ));
         }
         for evidence_ref in evidence {
             if let Some(reason) = tracker.evidence_quarantine_reason(&evidence_ref.session_id) {
-                return Some(reason);
+                return Some(QuarantineVerdict::new(reason, QuarantineClass::Tainted));
             }
         }
         None
@@ -839,40 +872,49 @@ impl LlmWriteGate for TaintLlmWriteGate {
 
 /// Evidence-scoped taint for distilled writes (§10.1). A distilled record
 /// is clean only when the extraction call that produced it read nothing but
-/// rows proven clean, which the Distiller stamps as
+/// rows proven clean, which the Distiller stamps as a well-formed
 /// [`EvidenceRef::clean_input`]. Everything else is unknown and quarantines:
-/// a missing trust fact is never clean. When the tracker holds a session
-/// fact for unknown evidence its reason is reported (the session-sticky
-/// fallback); otherwise the reason names the unknown evidence. A reset
-/// boundary quarantines every distillate over the session, clean input
-/// included (§8.4). A write that cites no evidence quarantines.
-fn distilled_evidence_quarantine_reason(
-    tracker: &SessionTaintTracker,
+/// a missing or malformed trust fact is never clean, with or without a
+/// tracker. A reset boundary quarantines every distillate over the session,
+/// clean input included (§8.4). A write that cites no evidence quarantines.
+/// The class is [`QuarantineClass::Tainted`] when the tracker holds a taint
+/// fact for the evidence (the session-sticky fallback), and
+/// [`QuarantineClass::Unproven`] when nothing but the missing proof put the
+/// record there.
+fn distilled_evidence_verdict(
+    tracker: Option<&SessionTaintTracker>,
     evidence: &[EvidenceRef],
-) -> Option<String> {
+) -> Option<QuarantineVerdict> {
     if evidence.is_empty() {
-        return Some(
+        return Some(QuarantineVerdict::new(
             "distilled write cites no evidence; unknown evidence quarantines \
-             (evidence-scoped taint)"
-                .to_string(),
-        );
+             (evidence-scoped taint)",
+            QuarantineClass::Unproven,
+        ));
     }
     for evidence_ref in evidence {
-        if let Some(reason) = tracker.reset_boundary_reason(&evidence_ref.session_id) {
-            return Some(reason);
+        if let Some(reason) =
+            tracker.and_then(|tracker| tracker.reset_boundary_reason(&evidence_ref.session_id))
+        {
+            return Some(QuarantineVerdict::new(reason, QuarantineClass::Tainted));
         }
-        if evidence_ref.clean_input.is_some() {
+        if evidence_ref
+            .clean_input
+            .as_ref()
+            .is_some_and(crate::memory::records::CleanExtractionInput::is_well_formed)
+        {
             continue;
         }
-        return Some(
-            tracker
-                .evidence_quarantine_reason(&evidence_ref.session_id)
-                .unwrap_or_else(|| {
-                    "the extraction call read transcript rows not proven clean; unknown \
-                     evidence quarantines (evidence-scoped taint)"
-                        .to_string()
-                }),
-        );
+        if let Some(reason) =
+            tracker.and_then(|tracker| tracker.evidence_quarantine_reason(&evidence_ref.session_id))
+        {
+            return Some(QuarantineVerdict::new(reason, QuarantineClass::Tainted));
+        }
+        return Some(QuarantineVerdict::new(
+            "the extraction call read transcript rows not proven clean; unknown \
+             evidence quarantines (evidence-scoped taint)",
+            QuarantineClass::Unproven,
+        ));
     }
     None
 }

@@ -449,6 +449,7 @@ mod tests {
                 },
                 profile: None,
                 verification: None,
+                quarantine_class: None,
             },
             trust: TrustTier::AgentObserved,
             status: RecordStatus::Quarantined {

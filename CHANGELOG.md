@@ -411,6 +411,27 @@ them.
   The schema artifacts and the generated SDK types do not carry the new
   members yet.
 
+- `meerkat`, `meerkat-core`: a model fallback keeps a session's
+  `reasoning_effort` level. Each chain target carries the level, and before
+  any switch the target is checked against its own route, as its client
+  observes it at that moment, and its model's catalog row. A target whose
+  route does not accept the level (the level is unsupported, the supported
+  levels are unknown or cannot be read, or the level conflicts with the
+  target's own params or with a default provider tag of the target's
+  client) is skipped with the reason
+  `reasoning_effort_unsupported` in `model_fallback_skipped` and in the
+  `model_fallback` notice's `skipped_targets`; when every target is skipped
+  the original failure stands. A target that accepts the level keeps it: the
+  fallback attempt and every later turn resolve it for the target's route
+  (`request_reasoning_effort_resolved` carries `fallback_attempt` for the
+  attempt, and the run result lists the origin and the target as separate
+  `sent` rows), and the identity the session commits to holds the level,
+  through recovery and resume too. A refused level never starts a fallback.
+  A session without a level falls back exactly as before. A turn's reasoning
+  preference on a fallback attempt is judged on the direct route of the
+  target's provider (`request_reasoning_lowered`); the per-request
+  resolution event is the record of what was sent.
+
 ### Changed
 
 - `meerkat-core`: a turn's reasoning-effort preference is judged by the
@@ -430,26 +451,6 @@ them.
 - `meerkat-core`: a compaction summary request of a session that sets the
   provider-neutral `reasoning_effort` level is sent with that level,
   resolved for the summary client's route.
-
-- `meerkat`, `meerkat-core`: a model fallback keeps a session's
-  `reasoning_effort` level. Each chain target carries the level, and before
-  any switch the target is checked against its own route, as its client
-  observes it at that moment, and its model's catalog row. A target whose
-  route does not accept the level (the level is unsupported, the supported
-  levels are unknown or cannot be read, or the level conflicts with the
-  target's own params) is skipped with the reason
-  `reasoning_effort_unsupported` in `model_fallback_skipped` and in the
-  `model_fallback` notice's `skipped_targets`; when every target is skipped
-  the original failure stands. A target that accepts the level keeps it: the
-  fallback attempt and every later turn resolve it for the target's route
-  (`request_reasoning_effort_resolved` carries `fallback_attempt` for the
-  attempt, and the run result lists the origin and the target as separate
-  `sent` rows), and the identity the session commits to holds the level,
-  through recovery and resume too. A refused level never starts a fallback.
-  A session without a level falls back exactly as before. A turn's reasoning
-  preference on a fallback attempt is judged on the direct route of the
-  target's provider (`request_reasoning_lowered`); the per-request
-  resolution event is the record of what was sent.
 
 ### Fixed
 

@@ -9,6 +9,12 @@
 //!   `refusal`, nothing of it committed, its text the provider detail;
 //! - a refused native search comes back from the `web_search` executor
 //!   failed, without the refusal as its answer (#1887).
+//!
+//! The same loop pins what happens when an HTTP 200 stream holds a
+//! `response.failed` with a null error and then the cause in an `error`
+//! event (a synthetic stream, not one observed from a service): the run
+//! fails after one request on the LLM failure itself, the code and message
+//! of the cause in what the caller sees.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -19,6 +25,7 @@ use async_trait::async_trait;
 use axum::{Json, Router, extract::State, response::IntoResponse, routing::post};
 use meerkat::{AgentBuilder, AgentFactory, AgentToolDispatcher, OpenAiClient, ToolDef, ToolError};
 use meerkat_core::event::{AgentErrorClass, AgentErrorReason};
+use meerkat_core::turn_execution_authority::{TurnTerminalCauseKind, TurnTerminalOutcome};
 use meerkat_core::{
     AgentError, AgentEvent, ContentFilteredStop, Message, ProviderStopDetail, RetryPolicy,
     ToolCallView, ToolDispatchOutcome,
@@ -178,6 +185,110 @@ async fn openai_refusal_fails_the_run_content_filtered_with_its_text() {
     assert!(
         !report.message.contains(REFUSAL),
         "the refusal text travels typed, not in the message: {}",
+        report.message
+    );
+}
+
+/// An HTTP 200 stream that holds a `response.failed` whose error is null,
+/// then the cause in a flat `error` event (a synthetic stream). The retry
+/// loop sends the request once (the cause is the terminal invalid-request
+/// class, not a server error to retry), nothing is committed, and the run
+/// fails on the LLM failure itself (not on used-up retries) with the code
+/// and message of the cause in the error and in the run's failure report.
+#[tokio::test]
+async fn a_request_refused_in_the_stream_fails_the_run_after_one_request_with_its_cause() {
+    const CODE: &str = "invalid_request_body";
+    const CAUSE: &str = "input[3]: the encrypted item could not be read";
+    let flat_error = format!(r#"data: {{"type":"error","code":"{CODE}","message":"{CAUSE}"}}"#);
+    let reply = sse(&[
+        r#"data: {"type":"response.created","response":{"id":"resp_1","status":"in_progress","error":null}}"#,
+        r#"data: {"type":"response.failed","response":{"id":"resp_1","status":"failed","error":null}}"#,
+        &flat_error,
+        "data: [DONE]",
+    ]);
+    let (base_url, requests, server) = spawn_responses_stub(reply).await;
+    let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
+    let factory = AgentFactory::new(".rkat/sessions");
+    let llm_adapter = Arc::new(factory.build_llm_adapter(Arc::new(client), MODEL).await);
+    let store_adapter = Arc::new(
+        factory
+            .build_store_adapter(Arc::new(TestSessionStore::new()))
+            .await,
+    );
+    let tools: Arc<dyn AgentToolDispatcher> = Arc::new(NoTools);
+    let mut agent = AgentBuilder::new()
+        .model(MODEL)
+        .max_tokens_per_turn(256)
+        .retry_policy(RetryPolicy {
+            max_retries: 2,
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(5),
+            ..RetryPolicy::default()
+        })
+        .build(llm_adapter, tools, store_adapter)
+        .await
+        .expect("agent");
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4096);
+    let result = agent
+        .run_with_events("Continue the task.".to_string().into(), tx)
+        .await;
+    server.abort();
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+
+    assert_eq!(
+        requests.lock().unwrap().len(),
+        1,
+        "a request the service refused is not sent again: {result:?}"
+    );
+    // The turn ends on the LLM failure itself, not on used-up retries.
+    match &result {
+        Err(AgentError::TerminalFailure {
+            outcome: TurnTerminalOutcome::Failed,
+            cause_kind: TurnTerminalCauseKind::LlmFailure,
+            message,
+        }) => assert!(
+            message.contains(CODE) && message.contains(CAUSE),
+            "the caller sees the code and the message: {message}"
+        ),
+        other => panic!("expected the turn to fail on the LLM failure, got {other:?}"),
+    }
+    assert!(
+        !agent
+            .session()
+            .messages()
+            .iter()
+            .any(|message| matches!(message, Message::BlockAssistant(_))),
+        "nothing of a refused request is committed"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Retrying { .. })),
+        "no retry is scheduled for a refused request"
+    );
+    let report = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::RunFailed { error_report, .. } => Some(error_report.clone()),
+            _ => None,
+        })
+        .expect("run failed event");
+    assert_eq!(report.class, AgentErrorClass::Llm);
+    assert_eq!(
+        report.reason,
+        Some(AgentErrorReason::TurnTerminalCause {
+            outcome: TurnTerminalOutcome::Failed,
+            cause_kind: TurnTerminalCauseKind::LlmFailure,
+        }),
+        "the run's reason is the LLM failure, not used-up retries"
+    );
+    assert!(
+        report.message.contains(CODE) && report.message.contains(CAUSE),
+        "the failure message names the cause: {}",
         report.message
     );
 }

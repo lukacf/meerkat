@@ -26,6 +26,7 @@
 use std::sync::Arc;
 
 use meerkat_mob::MobHandle;
+use meerkat_mob::forked_participant::ForkedParticipantRef;
 use meerkat_mob::temporary_council::{
     TEMPORARY_COUNCIL_MOB_ID_PREFIX, TemporaryCouncilId, TemporaryCouncilParticipantCustody,
 };
@@ -72,7 +73,7 @@ impl CouncilSeats {
                         participant
                             .capability_ref
                             .iter()
-                            .map(|capability| capability.fork_session_id()),
+                            .map(ForkedParticipantRef::fork_session_id),
                     )
                     .map(ToString::to_string),
             );

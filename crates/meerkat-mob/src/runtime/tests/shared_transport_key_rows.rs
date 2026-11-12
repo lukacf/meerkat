@@ -317,26 +317,49 @@ impl ActorPark {
     }
 }
 
-/// The refusal of the second member of a key: plain text naming both
-/// members, never the machine's own rejection.
-fn assert_plain_refusal(
-    refused: &MobError,
+/// What a caller reads about a member whose key another member holds (a
+/// spawn refusal, a broken member's reason): plain text that names that
+/// member alone. The caller may not be allowed to see the key's holder, so
+/// the text carries neither the holder's name nor the key's peer id, and
+/// never the machine's own rejection.
+fn assert_caller_text(
+    text: &str,
+    named: &AgentIdentity,
     holder: &AgentIdentity,
-    refused_member: &AgentIdentity,
+    holder_endpoint: &dsl::MemberPeerEndpoint,
 ) {
-    let MobError::WiringError(text) = refused else {
-        panic!("the second member of a key is refused as a wiring error: {refused:?}");
-    };
     assert!(
-        text.contains(holder.as_str()) && text.contains(refused_member.as_str()),
-        "the refusal names both members: {text}"
+        text.contains(named.as_str()) && text.contains("comms key"),
+        "the text names the member and its comms key: {text}"
+    );
+    assert!(
+        !text.contains(holder.as_str()),
+        "the text does not name the key's holder: {text}"
+    );
+    assert!(
+        !text.contains(holder_endpoint.peer_id.0.as_str()),
+        "the text does not carry the key's peer id: {text}"
     );
     for word in MACHINE_WORDS {
         assert!(
             !text.contains(word),
-            "the refusal is plain text, not the machine's rejection ({word}): {text}"
+            "the text is plain, not the machine's rejection ({word}): {text}"
         );
     }
+}
+
+/// The refusal of the second member of a key: a wiring error whose text is
+/// what [`assert_caller_text`] allows.
+fn assert_plain_refusal(
+    refused: &MobError,
+    holder: &AgentIdentity,
+    refused_member: &AgentIdentity,
+    holder_endpoint: &dsl::MemberPeerEndpoint,
+) {
+    let MobError::WiringError(text) = refused else {
+        panic!("the second member of a key is refused as a wiring error: {refused:?}");
+    };
+    assert_caller_text(text, refused_member, holder, holder_endpoint);
 }
 
 /// A member whose comms runtime loads the key a live member's endpoint
@@ -365,7 +388,7 @@ async fn a_member_whose_transport_key_a_live_member_holds_is_refused_before_its_
             .await
             .expect("the second spawn answers")
             .expect_err("the second member of the key is refused");
-    assert_plain_refusal(&refused, &alice, &carol);
+    assert_plain_refusal(&refused, &alice, &carol, &alice_endpoint);
 
     assert_eq!(
         mob.spawned_rows().await,
@@ -434,7 +457,7 @@ async fn a_member_whose_transport_key_a_dormant_member_holds_is_refused_before_i
         .spawn_on_shared_key(&carol)
         .await
         .expect_err("the second member of the key is refused");
-    assert_plain_refusal(&refused, &alice, &carol);
+    assert_plain_refusal(&refused, &alice, &carol, &alice_endpoint);
     assert_eq!(
         mob.spawned_rows().await,
         rows_before,
@@ -528,13 +551,10 @@ async fn two_members_of_one_key_admitted_back_to_back_admit_one_and_refuse_the_o
         matches!(refusal, MobError::WiringError(_)) && rows == vec![winner.to_string()],
         "the member admitted second is refused before its row, as a wiring error: rows={rows:?} refusal={refusal:?}"
     );
-    let refusal_text = refusal.to_string();
-    for word in MACHINE_WORDS {
-        assert!(
-            !refusal_text.contains(word),
-            "the refusal is plain text, not the machine's rejection ({word}): {refusal_text}"
-        );
-    }
+    let winner_endpoint = mob
+        .recorded_endpoint(winner)
+        .expect("the admitted member holds the key's endpoint");
+    assert_plain_refusal(refusal, winner, loser, &winner_endpoint);
     assert!(
         !mob.machine_holds(loser),
         "MobMachine holds nothing of the refused member"
@@ -690,12 +710,22 @@ async fn a_journal_with_a_row_of_another_members_key_starts_and_the_row_is_clean
     );
     let reason = listed[1].2.clone().expect("the broken member has a reason");
     assert!(
-        reason.contains("alice") && reason.contains("carol") && reason.contains("retire"),
-        "the reason names both members and the way out: {reason}"
+        reason.contains("retire"),
+        "the reason says the way out: {reason}"
     );
-    for word in MACHINE_WORDS {
-        assert!(!reason.contains(word), "the reason is plain text: {reason}");
-    }
+    assert_caller_text(&reason, &carol, &alice, &alice_endpoint);
+    // The read the layer above decides a key's holder from after a restart:
+    // the broken member carries no comms identity.
+    let tolerated = mob
+        .handle
+        .get_member(&carol)
+        .await
+        .expect("the roster answers")
+        .expect("the broken member is a member");
+    assert!(
+        tolerated.peer_id().is_none() && tolerated.transport_public_key().is_none(),
+        "the broken member's roster entry carries no comms identity"
+    );
     assert_eq!(
         mob.recorded_endpoint(&alice),
         Some(alice_endpoint.clone()),

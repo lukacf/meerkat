@@ -480,6 +480,10 @@ pub(in crate::runtime) struct MemberWakes {
     /// entry leaves at that step and whenever the activation ends
     /// ([`MobActor::release_member_key_route`]).
     key_routes_held_back: BTreeSet<mob_dsl::AgentRuntimeId>,
+    /// Refused members the log already names with the holder of their
+    /// transport key (refused member, holder): one warning per pair in this
+    /// actor's life, however often the spawn is retried. A log bound only.
+    key_refusals_logged: BTreeSet<(AgentIdentity, AgentIdentity)>,
     /// Callers waiting on each attempt, with the attempt's member.
     waiters: BTreeMap<MemberWakeAttempt, (AgentIdentity, Vec<MemberWakeReply>)>,
     /// Attempts this actor is resolving right now: their callers are
@@ -559,6 +563,7 @@ impl MemberWakes {
             )),
             routes: BTreeMap::new(),
             key_routes_held_back: BTreeSet::new(),
+            key_refusals_logged: BTreeSet::new(),
             waiters: BTreeMap::new(),
             resolving: BTreeSet::new(),
             closed: BTreeMap::new(),
@@ -909,6 +914,38 @@ impl MobActor {
             .remove(&mob_dsl::AgentRuntimeId::from_domain(agent_runtime_id))
         {
             self.publish_member_wake_route(identity);
+        }
+    }
+
+    /// Name in the log the holder of the transport key `agent_identity`'s
+    /// endpoint carries, the first time this actor refuses that member for
+    /// that holder; a repeated refusal (a retried spawn) is a debug line.
+    pub(in crate::runtime) fn note_member_endpoint_key_held(
+        &mut self,
+        agent_identity: &AgentIdentity,
+        holder: &AgentIdentity,
+        peer_id: &str,
+    ) {
+        if self
+            .member_wakes
+            .key_refusals_logged
+            .insert((agent_identity.clone(), holder.clone()))
+        {
+            super::super::builder::warn_member_endpoint_key_held(
+                &self.definition.id,
+                agent_identity,
+                holder,
+                peer_id,
+                "the member is refused before anything is recorded",
+            );
+        } else {
+            tracing::debug!(
+                mob_id = %self.definition.id,
+                agent_identity = %agent_identity,
+                holder = %holder,
+                peer_id,
+                "a member whose comms endpoint carries another member's transport key is refused again"
+            );
         }
     }
 

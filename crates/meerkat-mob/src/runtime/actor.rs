@@ -42682,11 +42682,19 @@ impl MobActor {
                 Err(error) => {
                     let error = match key_holder {
                         Some(holder) => {
-                            MobError::WiringError(super::builder::member_endpoint_key_held_refusal(
-                                &self.definition.id,
+                            // The caller reads the refused member alone;
+                            // the key's holder and the peer id are named
+                            // in the log, once per refused member and
+                            // holder (a reconciled member is refused again
+                            // at every retry).
+                            self.note_member_endpoint_key_held(
                                 agent_identity,
                                 &holder,
                                 &descriptor.peer_id.to_string(),
+                            );
+                            MobError::WiringError(super::builder::member_endpoint_key_held_refusal(
+                                &self.definition.id,
+                                agent_identity,
                             ))
                         }
                         None => error,

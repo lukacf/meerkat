@@ -1431,29 +1431,45 @@ pub(super) fn member_endpoint_key_holder(
 }
 
 /// The refusal of a member whose comms endpoint carries the transport key
-/// another member of the mob holds.
+/// another member of the mob holds, as its caller reads it. It names the
+/// refused member alone: the caller may not be allowed to see the key's
+/// holder, which is named in the log ([`warn_member_endpoint_key_held`]).
 pub(super) fn member_endpoint_key_held_refusal(
+    mob_id: &MobId,
+    agent_identity: &AgentIdentity,
+) -> String {
+    format!(
+        "member '{agent_identity}' cannot join mob '{mob_id}': another member of this host already holds its comms key, and a mob admits a comms key for one member"
+    )
+}
+
+/// The restore failure of a member whose recorded or live endpoint carries
+/// the transport key another member of the mob holds: what it is and the way
+/// out, as a caller or a sender to the member reads it. It names the broken
+/// member alone, as [`member_endpoint_key_held_refusal`] does.
+pub(super) fn member_endpoint_key_held_reason(agent_identity: &AgentIdentity) -> String {
+    format!(
+        "member '{agent_identity}' cannot run: another member of this host already holds its comms key, so it holds no endpoint; retire '{agent_identity}' to remove it"
+    )
+}
+
+/// Name the holder of a transport key in the log, where the refusal and the
+/// restore failure name only the member they refuse.
+pub(super) fn warn_member_endpoint_key_held(
     mob_id: &MobId,
     agent_identity: &AgentIdentity,
     holder: &AgentIdentity,
     peer_id: &str,
-) -> String {
-    format!(
-        "member '{agent_identity}' cannot join mob '{mob_id}': its comms endpoint carries the transport key that member '{holder}' already holds (peer id {peer_id}). A mob admits a transport key for one member; socket comms (tcp or uds) give every local member of a realm the same key"
-    )
-}
-
-/// The restore failure of a member whose journaled endpoint carries the
-/// transport key another member of the mob holds: what it is and the way
-/// out.
-pub(super) fn member_endpoint_key_held_reason(
-    agent_identity: &AgentIdentity,
-    holder: &AgentIdentity,
-    peer_id: &str,
-) -> String {
-    format!(
-        "member '{agent_identity}' was recorded with a comms endpoint that carries the transport key of member '{holder}' (peer id {peer_id}). A mob admits a transport key for one member, so '{agent_identity}' holds no endpoint and cannot run: retire '{agent_identity}' to remove it"
-    )
+    outcome: &'static str,
+) {
+    tracing::warn!(
+        mob_id = %mob_id,
+        agent_identity = %agent_identity,
+        holder = %holder,
+        peer_id,
+        outcome,
+        "a member's comms endpoint carries the transport key another member holds"
+    );
 }
 
 /// A member whose `MemberSpawned` row carries an endpoint MobMachine refused
@@ -1463,6 +1479,7 @@ pub(super) struct ReplayedEndpointKeyHeld {
     pub(super) agent_identity: AgentIdentity,
     pub(super) agent_runtime_id: AgentRuntimeId,
     pub(super) holder: AgentIdentity,
+    pub(super) peer_id: String,
     pub(super) reason: String,
 }
 
@@ -1566,17 +1583,50 @@ async fn record_first_seeded_member_endpoint(
     })
 }
 
+/// The restore failure of a member whose live endpoint MobMachine refused to
+/// register at a start. An endpoint whose transport key another member
+/// holds is answered with the reason of that case (retire the member; a
+/// respawn would load the same key) and the holder is named in the log;
+/// every other refusal is the endpoint-broken reason with `detail`.
+fn seeded_member_endpoint_refused_reason(
+    state: &crate::machines::mob_machine::MobMachineState,
+    mob_id: &MobId,
+    entry: &RosterEntry,
+    refused: &TrustedPeerDescriptor,
+    detail: &str,
+) -> String {
+    let endpoint = crate::machines::mob_machine::MemberPeerEndpoint::from(refused);
+    let holder = member_endpoint_key_holder(
+        state,
+        &crate::machines::mob_machine::AgentIdentity::from_domain(&entry.agent_identity),
+        &endpoint,
+    );
+    match holder {
+        Some(holder) => {
+            warn_member_endpoint_key_held(
+                mob_id,
+                &entry.agent_identity,
+                &holder,
+                &endpoint.peer_id.0,
+                "its live endpoint is not registered; the member is listed broken until it is retired",
+            );
+            member_endpoint_key_held_reason(&entry.agent_identity)
+        }
+        None => member_endpoint_broken_reason(&entry.agent_identity, detail),
+    }
+}
+
 /// Cold-boot twin of explicit Resume's per-member endpoint isolation: record
 /// only this member Broken (typed MobMachine restore failure plus the handle
-/// diagnostic), clear its projection, and let the rest of the mob boot.
+/// diagnostic) with `reason`, clear its projection, and let the rest of the
+/// mob boot.
 async fn record_seeded_member_endpoint_broken(
     authority: &mut crate::machines::mob_machine::MobMachineAuthority,
     roster: &mut Roster,
     restore_diagnostics: &RwLock<HashMap<AgentIdentity, super::handle::RestoreFailureDiagnostic>>,
     entry: &RosterEntry,
-    detail: &str,
+    reason: String,
 ) -> Result<(), MobError> {
-    let reason = member_endpoint_broken_reason(&entry.agent_identity, detail);
     apply_seeded_mob_signal(
         authority,
         crate::machines::mob_machine::MobMachineSignal::RecoverMemberRestoreFailure {
@@ -4559,11 +4609,8 @@ fn seed_mob_authority_sync_from_events_reporting(
                         ) else {
                             return Err(error);
                         };
-                        let reason = member_endpoint_key_held_reason(
-                            &member_spawned.agent_identity,
-                            &holder,
-                            &peer_endpoint.peer_id.0,
-                        );
+                        let reason =
+                            member_endpoint_key_held_reason(&member_spawned.agent_identity);
                         apply_seeded_mob_signal(
                             authority,
                             mob_dsl::MobMachineSignal::RecoverMemberRestoreFailure {
@@ -4576,6 +4623,7 @@ fn seed_mob_authority_sync_from_events_reporting(
                             agent_identity: member_spawned.agent_identity.clone(),
                             agent_runtime_id: member_spawned.agent_runtime_id.clone(),
                             holder,
+                            peer_id: peer_endpoint.peer_id.0.clone(),
                             reason,
                         });
                     }
@@ -9790,12 +9838,14 @@ impl MobBuilder {
                 if !current {
                     continue;
                 }
-                tracing::warn!(
-                    mob_id = %definition.id,
-                    agent_identity = %held.agent_identity,
-                    holder = %held.holder,
-                    reason = %held.reason,
-                    "a member's recorded comms endpoint carries another member's transport key; the member is listed broken until it is retired"
+                // One line per such member and start: the holder and the
+                // peer id are named here and nowhere a caller reads.
+                warn_member_endpoint_key_held(
+                    &definition.id,
+                    &held.agent_identity,
+                    &held.holder,
+                    &held.peer_id,
+                    "its recorded endpoint is not restored; the member is listed broken until it is retired",
                 );
                 let bridge_session_id = roster
                     .get(&held.agent_identity)
@@ -11078,7 +11128,10 @@ impl MobBuilder {
                         roster,
                         &tool_handle.restore_diagnostics,
                         entry,
-                        "its live comms runtime exposes no peer id or public key",
+                        member_endpoint_broken_reason(
+                            &entry.agent_identity,
+                            "its live comms runtime exposes no peer id or public key",
+                        ),
                     )
                     .await?;
                     continue;
@@ -11118,7 +11171,10 @@ impl MobBuilder {
                             roster,
                             &tool_handle.restore_diagnostics,
                             entry,
-                            &member_endpoint_mismatch_detail(&candidate, &durable),
+                            member_endpoint_broken_reason(
+                                &entry.agent_identity,
+                                &member_endpoint_mismatch_detail(&candidate, &durable),
+                            ),
                         )
                         .await?;
                         continue;
@@ -11170,12 +11226,19 @@ impl MobBuilder {
                         &spec,
                         "resume_register_member_peer",
                     ) {
+                        let reason = seeded_member_endpoint_refused_reason(
+                            dsl_authority.state(),
+                            &definition.id,
+                            entry,
+                            &spec,
+                            &error.to_string(),
+                        );
                         record_seeded_member_endpoint_broken(
                             dsl_authority,
                             roster,
                             &tool_handle.restore_diagnostics,
                             entry,
-                            &error.to_string(),
+                            reason,
                         )
                         .await?;
                         continue;
@@ -11190,12 +11253,19 @@ impl MobBuilder {
                 )
                 .await
                 {
+                    let reason = seeded_member_endpoint_refused_reason(
+                        dsl_authority.state(),
+                        &definition.id,
+                        entry,
+                        &spec,
+                        &detail,
+                    );
                     record_seeded_member_endpoint_broken(
                         dsl_authority,
                         roster,
                         &tool_handle.restore_diagnostics,
                         entry,
-                        &detail,
+                        reason,
                     )
                     .await?;
                     continue;
@@ -18891,9 +18961,10 @@ mod tests {
             .member_restore_failures
             .get(&dsl_second)
             .expect("the second member is recorded a restore failure");
+        let peer_id = meerkat_comms::PubKey::new(key).to_peer_id().to_string();
         assert!(
-            reason.contains("alice") && reason.contains("carol"),
-            "the reason names both members: {reason}"
+            reason.contains("carol") && !reason.contains("alice") && !reason.contains(&peer_id),
+            "the reason names the broken member alone, without the holder or the peer id: {reason}"
         );
     }
 

@@ -417,16 +417,52 @@ a separate add-only step after the scan. That step must require
 `PUBLISHABLE.json` and check the four digests in it against the files it
 uploads, immediately before the upload.
 
+The hosted stages. Both stages are dispatches of the release workflow
+(`.github/workflows/connect-release.yml`) on the GitHub-hosted `macos-15`
+runner, at the same checkout and work root paths, and neither publishes
+anything, creates a release or a tag, or holds a provider key:
+
+- `mode=macos-stage` runs stage one in two jobs. The first runs `preflight`,
+  the fetch step (`scripts/fetch-pinned-inputs.py`, after the one `cargo tree`
+  command that lists the tools' crates), `library`, `resources` and `build`,
+  and hands the work root to the second as one tar. The second runs `stage`,
+  the five checks and `stage-record`, attests `STAGE.json` and uploads the
+  stage record unchanged as the workflow artifact
+  `connect-macos-arm64-stage-<run id>-<attempt>` (its provenance bundle is the
+  artifact `connect-macos-arm64-stage-provenance-<run id>-<attempt>`). With
+  `rkat_release_tag=vX.Y.Z` the consumer check takes Core's published `rkat`
+  archive by that release's `checksums.sha256`; without it `rkat` is built
+  from the dispatched commit, and such a stage is never assembled.
+- `mode=macos-assemble` runs stage two in one job, dispatched at the stage's
+  own commit with `candidate_run_id` (the stage run's id, optionally followed
+  by `-<attempt>`) and `acceptance_sha256` (the SHA-256 `accept-review`
+  printed for the reader). It downloads that stage record, requires its
+  attestation by this workflow for the dispatched commit, runs
+  `accept-review` with the stated digest and `assemble`, and uploads the
+  artifact `connect-macos-arm64-assembly-<run id>-<attempt>`: `ASSEMBLY.json`,
+  both archives and their `.sha256` files, assembled, not scanned, not
+  published.
+
+No workflow job attaches the complete macOS installation to a release. That
+will be a separate add-only step that requires `PUBLISHABLE.json`.
+
+Where the build uses the network: the fetch step (every file checked against
+its pin), Cargo's registry downloads (pinned by `Cargo.lock`), the component
+build's `npm ci` for the integrity-locked packages of
+`sdk/activepieces/package-lock.json` (the lock's integrity values are their
+pins; they have no rows in the pin file), and the two installed checks that
+read live public pages.
+
 The macOS selection is `connect-release-inputs-macos-arm64.json`
 (`schema_version` 2, kind `connect-macos-producer-inputs`): the toolchain, the
 Cargo features, the public commit that imported `connect/`, the minimum macOS,
 the free-space bound, the five SDK build tools by version, the darwin Node
 prebuilt policy and the library pin file, each committed file with its
 SHA-256. It names no product version: versions are read from the checkout.
-Its library fields are pending in this tree (`"state": "pending"`, a null pin
-file digest), and every `macos` step refuses a pending or unbound selection.
-It is completed by setting the committed pin file's SHA-256 and `"state":
-"selected"`.
+Its library selection is `"state": "selected"` with the committed pin file's
+SHA-256; every `macos` step refuses a pending or unbound selection, and a
+change of the pin file needs that digest changed with it (a test holds the
+two together).
 
 Pinned inputs. `--pins` is the resolved pin file the fetch step writes beside
 the files it fetched: the committed pins plus one row per crate of the tools'

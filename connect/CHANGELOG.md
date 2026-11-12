@@ -20,6 +20,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   replace an asset. A `macos-build` dispatch of the workflow builds and
   checks them without publishing anything; a `macos-assets` dispatch builds
   an existing tag and adds them to its release.
+- The complete macOS installation can be built on a hosted macOS runner. No
+  release carries it yet: nothing in the workflow publishes it. A
+  `macos-stage` dispatch of the release workflow builds the Apple Silicon
+  integration library, the bundled Python, Node and npm resources and both
+  executables from one commit and pinned public files, runs the installed
+  checks there and uploads a stage record; a `macos-assemble` dispatch
+  assembles both archives from a reviewed stage record. Public inputs are
+  pinned in `release/library-pins-macos-arm64.json` and fetched by
+  `scripts/fetch-pinned-inputs.py`, which takes the crate pins from
+  `Cargo.lock`; the resource packager takes them with
+  `--pins FILE --pinned-inputs DIR`, and
+  `scripts/check-connect-resource-pins.py` compares its runtime pins with the
+  publishers' checksum files.
 
 ### Known limitations
 

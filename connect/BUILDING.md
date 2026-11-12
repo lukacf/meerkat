@@ -410,6 +410,37 @@ interpreter, for example:
 TOOLKIT_TEST_PYTHON=/absolute/path/to/python3.12 npm run validate
 ```
 
+## Pinned public inputs of the macOS installation
+
+The complete macOS arm64 installation is built on a GitHub-hosted macOS
+runner from one commit and pinned public files
+([release/CONNECT-CANDIDATE.md](release/CONNECT-CANDIDATE.md), "Complete macOS
+installation from one commit"). `release/library-pins-macos-arm64.json` pins
+the PyPI wheels, npm archives and publisher downloads by URL and by the digest
+their own index publishes. Crates have no row there: `Cargo.lock` is their
+pin. `scripts/fetch-pinned-inputs.py` is the one step that downloads them. It
+takes the committed pin file, the tools' crate listing that `cargo tree`
+prints and `Cargo.lock`, checks every file against its pin, and writes the
+resolved pin file (`library-pins-macos-arm64.resolved.json`: the committed
+rows plus one row per crate) and its record `FETCHED.json` beside the files:
+
+```sh
+scripts/repo-cargo tree --locked --manifest-path ../Cargo.toml -p toolkit-package \
+  --features local-recipes,local-artifacts --target aarch64-apple-darwin \
+  -e normal,build --prefix none --format "{p}" > /absolute/tool-closure.txt
+python3 -I scripts/fetch-pinned-inputs.py --pins release/library-pins-macos-arm64.json \
+  --closure /absolute/tool-closure.txt --lock ../Cargo.lock --destination /absolute/new/pins
+```
+
+The packagers and the exporter never download. Each takes the resolved pin
+file and that directory: for macOS arm64 the resource packager is called with
+`--pins FILE --pinned-inputs DIR` instead of an upstream directory, and
+`scripts/check-connect-resource-pins.py` compares the packager's own runtime
+pins with the publishers' checksum files. Besides the fetch step, the build
+reads the network for Cargo's registry downloads and for the component
+build's `npm ci`, whose packages `sdk/activepieces/package-lock.json` pins by
+integrity.
+
 ## Source checks and documentation
 
 The [default GitHub Actions workflow](.github/workflows/checks.yml) uses Python

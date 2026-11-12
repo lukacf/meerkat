@@ -361,8 +361,9 @@ This holds for every agent, whatever declares it:
 - **A configured agent.** Edit its instructions in the host's configuration.
   A roster refresh (`meta/reconcile_identity`, or the refresh your host
   runs) picks the edit up while the gateway runs.
-- **An agent created at run time.** Update its row; the update records the
-  change after its commit.
+- **An agent created at run time.** Update it with
+  [`meta/identity/update`](/api/rpc#metaidentityupdate); the update records
+  the change after its commit and answers when it applies.
 
 How it works. The gateway keeps one operator instruction record per agent
 whose instructions changed, in the namespace `meerkat.identity.instructions`,
@@ -388,8 +389,10 @@ What to know:
   its earlier conversation, which keeps its entries, and the gateway's next
   start records the current text for it once more, as one more entry.
 - **Removing an agent** revokes its record. A removal the gateway stopped
-  right after, before the record was revoked, is completed at the next
-  start: the record of every removed agent is revoked then. Archiving an
+  right after, before the record was revoked, is completed after the next
+  start, when the gateway first compares an agent (at the start when its
+  roster lists one, else at the first delivery or change of one): the
+  record of every removed agent is revoked then. Archiving an
   agent keeps the record: the agent comes back on its conversation with its
   instructions as they were. A change made while the agent is archived is
   recorded, and so is a change of an agent the host's configuration dropped
@@ -424,10 +427,20 @@ What to know:
   carries no system row besides its prompt applies it only with a fresh
   conversation.
 - **A change made while the gateway was down** (the usual way to edit a
-  configuration) is recorded when the gateway next registers the agent: at
-  its start for the agents its roster lists and the rows it serves, and
-  later for an agent it first registers later (one listed again after it
-  was dropped, a row first named at a delivery door). The gateway compares
+  configuration) is recorded after the gateway starts. For a configured
+  agent: when the gateway registers it, at its start for the agents its
+  roster lists, and later for one listed again after it was dropped. For an
+  agent created at run time: at the agent's first use after the start,
+  which is its first delivery through the gateway (a send or a dispatch)
+  or its first change through `meta/identity/*`, before that delivery is
+  submitted. A start reads no conversation on behalf of an agent created at
+  run time, however many there are, and a read records nothing: until that
+  first use `meta/instruction_status` shows the records written so far.
+  One limit: a run the mob starts itself with no delivery through the
+  gateway before it (a member it brings up at a start with work already
+  queued, work admitted through Meerkat's own handle) runs on the
+  instructions the agent's conversation holds; the change is recorded by
+  the agent's first delivery or change after it. The gateway compares
   the agent's current text with its record, or, for an agent with no record
   yet, with the sections its conversation was built with. A conversation
   built through 0.9.14 may not record those sections: for it nothing is
@@ -442,8 +455,10 @@ What to know:
   reads as unchanged. Make such an edit while the gateway runs (a roster
   refresh or an update records it), or reset the agent.
 
-What an update's result says. The step that runs after an update of an
-agent's instructions committed answers one of:
+What an update's result says. An update that names `set.instructions`
+answers, for its agent, the member `instructions`: `{"kind": ...}`, with a
+`reason` beside `applies_at_next_session`. It is on the update's first
+answer; a retry of the same request states none. The kinds:
 
 - `applies_at_next_run`: the change is recorded and reaches the agent at
   its next run (a run that starts within moments may still use the earlier
@@ -456,8 +471,9 @@ agent's instructions committed answers one of:
   fresh conversation. The reasons are `prepared_authorization_required`,
   `slot_limit_exceeded`, `active_set_budget_exceeded`, `body_too_large`,
   `lowering_unavailable` and `record_unavailable` (the mob's record could
-  not be read or written now; the gateway compares the agent again when it
-  next registers it).
+  not be read or written now; the change is recorded by the agent's next
+  update of its instructions, or at its first delivery or change after
+  the gateway's next start).
 - `unchanged`: the update left the instructions as they were.
 
 The update of the spec itself always stands.

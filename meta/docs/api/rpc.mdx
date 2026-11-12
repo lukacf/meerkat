@@ -1320,8 +1320,8 @@ Each entry of `agents` is `{name, state, spec_digest?, spec_revision?,
 session_id?, seat?, instructions?}`. `state` is `committed`,
 `pending_preparation`, `archiving`, `archived`, `restored`, `retiring` or
 `removed`. `seat`, on a create, is `seated` or `owed` (see
-[`meta/identity/create`](#metaidentitycreate)). `instructions` is absent
-unless the launch has an instruction step for updates (see
+[`meta/identity/create`](#metaidentitycreate)). `instructions` is on the
+first answer of an update that names `set.instructions` (see
 [`meta/identity/update`](#metaidentityupdate)).
 
 ### Refusals
@@ -1428,12 +1428,17 @@ An update can touch several change classes of the policy at once; each is
 judged by its own rules and the strictest outcome applies to the whole
 update.
 
-New instructions are in the agent's record at once. What carries them to
-an agent that is running is the launch's instruction step for updates: a
-launch that has one answers what became of the change in the agent's
-`instructions` member, on the first answer of an update that names
-`set.instructions` (a retry states none). A launch without one answers no
-such member.
+New instructions are in the agent's record at once, and the launch carries
+them to an agent that has a conversation: it reaches the agent at its next
+run; a run that starts within moments of the change may still use the
+earlier instructions; earlier instructions are never rewritten. The first
+answer of an update that names `set.instructions` says what became of the
+change in the agent's `instructions` member: `{"kind": "applies_at_next_run"}`,
+`{"kind": "applies_after_compaction"}`,
+`{"kind": "applies_at_next_session", "reason": ...}` or
+`{"kind": "unchanged"}` (a retry states none). The kinds, the reasons and
+the limits are in
+[Changing an agent's instructions](/concepts/roster#changing-an-agents-instructions).
 
 ### `meta/identity/archive`, `meta/identity/unarchive`, `meta/identity/remove`, `meta/identity/adopt`
 

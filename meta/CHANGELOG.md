@@ -162,8 +162,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `name_taken` names the agent of the request that asked for the name
   (`field: "agents[i].name"`), also when an existing agent holds it.
 
-- An update answers an `instructions` member only where the launch has an
-  instruction step for updates and the update names `set.instructions`.
+- An update that names `set.instructions` answers an `instructions` member
+  for its agent, on its first answer: when the changed instructions reach
+  the agent (`applies_at_next_run`, `applies_after_compaction`,
+  `applies_at_next_session` with a `reason`, or `unchanged`). Every launch
+  answers it: the launch records the change for the agent itself, and a
+  removal revokes that record. See
+  [Changing an agent's instructions](docs/concepts/roster.mdx#changing-an-agents-instructions).
+  A native host may give the family a step of its own
+  (`IdentityFamilyOptions::with_instruction_step`), which is then asked
+  instead.
 
 - An agent's change is refused `invalid_request` when the identity its
   surface attributed to the call is not the member of the session the call
@@ -297,7 +305,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   change may still use the earlier instructions; earlier instructions are
   never rewritten. An agent that is not loaded is not woken, a restart
   neither loses nor repeats the change, and the removal of an agent revokes
-  its record (at the next start when the gateway stopped right after the
+  its record (after the next start when the gateway stopped right after the
   removal). A reset or a delete of the agent revokes the record too: the
   fresh conversation's first prompt is the current text, and nothing is
   appended to it. A model that takes a system instruction only ahead of the
@@ -307,11 +315,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   with this release's limits (one agent's set of operator instructions,
   governed runtimes, forks).
 
-- Rust, in `meerkat_meta::identity_first::runtime`: the steps an identity
-  change runs after its commit, `IdentityRuntime::after_update` (answers an
-  `InstructionOutcome`, with an `InstructionNextSessionReason` where the
-  change waits for a fresh conversation; its input is an
-  `InstructionsChanged`) and `IdentityRuntime::after_removal`;
+- Rust: `IdentityRuntime` implements the identity change interface's
+  `identity_creation::InstructionStep`: `after_update` answers an
+  `InstructionOutcome` (with an `InstructionNextSessionReason` where the
+  change waits for a fresh conversation) for an `InstructionsChanged`, and
+  `after_removal` revokes the agent's record. A launch's family asks it
+  after its commits. In `meerkat_meta::identity_first::runtime`:
   `INSTRUCTIONS_NAMESPACE`, `RESERVED_INSTRUCTION_NAMESPACE_PREFIX` and
   `is_reserved_instruction_namespace`. `SessionBridge` gains
   `member_session_service`, with a default that answers none.
@@ -558,14 +567,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   observes a change of it (a roster refresh with other text, an update) or
   its conversation is rebuilt: such a conversation may not record the
   sections it was built with. A conversation built after 0.9.14
-  does, and the change is recorded when the gateway next registers the
-  agent, with one exception: an edit that only removes sections from the
+  does, and the change is recorded after the gateway's next start (for a
+  configured agent when the gateway registers it; for an agent created at
+  run time at its first delivery or change), with one exception: an edit
+  that only removes sections from the
   end of the text, or removes all of them, is not seen then for an agent
   with no instruction record yet (the sections a conversation was built
   with also hold what the host's build customizer and the agent's memory
   added after the agent's own, so a text they start with reads as
   unchanged). Make such an edit while the gateway runs, or reset the
   agent.
+
+- A change of the instructions of an agent created at run time that was
+  made while the gateway was down is recorded at the agent's first delivery
+  through the gateway or first change after the start, not by the start: a
+  run the mob starts itself with no such delivery before it runs on the
+  instructions the agent's conversation holds.
 
 ## [0.9.14] - 2026-11-11
 

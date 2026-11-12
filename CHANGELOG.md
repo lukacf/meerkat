@@ -71,6 +71,32 @@ them.
 
 ### Fixed
 
+- `meerkat-core`: a turn that fails because a provider failure outlasted the
+  retries now says what failed. Its typed turn error (`error.data.error` of
+  a JSON-RPC turn, `details.error` of REST, the `error=` JSON of the CLI's
+  `turn abandoned` line, and the error of a runtime completion) kept
+  `kind: "retry_exhausted"` and its detail text but left out `provider`,
+  `retryable` and `reason`, the fields a provider failure that is not
+  retried (`kind: "llm_failure"`, a 400 for example) fills, so a caller
+  could tell a rate limit from an overloaded or unreachable provider only by
+  reading the detail text. It now carries `provider`, `reason` and
+  `retryable: true`. `reason` is the typed reason of the last failed
+  attempt: `llm_rate_limited` (with `retry_after_ms` when the provider sent
+  a hint), `llm_network_timeout`, `llm_call_timeout` (a call timeout or a
+  stalled stream), or `llm_provider_error` with the provider's error kind,
+  such as `server_overloaded`, `server_error` or `connection_reset`. After a
+  model fallback, `provider` and `reason` are those of the fallback target's
+  last failure. `retryable: true` names the class of the failure: one
+  Meerkat retries, which ended the turn after the retries its policy
+  allowed. A failure of that class can succeed on a later attempt; the field
+  does not say that this one will, least of all for the `unknown` and
+  `connection_reset` provider error kinds and for `llm_call_timeout`. It is
+  advice for the caller, and the number and timing of Meerkat's own retries
+  are unchanged. `kind`, `detail`, the JSON-RPC code and the `run_failed`
+  event are unchanged, and no field is new: a stored turn error without the
+  three fields still reads, and an earlier release reads one that has them.
+  Affects 0.8.0 through 0.9.14.
+
 - `meerkat`, `meerkat-mob` (0.5.1 through 0.9.14): a session keeps the
   instruction sections it was built with. A session's durable build state
   records the `additional_instructions` of its build, and every build wrote

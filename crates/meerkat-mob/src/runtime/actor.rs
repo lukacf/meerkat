@@ -42331,48 +42331,47 @@ impl MobActor {
         // `MemberSpawned` lifecycle journal emit. Prepared (not committed) here
         // so the journal effect is validated before the expensive trust /
         // overlay / append work; committed once those succeed.
+        let commit_membership = mob_dsl::MobMachineInput::CommitSpawnMembership {
+            agent_identity: dsl_identity.clone(),
+            agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&agent_runtime_id),
+            fence_token: mob_dsl::FenceToken::from_domain(fence_token),
+            generation: mob_dsl::Generation::from_domain(generation),
+            profile_material_digest: authorized_profile_material.profile_material_digest.clone(),
+            external_addressable,
+            runtime_mode: mob_dsl::SpawnPolicyRuntimeMode::from(runtime_mode),
+            bridge_session_id: bridge_session_id.clone(),
+            replacing,
+            // Ack facts are populated from exactly one source — the
+            // transport-validated `MaterializedMemberAck`; the local
+            // path has no ack value in scope (DEC-P3-8, machine-
+            // enforced by the local `ack_fields_absent` guard).
+            member_peer_endpoint: ctx
+                .remote
+                .as_ref()
+                .map(|remote| mob_dsl::MemberPeerEndpoint::from(&remote.ack.member_peer)),
+            spec_digest_echo: ctx
+                .remote
+                .as_ref()
+                .map(|remote| remote.ack.spec_digest_echo.clone()),
+            ack_engine_version: ctx
+                .remote
+                .as_ref()
+                .map(|remote| remote.ack.engine_version.clone()),
+            placed_spawn_id: ctx
+                .remote
+                .as_ref()
+                .map(|remote| mob_dsl::PlacedSpawnId(remote.placed_spawn_id.to_string())),
+            provision_operation_id: ctx.remote.as_ref().map(|_| ctx.operation_id.to_string()),
+            // A member exempt from the definition's wiring rules is
+            // recorded exempt in this same step as its seat, so no seat,
+            // spawn or rotation committed after it can be wired to it by
+            // those rules. A placed member is never exempt (refused at
+            // its enqueue and by the remote commit's `placed_not_exempt`
+            // guard).
+            definition_wiring_exempt: ctx.definition_wiring.is_exempt(),
+        };
         let prepared_spawn = match self.prepare_dsl_input_transition(
-            mob_dsl::MobMachineInput::CommitSpawnMembership {
-                agent_identity: dsl_identity.clone(),
-                agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&agent_runtime_id),
-                fence_token: mob_dsl::FenceToken::from_domain(fence_token),
-                generation: mob_dsl::Generation::from_domain(generation),
-                profile_material_digest: authorized_profile_material
-                    .profile_material_digest
-                    .clone(),
-                external_addressable,
-                runtime_mode: mob_dsl::SpawnPolicyRuntimeMode::from(runtime_mode),
-                bridge_session_id: bridge_session_id.clone(),
-                replacing,
-                // Ack facts are populated from exactly one source — the
-                // transport-validated `MaterializedMemberAck`; the local
-                // path has no ack value in scope (DEC-P3-8, machine-
-                // enforced by the local `ack_fields_absent` guard).
-                member_peer_endpoint: ctx
-                    .remote
-                    .as_ref()
-                    .map(|remote| mob_dsl::MemberPeerEndpoint::from(&remote.ack.member_peer)),
-                spec_digest_echo: ctx
-                    .remote
-                    .as_ref()
-                    .map(|remote| remote.ack.spec_digest_echo.clone()),
-                ack_engine_version: ctx
-                    .remote
-                    .as_ref()
-                    .map(|remote| remote.ack.engine_version.clone()),
-                placed_spawn_id: ctx
-                    .remote
-                    .as_ref()
-                    .map(|remote| mob_dsl::PlacedSpawnId(remote.placed_spawn_id.to_string())),
-                provision_operation_id: ctx.remote.as_ref().map(|_| ctx.operation_id.to_string()),
-                // A member exempt from the definition's wiring rules is
-                // recorded exempt in this same step as its seat, so no seat,
-                // spawn or rotation committed after it can be wired to it by
-                // those rules. A placed member is never exempt (refused at
-                // its enqueue and by the remote commit's `placed_not_exempt`
-                // guard).
-                definition_wiring_exempt: ctx.definition_wiring.is_exempt(),
-            },
+            commit_membership.clone(),
             "finalize_spawn_admit_commit_membership",
         ) {
             Ok(prepared) => prepared,
@@ -42648,6 +42647,57 @@ impl MobActor {
                 return Err(error);
             }
         };
+
+        // The endpoint is judged before the member's row is written: the
+        // membership step and the endpoint's registration are applied to a
+        // prepared authority that is then dropped, so MobMachine's own guards
+        // answer and nothing is committed. An endpoint MobMachine would
+        // refuse after the row (its transport key is another member's) is
+        // refused here instead, with the ladder's ordinary pre-commit unwind:
+        // no row, no membership, and the member's session rolled back.
+        if let Some(descriptor) = member_peer_endpoint.as_ref() {
+            let peer_endpoint = mob_dsl::MemberPeerEndpoint::from(descriptor);
+            let key_holder = super::builder::member_endpoint_key_holder(
+                self.dsl_authority.state(),
+                &dsl_identity,
+                &peer_endpoint,
+            );
+            let register = mob_dsl::MobMachineInput::RegisterMemberPeer {
+                agent_identity: dsl_identity.clone(),
+                agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&agent_runtime_id),
+                generation: mob_dsl::Generation::from_domain(generation),
+                fence_token: mob_dsl::FenceToken::from_domain(fence_token),
+                peer_endpoint,
+            };
+            if let Err(error) = self.prepare_dsl_inputs(
+                &[commit_membership, register],
+                "finalize_spawn_admit_endpoint_admission",
+            ) {
+                let error = match key_holder {
+                    Some(holder) => {
+                        MobError::WiringError(super::builder::member_endpoint_key_held_refusal(
+                            &self.definition.id,
+                            agent_identity,
+                            &holder,
+                            &descriptor.peer_id.to_string(),
+                        ))
+                    }
+                    None => error,
+                };
+                let error = self.fold_spawn_exec_abort(
+                    &dsl_identity,
+                    agent_identity,
+                    error,
+                    "finalize_spawn_admit_endpoint_admission",
+                );
+                if let Err(rollback_error) = provision.rollback().await {
+                    return Err(MobError::Internal(format!(
+                        "spawn endpoint admission failed for '{agent_identity}': {error}; archive compensation failed: {rollback_error}"
+                    )));
+                }
+                return Err(error);
+            }
+        }
 
         tracing::debug!(
             agent_identity = %agent_identity,

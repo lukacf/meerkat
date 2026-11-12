@@ -1402,6 +1402,70 @@ pub(super) fn register_seeded_member_peer(
     )
 }
 
+/// The member, other than `agent_identity`, whose current or prior endpoint
+/// in `state` carries the peer id of `endpoint`. MobMachine admits a peer id
+/// for one identity (`peer_id_available_for_identity`), so while that member
+/// holds it, it refuses this endpoint for `agent_identity`.
+pub(super) fn member_endpoint_key_holder(
+    state: &crate::machines::mob_machine::MobMachineState,
+    agent_identity: &crate::machines::mob_machine::AgentIdentity,
+    endpoint: &crate::machines::mob_machine::MemberPeerEndpoint,
+) -> Option<AgentIdentity> {
+    let current = state
+        .member_peer_endpoints
+        .iter()
+        .find(|(other, held)| *other != agent_identity && held.peer_id == endpoint.peer_id)
+        .map(|(other, _)| other);
+    let prior = || {
+        state
+            .member_prior_peer_endpoints
+            .iter()
+            .find(|(other, held)| {
+                *other != agent_identity && held.iter().any(|held| held.peer_id == endpoint.peer_id)
+            })
+            .map(|(other, _)| other)
+    };
+    current
+        .or_else(prior)
+        .map(|other| AgentIdentity::from(other.0.as_str()))
+}
+
+/// The refusal of a member whose comms endpoint carries the transport key
+/// another member of the mob holds.
+pub(super) fn member_endpoint_key_held_refusal(
+    mob_id: &MobId,
+    agent_identity: &AgentIdentity,
+    holder: &AgentIdentity,
+    peer_id: &str,
+) -> String {
+    format!(
+        "member '{agent_identity}' cannot join mob '{mob_id}': its comms endpoint carries the transport key that member '{holder}' already holds (peer id {peer_id}). A mob admits a transport key for one member; socket comms (tcp or uds) give every local member of a realm the same key"
+    )
+}
+
+/// The restore failure of a member whose journaled endpoint carries the
+/// transport key another member of the mob holds: what it is and the way
+/// out.
+pub(super) fn member_endpoint_key_held_reason(
+    agent_identity: &AgentIdentity,
+    holder: &AgentIdentity,
+    peer_id: &str,
+) -> String {
+    format!(
+        "member '{agent_identity}' was recorded with a comms endpoint that carries the transport key of member '{holder}' (peer id {peer_id}). A mob admits a transport key for one member, so '{agent_identity}' holds no endpoint and cannot run: retire '{agent_identity}' to remove it"
+    )
+}
+
+/// A member whose `MemberSpawned` row carries an endpoint MobMachine refused
+/// at the replay because another member holds its transport key: the replay
+/// recorded the member a restore failure instead of failing.
+pub(super) struct ReplayedEndpointKeyHeld {
+    pub(super) agent_identity: AgentIdentity,
+    pub(super) agent_runtime_id: AgentRuntimeId,
+    pub(super) holder: AgentIdentity,
+    pub(super) reason: String,
+}
+
 /// Typed reason for a restored member whose comms endpoint cannot be
 /// published. Both resume paths (cold boot and explicit Resume) record it the
 /// same way, so a host reads one reason naming the defect and the repair.
@@ -4183,6 +4247,30 @@ fn seed_mob_authority_sync_from_events(
     defer_completed_phase: bool,
     committed_placed_recovery_keys: &BTreeSet<PlacedMemberRecoveryKey>,
 ) -> Result<(), MobError> {
+    let mut endpoint_key_held = Vec::new();
+    seed_mob_authority_sync_from_events_reporting(
+        authority,
+        events,
+        definition,
+        defer_completed_phase,
+        committed_placed_recovery_keys,
+        &mut endpoint_key_held,
+    )
+}
+
+/// [`seed_mob_authority_sync_from_events`], reporting in `endpoint_key_held`
+/// each member whose row's endpoint the replay did not restore because
+/// another member holds its transport key. Such a member is recorded a
+/// restore failure in `authority`; a later row of the journal may still
+/// retire or replace it.
+fn seed_mob_authority_sync_from_events_reporting(
+    authority: &mut crate::machines::mob_machine::MobMachineAuthority,
+    events: &[crate::event::MobEvent],
+    definition: &MobDefinition,
+    defer_completed_phase: bool,
+    committed_placed_recovery_keys: &BTreeSet<PlacedMemberRecoveryKey>,
+    endpoint_key_held: &mut Vec<ReplayedEndpointKeyHeld>,
+) -> Result<(), MobError> {
     use crate::machines::mob_machine as mob_dsl;
 
     let respawn_topology_ledger = respawn_topology_ledger(events)?;
@@ -4436,12 +4524,13 @@ fn seed_mob_authority_sync_from_events(
                     // have no live comms or surviving trust projection to
                     // rediscover it. Placed endpoints stay carrier-owned and
                     // are recovered only by the exact placed-spawn ladder.
-                    apply_seeded_mob_signal(
+                    let peer_endpoint = mob_dsl::MemberPeerEndpoint::from(member_peer_endpoint);
+                    let dsl_identity =
+                        mob_dsl::AgentIdentity::from_domain(&member_spawned.agent_identity);
+                    let restored = apply_seeded_mob_signal(
                         authority,
                         mob_dsl::MobMachineSignal::RecoverSpawnedMemberPeerEndpoint {
-                            agent_identity: mob_dsl::AgentIdentity::from_domain(
-                                &member_spawned.agent_identity,
-                            ),
+                            agent_identity: dsl_identity.clone(),
                             agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(
                                 &member_spawned.agent_runtime_id,
                             ),
@@ -4449,10 +4538,47 @@ fn seed_mob_authority_sync_from_events(
                                 member_spawned.fence_token,
                             ),
                             generation: mob_dsl::Generation::from_domain(member_spawned.generation),
-                            peer_endpoint: mob_dsl::MemberPeerEndpoint::from(member_peer_endpoint),
+                            peer_endpoint: peer_endpoint.clone(),
                         },
                         "recover_member_spawned_peer_endpoint",
-                    )?;
+                    );
+                    if let Err(error) = restored {
+                        // One refusal does not fail the replay: the row's
+                        // endpoint carries the transport key another member
+                        // holds. A release that judged the endpoint after
+                        // writing the row left such a row behind, with no
+                        // terminal row. The member is replayed as the live
+                        // machine last held it, a member with no endpoint,
+                        // and recorded a restore failure, so it is listed
+                        // broken and is never woken; the key's holder keeps
+                        // its endpoint. Every other refusal fails the replay.
+                        let Some(holder) = member_endpoint_key_holder(
+                            authority.state(),
+                            &dsl_identity,
+                            &peer_endpoint,
+                        ) else {
+                            return Err(error);
+                        };
+                        let reason = member_endpoint_key_held_reason(
+                            &member_spawned.agent_identity,
+                            &holder,
+                            &peer_endpoint.peer_id.0,
+                        );
+                        apply_seeded_mob_signal(
+                            authority,
+                            mob_dsl::MobMachineSignal::RecoverMemberRestoreFailure {
+                                agent_identity: dsl_identity,
+                                reason: reason.clone(),
+                            },
+                            "recover_member_spawned_peer_endpoint_key_held",
+                        )?;
+                        endpoint_key_held.push(ReplayedEndpointKeyHeld {
+                            agent_identity: member_spawned.agent_identity.clone(),
+                            agent_runtime_id: member_spawned.agent_runtime_id.clone(),
+                            holder,
+                            reason,
+                        });
+                    }
                 }
                 if let Some(bridge_session_id) = member_spawned
                     .bridge_member_ref
@@ -9522,12 +9648,14 @@ impl MobBuilder {
             // retired history. It skips only the exact current placed projection;
             // the canonical committed carrier installs that incarnation in one
             // recovery signal after historical generations establish high-water.
-            seed_mob_authority_sync_from_events(
+            let mut replayed_endpoint_key_held = Vec::new();
+            seed_mob_authority_sync_from_events_reporting(
                 &mut initial_dsl_authority,
                 &mob_events[post_bridge_epoch_start..],
                 &definition,
                 resumed_state == MobState::Completed,
                 &placed_recovery.current_committed_event_keys,
+                &mut replayed_endpoint_key_held,
             )?;
             recover_current_committed_placed_carrier_signals(
                 initial_dsl_authority.as_mut(),
@@ -9640,7 +9768,50 @@ impl MobBuilder {
                     });
                 }
             }
-            let seeded_restore_diagnostics = HashMap::new();
+            // A member the replay recorded a restore failure because its row's
+            // endpoint carries the transport key another member holds, and
+            // whose incarnation no later row retired or replaced: it is
+            // listed broken with the reason, named once in the log, and its
+            // roster projection drops the endpoint its row carries (the
+            // holder's key), as a member whose endpoint is unusable does.
+            let mut seeded_restore_diagnostics = HashMap::new();
+            for held in replayed_endpoint_key_held {
+                let dsl_identity = crate::machines::mob_machine::AgentIdentity::from_domain(
+                    &held.agent_identity,
+                );
+                let state = initial_dsl_authority.state();
+                let current = state.identity_to_runtime.get(&dsl_identity)
+                    == Some(
+                        &crate::machines::mob_machine::AgentRuntimeId::from_domain(
+                            &held.agent_runtime_id,
+                        ),
+                    )
+                    && state.member_restore_failures.contains_key(&dsl_identity);
+                if !current {
+                    continue;
+                }
+                tracing::warn!(
+                    mob_id = %definition.id,
+                    agent_identity = %held.agent_identity,
+                    holder = %held.holder,
+                    reason = %held.reason,
+                    "a member's recorded comms endpoint carries another member's transport key; the member is listed broken until it is retired"
+                );
+                let bridge_session_id = roster
+                    .get(&held.agent_identity)
+                    .and_then(|entry| entry.member_ref.bridge_session_id().cloned());
+                let _ = roster.set_comms_identity(&held.agent_identity, None, None);
+                seeded_restore_diagnostics.insert(
+                    held.agent_identity,
+                    super::handle::RestoreFailureDiagnostic {
+                        bridge_session_id,
+                        reason: held.reason,
+                        hold: None,
+                        cause_data: None,
+                        registration_refusal: None,
+                    },
+                );
+            }
             // Prepare shared runtime components early so resume reconciliation can
             // wire tool dispatchers for recreated sessions to the final actor channel.
             // Restored dispatchers may read identity and historical creation

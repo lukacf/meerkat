@@ -56,7 +56,13 @@ administrator only. See Security, Upgrade and Changed.
   record or a record of an agent that an access rule keeps from the person
   reading. Affects 0.9.14 and earlier. On a console that can identify
   nobody the signal is read as a member's record with no attributes is, so
-  an access deny that matches the anonymous caller also refuses it.
+  an access deny that matches the anonymous caller also refuses it. Gating
+  audit entries served by the Console no longer carry a memory conflict's
+  reason text for people who are not administrators.
+- A deny rule naming an agent's memory now also withholds the realm's dream
+  history when the console does not know that agent (for example after it
+  was retired); before, such a rule was not consulted for signed-in people
+  who are not administrators.
 - With no runtime registered, a console serves no stored frame whose member
   sat in a nested mob (a mob other than its runtime's own).
 
@@ -116,9 +122,20 @@ administrator only. See Security, Upgrade and Changed.
   its arguments and its result stay on the spawning agent's own timeline.
 - A member's memory event that names its session (`session_key`) and a live
   image record carry that session as `session_id` on their timeline frame.
+- For a person who is not an administrator, a realm's dream history is
+  listed only when access rules allow that person to read the memory of
+  every agent the realm holds memory for. An agent the console no longer
+  knows (for example one retired before a restart) has no role or labels,
+  so an allow rule scoped by role or label does not cover it and the
+  history is withheld while such memory exists; before, that agent was left
+  out of the check. An allow rule with no agent selector, with agents `*`,
+  or naming the agent keeps the history listed.
 
 ### Known limitations
 
+- Memory panel: for a realm's dream history, a deny scoped by role or label
+  that applies to the caller is treated as matching an agent the console
+  does not know.
 - Console timeline: memory records on the system page (taint transitions,
   quarantined writes, promotions) can show the session key, scope key or
   author name of a member that is private to another person. They carry no

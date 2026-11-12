@@ -5069,6 +5069,75 @@ async fn a_spawn_rolled_back_after_its_starting_notice_sends_nothing_for_the_mem
     fixture.finish().await;
 }
 
+/// A member released to Dormant while one of its kickoff notices is pending
+/// keeps that notice: the member is still seated in the same incarnation
+/// and the notice is still true of it, so no cancel covers a release. The
+/// notice is delivered once, from the comms runtime the delivery holds, and
+/// its send wakes nothing: the member stays Dormant and is not built again.
+/// The started notice's send is held while the member is released.
+///
+/// A current-thread runtime, so a record of the notice would reach this
+/// thread's capture.
+#[tokio::test]
+async fn a_kickoff_notice_of_a_member_released_to_dormant_is_still_delivered_and_wakes_nothing() {
+    let (warnings, _capture) = capture_warnings();
+    // A second registered dispatch keeps callsite interest per thread.
+    let _anchor = tracing::Dispatch::new(tracing_subscriber::Registry::default());
+    let fixture = WakeFixture::new("kickoff-notice-released-sender").await;
+    let started = crate::runtime::actor::kickoff_notice::hold_kickoff_notice_send_for_test(
+        fixture.handle.mob_id(),
+        "mob.kickoff_started",
+    );
+    let peer = fixture.spawn("notice-released-peer").await;
+    let member = fixture.spawn("notice-released-member").await;
+    fixture.wire(&member, &peer).await;
+    emit_kickoff_notice(&fixture, &member, "mob.kickoff_started").await;
+    let pending = reached(|| started.arrived() == 1).await;
+    let builds_before = fixture
+        .preparer
+        .prepared()
+        .into_iter()
+        .filter(|build| build.identity == member)
+        .count();
+
+    // The release answers and the member is Dormant; the notice is still
+    // held, not cancelled.
+    fixture.release(&member).await;
+    let cancelled_by_release =
+        kickoff_notice_records(&warnings, &member, &peer, "mob.kickoff_started");
+    let sent_while_held = started.passed();
+
+    started.release();
+    let received = kickoff_notice_kinds_settled(&fixture, &peer, &member, 1).await;
+    let records = kickoff_notice_records(&warnings, &member, &peer, "mob.kickoff_started");
+    let builds_after = fixture
+        .preparer
+        .prepared()
+        .into_iter()
+        .filter(|build| build.identity == member)
+        .count();
+    let residency = fixture.residency(&member);
+    assert!(
+        pending
+            && cancelled_by_release.is_empty()
+            && sent_while_held == 0
+            && started.passed() == 1
+            && received == kinds(&["mob.kickoff_started"])
+            && records.is_empty()
+            && residency == Some(mob_dsl::MemberMaterializationPhase::Dormant)
+            && builds_after == builds_before,
+        "a release to Dormant did not keep the member's pending kickoff notice, or the notice \
+         woke the member: the notice was pending: {pending}; records at the release: \
+         {cancelled_by_release:?} (none expected); {sent_while_held} send(s) while held, {} \
+         afterwards (0, then 1 expected); the peer holds {received:?} (the started notice, once, \
+         expected); records afterwards: {records:?} (none expected); the member is \
+         {residency:?} (Dormant expected) after {builds_after} build(s), {builds_before} before \
+         the release",
+        started.passed()
+    );
+    fixture.finish().await;
+}
+
 /// The declared apply on a durable store: an identity a complete roster
 /// unlisted, then lists again, comes back as the same identity with its
 /// history. The unlisted retirement archives the member's session and

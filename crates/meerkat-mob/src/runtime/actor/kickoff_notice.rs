@@ -43,13 +43,13 @@
 //! state.
 //!
 //! The deliveries are peer deliveries: a stop, a complete, a reset, a
-//! destroy and a shutdown of the mob, an unwire of the edge and a retirement
-//! of either member cancel the notices that are pending when they start,
-//! and wait for them to settle, as they do for a pending peer message. A
-//! notice such a command emits itself (the cancellation of a kickoff a stop
-//! closes) is handed to the lane after that cancel: it ends within its own
-//! send budget, and the actor's exit ends the lane, so nothing is delivered
-//! once a mob is destroyed.
+//! destroy and a shutdown of the mob, an unwire of the edge, a retirement of
+//! either member and the rollback of a failed spawn cancel the notices that
+//! are pending when they start, and wait for them to settle, as they do for
+//! a pending peer message. A notice such a command emits itself (the
+//! cancellation of a kickoff a stop closes) is handed to the lane after that
+//! cancel: it ends within its own send budget, and the actor's exit ends the
+//! lane, so nothing is delivered once a mob is destroyed.
 
 use super::*;
 

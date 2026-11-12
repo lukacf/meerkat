@@ -66035,6 +66035,14 @@ impl MobActor {
             successful_wiring_targets,
             planned_wiring_targets,
         } = rollback_context;
+        // The member leaves its seat: nothing it still owes a peer on the
+        // delivery lane (a kickoff notice handed off before the spawn
+        // failed) is sent for it, and nothing still owed to it is sent
+        // either. A retirement by command cancels these in a stage of its
+        // own; the rollback's retirement skips that stage, so the cancel is
+        // here.
+        self.cancel_peer_deliveries_for_member(agent_identity, "member spawn is rolling back")
+            .await?;
         let Some((custody, material, owner)) = self.claim_retained_spawn_rollback(agent_identity)
         else {
             return Err(MobError::LifecycleOperationPending {

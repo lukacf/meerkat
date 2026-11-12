@@ -16992,7 +16992,12 @@ impl MobActor {
                 .unwrap_or_default(),
             member_grant_mint: self.member_residency.member_grant_mint.clone(),
             member_tool_audience: self.member_residency.member_tool_audience.clone(),
+            // The residency holds a build preparer only with the runtime
+            // adapter (`MobBuilder::with_member_build_preparer`).
+            #[cfg(feature = "runtime-adapter")]
             member_build_preparer: self.member_residency.build_preparer.clone(),
+            #[cfg(not(feature = "runtime-adapter"))]
+            member_build_preparer: None,
         }
     }
 

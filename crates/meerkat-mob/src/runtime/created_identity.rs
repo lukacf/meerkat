@@ -319,8 +319,9 @@ fn reseat_spec(row: &MemberSpawnedEvent, session_id: SessionId) -> super::SpawnM
 /// the seat of such an identity's member at each of its builds
 /// ([`super::MemberBuildPreparer::prepare_store_owned_seat`]), since Core
 /// seats it from its row with no host step. A roster-owned identity's host
-/// composed its spec itself, and a worker is no identity entry.
-#[cfg(feature = "runtime-adapter")]
+/// composed its spec itself, and a worker is no identity entry. It reads
+/// MobMachine's state only, so it is there with or without the runtime
+/// adapter: the settle of a store-owned seat row asks it in every build.
 pub(super) fn host_composes_seat(
     state: &mob_dsl::MobMachineState,
     identity: &AgentIdentity,

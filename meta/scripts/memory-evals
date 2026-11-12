@@ -540,7 +540,9 @@ def validate_distiller_fixture(path, violations):
             if not isinstance(message, dict):
                 violations.append(f"{message_where}: must be an object")
                 continue
-            unknown = [key for key in message if key not in ("role", "text")]
+            unknown = [
+                key for key in message if key not in ("role", "text", "attested_person")
+            ]
             if unknown:
                 violations.append(f"{message_where}: unknown key(s): {', '.join(unknown)}")
             role = check_string(message, "role", message_where, violations)
@@ -550,6 +552,13 @@ def validate_distiller_fixture(path, violations):
                     f"(known: {', '.join(DISTILLER_TRANSCRIPT_ROLES)})"
                 )
             check_string(message, "text", message_where, violations)
+            attested = message.get("attested_person", False)
+            if not isinstance(attested, bool):
+                violations.append(f"{message_where}: attested_person must be a boolean")
+            elif attested and role != "user":
+                # Evidence-scoped taint (§10.1): only a person's own typed
+                # input, attested by the host, is proven clean.
+                violations.append(f"{message_where}: attested_person needs role `user`")
 
     manifest = fixture.get("existing_manifest", [])
     manifest_ids = []
@@ -602,7 +611,11 @@ def validate_distiller_fixture(path, violations):
     if not isinstance(expected, dict):
         violations.append(f"{where}: missing or non-object `expected`")
         return name
-    unknown = [key for key in expected if key not in ("noop", "proposals", "quarantined")]
+    unknown = [
+        key
+        for key in expected
+        if key not in ("noop", "proposals", "quarantined", "clean_call_quarantined")
+    ]
     if unknown:
         violations.append(f"{where}: expected unknown key(s): {', '.join(unknown)}")
     noop = expected.get("noop", False)
@@ -635,10 +648,17 @@ def validate_distiller_fixture(path, violations):
     if quarantined is not None:
         if not isinstance(quarantined, bool):
             violations.append(f"{where}: expected.quarantined must be a boolean")
-        elif quarantined and not session_tainted:
+    clean_call_quarantined = expected.get("clean_call_quarantined")
+    if clean_call_quarantined is not None:
+        if not isinstance(clean_call_quarantined, bool):
+            violations.append(f"{where}: expected.clean_call_quarantined must be a boolean")
+        elif not any(
+            isinstance(message, dict) and message.get("attested_person") is True
+            for message in (transcript if isinstance(transcript, list) else [])
+        ):
             violations.append(
-                f"{where}: expected.quarantined=true requires taint.session_tainted=true "
-                "(the gate verdict is deterministic over the fixture's taint context)"
+                f"{where}: expected.clean_call_quarantined needs an attested_person row "
+                "(the clean call reads only proven-clean rows)"
             )
 
     return name
@@ -1455,6 +1475,13 @@ def score_distiller_fixture(fixture, result):
             f"quarantined verdict {result.get('quarantined')} != "
             f"expected {expected['quarantined']}"
         )
+    if "clean_call_quarantined" in expected:
+        clean_call = result.get("clean_call") or {}
+        if clean_call.get("quarantined") != expected["clean_call_quarantined"]:
+            hard.append(
+                f"clean-call quarantined verdict {clean_call.get('quarantined')} != "
+                f"expected {expected['clean_call_quarantined']}"
+            )
     return misses, hard
 
 

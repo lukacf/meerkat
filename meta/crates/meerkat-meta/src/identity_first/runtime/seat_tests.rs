@@ -7318,6 +7318,7 @@ impl TranscriptSource for OneMessageEach {
                 index: from_index,
                 role: "user",
                 text,
+                proven_clean: false,
             }],
             head_revision: None,
         }))

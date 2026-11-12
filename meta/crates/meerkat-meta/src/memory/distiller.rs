@@ -578,6 +578,13 @@ pub struct TranscriptMessage {
     pub index: u64,
     pub role: &'static str,
     pub text: String,
+    /// Evidence-scoped taint (§10.1): whether this row is PROVEN clean from
+    /// typed, persisted facts. Only a person's own typed input is: a
+    /// conversational user row whose turn input is typed text and whose
+    /// host-stamped direct requester names a person (render class absent or
+    /// a user prompt). Every other row is unknown or tainted, and an
+    /// extraction call that reads it produces quarantined records.
+    pub proven_clean: bool,
 }
 
 /// The evidence window: messages `[start_index, end_index)` of the session
@@ -672,6 +679,7 @@ impl TranscriptSource for SessionStoreTranscriptSource {
                         &compact_whitespace(&text),
                         MAX_TRANSCRIPT_MESSAGE_BYTES,
                     ),
+                    proven_clean: proven_clean_row(message),
                 })
             })
             .collect();
@@ -728,6 +736,71 @@ fn project_message(message: &Message) -> Option<(&'static str, String)> {
                 .join("\n");
             Some(("tool results", text))
         }
+    }
+}
+
+/// Rule 3 of evidence-scoped taint (§10.1): a row is proven clean only when
+/// it is a person's own typed input, attested by the surface that admitted
+/// it rather than by its text. That is a conversational user row whose turn
+/// input is typed text and whose host-stamped requester is a person that
+/// reached the turn directly, with no render class or a user-prompt one.
+/// Nothing else is proven clean by this rule; a row without these facts is
+/// unknown, never clean.
+pub fn proven_clean_row(message: &Message) -> bool {
+    let Message::User(user) = message else {
+        return false;
+    };
+    user.transcript_role.is_conversational()
+        && user.identity.turn_input == Some(meerkat_core::types::TranscriptTurnInput::TypedText)
+        && user
+            .identity
+            .requester
+            .as_ref()
+            .and_then(meerkat_core::TurnRequester::direct_principal)
+            .is_some_and(|principal| principal.kind == meerkat_core::PrincipalKind::Human)
+        && user
+            .render_metadata
+            .as_ref()
+            .is_none_or(|render| render.class == meerkat_core::types::RenderClass::UserPrompt)
+}
+
+/// One proven-clean extraction call over a window (§10.1): the rendered
+/// clean rows, which rows they are, their digest, and the input window a
+/// record's citation is clamped to.
+#[derive(Debug, Clone)]
+struct CleanCall {
+    text: String,
+    input: crate::memory::records::CleanExtractionInput,
+    window: (u64, u64),
+}
+
+impl CleanCall {
+    /// The clean call over `slice`'s proven-clean rows, if it has any.
+    fn of(slice: &TranscriptSlice) -> Option<Self> {
+        let rows: Vec<TranscriptMessage> = slice
+            .messages
+            .iter()
+            .filter(|message| message.proven_clean)
+            .cloned()
+            .collect();
+        let first = rows.first()?.index;
+        let last = rows.last()?.index;
+        let digest = crate::memory::records::CleanExtractionInput::digest_rows(
+            rows.iter()
+                .map(|row| (row.index, row.role, row.text.as_str())),
+        );
+        let text = render_transcript(&TranscriptSlice {
+            messages: rows.clone(),
+            ..slice.clone()
+        });
+        Some(Self {
+            text,
+            input: crate::memory::records::CleanExtractionInput {
+                rows: rows.iter().map(|row| row.index).collect(),
+                digest,
+            },
+            window: (first, last),
+        })
     }
 }
 
@@ -1714,94 +1787,104 @@ impl DistillerEngine {
 
         // Evidence read comes before the budget gate: an empty window must
         // not burn a budgeted run.
-        let (evidence_text, evidence_range, window_end, head_revision) = match cause {
-            DistillCause::Compaction => {
-                let entries = match discards {
-                    // A batch Core's cold settle published and answered:
-                    // the discards are its records themselves.
-                    Some(entries) => entries,
-                    None => {
-                        let Some(compaction) = self.compaction.as_ref() else {
-                            return Ok(DistillOutcome::Skipped {
-                                reason: SKIP_NO_DISCARD_SOURCE.to_string(),
-                            });
-                        };
-                        match compaction
-                            .read_discards(session_key, COMPACTION_HARVEST_LIMIT)
-                            .await
-                        {
-                            Ok(entries) => entries,
-                            Err(err) => {
-                                tracing::warn!(
-                                    identity,
-                                    session_key,
-                                    error = %err,
-                                    "agent memory distiller: compaction harvest failed"
-                                );
+        let (evidence_text, evidence_range, window_end, head_revision, clean_call, whole_call) =
+            match cause {
+                DistillCause::Compaction => {
+                    let entries = match discards {
+                        // A batch Core's cold settle published and answered:
+                        // the discards are its records themselves.
+                        Some(entries) => entries,
+                        None => {
+                            let Some(compaction) = self.compaction.as_ref() else {
                                 return Ok(DistillOutcome::Skipped {
-                                    reason: format!("compaction harvest failed: {err}"),
+                                    reason: SKIP_NO_DISCARD_SOURCE.to_string(),
                                 });
+                            };
+                            match compaction
+                                .read_discards(session_key, COMPACTION_HARVEST_LIMIT)
+                                .await
+                            {
+                                Ok(entries) => entries,
+                                Err(err) => {
+                                    tracing::warn!(
+                                        identity,
+                                        session_key,
+                                        error = %err,
+                                        "agent memory distiller: compaction harvest failed"
+                                    );
+                                    return Ok(DistillOutcome::Skipped {
+                                        reason: format!("compaction harvest failed: {err}"),
+                                    });
+                                }
                             }
                         }
-                    }
-                };
-                if entries.is_empty() {
-                    return Ok(DistillOutcome::Skipped {
-                        reason: SKIP_NO_DISCARDS.to_string(),
-                    });
-                }
-                let range = discard_evidence_range(&entries);
-                // Discards predate the current transcript head (they were
-                // evicted at compaction), so there is no head revision to pin.
-                (render_discards(&entries), range, None, None)
-            }
-            _ => {
-                let slice = match self.transcripts.read(session_key, cursor).await {
-                    Ok(Some(slice)) => slice,
-                    Ok(None) => {
+                    };
+                    if entries.is_empty() {
                         return Ok(DistillOutcome::Skipped {
-                            reason: "session not found in the session store".to_string(),
+                            reason: SKIP_NO_DISCARDS.to_string(),
                         });
                     }
-                    Err(err) => {
-                        tracing::warn!(
-                            identity,
-                            session_key,
-                            error = %err,
-                            "agent memory distiller: transcript read failed"
-                        );
+                    let range = discard_evidence_range(&entries);
+                    // Discards predate the current transcript head (they were
+                    // evicted at compaction), so there is no head revision to pin.
+                    // Their rows carry no typed facts: no clean call, and the
+                    // harvest is unknown evidence (§10.1 rule 4).
+                    (render_discards(&entries), range, None, None, None, true)
+                }
+                _ => {
+                    let slice = match self.transcripts.read(session_key, cursor).await {
+                        Ok(Some(slice)) => slice,
+                        Ok(None) => {
+                            return Ok(DistillOutcome::Skipped {
+                                reason: "session not found in the session store".to_string(),
+                            });
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                identity,
+                                session_key,
+                                error = %err,
+                                "agent memory distiller: transcript read failed"
+                            );
+                            return Ok(DistillOutcome::Skipped {
+                                reason: format!("transcript read failed: {err}"),
+                            });
+                        }
+                    };
+                    if slice.messages.is_empty() {
                         return Ok(DistillOutcome::Skipped {
-                            reason: format!("transcript read failed: {err}"),
+                            reason: "empty evidence window".to_string(),
                         });
                     }
-                };
-                if slice.messages.is_empty() {
-                    return Ok(DistillOutcome::Skipped {
-                        reason: "empty evidence window".to_string(),
-                    });
+                    if cause == DistillCause::Interactions && recorder_wrote {
+                        // CC's mutual-exclusion trick: the agent already curated
+                        // this window itself; skip and advance the cursor.
+                        self.with_window(identity, session_key, |state| {
+                            state.cursor = slice.end_index;
+                            state.recorder_wrote = false;
+                            state.completed_runs = 0;
+                        });
+                        return Ok(DistillOutcome::Skipped {
+                            reason: "recorder wrote in window (mutual exclusion)".to_string(),
+                        });
+                    }
+                    let range = Some((slice.start_index, slice.end_index.saturating_sub(1)));
+                    let head_revision = slice.head_revision.clone();
+                    // Evidence-scoped taint (§10.1): the proven-clean rows get a
+                    // call of their own; any other row in the window is read by
+                    // the whole-window call, whose records are unknown evidence.
+                    let clean_call = CleanCall::of(&slice);
+                    let whole_call = slice.messages.iter().any(|message| !message.proven_clean);
+                    (
+                        render_transcript(&slice),
+                        range,
+                        Some(slice.end_index),
+                        head_revision,
+                        clean_call,
+                        whole_call,
+                    )
                 }
-                if cause == DistillCause::Interactions && recorder_wrote {
-                    // CC's mutual-exclusion trick: the agent already curated
-                    // this window itself; skip and advance the cursor.
-                    self.with_window(identity, session_key, |state| {
-                        state.cursor = slice.end_index;
-                        state.recorder_wrote = false;
-                        state.completed_runs = 0;
-                    });
-                    return Ok(DistillOutcome::Skipped {
-                        reason: "recorder wrote in window (mutual exclusion)".to_string(),
-                    });
-                }
-                let range = Some((slice.start_index, slice.end_index.saturating_sub(1)));
-                let head_revision = slice.head_revision.clone();
-                (
-                    render_transcript(&slice),
-                    range,
-                    Some(slice.end_index),
-                    head_revision,
-                )
-            }
-        };
+            };
 
         // §8.1 resource guard: consulted before every run, unless a wait
         // took the run for the caller already. A denial is the caller's:
@@ -1863,102 +1946,92 @@ impl DistillerEngine {
                 });
             }
         };
-        let raw_ops = match extract(
-            &self.profile,
-            &*client,
-            &manifest,
-            &tombstones,
-            &evidence_text,
-        )
-        .await
-        {
-            Ok(ops) => ops,
-            Err(DistillerError::Auth(message)) => {
-                // One re-resolve, mirroring the Selector's auth containment.
-                tracing::warn!(error = %message, "distiller auth failure; re-resolving client");
-                self.handle.invalidate();
-                let retried = match self.handle.client().await {
-                    Ok(client) => {
-                        extract(
-                            &self.profile,
-                            &*client,
-                            &manifest,
-                            &tombstones,
-                            &evidence_text,
-                        )
-                        .await
-                    }
-                    Err(err) => Err(err),
-                };
-                match retried {
-                    Ok(ops) => ops,
-                    Err(err) => {
-                        tracing::warn!(identity, error = %err, "agent memory distiller: extraction failed");
-                        return Ok(DistillOutcome::Skipped {
-                            reason: format!("extraction failed: {err}"),
-                        });
-                    }
-                }
-            }
-            Err(err) => {
-                tracing::warn!(identity, error = %err, "agent memory distiller: extraction failed");
-                return Ok(DistillOutcome::Skipped {
-                    reason: format!("extraction failed: {err}"),
-                });
-            }
-        };
-
-        let manifest_ids: Vec<String> = manifest.iter().map(|meta| meta.id.clone()).collect();
         let run_id = self.mint_run_id();
         let author = MemoryAuthor::Distiller {
             run_id: run_id.clone(),
         };
+        let mut client = client;
+        let mut manifest = manifest;
         let mut written = 0usize;
         let mut quarantined = 0usize;
-        for raw in raw_ops {
-            let op = match validate_op(raw, &manifest_ids) {
-                Ok(op) => op,
-                Err(reason) => {
-                    tracing::warn!(run_id, reason, "agent memory distiller: op dropped");
-                    continue;
-                }
+        // Evidence-scoped taint (§10.1): the decision is what each call READ.
+        // The clean call reads only proven-clean rows, so its records carry
+        // that input and land clean whatever they cite; the whole-window
+        // call reads the rest too, so its records are unknown evidence and
+        // quarantine at the store's gate. A window of only proven-clean rows
+        // is one (clean) call; a window with none is one whole-window call.
+        if let Some(clean) = clean_call.as_ref() {
+            let raw_ops = match self
+                .extract_with_reauth(identity, &mut client, &manifest, &tombstones, &clean.text)
+                .await
+            {
+                Ok(ops) => ops,
+                Err(reason) => return Ok(DistillOutcome::Skipped { reason }),
             };
-            let record = self.build_record(
-                &op,
-                session_key,
-                generation,
-                evidence_range,
-                head_revision.as_deref(),
-            );
-            let result = match &op.action {
-                ProposedAction::Remember => {
-                    self.provider
-                        .remember_authored(&scope, record, author.clone())
-                        .await
-                }
-                ProposedAction::Update { target_id } => {
-                    self.provider
-                        .supersede_authored(&scope, target_id, record, author.clone())
-                        .await
-                }
-            };
-            match result {
-                Ok(receipt) => {
-                    written += 1;
-                    if matches!(
-                        receipt.status,
-                        crate::memory::records::RecordStatus::Quarantined { .. }
-                    ) {
-                        quarantined += 1;
+            let (clean_written, clean_quarantined) = self
+                .write_ops(
+                    raw_ops,
+                    &manifest,
+                    &scope,
+                    &author,
+                    &run_id,
+                    session_key,
+                    generation,
+                    Some(clean.window),
+                    head_revision.as_deref(),
+                    Some(clean),
+                )
+                .await;
+            written += clean_written;
+            quarantined += clean_quarantined;
+            if whole_call {
+                // The whole-window call sees what the clean call stored, so
+                // the existing manifest handling covers its duplicates.
+                manifest = match self
+                    .provider
+                    .manifest(std::slice::from_ref(&scope), ManifestTier::Full)
+                    .await
+                {
+                    Ok(manifest) => manifest,
+                    Err(err) => {
+                        tracing::warn!(identity, error = %err, "agent memory distiller: manifest re-read failed");
+                        return Ok(DistillOutcome::Skipped {
+                            reason: format!("manifest read failed: {err}"),
+                        });
                     }
-                }
-                Err(err) => {
-                    // Includes the staged validator's tombstone-recreation
-                    // reject — the mechanical backstop behind the prompt
-                    // guard.
-                    tracing::warn!(run_id, error = %err, "agent memory distiller: write rejected");
-                }
+                };
             }
+        }
+        if whole_call {
+            let raw_ops = match self
+                .extract_with_reauth(
+                    identity,
+                    &mut client,
+                    &manifest,
+                    &tombstones,
+                    &evidence_text,
+                )
+                .await
+            {
+                Ok(ops) => ops,
+                Err(reason) => return Ok(DistillOutcome::Skipped { reason }),
+            };
+            let (whole_written, whole_quarantined) = self
+                .write_ops(
+                    raw_ops,
+                    &manifest,
+                    &scope,
+                    &author,
+                    &run_id,
+                    session_key,
+                    generation,
+                    evidence_range,
+                    head_revision.as_deref(),
+                    None,
+                )
+                .await;
+            written += whole_written;
+            quarantined += whole_quarantined;
         }
 
         self.with_window(identity, session_key, |state| {
@@ -1982,6 +2055,114 @@ impl DistillerEngine {
         })
     }
 
+    /// One extraction call with the Selector's auth containment: one
+    /// re-resolve of the client on an auth failure. `Err` is the skip reason.
+    async fn extract_with_reauth(
+        &self,
+        identity: &str,
+        client: &mut Arc<dyn LlmClient>,
+        manifest: &[RecordMeta],
+        tombstones: &[TombstoneMeta],
+        evidence_text: &str,
+    ) -> Result<Vec<RawParsedOp>, String> {
+        let first = extract(
+            &self.profile,
+            &**client,
+            manifest,
+            tombstones,
+            evidence_text,
+        )
+        .await;
+        let result = match first {
+            Err(DistillerError::Auth(message)) => {
+                tracing::warn!(error = %message, "distiller auth failure; re-resolving client");
+                self.handle.invalidate();
+                match self.handle.client().await {
+                    Ok(fresh) => {
+                        *client = fresh;
+                        extract(
+                            &self.profile,
+                            &**client,
+                            manifest,
+                            tombstones,
+                            evidence_text,
+                        )
+                        .await
+                    }
+                    Err(err) => Err(err),
+                }
+            }
+            other => other,
+        };
+        result.map_err(|err| {
+            tracing::warn!(identity, error = %err, "agent memory distiller: extraction failed");
+            format!("extraction failed: {err}")
+        })
+    }
+
+    /// Validate and write one call's ops through the authored seam. Returns
+    /// (written, quarantined). `clean` is the call's proven-clean input, set
+    /// only for the clean call.
+    #[allow(clippy::too_many_arguments)]
+    async fn write_ops(
+        &self,
+        raw_ops: Vec<RawParsedOp>,
+        manifest: &[RecordMeta],
+        scope: &MemoryScope,
+        author: &MemoryAuthor,
+        run_id: &str,
+        session_key: &str,
+        generation: u64,
+        window_range: Option<(u64, u64)>,
+        revision: Option<&str>,
+        clean: Option<&CleanCall>,
+    ) -> (usize, usize) {
+        let manifest_ids: Vec<String> = manifest.iter().map(|meta| meta.id.clone()).collect();
+        let mut written = 0usize;
+        let mut quarantined = 0usize;
+        for raw in raw_ops {
+            let op = match validate_op(raw, &manifest_ids) {
+                Ok(op) => op,
+                Err(reason) => {
+                    tracing::warn!(run_id, reason, "agent memory distiller: op dropped");
+                    continue;
+                }
+            };
+            let record =
+                self.build_record(&op, session_key, generation, window_range, revision, clean);
+            let result = match &op.action {
+                ProposedAction::Remember => {
+                    self.provider
+                        .remember_authored(scope, record, author.clone())
+                        .await
+                }
+                ProposedAction::Update { target_id } => {
+                    self.provider
+                        .supersede_authored(scope, target_id, record, author.clone())
+                        .await
+                }
+            };
+            match result {
+                Ok(receipt) => {
+                    written += 1;
+                    if matches!(
+                        receipt.status,
+                        crate::memory::records::RecordStatus::Quarantined { .. }
+                    ) {
+                        quarantined += 1;
+                    }
+                }
+                Err(err) => {
+                    // Includes the staged validator's tombstone-recreation
+                    // reject — the mechanical backstop behind the prompt
+                    // guard.
+                    tracing::warn!(run_id, error = %err, "agent memory distiller: write rejected");
+                }
+            }
+        }
+        (written, quarantined)
+    }
+
     fn build_record(
         &self,
         op: &ProposedOp,
@@ -1989,6 +2170,7 @@ impl DistillerEngine {
         generation: u64,
         window_range: Option<(u64, u64)>,
         revision: Option<&str>,
+        clean: Option<&CleanCall>,
     ) -> NewMemoryRecord {
         let mut tags = op.tags.clone();
         if op.epistemic == Epistemic::OperatorSaid
@@ -2000,7 +2182,10 @@ impl DistillerEngine {
         }
         // Model-cited range wins when it stays inside the window; a range
         // outside the evidence the model was shown is a hallucinated
-        // citation and falls back to the window bounds.
+        // citation and falls back to the window bounds. For the clean call
+        // the window is its input's, so a citation never widens past what
+        // the call read. The range is provenance only: the taint decision
+        // reads `clean_input`.
         let range = match (op.evidence_range, window_range) {
             (Some((start, end)), Some((window_start, window_end)))
                 if start >= window_start && end <= window_end =>
@@ -2023,6 +2208,7 @@ impl DistillerEngine {
                 // discards predate the current head).
                 revision: revision.map(str::to_string),
                 range,
+                clean_input: clean.map(|clean| clean.input.clone()),
             }],
             verification: None,
         }
@@ -2875,6 +3061,7 @@ mod tests {
                     index: index as u64,
                     role,
                     text: text.to_string(),
+                    proven_clean: false,
                 })
                 .collect(),
             head_revision: Some("rev-head".to_string()),
@@ -4117,3 +4304,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "distiller_evidence_taint_tests.rs"]
+mod evidence_taint_tests;

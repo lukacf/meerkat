@@ -24,6 +24,18 @@
 //!   quarantines. Coarse by design: the tracker holds session-sticky
 //!   facts, so session-tainted ⇒ every range in it tainted (per-turn
 //!   granularity would need the Hygienist's pinned revisions, P4).
+//! - **Evidence-scoped distilled writes** (supersedes the coarse rule above
+//!   for the Distiller author only): a distilled record is clean only when
+//!   the extraction call that produced it read nothing but rows proven
+//!   clean from typed transcript facts, which the Distiller stamps as
+//!   `EvidenceRef::clean_input`. The only rows proven clean are a person's
+//!   own typed input (a conversational typed-text user row with a
+//!   host-stamped direct person requester). Every other distillate is
+//!   unknown evidence and quarantines, whether or not this tracker holds a
+//!   fact for its session; a missing trust fact is never clean. The
+//!   compaction-discard path carries no row facts and so always takes this
+//!   unknown branch. Agent recorder writes and steward writes keep the
+//!   session rule above.
 //! - **Reset boundaries**: `reset()` marks the outgoing session so
 //!   Distiller output over it lands `Quarantined` (§8.4 — reset is the
 //!   operator's escape hatch; quarantine preserves the re-dream option).
@@ -558,6 +570,22 @@ impl SessionTaintTracker {
         None
     }
 
+    /// §8.4 reset boundary query alone: why a distillate citing
+    /// `session_key` must quarantine because the session closed at a reset,
+    /// if it did. Unlike [`Self::evidence_quarantine_reason`] it ignores
+    /// content taint, which proven-clean distilled input does not inherit.
+    pub fn reset_boundary_reason(&self, session_key: &str) -> Option<String> {
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        inner.reset_boundaries.contains_key(session_key).then(|| {
+            "evidence session closed at a reset boundary; distillates quarantine \
+             pending steward review (§8.4)"
+                .to_string()
+        })
+    }
+
     /// Taint fact for an explicit session key.
     pub fn session_taint(&self, session_key: &str) -> Option<TaintState> {
         let inner = self
@@ -797,6 +825,9 @@ impl LlmWriteGate for TaintLlmWriteGate {
         {
             return Some(format!("session tainted by {}", state.source));
         }
+        if matches!(author, MemoryAuthor::Distiller { .. }) {
+            return distilled_evidence_quarantine_reason(tracker, evidence);
+        }
         for evidence_ref in evidence {
             if let Some(reason) = tracker.evidence_quarantine_reason(&evidence_ref.session_id) {
                 return Some(reason);
@@ -804,6 +835,46 @@ impl LlmWriteGate for TaintLlmWriteGate {
         }
         None
     }
+}
+
+/// Evidence-scoped taint for distilled writes (§10.1). A distilled record
+/// is clean only when the extraction call that produced it read nothing but
+/// rows proven clean, which the Distiller stamps as
+/// [`EvidenceRef::clean_input`]. Everything else is unknown and quarantines:
+/// a missing trust fact is never clean. When the tracker holds a session
+/// fact for unknown evidence its reason is reported (the session-sticky
+/// fallback); otherwise the reason names the unknown evidence. A reset
+/// boundary quarantines every distillate over the session, clean input
+/// included (§8.4). A write that cites no evidence quarantines.
+fn distilled_evidence_quarantine_reason(
+    tracker: &SessionTaintTracker,
+    evidence: &[EvidenceRef],
+) -> Option<String> {
+    if evidence.is_empty() {
+        return Some(
+            "distilled write cites no evidence; unknown evidence quarantines \
+             (evidence-scoped taint)"
+                .to_string(),
+        );
+    }
+    for evidence_ref in evidence {
+        if let Some(reason) = tracker.reset_boundary_reason(&evidence_ref.session_id) {
+            return Some(reason);
+        }
+        if evidence_ref.clean_input.is_some() {
+            continue;
+        }
+        return Some(
+            tracker
+                .evidence_quarantine_reason(&evidence_ref.session_id)
+                .unwrap_or_else(|| {
+                    "the extraction call read transcript rows not proven clean; unknown \
+                     evidence quarantines (evidence-scoped taint)"
+                        .to_string()
+                }),
+        );
+    }
+    None
 }
 
 /// Sender-identity extraction from one line of injected peer-projection
@@ -1850,6 +1921,7 @@ mod tests {
             generation: 0,
             revision: None,
             range: Some((0, 4)),
+            clean_input: None,
         }]
     }
 
@@ -1876,14 +1948,50 @@ mod tests {
             )
             .expect("tainted evidence range quarantines (session-tainted ⇒ range-tainted)");
         assert!(reason.contains("evidence session tainted"), "{reason}");
-        // Clean evidence does not.
-        assert!(
-            gate.quarantine_reason(
+        // Evidence-scoped taint: a distillate without proven-clean input is
+        // unknown evidence and quarantines even when no session fact
+        // matches; a missing trust fact is never clean.
+        let reason = gate
+            .quarantine_reason(
                 &distiller,
                 StagedBatchKind::FreshWrite,
-                &evidence_for(&fresh)
+                &evidence_for(&fresh),
             )
-            .is_none()
+            .expect("unknown evidence quarantines");
+        assert!(reason.contains("not proven clean"), "{reason}");
+        // A distillate whose extraction call read only proven-clean rows is
+        // clean, whatever the session saw before.
+        let clean_input = |session: &SessionId| {
+            let mut evidence = evidence_for(session);
+            evidence[0].clean_input = Some(crate::memory::records::CleanExtractionInput {
+                rows: vec![2],
+                digest: crate::memory::records::CleanExtractionInput::digest_rows([(
+                    2, "user", "typed",
+                )]),
+            });
+            evidence
+        };
+        for session in [&session, &fresh] {
+            assert!(
+                gate.quarantine_reason(
+                    &distiller,
+                    StagedBatchKind::FreshWrite,
+                    &clean_input(session)
+                )
+                .is_none()
+            );
+        }
+        // An agent recorder write never borrows the distiller's exemption.
+        assert!(
+            gate.quarantine_reason(
+                &MemoryAuthor::Steward {
+                    run_id: "dream-1".to_string(),
+                },
+                StagedBatchKind::FreshWrite,
+                &clean_input(&session)
+            )
+            .is_some(),
+            "clean input is a distillate fact only; other authors keep the session rule"
         );
         // Non-LLM authors are never evidence-gated.
         assert!(

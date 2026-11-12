@@ -293,6 +293,47 @@ pub struct EvidenceRef {
     /// Message range within the pinned revision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub range: Option<(u64, u64)>,
+    /// Evidence-scoped taint (§10.1): the exact input of the extraction call
+    /// that produced this record, stamped by the Distiller only when every
+    /// row that call read was proven clean. The write gate and later audits
+    /// read this, never `range` (a model-chosen citation). `None` means the
+    /// producing call read at least one row not proven clean, or the write
+    /// came from another path: the evidence is then unknown and a distilled
+    /// record citing it quarantines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clean_input: Option<CleanExtractionInput>,
+}
+
+/// What one proven-clean extraction call read: the absolute transcript row
+/// indices it was given (in the session, generation and revision of the
+/// enclosing [`EvidenceRef`]) and a digest over those rows' rendered
+/// content. Changing any row changes the digest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CleanExtractionInput {
+    pub rows: Vec<u64>,
+    pub digest: String,
+}
+
+impl CleanExtractionInput {
+    /// Digest over `(index, role, text)` of each row, in order, with
+    /// length-prefixed fields so no two row lists collide by concatenation.
+    pub fn digest_rows<'a>(rows: impl IntoIterator<Item = (u64, &'a str, &'a str)>) -> String {
+        let mut hasher = Sha256::new();
+        for (index, role, text) in rows {
+            hasher.update(index.to_be_bytes());
+            hasher.update((role.len() as u64).to_be_bytes());
+            hasher.update(role.as_bytes());
+            hasher.update((text.len() as u64).to_be_bytes());
+            hasher.update(text.as_bytes());
+        }
+        let digest = hasher.finalize();
+        let mut hex = String::with_capacity(7 + digest.len() * 2);
+        hex.push_str("sha256:");
+        for byte in digest {
+            hex.push_str(&format!("{byte:02x}"));
+        }
+        hex
+    }
 }
 
 /// Calibration profile reference (§11). All strings for now: the calibration
@@ -812,6 +853,7 @@ mod tests {
                     generation: 2,
                     revision: None,
                     range: Some((3, 9)),
+                    clean_input: None,
                 }],
                 author: MemoryAuthor::Agent {
                     identity: "identity:luka".to_string(),

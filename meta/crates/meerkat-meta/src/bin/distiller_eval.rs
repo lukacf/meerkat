@@ -4,17 +4,22 @@
 //! Reads one fixture-shaped JSON object on stdin:
 //!
 //! ```json
-//! {"transcript": [{"role": "user", "text": "..."}],
+//! {"transcript": [{"role": "user", "text": "...", "attested_person": false}],
 //!  "existing_manifest": [RecordMeta...],
 //!  "tombstones": [{"title": "...", "kind": "Fact"}],
 //!  "taint": {"session_tainted": false, "source": "..."},
 //!  "profile_path": "optional/path.toml"}
 //! ```
 //!
-//! and writes `{"ops": [...], "quarantined": bool}` on stdout — the parsed,
-//! validated op list plus the deterministic write-gate verdict the fixture's
-//! taint context produces (the gate law is deterministic, so the harness can
-//! score it without a store). `--mock` swaps the live model for a scripted
+//! and writes `{"ops": [...], "quarantined": bool, "clean_call": null |
+//! {"rows": [...], "quarantined": bool}}` on stdout — the parsed, validated
+//! op list of the whole-window call plus the deterministic write-gate
+//! verdicts (the gate law is deterministic, so the harness can score it
+//! without a store). Evidence-scoped taint (§10.1): `quarantined` is the
+//! verdict for a record of the whole-window call, which reads every row;
+//! `clean_call` is the verdict for a record of the clean call, which reads
+//! only the rows proven clean (`attested_person` user rows: a person's own
+//! typed input with a host-stamped requester), present when any row is. `--mock` swaps the live model for a scripted
 //! client that extracts nothing (`[]`) — the doctrine's preferred output —
 //! so the noop scorecard plumbing runs end-to-end without credentials.
 //!
@@ -37,7 +42,9 @@ use meerkat_meta::memory::distiller::{
     DistillerClientHandle, DistillerError, DistillerProfile, FactoryDistillerHandle, TombstoneMeta,
     TranscriptMessage, TranscriptSlice, extract, render_transcript, validate_op,
 };
-use meerkat_meta::memory::records::{EvidenceRef, MemoryAuthor, MemoryKind, RecordMeta};
+use meerkat_meta::memory::records::{
+    CleanExtractionInput, EvidenceRef, MemoryAuthor, MemoryKind, RecordMeta,
+};
 use meerkat_meta::memory::taint::{ContentTrustConfig, LlmWriteGate, TaintLlmWriteGate};
 
 const EXIT_DISTILLER_ERROR: i32 = 1;
@@ -88,6 +95,10 @@ impl FixtureRecordMeta {
 struct FixtureTranscriptMessage {
     role: String,
     text: String,
+    /// A user row the host attested as a person's own typed input (a
+    /// conversational typed-text row with a host-stamped person requester).
+    #[serde(default)]
+    attested_person: bool,
 }
 
 #[derive(Deserialize)]
@@ -227,6 +238,7 @@ async fn main() {
                 index: index as u64,
                 role: role_label(&message.role),
                 text: message.text.clone(),
+                proven_clean: message.attested_person && role_label(&message.role) == "user",
             })
             .collect(),
     };
@@ -288,7 +300,7 @@ async fn main() {
     // same `TaintLlmWriteGate` law the store enforces, over the fixture
     // session's evidence — session-tainted ⇒ every distillate quarantines.
     let taint = input.taint.unwrap_or_default();
-    let quarantined = {
+    let (quarantined, clean_call) = {
         let tracker =
             meerkat_meta::memory::taint::SessionTaintTracker::new(ContentTrustConfig::default());
         tracker.note_current_session("fixture-identity", &slice.session_key);
@@ -310,20 +322,47 @@ async fn main() {
         }
         let gate =
             TaintLlmWriteGate::new(Some(tracker), meerkat_meta::AgentMemoryLlmWrites::Observed);
-        let evidence = vec![EvidenceRef {
-            session_id: slice.session_key.clone(),
-            generation: 0,
-            revision: None,
-            range: Some((0, slice.end_index.saturating_sub(1))),
-        }];
-        gate.quarantine_reason(
-            &MemoryAuthor::Distiller {
-                run_id: "distiller-eval".to_string(),
-            },
-            meerkat_meta::memory::staged::StagedBatchKind::FreshWrite,
-            &evidence,
-        )
-        .is_some()
+        let verdict = |range: (u64, u64), clean_input: Option<CleanExtractionInput>| {
+            gate.quarantine_reason(
+                &MemoryAuthor::Distiller {
+                    run_id: "distiller-eval".to_string(),
+                },
+                meerkat_meta::memory::staged::StagedBatchKind::FreshWrite,
+                &[EvidenceRef {
+                    session_id: slice.session_key.clone(),
+                    generation: 0,
+                    revision: None,
+                    range: Some(range),
+                    clean_input,
+                }],
+            )
+            .is_some()
+        };
+        let whole = verdict((0, slice.end_index.saturating_sub(1)), None);
+        let clean_rows: Vec<&TranscriptMessage> = slice
+            .messages
+            .iter()
+            .filter(|message| message.proven_clean)
+            .collect();
+        let clean = match (clean_rows.first(), clean_rows.last()) {
+            (Some(first), Some(last)) => {
+                let input = CleanExtractionInput {
+                    rows: clean_rows.iter().map(|row| row.index).collect(),
+                    digest: CleanExtractionInput::digest_rows(
+                        clean_rows
+                            .iter()
+                            .map(|row| (row.index, row.role, row.text.as_str())),
+                    ),
+                };
+                let rows = input.rows.clone();
+                Some(serde_json::json!({
+                    "rows": rows,
+                    "quarantined": verdict((first.index, last.index), Some(input)),
+                }))
+            }
+            _ => None,
+        };
+        (whole, clean)
     };
 
     let rendered_ops: Vec<serde_json::Value> = ops
@@ -353,6 +392,7 @@ async fn main() {
         serde_json::json!({
             "ops": rendered_ops,
             "quarantined": quarantined,
+            "clean_call": clean_call,
         })
     );
 }

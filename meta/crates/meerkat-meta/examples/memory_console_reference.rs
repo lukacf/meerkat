@@ -306,6 +306,7 @@ async fn seed_store(store: &SqliteAgentMemoryStore) -> SeededIds {
         generation: 2,
         revision: None,
         range: Some((3, 9)),
+        clean_input: None,
     }];
     let chain_tip = store
         .supersede_authored(

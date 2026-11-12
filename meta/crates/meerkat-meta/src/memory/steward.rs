@@ -5119,6 +5119,7 @@ mod tests {
                         index: start + offset as u64,
                         role: "user",
                         text: text.clone(),
+                        proven_clean: false,
                     })
                     .collect(),
             }))
@@ -5297,6 +5298,7 @@ mod tests {
             generation: 0,
             revision: None,
             range: None,
+            clean_input: None,
         }];
         let receipt = store
             .remember_authored(
@@ -7240,6 +7242,7 @@ mod tests {
             generation: 0,
             revision: None,
             range: None,
+            clean_input: None,
         }];
         let update = fixture
             .store
@@ -7694,6 +7697,7 @@ mod tests {
             generation: 0,
             revision: None,
             range: None,
+            clean_input: None,
         }];
         let proposal_id = fixture
             .store
@@ -8150,6 +8154,7 @@ mod tests {
                 generation: 0,
                 revision: None,
                 range: Some((0, 1)),
+                clean_input: None,
             }],
         });
         let receipt = store
@@ -8199,6 +8204,7 @@ mod tests {
                 generation: 0,
                 revision: None,
                 range: Some((0, 9)),
+                clean_input: None,
             }],
         });
         let receipt = store

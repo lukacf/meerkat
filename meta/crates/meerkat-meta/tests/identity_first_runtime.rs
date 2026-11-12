@@ -6337,6 +6337,7 @@ impl meerkat_meta::memory::distiller::TranscriptSource for OrderWitnessTranscrip
                 index: from_index,
                 role: "user",
                 text: "remember: always use the wrapper".to_string(),
+                proven_clean: false,
             }],
         }))
     }
@@ -6601,6 +6602,7 @@ impl meerkat_meta::memory::distiller::TranscriptSource for GatedTranscripts {
                 index: from_index,
                 role: "user",
                 text: "never run raw cargo; always ./scripts/repo-cargo".to_string(),
+                proven_clean: false,
             }],
         }))
     }
@@ -6752,6 +6754,7 @@ async fn reset_distillation_quarantine_case() {
                 generation: new_binding.generation().get(),
                 revision: None,
                 range: None,
+                clean_input: None,
             }],
             verification: None,
         },
@@ -6932,6 +6935,7 @@ impl meerkat_meta::memory::distiller::TranscriptSource for MarkedTranscripts {
                 index: from_index,
                 role: "user",
                 text: OWED_TRANSCRIPT_MARKER.to_string(),
+                proven_clean: false,
             }],
         }))
     }

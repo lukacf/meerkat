@@ -5692,6 +5692,7 @@ mod tests {
             generation: 0,
             revision: None,
             range: None,
+            clean_input: None,
         }]
     }
 
@@ -6332,15 +6333,43 @@ mod tests {
                 generation: 1,
                 revision: None,
                 range: Some((0, 3)),
+                clean_input: None,
             }],
             ..payload(title, "Distilled body")
         };
+        // Evidence-scoped taint: the distiller stamps the proven-clean input
+        // of the call that produced the record.
+        let with_clean_input = |title: &str, session: &str| {
+            let mut record = with_evidence(title, session);
+            record.evidence[0].clean_input = Some(crate::memory::records::CleanExtractionInput {
+                rows: vec![0, 3],
+                digest: crate::memory::records::CleanExtractionInput::digest_rows([
+                    (0, "user", "first"),
+                    (3, "user", "second"),
+                ]),
+            });
+            record
+        };
 
-        // Clean evidence: lands Active, tier-ceilinged at AgentObserved.
+        // Unknown evidence (no proven-clean input) quarantines even when no
+        // session fact matches: a missing trust fact is never clean.
         let receipt = store
             .remember_authored(
                 &scope,
-                with_evidence("Clean fact", "sess-clean"),
+                with_evidence("Unknown fact", "sess-clean"),
+                author.clone(),
+            )
+            .await?;
+        let RecordStatus::Quarantined { reason } = &receipt.status else {
+            return Err(format!("expected quarantine, got {:?}", receipt.status).into());
+        };
+        assert!(reason.contains("not proven clean"), "{reason}");
+
+        // Proven-clean input: lands Active, tier-ceilinged at AgentObserved.
+        let receipt = store
+            .remember_authored(
+                &scope,
+                with_clean_input("Clean fact", "sess-clean"),
                 author.clone(),
             )
             .await?;
@@ -6749,6 +6778,7 @@ mod tests {
                 generation: 1,
                 revision: None,
                 range: Some((4, 7)),
+                clean_input: None,
             }],
             ..payload(title, body)
         }

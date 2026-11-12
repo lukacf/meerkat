@@ -1044,6 +1044,24 @@ as a deliverable rather than asserting "the runtime knows":
   clear taint — the summary is derived from tainted context and inherits it.
   Distiller output over tainted evidence ranges quarantines regardless of which
   turn it distills.
+- **Distilled writes are evidence-scoped.** For the Distiller the decision is
+  what each extraction call READ, not the session's history. A distilled record
+  is clean only when every transcript row its call read is proven clean from
+  typed, persisted facts; unknown always quarantines, and a missing trust fact
+  is never clean. The only rows proven clean are a person's own typed input: a
+  conversational user row whose turn input is typed text and whose
+  host-stamped direct requester is a person (render class absent or a user
+  prompt). The Distiller reads those rows in a call of their own and stamps
+  its records with that call's input (`EvidenceRef::clean_input`: the row
+  indices and a digest of the rows); the rest of the window is read by a second
+  call whose records quarantine. The cited range stays provenance only and is
+  clamped to the clean call's input. Compaction discards carry no row facts,
+  so a compaction harvest always quarantines. Tool results, peer messages,
+  server-tool content, the agent's own replies and compaction summaries are
+  never proven clean by this rule; proving any of them would need its own
+  persisted fact (for a tool result, the trust class the tool had when it
+  ran, recorded at that time). Recorder and steward writes keep the
+  session-sticky rule.
 - **Taint crosses comms.** Intra-mob peer messages are trusted-or-dropped by
   construction, so a prompt-injected agent A can otherwise launder payloads
   through peer B, whose own session ingested nothing untrusted. Meta knows the

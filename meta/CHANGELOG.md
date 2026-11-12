@@ -48,6 +48,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   Core holds a member as an identity entry, and a session bridge has
   neither trait. No Meerkat code relied on them.
 
+### Upgrade
+
+- A Rust host that composes its runtime through `UnifiedRuntime::bootstrap`
+  or the `bootstrap_with_*` family must complete the bootstrap before an
+  agent created at run time can be built: an identity bootstrap
+  (`install_and_bootstrap_identity_first_context`, or
+  `bootstrap_installed_identity_first_context` and its held variants) or
+  `activate_without_identity_context`. Until one of them returns, every
+  build of such an agent is refused for now with a reason that names both
+  calls, and one warning is logged per process. An agent that starts at
+  its creation (it was given a first message, or its profile runs as an
+  autonomous host, the default) and one the mob's start owes its seat stay
+  owed their seat, and the call that completes the bootstrap seats them. A
+  delivery to an agent seated dormant is refused retryable
+  (`host_preparation_pending`), nothing is delivered, and the sender sends
+  it again once the bootstrap is complete; work the agent already owes is
+  retried by the mob. Creating an agent that builds
+  nothing (no first message, a turn-driven profile) is unchanged. Through
+  0.9.14 such an agent was built from its record at once.
+  `UnifiedRuntimeBuilder` and both gateway binaries complete the bootstrap
+  themselves.
+
 ### Added
 
 - `meta/identity/*`: host methods that change a mob's long-term agents while
@@ -419,6 +441,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   configured agent is, and its first message runs once. Until the runtime
   is composed the agent stays owed its seat, and a send to it is refused.
 
+- The same holds on a runtime that learns only when its host completes the
+  bootstrap whether it composes an agent customizer
+  (`UnifiedRuntime::bootstrap` or the `bootstrap_with_*` family over a spec
+  that does not declare one). A mob a killed process left running starts
+  inside `bootstrap`, before the host can install anything, and embodied
+  the seats it owed there: an agent created at run time was built from its
+  row alone, with no comparison of the customizer's labels with its seat's,
+  and ran its first message; a delivery that reached a dormant one before
+  the identity bootstrap built it the same way. Until the host completes
+  the bootstrap the build preparer of such a runtime now refuses every
+  build of such an agent for now, as it does before the identity runtime
+  is composed: a seat stays owed, and a dormant agent stays dormant. An
+  identity bootstrap that finds a customizer has the runtime's first
+  composition seat the agents owed their seat, where the host's build step
+  and its label rule decide; an identity bootstrap that finds none, and
+  `activate_without_identity_context`, settle that the composition has no
+  customizer and ask Core once to seat them from their records (see
+  Upgrade).
+
 - A name an agent holds through its record in the mob's identity store
   that the host's roster lists too (the host adopted the agent into the
   store, or its configuration lists a name an agent was created under) is
@@ -517,15 +558,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   identity-first spawn.
 
 ### Known limitations
-
-- On a runtime that learns of its agent customizer only at its identity
-  bootstrap (`UnifiedRuntime::bootstrap` over a spec that does not declare
-  one), a member of an identity whose record is its row that the mob's
-  start builds before that bootstrap (a seat the start owes it, or one that
-  owes work) is built from its row alone: without the customizer's tools,
-  system prompt, instructions and context, and with no comparison of the
-  customizer's labels with the seat's for that build. A runtime that
-  declares its customizer builds no such member before it is composed.
 
 - `identity_creation::normalize_create` refuses a name in a reserved
   namespace `invalid_name` at the agent's `name`: a name that starts with

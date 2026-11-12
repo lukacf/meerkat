@@ -4324,3 +4324,281 @@ async fn a_delivery_builds_no_created_agent_before_a_bootstrap_composition_learn
     );
     rig.shutdown().await;
 }
+
+impl Rig {
+    /// Create `name` at runtime with the first message `kickoff` through
+    /// Core's store-owned create, and answer what the create says of its
+    /// kickoff spawn, rendered.
+    async fn create_kicked(&self, name: &str, kickoff: &str) -> String {
+        let created = self
+            .runtime
+            .mob_handle()
+            .create_store_owned_identities(
+                meerkat_mob::StoreOwnedIdentityCreate::new(
+                    operation(&format!("create-{name}")),
+                    meerkat_mob::IdentityChangeRequesterInput::host("console"),
+                    vec![meerkat_mob::CreatedIdentityRequest::new(
+                        created_spec(name).with_initial_message(meerkat_core::ContentInput::Text(
+                            kickoff.to_string(),
+                        )),
+                    )],
+                ),
+                allow(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("Core creates {name}: {error}"));
+        assert!(
+            matches!(
+                created.change,
+                meerkat_mob::IdentityChangeOutcome::Committed { .. }
+            ),
+            "Core creates {name}: {:?}",
+            created.change
+        );
+        format!(
+            "{:?}",
+            created
+                .embodied
+                .get(&meerkat_mob::AgentIdentity::from(name))
+        )
+    }
+
+    /// The model the turn `marker` asked.
+    fn model_asked(&self, marker: &str) -> Value {
+        let rendered = self
+            .request_with(marker)
+            .unwrap_or_else(|| panic!("the turn {marker:?} was asked"));
+        serde_json::from_str::<Value>(&rendered).expect("a rendered model request")["model"].clone()
+    }
+
+    /// Ask Core to wake `name`'s member, as a host with no identity door
+    /// does, and answer what Core answers. Bounded: a wake that does not
+    /// answer fails the row.
+    async fn wake(&self, name: &str) -> Result<(), meerkat_mob::MobError> {
+        let handle = self.runtime.mob_handle();
+        let member = meerkat_mob::AgentIdentity::from(name);
+        tokio::time::timeout(TURN_BOUND, handle.ensure_member_live(&member))
+            .await
+            .unwrap_or_else(|_| panic!("the wake of {name} answers within its bound"))
+    }
+
+    /// Ask Core to wake `name`'s member until Core admits the wake, as the
+    /// caller of a wake refused for now asks again. Bounded: every answer
+    /// before the admission must be that refusal.
+    async fn wake_until_admitted(&self, name: &str) {
+        let deadline = std::time::Instant::now() + TURN_BOUND;
+        loop {
+            let woken = self.wake(name).await;
+            if woken.is_ok() {
+                return;
+            }
+            assert!(
+                refused_for_now(&woken) && std::time::Instant::now() < deadline,
+                "{name}: the wake, asked again, is admitted: {woken:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+}
+
+/// Whether `woken`, what Core answered a wake, is the refusal for now of a
+/// member whose host asked to retry its build: retryable, with nothing
+/// built.
+fn refused_for_now(woken: &Result<(), meerkat_mob::MobError>) -> bool {
+    matches!(
+        woken,
+        Err(meerkat_mob::MobError::MemberWakeRefused { refusal, .. })
+            if refusal.is_retryable() && refusal.as_str() == "host_preparation_pending"
+    )
+}
+
+/// Whether `answer`, what a create says of its kickoff spawn, names the two
+/// calls that complete a runtime's bootstrap.
+fn names_the_bootstrap_calls(answer: &str) -> bool {
+    answer.contains("install_and_bootstrap_identity_first_context")
+        && answer.contains("activate_without_identity_context")
+}
+
+/// On a runtime composed with `UnifiedRuntime::bootstrap` over a spec that
+/// declares no agent customizer, an agent created with a first message
+/// before its host completed the bootstrap is not built: the create
+/// commits, its answer says what the host must do, and the agent is owed its
+/// seat. The process is killed. The next process's mob starts inside
+/// `bootstrap` and does not build the agent either, while the bootstrap is
+/// not complete. The identity bootstrap of a host that composes no
+/// customizer then settles that there is none: the agent is seated from its
+/// row (its profile's model, its row's labels) and its first message runs
+/// once. A second identity bootstrap seats nothing again.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_owed_seat_is_seated_from_its_row_once_a_bootstrap_composition_learns_it_has_no_customizer()
+ {
+    const MOB_ID: &str = "meta-created-identities-undeclared-none";
+    const KEEPER: &str = "keeper-plain";
+    const KICKOFF: &str = "PLAIN-KICKOFF";
+    if let Some(state) = first_process_state() {
+        // The first process: its host never completes the bootstrap.
+        let rig = bootstrap_undeclared(&state, definition(MOB_ID)).await;
+        let spawn = rig.create_kicked(KEEPER, KICKOFF).await;
+        assert!(
+            names_the_bootstrap_calls(&spawn),
+            "the create's answer says what the host must do: {spawn}"
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            rig.owed_its_seat(KEEPER) && rig.request_with(KICKOFF).is_none(),
+            "the agent is owed its seat and was not built"
+        );
+        std::process::exit(0);
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let state = temp.path().join("state");
+    run_first_process_killed(
+        "an_owed_seat_is_seated_from_its_row_once_a_bootstrap_composition_learns_it_has_no_customizer",
+        &state,
+    );
+
+    // The second process: the mob was left running, so its start ran inside
+    // `bootstrap`.
+    let mut rig = bootstrap_undeclared(&state, definition(MOB_ID)).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        rig.owed_its_seat(KEEPER) && rig.request_with(KICKOFF).is_none(),
+        "the start seats nothing while the runtime's bootstrap is not complete"
+    );
+    rig.bootstrap_identities(&state, None).await;
+    assert!(
+        rig.asked(KICKOFF).await,
+        "the agent is seated once the bootstrap learned that its host composes no customizer"
+    );
+    assert!(rig.seated(KEEPER), "Core holds the agent's member");
+    assert_eq!(
+        rig.model_asked(KICKOFF),
+        json!("gpt-5.5"),
+        "the agent is built from its row: on its profile's model"
+    );
+    assert_eq!(
+        rig.member(KEEPER).await.labels,
+        created_labels(),
+        "the agent's seat carries its row's labels"
+    );
+
+    // A second identity bootstrap decides nothing again and seats nothing.
+    let declared = rig.declared.clone();
+    Box::pin(
+        rig.runtime
+            .bootstrap_installed_identity_first_context(&[declared]),
+    )
+    .await
+    .expect("a second identity bootstrap");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        rig.requests_with(KICKOFF),
+        1,
+        "the agent's first message runs once"
+    );
+    rig.shutdown().await;
+}
+
+/// The same on the path with no identity context: the activation without
+/// one (`UnifiedRuntime::activate_without_identity_context`) settles that
+/// the composition has no customizer. One agent is created with a first
+/// message before its host completed the bootstrap and is owed its seat;
+/// another is seated with nothing built. The process is killed. In the next
+/// process, before the activation, the first is still owed its seat and a
+/// wake of the second is refused for now with nothing built. The
+/// activation seats the first from its row and its first message runs once;
+/// the wake of the second, asked again, builds it from its row. A second
+/// activation seats nothing again, and an agent created with a first
+/// message afterwards is built at once.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_owed_seat_is_seated_from_its_row_once_by_the_activation_without_an_identity_context() {
+    const MOB_ID: &str = "meta-created-identities-undeclared-classic";
+    const KEEPER: &str = "keeper-classic";
+    const KICKOFF: &str = "CLASSIC-KICKOFF";
+    const QUIET: &str = "keeper-quiet";
+    const LATER: &str = "keeper-later";
+    const LATER_KICKOFF: &str = "LATER-KICKOFF";
+    if let Some(state) = first_process_state() {
+        // The first process: its host never completes the bootstrap.
+        let rig = bootstrap_undeclared(&state, definition(MOB_ID)).await;
+        let spawn = rig.create_kicked(KEEPER, KICKOFF).await;
+        assert!(
+            names_the_bootstrap_calls(&spawn),
+            "the create's answer says what the host must do: {spawn}"
+        );
+        rig.create(QUIET).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            rig.owed_its_seat(KEEPER) && rig.request_with(KICKOFF).is_none(),
+            "the agent created with a first message is owed its seat and was not built"
+        );
+        assert!(rig.seated(QUIET), "the agent created with none is seated");
+        std::process::exit(0);
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let state = temp.path().join("state");
+    run_first_process_killed(
+        "an_owed_seat_is_seated_from_its_row_once_by_the_activation_without_an_identity_context",
+        &state,
+    );
+
+    // The second process: the mob was left running, so its start ran inside
+    // `bootstrap`.
+    let mut rig = bootstrap_undeclared(&state, definition(MOB_ID)).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        rig.owed_its_seat(KEEPER) && rig.request_with(KICKOFF).is_none(),
+        "the start seats nothing while the runtime's bootstrap is not complete"
+    );
+    let woken = rig.wake(QUIET).await;
+    assert!(
+        refused_for_now(&woken),
+        "a wake before the bootstrap is complete is refused for now: {woken:?}"
+    );
+
+    rig.runtime
+        .activate_without_identity_context()
+        .await
+        .expect("activate without an identity context");
+    assert!(
+        rig.asked(KICKOFF).await,
+        "the agent is seated by the activation without an identity context"
+    );
+    assert!(rig.seated(KEEPER), "Core holds the agent's member");
+    assert_eq!(
+        rig.model_asked(KICKOFF),
+        json!("gpt-5.5"),
+        "the agent is built from its row: on its profile's model"
+    );
+    assert_eq!(
+        rig.member(KEEPER).await.labels,
+        created_labels(),
+        "the agent's seat carries its row's labels"
+    );
+
+    // The wake refused before the activation, asked again.
+    rig.wake_until_admitted(QUIET).await;
+
+    // A second activation decides nothing again and seats nothing.
+    rig.runtime
+        .activate_without_identity_context()
+        .await
+        .expect("a second activation is a no-op");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        rig.requests_with(KICKOFF),
+        1,
+        "the agent's first message runs once"
+    );
+
+    // The bootstrap is complete: a create with a first message is built at
+    // once.
+    let spawn = rig.create_kicked(LATER, LATER_KICKOFF).await;
+    assert!(
+        rig.asked(LATER_KICKOFF).await && rig.seated(LATER),
+        "an agent created after the activation runs its first message: {spawn}"
+    );
+    rig.shutdown().await;
+}

@@ -24,7 +24,9 @@
 //!   another mob. Nobody is built and no store is read.
 //! - a runtime's whole part goes when the runtime begins to shut down or
 //!   stops its mob ([`close_part`]); when its shutdown ran to its end the
-//!   inbox routes of its links go too ([`clear_part`]).
+//!   inbox routes of its links go too ([`clear_part`]). A part that was
+//!   closed, or that a later runtime of the mob replaced, takes no link
+//!   again.
 //!
 //! A part belongs to the runtime whose start-time read created it. Nothing
 //! else creates one: a wire on a runtime that never ran the read (a launch
@@ -49,8 +51,13 @@
 //!
 //! **What this module writes.** In its own namespace: its forwarder's wake
 //! routes (never over a route another owner holds, and it retracts only its
-//! own) and the inbox routes of its links. In another mob's namespace:
-//! nothing. When a runtime's shutdown ran to its end, each OTHER part drops
+//! own) and the inbox routes of its links. A key that lost its last link
+//! loses both: its wake route, and the inbox route the namespace holds
+//! under that key while it is under the link's name, whichever wire or
+//! wake installed it (an unwire that fails reads the link back, and the
+//! next forwarded wake installs the route again). In another mob's
+//! namespace: nothing. When a runtime's shutdown ran to its end, each OTHER
+//! part drops
 //! the inbox routes of its own links to that runtime's members, in its own
 //! namespace (they lead to inboxes that are gone). A route no link names is
 //! never touched. This module never reads or changes another mob's state.
@@ -66,7 +73,9 @@
 //! **Locks.** `state` is taken by the methods the registry calls (`wake`,
 //! `member_is_waking`). Nothing is called while it is held: no registry
 //! call, no owner, and it is never held across an await. `writing` orders
-//! the writers of one part and is taken by nothing the registry calls.
+//! the writers of one part, and the install of an inbox route after a wake
+//! with them; it is taken by nothing the registry calls, never while `state`
+//! is held, and never held across an await.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError, Weak};
@@ -128,6 +137,10 @@ struct PendingWake {
 struct RoutesState {
     links: HashSet<Link>,
     pending: HashMap<WakeSlot, PendingWake>,
+    /// The part was closed by its runtime, or replaced by the part of a
+    /// later runtime of the mob: it takes no link again. Set under the
+    /// writers' lock, in the write that drops its links.
+    closed: bool,
     /// The links the part held when its runtime closed it, kept for the
     /// sweep of their inbox routes at the end of the shutdown. `None` while
     /// the part is open, and for a part that was no longer its namespace's
@@ -279,7 +292,8 @@ impl CrossMobWakeRoutes {
 
     /// Replace the links of `member` with `links` (what its row names now):
     /// a key that gained its first link gets this part's wake route, and a
-    /// key that lost its last link loses it, with its pending wakes.
+    /// key that lost its last link loses it, with its pending wakes and with
+    /// the inbox route this namespace held for it.
     fn set_member_links(&self, member: &str, links: Vec<Link>) {
         let registry = InprocRegistry::global();
         let _writing = locked(&self.writing);
@@ -288,13 +302,15 @@ impl CrossMobWakeRoutes {
             .into_iter()
             .filter(|link| self.may_route(&link.remote_key))
             .collect();
-        let (retract, publish) = {
+        let (retract, forget, publish) = {
             let mut state = locked(&self.state);
-            if state.closed_links.is_some() {
-                // The runtime closed this part: it holds no link any more.
+            if state.closed {
+                // The runtime closed this part, or a later runtime of the
+                // mob replaced it: it holds no link any more.
                 return;
             }
-            let before: HashSet<PubKey> = state.links.iter().map(|link| link.remote_key).collect();
+            let held: Vec<Link> = state.links.iter().cloned().collect();
+            let before: HashSet<PubKey> = held.iter().map(|link| link.remote_key).collect();
             state.links.retain(|link| link.member != member);
             state.links.extend(routable);
             let after: HashMap<PubKey, String> = state
@@ -312,11 +328,15 @@ impl CrossMobWakeRoutes {
                     .pending
                     .retain(|(pending_key, _), _| pending_key != key);
             }
+            let forget: Vec<Link> = held
+                .into_iter()
+                .filter(|link| retract.contains(&link.remote_key))
+                .collect();
             let publish: Vec<(PubKey, String)> = after
                 .into_iter()
                 .filter(|(key, _)| !before.contains(key))
                 .collect();
-            (retract, publish)
+            (retract, forget, publish)
         };
         for key in retract {
             if !registry.retract_wake_route(&self.namespace, &key, &self.waker()) {
@@ -326,6 +346,9 @@ impl CrossMobWakeRoutes {
                 );
             }
         }
+        // The inbox route of a key that lost its last link goes with the
+        // link: a route no link names would never be taken again.
+        self.forget_inbox_routes(&forget);
         for (key, remote) in publish {
             // Never over another owner's route: it was free when this
             // write began, and is looked at again here.
@@ -359,13 +382,15 @@ impl CrossMobWakeRoutes {
         self.set_member_links(member, kept);
     }
 
-    /// Drop every link, wake route and pending wake of this part. Returns
-    /// the links it held.
+    /// Drop every link, wake route and pending wake of this part, and mark
+    /// it closed before the writers' lock is released: a write that already
+    /// held the part adds no link after this. Returns the links it held.
     fn clear(&self) -> Vec<Link> {
         let registry = InprocRegistry::global();
         let _writing = locked(&self.writing);
         let links: Vec<Link> = {
             let mut state = locked(&self.state);
+            state.closed = true;
             state.pending.clear();
             state.links.drain().collect()
         };
@@ -400,6 +425,32 @@ impl CrossMobWakeRoutes {
             .cloned()
             .collect();
         self.forget_inbox_routes(&links);
+    }
+
+    /// Point this namespace's route under `remote_key` at the inbox the
+    /// member `remote` has now, while some link of this part to it is whole.
+    /// In the writers' order: a key that loses its last link takes the route
+    /// with it ([`Self::set_member_links`]), so the route is installed
+    /// before that write, which then drops it, or not at all.
+    fn install_inbox_route(&self, remote_namespace: &str, remote: &str, remote_key: PubKey) {
+        let _writing = locked(&self.writing);
+        if !self.some_whole_link_to(remote, &remote_key) {
+            return;
+        }
+        if let Err(error) = install_route_alias(
+            &self.namespace,
+            remote_namespace,
+            remote,
+            remote_key,
+            "remote",
+        ) {
+            // The send resolves the route again and answers a miss itself.
+            tracing::debug!(
+                member = %remote,
+                %error,
+                "cross-mob wake: the member answered ready and its route was not installed"
+            );
+        }
     }
 
     /// Forward a wake of the member under `recipient`, published by this
@@ -461,7 +512,6 @@ impl CrossMobWakeRoutes {
         // before any waiting send hears "ready". The route is installed for
         // the key while some link of this part to it is still whole.
         let this = Weak::clone(&self.this);
-        let namespace = self.namespace.clone();
         let remote_name = link.remote.clone();
         let asking = move || -> SharedWake {
             // The owner is asked and let go: only its answer is kept.
@@ -470,24 +520,9 @@ impl CrossMobWakeRoutes {
             async move {
                 let answer = asked.await;
                 if matches!(answer, Ok(PeerWakeAnswer::Ready))
-                    && this
-                        .upgrade()
-                        .is_some_and(|this| this.some_whole_link_to(&remote_name, &recipient))
-                    && let Err(error) = install_route_alias(
-                        &namespace,
-                        &remote_namespace,
-                        &remote_name,
-                        recipient,
-                        "remote",
-                    )
+                    && let Some(this) = this.upgrade()
                 {
-                    // The send resolves the route again and answers a miss
-                    // itself.
-                    tracing::debug!(
-                        member = %remote_name,
-                        %error,
-                        "cross-mob wake: the member answered ready and its route was not installed"
-                    );
+                    this.install_inbox_route(&remote_namespace, &remote_name, recipient);
                 }
                 answer
             }
@@ -790,9 +825,10 @@ pub(super) async fn restore_from_roster(handle: &MobHandle) -> Option<Arc<CrossM
 /// The runtime of `part` begins to shut down, or stops its mob: its whole
 /// part of the link table goes, with its wake routes and pending wakes.
 /// From here on no wake is forwarded for a link of this mob, in either
-/// direction. The namespace's entry is taken only while it is still this
-/// part (a later runtime of the mob has its own); the links such a part
-/// held are kept for [`clear_part`].
+/// direction, and no later write adds a link to this part. The namespace's
+/// entry is taken only while it is still this part (a later runtime of the
+/// mob has its own); the links such a part held are kept for
+/// [`clear_part`].
 pub(super) fn close_part(part: &Arc<CrossMobWakeRoutes>) {
     let was_current = {
         let mut namespaces = locked(&NAMESPACES);

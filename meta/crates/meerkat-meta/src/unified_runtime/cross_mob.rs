@@ -1073,6 +1073,15 @@ async fn wire_bilateral_transaction(
         &local_info.comms_name,
         PubKey::new(local_info.pubkey),
     );
+    // A key a member of either mob is seated under is never routed to the
+    // other mob's member: refused before either row changes, as
+    // `wire_local_edge` refuses it.
+    if !local_wired || !local_agent_ready {
+        super::cross_mob_routes::refuse_locally_seated_key(&local_mob_id, &peer_spec)?;
+    }
+    if !peer_wired || !peer_agent_ready {
+        super::cross_mob_routes::refuse_locally_seated_key(&peer_mob_id, &local_spec)?;
+    }
     let mut local_mutated = false;
     let mut peer_mutated = false;
     if !local_wired || !local_agent_ready {
@@ -1474,6 +1483,11 @@ async fn wire_cross_mob_transaction(
                 &remote_plane,
             )
             .await?;
+            // A key a member of either mob is seated under is never routed
+            // to the other mob's member: refused before either row changes,
+            // as `wire_local_edge` refuses it.
+            super::cross_mob_routes::refuse_locally_seated_key(&local_mob_id, &remote_spec)?;
+            super::cross_mob_routes::refuse_locally_seated_key(&remote_mob_id, &local_spec)?;
             mutate_member_unchecked(
                 local_handle.clone(),
                 &local_member_id,
@@ -1724,6 +1738,11 @@ impl UnifiedRuntime {
         local_member_id: &str,
         peer_member_id: &str,
     ) -> Result<(), CrossMobError> {
+        // The links this wire declares are held in each runtime's part of
+        // the link table, which its start-time read creates: a no-op for
+        // every runtime whose mob was started through its bootstrap.
+        self.restore_cross_mob_wake_routes().await;
+        peer.restore_cross_mob_wake_routes().await;
         let local_member_id = self.topology_concrete_member_id(local_member_id).await?;
         let peer_member_id = peer.topology_concrete_member_id(peer_member_id).await?;
         let local_target = member_lifecycle_target_with_authority(
@@ -2360,6 +2379,12 @@ impl UnifiedRuntime {
             crate::member_comms_id::runtime_alias_str(local_member_id).into_owned();
         let remote_member_id =
             crate::member_comms_id::runtime_alias_str(remote_member_id).into_owned();
+        // The link this wire declares is held in the runtime's part of the
+        // link table, which its start-time read creates: a no-op for every
+        // runtime whose mob was started through its bootstrap. The other
+        // mob's runtime is reached through its handle here and ran its own
+        // read when its mob started.
+        self.restore_cross_mob_wake_routes().await;
 
         let local_handle = self.mob_runtime.handle();
         let local_mob_id = local_handle.mob_id().to_string();

@@ -1710,6 +1710,9 @@ class ReleaseTests(unittest.TestCase):
                 repin(change)
                 self.run_refused(run, code, "pins-" + str(index))
         run["pins"].write_text(json.dumps(document))
+        # The release may be named by its tag: the same version with a leading "v".
+        repin(lambda pins: [row.update(version="v2.0.3") for row in pins if row["use"] == "official github"])
+        self.assertEqual(self.run_package(run, "tag-version")["inputs"]["official"]["github"]["sha256"], sha(run["asset"]))
         asset = gzip_tar({"LICENSE": (b"Upstream MIT licence\n", 0o644), "github-mcp-server": (b"\x7fELF not a Mach-O file", 0o755)})
         write(run["pinned"] / "release-download/github-mcp-server_Darwin_arm64.tar.gz", asset)
         repin(lambda pins: [row.update(sha256=sha(asset)) for row in pins if row["use"] == "official github"])

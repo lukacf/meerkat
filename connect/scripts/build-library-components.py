@@ -40,17 +40,16 @@ WHEELS = {
 AP_PROJECT = "sdk/activepieces"
 AP_PACKAGE = ("@rkat/toolkit-activepieces", "0.1.0")
 AP_ARCHIVE = "rkat-toolkit-activepieces-0.1.0.tgz"
-HELPERS = ("packaging", "wheel")
-HELPER_USE = "component build tool"
 MAX_FILE = 64 * 1024 * 1024
 MAX_UNPACKED = 256 * 1024 * 1024
 FAILURE = "component build failed: read the logs under the output directory; no record was written"
-# The staged project's backend hook, as an installer calls it without build isolation.
+# The staged project's backend hook, as an installer calls it without build isolation. The import path holds
+# the standard library and the unpacked backend wheel, which carries its own dependencies; no other package.
 HOOK = ("import os, sys\n"
-        "sys.path[:0] = sys.argv[1:3]\n"
-        "os.chdir(sys.argv[3])\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "os.chdir(sys.argv[2])\n"
         "from setuptools import build_meta\n"
-        "print(build_meta.build_wheel(sys.argv[4]))\n")
+        "print(build_meta.build_wheel(sys.argv[3]))\n")
 PYTHON_VERSION = "import sys; print('.'.join(str(part) for part in sys.version_info[:3]))"
 
 
@@ -82,8 +81,8 @@ def normalized(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
-def pinned_wheels(pins: Path, directory: Path, backends: dict[str, str]) -> tuple[dict, dict]:
-    """Select and check the backend wheel of each Python component and the two helper wheels."""
+def pinned_backends(pins: Path, directory: Path, backends: dict[str, str]) -> dict:
+    """Select and check the backend wheel of each Python component, by name and exact version."""
     document = json.loads(read_regular(pins))
     if (not isinstance(document, dict) or document.get("schema") != PINS_SCHEMA
             or document.get("target") != PINS_TARGET or not isinstance(document.get("pins"), list)):
@@ -103,12 +102,9 @@ def pinned_wheels(pins: Path, directory: Path, backends: dict[str, str]) -> tupl
             raise BuildError("fetched build wheel differs from its pin")
         return row, data
 
-    selected_backends = {
+    return {
         family: fetched([row for row in rows if normalized(row["name"]) == "setuptools" and row["version"] == version])
         for family, version in backends.items()}
-    helpers = {name: fetched([row for row in rows if normalized(row["name"]) == name and row.get("use") == HELPER_USE])
-               for name in HELPERS}
-    return selected_backends, helpers
 
 
 def unpack_wheel(data: bytes, destination: Path) -> None:
@@ -192,7 +188,7 @@ class Builder:
             raise BuildError("build produced another file set than the selected component")
         return read_regular(directory / expected)
 
-    def wheel(self, prefix: str, work: Path, family: str, backend: Path, helpers: Path) -> bytes:
+    def wheel(self, prefix: str, work: Path, family: str, backend: Path) -> bytes:
         directory, _, _, filename = WHEELS[family]
         source, distribution = work / (family + "-source"), work / (family + "-dist")
         distribution.mkdir()
@@ -200,7 +196,7 @@ class Builder:
                                               str(source)], self.root, 600)
         if read_regular(source / "pyproject.toml") != read_regular(self.root / directory / "pyproject.toml"):
             raise BuildError("staged project file differs from the checkout's")
-        self.run(prefix + family + "-wheel", [str(self.python), "-I", "-S", "-B", "-c", HOOK, str(backend), str(helpers),
+        self.run(prefix + family + "-wheel", [str(self.python), "-I", "-S", "-B", "-c", HOOK, str(backend),
                                               str(source), str(distribution)], source, 1800)
         return self.one_file(distribution, filename)
 
@@ -217,11 +213,11 @@ class Builder:
                  source, 1800)
         return self.one_file(distribution, AP_ARCHIVE)
 
-    def build(self, number: int, backends: dict, helpers: Path) -> dict[str, bytes]:
+    def build(self, number: int, backends: dict) -> dict[str, bytes]:
         prefix, work = "build-%d-" % number, self.scratch / ("build-%d" % number)
         work.mkdir()
-        return {"agno": self.wheel(prefix, work, "agno", backends["agno"], helpers),
-                "services": self.wheel(prefix, work, "services", backends["services"], helpers),
+        return {"agno": self.wheel(prefix, work, "agno", backends["agno"]),
+                "services": self.wheel(prefix, work, "services", backends["services"]),
                 "activepieces": self.archive(prefix, work)}
 
 
@@ -248,16 +244,13 @@ def build(args: argparse.Namespace) -> dict:
     if not isinstance(package, dict) or (package.get("name"), package.get("version")) != AP_PACKAGE:
         raise BuildError("Activepieces project names another package or version")
     lock = read_regular(root / AP_PROJECT / "package-lock.json")
-    backend_wheels, helper_wheels = pinned_wheels(pins, directory, versions)
+    backend_wheels = pinned_backends(pins, directory, versions)
 
     os.umask(0o022)
     os.mkdir(output, 0o755)
     builder = Builder(root, output, python, node, npm_cli, epoch)
     for path in (builder.logs, builder.scratch, builder.scratch / "home", builder.scratch / "npm-cache"):
         path.mkdir()
-    helpers = builder.scratch / "helpers"
-    for _, data in helper_wheels.values():
-        unpack_wheel(data, helpers)
     backends = {}
     for family, (_, data) in backend_wheels.items():
         backends[family] = builder.scratch / ("backend-" + family)
@@ -267,10 +260,10 @@ def build(args: argparse.Namespace) -> dict:
         "node": builder.run("node-version", [str(node), "--version"], builder.scratch, 60),
         "npm": builder.run("npm-version", [str(node), str(npm_cli), "--version"], builder.scratch, 60),
     }
-    first = builder.build(1, backends, helpers)
+    first = builder.build(1, backends)
     reproducible = None
     if args.verify_reproducible:
-        second = builder.build(2, backends, helpers)
+        second = builder.build(2, backends)
         reproducible = {family: {"equal": second[family] == first[family], "second_sha256": sha(second[family])}
                         for family in first}
     names = {"agno": WHEELS["agno"][3], "services": WHEELS["services"][3], "activepieces": AP_ARCHIVE}

@@ -382,6 +382,11 @@ await mob.set_instruction(
 page = await mob.instruction_status(agent_identity="worker-1")
 ```
 
+A member target (`{"kind": "member", "agent_identity": "worker-1"}`) may
+carry `"include_forks": True` since 0.9.15: the record then also selects the
+forks of the member's fork family, and a status read shows the key on such a
+record (see [operator instructions](/guides/mobs#operator-instructions)).
+
 The client methods are `set_session_instruction`,
 `revoke_session_instruction`, `session_instruction_status`,
 `set_mob_instruction`, `revoke_mob_instruction` and `mob_instruction_status`.

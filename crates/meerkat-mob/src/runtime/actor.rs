@@ -7293,6 +7293,10 @@ pub(super) struct PendingSpawn {
     /// its spawn event and roster entry, and its build's admission presence,
     /// retained with its overlay.
     pub(super) dispatch_admission: super::fork_build::SpawnDispatchAdmissionFacts,
+    /// The spawn's fork lineage for operator instructions, resolved at its
+    /// admission: the root its row stores and, for a fork seat, the record
+    /// its membership commit's step makes in MobMachine.
+    pub(super) instruction_lineage: operator_instructions::SpawnInstructionLineage,
     /// Whether the spawn acts for the identity entry of its name
     /// (`SpawnMemberSpec::entry_custody`), carried to its ladder's open.
     pub(super) entry_custody: bool,
@@ -8228,6 +8232,10 @@ struct SpawnFinalizeCtx {
     /// The spawn's tool dispatch admission facts, for its spawn event, its
     /// roster entry and the retention map.
     dispatch_admission: super::fork_build::SpawnDispatchAdmissionFacts,
+    /// The spawn's fork lineage for operator instructions: the root its
+    /// spawn event stores and, for a fork seat, the record the membership
+    /// commit's own step makes in MobMachine.
+    instruction_lineage: operator_instructions::SpawnInstructionLineage,
     /// Whether the spawn acts for the identity entry of its name: its
     /// ladder's open carries it, and its membership commit records the
     /// member an entry (MobMachine's `spawn_exec_entry_custody`).
@@ -8366,6 +8374,9 @@ impl SpawnActivateState {
             fork_overlay,
             definition_wiring,
             dispatch_admission,
+            // Stored on the spawn's row and recorded in MobMachine at its
+            // admission: the roster keeps no copy.
+            instruction_lineage: _,
             entry_custody: _,
             created_custody: _,
             // Recorded on the spawn's row at its admission.
@@ -31969,11 +31980,30 @@ impl MobActor {
                     agent_identity,
                     reply_tx,
                 } => {
-                    let result = self.prepare_member_instruction_delivery(&agent_identity);
+                    let result = self
+                        .prepare_member_instruction_delivery(&agent_identity)
+                        .await;
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::SettleMemberInstructionDeliveries { outcomes, reply_tx } => {
                     let result = self.settle_member_instruction_deliveries(outcomes).await;
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::PrepareForkMemberInstructionBirth {
+                    source,
+                    child,
+                    profile_name,
+                    fork_session_id,
+                    reply_tx,
+                } => {
+                    let result = self
+                        .prepare_fork_member_instruction_birth(
+                            &source,
+                            &child,
+                            &profile_name,
+                            fork_session_id,
+                        )
+                        .await;
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::GrantScopes {
@@ -36751,6 +36781,7 @@ impl MobActor {
             fork_overlay: entry.fork_overlay,
             definition_wiring: entry.definition_wiring,
             dispatch_admission: Default::default(),
+            instruction_lineage: Default::default(),
             entry_custody: false,
             created_custody: false,
             history_unavailable: None,
@@ -37082,6 +37113,24 @@ impl MobActor {
                 ))
             );
         }
+        // The fork lineage root for operator instructions is the durable
+        // fork routes' own read of MobMachine's state: no other spawn names
+        // one.
+        if spec.instruction_lineage_root.is_some()
+            && !matches!(
+                spawn_source,
+                super::handle::SpawnSource::PersistedForkResume
+            )
+        {
+            reject_spawn_before_custody!(
+                "instruction_lineage_root_spawn_source",
+                MobError::WiringError(format!(
+                    "spawn source '{}' is not a durable fork seating and may not carry an \
+                     operator instruction lineage root",
+                    spawn_source.as_str()
+                ))
+            );
+        }
         // An approval branch's identity and label belong to the branch's own
         // opening (`MobHandle::open_approval_branch`, whose spec records the
         // decision as the member's typed creation source) and to the restore
@@ -37229,12 +37278,33 @@ impl MobActor {
             // whose lineage carries an admission: the seat's membership
             // commit records it in MobMachine, and the spawn row persists it.
             dispatch_admission_lineage,
+            // Set only by a durable fork's seat: the fork lineage root its
+            // birth snapshot was built with, which this seat records.
+            instruction_lineage_root,
         } = spec;
         let dispatch_admission = super::fork_build::SpawnDispatchAdmissionFacts {
             lineage: dispatch_admission_lineage,
             present: tool_dispatch_admission.is_some(),
         };
         let agent_identity = AgentIdentity::from(identity.as_str());
+        // The member's fork lineage for operator instructions, resolved here
+        // once from MobMachine's state: a durable fork carries the root the
+        // actor read for its birth snapshot; a helper fork names its source
+        // in its launch mode, and the root is that member's own root or the
+        // member; any other seat keeps the entry MobMachine holds for the
+        // identity (a respawn or a reseat of a fork), which its row stores
+        // again. The birth snapshot of a session this spawn mints, the
+        // spawn row and the record in the membership commit's step all use
+        // this one value.
+        let instruction_lineage = match (&instruction_lineage_root, &launch_mode) {
+            (Some(root), _) => operator_instructions::SpawnInstructionLineage::fork_seat(
+                Some(root.clone()).filter(|root| root != &agent_identity),
+            ),
+            (None, crate::launch::MemberLaunchMode::Fork {
+                source_member_id, ..
+            }) => self.spawn_instruction_lineage(&agent_identity, Some(source_member_id)),
+            (None, _) => self.spawn_instruction_lineage(&agent_identity, None),
+        };
         self.inline_step_watchdog
             .set_spawn_stage(SpawnInlineStage::CommandAdmission);
         if let Err(error) =
@@ -37475,6 +37545,7 @@ impl MobActor {
             fork_overlay,
             definition_wiring,
             dispatch_admission,
+            instruction_lineage,
             entry_custody,
             created_custody,
             history_unavailable,
@@ -38122,6 +38193,7 @@ impl MobActor {
             fork_overlay,
             definition_wiring,
             dispatch_admission,
+            instruction_lineage,
             entry_custody,
             created_custody,
             history_unavailable,
@@ -38341,6 +38413,7 @@ impl MobActor {
                 fork_overlay,
                 definition_wiring,
                 dispatch_admission,
+                instruction_lineage,
                 entry_custody,
                 created_custody,
                 history_unavailable,
@@ -38389,11 +38462,14 @@ impl MobActor {
         // delivery.
         if matches!(provision_input.binding(), crate::RuntimeBinding::Session)
             && let SpawnProvisionInput::Ready(request) = &mut provision_input
-            && let Err(error) = self.carry_member_instruction_birth(
-                &mut request.create_session,
-                &agent_identity,
-                profile_name.as_str(),
-            )
+            && let Err(error) = self
+                .carry_member_instruction_birth(
+                    &mut request.create_session,
+                    &agent_identity,
+                    profile_name.as_str(),
+                    instruction_lineage.root.as_ref(),
+                )
+                .await
         {
             reject_spawn_before_custody!("operator_instruction_birth", error);
         }
@@ -38602,6 +38678,7 @@ impl MobActor {
             fork_overlay,
             definition_wiring,
             dispatch_admission,
+            instruction_lineage,
             entry_custody,
             created_custody,
             history_unavailable,
@@ -39760,6 +39837,8 @@ impl MobActor {
             // Refused below: a placed member cannot carry a process-local
             // admission, which such a lineage needs at every build.
             dispatch_admission_lineage,
+            // Set only by a durable fork's seat, which refuses placement.
+            instruction_lineage_root: _,
         } = spec;
         let Some(host) = placement else {
             fail!(MobError::Internal(
@@ -39886,6 +39965,16 @@ impl MobActor {
         let resume_from_role = launch_mode
             .resume_from_role()
             .map(|role| role.as_str().to_string());
+        // The placed member's fork lineage for operator instructions, read
+        // once from MobMachine's state as the local lane reads it: a helper
+        // fork names its source in its launch mode; any other seat keeps
+        // the entry MobMachine holds for the identity.
+        let instruction_lineage = match &launch_mode {
+            crate::launch::MemberLaunchMode::Fork {
+                source_member_id, ..
+            } => self.spawn_instruction_lineage(&agent_identity, Some(source_member_id)),
+            _ => self.spawn_instruction_lineage(&agent_identity, None),
+        };
         let fork_spec = match launch_mode {
             crate::launch::MemberLaunchMode::Fork {
                 source_member_id,
@@ -39995,7 +40084,12 @@ impl MobActor {
                 .await
             {
                 Ok(true) => match self
-                    .member_instruction_birth_target(&agent_identity, profile_name.as_str())
+                    .member_instruction_birth_target(
+                        &agent_identity,
+                        profile_name.as_str(),
+                        instruction_lineage.root.as_ref(),
+                    )
+                    .await
                 {
                     Ok(target) => Some(target),
                     Err(error) => fail!(error),
@@ -40720,6 +40814,11 @@ impl MobActor {
             // Refused above: a placed member carries no dispatch admission
             // and no lineage that needs one.
             dispatch_admission: Default::default(),
+            // A placed helper fork's lineage, read above. Like the source
+            // witness it is not in the remote Pending carrier: a spawn the
+            // controller recovers from its carrier after a restart seats
+            // its member with no lineage.
+            instruction_lineage,
             // The remote ladder's custody is MobMachine's, recorded at its
             // open (spawn_exec_entry_custody, spawn_exec_created_custody):
             // the pending record of a placed spawn carries none.
@@ -41023,6 +41122,7 @@ impl MobActor {
                 fork_overlay,
                 definition_wiring,
                 dispatch_admission,
+                instruction_lineage,
                 entry_custody,
                 created_custody,
                 history_unavailable,
@@ -41232,6 +41332,7 @@ impl MobActor {
                                 fork_overlay,
                                 definition_wiring,
                                 dispatch_admission,
+                                instruction_lineage,
                                 entry_custody,
                                 created_custody,
                                 history_unavailable,
@@ -41321,6 +41422,7 @@ impl MobActor {
                                 fork_overlay,
                                 definition_wiring,
                                 dispatch_admission,
+                                instruction_lineage,
                                 entry_custody,
                                 created_custody,
                                 history_unavailable,
@@ -41500,6 +41602,8 @@ impl MobActor {
             created_custody: _,
             // A policy auto-spawn is fresh: it continues no lineage.
             dispatch_admission_lineage: _,
+            // Nor is it a fork seat.
+            instruction_lineage_root: _,
         } = member_spec;
 
         if agent_identity.is_system_reserved() {
@@ -41670,12 +41774,17 @@ impl MobActor {
         };
         let admitted_bridge_session_id =
             admit_bridge_session_for_spawn(&mut provision_request.create_session);
+        // A policy auto-spawn is fresh, never a fork seat: its member keeps
+        // the fork lineage MobMachine holds for the identity, if any.
+        let instruction_lineage = self.spawn_instruction_lineage(agent_identity, None);
         if matches!(provision_request.binding, crate::RuntimeBinding::Session) {
             self.carry_member_instruction_birth(
                 &mut provision_request.create_session,
                 agent_identity,
                 profile_name.as_str(),
-            )?;
+                instruction_lineage.root.as_ref(),
+            )
+            .await?;
         }
 
         if matches!(
@@ -41763,6 +41872,7 @@ impl MobActor {
                 lineage: false,
                 present: policy_dispatch_admission.is_some(),
             },
+            instruction_lineage,
             entry_custody: false,
             created_custody: false,
             history_unavailable: None,
@@ -42657,6 +42767,22 @@ impl MobActor {
                 let _member_ref = provision.commit()?;
                 return Err(failure);
             }
+            // A placed helper fork records its fork lineage root for
+            // operator instructions here, in the same synchronous step as
+            // the membership commit above, as a local fork seat does below
+            // (and for the same reason: no delivery can be prepared for the
+            // seat before the record). A refusal is a broken invariant: the
+            // actor fail-stops with the carrier committed.
+            if ctx.instruction_lineage.record
+                && let Some(root) = ctx.instruction_lineage.root.as_ref()
+                && let Err(error) = self.record_member_instruction_lineage(&identity, root)
+            {
+                let failure = self.durable_uncertainty_fail_stop.record(MobError::Internal(format!(
+                    "placed member '{agent_identity}' was seated but MobMachine refused the record of its operator instruction lineage root '{root}'; actor is fail-stopping for cold recovery: {error}"
+                )));
+                let _member_ref = provision.commit()?;
+                return Err(failure);
+            }
             // Carrier and machine are now irreversible.  Transfer provision
             // ownership before the private-linked event append; every later
             // failure is recovery/retirement, never AbortSpawnExec.
@@ -42712,6 +42838,10 @@ impl MobActor {
             spawned.fork_overlay = ctx.fork_overlay;
             spawned.definition_wiring = ctx.definition_wiring;
             spawned.approval_branch = ctx.approval_branch.clone();
+            // Durable: the fork lineage root MobMachine holds for the placed
+            // member (recorded above for a fork seat), so replay records it
+            // again once the carrier has seated the member.
+            spawned.instruction_lineage_root = ctx.instruction_lineage.root.clone();
             // Durable: the identity entry MobMachine recorded for the placed
             // member in its membership commit (a spawn holding the entry's
             // custody), so replay records the entry again after the carrier.
@@ -42879,6 +43009,13 @@ impl MobActor {
         // membership commit's step makes in MobMachine below (both come from
         // this seat's admission), and its replay records it there again.
         spawned_event.dispatch_admission_lineage = ctx.dispatch_admission.lineage;
+        // Durable: the fork lineage root of a fork-derived member, for
+        // operator instructions. A fork seat's row stores exactly the root
+        // the membership commit's step records in MobMachine below, and a
+        // later seat of the same fork (a respawn, a reseat) stores the
+        // entry MobMachine keeps for the identity, so the replay of either
+        // row writes the entry the live mob holds.
+        spawned_event.instruction_lineage_root = ctx.instruction_lineage.root.clone();
         // Durable: replay records an exempt member in MobMachine again, and
         // its roster entry keeps it for its respawn.
         spawned_event.definition_wiring = ctx.definition_wiring;
@@ -43042,6 +43179,26 @@ impl MobActor {
         {
             let failure = self.durable_uncertainty_fail_stop.record(MobError::Internal(format!(
                 "'{agent_identity}' was seated but MobMachine refused the record of its tool dispatch admission lineage; actor is fail-stopping for cold recovery: {error}"
+            )));
+            let _member_ref = provision.commit()?;
+            return Err(failure);
+        }
+        // A fork seat records its fork lineage root for operator
+        // instructions here too, in the same synchronous step as the
+        // membership commit and before this command awaits anything: no
+        // delivery can be prepared for the seat between the commit and the
+        // record, so the first snapshot the member's session records is
+        // built with the root (a fork's birth snapshot already was: its
+        // admission read the same root). The record is made once per seat,
+        // never later. A record MobMachine refuses right after the commit
+        // it follows is a broken invariant, and the actor fail-stops, as
+        // above: replay of the row records it again.
+        if ctx.instruction_lineage.record
+            && let Some(root) = ctx.instruction_lineage.root.as_ref()
+            && let Err(error) = self.record_member_instruction_lineage(&identity, root)
+        {
+            let failure = self.durable_uncertainty_fail_stop.record(MobError::Internal(format!(
+                "'{agent_identity}' was seated but MobMachine refused the record of its operator instruction lineage root '{root}'; actor is fail-stopping for cold recovery: {error}"
             )));
             let _member_ref = provision.commit()?;
             return Err(failure);
@@ -68876,17 +69033,23 @@ mod runtime_observation_tests {
             epoch: 7,
             binding_generation: 2,
         };
+        // Built on the heap: six journal events are past the stack array
+        // limit.
+        let mut duplicates = Vec::new();
+        for (cursor, kind) in [
+            (1, &started),
+            (2, &started),
+            (3, &confirmed),
+            (4, &confirmed),
+            (5, &completed),
+            (6, &completed),
+        ] {
+            duplicates.push(event(cursor, kind.clone()));
+        }
         assert!(
-            pending_host_revoke_anchors(&[
-                event(1, started.clone()),
-                event(2, started.clone()),
-                event(3, confirmed.clone()),
-                event(4, confirmed.clone()),
-                event(5, completed.clone()),
-                event(6, completed.clone()),
-            ])
-            .expect("exact same-phase duplicates are idempotent")
-            .is_empty()
+            pending_host_revoke_anchors(&duplicates)
+                .expect("exact same-phase duplicates are idempotent")
+                .is_empty()
         );
 
         for malformed in [

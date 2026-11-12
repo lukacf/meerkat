@@ -2202,7 +2202,17 @@ impl MobActor {
             .with_seat_rotation(Some(crate::runtime::SeatRotation::successor(
                 entry.generation,
                 link.target,
-            )));
+            )))
+            // A fork's lineage belongs to its identity, which the rotation
+            // keeps: the next incarnation's row stores the root MobMachine
+            // holds for it after this step (the step records nothing), so
+            // replay of the row writes the entry MobMachine holds.
+            .with_instruction_lineage_root(
+                crate::runtime::operator_instruction_delivery::member_lineage_root(
+                    prepared.authority.state(),
+                    identity,
+                ),
+            );
         let mut batch = vec![
             NewMobEvent {
                 mob_id: self.definition.id.clone(),
@@ -2582,7 +2592,17 @@ impl SettledSeatChunk {
                     // A resume seat that takes another role than its session
                     // was last built under records the declared migration,
                     // which the session's next build declares.
-                    .with_resume_from_role(seat.candidate.resume_from_role.clone());
+                    .with_resume_from_role(seat.candidate.resume_from_role.clone())
+                    // A seat of a fork-derived identity whose fork lineage
+                    // MobMachine still holds (a reseat of a fork) stores the
+                    // root on its row: the seat records nothing, and replay
+                    // of the row writes the entry MobMachine holds.
+                    .with_instruction_lineage_root(
+                        crate::runtime::operator_instruction_delivery::member_lineage_root(
+                            state,
+                            &seat.candidate.agent_identity,
+                        ),
+                    );
                 for transition in transitions {
                     self.effects.extend(transition.into_effects());
                 }

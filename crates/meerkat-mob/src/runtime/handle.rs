@@ -7627,6 +7627,19 @@ pub struct SpawnMemberSpec {
     /// refused. Set only by the fork seat's resolution; never taken from
     /// caller-supplied arguments.
     pub(crate) dispatch_admission_lineage: bool,
+    /// The fork lineage root this seat records in MobMachine, for operator
+    /// instructions: the first member of the fork family a durable fork's
+    /// child joins, as the actor read it from MobMachine's state when it
+    /// built the child's birth snapshot
+    /// ([`MobHandle::record_fork_member_instruction_birth`]). The seat's
+    /// membership commit records exactly this root, and the spawn row
+    /// persists it, so the child's snapshot and MobMachine's selection of
+    /// the child agree from the first generation its session records. Set
+    /// only by the runtime's durable fork routes; never taken from
+    /// caller-supplied arguments, and refused on any other spawn. (A helper
+    /// fork names its source in its launch mode, and its spawn admission
+    /// reads the root.)
+    pub(crate) instruction_lineage_root: Option<AgentIdentity>,
 }
 
 impl std::fmt::Debug for SpawnMemberSpec {
@@ -7691,6 +7704,7 @@ impl std::fmt::Debug for SpawnMemberSpec {
                 "dispatch_admission_lineage",
                 &self.dispatch_admission_lineage,
             )
+            .field("instruction_lineage_root", &self.instruction_lineage_root)
             .finish()
     }
 }
@@ -7781,6 +7795,7 @@ impl SpawnMemberSpec {
             created_custody: false,
             approval_branch: None,
             dispatch_admission_lineage: false,
+            instruction_lineage_root: None,
         }
     }
 
@@ -19889,7 +19904,7 @@ impl MobHandle {
                 return Ok(ForkMemberAtTurnBoundary::SourceBusy { waited });
             }
         };
-        self.seat_forked_member(member, fork)
+        self.seat_forked_member(source_identity, member, fork)
             .await
             .map(ForkMemberAtTurnBoundary::Forked)
     }
@@ -20124,10 +20139,19 @@ impl MobHandle {
         Ok((inheritance, app_context_from_fork_child))
     }
 
-    /// Seat an already committed durable fork as a new mob member through the
-    /// ordinary resume pipeline.
+    /// Seat an already committed durable fork of `source_identity` as a new
+    /// mob member through the ordinary resume pipeline.
+    ///
+    /// Before the seat, the child's operator instruction snapshot is
+    /// recorded in its committed session
+    /// ([`Self::record_fork_member_instruction_birth`]): the shared records
+    /// and, through the fork lineage root the seat then records, the
+    /// records written for that root and its forks. So the snapshot is
+    /// recorded before the seat, whoever starts the child. A snapshot that
+    /// cannot be recorded fails the fork: the committed child stays unseated.
     async fn seat_forked_member(
         &self,
+        source_identity: &AgentIdentity,
         mut member: SpawnMemberSpec,
         fork: meerkat_core::SessionForkResult,
     ) -> Result<ForkMemberResult, MobError> {
@@ -20139,6 +20163,26 @@ impl MobHandle {
         member.launch_mode = crate::launch::MemberLaunchMode::Resume {
             bridge_session_id: fork_session_id.clone(),
             resume_from_role: None,
+        };
+        member.instruction_lineage_root = match self
+            .record_fork_member_instruction_birth(
+                source_identity,
+                &child_identity,
+                &member.role_name,
+                &fork_session_id,
+            )
+            .await
+        {
+            Ok(root) => root,
+            Err(error) => {
+                return Err(MobError::ForkMemberProvisionFailed {
+                    member_id: child_identity,
+                    fork_session_id,
+                    reason: format!(
+                        "the child's operator instruction snapshot could not be recorded: {error}"
+                    ),
+                });
+            }
         };
         if let Err(error) = self
             .spawn_spec_internal_with_source(member, SpawnSource::PersistedForkResume)
@@ -20267,7 +20311,7 @@ impl MobHandle {
                 None,
             )
             .await?;
-        self.seat_forked_member(member, fork).await
+        self.seat_forked_member(source_identity, member, fork).await
     }
 
     /// Admit a fork of `source_identity` for `member` and persist the forked
@@ -20598,9 +20642,11 @@ impl MobHandle {
         // a handoff dropped in transit, retires the child.
         let (handoff_tx, handoff_rx) = tokio::sync::oneshot::channel();
         let seat = self.clone();
+        let fork_source = source_identity.clone();
         tokio::spawn(async move {
             let handoff = seat
                 .seat_and_start_detached_fork_child(
+                    fork_source,
                     member,
                     session_fork,
                     task,
@@ -20625,9 +20671,12 @@ impl MobHandle {
     /// exact turn and start the supervisor that owns the run. The returned
     /// run is armed to retire the child if it is dropped before its holder
     /// takes it (see [`Self::fork_member_then_run_detached`]). A child whose
-    /// turn could not be admitted is retired.
+    /// turn could not be admitted is retired. `source_identity` is the
+    /// member the fork was taken from.
+    #[allow(clippy::too_many_arguments)]
     async fn seat_and_start_detached_fork_child(
         &self,
+        source_identity: AgentIdentity,
         member: SpawnMemberSpec,
         session_fork: meerkat_core::SessionForkResult,
         task: ContentInput,
@@ -20639,7 +20688,9 @@ impl MobHandle {
             .fork_job
             .as_ref()
             .and_then(|job| job.turn_delivery.clone());
-        let fork = self.seat_forked_member(member, session_fork).await?;
+        let fork = self
+            .seat_forked_member(&source_identity, member, session_fork)
+            .await?;
         let work = Self::fork_child_work(task, objective_id);
         let admitted = match turn_delivery {
             // The job's durable result is read back through this identity.

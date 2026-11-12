@@ -424,7 +424,7 @@ impl super::MobHandle {
 
     /// Seat, while the mob runs, every store-owned identity that is owed its
     /// seat, and realize the owned edges its seat completes: the pass a
-    /// start runs ([`Self::reseat_owed_created_entries`]), for a host that
+    /// start runs (`Self::reseat_owed_created_entries`), for a host that
     /// does not wait for the next start. An identity is owed its seat when
     /// the spawn of its create's kickoff failed
     /// ([`super::IdentityCreateOutcome::embodied`] answered it failed): it

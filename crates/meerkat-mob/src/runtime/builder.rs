@@ -19285,7 +19285,7 @@ mod tests {
             )])
         };
 
-        let epoch = authority.state().topology_epoch.clone();
+        let epoch = authority.state().topology_epoch;
         seed_mob_authority_restore_failures(&mut authority, &diagnostic(&second, &reason))
             .expect("a Running start states the failure again");
         assert_ne!(
@@ -19296,7 +19296,7 @@ mod tests {
 
         finish_seeded_mob_authority_phase(&mut authority, MobState::Stopped)
             .expect("the mob was stopped");
-        let epoch = authority.state().topology_epoch.clone();
+        let epoch = authority.state().topology_epoch;
         seed_mob_authority_restore_failures(&mut authority, &diagnostic(&second, &reason))
             .expect("the failure MobMachine holds is not stated to a stopped mob again");
         assert_eq!(

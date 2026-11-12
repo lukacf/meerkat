@@ -279,7 +279,7 @@ impl KeyMob {
             .borrow()
             .spawn_exec_phase
             .get(&dsl::AgentIdentity::from_domain(identity))
-            .cloned()
+            .copied()
     }
 
     /// Hold every read of a member's comms runtime for
@@ -1456,7 +1456,7 @@ async fn a_broken_member_retired_after_a_stopped_mobs_lift_stays_retiring_until_
              archive-only {:?}",
             runtime
                 .as_ref()
-                .and_then(|runtime| state.member_state_markers.get(runtime).cloned()),
+                .and_then(|runtime| state.member_state_markers.get(runtime).copied()),
             state.member_materialization.get(&carol),
             state.member_restore_failures.contains_key(&carol),
             state.runtime_retire_archive_only
@@ -1467,7 +1467,7 @@ async fn a_broken_member_retired_after_a_stopped_mobs_lift_stays_retiring_until_
         state
             .identity_to_runtime
             .get(&dsl::AgentIdentity::from_domain(&id("carol")))
-            .and_then(|runtime| state.member_state_markers.get(runtime).cloned())
+            .and_then(|runtime| state.member_state_markers.get(runtime).copied())
             == Some(dsl::MobMemberState::Retiring)
     };
     let assert_stuck = |answer: Result<(), MobError>, which: &str, mob: &KeyMob| {
@@ -1752,13 +1752,13 @@ impl DeclaredKeyMob {
             }
         })
         .await;
-        match refused {
-            Ok(status) => status,
-            Err(_) => panic!(
+        let Ok(status) = refused else {
+            panic!(
                 "the reconciler records the refusal of revision {intent_revision}; latest status: {:?}",
                 self.carol_status().await
-            ),
-        }
+            )
+        };
+        status
     }
 
     /// Watch carol's build count for several backoff periods: it stays at

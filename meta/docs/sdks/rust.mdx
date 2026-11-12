@@ -383,8 +383,20 @@ seat does: the model and the provider parameters at every build, and the
 system prompt, the additional instructions and the context at the first
 build of the member's session, in its first life and in the fresh life a
 reset or a delete starts. A later build keeps the instructions its session
-was first built with. Its tools reach every build. The draft's labels are
-not applied: the member's roster labels are its row's.
+was first built with. Its tools reach every build.
+
+A customizer that sets labels must find them in such an agent's row. The
+agent's member carries its row's labels and no others, and an access rule
+or an audience that selects by label reads the member's seat. When the
+draft's labels are not exactly the seat's (a key added, dropped or given
+another value), the agent is refused its seat for good and nothing is built:
+it is never seated without a label the host requires. The refusal names the
+label keys, never a value; the refused send answers it and
+`meta/status_identity` shows it under `customizer_tools_pending`. Put the
+label in the agent's row, at its create or by an update: an agent that is
+owed its seat is seated by the update, and an agent Core already holds a
+member of takes its row's labels at a respawn or a reset. A customizer that
+sets no labels is unaffected.
 
 `after_create` is best-effort: the seat or build stands whatever it answers.
 The gateway calls it once Core's journal records the seat, with no lock of

@@ -2613,6 +2613,24 @@ const HOST_PROMPT: &str = "HOST-SYSTEM-PROMPT: keep the desk's record.";
 const HOST_INSTRUCTION: &str = "HOST-INSTRUCTION: cite the workspace record.";
 /// The profile of the build rows whose resume mask names the model.
 const MASKED: &str = "masked";
+/// The label the host's customizer of the build rows sets on every build:
+/// its key and its value.
+const HOST_LABEL: (&str, &str) = ("host_tier", "gold");
+
+/// The labels of a created agent's row that carries the host's label.
+fn host_labelled_row() -> BTreeMap<String, String> {
+    let mut labels = created_labels();
+    labels.insert(HOST_LABEL.0.to_string(), HOST_LABEL.1.to_string());
+    labels
+}
+
+/// The spec of an agent created on `profile` whose row carries the host's
+/// label: what a host that labels its members in its customizer creates.
+fn host_labelled_spec(name: &str, profile: &str) -> meerkat_mob::CreatedIdentitySpec {
+    meerkat_mob::CreatedIdentitySpec::new(name, profile)
+        .with_display_name(format!("Created {name}"))
+        .with_labels(host_labelled_row())
+}
 
 /// The application context the host's customizer gives every build.
 fn host_context() -> Value {
@@ -2674,7 +2692,7 @@ impl AgentCustomizer for ComposingCustomizer {
             .push(HOST_INSTRUCTION.to_string());
         draft
             .labels
-            .insert("host_tier".to_string(), "gold".to_string());
+            .insert(HOST_LABEL.0.to_string(), HOST_LABEL.1.to_string());
         draft.app_context = Some(host_context());
         draft.provider_params = Some(host_provider_params());
         draft.local_external_tools = LocalExternalToolOverlay::new(Arc::new(HostTools));
@@ -2856,7 +2874,8 @@ fn assert_host_inputs(name: &str, inputs: &BuildInputs) {
 /// then sent to, and each equals the configured agent's field by field. The
 /// host's customizer composes each of those first builds once.
 ///
-/// It does not compare the members' roster labels.
+/// Each created agent's row carries the label the host's customizer sets,
+/// as it must for the agent to be seated.
 ///
 /// RED before Core asked the host to compose a store-owned seat: both
 /// created agents were built on the profile's own model with no host system
@@ -2877,9 +2896,11 @@ async fn a_store_owned_agent_is_built_from_the_hosts_inputs_as_a_configured_one(
     assert_host_inputs(DECLARED, &configured);
 
     rig.create_request(
-        meerkat_mob::CreatedIdentityRequest::new(created_spec(KICKED).with_initial_message(
-            meerkat_core::ContentInput::Text("BUILD-KICKOFF".to_string()),
-        )),
+        meerkat_mob::CreatedIdentityRequest::new(
+            host_labelled_spec(KICKED, "worker").with_initial_message(
+                meerkat_core::ContentInput::Text("BUILD-KICKOFF".to_string()),
+            ),
+        ),
         KICKED,
     )
     .await;
@@ -2890,7 +2911,11 @@ async fn a_store_owned_agent_is_built_from_the_hosts_inputs_as_a_configured_one(
     tokio::time::sleep(Duration::from_millis(200)).await;
     let kicked = rig.build_inputs(KICKED, "BUILD-KICKOFF").await;
 
-    rig.create(SEATED).await;
+    rig.create_request(
+        meerkat_mob::CreatedIdentityRequest::new(host_labelled_spec(SEATED, "worker")),
+        SEATED,
+    )
+    .await;
     assert!(
         rig.turn(SEATED, "BUILD-SEATED").await,
         "the agent created Dormant runs its first turn"
@@ -2919,7 +2944,8 @@ async fn a_store_owned_agent_is_built_from_the_hosts_inputs_as_a_configured_one(
 /// first build of its fresh life takes from the host's build step what the
 /// first build of its first life took, field by field, on a new session.
 ///
-/// It does not compare the member's roster labels.
+/// The agent's row carries the label the host's customizer sets, as it
+/// must for the agent to be seated.
 ///
 /// RED before Core asked the host to compose a store-owned seat: neither
 /// life took the host's model, system prompt, instruction, provider
@@ -2928,7 +2954,11 @@ async fn a_store_owned_agent_is_built_from_the_hosts_inputs_as_a_configured_one(
 async fn a_reset_store_owned_agent_is_built_from_the_host_inputs_of_its_first_life() {
     let temp = tempfile::tempdir().unwrap();
     let (mut rig, _customizer) = boot_build_rows(temp.path(), &fresh_mob_id(), "worker").await;
-    rig.create(CREATED).await;
+    rig.create_request(
+        meerkat_mob::CreatedIdentityRequest::new(host_labelled_spec(CREATED, "worker")),
+        CREATED,
+    )
+    .await;
     assert!(
         rig.turn(CREATED, "FIRST-LIFE").await,
         "the first life runs a turn"
@@ -2971,11 +3001,7 @@ async fn under_a_resume_model_mask_a_store_owned_agent_builds_with_the_configure
     let mob_id = fresh_mob_id();
     let (mut rig, _customizer) = boot_build_rows(temp.path(), &mob_id, MASKED).await;
     rig.create_request(
-        meerkat_mob::CreatedIdentityRequest::new(
-            meerkat_mob::CreatedIdentitySpec::new(CREATED, MASKED)
-                .with_display_name(format!("Created {CREATED}"))
-                .with_labels(created_labels()),
-        ),
+        meerkat_mob::CreatedIdentityRequest::new(host_labelled_spec(CREATED, MASKED)),
         CREATED,
     )
     .await;
@@ -3030,5 +3056,397 @@ async fn under_a_resume_model_mask_a_store_owned_agent_builds_with_the_configure
         customizer.builds_of(CREATED) >= 1,
         "the host is asked again at the rebuild of the created agent"
     );
+    rig.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// A label the host's customizer sets: a created agent's row must carry it
+// ---------------------------------------------------------------------------
+
+/// The subject the label rows' access rules are decided for.
+const LABEL_SUBJECT: &str = "alice@example.test";
+
+/// The access configuration of the label rows. Everyone may send to any
+/// agent, except to one that carries the host's label: the deny rule keyed
+/// on that label. Only an agent that carries it may be viewed: the allow
+/// rule keyed on it.
+fn label_access() -> meerkat_meta::AccessControlConfig {
+    let host_labelled = BTreeMap::from([(HOST_LABEL.0.to_string(), HOST_LABEL.1.to_string())]);
+    meerkat_meta::AccessControlConfig {
+        approvers: Default::default(),
+        enabled: true,
+        admins: Vec::new(),
+        groups: BTreeMap::new(),
+        rules: vec![
+            meerkat_meta::AccessRule {
+                id: "send-any".to_string(),
+                actions: vec!["agent.send".to_string()],
+                ..meerkat_meta::AccessRule::default()
+            },
+            meerkat_meta::AccessRule {
+                id: "no-send-to-host-labelled".to_string(),
+                effect: meerkat_meta::AccessEffect::Deny,
+                actions: vec!["agent.send".to_string()],
+                match_labels: host_labelled.clone(),
+                ..meerkat_meta::AccessRule::default()
+            },
+            meerkat_meta::AccessRule {
+                id: "view-host-labelled".to_string(),
+                actions: vec!["agent.view".to_string()],
+                match_labels: host_labelled,
+                ..meerkat_meta::AccessRule::default()
+            },
+        ],
+    }
+}
+
+/// What [`label_access`] decides about the member `seat` of `name`, read
+/// from Core's roster entry as the console reads a member's attributes:
+/// whether a send to it is allowed, and whether it may be viewed.
+fn label_decisions(name: &str, seat: &Seat) -> (bool, bool) {
+    let principal = meerkat_meta::AccessPrincipal {
+        subject: Some(LABEL_SUBJECT.to_string()),
+        groups: Default::default(),
+    };
+    let resource = meerkat_meta::AccessResource {
+        identity: Some(name),
+        agent_id: None,
+        role: Some(seat.role.as_str()),
+        labels: Some(&seat.labels),
+    };
+    let config = label_access();
+    let allowed = |action: &str| {
+        meerkat_meta::evaluate_access(&config, &principal, action, &resource).is_allow()
+    };
+    (allowed("agent.send"), allowed("agent.view"))
+}
+
+/// The decisions for a member that carries the host's label: the deny holds
+/// (no send), and the allow rule matches (view).
+const HOST_LABELLED: (bool, bool) = (false, true);
+
+/// What the identity's status shows of its seat: its state, and the reason
+/// its build is refused for, when one stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SeatStatus {
+    state: String,
+    refused: Option<String>,
+}
+
+impl SeatStatus {
+    /// Whether the status shows the label refusal: it names the host's
+    /// label key and the remedy (the row), and no label value.
+    fn shows_the_label_refusal(&self) -> bool {
+        self.refused.as_deref().is_some_and(names_the_label_key)
+    }
+}
+
+/// Whether `reason` names the host's label key and the remedy (the label
+/// belongs in the agent's row), and not the label's value.
+fn names_the_label_key(reason: &str) -> bool {
+    reason.contains(&format!("added [{}]", HOST_LABEL.0))
+        && reason.contains("row")
+        && !reason.contains(HOST_LABEL.1)
+}
+
+impl Rig {
+    async fn seat_status(&self, name: &str) -> SeatStatus {
+        let status = self
+            .runtime
+            .identity_runtime()
+            .expect("identity runtime installed")
+            .status(&id(name))
+            .await
+            .unwrap_or_else(|error| panic!("{name}: the status reads: {error}"));
+        SeatStatus {
+            state: status.state.wire_str().to_string(),
+            refused: status
+                .customizer_tools_pending
+                .map(|pending| pending.reason),
+        }
+    }
+
+    /// Change `name`'s row through Core's store-owned update, from `from`
+    /// to `to`, as the operation `operation_id`.
+    async fn update_from(
+        &self,
+        operation_id: &str,
+        from: &meerkat_mob::CreatedIdentitySpec,
+        to: meerkat_mob::CreatedIdentitySpec,
+    ) {
+        let name = to.identity.to_string();
+        let updated = self
+            .runtime
+            .mob_handle()
+            .update_store_owned_identity(
+                meerkat_mob::StoreOwnedIdentityUpdate::new(
+                    operation(operation_id),
+                    meerkat_mob::IdentityChangeRequesterInput::host("console"),
+                    to,
+                    from.spec_digest().expect("the row's digest"),
+                ),
+                allow(),
+            )
+            .await
+            .map(|updated| updated.change);
+        assert!(
+            matches!(
+                updated,
+                Ok(meerkat_mob::IdentityChangeOutcome::Committed { .. })
+            ),
+            "Core updates {name}: {updated:?}"
+        );
+    }
+
+    /// Whether a build created the session Core binds `name`'s member to:
+    /// the session is stored.
+    async fn session_built(&self, name: &str) -> bool {
+        let Some(session) = self.life(name).await.session else {
+            return false;
+        };
+        let session_id =
+            meerkat_core::types::SessionId::parse(&session).expect("the member's session id");
+        meerkat_mob::MobSessionService::load_persisted_session(
+            &**self
+                .runtime
+                .mob_runtime()
+                .session_service()
+                .expect("the runtime's session service"),
+            &session_id,
+        )
+        .await
+        .expect("the member's session reads")
+        .is_some()
+    }
+}
+
+/// A label the host's customizer sets on every build reaches a configured
+/// agent's seat, where the access rules keyed on it decide: the deny holds
+/// and the allow rule matches. A created agent whose row lacks that label is
+/// refused its seat instead of being seated without it: created Dormant and
+/// then sent to, the send is refused with a reason that names the label key
+/// and the remedy and no value, nothing is built and no turn runs; created
+/// with a first message, its kickoff does not run and Core holds no member
+/// of it. The host's customizer was asked about each.
+///
+/// RED before the rule: both created agents were built and ran, on seats
+/// that did not carry the host's label, so the deny rule missed them.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_created_agent_whose_row_lacks_a_host_label_is_refused_its_seat_and_not_built() {
+    const KICKED: &str = "keeper-kicked";
+    const SEATED: &str = "keeper-seated";
+    let temp = tempfile::tempdir().unwrap();
+    let (mut rig, customizer) = boot_build_rows(temp.path(), &fresh_mob_id(), "worker").await;
+
+    assert!(
+        rig.turn(DECLARED, "LABEL-CONFIGURED").await,
+        "the configured agent runs a turn"
+    );
+    let configured = rig.member(DECLARED).await;
+    assert_eq!(
+        configured.labels.get(HOST_LABEL.0).map(String::as_str),
+        Some(HOST_LABEL.1),
+        "the configured agent's seat carries the host's label: {:?}",
+        configured.labels
+    );
+    assert_eq!(
+        label_decisions(DECLARED, &configured),
+        HOST_LABELLED,
+        "the deny holds for the configured agent, and the allow rule matches it"
+    );
+
+    rig.create(SEATED).await;
+    let sent = rig.send(SEATED, "LABEL-SEATED").await;
+    assert!(
+        !sent["error"].is_null() && names_the_label_key(&sent["error"].to_string()),
+        "the send to an agent whose row lacks the host's label is refused, naming the label \
+         key and the remedy: {sent}"
+    );
+    rig.create_request(
+        meerkat_mob::CreatedIdentityRequest::new(created_spec(KICKED).with_initial_message(
+            meerkat_core::ContentInput::Text("LABEL-KICKOFF".to_string()),
+        )),
+        KICKED,
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        rig.request_with("LABEL-SEATED").is_none() && rig.request_with("LABEL-KICKOFF").is_none(),
+        "no turn of a refused agent runs"
+    );
+    assert!(
+        !rig.session_built(SEATED).await,
+        "nothing is built for the agent created Dormant: no build created its session"
+    );
+    assert!(
+        !rig.seated(KICKED),
+        "Core holds no member of the agent created with a first message"
+    );
+    assert!(
+        customizer.builds_of(SEATED) >= 1 && customizer.builds_of(KICKED) >= 1,
+        "the host's customizer was asked about each refused agent"
+    );
+    rig.shutdown().await;
+}
+
+/// A created agent whose row carries the label the host's customizer sets
+/// is built, its seat carries the label, and the access rules keyed on it
+/// decide as for a configured agent: the deny holds and the allow rule
+/// matches.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_created_agent_whose_row_carries_the_host_label_is_built_and_the_deny_holds() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut rig, _customizer) = boot_build_rows(temp.path(), &fresh_mob_id(), "worker").await;
+    rig.create_request(
+        meerkat_mob::CreatedIdentityRequest::new(host_labelled_spec(CREATED, "worker")),
+        CREATED,
+    )
+    .await;
+    assert!(
+        rig.turn(CREATED, "LABEL-IN-THE-ROW").await,
+        "the agent whose row carries the host's label is built and runs"
+    );
+    let created = rig.member(CREATED).await;
+    assert_eq!(
+        created.labels,
+        host_labelled_row(),
+        "its seat carries its row's labels, the host's among them"
+    );
+    assert_eq!(
+        label_decisions(CREATED, &created),
+        HOST_LABELLED,
+        "the deny holds for the created agent, and the allow rule matches it"
+    );
+    assert_eq!(rig.seat_status(CREATED).await.refused, None);
+    rig.shutdown().await;
+}
+
+/// A created agent refused its seat for a label its row lacks is visible as
+/// such, and its row and a seat of its member are all that has to change
+/// for it to be built: no restart and no store edit. Its status shows the
+/// reason, naming the label key and the remedy, with the state `broken`
+/// for one refused at its first wake and `dormant` for one owed its seat.
+/// An update of its row that adds the label does not change the seat Core
+/// holds, so the next send is still refused; a respawn, or a reset, then
+/// seats its member with the row's labels, and it is built at its next
+/// wake: its seat carries the label and the deny holds. An agent created
+/// with a first message, which Core holds no member of, is seated by the
+/// update itself and runs its kickoff. An archive and a removal of a
+/// refused agent are served.
+///
+/// RED before the rule: the agents were built without the label.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_created_agent_shows_the_reason_and_is_seated_once_its_row_carries_the_label() {
+    const KICKED: &str = "keeper-kicked";
+    const SEATED: &str = "keeper-seated";
+    const ARCHIVED: &str = "keeper-archived";
+    const REMOVED: &str = "keeper-removed";
+    const RESET: &str = "keeper-reset";
+    let temp = tempfile::tempdir().unwrap();
+    let (mut rig, _customizer) = boot_build_rows(temp.path(), &fresh_mob_id(), "worker").await;
+
+    // Created Dormant: refused at its first wake.
+    rig.create(SEATED).await;
+    let sent = rig.send(SEATED, "REFUSED-WAKE").await;
+    assert!(!sent["error"].is_null(), "the send is refused: {sent}");
+    let refused = rig.seat_status(SEATED).await;
+    assert!(
+        refused.shows_the_label_refusal(),
+        "the status shows the refusal's reason: {refused:?}"
+    );
+    assert_eq!(refused.state, "broken", "Core holds the member Broken");
+
+    rig.update(SEATED, host_labelled_spec(SEATED, "worker"))
+        .await;
+    let again = rig.send(SEATED, "AFTER-UPDATE").await;
+    assert!(
+        !again["error"].is_null() && names_the_label_key(&again["error"].to_string()),
+        "the update leaves the seat Core holds as it was, so the send is still refused: \
+         {again}"
+    );
+    assert_eq!(
+        rig.seat_status(SEATED).await,
+        refused,
+        "the status still shows the refusal"
+    );
+    let respawned = rig.verb("meta/respawn", SEATED).await;
+    assert!(
+        respawned["error"].is_null(),
+        "the respawn that seats the member with its row's labels is served: {respawned:#?}"
+    );
+    assert!(
+        rig.turn(SEATED, "AFTER-RESPAWN").await,
+        "the agent is built once its seat carries the label"
+    );
+    let seat = rig.member(SEATED).await;
+    assert_eq!(seat.labels, host_labelled_row());
+    assert_eq!(label_decisions(SEATED, &seat), HOST_LABELLED);
+    let cleared = rig.seat_status(SEATED).await;
+    assert_eq!(
+        (cleared.state.as_str(), &cleared.refused),
+        ("active", &None),
+        "the refusal is gone from the status"
+    );
+
+    // Created with a first message: owed its seat, seated by the update.
+    let kicked = created_spec(KICKED).with_initial_message(meerkat_core::ContentInput::Text(
+        "KICKOFF-ONCE-LABELLED".to_string(),
+    ));
+    rig.create_request(
+        meerkat_mob::CreatedIdentityRequest::new(kicked.clone()),
+        KICKED,
+    )
+    .await;
+    assert!(!rig.seated(KICKED), "the agent is owed its seat");
+    let owed = rig.seat_status(KICKED).await;
+    assert!(
+        owed.shows_the_label_refusal(),
+        "the status shows the refusal's reason: {owed:?}"
+    );
+    assert_eq!(owed.state, "dormant", "Core holds no member of it");
+    rig.update_from(
+        "update-kicked",
+        &kicked,
+        kicked.clone().with_labels(host_labelled_row()),
+    )
+    .await;
+    assert!(
+        rig.asked("KICKOFF-ONCE-LABELLED").await,
+        "the update seats the agent, and its kickoff runs"
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let seat = rig.member(KICKED).await;
+    assert_eq!(seat.labels, host_labelled_row());
+    assert_eq!(label_decisions(KICKED, &seat), HOST_LABELLED);
+    assert_eq!(rig.seat_status(KICKED).await.refused, None);
+
+    // A refused agent is archived, and another removed.
+    for name in [ARCHIVED, REMOVED, RESET] {
+        rig.create(name).await;
+        let sent = rig.send(name, &format!("REFUSED {name}")).await;
+        assert!(
+            !sent["error"].is_null(),
+            "{name}: the send is refused: {sent}"
+        );
+    }
+    rig.archive(ARCHIVED).await;
+    rig.remove(REMOVED).await;
+    assert!(
+        !rig.seated(ARCHIVED) && !rig.seated(REMOVED),
+        "neither refused agent keeps a member"
+    );
+
+    // A reset seats a refused agent's member with its row's labels, as a
+    // respawn does.
+    rig.update(RESET, host_labelled_spec(RESET, "worker")).await;
+    let reset = rig.verb("meta/reset", RESET).await;
+    assert!(reset["error"].is_null(), "the reset is served: {reset:#?}");
+    assert!(
+        rig.turn(RESET, "AFTER-RESET-LABELLED").await,
+        "the agent is built once a reset seated it with the label"
+    );
+    let seat = rig.member(RESET).await;
+    assert_eq!(seat.labels, host_labelled_row());
+    assert_eq!(label_decisions(RESET, &seat), HOST_LABELLED);
     rig.shutdown().await;
 }

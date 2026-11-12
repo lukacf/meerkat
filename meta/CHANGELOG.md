@@ -43,6 +43,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `meta/identity/list`, `get` and `directory` say `roster_listing_superseded:
+  true` on an agent the host's roster lists while it is served from its
+  record, and `meta/identity/plan` says it on the plan of a change of such
+  an agent: the roster's entry for that name is not applied. The member is
+  written only when it is so. Rust: `identity_creation::AgentSummary`,
+  `DirectoryPeer` and `ChangePlan` gain it.
+
+- `meta/identity/create` and `meta/identity/update` take `addressability`
+  (`addressable` or `internal_only`) and `runtime_mode_override`
+  (`autonomous_host` or `turn_driven`): on an agent of a create, and in
+  `set` of an update. They say who reaches the agent and how it runs, with
+  the members and the values of a roster row. An update that sets either is
+  of the change class `capability` of the identity policy, which no request
+  touched before. An update sets a runtime mode and cannot return the agent
+  to its profile's. `meta/identity/get` and each agent of
+  `meta/identity/list` read both back under the same names, each only when
+  it is not the default (`addressability` only as `internal_only`). Rust:
+  `identity_creation::AgentSpec`, `AgentSet` and `AgentSummary` gain the two
+  members.
+
+- The schedules that target an agent follow its archive, its unarchive and
+  its removal (`meta/identity/archive`, `unarchive`, `remove`, and the
+  agents' tools over them): an archive pauses the Active schedules that
+  target the agent, an unarchive resumes exactly the ones that archive
+  paused, and a removal ends every one. Before, such a schedule kept firing
+  and each fire ended as a delivery failure or a missing target. A schedule
+  somebody paused by name stays paused through the unarchive, and a pause or
+  a resume by name of a schedule the archive paused takes it over. The
+  agent's entry of the change's first answer says what was done
+  (`schedules: {effect, count, schedules, incomplete?}`, `effect` one of
+  `paused`, `resumed`, `ended`), and a plan of the change carries the same
+  member with what it would do. Whose pause a pause is, the schedule's own
+  lifecycle records (Core: `ScheduleService::pause_for_target`,
+  `resume_for_target`). The stdio gateway gives the family its schedules; a
+  Rust host does with `IdentityFamilyOptions::with_schedules`
+  (`identity_creation::AgentSchedules`, implemented over a schedule service
+  by `schedule_wiring::MobAgentSchedules`), and a launch that gives none
+  changes no schedule. Rust: `identity_creation::AgentOutcome` and
+  `ChangePlan` gain `schedules`.
+
 - `meta/identity/*`: host methods that change a mob's long-term agents while
   it runs, on the stdio gateway and on `POST /console/rpc`: `create` (1 to
   256 agents, all or nothing), `update`, `archive`, `unarchive`, `remove`,
@@ -327,6 +367,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- A host that labels its members in its customizer must put those labels
+  in the row of an agent created at run time (an identity whose record is
+  its row). Such an agent's member carries its row's labels and no others,
+  and what decides on a member's labels (an access rule's `match_labels`,
+  an audience) reads its seat. So when the labels the customizer's draft
+  holds are not exactly the seat's (a key added, a key dropped, a key given
+  another value), the agent is refused its seat for good and nothing is
+  built or run: it is never seated without a label its host requires, so a
+  deny rule keyed on a host label cannot miss it. The refusal is Core's
+  `MemberBuildPreparationRefusal::store_owned_seat_labels`. Its reason names
+  the label keys, never a value, and the remedy; the refused send answers
+  it, and `meta/status_identity` shows it under `customizer_tools_pending`,
+  with the state `broken` for an agent refused at its first wake. To seat
+  the agent, put the label in its row: at its create, or by an update. An
+  update seats an agent that is owed its seat (one created with a first
+  message) at once; an agent Core already holds a member of takes its
+  row's labels when it is respawned or reset (`meta/respawn`,
+  `meta/reset`), and is built at its next wake. The same holds after a
+  later label change of a row: until the member is seated again its seat
+  carries the old labels, and its next build is refused. A customizer that
+  sets no labels refuses nothing. An archive and a removal of a refused
+  agent are served.
+
+- On the Console, a read, a plan and a change of one agent
+  (`meta/identity/get`, `plan`, `update`, `archive`, `unarchive`, `remove`
+  and `adopt`) answer an agent the caller may not view exactly as a name no
+  agent holds: `identity_unknown` at `name`, and nothing is changed. A rule
+  that denies viewing the agent answered `access_denied` (`-32030`) before.
+  An agent the caller may view and may not change still answers
+  `access_denied`.
+
+- The rendering of a change of an agent, which a plan answers and a held
+  change's decision shows and binds, names a person by the id their
+  principal key carries: the person who asked, and a person a host names as
+  the `proposer`. It showed the key. The subject digest of a rendering that
+  names a person is therefore not the one a build before this change gave
+  it; the request digest is unchanged and binds the keys.
+
 - An access rule with the pattern `agent.*` or `*` covers the three new
   `agent.identity.*` actions, as it covers every action a release adds to a
   family. They only open the methods: the identity policy still judges every
@@ -336,6 +414,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   classes `archive` (an archive and an unarchive) and `adopt`, and
   `approval.timeouts_ms` takes `archive` and `adopt` (4 hours each by
   default). A launch that names them was refused at init before.
+
+- `identity_creation::normalize_create` refuses a name in a reserved
+  namespace `invalid_name` at the agent's `name`: a name that starts with
+  `mk--` (the encoded member-id namespace) or with `rt:` (the namespace of
+  generated runtime aliases). It admitted such names before.
+
+- `identity_creation::IdentityRefusalKind::AdmissionUnsettled` is retryable
+  (`is_retryable`), as Core's refusal of the same name is.
 
 - Meta serves an identity whose record is its row in the mob's identity
   store (one created at run time, or one a host adopted into the store) as
@@ -540,26 +626,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   run. A member of an identity whose record is its row that the mob's
   start spawns then (a seat the start owes it) is built from its row
   alone: without the customizer's tools until its next build, and without
-  its system prompt, instructions and context for that life. One the
+  its system prompt, instructions and context for that life; the
+  customizer is not asked, so its labels are not compared with the seat's
+  for that build either. One the
   start restores then (one that owes work) is refused for now and built
   once the runtime is composed, with both; on a runtime that learns of its
   customizer only at its identity bootstrap it is built without them, as
   before.
-
-- The labels a host customizer sets on a build's draft do not reach the
-  member of an identity whose record is its row: its roster labels are its
-  row's, at its create and at a reset. A rule that matches a label only the
-  customizer adds (an access rule's `match_labels`, for example) matches a
-  configured agent and not such an agent. The customizer's model, system
-  prompt, instructions, provider parameters, context and tools do reach it.
-
-- `identity_creation::normalize_create` refuses a name in a reserved
-  namespace `invalid_name` at the agent's `name`: a name that starts with
-  `mk--` (the encoded member-id namespace) or with `rt:` (the namespace of
-  generated runtime aliases). It admitted such names before.
-
-- `identity_creation::IdentityRefusalKind::AdmissionUnsettled` is retryable
-  (`is_retryable`), as Core's refusal of the same name is.
 
 - An agent whose instructions were edited while the gateway was down, whose
   conversation was built through 0.9.14 and that has no instruction record

@@ -1445,6 +1445,7 @@ fn a_directory_entry_writes_its_verdict_flat() {
                 verdict: DirectoryVerdict::NeedsDecision {
                     lines: vec!["A peer of the records desk needs a decision.".to_owned()],
                 },
+                roster_listing_superseded: false,
             },
             DirectoryPeer {
                 name: "warden".to_owned(),
@@ -1453,6 +1454,7 @@ fn a_directory_entry_writes_its_verdict_flat() {
                 verdict: DirectoryVerdict::NotAllowed {
                     reason: Some("Wardens take no peers.".to_owned()),
                 },
+                roster_listing_superseded: false,
             },
         ],
         next: Some("warden".to_owned()),

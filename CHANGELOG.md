@@ -37,6 +37,27 @@ them.
 
 ### Breaking
 
+- Rust API of `meerkat-schedule`, `meerkat-machine-schema` and
+  `meerkat-machine-kernels`: the schedule lifecycle machine gains a state
+  field and two inputs, and its public types follow.
+  `meerkat_schedule::ScheduleLifecycleInput` gains the variants
+  `PauseForTarget` and `ResumeForTarget`. In `meerkat-machine-schema`
+  (`catalog::dsl::schedule_lifecycle`), `ScheduleLifecycleInput` and
+  `ScheduleLifecycleInputVariant` gain `PauseForTarget` and
+  `ResumeForTarget`, and `ScheduleLifecycleMachineState` gains the public
+  field `paused_for_target: bool`. In `meerkat-machine-kernels`
+  (`generated::schedule_lifecycle`), `Input` and `InputKind` gain
+  `PauseForTarget` and `ResumeForTarget`, `TransitionId` gains
+  `PauseForTargetActive`, `PauseForTargetPaused`, `PauseForTargetDeleted`,
+  `ResumeForTargetPausedForTarget`, `ResumeForTargetPausedByName`,
+  `ResumeForTargetActive` and `ResumeForTargetDeleted`, and `State` gains
+  the public field `paused_for_target: bool`. Every new variant is appended
+  last, so no existing variant's implicit discriminant moves. Exhaustive
+  matches must add the new variants, code that builds
+  `ScheduleLifecycleMachineState` or the kernel `State` literally must set
+  the field, and a serialized kernel `State` without the field no longer
+  deserializes.
+
 - `meerkat-machine-kernels`: the kernel `generated::mob::TransitionId` gains
   `SetOperatorInstructionAdvanceSlotLimitExceededRunning` and
   `SetOperatorInstructionAdvanceSlotLimitExceededStopped`, the refusal of a
@@ -47,6 +68,27 @@ them.
   needs the two arms.
 
 ### Added
+
+- Schedule: a schedule can follow its target. `ScheduleService::pause_for_target`
+  pauses an Active schedule because its target stopped taking deliveries for
+  now, and the schedule remembers that the pause is its target's
+  (`Schedule::paused_for_target`). `ScheduleService::resume_for_target`
+  resumes exactly the schedules paused that way and plans their occurrences
+  as a resume by name does. Both answer `(Schedule, bool)`: the schedule
+  after the call and whether this call changed it. A schedule somebody
+  paused by name keeps that pause through both calls. A pause or a resume by
+  name of a schedule paused for its target takes it over: it is no longer
+  the target's. So does a revise that points it at another target: the
+  schedule stays paused until somebody resumes it. A call that has nothing
+  to do answers the schedule unchanged and writes nothing, for a deleted
+  schedule too, so the owner of the target's lifecycle can make it again
+  after a crash. The `ScheduleLifecycleMachine` owns the fact (state
+  `paused_for_target`, inputs `PauseForTarget` and `ResumeForTarget`); a
+  stored schedule carries it in its machine state only while it is true, so
+  a schedule that is not paused for its target is stored as before, and one
+  stored by an earlier release loads as not paused for its target. No
+  `schedule/*` RPC method, REST route, schedule tool or wire type changes,
+  and no read of a schedule on those surfaces says whose pause it is yet.
 
 - `MobHandle::seat_owed_store_owned_identities` seats, while the mob runs,
   every store-owned identity that is owed its seat (the spawn of its
@@ -93,9 +135,20 @@ them.
   what its session was first built with. No build relies on an earlier
   answer, so the host answers the same from the row and its own
   state each time, and may be asked more than once for one seat. The seat's
-  labels, runtime mode, binding, placement and first message stay as Core
+  runtime mode, binding, placement and first message stay as Core
   lowered them, and an answer that changed the seat's identity, role,
-  launch mode or custody is refused. A refusal fails the build before
+  launch mode or custody is refused. The seat's labels are its row's, and
+  the answer's labels must be exactly the seat's: what decides on a
+  member's labels (an access rule, an audience) reads its seat, so a member
+  is never seated without a label its host requires, nor with one its row
+  does not carry. An answer that adds a label key, drops one or gives one
+  another value is refused for good and the member is not built;
+  `MemberBuildPreparationRefusal::store_owned_seat_labels` is that refusal
+  (its reason names the label keys, never a value, and the remedy: the
+  label belongs in the identity's row, at its create or by an update, and
+  a seated member takes its row's labels when it is seated again or
+  respawned), public so that a host can refuse first with the same reason.
+  A refusal fails the build before
   anything is built: at a spawn the identity stays owed its seat and the
   mob's next start asks again; at a wake or a restore the member stays
   Dormant (`BuildPreparationRetry`) or is recorded broken, as for a refused
@@ -284,6 +337,15 @@ them.
   that stays Live between runs is not tried at each run start.
 
 ### Upgrade notes
+
+- Schedules paused for their target, and a rollback. A schedule paused for
+  its target (see Added) is stored as a paused schedule whose machine state
+  carries `paused_for_target: true`. An earlier release reads it as paused,
+  never resumes it on its own, ignores the mark, and drops the mark when it
+  writes the schedule while it is paused. After a rollback and a return to
+  this release such a schedule stays paused when its target takes
+  deliveries again: resume it by name. A schedule the earlier release did
+  not write keeps the mark. See `docs/guides/upgrading.mdx`.
 
 - Rolling back to 0.9.14 or earlier: an earlier release cannot serve a mob
   whose operator instruction records are past what it holds in one mob,

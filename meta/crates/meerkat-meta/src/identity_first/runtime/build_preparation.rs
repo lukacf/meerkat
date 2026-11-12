@@ -69,7 +69,7 @@ impl IdentityRuntime {
         &self,
         identity: &AgentIdentity,
     ) -> Result<MemberBuildPrepared, MemberBuildPreparationRefusal> {
-        Ok(match self.compose_identity_build(identity).await? {
+        Ok(match self.compose_identity_build(identity, None).await? {
             ComposedIdentityBuild::NoCustomizer => MemberBuildPrepared::Prepared,
             // The identity left the roster since the preparer read it: the
             // roster pass retires its member, which holds no run until then.
@@ -100,6 +100,22 @@ impl IdentityRuntime {
     /// parameters at every build, the context, the instructions and the
     /// system prompt at the first build of the member's session.
     ///
+    /// `row` is the spec the identity's row holds now, when it reads: the
+    /// customizer composes from it, so the draft follows a row Core changed
+    /// since the identity was registered. Without it the registered spec
+    /// stands in.
+    ///
+    /// The draft's labels must be exactly the seat's. What decides on a
+    /// member's labels reads its seat, and the seat of such an identity
+    /// carries its row's labels and no others, so a label the customizer
+    /// sets that the seat lacks cannot be honoured: the composition is
+    /// refused for good
+    /// (`MemberBuildPreparationRefusal::store_owned_seat_labels`, naming
+    /// the label keys and never a value), the member is not built, and the
+    /// reason is recorded for the identity's status. Core refuses such an
+    /// answer itself: the draft's labels are lowered onto the seat, so the
+    /// refusal does not rest on this check.
+    ///
     /// `Ok(Some(answer))` is what this build's preparation answers, the
     /// customizer having run for it already; `Ok(None)` when nothing was
     /// composed (the runtime composes no customizer, or the identity left
@@ -110,17 +126,35 @@ impl IdentityRuntime {
     pub(crate) async fn compose_store_owned_seat(
         &self,
         identity: &AgentIdentity,
+        row: Option<DurableAgentSpec>,
         seat: &mut meerkat_mob::SpawnMemberSpec,
     ) -> Result<Option<MemberBuildPrepared>, MemberBuildPreparationRefusal> {
         let Some(bridge) = self.bridge() else {
             return Ok(None);
         };
         let ComposedIdentityBuild::Composed(composed) =
-            self.compose_identity_build(identity).await?
+            self.compose_identity_build(identity, row).await?
         else {
             return Ok(None);
         };
         let (spec, draft) = *composed;
+        if let Some(refusal) =
+            MemberBuildPreparationRefusal::store_owned_seat_labels(seat, &draft.labels)
+        {
+            tracing::warn!(
+                %identity,
+                reason = refusal.reason(),
+                "the member's build was refused: its host's customizer answers labels its seat                  does not carry"
+            );
+            self.record_customizer_failure(
+                identity,
+                CustomizerToolsPending {
+                    reason: refusal.reason().to_string(),
+                    artifact_refusal: None,
+                },
+            );
+            return Err(refusal);
+        }
         if let Err(error) = bridge.lower_store_owned_seat_build(&spec, &draft, seat) {
             let reason = format!("the host's build did not lower onto the member's seat: {error}");
             tracing::warn!(
@@ -145,22 +179,28 @@ impl IdentityRuntime {
     /// `identity`'s member Core is about to perform, with the runtime's
     /// real context, and publish its tools into the identity's stable
     /// dispatcher, unreleased: the one host build step of a build, whose
-    /// draft the caller lowers further or drops. A failed customizer is
+    /// draft the caller lowers further or drops. The customizer composes
+    /// from `row`, the spec the identity's row holds now, when the caller
+    /// read one, else from the registered spec. A failed customizer is
     /// refused retryable, its failure recorded.
     async fn compose_identity_build(
         &self,
         identity: &AgentIdentity,
+        row: Option<DurableAgentSpec>,
     ) -> Result<ComposedIdentityBuild, MemberBuildPreparationRefusal> {
         let Some(customizer) = self.customizer.read().await.clone() else {
             return Ok(ComposedIdentityBuild::NoCustomizer);
         };
-        let Some(spec) = self
-            .entries
-            .read()
-            .await
-            .get(identity)
-            .map(|entry| entry.spec.clone())
-        else {
+        let registered = match row {
+            Some(row) => Some(row),
+            None => self
+                .entries
+                .read()
+                .await
+                .get(identity)
+                .map(|entry| entry.spec.clone()),
+        };
+        let Some(spec) = registered else {
             return Ok(ComposedIdentityBuild::Unregistered);
         };
         let context = AgentBuildContext {

@@ -2783,6 +2783,14 @@ def official_inputs(bundle: Path, expected: str, component: str):
         if (notices != ["github/notices/upstream-LICENSE"]
                 or sha(files[notices[0]]) != GHE_LICENSE_SHA256):
             raise InstallError("unsupported enterprise license payload")
+    elif "source_archive" in selected and official_target(selected) == "macos-arm64":
+        # An executable taken from an upstream release archive carries that archive's one license.
+        archive = selected["source_archive"]
+        if (not isinstance(archive, dict) or set(archive) != {"bytes", "sha256"}
+                or type(archive["bytes"]) is not int or archive["bytes"] <= 0
+                or not isinstance(archive["sha256"], str) or not re.fullmatch(r"[a-f0-9]{64}", archive["sha256"])
+                or notices != ["github/notices/upstream-LICENSE"]):
+            raise InstallError("unsupported release asset notices")
     elif len(notices) != 78 or "github/notices/upstream-LICENSE" not in notices:
         raise InstallError("incomplete official notices")
     expected_files = {"delivery.json", "github/github-mcp-server", "github/mcp.template.json", "github/UPSTREAM-PROFILE.md", *notices}

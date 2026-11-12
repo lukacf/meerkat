@@ -421,12 +421,14 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # witnesses violated, and with --mutants each seeded defect's target
 # invariant violated.
 # operator_instruction_delivery_audit.sh (mob_machine) requires a final
-# distinct-state count for each of its two runs, a coverage block in which
-# each covered action of both runs generated a state, its seven step
-# witnesses and four state witnesses violated, and with --mutants each
-# seeded defect's target property violated and its live-only delivery and
-# bound-only release mutants' runs to end without an error (the success line
-# above).
+# distinct-state count for each of its three runs (write, seat, fork), a
+# coverage block in which each covered action of every run generated a state
+# (the replay and the end of an identity's life read under their wrappers'
+# names, AuditReplay and AuditEndLife, by the runner's closed alias table),
+# its sixteen step witnesses and four state witnesses violated, and with
+# --mutants each of sixteen seeded defects' target invariant or action
+# property violated and its live-only delivery and bound-only release
+# mutants' runs to end without an error (the success line above).
 # superseded_ack_retention_audit.sh (schedule_lifecycle) requires its three
 # witnesses violated, and with --mutants each seeded defect's invariant
 # violated.
@@ -1290,19 +1292,36 @@ printf '%s\n' \
   'echo "Error: Invariant AuditDoorsNoExternalEntryAdmission is violated."' \
   'echo "Error: Invariant AuditDoorsAtMostOne is violated."' \
   'echo "Error: Invariant AuditDoorsEntryExactlyOne is violated."' \
-  'for action in SetOperatorInstructionNewRunning SetOperatorInstructionAdvanceRunning SetOperatorInstructionDuplicateRunning SetOperatorInstructionStaleRunning SetOperatorInstructionConflictRunning RevokeOperatorInstructionUnknownSlotRunning RevokeOperatorInstructionStaleRunning RevokeOperatorInstructionDuplicateRunning RevokeOperatorInstructionConflictRunning RevokeOperatorInstructionAdvanceRunning PrepareMemberInstructionDeliveryNotOwedRunning PrepareMemberInstructionDeliveryDeliverRunning PrepareMemberInstructionDeliveryUnbornRunning PrepareMemberInstructionDeliveryUnboundRunning RecordMemberInstructionTargetNotOwedRunning RecordMemberInstructionTargetStaleSessionRunning RecordMemberInstructionTargetSupersededRunning RecordMemberInstructionTargetCurrentRunning RecordMemberInstructionTargetUnmintedRunning RefuseMemberInstructionTargetNotOwedRunning RefuseMemberInstructionTargetStaleSessionRunning RefuseMemberInstructionTargetSupersededRunning RefuseMemberInstructionTargetBlockedRunning PrepareMemberInstructionDeliveryRetiringRunning RetireRunningReleasingArchiveOnly ResolveMemberInstructionReleaseAuthorizedRunning ResolveMemberInstructionReleaseNotNeededRunning; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
+  'for action in SetOperatorInstructionNewRunning SetOperatorInstructionAdvanceRunning SetOperatorInstructionDuplicateRunning SetOperatorInstructionStaleRunning SetOperatorInstructionConflictRunning RevokeOperatorInstructionUnknownSlotRunning RevokeOperatorInstructionStaleRunning RevokeOperatorInstructionDuplicateRunning RevokeOperatorInstructionConflictRunning RevokeOperatorInstructionAdvanceRunning PrepareMemberInstructionDeliveryNotOwedRunning PrepareMemberInstructionDeliveryDeliverRunning PrepareMemberInstructionDeliveryUnbornRunning PrepareMemberInstructionDeliveryUnboundRunning RecordMemberInstructionTargetNotOwedRunning RecordMemberInstructionTargetStaleSessionRunning RecordMemberInstructionTargetSupersededRunning RecordMemberInstructionTargetCurrentRunning RecordMemberInstructionTargetUnmintedRunning RefuseMemberInstructionTargetNotOwedRunning RefuseMemberInstructionTargetStaleSessionRunning RefuseMemberInstructionTargetSupersededRunning RefuseMemberInstructionTargetBlockedRunning PrepareMemberInstructionDeliveryRetiringRunning RetireRunningReleasingArchiveOnly ResolveMemberInstructionReleaseAuthorizedRunning ResolveMemberInstructionReleaseNotNeededRunning RecordMemberInstructionLineageRunning; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
+  'echo "<AuditReplay line 1, col 1 to line 1, col 2 of module operator_instruction_delivery_audit>: 1:1"' \
+  'echo "<AuditEndLife line 1, col 1 to line 1, col 2 of module operator_instruction_delivery_audit>: 1:1"' \
   'echo "Error: Action property NotAuditWitnessProfileWriteOwesOne is violated."' \
   'echo "Error: Action property NotAuditWitnessRetargetOwesLeaver is violated."' \
+  'echo "Error: Action property NotAuditWitnessMemberRetargetOwesBoth is violated."' \
   'echo "Error: Action property NotAuditWitnessRecordedReowed is violated."' \
   'echo "Error: Action property NotAuditWitnessBlockedThenUnblocked is violated."' \
   'echo "Error: Action property NotAuditWitnessRecordCloses is violated."' \
+  'echo "Error: Action property NotAuditWitnessForkWriteOwesFork is violated."' \
+  'echo "Error: Action property NotAuditWitnessMemberWriteSkipsFork is violated."' \
+  'echo "Error: Action property NotAuditWitnessLineageRecordOwes is violated."' \
+  'echo "Error: Action property NotAuditWitnessOwnForkAsRootWritesNoEntry is violated."' \
   'echo "Error: Action property NotAuditWitnessSeatAfterWriteOwed is violated."' \
   'echo "Error: Action property NotAuditWitnessUnseatDropsFacts is violated."' \
+  'echo "Error: Action property NotAuditWitnessIdentityEndDropsLineage is violated."' \
+  'echo "Error: Action property NotAuditWitnessForkOwedWithoutSeatedRoot is violated."' \
+  'echo "Error: Action property NotAuditWitnessForkOfForkNamesTheRoot is violated."' \
+  'echo "Error: Action property NotAuditWitnessForkWriteSkipsBystander is violated."' \
   'echo "Error: Invariant NotAuditWitnessDormantDeliverable is violated."' \
   'echo "Error: Invariant NotAuditWitnessUnbornOwedDeferred is violated."' \
   'echo "Error: Invariant NotAuditWitnessUnboundOwedDeferred is violated."' \
   'echo "Error: Invariant NotAuditWitnessRetiringReleasable is violated."' \
   'echo "Error: Action property AuditWriteOwesExactlyTheSelected is violated."' \
+  'echo "Error: Invariant AuditOwedIsSeatedAndUnblocked is violated."' \
+  'echo "Error: Action property AuditLineageRecordOwesTheGeneration is violated."' \
+  'echo "Error: Invariant AuditLineageOnlyBeforeASnapshot is violated."' \
+  'echo "Error: Invariant member_instruction_lineage_names_another_member is violated."' \
+  'echo "Error: Action property AuditLineageRecordNamesTheRoot is violated."' \
+  'echo "Error: Action property AuditIdentityEndLeavesNoLineage is violated."' \
   'echo "Error: Invariant AuditDeliversOnlyToBoundBornMembers is violated."' \
   'echo "Error: Action property AuditSeatOwesTheGeneration is violated."' \
   'echo "Error: Action property AuditUnseatLeavesNoFact is violated."' \

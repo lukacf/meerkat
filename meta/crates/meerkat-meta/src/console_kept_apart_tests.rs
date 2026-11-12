@@ -883,10 +883,10 @@ async fn an_ended_members_memory_scope_waits_for_the_first_read_of_who_members_a
 /// Until the first read of who members are private to has succeeded, the
 /// session of a member that ended, like a session no member ever ran on,
 /// is answered to everyone but an administrator as a session that does not
-/// exist, on a console that identifies nobody too. A runtime that can read
-/// no session's stored labels keeps answering so after the read: it cannot
-/// say whether such a session was private. The restarted console itself
-/// reads the labels each session was created with: once its read has
+/// exist, on a console that identifies nobody too. A runtime with no session
+/// service to read a stored session through keeps answering so after the
+/// read: it cannot say whether such a session was private. The restarted
+/// console itself reads the labels each session was created with: once its read has
 /// succeeded its operator attaches the ordinary ended member's session and
 /// a session nobody ran on as before, and the private member's session is
 /// answered as one that does not exist.
@@ -922,9 +922,9 @@ async fn an_ended_members_session_waits_for_the_first_read_of_who_members_are_pr
         );
     }
 
-    // The read succeeds. This runtime was taken from a bare handle and reads
-    // no session's stored labels, so it still cannot say whether a session
-    // no member holds was private to a person.
+    // The read succeeds. This runtime was taken from a bare handle and has no
+    // session service to read a stored session through, so it still cannot
+    // say whether a session no member holds was private to a person.
     let handle = runtime.handle();
     assert!(runtime.private_owners().seeded(&handle).await.landed());
     let operator = primed_operator(&runtime).await;
@@ -935,7 +935,7 @@ async fn an_ended_members_session_waits_for_the_first_read_of_who_members_are_pr
         assert_eq!(
             attach(&operator, &runtime, session).await,
             "absent",
-            "a runtime that reads no stored labels, once the record is read: {whose}"
+            "a runtime with no session service, once the record is read: {whose}"
         );
     }
 
@@ -1122,10 +1122,21 @@ async fn an_ended_private_members_session_is_not_attached_again_under_its_name()
     let restarted = persistent_gateway_runtime_in(left.state.path(), MOB, "", "").await?;
     let never_ran = meerkat_core::types::SessionId::new();
     // Consoles over the same mob whose record knows nobody.
-    let consoles = [(
-        "a runtime that keeps no stored labels",
-        MobRuntime::from_handle(restarted.handle()),
-    )];
+    let consoles = [
+        (
+            "a runtime with no session service to read a stored session through",
+            MobRuntime::from_handle(restarted.handle()),
+        ),
+        (
+            "a runtime that reads the stored session through its session service",
+            MobRuntime::from_handle(restarted.handle()).with_session_service_for_test(
+                restarted
+                    .session_service()
+                    .cloned()
+                    .ok_or("the restarted runtime keeps its session service")?,
+            ),
+        ),
+    ];
     for (console, runtime) in consoles {
         assert!(runtime.private_owners().seeded(&NoSpawns).await.landed());
         let app = console_json_router_with_state(console_that_identifies_nobody(&runtime));
@@ -1162,6 +1173,222 @@ async fn an_ended_private_members_session_is_not_attached_again_under_its_name()
             "{console}: nobody is seated"
         );
     }
+    Ok(())
+}
+
+/// What the console answers a caller who attaches `session`: the decision
+/// alone, with no member history to ask.
+async fn attach_decision(
+    view: &AccessView,
+    runtime: &MobRuntime,
+    session: &meerkat_core::types::SessionId,
+) -> &'static str {
+    match attached_session_decision(Some(view), runtime, None, session).await {
+        SessionAttachDecision::Allowed => "allowed",
+        SessionAttachDecision::Absent => "absent",
+        SessionAttachDecision::Denied(_) => "denied",
+    }
+}
+
+/// The answer of `meta/attach_existing_session` to a caller with no token
+/// who attaches `session` under the name `member`, with the session's id
+/// replaced by a placeholder.
+async fn attach_answer(
+    app: &Router,
+    member: &str,
+    session: &meerkat_core::types::SessionId,
+) -> String {
+    console_rpc_as(
+        app,
+        None,
+        "meta/attach_existing_session",
+        json!({
+            "role": "worker",
+            "agent_identity": member,
+            "session_id": session.to_string(),
+        }),
+    )
+    .await
+    .to_string()
+    .replace(&session.to_string(), "<session>")
+}
+
+/// A session service whose read of a stored session fails says nothing of
+/// whose the session was. The session of an ended member, private or not,
+/// is then answered to the one operator of a console that can identify
+/// nobody exactly as a console that reads its sessions answers a session
+/// nobody ever ran on, and nobody is seated. An administrator attaches it.
+#[tokio::test]
+async fn a_session_whose_stored_document_cannot_be_read_is_answered_as_one_that_does_not_exist()
+-> TestResult {
+    const MOB: &str = "kept-apart-attach-unreadable";
+    const MEMBER: &str = "attach-unreadable";
+    let left = state_after_a_console_with_sign_in(MOB).await?;
+    let restarted = persistent_gateway_runtime_in(left.state.path(), MOB, "", "").await?;
+    let handle = restarted.handle();
+    assert!(restarted.private_owners().seeded(&handle).await.landed());
+    let never_ran = meerkat_core::types::SessionId::new();
+
+    // The same mob behind a session service whose read of a stored session
+    // fails.
+    let service = crate::console_aggregator::tests::DelayedHistorySessionService::new(
+        restarted
+            .session_service()
+            .cloned()
+            .ok_or("the restarted runtime keeps its session service")?,
+        Duration::ZERO,
+    );
+    service.refuse_resume_loads();
+    let unreadable = MobRuntime::from_handle(restarted.handle())
+        .with_session_service_for_test(Arc::new(service));
+    assert!(unreadable.private_owners().seeded(&handle).await.landed());
+
+    let readable_app = console_json_router_with_state(console_that_identifies_nobody(&restarted));
+    let unknown = attach_answer(&readable_app, MEMBER, &never_ran).await;
+    assert!(
+        unknown.contains("\"error\":{"),
+        "a console that reads its sessions attaches no session nobody ran on: {unknown}"
+    );
+    let unreadable_app =
+        console_json_router_with_state(console_that_identifies_nobody(&unreadable));
+    for (session, whose) in [
+        (&left.beta_session, "an ordinary ended member's session"),
+        (&left.side_chat_session, "an ended private member's session"),
+        (&never_ran, "a session nobody ran on"),
+    ] {
+        assert_eq!(
+            attach_answer(&unreadable_app, MEMBER, session).await,
+            unknown,
+            "a session whose stored document cannot be read is answered as a session nobody ran \
+             on: {whose}"
+        );
+    }
+    assert!(
+        handle
+            .get_member(&AgentIdentity::from(MEMBER))
+            .await?
+            .is_none(),
+        "nobody is seated"
+    );
+
+    let operator = primed_operator(&unreadable).await;
+    let administrator = AccessController::new(AccessControlConfig {
+        enabled: false,
+        admins: vec![ROOT.to_string()],
+        ..AccessControlConfig::default()
+    })
+    .expect("access controller")
+    .view_for_caller(Some(ROOT), None);
+    assert_eq!(
+        attach_decision(&operator, &unreadable, &left.beta_session).await,
+        "absent",
+        "the operator of a console that identifies nobody"
+    );
+    assert_eq!(
+        attach_decision(&administrator, &unreadable, &left.beta_session).await,
+        "allowed",
+        "the administrator"
+    );
+    Ok(())
+}
+
+/// A runtime composed with its host's own session service, and no durable
+/// session store of the runtime's own, reads who an ended session was
+/// private to through that service: the one an attach loads the session
+/// through. Its console, as one that can identify nobody, answers the
+/// session of an ended private side chat as a session that does not exist
+/// and seats nobody, and attaches the session of an ordinary ended member
+/// again under that member's name.
+#[tokio::test]
+async fn a_runtime_with_no_durable_session_store_reads_an_ended_sessions_owner_through_its_session_service()
+-> TestResult {
+    const MOB: &str = "kept-apart-attach-host-service";
+    const MEMBER: &str = "attach-host-service";
+    let (_state, spec) = super::console_side_chat_tests::persistent_console_spec(MOB, "", "")?;
+    assert!(
+        spec.durable_session_store.is_none(),
+        "the composition hands the runtime no durable session store"
+    );
+    let runtime = Box::pin(MobRuntime::bootstrap(spec)).await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    seeded_member(&runtime, "worker", "beta", &[]).await?;
+    let app = console_json_router_with_state(enforced_console(
+        &runtime,
+        Some(everyone_drives_every_agent()),
+    ));
+    let forked = fork_on_console(
+        &app,
+        Some(&person_bearer(alice_claims())),
+        "alpha",
+        "alpha-side",
+    )
+    .await;
+    assert!(forked["error"].is_null(), "{forked:#}");
+    drop(app);
+    let side_chat_session = session_of(&runtime, "alpha-side").await?;
+    let beta_session = session_of(&runtime, "beta").await?;
+    leaves(&runtime, "alpha-side").await?;
+    leaves(&runtime, "beta").await?;
+    let never_ran = meerkat_core::types::SessionId::new();
+
+    let handle = runtime.handle();
+    assert!(runtime.private_owners().seeded(&handle).await.landed());
+    let operator = primed_operator(&runtime).await;
+    let app = console_json_router_with_state(console_that_identifies_nobody(&runtime));
+
+    // The ordinary ended member's session is attached again under its name,
+    // as it was before the console read who an ended session was private to.
+    for (session, whose) in [
+        (&beta_session, "the ordinary ended member's session"),
+        (&never_ran, "a session nobody ran on"),
+    ] {
+        assert_eq!(
+            attach_decision(&operator, &runtime, session).await,
+            "allowed",
+            "{whose}"
+        );
+    }
+    let attached = console_rpc_as(
+        &app,
+        None,
+        "meta/attach_existing_session",
+        json!({
+            "role": "worker",
+            "agent_identity": "beta",
+            "session_id": beta_session.to_string(),
+        }),
+    )
+    .await;
+    assert!(attached["error"].is_null(), "{attached:#}");
+    assert_eq!(
+        session_of(&runtime, "beta").await?,
+        beta_session,
+        "beta is seated again on the session it ran on"
+    );
+
+    // The ended private side chat's session is not.
+    assert_eq!(
+        attach_decision(&operator, &runtime, &side_chat_session).await,
+        "absent",
+        "the private member's session"
+    );
+    let private = attach_answer(&app, MEMBER, &side_chat_session).await;
+    assert!(
+        !private.contains("alpha-side"),
+        "the answer names no member the session belonged to: {private}"
+    );
+    assert_eq!(
+        private,
+        attach_answer(&app, MEMBER, &never_ran).await,
+        "the private member's session and a session nobody ran on get one answer"
+    );
+    assert!(
+        handle
+            .get_member(&AgentIdentity::from(MEMBER))
+            .await?
+            .is_none(),
+        "nobody is seated"
+    );
     Ok(())
 }
 

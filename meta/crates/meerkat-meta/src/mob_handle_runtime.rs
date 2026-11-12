@@ -12424,6 +12424,18 @@ impl MobRuntime {
         self.session_service.as_ref()
     }
 
+    /// This runtime with `service` as its session service: for a row that
+    /// takes a runtime from a bare handle of a mob whose sessions a session
+    /// service holds.
+    #[cfg(test)]
+    pub(crate) fn with_session_service_for_test(
+        mut self,
+        service: Arc<dyn MobSessionService>,
+    ) -> Self {
+        self.session_service = Some(service);
+        self
+    }
+
     /// The host config this runtime's member builder resolves models with,
     /// when the bootstrap spec recorded it
     /// ([`MobBootstrapSpec::with_member_model_config`]): the image checks'

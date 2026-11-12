@@ -11250,7 +11250,7 @@ fn runtime_registry_lock_error() -> ConsoleLogError {
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::large_futures, clippy::panic)]
-mod tests {
+pub(crate) mod tests {
     /// Golden values: an empty skill selection must keep the exact
     /// fingerprint recorded before skill selection existed, so replays of
     /// sends persisted by older gateways still match. A nonempty selection
@@ -11448,9 +11448,10 @@ mod tests {
     }
 
     #[derive(Clone)]
-    pub(super) struct DelayedHistorySessionService {
+    pub(crate) struct DelayedHistorySessionService {
         inner: Arc<dyn MobSessionService>,
         delay: Duration,
+        resume_loads_refused: Arc<std::sync::atomic::AtomicBool>,
         read_calls: Arc<AtomicUsize>,
         application_read_calls: Arc<AtomicUsize>,
         active_reads: Arc<AtomicUsize>,
@@ -11506,10 +11507,11 @@ mod tests {
     }
 
     impl DelayedHistorySessionService {
-        fn new(inner: Arc<dyn MobSessionService>, delay: Duration) -> Self {
+        pub(crate) fn new(inner: Arc<dyn MobSessionService>, delay: Duration) -> Self {
             Self {
                 inner,
                 delay,
+                resume_loads_refused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 read_calls: Arc::new(AtomicUsize::new(0)),
                 application_read_calls: Arc::new(AtomicUsize::new(0)),
                 active_reads: Arc::new(AtomicUsize::new(0)),
@@ -11531,6 +11533,13 @@ mod tests {
                 .lock()
                 .expect("refused event sessions lock")
                 .insert(session_id.to_string());
+        }
+
+        /// Fail every later read of a stored session for a resume
+        /// ([`MobSessionService::load_session_for_resume`]), as a service
+        /// whose store cannot be read fails it.
+        pub(crate) fn refuse_resume_loads(&self) {
+            self.resume_loads_refused.store(true, Ordering::SeqCst);
         }
 
         fn session_events_refused(&self, session_id: &SessionId) -> bool {
@@ -12010,6 +12019,13 @@ mod tests {
             &self,
             session_id: &meerkat_core::types::SessionId,
         ) -> Result<meerkat_mob::ResumeSessionLoad, SessionError> {
+            if self.resume_loads_refused.load(Ordering::SeqCst) {
+                return Err(SessionError::Agent(
+                    meerkat_core::error::AgentError::InternalError(format!(
+                        "session {session_id}: the stored session could not be read"
+                    )),
+                ));
+            }
             self.inner.load_session_for_resume(session_id).await
         }
 

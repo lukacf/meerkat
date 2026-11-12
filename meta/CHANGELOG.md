@@ -384,8 +384,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `CoreIdentityEntry::is_archived` and `awaits_host_preparation`. An
   agent's spec digest and revision, who asked for it and its open
   operations are not on its status: `meta/identity/get` and
-  `meta/identity/list` answer them. The Console's own status answer is
-  unchanged.
+  `meta/identity/list` answer them. The Console's own status answer
+  carries the two members the same way (see the Console's
+  `meta/status_identity` entry below).
 - `meta/identity/get` and `meta/identity/list` name the operations open
   for an agent in `open_operations`: the create of an agent that waits for
   its host's preparation, until the host settles it, and each change of
@@ -424,20 +425,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     that archive is the reversible choice. The confirmation of an archive,
     an unarchive and a removal is a dialog: it takes focus on Cancel, and
     Escape or a click outside cancels it. The confirmation of an archive
-    and of a removal says that the agent's last conversation is harvested,
-    as for any agent that leaves the team.
+    and of a removal says that the agent's last conversation is harvested
+    and distilled, as for any agent that leaves the team, and the result
+    of an archive says it too, beside what the agent keeps.
   - The result of an archive, an unarchive and a removal says what became
     of the schedules that target the agent, where the answer states it
     (`schedules`): how many were paused, run again or were ended, and which
     by name; a schedule without a name is counted, and ids are among the
-    technical details. An answer that is `incomplete` says so and offers
+    technical details. An answer that counts schedules it does not list
+    reads by its count: the listed ones by name, the others as more. An
+    answer that is `incomplete` says so and offers
     Try again, which sends the same request. Only a first answer states the
     schedules, so the Console takes no later answer of the same request in
     place of the first: what the first answer said stays.
-  - An agent whose status says `roster_listing_superseded` reads a note at
-    its status in the details pane: the host's configuration lists its name
-    too, that entry is not applied, and a change made in the Console
-    changes the agent's record.
+  - An agent whose record says `roster_listing_superseded`
+    (`meta/identity/get`) reads a note at its status in the details pane:
+    the host's configuration lists its name too, that entry is not applied,
+    and a change made in the Console changes the agent's record. The note
+    is read from the details answer too, where that says it.
   - Archived agents are listed under the roster with Unarchive and Remove.
     The same list ("Archived and waiting agents") shows an agent whose host
     still prepares it, which has no member and so no row of the roster: by
@@ -499,8 +504,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   that answers `pending_preparation` means and who settles it, what the
   operation read says of an agent that waited, the refusal of a move into a
   profile the host prepares, and `open_operations` on a get and a list with
-  the refusal of a read that cannot see the team's held changes. The
+  the refusal of a read that cannot see the team's held changes. It names
+  `roster_listing_superseded` on a get and a list, `paused_for_target` on a
+  console schedule, and the refusal of a schedule for an archived agent
+  (`-32603`, `identity_archived`). The
   console guide has a section on long-term agents.
+- The Console's `meta/status_identity` (`POST /console/rpc`) says what the
+  stdio gateway's answer says of an agent no member holds and of one the
+  host's roster also lists: `archived`, `preparation_pending` and
+  `roster_listing_superseded`, each written only when `true`, so the answer
+  of every other agent is unchanged. Before, the Console's answer carried
+  none of the three.
 
 ### Changed
 
@@ -653,6 +667,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   identity holds through its row answers
   `HeldBootstrapRefusal::ExistingContinuity`, as the add of a configured
   identity that has continuity does. It answered `IdentityStoreOwned`.
+
+- Console: the line of a broken agent, in the roster and in its details,
+  reads "Broken: it may need a respawn or a reset". It said that the agent
+  needs one of the two. An agent created at run time that was refused its
+  seat for a label its host requires needs neither: it runs again once an
+  edit puts the label in its record.
 
 ### Fixed
 

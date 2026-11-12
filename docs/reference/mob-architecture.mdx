@@ -704,12 +704,21 @@ composition without the built-in identity and member store commits no change
   system prompt and the other first-build inputs; a later build keeps what
   its session was first built with. No build relies on an earlier answer,
   so the host is the one source at each and a restart changes
-  nothing. The seat's labels, runtime mode, binding, placement and first
+  nothing. The seat's runtime mode, binding, placement and first
   message stay the row's, an answer that changed the seat's identity, role,
   launch mode or custody is refused, and a refusal ends the build as a
   refused build preparation does: a spawn fails with the identity owed its
-  seat, a wake leaves the member Dormant and asks again. A seat Core holds
-  Dormant asks nothing until it is built. A placed or externally
+  seat, a wake leaves the member Dormant and asks again. The seat's labels
+  are its row's, and the labels of the host's answer must be exactly the
+  seat's: what decides on a member's labels reads its seat, so a member is
+  never seated without a label its host requires, nor with one its row
+  does not carry. An answer that adds a label key, drops one or gives one
+  another value is refused for good
+  (`MemberBuildPreparationRefusal::store_owned_seat_labels`; the reason
+  names the keys, never a value), and nothing is built: the label belongs
+  in the identity's row, at its create or by an update, and a seated member
+  takes its row's labels when it is seated again or respawned. A seat Core
+  holds Dormant asks nothing until it is built. A placed or externally
   bound identity is hosted on its first use,
   one whose creation its host holds (`CreatedIdentityRequest::held_creation`)
   awaits it, and one whose host prepares it first waits unseated; their

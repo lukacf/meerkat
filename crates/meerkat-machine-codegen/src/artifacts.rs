@@ -6610,11 +6610,11 @@ mod tests {
         widest_own == IF instruction_snapshots = {} THEN 0 ELSE CHOOSE snapshot_size \in instruction_snapshots : \A other_size \in instruction_snapshots : snapshot_size >= other_size
     IN ActiveBytesOf(DOMAIN slot_effect \ member_slots) + widest_own
 "#;
-        let write_slots = r#"mob_machine_instruction_write_snapshot_slots(target_kind, target_member, slot, kind, member) ==
+        let write_slots = r"mob_machine_instruction_write_snapshot_slots(target_kind, target_member, slot, kind, member) ==
     LET kind_after == MapSet(target_kind, slot, kind)
         member_after == IF member = None THEN [other_slot \in DOMAIN target_member \ {slot} |-> target_member[other_slot]] ELSE MapSet(target_member, slot, member.value)
     IN mob_machine_instruction_widest_snapshot_slots(kind_after, member_after)
-"#;
+";
         let write_bytes = r#"mob_machine_instruction_write_snapshot_active_bytes(slot_effect, slot_bytes, target_kind, target_member, slot, body_bytes, kind, member) ==
     LET effect_after == MapSet(slot_effect, slot, "Active")
         bytes_after == MapSet(slot_bytes, slot, body_bytes)

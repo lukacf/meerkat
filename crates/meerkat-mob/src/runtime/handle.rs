@@ -11465,9 +11465,9 @@ impl MobHandle {
     /// member's place. The mob's wire and unwire commands look both members
     /// up, local first, before any refusal about either member; this order
     /// follows theirs. `None` when neither end is hidden (the mob answers
-    /// the call itself) and when both names are the same (a call the mob
-    /// refuses without looking a member up). `peer` is `None` for a peer
-    /// that is no member of the mob.
+    /// the call itself). One name given as both ends is asked about like
+    /// any other, as the mob looks it up like any other. `peer` is `None`
+    /// for a peer that is no member of the mob.
     #[doc(hidden)]
     pub async fn wire_end_answered_absent(
         &self,
@@ -11475,9 +11475,6 @@ impl MobHandle {
         local: &AgentIdentity,
         peer: Option<&AgentIdentity>,
     ) -> Option<AgentIdentity> {
-        if peer == Some(local) {
-            return None;
-        }
         let ends: Vec<AgentIdentity> = std::iter::once(local).chain(peer).cloned().collect();
         let hidden = self.members_hidden_from(caller, &ends).await;
         if hidden.is_empty() {

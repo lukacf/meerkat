@@ -48473,9 +48473,11 @@ impl MobActor {
     /// (`MobHandle::wire_end_answered_absent`): the local member first,
     /// then the peer. Keep the two in step.
     ///
-    /// Left to the command itself: a call that names one member twice, a
-    /// wire in a mob that is not running (its lifecycle refusal comes
-    /// first), and an unwire of an external peer by its name.
+    /// Left to the command itself: a wire in a mob that is not running (its
+    /// lifecycle refusal comes first), and an unwire of an external peer by
+    /// its name. One name given as both ends is looked up like any other:
+    /// a name the roster does not hold answers member not found, and a
+    /// member it holds goes on to the command's own refusal of such a call.
     async fn refuse_edge_naming_unheld_member(
         &self,
         local: &AgentIdentity,
@@ -48487,7 +48489,7 @@ impl MobActor {
             super::handle::PeerTarget::Local(peer) => Some(peer),
             _ => None,
         };
-        if peer == Some(local) || (!unwire && self.state() != MobState::Running) {
+        if !unwire && self.state() != MobState::Running {
             return Ok(());
         }
         let roster = self.roster.read().await;

@@ -400,7 +400,7 @@ pub enum IdentityRefusalKind {
     StorageUnsupported,
     /// Core refused the held construction.
     ConstructionRefused { kind: String },
-    // Kinds added in 0.9.14. A new kind is declared after every earlier
+    // Kinds added after 0.9.13. A new kind is declared after every earlier
     // one, so that no earlier kind's implicit discriminant moves; the order
     // of the wire tokens is the token list's below, not this one.
     /// The spec sets a field only a grant with manage scope admits.

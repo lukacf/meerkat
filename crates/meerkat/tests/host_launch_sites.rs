@@ -1922,7 +1922,7 @@ fn every_mob_session_service_impl_answers_the_recorded_sections_read() {
 /// modules and other mentions of the trait.
 #[test]
 fn the_session_service_scan_reads_every_impl_form() {
-    let source = r##"
+    let source = r#"
 impl MobSessionService for Forwarding {
     async fn recorded_build_instructions(&self, id: &SessionId) -> Sections {
         self.inner.recorded_build_instructions(id).await
@@ -1962,7 +1962,7 @@ fn mentions(service: impl MobSessionService, other: &dyn MobSessionService) {
 mod tests {
     impl MobSessionService for TestDouble {}
 }
-"##;
+"#;
     let found: Vec<(String, bool)> = mob_session_service_impls(&shipped_code(source))
         .expect("every header is readable")
         .into_iter()

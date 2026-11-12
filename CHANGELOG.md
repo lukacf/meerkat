@@ -37,26 +37,24 @@ them.
 
 ### Added
 
-- `meerkat-mob`: `MobHandle::member_build_instructions(identity)` reads the
-  instruction sections a member's session was built with
-  (`additional_instructions`), from the session's committed build state. It
-  sends no command to the mob actor, never wakes or materializes the member,
-  and decodes no transcript row. `Ok(Some(sections))` is what the session
-  records, and `Ok(Some(vec![]))` is a session built with none. `Ok(None)`
-  means the sections are not known: the identity is not a member, no
-  committed session exists, or the session's record does not say (a session
-  built before 0.9.14, or one whose record an earlier release erased, see
-  Fixed). A seat no build has created yet answers the sections it carries to
-  its first build; that build may append the host's spawn customizer's
-  sections, so the session then records the seat's sections followed by
-  those. The read asks this process's session service: a member whose
-  session another host keeps, and a member of a mob whose session service
-  keeps no committed sessions, answer `None` once a build has created their
-  session. It takes no caller principal: it is a Rust host API, and a
-  surface that serves it admits its caller first. The read goes through the
-  new provided method
-  `MobSessionService::recorded_build_instructions(session_id)`, which
-  `PersistentSessionService` answers from the committed metadata alone
+- `meerkat-mob`: `MobSessionService::recorded_build_instructions(session_id)`
+  (a provided trait method) reads the instruction sections a session was
+  built with (`additional_instructions`), from the session's committed build
+  state: the read a host uses to compare what a member's session holds with
+  what it would build the member with now (a member's session id is
+  `MobHandle::resolve_bridge_session_id`). It never materializes the
+  session, wakes no member and sends the mob actor no command.
+  `Ok(Some(sections))` is what the session records, and `Ok(Some(vec![]))`
+  is a session built with none. `Ok(None)` means the sections are not known:
+  the service holds no committed session under that id (a seat no build has
+  created yet has none, and a session another host keeps is not committed
+  here), or the session's record does not say (a session built before
+  0.9.14, or one whose record an earlier release erased, see Fixed). A first
+  build may append the host's spawn customizer's sections, so a session
+  records its spec's sections followed by those. The read takes no caller
+  principal: a surface that serves it admits its caller first.
+  `PersistentSessionService` answers from the committed metadata alone and
+  decodes no transcript row
   (`PersistentSessionService::load_authoritative_session_build_state`;
   `meerkat_core::try_session_build_state_from_map` and
   `SessionMetadataDocument::try_build_state` decode it): the committed head

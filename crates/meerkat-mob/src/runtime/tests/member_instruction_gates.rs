@@ -1720,8 +1720,8 @@ async fn a_decorator_that_does_not_forward_the_build_sections_read_still_answers
         .await
         .expect("the member's session");
     let through_the_decorator = fixture
-        .handle
-        .member_build_instructions(&fixture.identity)
+        .mob_service
+        .recorded_build_instructions(&session_id)
         .await
         .expect("read through the non-forwarding decorator");
     assert_eq!(

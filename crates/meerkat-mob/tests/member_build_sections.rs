@@ -5,8 +5,9 @@
 //! member's first build records them. Every later build of the member (a
 //! restart's restore, a wake, a fork child's seating) resumes its session
 //! and names no sections, because a resume authors nothing: it must keep the
-//! recorded sections, not erase them. `MobHandle::member_build_instructions`
-//! reads them from committed state without waking the member.
+//! recorded sections, not erase them.
+//! `MobSessionService::recorded_build_instructions` reads them from
+//! committed state without waking the member.
 //!
 //! The rows run a persistent mob on the production realm shape (SQLite
 //! session rows and HeadCanonical runtime authority in one database) with
@@ -485,15 +486,22 @@ async fn live_actor_registered(service: &Service, session: &SessionId) -> bool {
         .expect("read the live actor registry")
 }
 
-/// `MobHandle::member_build_instructions` answers what the member session's
-/// committed build state records, for a live member and for a member a
-/// restart left unmaterialized. The read wakes nothing: the member stays
-/// unmaterialized, no session actor exists, no provider request is made, and
-/// the transcript is not loaded (the content digest counter, which a load of
-/// the session's rows moves by at least their size, moves by a small
-/// fraction of it: the committed head's metadata).
+/// The session service's read of a member session's recorded sections.
+async fn read_recorded(service: &Service, session: &SessionId) -> Option<Vec<String>> {
+    meerkat_mob::MobSessionService::recorded_build_instructions(service.as_ref(), session)
+        .await
+        .expect("read the session's recorded sections")
+}
+
+/// `MobSessionService::recorded_build_instructions` answers what a member
+/// session's committed build state records, for a live member and for a
+/// member a restart left unmaterialized. The read wakes nothing: the member
+/// stays unmaterialized, no session actor exists, no provider request is
+/// made, and the transcript is not loaded (the content digest counter, which
+/// a load of the session's rows moves by at least their size, moves by a
+/// small fraction of it: the committed head's metadata).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_read_answers_the_recorded_sections_without_waking_the_member() {
+async fn the_recorded_sections_read_wakes_no_member_and_loads_no_transcript() {
     let _window = DIGEST_WINDOW.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let paths = Paths::new(temp.path());
@@ -512,22 +520,9 @@ async fn the_read_answers_the_recorded_sections_without_waking_the_member() {
         )
         .await;
     assert_eq!(
-        first
-            .handle
-            .member_build_instructions(&member)
-            .await
-            .expect("read a live member's sections"),
+        read_recorded(&first.service, &session).await,
         Some(sections()),
-        "a live member answers what its session records"
-    );
-    assert_eq!(
-        first
-            .handle
-            .member_build_instructions(&AgentIdentity::from("nobody"))
-            .await
-            .expect("read an identity the mob does not hold"),
-        None,
-        "an identity that is not a member has no sections to answer"
+        "a live member's session answers what it records"
     );
     first.end(&[&session]).await;
 
@@ -540,13 +535,9 @@ async fn the_read_answers_the_recorded_sections_without_waking_the_member() {
     let requests_before = client.requests();
     let digest_before = meerkat_core::global_session_content_digest_bytes();
     assert_eq!(
-        second
-            .handle
-            .member_build_instructions(&member)
-            .await
-            .expect("read an unmaterialized member's sections"),
+        read_recorded(&second.service, &session).await,
         Some(sections()),
-        "an unmaterialized member answers from its session's committed state"
+        "an unmaterialized member's session answers from its committed state"
     );
     let digest_after_read = meerkat_core::global_session_content_digest_bytes();
     let read_digest = digest_after_read - digest_before;
@@ -587,24 +578,21 @@ async fn the_read_answers_the_recorded_sections_without_waking_the_member() {
 
     second.turn("desk-north", "turn after the restart").await;
     assert_eq!(
-        second
-            .handle
-            .member_build_instructions(&member)
-            .await
-            .expect("read after the member's resumed build"),
+        read_recorded(&second.service, &session).await,
         Some(sections()),
         "the member's resumed build keeps what the read answers"
     );
     second.end(&[&session]).await;
 }
 
-/// A seat no build has created yet answers the sections it carries to its
-/// first build, and nothing is built for the read. Once the member's first
-/// wake has built the session, the session's own record answers: the same
-/// sections here, where no spawn customizer appends any. A seat that names
-/// no sections answers an empty list before and after.
+/// A seat no build has created yet has no session, so the read answers none
+/// for the session it names, and nothing is built for the read: the seat's
+/// sections are still its spec's. Once the member's first wake has built the
+/// session, the read answers the sections the seat carried to that build
+/// (here no spawn customizer appends any). A seat that names no sections
+/// then answers an empty list.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_read_answers_an_unborn_seats_sections_then_the_sessions_record() {
+async fn an_unborn_seats_session_answers_none_then_the_sections_its_seat_carried() {
     let _window = DIGEST_WINDOW.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let paths = Paths::new(temp.path());
@@ -632,26 +620,15 @@ async fn the_read_answers_an_unborn_seats_sections_then_the_sessions_record() {
         .collect::<Vec<_>>();
     let expected = [(&carrying, sections()), (&plain, Vec::new())];
 
-    for ((member, sections), session) in expected.iter().zip(&seated) {
+    for ((member, _), session) in expected.iter().zip(&seated) {
         assert_eq!(
-            life.handle
-                .member_build_instructions(member)
-                .await
-                .expect("read an unborn seat's sections"),
-            Some(sections.clone()),
-            "an unborn seat answers the sections it carries to its first build"
+            read_recorded(&life.service, session).await,
+            None,
+            "a session no build has created has no record"
         );
         assert!(
             life.handle.session_unborn(session) && life.handle.member_unmaterialized(member),
             "the read builds nothing: the seat's session stays unborn"
-        );
-        assert!(
-            life.service
-                .load_authoritative_session(session)
-                .await
-                .expect("read the session store")
-                .is_none(),
-            "no session exists for the seat yet"
         );
     }
     assert_eq!(client.requests(), 0, "no provider request was made");
@@ -666,17 +643,9 @@ async fn the_read_answers_an_unborn_seats_sections_then_the_sessions_record() {
             "the first wake created the session"
         );
         assert_eq!(
-            life.recorded_sections(session).await,
+            read_recorded(&life.service, session).await,
             Some(sections.clone()),
             "the first build records the sections the seat carried"
-        );
-        assert_eq!(
-            life.handle
-                .member_build_instructions(member)
-                .await
-                .expect("read the born session's sections"),
-            Some(sections.clone()),
-            "after its first build the session's own record answers"
         );
     }
     life.end(&[&seated[0], &seated[1]]).await;

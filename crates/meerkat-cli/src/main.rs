@@ -29921,13 +29921,50 @@ default_model = "gemma"
         );
     }
 
+    /// A symbolic link to nothing at the `--comms-binding-out` path is
+    /// replaced like a link to a regular file: a link at the path is never
+    /// followed, so nothing is created where it pointed, and the path ends
+    /// as a regular 0600 file that holds the binding. RED before: such a
+    /// link was refused, although removing it loses nothing and the write
+    /// before the owner-only rule created the file it named.
+    #[cfg(all(unix, feature = "comms"))]
+    #[tokio::test]
+    async fn comms_binding_out_replaces_a_link_to_nothing() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = TestCommsRuntime::new("binding-out-dangling");
+
+        let absent = temp.path().join("absent.json");
+        let link = temp.path().join("dangling.binding.json");
+        std::os::unix::fs::symlink(&absent, &link).expect("a link to nothing at the path");
+
+        write_comms_binding_out(&link, &runtime)
+            .await
+            .expect("the link is replaced by the binding file");
+
+        let at_path = std::fs::symlink_metadata(&link).expect("the binding path");
+        assert!(
+            at_path.file_type().is_file(),
+            "the link is replaced by a regular file"
+        );
+        assert_eq!(at_path.permissions().mode() & 0o7777, 0o600);
+        let binding: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&link).expect("read the binding"))
+                .expect("binding JSON");
+        assert_eq!(binding["kind"], "external");
+        assert!(
+            std::fs::symlink_metadata(&absent).is_err(),
+            "nothing is created where the link pointed"
+        );
+    }
+
     /// `--comms-binding-out` replaces the file at its path, so it refuses a
     /// path that holds anything else, before it removes anything: a named
-    /// pipe a supervisor reads from stays a named pipe, a directory stays a
-    /// directory, and a symbolic link to a named pipe or to nothing stays
-    /// that link. RED before: the pipe and both links were unlinked and a
-    /// regular file took their place (a reader of the pipe then waits for
-    /// ever).
+    /// pipe a supervisor reads from stays a named pipe, a socket stays a
+    /// socket, a directory stays a directory, and a symbolic link to a named
+    /// pipe or to a device stays that link. RED before: the pipe and the
+    /// links were unlinked and a regular file took their place (a reader of
+    /// the pipe then waits for ever).
     #[cfg(all(unix, feature = "comms"))]
     #[tokio::test]
     async fn comms_binding_out_refuses_a_path_that_is_not_a_file_and_leaves_it() {
@@ -29983,23 +30020,40 @@ default_model = "gemma"
         assert!(entry(&link_to_pipe).is_symlink(), "the link is still there");
         assert!(entry(&pipe).is_fifo(), "and so is the named pipe");
 
-        let dangling = temp.path().join("dangling.link");
-        std::os::unix::fs::symlink(temp.path().join("absent"), &dangling)
-            .expect("a link to nothing");
-        let error = write_comms_binding_out(&dangling, &runtime)
+        let socket = temp.path().join("binding.sock");
+        let _listener =
+            std::os::unix::net::UnixListener::bind(&socket).expect("a socket at the path");
+        let error = write_comms_binding_out(&socket, &runtime)
             .await
-            .expect_err("a link whose target does not exist is refused");
+            .expect_err("a socket at the path is refused");
         assert_eq!(
             found(error),
             NotAFile {
-                entry: PathEntry::Nothing,
+                entry: PathEntry::Socket,
+                through_link: false
+            }
+        );
+        assert!(entry(&socket).is_socket(), "the socket is still there");
+
+        let link_to_device = temp.path().join("device.link");
+        std::os::unix::fs::symlink("/dev/null", &link_to_device).expect("a link to a device");
+        let error = write_comms_binding_out(&link_to_device, &runtime)
+            .await
+            .expect_err("a link to a device is refused");
+        assert_eq!(
+            found(error),
+            NotAFile {
+                entry: PathEntry::Device,
                 through_link: true
             }
         );
-        assert!(entry(&dangling).is_symlink(), "the link is still there");
         assert!(
-            !temp.path().join("absent").exists(),
-            "nothing is created through the link"
+            entry(&link_to_device).is_symlink(),
+            "the link is still there"
+        );
+        assert!(
+            entry(Path::new("/dev/null")).is_char_device(),
+            "and so is the device"
         );
 
         let directory = temp.path().join("binding.dir");
@@ -30074,6 +30128,94 @@ default_model = "gemma"
                 Some(PrivateFileError::NotReplaceable { .. })
             ),
             "the typed refusal of the path: {error:#}"
+        );
+        assert_eq!(
+            std::fs::symlink_metadata(stdout)
+                .expect("/dev/stdout is still there")
+                .file_type(),
+            before,
+            "/dev/stdout is what it was"
+        );
+        eprintln!("{CHILD_DONE}");
+    }
+
+    /// `--comms-binding-out /dev/stdout` is refused when standard output is
+    /// redirected to a file, too. `/dev/stdout` is then a symbolic link to a
+    /// regular file, which the rule for a link at the path would replace: a
+    /// root process would remove the link from `/dev` and leave a regular
+    /// file with the bootstrap token there. The scenario runs in a child
+    /// process of this test binary whose standard output is a file, as the
+    /// test user: the refusal is the typed one, made before any unlink,
+    /// `/dev/stdout` is what it was, and the file standard output goes to
+    /// is the same file and holds no binding. RED before: the write tried
+    /// to unlink `/dev/stdout`, and what stopped the test user was the
+    /// operating system's permission error.
+    #[cfg(all(target_os = "linux", feature = "comms"))]
+    #[tokio::test]
+    async fn comms_binding_out_refuses_dev_stdout_redirected_to_a_file() {
+        use std::os::unix::fs::MetadataExt as _;
+        const CHILD: &str = "RKAT_TEST_BINDING_OUT_REDIRECTED_STDOUT_CHILD";
+        const CHILD_DONE: &str = "binding-out to a redirected /dev/stdout was refused by the rule";
+        if std::env::var_os(CHILD).is_none() {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let redirect = temp.path().join("stdout.txt");
+            let file = std::fs::File::create(&redirect).expect("the file standard output goes to");
+            let inode = file.metadata().expect("its metadata").ino();
+            #[allow(clippy::disallowed_methods)] // the test re-runs its own binary
+            let output =
+                std::process::Command::new(std::env::current_exe().expect("the test binary"))
+                    .args([
+                        "--exact",
+                        "tests::comms_binding_out_refuses_dev_stdout_redirected_to_a_file",
+                        "--nocapture",
+                        "--test-threads=1",
+                    ])
+                    .env(CHILD, "1")
+                    .stdin(std::process::Stdio::null())
+                    .stdout(file)
+                    .output()
+                    .expect("run the scenario in a child process");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                output.status.success() && stderr.contains(CHILD_DONE),
+                "the scenario failed in its child process ({}):\n{stderr}",
+                output.status,
+            );
+            assert_eq!(
+                std::fs::metadata(&redirect)
+                    .expect("the file standard output went to")
+                    .ino(),
+                inode,
+                "the file standard output went to is the same file"
+            );
+            let written = std::fs::read_to_string(&redirect).expect("read it");
+            assert!(
+                !written.contains("\"kind\"") && !written.contains("bootstrap_token"),
+                "no binding was written into it: {written}"
+            );
+            return;
+        }
+
+        let stdout = Path::new("/dev/stdout");
+        assert!(
+            std::fs::metadata(stdout)
+                .expect("what /dev/stdout leads to")
+                .is_file(),
+            "standard output is a regular file in this child"
+        );
+        let before = std::fs::symlink_metadata(stdout)
+            .expect("/dev/stdout")
+            .file_type();
+        let runtime = TestCommsRuntime::new("binding-out-redirected-stdout");
+        let error = write_comms_binding_out(stdout, &runtime)
+            .await
+            .expect_err("/dev/stdout is refused");
+        assert!(
+            matches!(
+                error.downcast_ref::<PrivateFileError>(),
+                Some(PrivateFileError::NotReplaceable { .. })
+            ),
+            "the typed refusal of the path, made before any unlink: {error:#}"
         );
         assert_eq!(
             std::fs::symlink_metadata(stdout)

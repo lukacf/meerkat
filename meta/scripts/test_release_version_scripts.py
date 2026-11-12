@@ -104,7 +104,7 @@ class ReleaseVersionScriptsTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def run_command(self, *args, check=True, extra_env=None):
+    def run_command(self, *args, check=True, extra_env=None, cwd=None):
         env = os.environ.copy()
         env["CARGO_TARGET_DIR"] = str(self.root / "target")
         # A None value removes the variable.
@@ -115,7 +115,7 @@ class ReleaseVersionScriptsTests(unittest.TestCase):
                 env[key] = value
         result = subprocess.run(
             args,
-            cwd=self.root,
+            cwd=cwd or self.root,
             env=env,
             capture_output=True,
             text=True,
@@ -174,6 +174,77 @@ class ReleaseVersionScriptsTests(unittest.TestCase):
         self.assertIn("installer/pyproject.toml", staged)
 
         self.run_command("scripts/verify-version-parity.sh")
+
+    def test_release_hook_stages_the_pins_it_moves_in_the_other_products(self):
+        # In the repository that holds Meta beside the other products, the bump
+        # moves their pins on Meta's packages: the top level's pin check runs
+        # with --write and prints each manifest it changed. Those files are
+        # outside Meta's root, and the hook stages them with its own: nothing
+        # the hook changed stays modified and out of the index.
+        holder = tempfile.TemporaryDirectory()
+        self.addCleanup(holder.cleanup)
+        top = Path(holder.name)
+        shutil.copytree(
+            self.root, top / "meta", ignore=shutil.ignore_patterns(".git", "target")
+        )
+        (top / "scripts").mkdir()
+        shutil.copy2(
+            SCRIPTS.parent.parent / "scripts/check_inrepo_version_pins.py",
+            top / "scripts/check_inrepo_version_pins.py",
+        )
+        (top / "Cargo.toml").write_text(
+            '[workspace]\nresolver = "3"\nmembers = ["meta/crates/meerkat-meta"]\n'
+        )
+        manifest = top / "connect/sdk/typescript/package.json"
+        project = top / "connect/sdk/python/pyproject.toml"
+        manifest.parent.mkdir(parents=True)
+        project.parent.mkdir(parents=True)
+        manifest.write_text(
+            json.dumps(
+                {
+                    "name": "@rkat/toolkit",
+                    "version": "0.8.0",
+                    "peerDependencies": {"@rkat/meta-sdk": ">=0.8.0 <0.9.0"},
+                },
+                indent=2,
+            )
+            + "\n"
+        )
+        project.write_text(
+            '[project]\nname = "meerkat-toolkit"\nversion = "0.8.0"\n\n'
+            '[project.optional-dependencies]\nnative-host = ["meerkat-meta==0.8.0"]\n'
+        )
+        self.run_command("git", "init", "-q", cwd=top)
+        self.run_command("git", "config", "user.email", "test@example.com", cwd=top)
+        self.run_command("git", "config", "user.name", "Release Script Test", cwd=top)
+        self.run_command("git", "add", ".", cwd=top)
+        self.run_command("git", "commit", "-qm", "fixture", cwd=top)
+
+        hook = self.run_command(
+            "meta/scripts/release-hook.sh",
+            "0.8.1",
+            cwd=top,
+            extra_env={"DRY_RUN": "false"},
+        )
+
+        self.assertIn('"@rkat/meta-sdk": ">=0.8.1 <0.9.0"', manifest.read_text())
+        self.assertIn('native-host = ["meerkat-meta==0.8.1"]', project.read_text())
+        moved = [
+            "connect/sdk/python/pyproject.toml",
+            "connect/sdk/typescript/package.json",
+        ]
+        for path in moved:
+            self.assertIn(f"moved in-repo pins in {path}", hook.stdout)
+        staged = self.run_command(
+            "git", "diff", "--cached", "--name-only", cwd=top
+        ).stdout.splitlines()
+        unstaged = self.run_command(
+            "git", "diff", "--name-only", cwd=top
+        ).stdout.splitlines()
+        for path in moved:
+            self.assertIn(path, staged, f"{path} was moved and not staged")
+        self.assertIn("meta/sdk/python/pyproject.toml", staged)
+        self.assertEqual(unstaged, [], "the hook left changes out of the index")
 
     def test_release_hook_writes_nothing_in_a_dry_run(self):
         # cargo-release runs the pre-release hook in its dry run too, with

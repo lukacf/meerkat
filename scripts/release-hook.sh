@@ -2,7 +2,8 @@
 # Pre-release hook for cargo-release.
 #
 # Called with the new version as $1. Performs:
-#   1. Bump SDK, contract, and documentation versions
+#   1. Bump SDK, contract, and documentation versions, and move the other
+#      products' pins on Core's packages to the new version
 #   2. Stamp the pending CHANGELOG section for the release
 #   3. Re-emit schemas, run SDK codegen, and refresh build metadata
 #   4. Verify generated surfaces and stage the release commit
@@ -59,6 +60,16 @@ echo "==> Release hook: syncing SDK versions to $VERSION"
 # missing notes aborts before the expensive schema/codegen work.
 echo "==> Stamping CHANGELOG.md for $VERSION"
 "$PYTHON" "$ROOT/scripts/stamp-changelog-release.py" "$ROOT/CHANGELOG.md" "$VERSION"
+
+# 1d. Move the in-repo pins on the bumped packages. Every product consumes the
+# others at the version this tree builds, so each plain-text pin of a
+# dependency manifest on a Core package (Connect's TypeScript SDK accepts
+# @rkat/sdk from this release) moves in this same commit. The check fails here
+# on a pin it cannot move; verify-version-parity.sh below runs it again.
+echo "==> Moving in-repo pins on Core's packages to $VERSION"
+PIN_REPORT="$("$PYTHON" "$ROOT/scripts/check_inrepo_version_pins.py" --root "$ROOT" --write)"
+printf '%s\n' "$PIN_REPORT"
+mapfile -t MOVED_PIN_FILES < <(printf '%s\n' "$PIN_REPORT" | sed -n 's/^moved in-repo pins in //p')
 
 # 2. Bump ContractVersion::CURRENT in version.rs to match package version
 VERSION_RS="$ROOT/crates/meerkat-contracts/src/version.rs"
@@ -142,6 +153,10 @@ git add \
     "$ROOT/sdks/typescript/src/generated/" \
     "$ROOT/artifacts/schemas/"
 git ls-files -z '*BUILD.bazel' | xargs -0 git add --
+# The manifests whose in-repo pins step 1d moved (another product's files).
+if [[ ${#MOVED_PIN_FILES[@]} -gt 0 ]]; then
+    git add -- "${MOVED_PIN_FILES[@]/#/$ROOT/}"
+fi
 
 # 5. Mark as done for this version
 echo "$VERSION" > "$SENTINEL"

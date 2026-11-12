@@ -112,6 +112,7 @@ fn project_realtime_replay_messages(messages: &[Message]) -> Result<Vec<Message>
         false,
         false,
         false,
+        None,
     )
 }
 

@@ -22,11 +22,11 @@
     "sha256": "4a9ea2a27cab1b1aebef8c2896b72cc9b9aab46c5e2a4570f5008cc03cc8a0e4"
   },
   "library": {
-    "state": "pending",
+    "state": "selected",
     "pins": {
       "path": "release/library-pins-macos-arm64.json",
-      "sha256": null
+      "sha256": "be0315277d28249e12d921474794b8893563a2092474792bc4656425a75c3cb0"
     },
-    "reason": "PENDING: the macOS integration library is built in the run from the committed pin file. Until that pin file and the library packagers are in this tree, its digest is unbound and every macos step of connect-candidate.py refuses. To complete: set pins.sha256 to the sha256 of the committed pin file and state to selected."
+    "reason": "The macOS integration library is built in the run from the committed pin file named here by its sha256. The fetch step adds the crate rows from Cargo.lock and writes the resolved pin file the library steps read. A change of the pin file needs this digest changed with it."
   }
 }

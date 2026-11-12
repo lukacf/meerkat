@@ -119,22 +119,6 @@ const A_PERSON_DECIDES_A_DESCRIPTIVE_CHANGE = {
   peers: { default: "allow" },
 };
 
-const aheadRows = new Set(
-  (process.env.META_IDENTITY_AHEAD_ROWS ?? "").split(",").filter((name) => name !== ""),
-);
-
-/**
- * The skip of a row for a member the host methods of this tree do not carry
- * yet. It runs when `META_IDENTITY_AHEAD_ROWS` names the member (against a
- * gateway that serves it); the mark goes when the host methods carry it.
- */
-function ahead(member: string): string | false {
-  if (skip) return skip;
-  return aheadRows.has(member)
-    ? false
-    : `the host methods of this tree do not carry ${member} yet`;
-}
-
 // The agents the host's configuration declares: one, `scout`.
 const roster = {
   async roster() {
@@ -767,7 +751,7 @@ describe("identity family on a real gateway", () => {
 
   it(
     "a status says when the roster lists an agent served from its record",
-    { skip: ahead("roster_listing_superseded") },
+    { skip },
     async () => {
       await withGateway(async (identities, rpc) => {
         const status = async (identity: string) =>
@@ -790,7 +774,7 @@ describe("identity family on a real gateway", () => {
 
   it(
     "get, list, the directory and a plan say when the roster lists an agent",
-    { skip: ahead("roster_listing_superseded") },
+    { skip },
     async () => {
       await withGateway(async (identities) => {
         const read = async (name: string) => {

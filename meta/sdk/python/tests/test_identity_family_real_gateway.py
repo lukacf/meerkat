@@ -175,20 +175,6 @@ _A_PERSON_DECIDES_A_DESCRIPTIVE_CHANGE = {
     "peers": {"default": "allow"},
 }
 
-_AHEAD_ROWS = {
-    name for name in os.environ.get("META_IDENTITY_AHEAD_ROWS", "").split(",") if name
-}
-
-
-def _ahead(member: str):
-    """A row for a member the host methods of this tree do not carry yet. It
-    runs when ``META_IDENTITY_AHEAD_ROWS`` names the member (against a
-    gateway that serves it); the mark goes when the host methods carry it."""
-    return pytest.mark.skipif(
-        member not in _AHEAD_ROWS,
-        reason=f"the host methods of this tree do not carry {member} yet",
-    )
-
 
 class Roster:
     """The agents the host's configuration declares: one, ``scout``."""
@@ -689,7 +675,6 @@ async def test_the_host_settles_the_preparation_of_an_agent_it_created(tmp_path)
         assert refused.value.kind == "preparation_not_pending"
 
 
-@_ahead("roster_listing_superseded")
 async def test_a_status_says_when_the_roster_lists_an_agent_served_from_its_record(tmp_path):
     async with gateway(tmp_path) as identities:
         runtime = identities._runtime
@@ -706,7 +691,6 @@ async def test_a_status_says_when_the_roster_lists_an_agent_served_from_its_reco
         assert (await runtime.status("editor")).roster_listing_superseded is False
 
 
-@_ahead("roster_listing_superseded")
 async def test_get_list_the_directory_and_a_plan_say_when_the_roster_lists_an_agent(tmp_path):
     async with gateway(tmp_path) as identities:
 

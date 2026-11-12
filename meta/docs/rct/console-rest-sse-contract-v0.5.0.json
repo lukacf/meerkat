@@ -2708,7 +2708,7 @@
               "expected_spec_digest"
             ],
             "optional_fields": [],
-            "note": "Archives one agent: it stops and keeps its name, record, conversation and memory. Gated on a writable console and agent.identity.manage for the agent. An unknown member is refused."
+            "note": "Archives one agent: it stops and keeps its name, record, conversation and memory, and its last conversation is harvested as for any agent that leaves. Gated on a writable console and agent.identity.manage for the agent. An unknown member is refused."
           },
           "success": {
             "required_fields": [
@@ -2772,7 +2772,7 @@
               "expected_spec_digest"
             ],
             "optional_fields": [],
-            "note": "Removes one agent for good: its name is never available again. Gated on a writable console and agent.identity.remove for the agent. An unknown member is refused."
+            "note": "Removes one agent for good: its name is never available again, and its last conversation is harvested as for any agent that leaves. Gated on a writable console and agent.identity.remove for the agent. An unknown member is refused."
           },
           "success": {
             "required_fields": [

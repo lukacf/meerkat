@@ -5107,12 +5107,17 @@ async function runIdentityChangesStoryProof() {
     await page.getByTestId("identity-cancel").click();
 
     // Archive, then unarchive from the archived agents. The question says
-    // that the last conversation is harvested and distilled, and so does
-    // the answer, which also says what became of the agent's schedules, by
-    // name.
+    // that the last conversation is harvested and distilled, and what the
+    // archive will do to the agent's schedules, by name (the plan the
+    // dialog asks when it opens). The answer says both of what was done.
     await openAgent("scout");
     await page.getByTestId("roster-action:scout:archive").click();
     await page.getByTestId("identity-confirm:scout:archive").getByText(/Its last conversation is harvested and distilled, as for any agent that leaves the team\./).waitFor();
+    await page.getByTestId("identity-confirm:scout:archive").getByTestId("identity-confirm-schedules")
+      .getByText("Its 2 schedules will be paused until it is unarchived: Morning report, Weekly digest.").waitFor();
+    // Asking changed no schedule.
+    assert.deepEqual(family.schedulesOf("scout").map(schedule => schedule.state), ["active", "active"]);
+    await page.screenshot({ path: path.join(evidenceDir, "identity-changes-archive-confirm.png"), fullPage: true });
     await page.getByTestId("identity-confirm:scout:archive").getByTestId("identity-confirm-yes").click();
     await notice.getByText("Chief scout is archived").waitFor();
     await notice.getByText("Its last conversation is harvested and distilled, as for any agent that leaves the team.").waitFor();
@@ -5134,7 +5139,22 @@ async function runIdentityChangesStoryProof() {
     await waitingRow.getByTestId("roster-waiting-action:porter:remove").waitFor();
     assert.equal(await agent("porter").count(), 0);
     await page.screenshot({ path: path.join(evidenceDir, "identity-changes-archived.png"), fullPage: true });
+    // The removal of an archived agent is asked without a harvest to come:
+    // its last conversation was harvested when it was archived. The
+    // question says which schedules the removal will end.
+    await page.getByTestId("roster-archived-action:scout:remove").click();
+    const archivedRemove = page.getByTestId("identity-confirm:scout:remove");
+    await archivedRemove.getByText(/Its last conversation was already harvested and distilled when it was archived\./).waitFor();
+    await archivedRemove.getByText(/Left archived, it keeps its name, its record, its conversation and its memory, and you can bring it back\./).waitFor();
+    await archivedRemove.getByTestId("identity-confirm-schedules").getByText("Its 2 schedules will be ended: Morning report, Weekly digest.").waitFor();
+    assert.equal(/is harvested|Archive is the reversible choice|sched-000/.test(await archivedRemove.textContent()), false);
+    assert.equal(await archivedRemove.getByTestId("identity-confirm-archive-instead").count(), 0);
+    await page.screenshot({ path: path.join(evidenceDir, "identity-changes-archived-remove-confirm.png"), fullPage: true });
+    await archivedRemove.getByTestId("identity-confirm-cancel").click();
+    assert.equal(family.agents.has("scout"), true);
     await page.getByTestId("roster-archived-action:scout:unarchive").click();
+    await page.getByTestId("identity-confirm:scout:unarchive").getByTestId("identity-confirm-schedules")
+      .getByText("Its 2 schedules will run again: Morning report, Weekly digest.").waitFor();
     await page.getByTestId("identity-confirm:scout:unarchive").getByTestId("identity-confirm-yes").click();
     await notice.getByText("Chief scout is back").waitFor();
     await notice.getByText("Its 2 schedules run again: Morning report, Weekly digest.").waitFor();
@@ -5148,6 +5168,8 @@ async function runIdentityChangesStoryProof() {
     await confirm.getByText(/Its name can never be used again/).waitFor();
     await confirm.getByText(/Its last conversation is harvested/).waitFor();
     await confirm.getByText(/Archive is the reversible choice/).waitFor();
+    await confirm.getByTestId("identity-confirm-schedules").getByText("Its 2 schedules will be ended: Morning report, Weekly digest.").waitFor();
+    assert.equal(/sched-000/.test(await confirm.textContent()), false);
     await page.screenshot({ path: path.join(evidenceDir, "identity-changes-remove-confirm.png"), fullPage: true });
     await confirm.getByTestId("identity-confirm-yes").click();
     await notice.getByText("Chief scout is removed").waitFor();

@@ -409,6 +409,19 @@ async function fullStory() {
     await openAgent("scout");
     await page.getByTestId("roster-action:scout:archive").click();
     await page.getByTestId("identity-confirm:scout:archive").getByText(/Its last conversation is harvested/).waitFor();
+    // The question says what the archive will do to the schedule, by its
+    // name: the dialog asked the gateway's plan of this agent, at the digest
+    // of its record, when it opened. Asking changed nothing.
+    await page.getByTestId("identity-confirm:scout:archive").getByTestId("identity-confirm-schedules")
+      .getByText("Its schedule Morning report will be paused until it is unarchived.").waitFor();
+    const planned = sent(fixture, "meta/identity/plan").at(-1);
+    assert.equal(planned.change, "archive");
+    assert.equal(planned.name, "scout");
+    assert.equal(planned.expected_spec_digest, record.spec_digest);
+    assert.equal((await page.getByTestId("identity-confirm:scout:archive").textContent()).includes(morning.schedule_id), false, "a schedule's id is no part of the question");
+    assert.deepEqual(await schedule(), [{ name: "Morning report", phase: "active", paused_for_target: false }]);
+    assert.deepEqual(sent(fixture, "meta/identity/archive"), [], "nothing is sent before the person confirms");
+    await page.screenshot({ path: path.join(evidence, "real-identity-story-archive-asked.png"), fullPage: true });
     await page.getByTestId("identity-confirm:scout:archive").getByTestId("identity-confirm-yes").click();
     await outcome(/is stopping$|is archived$/);
     await outcome("Its schedule Morning report is paused until it is unarchived.");
@@ -421,9 +434,24 @@ async function fullStory() {
     assert.match(await archived.textContent(), /Chief scout/);
     await page.screenshot({ path: path.join(evidence, "real-identity-story-archived.png"), fullPage: true });
 
+    // The removal of the archived agent is asked without a harvest to come
+    // (its last conversation was harvested when it was archived), and the
+    // question says that its schedule will be ended. It is not confirmed.
+    await page.getByTestId("roster-archived-action:scout:remove").click();
+    const archivedRemove = page.getByTestId("identity-confirm:scout:remove");
+    await archivedRemove.getByText(/Its last conversation was already harvested and distilled when it was archived\./).waitFor();
+    await archivedRemove.getByTestId("identity-confirm-schedules").getByText("Its schedule Morning report will be ended.").waitFor();
+    assert.equal(/is harvested|Archive is the reversible choice/.test(await archivedRemove.textContent()), false);
+    await page.screenshot({ path: path.join(evidence, "real-identity-story-archived-remove-asked.png"), fullPage: true });
+    await archivedRemove.getByTestId("identity-confirm-cancel").click();
+    assert.deepEqual(sent(fixture, "meta/identity/remove"), []);
+    assert.deepEqual(await schedule(), [{ name: "Morning report", phase: "paused", paused_for_target: true }]);
+
     // Unarchive: it is back in the roster, on the record it had, and its
-    // schedule runs again.
+    // schedule runs again. The question says so before.
     await page.getByTestId("roster-archived-action:scout:unarchive").click();
+    await page.getByTestId("identity-confirm:scout:unarchive").getByTestId("identity-confirm-schedules")
+      .getByText("Its schedule Morning report will run again.").waitFor();
     await page.getByTestId("identity-confirm:scout:unarchive").getByTestId("identity-confirm-yes").click();
     await outcome(/is back$/);
     await outcome("Its schedule Morning report runs again.");
@@ -459,6 +487,9 @@ async function fullStory() {
     await confirm.getByText(/Its name can never be used again/).waitFor();
     await confirm.getByText(/Its last conversation is harvested/).waitFor();
     await confirm.getByText(/Archive is the reversible choice/).waitFor();
+    await confirm.getByTestId("identity-confirm-schedules").getByText("Its schedule Morning report will be ended.").waitFor();
+    assert.deepEqual(await schedule(), [{ name: "Morning report", phase: "active", paused_for_target: false }]);
+    await page.screenshot({ path: path.join(evidence, "real-identity-story-remove-asked.png"), fullPage: true });
     await confirm.getByTestId("identity-confirm-yes").click();
     await outcome(/is stopping$|is removed$/);
     await outcome(/can never be used again/);

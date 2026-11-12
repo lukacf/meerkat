@@ -1655,33 +1655,162 @@ old or new target selects it) is owed it, and the mob records the member's
 whole snapshot in the member's session, through the session while it is
 live and store-only while it is dormant. Nothing wakes or materializes a
 member to deliver. A member born on a new session (a spawn, a rotation, an
-unborn seat's first wake) carries the snapshot from its first build. Each
+unborn seat's first wake) carries the snapshot from its first build. A
+dormant member that is still owed its snapshot when a delivery wakes it has
+it recorded during the wake, after its conversation is loaded and before its
+run starts. So a record owed to a member seated dormant on a conversation it
+already has is in effect at the first run after the seat when the member's
+session takes the write then. A write that fails stays owed: the mob tries
+again at every wake of the member and on its own retry, at most 30 seconds
+apart, and the entry reaches the first run that starts after a write
+succeeded. A write the session refuses because its target or a slot belongs
+to another owner (`owned_by_session`, `owned_by_other_mob`,
+`slot_managed_by_activation`) is blocked: the status shows it with its kind,
+and it is not tried again until a write selects the member again, the member
+is seated again, or the mob restarts. The wake does not wait long for the
+write: a session that does not answer it within 5 seconds leaves the member
+live and owed. Only the wake a delivery causes orders the record before the
+member's run: a member seated eagerly on a conversation (a spawn with a
+Resume launch), and a member the mob materializes itself at a start or a
+lift, are recorded by the mob's own delivery, tried at once when the member
+is live; and a member that stays live between runs is not tried at each run
+start. A member the mob brings up itself at a start or a lift with work
+already queued may start that run before the write is tried; the entry then
+reaches the first run that starts after the write. Each
 session applies its target at its next fresh run start, never inside a run.
 Dormant members are recorded at most 16 at a time by default
 (`MobBuilder::with_member_instruction_delivery_concurrency`); deliveries
 through live sessions run in their own lane. An exact repeat answers as a
 duplicate; a lower revision, the same revision with other content, a body
-over 256 KiB, more than 64 slots, more than 1 MiB of Active bodies and a
+over 256 KiB, a 65th record or more than 1 MiB of Active bodies in one
+member's snapshot, and a
 completed or destroyed mob are refused typed
 (`OperatorInstructionError::code`; on the wire `error.data.instruction_set_code`).
+
+A member's snapshot is the shared records (targeted at every member or at a
+profile) plus the member-targeted records that name the member (and, for a
+fork, the records written for the first member of its fork family and its
+forks, see `include_forks` below). Any other
+member-targeted record is not in it, so a member's session and its
+status row do not grow with the number of other members that hold a record.
+The two limits bound that snapshot, the shared records and the member's own
+together: at most 64 records (`slot_limit_exceeded`) and 1 MiB of Active
+bodies (`active_set_budget_exceeded`). A mob can therefore hold a
+member-targeted record for each of any number of members, such as one
+standing text per agent. Shared records are in every snapshot, so they stay
+within 64 records and 1 MiB as before, and a mob that already holds 64 shared
+records has no room for a member's own. A higher revision that would move a
+record into a full snapshot (a member's record retargeted to every member,
+or to a member whose snapshot is full) is refused the same way.
 A revoked slot keeps its record (its
-effect Absent), so it counts toward the 64 slots until a reset clears the
-records. Writes need the `AdminHost` scope and are never an agent tool. On a
+effect Absent), so it counts toward the 64 records of the snapshots it is in
+(every member's for a shared record, its one member's for a member-targeted
+record) until a reset clears the
+records. A record that names a member the mob no longer has is in no
+snapshot, but the limits still count it under the name it targets: they
+count a member-targeted record by its target, seated or not, so the records
+of a retired or never-seated name keep taking room from new shared records
+(a shared record must fit beside the most records any one name holds, and
+beside what another name's records pass to its forks, see below) until
+they are written with another target or a reset clears them. A refused
+shared write does not name the member whose snapshot is full; the status
+read's `desired` list shows each record's target. Writes need the `AdminHost` scope and are never an agent tool. On a
 governed runtime (a runtime with a native work authorization host) every
 write and revoke is refused `prepared_authorization_required` before anything
 is journaled: such a write needs prepared authorization, which this release
 does not mint, so a retry is refused the same way.
 
+A member-targeted record covers the member's forks when it is written with
+`include_forks`
+(`{"kind": "member", "agent_identity": ..., "include_forks": true}`,
+`OperatorInstructionTarget::Member { include_forks: true, .. }` in Rust).
+Without it, the default, the record is its member's alone and a fork of the
+member runs without it, as before. With it the record follows the member's
+fork family from its root. Written for a member that is not itself a fork,
+it selects that member and every fork below it, forks of forks included.
+Written for a member that is itself a fork, it selects that member only:
+that fork's own forks
+follow the records written for the first member of their family, not for
+the fork between. Each member's row of `mob/instruction_status` lists the
+records of its snapshot, a fork's included, so the rows show which members
+a record selects, and the
+write's `matched_members` counts the seated ones. A durable
+fork (`fork_off`, `MobHandle::fork_member` and its bounded and detached
+forms, `mob/fork_member`, a
+live delegation's fork) has its snapshot recorded in its committed session
+before it is seated, so its first run applies the record, and a helper fork
+(a spawn with a fork launch mode) is born with it. A seated fork then
+follows the record like any member it selects: a higher revision and the
+revoke reach it as entries appended at its next fresh run start, and nothing
+already in the fork's conversation is rewritten. A fork taken after the
+record was revoked gets the record's slot with no body: nothing of it is in
+effect in that fork. A higher revision that writes the record without
+`include_forks` (or for another member) takes it from the seated forks: each
+drops it at its next fresh run start. A durable fork copies its
+source's conversation up to the fork point, so its model also reads the
+source's earlier entry
+rows, each as a header without a body
+(`[meerkat-inherited-operator-instructions-v1]`,
+`status=not_active_in_child`): those are history, and the fork's own entry
+after them is what applies. The same recording gives every durable fork the
+shared records (targeted at every member or at its profile) in its first
+run; before, a fork that started its own turn could run it without them. A
+fork whose snapshot cannot be recorded is not seated
+(`fork_member_provision_failed`): once the mob has recorded its first
+operator instruction, a durable fork fails over a child session that refuses
+the record for any reason, where a seated child was only blocked before
+(another owner of the session's target, or a session service that keeps no
+durable session document or does not forward the record). The mob holds each
+fork's lineage (the
+first member of the family it descends from) with its roster: it survives a
+restart, it follows the fork's identity through a respawn, a rotation and a
+host's adoption, and it ends with the fork's
+identity. The lineage names that member as a target does, by name, across
+lives: the forks of a member that was removed keep following the records
+written for that name until those are revoked, and a record written with
+`include_forks` for a new member seated under that name, as a fork or not,
+reaches the earlier
+member's forks too (the one exception to "that member only"). A record for
+a member and its forks counts in the
+snapshot of every other name as well (any name may be seated as a fork of
+that member), so such a write is refused `slot_limit_exceeded` or
+`active_set_budget_exceeded` when it would not fit beside the most another
+name holds: a member that holds 64 records of its own blocks every
+`include_forks` write for another member, and one name's records for forks
+lower
+the room every other name has for its own. The refusal does not name that
+member: the mob logs a warning at the refused write that names the member
+whose snapshot would be full and what fills it (the shared records, its
+own, and what another member's records pass to forks; with no
+member-targeted record it says that the shared records alone fill every
+snapshot), and the status
+read's `desired` list shows each record's target. No fork is refused
+at its seat for room. The participants of a
+temporary council are seated in the council's own mob, which holds none of
+their source's records: they are not covered. Only a fork the mob itself
+takes (the routes above) joins a fork family: a session forked outside the
+mob and seated later as a member is not a fork for this rule, and neither
+is a fork seated by a release before 0.9.15 (see
+[Upgrading](/guides/upgrading#operator-instructions-for-a-member-and-its-forks)).
+A placed helper fork whose seat the mob repairs after its host stopped in
+the middle of it is seated outside its fork family (the mob logs a warning
+that names the member).
+
 `mob/instruction_status` (`MobHandle::operator_instruction_status`, scope
 `ReadHistory`) reads the
 records and, per member, its residency, its delivery state (`current`,
 `owed` with the last retryable failure, or `blocked` with a reason), and per
-slot what the member should have, what its session recorded and the entry
+slot of its snapshot what the member should have, what its session recorded
+and the entry
 that put it in effect, with the reason a change is still pending (the
 session's next run start, a model that lowers System rows only in the
 leading prefix, or one that cannot carry them at all). It reads committed
 session state and never wakes a member; a member whose session cannot be
-read is reported with the reason, and the page still answers. The reasons
+read is reported with the reason, and the page still answers. A member is
+blocked for one of `owned_by_session`, `owned_by_other_mob`,
+`slot_managed_by_activation`, `durability_unavailable` (its session service
+keeps no durable session document) or `member_host_unsupported`. The last
+failure is diagnostic and is not kept across a restart. The reasons
 and the residency are advisory and may grow: the SDKs keep a value they do
 not know as `{"unknown": <the value>}`. A member's session also publishes an
 `operator_instructions_applied` event for each entry it applies (an
@@ -1743,11 +1872,15 @@ again (or it is seated again). A placed member on a governed member host
 `prepared_authorization_required` before anything is written, since this
 release provides no prepared authorization for instruction writes. A
 snapshot whose record would not fit the supervisor bridge's frame (about
-1 MiB with its envelope, which the mob's 1 MiB active budget can reach) is
+1 MiB with its envelope, which a snapshot's 1 MiB active budget can reach) is
 not sent: the placed member is blocked `member_host_unsupported` until a
 write changes its snapshot. The status read reports a placed member's
 delivery but does not read its session on the member host
-(`effective_read` is `unreadable`). A mob that recorded operator
+(`effective_read` is `unreadable`). A member's status row lists a record
+that moved to another member until the member's session has revoked it;
+for a member whose session the read does not reach (a placed member, an
+unreadable session) such a record leaves the row at once, and the member's
+delivery reads `owed` until its new snapshot is recorded. A mob that recorded operator
 instructions journals
 them at mob event schema 10, which a release before operator instructions
 refuses for every mob of that realm, not only that one: see

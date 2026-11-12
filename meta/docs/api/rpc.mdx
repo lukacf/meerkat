@@ -4258,7 +4258,11 @@ body's digest is refused), and `target`: `{"kind": "mob"}`,
 `{"kind": "member", "identity": "triage:main"}`. A member target's identity
 is resolved through the same identity-control gate as `meta/respawn`. A
 profile that no member has yet selects nobody until one does. Unknown fields
-are refused.
+are refused. A member target written here is for that member alone:
+`meta/set_instruction` cannot set Meerkat's `include_forks` (a record for a
+member and the forks of its fork family) and refuses a target that carries
+it; a Rust host that embeds Meta sets it through the mob handle's
+`set_operator_instruction`, and `meta/instruction_status` shows it.
 
 <CodeGroup>
 ```json Request
@@ -4284,7 +4288,10 @@ with Meerkat's closed code in `error.data.instruction_set_code`:
 `unknown_slot`, `slot_limit_exceeded`, `body_too_large`,
 `active_set_budget_exceeded`, `mob_terminal`, `malformed_instruction_history`
 or `prepared_authorization_required` (a governed runtime). Nothing was
-written. A mob that cannot answer keeps Meerkat's own error code and data.
+written. `slot_limit_exceeded` and `active_set_budget_exceeded` bound one
+member's snapshot, not the mob: at most 64 records and 1 MiB of Active
+bodies over the records targeted at every member or at a profile plus the
+member-targeted records that name the member. A mob that cannot answer keeps Meerkat's own error code and data.
 
 ### `meta/revoke_instruction`
 
@@ -4303,7 +4310,9 @@ wakes or materializes a member.
 
 The result is Meerkat's status page with each member named by its Meta
 identity: `generation`; `desired`, the records sorted by slot, each with its
-`target` (a member target reads `{"kind": "member", "identity": ...}`);
+`target` (a member target reads `{"kind": "member", "identity": ...}`, with
+`"include_forks": true` when the record was written for the member and its
+forks);
 `members`, one page in identity order, each with its `identity`, `profile`,
 `residency` (`live`, `dormant` or `unborn`), `delivery` (the
 `recorded_generation`, and `state` `current`, `owed` with the `generation`

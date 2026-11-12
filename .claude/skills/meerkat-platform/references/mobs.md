@@ -583,7 +583,27 @@ before 0.9.11 is blocked `member_host_unsupported` until the host runs
 (the host refuses the record `prepared_authorization_required`), and one
 whose snapshot record would not fit the bridge frame (about 1 MiB; nothing
 is sent). A
-governed runtime refuses every write `prepared_authorization_required`. A mob
+governed runtime refuses every write `prepared_authorization_required`. Since
+0.9.15 the limits (64 records, 1 MiB of Active bodies) bound one member's
+snapshot, the shared records plus the member-targeted records that name the
+member, so a mob holds a member-targeted record for each of any number of
+members, and a member's session and status row name only the shared records
+and its own (a fork's also name the records written for the first member of
+its fork family and its forks). Since 0.9.15 a member target may carry
+`include_forks` (`OperatorInstructionTarget::Member { agent_identity,
+include_forks }`, `{"kind":"member","agent_identity":...,"include_forks":true}`;
+false by default and left out when false): the record then also selects the
+forks of the member's fork family, forks of forks included, when it is
+written for the family's first member, and that member only when it is
+written for a fork; a fork's first run has it, and later revisions and the
+revoke reach a seated fork as appended entries. Such a record counts in
+every other name's snapshot too, so a member that holds 64 records of its
+own blocks every `include_forks` write for another member. Council
+participants are not covered. A release before 0.9.15 cannot serve a mob that holds more
+than 64 records or more than 1 MiB of Active bodies in total
+(`rkat storage doctor`: `operator-instruction-mob-totals`). The limits count
+a member-targeted record under the member it names, seated or not.
+A mob
 that recorded one journals at mob event schema 10, which 0.9.8 and 0.9.7
 refuse (`rkat storage doctor`: `operator-instruction-mob-events`).
 

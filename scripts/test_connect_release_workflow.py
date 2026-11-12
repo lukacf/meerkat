@@ -1664,5 +1664,48 @@ class ConnectMacosAssembleTests(unittest.TestCase):
         ])
 
 
+class ConnectMacosProducerContractTests(unittest.TestCase):
+    """What the three jobs of the complete macOS installation assume of the producer they call
+    (connect/scripts/connect-candidate.py), read from its source."""
+
+    SOURCE = ROOT / "connect/scripts/connect-candidate.py"
+    JOBS = (*STAGE_JOBS, "assemble_macos")
+
+    def test_the_stage_jobs_call_every_stage_one_step_of_the_producer_in_its_order(self):
+        source = self.SOURCE.read_text()
+        declared = re.search(r"(?m)^MACOS_STEPS = \(([^)]*)\)", source).group(1)
+        steps = re.findall(r'"([a-z-]+)"', declared)
+        called = re.findall(r"connect-candidate\.py macos ([a-z-]+)", "".join(job_block(job) for job in STAGE_JOBS))
+        in_order = [step for index, step in enumerate(called) if index == 0 or called[index - 1] != step]
+        self.assertEqual(in_order, steps)
+        for step in ("accept-review", "assemble", "release-check"):
+            self.assertIn(f'"{step}"', source)
+
+    def test_the_cargo_output_the_stage_frees_is_the_producers_lane(self):
+        lane = re.search(r'(?m)^MACOS_LANE = "([^"]+)"$', self.SOURCE.read_text()).group(1)
+        self.assertIn(f"          RUST_LANE_ID: {lane}\n", step_block("Free the Cargo output", "stage_macos_build") + "\n")
+
+    def test_a_failed_step_fails_its_job(self):
+        # A failed check (the official Playwright install is one) must stop the job before the stage
+        # record is written: no step is conditional and none tolerates a failure. The producer's own
+        # tests hold that a failed official install fails its step and that a check that did not run is
+        # stated and never assembled (connect/scripts/test_connect_candidate_cli.py:
+        # test_a_failed_official_install_fails_the_stage,
+        # test_an_official_install_that_could_not_run_is_stated_and_never_assembles).
+        for job in self.JOBS:
+            block = job_block(job)
+            with self.subTest(job=job):
+                self.assertNotIn("continue-on-error", block)
+                self.assertEqual(re.findall(r"(?m)^        if:", block), [])
+                for step in re.findall(r"(?m)^      - name: (.+)$", block):
+                    body = step_block(step, job)
+                    if "        run: |\n" in body + "\n":
+                        self.assertIn("          set -euo pipefail\n", body + "\n", step)
+        producer_tests = (ROOT / "connect/scripts/test_connect_candidate_cli.py").read_text()
+        for name in ("test_a_failed_official_install_fails_the_stage",
+                     "test_an_official_install_that_could_not_run_is_stated_and_never_assembles"):
+            self.assertIn(f"def {name}(", producer_tests)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -664,6 +664,17 @@ class CommittedPinFileTests(unittest.TestCase):
                 self.assertTrue(selected)
                 self.assertEqual({row["kind"] for row in selected}, {kind})
 
+    def test_the_macos_producer_selection_binds_exactly_this_pin_file(self):
+        # The producer refuses every macOS step unless its committed selection names this file's digest,
+        # so a pin change without the selection (or the other way round) fails here first.
+        selection = json.loads((ROOT / "release/connect-release-inputs-macos-arm64.json").read_text(encoding="utf-8"))
+        library = selection["library"]
+        self.assertEqual(library["state"], "selected")
+        self.assertEqual(library["pins"], {"path": "release/library-pins-macos-arm64.json",
+                                           "sha256": hashlib.sha256(PINS.read_bytes()).hexdigest()})
+        self.assertEqual(library["pins"]["sha256"], self.pins.sha256)
+        self.assertNotIn("PENDING", library["reason"])
+
     @unittest.skipUnless(os.environ.get("CONNECT_PINS_TOOL_CLOSURE") == "1",
                          "needs Cargo and the registry: set CONNECT_PINS_TOOL_CLOSURE=1 (the macOS stage run does)")
     def test_the_tool_closure_cargo_prints_resolves_against_the_current_lock(self):

@@ -394,7 +394,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     The same list ("Archived and waiting agents") shows an agent whose host
     still prepares it, which has no member and so no row of the roster: by
     name, with the state "Waiting for its host" and no control. The list is
-    read when it is opened.
+    read when it is opened. Only the host settles an agent's preparation
+    (`meta/identity/settle_preparation`, which the Console neither lists nor
+    offers). A read that is refused because the team's open requests cannot
+    be read just then says so and to try again, in a sentence of its own.
+  - A move into a profile whose agents the host prepares before their
+    first use is refused by the gateway when it is asked; Edit says so at
+    the profile, in a sentence of its own, before anything is sent.
   - The Record of an agent's details says how many requests wait for the
     agent; their operation ids (`open_operations`) are among its technical
     details.
@@ -436,8 +442,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `runtime_mode_override` on a create, an update and the reads, `schedules`
   on the first answer and on the plan of an archive, an unarchive and a
   removal, and the answer for an agent the caller may not view
-  (`identity_unknown`, as for a name no agent holds). The console guide has
-  a section on long-term agents.
+  (`identity_unknown`, as for a name no agent holds). It says what a create
+  that answers `pending_preparation` means and who settles it, what the
+  operation read says of an agent that waited, the refusal of a move into a
+  profile the host prepares, and `open_operations` on a get and a list with
+  the refusal of a read that cannot see the team's held changes. The
+  console guide has a section on long-term agents.
 
 ### Changed
 

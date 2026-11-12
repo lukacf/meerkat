@@ -719,7 +719,9 @@ by how it came to exist.
   pick another profile the Console asks the gateway what that change of
   that agent would get and shows the answer at the field: allowed, a person
   must decide it, or the refusal. Asking changes nothing; **Save changes**
-  is the change.
+  is the change. A profile whose agents the host prepares before their
+  first use takes no agent that was not prepared for it: the field says
+  so, and a new agent is created in that profile instead.
 - **Archive** stops the agent and keeps its name, its record, its
   conversation and its memory; **Unarchive** brings it back. **Remove** is
   for good: its confirmation says that the name can never be used again and
@@ -740,8 +742,11 @@ by how it came to exist.
   have no member and so no row of the roster: the archived agents, with
   **Unarchive** and **Remove**, and the agents whose host still prepares
   them, each by name with the state "Waiting for its host" and no control
-  (such an agent joins the roster when its host is done). They are read
-  when you open the list.
+  (such an agent joins the roster when its host is done). Only the host
+  settles an agent's preparation: the Console shows the state and offers no
+  settle. They are read when you open the list. If the team's open requests
+  cannot be read just then, the list says that it could not be read and to
+  try again; it never reads as if nobody waited.
 - A change answers in one of four ways. It is made. A person must decide it
   first: nothing has changed, the notice shows until when the decision is
   open, and **Withdraw request** takes the request back. The agent is being

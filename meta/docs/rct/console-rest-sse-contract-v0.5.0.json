@@ -2647,7 +2647,7 @@
               "outcome",
               "operation_id"
             ],
-            "note": "The change's typed outcome, tagged by outcome: done {operation_id, agents: [{name, state, spec_digest?, spec_revision?, session_id?, seat?, instructions?}]}, pending_decision {operation_id, decision_id, deadline_ms} (nothing is written but the decision) or pending_preparation {operation_id, agents}. The same caller, request_id and request answer the same state again and write nothing."
+            "note": "The change's typed outcome, tagged by outcome: done {operation_id, agents: [{name, state, spec_digest?, spec_revision?, session_id?, seat?, instructions?}]}, pending_decision {operation_id, decision_id, deadline_ms} (nothing is written but the decision) or pending_preparation {operation_id, agents}. The same caller, request_id and request answer the same state again and write nothing. pending_preparation is the create of an agent whose profile the host prepares before first use: the agent is committed, reads readiness preparation_pending, has no member and takes no message until the host's operator settles its preparation (meta/identity/settle_preparation on the stdio gateway). No console caller is the operator: the console RPC does not list that method and refuses it for every caller."
           },
           "errors": [
             {
@@ -2676,7 +2676,7 @@
               "peers_add",
               "peers_remove"
             ],
-            "note": "Updates one agent at the spec digest the caller read (a moved spec answers stale_spec with the current one). set {display_name?, instructions?, context?, labels?, labels_remove?, profile?, addressability?, runtime_mode_override?}: an absent member is unchanged. addressability and runtime_mode_override take the values they take on a create; an update sets a runtime mode and cannot return the agent to its profile's. An agent's entry of the outcome says what became of an instructions change. Gated on a writable console and agent.identity.manage for the agent. An unknown member is refused. An agent the caller may not view is answered as a name no agent holds (-32058, kind identity_unknown at name), and nothing is changed."
+            "note": "Updates one agent at the spec digest the caller read (a moved spec answers stale_spec with the current one). set {display_name?, instructions?, context?, labels?, labels_remove?, profile?, addressability?, runtime_mode_override?}: an absent member is unchanged. A move (set.profile) into a profile whose agents the host prepares is refused kind unsupported with feature move_into_prepared_profile at set.profile when it is asked, also where a rule has a person decide a profile change, and its plan answers the same refusal. addressability and runtime_mode_override take the values they take on a create; an update sets a runtime mode and cannot return the agent to its profile's. An agent's entry of the outcome says what became of an instructions change. Gated on a writable console and agent.identity.manage for the agent. An unknown member is refused. An agent the caller may not view is answered as a name no agent holds (-32058, kind identity_unknown at name), and nothing is changed."
           },
           "success": {
             "required_fields": [
@@ -2841,7 +2841,7 @@
               "labels",
               "peers"
             ],
-            "note": "One agent in full. display_name, spec_revision, provenance {entered, requester_kind, requester, at_ms, consent} (when its record says), open_operations and context are present when set. addressability is present as internal_only (an addressable agent says nothing), and runtime_mode_override as autonomous_host or turn_driven (an agent that runs as its profile says says nothing). peers names the peers the caller may view. The read never wakes the agent."
+            "note": "One agent in full. display_name, spec_revision, provenance {entered, requester_kind, requester, at_ms, consent} (when its record says), context is present when set. open_operations is the ids of the operations open for the agent that the caller may read (its own, and every one with runtime.admin): the create of an agent that waits for its host's preparation, and each change of the agent that is held for a decision or approved and not yet carried out. It is absent when none is open, never an empty list. When the team's held changes cannot be read, the read is refused -32058 kind approval_unavailable with a detail that says to read again; it is never answered as if nothing were open. addressability is present as internal_only (an addressable agent says nothing), and runtime_mode_override as autonomous_host or turn_driven (an agent that runs as its profile says says nothing). peers names the peers the caller may view. The read never wakes the agent."
           },
           "errors": [
             {
@@ -2869,7 +2869,7 @@
             "required_fields": [
               "agents"
             ],
-            "note": "A page of the mob's agents in one stable order that after continues (it is not name order), each as get names it without instructions, context, labels and peers; next names the agent to read the next page after. An agent the caller may not view is left out."
+            "note": "A page of the mob's agents in one stable order that after continues (it is not name order), each as get names it without instructions, context, labels and peers; next names the agent to read the next page after. An agent the caller may not view is left out. When the team's held changes cannot be read, the read is refused -32058 kind approval_unavailable with a detail that says to read again; it is never answered as if nothing were open."
           },
           "errors": [
             {
@@ -2896,7 +2896,7 @@
             "required_fields": [
               "outcome"
             ],
-            "note": "The operation's typed outcome as its change answered it (a refused one as a result, outcome refused), or {outcome: unknown, operation_id} for an operation nothing committed under and no decision is held for."
+            "note": "The operation's typed outcome as its change answered it (a refused one as a result, outcome refused), or {outcome: unknown, operation_id} for an operation nothing committed under and no decision is held for. The entry of an agent whose create answered pending_preparation says where the agent stands since: pending_preparation while it waits for its host, committed (and the outcome done) once its preparation was settled, removed once it was removed."
           },
           "errors": [
             {

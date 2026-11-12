@@ -708,14 +708,20 @@ impl meerkat_mob::MemberToolAudience for PrivateOwners {
         target: &meerkat_mob::AgentIdentity,
         target_labels: Option<&BTreeMap<String, String>>,
     ) -> bool {
-        let _ = (caller_labels, target_labels);
-        let Some(owner) = self.owner_of(mob_id.as_str(), target.as_str()) else {
+        let named = |labels: &BTreeMap<String, String>| {
+            crate::access::private_owner(labels).map(str::to_string)
+        };
+        let Some(owner) = target_labels
+            .and_then(named)
+            .or_else(|| self.owner_of(mob_id.as_str(), target.as_str()))
+        else {
             return false;
         };
-        caller
-            .and_then(|caller| self.owner_of(mob_id.as_str(), caller.as_str()))
-            .as_deref()
-            != Some(owner.as_str())
+        let callers = caller.and_then(|caller| match caller_labels {
+            Some(labels) => named(labels),
+            None => self.owner_of(mob_id.as_str(), caller.as_str()),
+        });
+        callers != Some(owner)
     }
 }
 

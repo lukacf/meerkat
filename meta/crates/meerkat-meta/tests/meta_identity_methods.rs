@@ -5164,6 +5164,145 @@ async fn who_asked_for_an_agent_is_not_shown_to_an_agent_once_the_asker_cannot_b
     rig.shutdown().await;
 }
 
+/// No change of the family adds or removes the label that says an agent
+/// is private to a person: it is the host's own, and what an agent is
+/// shown goes by it. A create that carries it, an update that sets it and
+/// an update that removes it are each refused `reserved_key`, also for an
+/// agent that was adopted with the label, and the agent stays hidden from
+/// agents.
+#[tokio::test(flavor = "multi_thread")]
+async fn no_change_adds_or_removes_the_label_that_says_an_agent_is_private() {
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, asked, fail_next_session) = launch_roster(
+        temp.path(),
+        &fresh_mob_id(),
+        false,
+        false,
+        Arc::new(RosterWithPrivate {
+            first_message: false,
+        }),
+    )
+    .await;
+    assert!(runtime.attach_identity_policy(in_process_policy(), IdentityFamilyOptions::new()));
+    let rig = Rig {
+        runtime,
+        asked,
+        step: Arc::new(RecordingStep::default()),
+        fail_next_session,
+    };
+    let family = rig.family();
+    let mob = rig.runtime.mob_handle();
+    let host = ChangeRequester::host("ops");
+    let planner = ChangeRequester::agent_recorded(PLANNER);
+    let reserved = |outcome: &IdentityOutcome| refusal_of(outcome).0 == "reserved_key";
+    let update = |name: &str, digest: &Sha256Digest, set: Value| {
+        IdentityChangeSpec::Update(
+            serde_json::from_value(json!({
+                "name": name, "expected_spec_digest": digest.as_str(), "set": set,
+            }))
+            .expect("an update as a surface writes it"),
+        )
+    };
+
+    // A create that carries the label.
+    let created = rig
+        .change(
+            &host,
+            "c-1",
+            create_of(json!([{"name": "gamma", "profile": "worker",
+                              "labels": {PRIVATE_TO: "person-2"}}])),
+        )
+        .await;
+    assert!(reserved(&created), "{created:?}");
+    assert!(rig.agent("gamma").await.is_none(), "nothing was created");
+
+    // An update that sets it, and one that removes it, on an agent made at
+    // run time.
+    let made = rig
+        .change(
+            &host,
+            "c-2",
+            create_of(json!([{"name": "gamma", "profile": "worker"}])),
+        )
+        .await;
+    assert_eq!(made.token(), "done", "{made:?}");
+    let digest = rig.digest("gamma").await;
+    let set = rig
+        .change(
+            &host,
+            "u-1",
+            update(
+                "gamma",
+                &digest,
+                json!({"labels": {PRIVATE_TO: "person-2"}}),
+            ),
+        )
+        .await;
+    assert!(reserved(&set), "{set:?}");
+    assert_eq!(rig.digest("gamma").await, digest, "nothing changed gamma");
+
+    // An agent adopted with the label keeps it: no update removes it, and
+    // agents are still not shown the agent.
+    let adopted = rig
+        .change(
+            &host,
+            "a-1",
+            IdentityChangeSpec::Adopt(agent_ref("confidant", &rig.digest("confidant").await)),
+        )
+        .await;
+    assert_eq!(adopted.token(), "done", "{adopted:?}");
+    let digest = rig.digest("confidant").await;
+    let removed = rig
+        .change(
+            &host,
+            "u-3",
+            update("confidant", &digest, json!({"labels_remove": [PRIVATE_TO]})),
+        )
+        .await;
+    assert_eq!(
+        refusal_of(&removed),
+        (
+            "reserved_key".to_owned(),
+            Some("set.labels_remove".to_owned())
+        ),
+        "{removed:?}"
+    );
+    assert_eq!(
+        rig.digest("confidant").await,
+        digest,
+        "nothing changed the private agent"
+    );
+    // Naming the label for removal is refused on an agent that does not
+    // hold it, too.
+    let removed = rig
+        .change(
+            &host,
+            "u-2",
+            update(
+                "gamma",
+                &rig.digest("gamma").await,
+                json!({"labels_remove": [PRIVATE_TO]}),
+            ),
+        )
+        .await;
+    assert_eq!(
+        refusal_of(&removed),
+        (
+            "reserved_key".to_owned(),
+            Some("set.labels_remove".to_owned())
+        ),
+        "{removed:?}"
+    );
+    let mut shown = vec!["gamma".to_owned(), HOST_A.to_owned(), PLANNER.to_owned()];
+    shown.sort_unstable();
+    assert_eq!(
+        listed_to(&family, &mob, &planner).await,
+        shown,
+        "an agent is still not shown the private agent"
+    );
+    rig.shutdown().await;
+}
+
 /// A member private to a person asks for no change of agents: the family
 /// refuses it `private_requester` before anything is read of its request,
 /// for a change and for a plan, and nothing is created.

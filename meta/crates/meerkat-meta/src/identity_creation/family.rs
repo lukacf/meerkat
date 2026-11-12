@@ -45,6 +45,7 @@ use super::request::{
     RequestEnvelope, UnarchiveIdentitySpec, UpdateIdentitySpec,
 };
 use super::request::{Requester, SourceEvidence, UpdateSetSpec};
+use super::schedules::SchedulesFollowed;
 
 fn malformed(field: impl Into<String>) -> IdentityRefusal {
     IdentityRefusal::new(IdentityRefusalKind::InvalidRequest {
@@ -1049,6 +1050,13 @@ pub struct ChangePlan {
     /// is so.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub roster_listing_superseded: bool,
+    /// The schedules that target the agent and that the change would take
+    /// with it: paused by an archive, resumed by an unarchive, ended by a
+    /// removal. Present on the plan of those three changes, on a launch
+    /// whose family is given its schedules. It is what the schedules are
+    /// when the plan is made, and no part of the rendering.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schedules: Option<SchedulesFollowed>,
 }
 
 impl ChangePlan {
@@ -1072,6 +1080,7 @@ impl ChangePlan {
             subject_digest,
             rendering: rendering.into(),
             roster_listing_superseded: false,
+            schedules: None,
         }
     }
 }

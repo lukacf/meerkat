@@ -21,6 +21,7 @@ use serde_json::{Value, json};
 use super::digest::Sha256Digest;
 use super::operation::OperationId;
 use super::refusal::{IdentityRefusal, IdentityRefusalKind};
+use super::schedules::SchedulesFollowed;
 
 /// The typed outcome of an identity change.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,6 +112,21 @@ impl IdentityOutcome {
         self
     }
 
+    /// Record what became of the schedules that target the agent `name`
+    /// of a committed archive, unarchive or removal: what the launch's
+    /// schedules answer after the commit
+    /// ([`super::AgentSchedules::follow`]). An outcome that names no such
+    /// agent is unchanged.
+    #[must_use]
+    pub fn with_schedules(mut self, name: &str, followed: SchedulesFollowed) -> Self {
+        if let Self::Done { agents, .. } | Self::PendingPreparation { agents, .. } = &mut self
+            && let Some(agent) = agents.iter_mut().find(|agent| agent.name == name)
+        {
+            agent.schedules = Some(followed);
+        }
+        self
+    }
+
     /// The outcome as every surface writes it: `outcome` is its token, and
     /// a refusal carries `kind`, `field`, `retryable`, `detail` and the
     /// kind's details ([`IdentityRefusal::to_refused`]).
@@ -189,6 +205,12 @@ pub struct AgentOutcome {
     /// update's outcome only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instructions: Option<InstructionOutcome>,
+    /// What became of the schedules that target the agent: paused by its
+    /// archive, resumed by its unarchive, ended by its removal. Present on
+    /// the first answer of those three changes, on a launch whose family
+    /// is given its schedules; a replay states none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schedules: Option<SchedulesFollowed>,
 }
 
 impl AgentOutcome {
@@ -202,6 +224,7 @@ impl AgentOutcome {
             session_id: None,
             seat: None,
             instructions: None,
+            schedules: None,
         }
     }
 }

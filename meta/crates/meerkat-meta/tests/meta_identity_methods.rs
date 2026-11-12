@@ -1488,9 +1488,22 @@ fn an_archive_keeps_an_agent_an_unarchive_restores_it_and_a_removal_retires_its_
         json!("identity_archived"),
         "a message to an archived agent is refused: {refused_send:#}"
     );
+    // A retry replays the outcome. What became of the agent's schedules is
+    // said on the first answer only: this launch has no schedule that
+    // targets the agent, and says so there.
+    assert_eq!(
+        archived["agents"][0]["schedules"],
+        json!({"effect": "paused", "count": 0, "schedules": []}),
+        "{archived:#}"
+    );
+    let mut first = archived.clone();
+    first["agents"][0]
+        .as_object_mut()
+        .expect("an agent")
+        .remove("schedules");
     assert_eq!(
         gateway.ok("meta/identity/archive", named_scout("archive-1")),
-        archived,
+        first,
         "a retry replays"
     );
 
@@ -4492,6 +4505,278 @@ async fn a_create_and_an_update_set_addressability_and_runtime_mode_as_a_roster_
         .expect("scout is registered")
         .spec;
     assert_eq!(unchanged.addressability, AgentAddressability::Addressable);
+    let _ = runtime.shutdown().await;
+}
+
+/// The schedules that target an agent follow its archive, its unarchive
+/// and its removal, and the change says which. An archive pauses the Active
+/// schedules that target the agent and leaves one somebody paused by name
+/// as theirs; the same archive asked again changes nothing; a resume by
+/// name takes a schedule over; the unarchive resumes exactly the schedules
+/// still paused for their target; a removal ends every one. A plan of each
+/// change lists what it would do. Another agent's schedule is never
+/// touched.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_schedules_that_target_an_agent_follow_its_archive_unarchive_and_removal() {
+    use meerkat::SchedulePhase::{Active, Deleted, Paused};
+    use meerkat_meta::schedule_wiring::{MobAgentSchedules, ScheduleMobTargetRegistry};
+
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, _asked, _fail_next_session) = launch(temp.path(), false).await;
+    let schedules = meerkat::ScheduleService::new(Arc::new(meerkat::MemoryScheduleStore::new()));
+    let options = IdentityFamilyOptions::new().with_schedules(Arc::new(MobAgentSchedules::new(
+        schedules.clone(),
+        ScheduleMobTargetRegistry::default(),
+    )));
+    assert!(runtime.attach_identity_policy(in_process_policy(), options));
+    let family = runtime.identity_family().expect("the family");
+    let mob = runtime.mob_handle();
+    let host = ChangeRequester::host("ops");
+    let ask = |request: &'static str, change: IdentityChangeSpec| {
+        let (family, mob, host) = (Arc::clone(&family), mob.clone(), host.clone());
+        async move {
+            let operation =
+                OperationId::for_request(&host.recorded(), request).expect("a request id");
+            family
+                .change(&mob, &host, IdentityChangeCall::new(operation, change))
+                .await
+        }
+    };
+    let plan = |change: IdentityChangeSpec| {
+        let (family, mob, host) = (Arc::clone(&family), mob.clone(), host.clone());
+        async move {
+            let operation =
+                OperationId::for_request(&host.recorded(), "plan").expect("a request id");
+            match family
+                .read(
+                    &mob,
+                    &host,
+                    IdentityRead::Plan(Box::new(IdentityChangeCall::new(operation, change))),
+                )
+                .await
+            {
+                Ok(IdentityReadAnswer::Plan(plan)) => {
+                    serde_json::to_value(*plan).expect("a plan as a surface writes it")
+                }
+                other => panic!("a plan answers one: {other:?}"),
+            }
+        }
+    };
+    let made = ask(
+        "r-1",
+        create_of(json!([
+            {"name": "scout", "profile": "worker"},
+            {"name": "ledger", "profile": "worker"},
+        ])),
+    )
+    .await;
+    assert_eq!(made.token(), "done", "{made:?}");
+    let digest = |name: &'static str| {
+        let (family, mob, host) = (Arc::clone(&family), mob.clone(), host.clone());
+        async move {
+            match family
+                .read(&mob, &host, IdentityRead::Get(GetAgent::new(name)))
+                .await
+            {
+                Ok(IdentityReadAnswer::Get(record)) => record.agent.spec_digest,
+                other => panic!("a get answers one agent: {other:?}"),
+            }
+        }
+    };
+
+    // Four schedules: three that target scout (one of them paused by name)
+    // and one that targets another agent.
+    let schedule = |name: &'static str, agent: &'static str| {
+        let schedules = schedules.clone();
+        async move {
+            schedules
+                .create(meerkat::CreateScheduleRequest {
+                    name: Some(name.to_owned()),
+                    description: None,
+                    trigger: meerkat::TriggerSpec::Once {
+                        due_at_utc: chrono::Utc::now() + chrono::Duration::days(1),
+                    },
+                    target: meerkat::TargetBinding::identity(
+                        meerkat::IdentityTargetBinding::resumable(
+                            agent,
+                            meerkat::ScheduledSessionAction::Prompt {
+                                prompt: meerkat_core::ContentInput::Text("Check in.".into()),
+                                system_prompt: None,
+                                render_metadata: None,
+                                skill_refs: Vec::new(),
+                                additional_instructions: Vec::new(),
+                            },
+                        ),
+                    ),
+                    misfire_policy: meerkat::MisfirePolicy::default(),
+                    overlap_policy: meerkat::OverlapPolicy::default(),
+                    missing_target_policy: meerkat::MissingTargetPolicy::default(),
+                    labels: std::collections::BTreeMap::new(),
+                    planning_horizon_days: Some(1),
+                    planning_horizon_occurrences: Some(1),
+                })
+                .await
+                .unwrap_or_else(|error| panic!("the schedule {name} is created: {error}"))
+                .schedule_id
+        }
+    };
+    let daily = schedule("daily", "scout").await;
+    let weekly = schedule("weekly", "scout").await;
+    let held = schedule("held", "scout").await;
+    let other = schedule("other", "ledger").await;
+    schedules.pause(&held).await.expect("a pause by name");
+    let state = |id: &meerkat::ScheduleId| {
+        let (schedules, id) = (schedules.clone(), id.clone());
+        async move {
+            let schedule = schedules.get(&id).await.expect("the schedule is read");
+            (schedule.phase, schedule.paused_for_target())
+        }
+    };
+    // The names a `schedules` member lists, with its effect and count.
+    let said = |schedules: &Value| -> (String, u64, Vec<String>) {
+        let mut names: Vec<String> = schedules["schedules"]
+            .as_array()
+            .unwrap_or_else(|| panic!("a list of schedules: {schedules:#}"))
+            .iter()
+            .map(|schedule| {
+                assert!(schedule["schedule_id"].is_string(), "{schedule:#}");
+                schedule["name"].as_str().expect("a name").to_owned()
+            })
+            .collect();
+        names.sort_unstable();
+        assert!(schedules.get("incomplete").is_none(), "{schedules:#}");
+        (
+            schedules["effect"].as_str().expect("an effect").to_owned(),
+            schedules["count"].as_u64().expect("a count"),
+            names,
+        )
+    };
+    let names = |names: &[&str]| names.iter().map(ToString::to_string).collect::<Vec<_>>();
+
+    // An archive: the plan lists what it would pause, and the answer what
+    // it paused.
+    let scout = digest("scout").await;
+    let at_archive = scout.clone();
+    let planned = plan(IdentityChangeSpec::Archive(agent_ref("scout", &scout))).await;
+    assert_eq!(
+        said(&planned["schedules"]),
+        ("paused".to_owned(), 2, names(&["daily", "weekly"])),
+        "{planned:#}"
+    );
+    assert_eq!(
+        state(&daily).await,
+        (Active, false),
+        "a plan writes nothing"
+    );
+    let archived = ask(
+        "r-2",
+        IdentityChangeSpec::Archive(agent_ref("scout", &scout)),
+    )
+    .await;
+    assert_eq!(archived.token(), "done", "{archived:?}");
+    assert_eq!(
+        said(&archived.to_json()["agents"][0]["schedules"]),
+        ("paused".to_owned(), 2, names(&["daily", "weekly"])),
+        "{archived:?}"
+    );
+    assert_eq!(state(&daily).await, (Paused, true));
+    assert_eq!(state(&weekly).await, (Paused, true));
+    assert_eq!(state(&held).await, (Paused, false), "a pause by name stays");
+    assert_eq!(state(&other).await, (Active, false), "another agent's");
+
+    // The same archive asked again: its outcome again, no schedules said,
+    // nothing changed.
+    let again = ask(
+        "r-2",
+        IdentityChangeSpec::Archive(agent_ref("scout", &scout)),
+    )
+    .await;
+    assert_eq!(again.token(), "done", "{again:?}");
+    assert!(
+        again.to_json()["agents"][0].get("schedules").is_none(),
+        "{again:?}"
+    );
+    assert_eq!(state(&daily).await, (Paused, true));
+    assert_eq!(state(&held).await, (Paused, false));
+
+    // A resume by name while the agent is archived takes the schedule over.
+    schedules.resume(&weekly).await.expect("a resume by name");
+    assert_eq!(state(&weekly).await, (Active, false));
+
+    // The unarchive resumes exactly the schedule still paused for its
+    // target.
+    let scout = digest("scout").await;
+    let planned = plan(IdentityChangeSpec::Unarchive(agent_ref("scout", &scout))).await;
+    assert_eq!(
+        said(&planned["schedules"]),
+        ("resumed".to_owned(), 1, names(&["daily"])),
+        "{planned:#}"
+    );
+    let restored = ask(
+        "r-3",
+        IdentityChangeSpec::Unarchive(agent_ref("scout", &scout)),
+    )
+    .await;
+    assert_eq!(restored.token(), "done", "{restored:?}");
+    assert_eq!(
+        said(&restored.to_json()["agents"][0]["schedules"]),
+        ("resumed".to_owned(), 1, names(&["daily"])),
+        "{restored:?}"
+    );
+    assert_eq!(state(&daily).await, (Active, false));
+    assert_eq!(state(&weekly).await, (Active, false));
+    assert_eq!(state(&held).await, (Paused, false), "a pause by name stays");
+
+    // The archive asked again after the unarchive undid it moves nothing.
+    let stale = ask(
+        "r-2",
+        IdentityChangeSpec::Archive(agent_ref("scout", &at_archive)),
+    )
+    .await;
+    assert_eq!(stale.token(), "done", "{stale:?}");
+    assert_eq!(state(&daily).await, (Active, false));
+
+    // A removal ends every schedule that targets the agent.
+    let scout = digest("scout").await;
+    let planned = plan(IdentityChangeSpec::Remove(agent_ref("scout", &scout))).await;
+    assert_eq!(
+        said(&planned["schedules"]),
+        ("ended".to_owned(), 3, names(&["daily", "held", "weekly"])),
+        "{planned:#}"
+    );
+    let removed = ask(
+        "r-4",
+        IdentityChangeSpec::Remove(agent_ref("scout", &scout)),
+    )
+    .await;
+    assert_eq!(removed.token(), "done", "{removed:?}");
+    assert_eq!(
+        said(&removed.to_json()["agents"][0]["schedules"]),
+        ("ended".to_owned(), 3, names(&["daily", "held", "weekly"])),
+        "{removed:?}"
+    );
+    for ended in [&daily, &weekly, &held] {
+        assert_eq!(state(ended).await.0, Deleted);
+    }
+    assert_eq!(state(&other).await, (Active, false), "another agent's");
+
+    // A change that stops nobody says nothing of schedules.
+    let ledger = digest("ledger").await;
+    let updated = ask(
+        "r-5",
+        IdentityChangeSpec::Update(
+            serde_json::from_value(json!({"name": "ledger",
+                "expected_spec_digest": ledger.as_str(),
+                "set": {"display_name": "The ledger"}}))
+            .expect("an update as a surface writes it"),
+        ),
+    )
+    .await;
+    assert_eq!(updated.token(), "done", "{updated:?}");
+    assert!(
+        updated.to_json()["agents"][0].get("schedules").is_none(),
+        "{updated:?}"
+    );
     let _ = runtime.shutdown().await;
 }
 

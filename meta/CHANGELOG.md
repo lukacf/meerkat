@@ -267,8 +267,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     rules give a new agent of it: allowed, needs a decision (with the
     decision's lines) or not allowed (with the rule's reason; it cannot be
     picked).
+  - New agent and Edit list who reaches an agent (Reachability: it can
+    receive messages, or it is internal only) and how it runs (as its
+    profile says, on its own, or turn by turn), each choice in words with
+    what it means. A create writes `addressability` and
+    `runtime_mode_override` only where they are not the default, an edit
+    only where they changed, and a refusal that names one shows at its
+    field. An edit cannot hand the way an agent runs back to its profile,
+    so that choice is listed only for an agent whose record names no way.
   - An agent's drawer and its details pane offer Edit (display name,
-    instructions, context, labels, profile, peers), Archive and Remove. Edit
+    instructions, context, labels, profile, peers, reachability and how it
+    runs), Archive and Remove. Edit
     sends only what changed, against the agent as it was read; an agent that
     changed in the meantime is refused and read again on request, never
     resent on its own. A profile change is judged by the gateway: the form
@@ -277,7 +286,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   - Remove asks first and says that the name can never be used again and
     that archive is the reversible choice. The confirmation of an archive,
     an unarchive and a removal is a dialog: it takes focus on Cancel, and
-    Escape or a click outside cancels it.
+    Escape or a click outside cancels it. The confirmation of an archive
+    and of a removal says that the agent's last conversation is harvested,
+    as for any agent that leaves the team.
+  - The result of an archive, an unarchive and a removal says what became
+    of the schedules that target the agent, where the answer states it
+    (`schedules`): how many were paused, run again or were ended, and which
+    by name; a schedule without a name is counted, and ids are among the
+    technical details. An answer that is `incomplete` says so and offers
+    Try again, which sends the same request. Only a first answer states the
+    schedules, so the Console takes no later answer of the same request in
+    place of the first: what the first answer said stays.
+  - An agent whose status says `roster_listing_superseded` reads a note at
+    its status in the details pane: the host's configuration lists its name
+    too, that entry is not applied, and a change made in the Console
+    changes the agent's record.
   - Archived agents are listed under the roster with Unarchive and Remove.
     They are read when the list is opened.
   - An outcome reads in words; an instructions change says when it reaches
@@ -296,7 +319,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   - The controls follow the experience read's `identity_changes` section
     (`available`, `can_create`, `can_change`, `can_remove`) and each agent's
     `affordances.can_change_identity` and `can_remove_identity`. The details
-    pane shows who asked for an agent and when, as its record says (a person
+    pane shows how an agent runs, and who asked for it and when, as its
+    record says (a person
     by name, never by key), and the archived agents can be listed, wherever
     the gateway serves those reads, with or without a control. Every agent
     looks the same in the roster, whoever asked for it.

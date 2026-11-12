@@ -7326,6 +7326,7 @@ mod tests {
             "billing_hard_limit_reached",
             "enforced_spend_limit_reached",
             "quota_exceeded",
+            "usage_limit_reached",
         ];
         for code in quota_codes {
             assert!(

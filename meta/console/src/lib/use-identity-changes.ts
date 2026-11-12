@@ -8,6 +8,7 @@ import React from "react";
 import { createConsoleId } from "./id";
 import {
   answeredRefusalOf,
+  hasNoMember,
   identityRefusalOf,
   parseAgentPage,
   parseAgentRecord,
@@ -99,8 +100,9 @@ export interface IdentityChangesApi {
   /** One agent's record, read now: its spec digest is what a change of it
    * names. */
   loadRecord(name: string): Promise<AgentRecord>;
-  /** The archived agents. */
-  loadArchived(): Promise<AgentSummary[]>;
+  /** The agents without a member, so without a row of the roster: the
+   * archived ones, and those that still wait for their host. */
+  loadOffRoster(): Promise<AgentSummary[]>;
   /** Send `request` as the change `change` under `requestId`. `name` is
    * the agent as people know it, kept with a request that waits for a
    * decision. */
@@ -203,12 +205,12 @@ export function useIdentityChanges({
         return { profiles, peers };
       },
       loadRecord,
-      loadArchived: async (): Promise<AgentSummary[]> => {
+      loadOffRoster: async (): Promise<AgentSummary[]> => {
         const agents = await readAllPages(async (after) => {
           const page = parseAgentPage(await runRef.current("listAgentRecords", { include_archived: true, ...(after ? { after } : {}) }));
           return { items: page.agents, next: page.next };
         });
-        return agents.filter((agent) => agent.archived);
+        return agents.filter(hasNoMember);
       },
       change,
       plan: async (kind, request): Promise<IdentityPlanResult> => {

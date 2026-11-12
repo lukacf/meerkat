@@ -186,16 +186,20 @@ describe("the console's changes of long-term agents", () => {
     expect(family.agents.get("warden").profile).toBe("worker");
   });
 
-  it("reads every page of the directory and of the archived agents", async () => {
+  it("reads every page of the directory and of the agents without a member", async () => {
     const family = createScriptedIdentityFamily({ pageSize: 1 });
     family.seed({ name: "oldhand", archived: true });
+    // One that still waits for its host is read with the archived ones;
+    // an agent that has a member is not.
+    family.seed({ name: "porter", readiness: "preparation_pending" });
     family.seed({ name: "relic", archived: true });
     const run = async (command: IdentityCommand, params: Record<string, unknown>) =>
       family.handle(consoleCommandMethod(CONSOLE_COMMAND_NAMES[command]), params).result;
     const { result } = renderHook(() => useIdentityChanges({ flags: ALL, readable: true, run, onChanged: () => {} }));
     const directory = await result.current!.loadDirectory();
     expect(directory.profiles.map((entry) => entry.profile)).toEqual(["worker", "reviewer", "operator"]);
-    expect(directory.peers.map((entry) => entry.name)).toEqual(["helper", "warden"]);
-    expect((await result.current!.loadArchived()).map((agent) => agent.name)).toEqual(["oldhand", "relic"]);
+    expect(directory.peers.map((entry) => entry.name)).toEqual(["helper", "warden", "porter"]);
+    expect((await result.current!.loadOffRoster()).map((agent) => [agent.name, agent.archived]))
+      .toEqual([["oldhand", true], ["porter", false], ["relic", true]]);
   });
 });

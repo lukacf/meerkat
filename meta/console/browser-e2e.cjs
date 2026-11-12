@@ -4988,6 +4988,9 @@ const scenarios = [
 async function runIdentityChangesStoryProof() {
   const { createScriptedIdentityFamily } = require("./fixtures/scripted-identity-family.cjs");
   const family = createScriptedIdentityFamily();
+  // An agent whose host still prepares it: it has no member and no row of
+  // the roster, and is listed with the archived agents, by name.
+  family.seed({ name: "porter", display_name: "The porter", profile: "worker", readiness: "preparation_pending" });
   const server = await startMockConsoleServer({ identityFamily: family });
   const evidenceDir = process.env.META_BROWSER_EVIDENCE || path.join(repoRoot, "output/playwright/console-acceptance");
   fs.mkdirSync(evidenceDir, { recursive: true });
@@ -5119,6 +5122,13 @@ async function runIdentityChangesStoryProof() {
     assert.equal(await page.getByTestId("roster-archived").count(), 0);
     await page.getByTestId("roster-archived-open").click();
     await page.getByTestId("roster-archived:scout").waitFor();
+    // The agent that waits for its host is in the same list, by name, with
+    // its state in words and no control; the roster has no row for it.
+    const waitingRow = page.getByTestId("roster-waiting:porter");
+    await waitingRow.getByText("The porter").waitFor();
+    await waitingRow.getByText("Waiting for its host").waitFor();
+    assert.equal(await waitingRow.locator("button").count(), 0);
+    assert.equal(await agent("porter").count(), 0);
     await page.screenshot({ path: path.join(evidenceDir, "identity-changes-archived.png"), fullPage: true });
     await page.getByTestId("roster-archived-action:scout:unarchive").click();
     await page.getByTestId("identity-confirm:scout:unarchive").getByTestId("identity-confirm-yes").click();

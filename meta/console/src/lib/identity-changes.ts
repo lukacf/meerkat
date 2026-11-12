@@ -226,6 +226,18 @@ function summaryOf(raw: Raw): AgentSummary | null {
   };
 }
 
+/** Whether an agent's record says that it still waits for its host's
+ * preparation: its create is committed and it has no member yet. */
+export function waitsForItsHost(agent: Pick<AgentSummary, "archived" | "readiness">): boolean {
+  return !agent.archived && agent.readiness === "preparation_pending";
+}
+
+/** Whether an agent has no member, so no row of the roster: it is archived,
+ * or it still waits for its host. The list under the roster shows these. */
+export function hasNoMember(agent: Pick<AgentSummary, "archived" | "readiness">): boolean {
+  return agent.archived || waitsForItsHost(agent);
+}
+
 /** The answer of `meta/identity/get`; null when it is no agent's record. */
 export function parseAgentRecord(value: unknown): AgentRecord | null {
   const raw = rawOf(value);

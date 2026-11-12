@@ -980,7 +980,7 @@ describe("long-term agents in the console", () => {
       // count: it has read none of them.
       const open = await find(view, "roster-archived-open");
       expect(open.getAttribute("aria-expanded")).toBe("false");
-      expect(open.textContent).toBe("Archived agents");
+      expect(open.textContent).toBe("Archived and waiting agents");
       expect(present(view, "roster-archived")).toBe(false);
       await selectAgent(view, "warden");
       await settle(100);

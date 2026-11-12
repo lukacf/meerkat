@@ -736,8 +736,12 @@ by how it came to exist.
   the team follows the rest. Only the first answer of a change states its
   schedules: after a lost answer, or after **Try again**, the Console shows
   what it was told and takes no later answer in place of the first.
-- **Archived agents**, under the roster, lists the archived agents with
-  **Unarchive** and **Remove**. They are read when you open the list.
+- **Archived and waiting agents**, under the roster, lists the agents that
+  have no member and so no row of the roster: the archived agents, with
+  **Unarchive** and **Remove**, and the agents whose host still prepares
+  them, each by name with the state "Waiting for its host" and no control
+  (such an agent joins the roster when its host is done). They are read
+  when you open the list.
 - A change answers in one of four ways. It is made. A person must decide it
   first: nothing has changed, the notice shows until when the decision is
   open, and **Withdraw request** takes the request back. The agent is being
@@ -754,7 +758,9 @@ by how it came to exist.
   twice.
 - The details pane of an agent has a **Record** section: how it runs, and,
   for an agent that was asked for at run time, who asked for it, when, and
-  whether the host's rules allowed it or a person decided it.
+  whether the host's rules allowed it or a person decided it. It says how
+  many requests wait for the agent (a change held for a person's decision,
+  for one); their ids are among its technical details.
 - An agent whose status says `roster_listing_superseded` (the host's
   configuration lists its name while the agent runs from its own record)
   reads a note at its status in the details pane: that entry is not

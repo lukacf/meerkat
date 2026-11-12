@@ -302,7 +302,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     too, that entry is not applied, and a change made in the Console
     changes the agent's record.
   - Archived agents are listed under the roster with Unarchive and Remove.
-    They are read when the list is opened.
+    The same list ("Archived and waiting agents") shows an agent whose host
+    still prepares it, which has no member and so no row of the roster: by
+    name, with the state "Waiting for its host" and no control. The list is
+    read when it is opened.
+  - The Record of an agent's details says how many requests wait for the
+    agent; their operation ids (`open_operations`) are among its technical
+    details.
   - An outcome reads in words; an instructions change says when it reaches
     the agent. A refusal reads in the console's own sentence for its kind,
     at the form field it names when the form has one; the gateway's

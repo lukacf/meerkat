@@ -444,53 +444,6 @@ async fn a_spawn_wired_to_a_peer_whose_wake_is_bound_installs_both_sides_before_
     fixture.finish().await;
 }
 
-/// A kickoff notice that cannot be prepared for one of the member's peers
-/// still reaches the others: each recipient is prepared on its own, and one
-/// recipient's failure is recorded, not the end of the loop.
-///
-/// The peer whose preparation fails here is one whose wake has not bound it,
-/// on a tree where endpoint resolution still looked its comms runtime up
-/// first. With that resolution fixed its preparation succeeds too, so this
-/// row is RED only without that fix: it was shown RED on the rows commit,
-/// GREEN with this change alone on top of the rows commit, and GREEN at the
-/// tip.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_kickoff_notice_that_cannot_be_prepared_for_one_peer_still_reaches_the_others() {
-    let fixture = kickoff_notice_fixture("we-notice-others").await;
-    // The held peer's name sorts between the two live peers' names, so in
-    // whichever order the member's peers are taken, a live one follows it.
-    let before = fixture.spawn("we-a-live").await;
-    let (held, mut hold) = peer_held_before_bind(&fixture, "we-m-held").await;
-    let after = fixture.spawn("we-z-live").await;
-
-    // The member's starting notice wakes the held peer; its wake holds at
-    // its bind. The kickoff then resolves: the started notice is owed to
-    // all three peers while the one in the middle cannot be prepared for.
-    fixture.client.block();
-    let member = spawn_kickoff_member(&fixture, "we-others-member").await;
-    wait_held_before_bind(&fixture, &held, &mut hold).await;
-    fixture.client.release();
-    wait_kickoff_started(&fixture, &member).await;
-    assert!(
-        actor_answer_time(&fixture).await < ACTOR_ANSWER_BOUND,
-        "the notices do not hold the actor"
-    );
-
-    hold.release.send_replace(true);
-    fixture
-        .wait_residency(&held, Some(mob_dsl::MemberMaterializationPhase::Live))
-        .await;
-    let live = [before, after];
-    let received =
-        kickoff_notices_settled(&fixture, &live, std::slice::from_ref(&member), WAIT).await;
-    assert_eq!(
-        received,
-        vec![starting_then_started(), starting_then_started()],
-        "both live peers hold the member's kickoff notices once each, in order"
-    );
-    fixture.finish().await;
-}
-
 /// A spawn that already wired a peer whose wake has not bound it, and is
 /// then refused (its next edge cannot be journaled), is rolled back at once:
 /// the rollback's endpoint stage takes that peer by its recorded endpoint.

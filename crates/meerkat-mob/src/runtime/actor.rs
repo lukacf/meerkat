@@ -6393,10 +6393,11 @@ pub(super) struct PeerDeliveryInflight {
     to: AgentIdentity,
     cancel_token: tokio_util::sync::CancellationToken,
     settled: tokio::sync::watch::Receiver<bool>,
-    /// The delivery is a kickoff lifecycle notice (see
-    /// [`kickoff_notice`]): the next notice of `from` to `to` waits for it
-    /// to settle.
-    kickoff_notice: bool,
+    /// The delivery sends the kickoff lifecycle notices of `from` to `to`
+    /// (see [`kickoff_notice`]): the queue it sends from, which takes the
+    /// next notice of that pair while the delivery runs. `None` for a peer
+    /// message.
+    kickoff_notices: Option<Arc<kickoff_notice::KickoffNoticeQueue>>,
     /// Tokio task identity captured from the `AbortHandle` returned by
     /// `JoinSet::spawn`. A panicked task returns no `PeerDeliveryCompletion`,
     /// so this is the only exact bridge back to the logical delivery id.
@@ -17606,7 +17607,7 @@ impl MobActor {
                 to,
                 cancel_token,
                 settled,
-                kickoff_notice: false,
+                kickoff_notices: None,
                 #[cfg(not(target_arch = "wasm32"))]
                 task_id: abort_handle.id(),
             },
@@ -32256,6 +32257,15 @@ impl MobActor {
                     reply_tx,
                 } => {
                     let _ = reply_tx.send(Ok(self.owed_member_wake_retry_armed(&agent_identity)));
+                }
+                #[cfg(test)]
+                MobCommand::EmitKickoffNoticeForTest {
+                    agent_identity,
+                    intent,
+                    reply_tx,
+                } => {
+                    let emitted = self.notify_kickoff_event(&agent_identity, intent).await;
+                    let _ = reply_tx.send(emitted);
                 }
                 #[cfg(test)]
                 MobCommand::ParkActorForObservationTest {
@@ -66027,6 +66037,14 @@ impl MobActor {
             successful_wiring_targets,
             planned_wiring_targets,
         } = rollback_context;
+        // The member leaves its seat: nothing it still owes a peer on the
+        // delivery lane (a kickoff notice handed off before the spawn
+        // failed) is sent for it, and nothing still owed to it is sent
+        // either. A retirement by command cancels these in a stage of its
+        // own; the rollback's retirement skips that stage, so the cancel is
+        // here.
+        self.cancel_peer_deliveries_for_member(agent_identity, "member spawn is rolling back")
+            .await?;
         let Some((custody, material, owner)) = self.claim_retained_spawn_rollback(agent_identity)
         else {
             return Err(MobError::LifecycleOperationPending {
@@ -67059,12 +67077,6 @@ impl MobActor {
             return Ok(());
         };
 
-        // Each recipient's notice is prepared on its own: a recipient whose
-        // notice cannot be prepared is recorded with its name and the
-        // notice's kind, and the member's other peers still get theirs. The
-        // first such failure is this function's result, which its callers
-        // record; nothing treats it as a failure of the transition.
-        let mut first_failure = None;
         for effect in effects {
             let MobRuntimeBridgeEffect::DeliverLifecycleNotice { peer_id, intent } = effect;
             let recipient_entry = {
@@ -67074,85 +67086,103 @@ impl MobActor {
             let Some(recipient_entry) = recipient_entry else {
                 continue;
             };
-            let prepared = async {
-                // A kickoff status notice is content in MobMachine's verdict:
-                // it is delivered like a message, so a recipient that is not
-                // materialized is woken by its delivery, never skipped.
-                if !self.peer_notice_delivers(
-                    &recipient_entry.agent_identity,
-                    agent_identity,
-                    mob_dsl::PeerInputClass::Content,
-                )? {
-                    return Ok(None);
-                }
-                let (recipient_spec, dormant_endpoint) = match self
-                    .resolve_wiring_endpoint(&recipient_entry, "notify_kickoff_event")
-                    .await?
-                {
-                    WiringEndpoint::Local { spec, .. } | WiringEndpoint::PeerOnly { spec, .. } => {
-                        (spec, false)
-                    }
-                    WiringEndpoint::LocalDormant { spec, .. } => (spec, true),
-                    WiringEndpoint::Placed { .. } => {
-                        return Err(MobError::WiringError(format!(
-                            "kickoff lifecycle notice to placed member '{}' has no remote-recipient realization",
-                            recipient_entry.agent_identity
-                        )));
-                    }
-                };
-                // The recipient is not live in MobMachine's residency:
-                // Dormant, or Waking, whether or not its wake has built its
-                // comms runtime yet. The send wakes it, or joins its wake.
-                let recipient_unmaterialized = dormant_endpoint
-                    || super::boot_plan::domain_member_is_unmaterialized(
-                        self.dsl_authority.state(),
-                        &recipient_entry.agent_identity,
-                    );
-                // The actor prepares the notice and never awaits its send
-                // (see `kickoff_notice`): a send to a recipient that is not
-                // live waits for the recipient's wake, which this actor runs,
-                // and a send to a live one waits on the recipient's drain.
-                let command = Self::peer_event_command(
-                    intent,
-                    &recipient_spec,
+            // The actor prepares the notice and never awaits its send (see
+            // `kickoff_notice`): a send to a recipient that is not live
+            // waits for the recipient's wake, which this actor runs, and a
+            // send to a live one waits on the recipient's drain.
+            //
+            // One rule for a notice that is not delivered, whether its
+            // preparation here or its send on the lane failed: it is
+            // recorded, and the member's remaining peers are still served.
+            match self
+                .prepare_kickoff_notice(
                     agent_identity,
                     &entry,
-                    &self.sender_notice_spec(&entry).await?,
-                )?;
-                Ok::<_, MobError>(Some((recipient_unmaterialized, command)))
-            }
-            .await;
-            match prepared {
-                Ok(Some((recipient_unmaterialized, command))) => {
-                    self.spawn_kickoff_notice_delivery(kickoff_notice::KickoffNoticeDelivery {
-                        from: agent_identity.clone(),
-                        to: recipient_entry.agent_identity.clone(),
-                        intent,
-                        recipient_unmaterialized,
-                        sender_comms: Arc::clone(&sender_comms),
-                        command,
-                    });
-                }
+                    &recipient_entry,
+                    intent,
+                    &sender_comms,
+                )
+                .await
+            {
+                Ok(Some(notice)) => self.spawn_kickoff_notice_delivery(notice),
                 Ok(None) => {}
-                Err(error) => {
-                    tracing::warn!(
-                        mob_id = %self.definition.id,
-                        from = %agent_identity,
-                        to = %recipient_entry.agent_identity,
-                        intent,
-                        error = %error,
-                        "a kickoff notice could not be prepared for one peer; the member's other peers still get theirs"
-                    );
-                    if first_failure.is_none() {
-                        first_failure = Some(error);
-                    }
-                }
+                Err(error) => kickoff_notice::record_unprepared_kickoff_notice(
+                    &self.definition.id,
+                    agent_identity,
+                    &recipient_entry.agent_identity,
+                    intent,
+                    &error,
+                ),
             }
         }
-        match first_failure {
-            Some(error) => Err(error),
-            None => Ok(()),
+        Ok(())
+    }
+
+    /// Prepare one kickoff notice of `agent_identity` (`entry`) for
+    /// `recipient_entry` on the actor's step: MobMachine's verdict on it, the
+    /// recipient's endpoint and the finished comms command. `None` when
+    /// MobMachine's verdict is that the recipient gets no notice.
+    async fn prepare_kickoff_notice(
+        &mut self,
+        agent_identity: &AgentIdentity,
+        entry: &RosterEntry,
+        recipient_entry: &RosterEntry,
+        intent: &'static str,
+        sender_comms: &Arc<dyn CoreCommsRuntime>,
+    ) -> Result<Option<kickoff_notice::KickoffNoticeDelivery>, MobError> {
+        // A kickoff status notice is content in MobMachine's verdict: it
+        // is delivered like a message, so a recipient that is not
+        // materialized is woken by its delivery, never skipped.
+        if !self.peer_notice_delivers(
+            &recipient_entry.agent_identity,
+            agent_identity,
+            mob_dsl::PeerInputClass::Content,
+        )? {
+            return Ok(None);
         }
+        #[cfg(test)]
+        kickoff_notice::kickoff_notice_preparation_fault_for_test(
+            &self.definition.id,
+            &recipient_entry.agent_identity,
+        )?;
+        let (recipient_spec, dormant_endpoint) = match self
+            .resolve_wiring_endpoint(recipient_entry, "notify_kickoff_event")
+            .await?
+        {
+            WiringEndpoint::Local { spec, .. } | WiringEndpoint::PeerOnly { spec, .. } => {
+                (spec, false)
+            }
+            WiringEndpoint::LocalDormant { spec, .. } => (spec, true),
+            WiringEndpoint::Placed { .. } => {
+                return Err(MobError::WiringError(format!(
+                    "kickoff lifecycle notice to placed member '{}' has no remote-recipient realization",
+                    recipient_entry.agent_identity
+                )));
+            }
+        };
+        // The recipient is not live in MobMachine's residency: Dormant,
+        // or Waking, whether or not its wake has built its comms runtime
+        // yet. The send wakes it, or joins its wake.
+        let recipient_unmaterialized = dormant_endpoint
+            || super::boot_plan::domain_member_is_unmaterialized(
+                self.dsl_authority.state(),
+                &recipient_entry.agent_identity,
+            );
+        let command = Self::peer_event_command(
+            intent,
+            &recipient_spec,
+            agent_identity,
+            entry,
+            &self.sender_notice_spec(entry).await?,
+        )?;
+        Ok(Some(kickoff_notice::KickoffNoticeDelivery {
+            from: agent_identity.clone(),
+            to: recipient_entry.agent_identity.clone(),
+            intent,
+            recipient_unmaterialized,
+            sender_comms: Arc::clone(sender_comms),
+            command,
+        }))
     }
 
     /// The peer spec a notice from `entry` names its sender by, resolved as

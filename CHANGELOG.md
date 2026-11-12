@@ -35,6 +35,101 @@ them.
 
 ## [Unreleased]
 
+### Fixed
+
+- `meerkat-mob`: a kickoff notice to a wired peer that was being woken held
+  the whole mob for 30 seconds (0.9.7 through 0.9.14: since a send to a member
+  that is not live began to wake it). When a member's kickoff changed phase,
+  for example resolved, while a wired peer's wake was between its applied
+  plan and its readiness, the mob's actor sent the notice on its own step.
+  The send joined the peer's wake, the wake's next step needed the actor, and
+  the step ended only when the send's budget did (`wake_timed_out`). Until
+  then every other command of the mob waited: a spawn, a wire, an identity
+  change, a status read, a stop. The notice was not delivered, and the peer
+  was woken without it. The actor now prepares each kickoff notice and hands
+  its send to a task it owns on the peer delivery lane, for live recipients
+  and recipients that are not live alike, so the peer's wake is served while
+  the notice waits for it. A kickoff notice still wakes a peer that is not
+  live. What holds for the notices now:
+  - Order: the notices of one member to one peer are sent one at a time, in
+    the order the kickoff went through its phases. Notices to different
+    peers, and of different members, are independent, so a peer that cannot
+    be reached delays only the notices owed to it. A notice behind one that
+    cannot be delivered is attempted when that one's send budget has ended.
+    The budget is the sending member's comms ack timeout (30 seconds by
+    default), not a constant of the lane.
+  - Bound: at most eight notices of one member are pending for one peer, the
+    one being sent included. A notice owed beyond that takes the place of the
+    oldest one still queued, never of the one being sent, so the latest phase
+    (a failure or a cancellation included) reaches the peer and the notices
+    that stay keep their order. There is no bound across peers or members:
+    the lane holds at most eight notices for every wired pair of members.
+  - A notice that is not delivered is logged at WARN with the member
+    (`from`), the peer (`to`), the notice's kind (`intent`) and a `class`
+    (`preparation_failed`, `send_failed`, `pending_bound` or `cancelled`),
+    and is not sent again. The messages are `a kickoff notice to a peer that
+    was not materialized was not delivered`, `a kickoff notice to a live peer
+    was not delivered` (before: `failed to emit kickoff lifecycle notice`,
+    without the peer) and `a kickoff notice could not be prepared for a peer
+    and was not delivered`. A notice whose preparation or send fails for one
+    peer no longer skips the member's remaining peers.
+  - Cancel: a stop, a complete, a reset, a destroy or a shutdown of the mob,
+    an unwire of the edge, a retirement of either member and the rollback of
+    a failed spawn cancel the notices that are pending when they start, as
+    they cancel a pending peer message. A notice such a command emits itself
+    (the cancellation of a kickoff that a stop closes) is handed to the lane
+    after that cancel and ends within its send budget; the stop does not
+    wait for it, and nothing is delivered after a destroy. A member released
+    to Dormant keeps its pending notices: they are still true of it, and
+    their send wakes nothing.
+
+- `meerkat-mob`: a member that was being woken could not be wired, messaged
+  or notified for a short span of its wake (0.9.7 through 0.9.14: since
+  members are woken on demand). A wake creates the member's session, and
+  with it its comms runtime, before it binds the member's operation record.
+  To find a member's peer endpoint the mob read its recorded endpoint first
+  for a member that is not materialized, but for a member that is being woken
+  only after a lookup of its comms runtime had found nothing. In that span
+  the lookup found the runtime, and the call was refused with `missing
+  generated owner operation binding`. A spawn wired to the member by the
+  definition's wiring rules was refused; when the refused spawn's rollback
+  met the same member, the spawn answered `rollback remains owned for retry`
+  and the new member stayed seated with part of its edges until the
+  rollback's next attempt, seconds later. A kickoff notice owed to the member
+  was dropped with a log record. A host peer message to it was refused. A
+  member woken at the same time recorded its edge to it as owing a repair.
+  The mob now reads the recorded endpoint, without looking the comms runtime
+  up, for a member that is not materialized and for one whose wake has not
+  yet applied its plan, wherever it resolves an endpoint, the rollback of a
+  refused spawn included. Such a member takes the edge on its own side when
+  its wake restores its wiring. A member whose wake has applied its plan is
+  wired through its comms runtime, as before.
+
+## [0.9.14] - 2026-11-11
+
+### Highlights
+
+- A session whose history one OpenAI-family service produced no longer
+  fails its first turn on another (the OpenAI API, the ChatGPT backend, Azure
+  OpenAI, GitHub Copilot, a self-hosted server): encrypted reasoning and the
+  other opaque items of a response are replayed only to the service that
+  issued them (0.5.2 through 0.9.13). After a restart, earlier turns are
+  replayed without that material. See Breaking, Added, Fixed and Known
+  limitations.
+
+- A request that an OpenAI-family service refuses inside a response stream
+  fails once, with the service's cause, instead of being sent again until
+  the retry policy is used up (0.8.25 through 0.9.13). See Fixed.
+
+- GitHub Copilot routes send a current client identity, so the Copilot API
+  no longer marks every listed model `client_version_deprecated`. See
+  Changed.
+
+- A file write that the operating system refuses (a full disk, a quota, a
+  file size limit) no longer replaces a stored credential, a realm manifest,
+  a task file or an export with an empty file while the operation reports
+  success (0.3.0 through 0.9.13). See Fixed.
+
 ### Breaking
 
 - Behaviour-only (not measured by the gate): `meerkat-core`:
@@ -278,57 +373,6 @@ them.
   neither stays behind to be waited on. A file an earlier release already
   emptied is not restored.
 
-- `meerkat-mob`: a kickoff notice to a wired peer that was being woken held
-  the whole mob for 30 seconds (0.9.7 through 0.9.14: since a send to a member
-  that is not live began to wake it). When a member's kickoff changed phase,
-  for example resolved, while a wired peer's wake was between its applied
-  plan and its readiness, the mob's actor sent the notice on its own step.
-  The send joined the peer's wake, the wake's next step needed the actor, and
-  the step ended only when the send's budget did (`wake_timed_out`). Until
-  then every other command of the mob waited: a spawn, a wire, an identity
-  change, a status read, a stop. The notice was not delivered, and the peer
-  was woken without it. The actor now prepares each kickoff notice and hands
-  its send to a task it owns on the peer delivery lane, for live recipients
-  and recipients that are not live alike, so the peer's wake is served while
-  the notice waits for it. The notices of one member to one peer are sent one
-  at a time, in the order the kickoff went through its phases; at most eight
-  may be pending for one member and one peer, and a notice beyond that is
-  refused and logged. A notice that cannot be delivered is logged as before
-  (`a kickoff notice to a peer that was not materialized was not delivered`,
-  or `failed to emit kickoff lifecycle notice` for a live recipient), now
-  with the recipient and the notice's kind. A failed send to one live peer no
-  longer skips the member's remaining peers. A notice behind one that cannot
-  be delivered is attempted when that one's 30 second budget has ended. A
-  stop, a complete, a reset, a destroy or a shutdown of the mob, an unwire of
-  the edge and a retirement of either member cancel a pending notice as they
-  cancel a pending peer message. A kickoff notice still wakes a peer that is
-  not live.
-
-- `meerkat-mob`: a member that was being woken could not be wired, messaged
-  or notified for a short span of its wake (0.9.7 through 0.9.14: since
-  members are woken on demand). A wake creates the member's session, and
-  with it its comms runtime, before it binds the member's operation record.
-  To find a member's peer endpoint the mob read its recorded endpoint first
-  for a member that is not materialized, but for a member that is being woken
-  only after a lookup of its comms runtime had found nothing. In that span
-  the lookup found the runtime, and the call was refused with `missing
-  generated owner operation binding`. A spawn wired to the member by the
-  definition's wiring rules was refused; when the refused spawn's rollback
-  met the same member, the spawn answered `rollback remains owned for retry`
-  and the new member stayed seated with part of its edges until the
-  rollback's next attempt, seconds later. A kickoff notice owed to the member
-  was dropped with a log record. A host peer message to it was refused. A
-  member woken at the same time recorded its edge to it as owing a repair.
-  The mob now reads the recorded endpoint, without looking the comms runtime
-  up, for a member that is not materialized and for one whose wake has not
-  yet applied its plan, wherever it resolves an endpoint, the rollback of a
-  refused spawn included. Such a member takes the edge on its own side when
-  its wake restores its wiring. A member whose wake has applied its plan is
-  wired through its comms runtime, as before. A kickoff notice that cannot be
-  prepared for one of a member's peers no longer skips the peers after it:
-  it is logged with the peer and the notice's kind (`a kickoff notice could
-  not be prepared for one peer`), and the others get theirs.
-
 ### Known limitations
 
 - The issuer of OpenAI-family continuity material is the service (a kind of
@@ -337,6 +381,17 @@ them.
   same service at the same endpoint inside one process (two API keys of
   different organisations, two ChatGPT accounts, two Copilot accounts on one
   API host). Whether a service refuses that is not known; it was not tested.
+
+- `rustix` 1.1.5 in Cargo.lock is named by RUSTSEC-2026-0486, as in 0.9.12
+  and 0.9.13: the `getxattr` and `listxattr` functions of `rustix::fs` (with
+  their `l` and `f` forms) mark bytes they never wrote as initialized when
+  they are given a zero-length buffer. `meerkat-core` depends on `rustix`
+  directly, and it is also taken through `fs4`, `tempfile`, `which`, and
+  `xattr` through `tar`. No Meerkat crate calls those functions. Of the
+  crates Meerkat builds with only `xattr` does, and `tar`, the one crate
+  that uses `xattr`, calls it only to set attributes while unpacking, so
+  Meerkat's own use is not known to be affected. `rustix` 1.1.6 has the
+  fix; this release still builds with 1.1.5.
 
 ## [0.9.13] - 2026-11-11
 
@@ -48174,7 +48229,8 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.13...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.14...HEAD
+[0.9.14]: https://github.com/lukacf/meerkat/compare/v0.9.13...v0.9.14
 [0.9.13]: https://github.com/lukacf/meerkat/compare/v0.9.12...v0.9.13
 [0.9.12]: https://github.com/lukacf/meerkat/compare/v0.9.11...v0.9.12
 [0.9.11]: https://github.com/lukacf/meerkat/compare/v0.9.10...v0.9.11

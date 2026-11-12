@@ -2077,8 +2077,13 @@ def macos_emit(context, log, name, destination, *, test, label):
     return signed_binding(destination)
 
 
-def pin_rows(pins_path, pinned_inputs):
-    """The committed pin file and the directory the fetch step filled; both are read, never written."""
+def pin_rows(context, pins_path, pinned_inputs):
+    """The resolved pin file and the directory the fetch step filled, bound to this selection and checkout.
+
+    `--pins` is the RESOLVED file the fetch step wrote (the committed pins plus one row per crate of the tool
+    closure, derived from Cargo.lock). The fetch step's own record binds the three: the committed pin file
+    this selection names, the resolved file given here, and this checkout's Cargo.lock. Read, never written.
+    """
     require(pins_path is not None and pinned_inputs is not None, "--pins and --pinned-inputs required")
     require(pins_path.is_absolute() and pinned_inputs.is_absolute() and pinned_inputs.is_dir()
             and not pinned_inputs.is_symlink(), "absolute pin file and pinned input directory required")
@@ -2086,6 +2091,24 @@ def pin_rows(pins_path, pinned_inputs):
     require(isinstance(value, dict) and value.get("schema") == MACOS_PINS_SCHEMA
             and value.get("target") == MACOS_TARGET and isinstance(value.get("pins"), list),
             "not the macOS library pin file")
+    fetched_path = pinned_inputs / "FETCHED.json"
+    fetched = read_json(fetched_path)
+    require(isinstance(fetched, dict) and fetched.get("schema") == "connect-pinned-inputs/1"
+            and isinstance(fetched.get("resolved_pins"), dict), "not the fetch step's record")
+    require(fetched.get("pins_sha256") == context["inputs"]["library"]["pins"]["sha256"],
+            "the fetch did not start from the committed pin file this selection names")
+    require(fetched["resolved_pins"].get("sha256") == digest(pins_path),
+            "--pins is not the resolved pin file of this fetch")
+    require(fetched.get("lock_sha256") == digest(WORKSPACE / "Cargo.lock"),
+            "the fetch resolved another Cargo.lock than this checkout's")
+    # One copy of the binding stays with the records: the first step that reads a fetch keeps it, and every
+    # later step must be given the same one.
+    kept = context["work"] / "records/pinned-inputs"
+    for source, name in ((fetched_path, "FETCHED.json"), (pins_path, pins_path.name)):
+        if (kept / name).exists():
+            require(digest(kept / name) == digest(source), "another fetch than the one an earlier step read: " + name)
+        else:
+            copy_exact(source, kept / name)
     return value["pins"]
 
 
@@ -2250,7 +2273,7 @@ def macos_library_archive(context):
 def macos_library(work, pins, pinned_inputs):
     """Step 3: the six library tools from this checkout (signed, recorded), then the library itself."""
     context = macos_begin(work, "library")
-    pin_rows(pins, pinned_inputs)
+    pin_rows(context, pins, pinned_inputs)
     record, preflight = context["record"], context["preflight"]
     free = macos_free_space(context)
     tools = work / "tools"
@@ -2288,7 +2311,7 @@ def macos_library(work, pins, pinned_inputs):
         record.run(step, macos_owner_argv(context, pins, pinned_inputs, step, **values), cwd=work,
                    env=environment, inherit=False, seconds=3600)
 
-    node, npm = pinned_node(pin_rows(pins, pinned_inputs), pinned_inputs, work / "node")
+    node, npm = pinned_node(pin_rows(context, pins, pinned_inputs), pinned_inputs, work / "node")
     owner("library-components", node=node, npm=npm)
     built = read_json(work / "components/components.json")
     require(built.get("schema") == "connect-library-components/1" and isinstance(built.get("components"), dict),
@@ -2317,7 +2340,7 @@ def macos_library(work, pins, pinned_inputs):
 def macos_resources(work, pins, pinned_inputs):
     """Step 4: the starter for exactly this library, then the resource closure the executables bind."""
     context = macos_begin(work, "resources")
-    pin_rows(pins, pinned_inputs)
+    pin_rows(context, pins, pinned_inputs)
     record, environment = context["record"], macos_environment(work)
     archive = macos_library_archive(context)
     require(binding(archive) == read_json(step_path(work, "library"))["outputs"]["library"],
@@ -2434,7 +2457,7 @@ def macos_assembly_argv(context, kind, record_path):
 def macos_sdk_wheels(context, pins, pinned_inputs, meta_wheel, meta_wheel_sha256):
     """Connect's SDK wheel from this checkout, and Meta's: from this checkout, or the supplied published one."""
     work, record, versions = context["work"], context["record"], context["preflight"]["versions"]
-    rows = pin_rows(pins, pinned_inputs)
+    rows = pin_rows(context, pins, pinned_inputs)
     environment = macos_environment(work, SOURCE_DATE_EPOCH=str(context["preflight"]["source_date_epoch"]))
     scratch = work / "sdk-build"
     wheelhouse = scratch / "tools"
@@ -2943,6 +2966,10 @@ def macos_stage_record(work, output, consumer_not_run=None):
                           else {"status": "not_run", "reason": consumer_not_run.strip()})}
     require(gates["shutdown_review"]["status"] == "pending", "stage one never accepts the shutdown review")
     require(gates["gateway_verification"]["status"] == "passed", "the gateway verification did not pass")
+    fetched = read_json(work / "records/pinned-inputs/FETCHED.json")
+    require(fetched["pins_sha256"] == context["inputs"]["library"]["pins"]["sha256"]
+            and fetched["lock_sha256"] == digest(WORKSPACE / "Cargo.lock"),
+            "the kept fetch record is not of this selection and checkout")
     # The gateway product needs nothing from the review: its final archive is assembled now, so the exact
     # bytes can be scanned from this stage record. Nothing here publishes it.
     verification = work / "gateway-verification/manifest.json"
@@ -3001,6 +3028,7 @@ def macos_stage_record(work, output, consumer_not_run=None):
         "work_root": preflight["work_root"], "versions": preflight["versions"],
         "library_edition": preflight["library_edition"], "inputs_sha256": preflight["inputs"]["sha256"],
         "pins_sha256": context["inputs"]["library"]["pins"]["sha256"],
+        "resolved_pins_sha256": fetched["resolved_pins"]["sha256"], "lock_sha256": fetched["lock_sha256"],
         "resources_sha256": steps["resources"]["outputs"]["resources_sha256"],
         "executables": executables, "gates": gates,
         "products": {"gateway": {"state": "assembled_not_scanned_not_published", "directory": "products/gateway",

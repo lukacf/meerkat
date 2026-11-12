@@ -355,6 +355,17 @@ file digest), and every `macos` step refuses a pending or unbound selection.
 It is completed by setting the committed pin file's SHA-256 and `"state":
 "selected"`.
 
+Pinned inputs. `--pins` is the resolved pin file the fetch step writes beside
+the files it fetched: the committed pins plus one row per crate of the tools'
+dependency closure, derived from `Cargo.lock`. The selection names the
+committed pin file, not the resolved one. The fetch step's record
+(`FETCHED.json` in `--pinned-inputs`) binds the three, and every step that
+reads pinned inputs checks all of them: the record's committed pin digest is
+the selection's, its resolved pin digest is that of the `--pins` file, and its
+lock digest is this checkout's `Cargo.lock`. The first such step keeps the
+record and the resolved pin file under `records/pinned-inputs/`; a later step
+given another fetch refuses, and the stage record carries both.
+
 `node-prebuilt-policy-macos-arm64.json` is the Linux policy's shape for
 `darwin` and `arm64`, with no libc and the SHA-256 of `bin/node` inside the
 pinned Node v24.19.0 archive. The resource packager refuses a policy whose

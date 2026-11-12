@@ -588,6 +588,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   boundary for agent memory, and a retirement's hooks name the member.
   They were skipped, because the member carried no mark of an
   identity-first spawn.
+- The memory steward's mob context lists an agent created at run time
+  while it is a member of the mob (not archived, not removed), by its name
+  and its profile only; it listed none. Nothing else of such an agent
+  enters a steward prompt (its labels, display name, context, instructions
+  and first message), and the mob's purpose is read from the host's roster
+  only, never from a created agent's `purpose` or `mob_purpose` label.
 
 - An archive or a removal of an agent whose record is its row in the mob's
   identity store (one created at run time) owes that agent what leaving the

@@ -690,7 +690,7 @@ impl IdentityGate {
     /// agent, for a call that has no view. It is asked by name and first,
     /// so nothing is read of an agent the view hides.
     fn view_shows(&self, name: &str) -> bool {
-        !self.seen.as_ref().is_some_and(|seen| !seen.sees(name))
+        self.seen.as_ref().is_none_or(|seen| seen.sees(name))
     }
 
     /// Whether `requester` is shown `agent`: the one rule every read of the

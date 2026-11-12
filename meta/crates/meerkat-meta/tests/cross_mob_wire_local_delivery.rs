@@ -33,7 +33,7 @@ use meerkat_core::types::HandlingMode;
 use meerkat_core::{Message, Provider, StopReason};
 use meerkat_meta::{
     DiscoverySpec, MetaConfig, MobBootstrapOptions, MobBootstrapSpec, TopologyBootstrapConfig,
-    TopologyControlPolicy, UnifiedRuntime, handle_unified_rpc_json,
+    TopologyControlPolicy, UnifiedRuntime, decode_pubkey_b64, handle_unified_rpc_json,
 };
 use meerkat_mob::{
     MobDefinition, MobRuntimeMode, MobStorage, SpawnMemberSpec, ids::AgentIdentity as MeerkatId,
@@ -155,20 +155,64 @@ struct Mob {
     unmatched: Vec<Observation>,
 }
 
-/// A member's `meta/cross_mob/peer_info` answer.
+/// A member's `meta/cross_mob/peer_info` answer, and the descriptor a caller
+/// wires from it.
 #[derive(Clone)]
 struct PeerInfo {
     comms_name: String,
     peer_id: String,
+    /// The address a wire names: the answer's `address` until
+    /// [`PeerInfo::by_socket`] replaces it.
     address: String,
+    /// The key a wire names (`remote_pubkey_b64`): none until
+    /// [`PeerInfo::by_socket`] sets it.
+    key: Option<String>,
+    /// The answer's `pubkey_b64`.
+    pubkey_b64: Option<String>,
+    /// The answer's `dialable_address`.
+    dialable_address: Option<String>,
+    /// The answer as it came.
+    answer: Value,
+}
+
+impl PeerInfo {
+    /// The member by its socket endpoint and key, as a caller in another
+    /// process must describe it.
+    fn by_socket(&self) -> Self {
+        Self {
+            address: self
+                .dialable_address
+                .clone()
+                .expect("peer_info reports a dialable address"),
+            key: Some(
+                self.pubkey_b64
+                    .clone()
+                    .expect("peer_info reports the member's key"),
+            ),
+            ..self.clone()
+        }
+    }
+}
+
+/// Member comms with a socket endpoint on a loopback port the kernel picks.
+fn socket_member_comms() -> Config {
+    let mut config = Config::default();
+    config.comms.mode = meerkat_core::CommsRuntimeMode::Tcp;
+    config.comms.address = Some("127.0.0.1:0".to_string());
+    config
 }
 
 impl Mob {
+    /// A mob whose member has in-process comms only.
     async fn start(root: &Path, mob_id: &str, member: &str) -> Self {
+        Self::start_with(root, mob_id, member, Config::default()).await
+    }
+
+    async fn start_with(root: &Path, mob_id: &str, member: &str, config: Config) -> Self {
         let session_path = root.join(format!("{mob_id}-sessions"));
         std::fs::create_dir_all(&session_path).expect("session path");
         let factory = AgentFactory::new(&session_path).comms(true);
-        let session_service = Arc::new(build_ephemeral_service(factory, Config::default(), 8));
+        let session_service = Arc::new(build_ephemeral_service(factory, config, 8));
         let definition = MobDefinition::from_toml(&format!(
             r#"
 [mob]
@@ -271,20 +315,29 @@ comms = true
                 .unwrap_or_else(|| panic!("peer_info has no {name}: {info}"))
                 .to_string()
         };
+        let optional = |name: &str| info.get(name).and_then(Value::as_str).map(str::to_string);
         PeerInfo {
             comms_name: field("comms_name"),
             peer_id: field("peer_id"),
             address: field("address"),
+            key: None,
+            pubkey_b64: optional("pubkey_b64"),
+            dialable_address: optional("dialable_address"),
+            answer: info.clone(),
         }
     }
 
     fn wire_params(&self, remote: &PeerInfo) -> Value {
-        json!({
+        let mut params = json!({
             "local_member_id": self.member,
             "remote_comms_name": remote.comms_name,
             "remote_peer_id": remote.peer_id,
             "remote_address": remote.address,
-        })
+        });
+        if let Some(key) = &remote.key {
+            params["remote_pubkey_b64"] = json!(key);
+        }
+        params
     }
 
     async fn wire_local(&self, remote: &PeerInfo) -> Result<Value, String> {
@@ -415,9 +468,21 @@ async fn sdk_wire_with(
     Ok(())
 }
 
+/// The helper from its start: the two `peer_info` calls, then each side by
+/// its socket endpoint and key when BOTH answers report a dialable address,
+/// and by the in-process address with no key otherwise.
 async fn sdk_wire_cross_mob(local: &Mob, remote: &Mob) -> Result<(), String> {
     let local_info = local.peer_info().await;
     let remote_info = remote.peer_info().await;
+    if local_info.dialable_address.is_some() && remote_info.dialable_address.is_some() {
+        return sdk_wire_with(
+            local,
+            &local_info.by_socket(),
+            remote,
+            &remote_info.by_socket(),
+        )
+        .await;
+    }
     sdk_wire_with(local, &local_info, remote, &remote_info).await
 }
 
@@ -628,6 +693,148 @@ async fn sdk_wire_rollback_leaves_no_trust_and_no_route() {
         .expect("the helper's call sequence after a rollback");
     assert_delivers(&mut left, &mut right, "undo a-to-b").await;
     assert_delivers(&mut right, &mut left, "undo b-to-a").await;
+
+    left.stop().await;
+    right.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn peer_info_answers_the_members_key_and_omits_a_dialable_address_it_does_not_have() {
+    let root = tempfile::tempdir().expect("root");
+    let plain = Mob::start(root.path(), "wire-info-a", "alice").await;
+    let socket = Mob::start_with(root.path(), "wire-info-b", "bob", socket_member_comms()).await;
+
+    let alice = plain.peer_info().await;
+    let key = alice.pubkey_b64.clone().expect("the member's key");
+    assert_eq!(
+        decode_pubkey_b64(&key).expect("standard base64 of 32 bytes"),
+        plain.registered_key(&alice.comms_name),
+        "pubkey_b64 is the member's transport key"
+    );
+    // A member with in-process comms only has no dialable address: the
+    // field is left out, never null.
+    assert!(
+        alice.answer.get("dialable_address").is_none(),
+        "peer_info: {}",
+        alice.answer
+    );
+    assert!(alice.address.starts_with("inproc://"));
+
+    let bob = socket.peer_info().await;
+    let dialable = bob.dialable_address.clone().expect("a socket endpoint");
+    assert!(
+        dialable.starts_with("tcp://127.0.0.1:") && !dialable.ends_with(":0"),
+        "the bound endpoint, not the configured port 0: {dialable}"
+    );
+    assert!(bob.pubkey_b64.is_some());
+
+    plain.stop().await;
+    socket.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sdk_wire_sequence_over_member_socket_endpoints_delivers_both_ways() {
+    let root = tempfile::tempdir().expect("root");
+    let mut left =
+        Mob::start_with(root.path(), "wire-socket-a", "alice", socket_member_comms()).await;
+    let mut right =
+        Mob::start_with(root.path(), "wire-socket-b", "bob", socket_member_comms()).await;
+    let alice = left.peer_info().await;
+    let bob = right.peer_info().await;
+
+    // What two gateways in two processes do: each side names the other by
+    // the socket endpoint and key its peer_info reports.
+    sdk_wire_cross_mob(&left, &right)
+        .await
+        .expect("the helper's call sequence");
+    // No in-process route was installed: the sends below cross the members'
+    // socket endpoints.
+    assert_eq!(left.route_to(&bob.comms_name), None);
+    assert_eq!(right.route_to(&alice.comms_name), None);
+
+    assert_delivers(&mut left, &mut right, "socket a-to-b").await;
+    assert_delivers(&mut right, &mut left, "socket b-to-a").await;
+
+    left.unwire_local(&bob.by_socket())
+        .await
+        .expect("unwire alice from bob");
+    right
+        .unwire_local(&alice.by_socket())
+        .await
+        .expect("unwire bob from alice");
+    assert!(left.trusts().await.is_empty());
+    assert!(right.trusts().await.is_empty());
+
+    left.stop().await;
+    right.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn keyless_in_process_wire_to_a_member_no_local_mob_has_is_refused_in_plain_words() {
+    let root = tempfile::tempdir().expect("root");
+    let left = Mob::start(root.path(), "wire-absent-a", "alice").await;
+    // A member of a mob another process hosts, as that process's peer_info
+    // describes it to a caller that passes no key.
+    let absent_name = "wire-absent-elsewhere/worker/zed".to_string();
+    let absent = PeerInfo {
+        comms_name: absent_name.clone(),
+        peer_id: meerkat_core::comms::PeerId::from_ed25519_pubkey(&[42_u8; 32]).to_string(),
+        address: format!("inproc://{absent_name}"),
+        key: None,
+        pubkey_b64: None,
+        dialable_address: None,
+        answer: Value::Null,
+    };
+
+    let refusal = left
+        .wire_local(&absent)
+        .await
+        .expect_err("an in-process address reaches no other process");
+    assert!(
+        refusal.contains("is not a live member of a mob in this process")
+            && refusal.contains("member_comms_address"),
+        "the refusal must say what is wrong and what to do: {refusal}"
+    );
+    assert!(
+        !refusal.contains("must be non-zero"),
+        "the raw descriptor text must not reach the caller: {refusal}"
+    );
+    assert!(left.trusts().await.is_empty());
+
+    // With the member's key supplied the same wire is accepted as before.
+    let keyed = PeerInfo {
+        // Standard base64 of the 32-byte key [42; 32] the peer id derives from.
+        key: Some("KioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKio=".to_string()),
+        ..absent.clone()
+    };
+    left.wire_local(&keyed)
+        .await
+        .expect("a keyed in-process wire");
+    assert_eq!(left.trusts().await, vec![absent_name]);
+
+    left.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_wire_local_takes_back_the_route_it_installed() {
+    let root = tempfile::tempdir().expect("root");
+    let left = Mob::start(root.path(), "wire-failed-a", "alice").await;
+    let right = Mob::start(root.path(), "wire-failed-b", "bob").await;
+    let bob = right.peer_info().await;
+
+    // The route goes in before the trust, and this mob has no such member
+    // to give the trust to.
+    let mut params = left.wire_params(&bob);
+    params["local_member_id"] = json!("nobody");
+    left.rpc("meta/cross_mob/wire_local", params)
+        .await
+        .expect_err("a member this mob does not have");
+    assert_eq!(
+        left.route_to(&bob.comms_name),
+        None,
+        "a failed wire left its route behind"
+    );
+    assert!(left.trusts().await.is_empty());
 
     left.stop().await;
     right.stop().await;

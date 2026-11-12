@@ -18053,6 +18053,23 @@ async fn handle_console_wire_local(
     };
 
     let handle = runtime.handle();
+    // The route half of a same-process peer, as in
+    // `UnifiedRuntime::wire_local` and `unwire_local`.
+    let mob_id = handle.mob_id().to_string();
+    let route_lookup = if wire {
+        crate::unified_runtime::cross_mob::install_local_wire_route(&mob_id, spec)
+    } else {
+        crate::unified_runtime::cross_mob::installed_local_wire_route(&mob_id, spec)
+    };
+    let (spec, route) = match route_lookup {
+        Ok(found) => found,
+        Err(err) => {
+            let action = if wire { "wire_local" } else { "unwire_local" };
+            return internal_error(response_id, format!("cross_mob/{action} failed: {err}"));
+        }
+    };
+    let peer_name = spec.name.as_str().to_string();
+    let route_handle = handle.clone();
     let local_alias = crate::member_comms_id::runtime_alias_str(local_id).into_owned();
     let authority_target = if let Some(identity_runtime) = identity_runtime {
         identity_runtime
@@ -18119,6 +18136,17 @@ async fn handle_console_wire_local(
             result.map_err(|err| err.to_string())
         }
     };
+    if let Some(route) = route {
+        match (&result, wire) {
+            (Err(_), true) => route.roll_back(),
+            (Ok(()), false) => {
+                route
+                    .remove_unless_referenced(&route_handle, &peer_name)
+                    .await;
+            }
+            _ => {}
+        }
+    }
 
     let action = if wire { "wire_local" } else { "unwire_local" };
     match result {

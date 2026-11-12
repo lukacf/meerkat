@@ -1930,16 +1930,54 @@ impl AgentSpecs for GateSpecs {
 /// committed, the identity runtime's registration of each agent it wrote.
 /// It is the one place that registration is asked from, whoever commits:
 /// the gate at once, or the decisions' driver after a person approved.
+///
+/// It is also the one place that tells the identity runtime to forget what
+/// it read of the record of each agent a change names
+/// ([`IdentityRuntime::forget_unseated_record`]): however the attempt ends
+/// (an outcome, an error that may have committed, a caller that stopped
+/// waiting), so a record read before a change is never decided on after it.
 struct LaunchExecutor {
     core: CoreChangeExecutor,
     /// A back-edge, as the gate's own.
     identities: Weak<IdentityRuntime>,
 }
 
+/// Forgets, when it is dropped, what the identity runtime read of the
+/// records of the agents `names`.
+struct ForgetRecordsRead {
+    identities: Weak<IdentityRuntime>,
+    names: Vec<String>,
+}
+
+impl Drop for ForgetRecordsRead {
+    fn drop(&mut self) {
+        if let Some(identities) = self.identities.upgrade() {
+            for name in &self.names {
+                identities.forget_unseated_record(name);
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl IdentityChangeExecutor for LaunchExecutor {
     async fn commit(&self, commit: ChangeCommit<'_>) -> Result<ChangeCommitted, ExecutorError> {
-        let committed = self.core.commit(commit).await?;
+        let forget = ForgetRecordsRead {
+            identities: Weak::clone(&self.identities),
+            names: commit
+                .request
+                .action
+                .identities()
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+        };
+        let committed = self.core.commit(commit).await;
+        // Core answered: whatever it answered, the records the change names
+        // are read again from here on. A caller that stops waiting before
+        // this line drops the guard, which forgets them the same.
+        drop(forget);
+        let committed = committed?;
         // Each agent the change wrote is served from its record from now
         // on: registered, registered again or forgotten, with no wake.
         if let Some(identities) = self.identities.upgrade() {

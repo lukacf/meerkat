@@ -19711,6 +19711,9 @@ pub(crate) async fn prime_access_cache_from_handle(handle: &MobHandle, access: &
         None,
     )
     .await;
+    // No identity runtime here: each record is read now.
+    let unseated =
+        unseated_agent_access_attributes(handle, None, &roster_identities, &BTreeMap::new()).await;
     record_live_and_registered_attributes(
         access,
         members,
@@ -19719,6 +19722,148 @@ pub(crate) async fn prime_access_cache_from_handle(handle: &MobHandle, access: &
         &BTreeMap::new(),
         "",
     );
+    for attributes in unseated {
+        access.record_agent_attributes(attributes);
+    }
+}
+
+/// The access attributes of every agent of `handle`'s mob that no roster
+/// row in `roster_identities` names (the roster rows of that mob: a row
+/// wins), so the rules decide an agent no member is seated for (one owed
+/// its seat, an archived one, one its host has not placed yet) as they
+/// decide a seated one:
+///
+/// - an agent whose record is its row in the mob's identity store, from
+///   that row: its profile as its role, and the row's labels. The names
+///   are Core's identity entries (the machine state its actor published: no
+///   store read). With `identities`, a row is read once and kept
+///   (`IdentityRuntime::unseated_records`: one read for the names not kept,
+///   forgotten at a change of the agent and after a bound); without, each
+///   row is read now. A row that cannot be read is private to nobody known
+///   ([`crate::access::UNKNOWN_PRIVATE_OWNER`]): only an access
+///   administrator is shown the agent;
+/// - every other agent `identities` has registered (one its host
+///   configures), from that registration as it is now: the registered
+///   profile as its role, and the registered labels as the Console reads
+///   them. An entry Core holds for such an agent that the runtime has not
+///   registered is private to nobody known.
+///
+/// The private-owner record's owner of an agent (`known_members`) is added
+/// where the agent's own record names none: it never makes one less
+/// private.
+async fn unseated_agent_access_attributes(
+    handle: &MobHandle,
+    identities: Option<&crate::identity_first::IdentityRuntime>,
+    roster_identities: &BTreeSet<String>,
+    known_members: &BTreeMap<String, Option<String>>,
+) -> Vec<AgentResourceAttributes> {
+    use crate::identity_creation::identity_name_of_member;
+    let private_to_nobody_known = |identity: String| AgentResourceAttributes {
+        identity,
+        agent_id: None,
+        role: None,
+        labels: BTreeMap::from([(
+            crate::access::PRIVATE_TO_LABEL.to_string(),
+            crate::access::UNKNOWN_PRIVATE_OWNER.to_string(),
+        )]),
+    };
+    let decided_on = |identity: String, role: String, mut labels: BTreeMap<String, String>| {
+        if crate::access::private_owner(&labels).is_none()
+            && let Some(Some(owner)) = known_members.get(&identity)
+        {
+            labels.insert(crate::access::PRIVATE_TO_LABEL.to_string(), owner.clone());
+        }
+        AgentResourceAttributes {
+            identity,
+            agent_id: None,
+            role: Some(role),
+            labels,
+        }
+    };
+
+    // Core's entries no roster row names: the created ones with their
+    // member names, the others by name, and apart the ones this build
+    // cannot read.
+    let mut created = Vec::new();
+    let mut created_names = BTreeSet::new();
+    let mut others = BTreeSet::new();
+    let mut unreadable = BTreeSet::new();
+    let mut after: Option<meerkat_mob::AgentIdentity> = None;
+    loop {
+        let page =
+            match handle.identity_entries(after.as_ref(), meerkat_mob::IDENTITY_ENTRY_PAGE_MAX) {
+                Ok(page) => page,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "access priming: Core's identity entries could not be read; the agents no \
+                         member is seated for are recorded as far as they were read"
+                    );
+                    break;
+                }
+            };
+        for view in &page.entries {
+            let name = identity_name_of_member(&view.identity);
+            if roster_identities.contains(&name) {
+                continue;
+            }
+            if view.origin == meerkat_mob::IdentityEntryOrigin::Created {
+                created_names.insert(name.clone());
+                created.push((name, view.identity.clone()));
+            } else {
+                others.insert(name);
+            }
+        }
+        unreadable.extend(
+            page.unreadable
+                .iter()
+                .map(identity_name_of_member)
+                .filter(|name| !roster_identities.contains(name)),
+        );
+        match page.next {
+            Some(next) if after.as_ref().is_none_or(|current| &next > current) => {
+                after = Some(next);
+            }
+            _ => break,
+        }
+    }
+
+    let mut attributes = Vec::new();
+    let records = match identities {
+        Some(identities) => identities.unseated_records(handle, &created).await,
+        None => {
+            crate::identity_first::IdentityRuntime::read_unseated_records(handle, &created).await
+        }
+    };
+    for (name, record) in records {
+        attributes.push(match record {
+            Some(record) => decided_on(name, record.profile, record.labels),
+            None => private_to_nobody_known(name),
+        });
+    }
+
+    // The agents the host configures, as the identity runtime registered
+    // them: a roster row and a created row win, and an entry this build
+    // cannot read is decided as a record that cannot be read.
+    let mut configured = match identities {
+        Some(identities) => identities.configured_records().await,
+        None => BTreeMap::new(),
+    };
+    configured.retain(|name, _| {
+        !roster_identities.contains(name)
+            && !created_names.contains(name)
+            && !unreadable.contains(name)
+    });
+    others.retain(|name| !configured.contains_key(name));
+    for name in unreadable.into_iter().chain(others) {
+        attributes.push(private_to_nobody_known(name));
+    }
+    for (name, record) in configured {
+        let mut labels = record.labels;
+        crate::console_spawn::sanitize_unverified_lineage_labels(&mut labels);
+        attributes.push(decided_on(name, record.profile, labels));
+    }
+    attributes
 }
 
 fn namespace_console_identity(identity: &str, namespace: &str) -> String {
@@ -19750,8 +19895,13 @@ fn namespace_console_attributes(
 /// experience records them, one final value per console identity, and the
 /// spawn registry's attributes for each registered identity no live member
 /// names. The members of agent-created sub-mobs count as live members,
-/// found and labelled as the console's snapshot finds and labels them.
-/// Returns the recorded live identities, namespaced.
+/// found and labelled as the console's snapshot finds and labels them. Then
+/// the agents of the mob that no roster row of the mob itself names (one
+/// owed its seat, an archived one, one its host has not placed yet), each
+/// from its own record ([`unseated_agent_access_attributes`]), so a rule
+/// about a role or a label and the rule about an agent private to a person
+/// decide such an agent wherever it is named.
+/// Returns the recorded live identities and those agents, namespaced.
 async fn prime_access_cache_from_runtime_in_namespace(
     runtime: &MobRuntime,
     access: &AccessController,
@@ -19768,6 +19918,9 @@ async fn prime_access_cache_from_runtime_in_namespace(
         Some(runtime.side_chat_lineages()),
     )
     .await;
+    // The mob's own roster rows: a member of a sub-mob that carries an
+    // agent's name does not stand for the agent.
+    let own_roster_identities = roster_identities.clone();
     for (mob_id, delegate_handle, host_identity) in delegate_mobs_with_hosts(runtime).await {
         members.extend(
             live_member_access_attributes(
@@ -19793,14 +19946,30 @@ async fn prime_access_cache_from_runtime_in_namespace(
         .collect();
     let mut known_members = runtime.private_owners().memory_members();
     known_members.retain(|identity, _| !live_rows.contains(identity));
-    record_live_and_registered_attributes(
+    let unseated = unseated_agent_access_attributes(
+        &runtime.handle(),
+        runtime.installed_identity_runtime().as_deref(),
+        &own_roster_identities,
+        &known_members,
+    )
+    .await;
+    let mut recorded = record_live_and_registered_attributes(
         access,
         members,
         &registered,
         &roster_identities,
         &known_members,
         namespace,
-    )
+    );
+    // After the members and the ended ones: an agent's own record decides
+    // it, whatever the spawn registry or a sub-mob's member of its name
+    // says.
+    for attributes in unseated {
+        let attributes = namespace_console_attributes(attributes, namespace);
+        recorded.insert(attributes.identity.clone());
+        access.record_agent_attributes(attributes);
+    }
+    recorded
 }
 
 /// The access attributes of every structural roster row of `handle`,

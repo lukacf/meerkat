@@ -3762,6 +3762,9 @@ pub struct IdentityRuntime {
     /// (`meta/identity/*` and the agents' identity tools), attached by a
     /// launch that has an identity policy (see `runtime/identity_family.rs`).
     identity_family: crate::identity_creation::IdentityFamilySlot,
+    /// What this process read of the records of the agents no member is
+    /// seated for (see `runtime/identity_family.rs`).
+    unseated_records: StdMutex<identity_family::UnseatedRecords>,
     bootstrap_status: watch::Sender<IdentityBootstrapStatus>,
     bootstrap_generation: StdMutex<u64>,
     bootstrap_controller: Mutex<()>,
@@ -4762,6 +4765,7 @@ impl IdentityRuntime {
             actor_loop_health: StdRwLock::new(None),
             session_rotation_observer: StdRwLock::new(None),
             identity_family: crate::identity_creation::IdentityFamilySlot::default(),
+            unseated_records: StdMutex::new(identity_family::UnseatedRecords::default()),
             bootstrap_status,
             bootstrap_generation: StdMutex::new(0),
             bootstrap_controller: Mutex::new(()),

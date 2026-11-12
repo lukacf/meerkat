@@ -10423,8 +10423,9 @@ async fn frame_is_visible_cached(
             .map_err(|_| runtime_registry_lock_error())?;
         if entries.is_empty() {
             // No runtime is registered to decide the frame's member, and
-            // the frames the console stored stay readable: all but one a
-            // council participant wrote, which no registry state serves.
+            // the frames the console stored stay readable: every frame
+            // except those a council participant wrote, which no registry
+            // state serves.
             let council = frame
                 .source
                 .member_provenance

@@ -1399,6 +1399,116 @@ async fn a_memory_conflict_reaches_neither_the_pending_list_nor_the_gating_strea
     );
 }
 
+/// When gating cannot read whether a memory conflict applies, the audit
+/// entry it leaves carries the failed read's error text, and that text can
+/// quote what the memory module answered about the conflict. A console that
+/// can identify a person serves it to an administrator only, like the
+/// conflict's reason: every other caller who may see the entry reads that
+/// the lookup failed, for which entity and topic, and no error text. The
+/// stored entry keeps it, and a console that can identify nobody serves its
+/// one operator the text as before.
+#[tokio::test]
+async fn a_failed_conflict_lookups_error_text_in_the_gating_audit_is_for_an_administrator_only() {
+    const ERROR: &str = "the memory module answered: words about the conflict";
+    // A stored audit entry of a failed lookup, as the gating owner writes
+    // it, restored the way a host restores gating state.
+    let (_scratch_dir, scratch) = build_access_runtime_fixture().await;
+    gate_with_origin(&scratch, "router").await;
+    let mut stored = serde_json::to_value(scratch.gating_state_snapshot().await)
+        .expect("the gating state serializes");
+    stored["pending"] = json!([]);
+    let mut entry = stored["audit"][0].clone();
+    entry["event_type"] = json!("memory_conflict_lookup_failed");
+    entry["pending_id"] = Value::Null;
+    entry["outcome"] = json!("safe_draft");
+    entry["detail"] = json!({
+        "policy": "memory_conflict_lookup_via_core_mcp",
+        "reason": "memory_conflict_lookup_failed",
+        "error": ERROR,
+        "origin": { "identity": "router" },
+        "reference": { "entity": "delivery", "topic": "email_send" },
+    });
+    stored["audit"] = json!([entry]);
+    let stored: meerkat_meta::GatingStateSnapshot =
+        serde_json::from_value(stored).expect("the stored gating state");
+
+    for verifies_tokens in [true, false] {
+        let (_temp_dir, mut runtime) = build_access_runtime_fixture().await;
+        let controller = AccessController::new(gating_router_only_config()).expect("controller");
+        runtime.set_access_controller(controller);
+        runtime
+            .restore_gating_state(stored.clone())
+            .await
+            .expect("the stored gating state is restored");
+        let mut decisions = decision_state(false);
+        if !verifies_tokens {
+            decisions.trusted_oidc.jwks_json = r#"{"keys":[]}"#.to_string();
+        }
+        let app = runtime.build_reference_app_router(decisions);
+        // The detail of the one failed lookup an answer serves.
+        let detail_of = |answer: &Value| -> Value {
+            answer["result"]["entries"]
+                .as_array()
+                .expect("entries")
+                .iter()
+                .find(|entry| entry["event_type"] == json!("memory_conflict_lookup_failed"))
+                .unwrap_or_else(|| panic!("the failed lookup is served: {answer:#}"))["detail"]
+                .clone()
+        };
+        if !verifies_tokens {
+            let operator = rpc(&app, "meta/gating/audit", json!({})).await;
+            assert_eq!(
+                detail_of(&operator)["error"],
+                json!(ERROR),
+                "the one operator of a console that can identify nobody reads it as before"
+            );
+            continue;
+        }
+        let admin = rpc_as(
+            &app,
+            &person_token("root@example.test"),
+            "meta/gating/audit",
+            json!({}),
+        )
+        .await;
+        assert_eq!(detail_of(&admin)["error"], json!(ERROR), "{admin:#}");
+        for (who, answer) in [
+            (
+                "a signed-in person who is not an administrator",
+                rpc_as(
+                    &app,
+                    &person_token("alice@example.test"),
+                    "meta/gating/audit",
+                    json!({}),
+                )
+                .await,
+            ),
+            (
+                "the caller with no token",
+                rpc(&app, "meta/gating/audit", json!({})).await,
+            ),
+        ] {
+            let detail = detail_of(&answer);
+            assert_eq!(
+                (&detail["reason"], &detail["reference"]),
+                (
+                    &json!("memory_conflict_lookup_failed"),
+                    &json!({ "entity": "delivery", "topic": "email_send" })
+                ),
+                "{who} still reads that the lookup failed and for what: {answer:#}"
+            );
+            assert!(
+                detail.get("error").is_none() && !answer.to_string().contains(ERROR),
+                "{who} reads no error text: {answer:#}"
+            );
+        }
+        assert!(
+            format!("{:?}", runtime.gating_state_snapshot().await.audit).contains(ERROR),
+            "the stored entry keeps the error text"
+        );
+    }
+}
+
 /// Withdrawal belongs to the requester side (the embedding host's RPC): the
 /// console has no route for it, so even a session allowed to decide cannot
 /// withdraw a request, and the request stays pending until the host does.

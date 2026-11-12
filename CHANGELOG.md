@@ -81,6 +81,21 @@ them.
   Registrations of different inboxes under one key are still ambiguous:
   nothing is handed off. Sends scoped to a namespace are unchanged.
 
+- `meerkat-comms`: a route never outlives its inbox. When a runtime's
+  in-process inbox leaves the registry (`CommsRuntime::retire_inproc_route`,
+  the runtime's drop, or a successor's
+  `PreparedCommsRuntime::publish_replacing`), every registration of that
+  inbox in another namespace (a route a host that links two namespaces
+  installed to it) is removed in the same step. A send scoped to that
+  namespace then finds no live route: it takes the member's wake route,
+  which builds the member, or answers `PeerNotFound`. Before, such a
+  registration stayed and kept answering for an inbox that was gone: every
+  send to it was refused, and none reached the wake route, so a member
+  released to rest was never built by a peer message from the other
+  namespace. Registrations of other inboxes are not touched, and
+  `InprocRegistry::unregister_in_namespace` still removes exactly the one
+  registration it names.
+
 ### Fixed
 
 - `meerkat-core`: a turn that fails because a provider failure outlasted the

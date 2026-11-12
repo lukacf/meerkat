@@ -98,7 +98,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   typed answer (a mob stopped through its handle refuses, and builds
   nobody; a mob its runtime stopped for teardown holds no edge any more,
   and the send is answered `peer_not_found_or_not_trusted`). The route to
-  the member's inbox is installed once its mob answered ready. A wake is
+  the member's inbox is installed once its mob answered ready. A member
+  released to rest while its runtime keeps running is reached the same
+  way: the other mob's route to its inbox goes when the member is
+  released, and the other mob's next peer message builds the member again
+  and is delivered. A wake is
   forwarded only for an edge BOTH mobs hold in their state, each naming
   the other member by its key, and only for a send of the member that
   holds it. An edge only one mob holds, an edge one side unwired, another
@@ -160,13 +164,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `unwire_local` on both gateways, each with the other member's current
   `peer_info`, then `wire_cross_mob` again.
 - With member socket endpoints, run one member per gateway today.
-- Between two mobs of one process: after a member that a member of
-  another mob is wired to was released and built again while its runtime
-  kept running, a sender that belongs to no mob's namespace (a host
-  session with no realm of its own) and addresses that member by its key
-  is refused (`materialization_lost`). The next peer message a member of
-  the wired mob sends to that member clears it. Members of either mob are
-  not affected.
 
 ## [0.9.14] - 2026-11-11
 

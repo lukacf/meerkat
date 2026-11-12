@@ -1196,6 +1196,13 @@ async fn a_respawned_peer_is_wired_again_after_both_sides_unwire() {
         new_bob.peer_id, bob.peer_id,
         "fixture: a respawned member has a new key"
     );
+    // The inbox of the bob that is gone left with him, and alice's mob's
+    // route to it went with the inbox.
+    assert_eq!(
+        left.route_to(&bob.comms_name),
+        None,
+        "mob A still routes the bob that is gone"
+    );
 
     // The helper again: alice is wired to bob's old key, and a wire is
     // never replaced. The refusal leaves trust and routes exactly as they
@@ -1207,7 +1214,7 @@ async fn a_respawned_peer_is_wired_again_after_both_sides_unwire() {
     assert_eq!(left.trusts().await, vec![bob.comms_name.clone()]);
     assert_eq!(
         left.route_to(&bob.comms_name),
-        Some(bob.peer_id.clone()),
+        None,
         "a refused wire changed the route"
     );
     assert_eq!(right.trusts().await, vec![alice.comms_name.clone()]);

@@ -3291,11 +3291,11 @@ pub(super) fn install_route_alias(
         .ok_or_else(|| {
             format!("{side} peer {name:?} is not registered in {canonical_namespace:?}")
         })?;
-    // A route that is already there may hold the inbox of an earlier build
-    // of the member: a member built again over its state keeps its name and
-    // key and gets a new inbox, and nothing takes the old route away. The
-    // route is re-pointed at the member's inbox of now. It stays the earlier
-    // wire's route (`Ok(false)`).
+    // A route that is already there is re-pointed at the member's inbox of
+    // now. The registry removes a route with the inbox it leads to when that
+    // inbox leaves through its own runtime, so what is found here is the
+    // member's current inbox or a route somebody registered to another one.
+    // It stays the earlier wire's route (`Ok(false)`).
     let already_installed = alias_already_installed(namespace, name, pubkey);
     if already_installed {
         registry.unregister_in_namespace(namespace, &pubkey);

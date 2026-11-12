@@ -54,10 +54,10 @@ them.
 
 - Behaviour-only (not measured by the gate): `rkat`: `--comms-binding-out`
   replaces what is at its path with a new owner-only file instead of writing
-  into it. A path that holds a named pipe, a device (`/dev/stdout`), a
-  directory or a symbolic link whose target is not a regular file is
-  refused, and another account can no longer read the binding file. See
-  Security and the Upgrade notes.
+  into it. A named pipe, a socket, a device or a directory at the path, a
+  symbolic link to one of them, and any path in `/dev` or `/proc`
+  (`/dev/stdout`) is refused, and another account can no longer read the
+  binding file. See Security and the Upgrade notes.
 
 ### Added
 
@@ -301,11 +301,12 @@ them.
   JSON-RPC `config/set` and `config/patch`, the REST and MCP config writes)
   saw success. The write now fails with the filesystem's error, publishes
   nothing and removes its temporary file: the document it could not replace
-  stays as it was, as for the files of the entry above. A write that fails at
+  stays as it was, the contract the credential, realm, blob, task and
+  trajectory file writes have since 0.9.14. A write that fails at
   its sync or its rename removes its temporary file too, where it left a
   `.config.tmp.<id>` or `.config_state.tmp.<id>` file behind on every
   attempt, and so does a failed `mcp.toml` write. Affects 0.3.3 through
-  0.9.13.
+  0.9.14.
 
 ### Security
 
@@ -332,7 +333,7 @@ them.
   document's path now fails the command, where a link to nothing was
   followed. The engine changes the mode of no directory. The
   documents have had the umask's mode since 0.3.0, and the inline secret
-  source since 0.6.0. Affects 0.3.0 through 0.9.13.
+  source since 0.6.0. Affects 0.3.0 through 0.9.14.
 
 - `rkat`: `--comms-binding-out` wrote its binding file, which carries the
   comms runtime's bootstrap token, with the umask's mode (0644 under the
@@ -340,19 +341,21 @@ them.
   its own mode, and a symbolic link was followed. The binding file is now a
   new file that takes the place of the one at its path, with three limits:
   - The path is replaced, never written through. A regular file at the path
-    is removed, and a symbolic link to a regular file is replaced by the
-    binding file while the file it pointed to stays as it was. A path that
-    holds anything else (a named pipe, a socket, a device such as
-    `/dev/stdout`, a directory, or a symbolic link that leads to one of
-    these or to nothing) is refused before anything is removed, with an
-    error that names what is there. The directory of the path must allow
-    the removal and the creation of a file.
+    is removed. A symbolic link at the path is never followed: a link to a
+    regular file or to nothing is replaced by the binding file (the file it
+    pointed to stays as it was, and nothing is created where it pointed),
+    and a link to a named pipe, a socket, a device or a directory is
+    refused, as those things themselves are. A path in `/dev` or `/proc`
+    (`/dev/stdout`, also when standard output is redirected to a file) is
+    refused whatever it holds. A refusal comes before anything is removed
+    or created, with an error that names what is there. The directory of
+    the path must allow the removal and the creation of a file.
   - On Unix the file is 0600 from its creation, whatever the umask and
     whatever mode the file before it had.
   - A supervisor that runs under another account than `rkat` cannot read
     it.
 
-  Affects 0.6.33 through 0.9.13.
+  Affects 0.6.33 through 0.9.14.
 
 - `meerkat-comms`: `Keypair::save` created `identity.key` with the umask's
   mode and made it 0600 only after it had written the key, so the secret
@@ -360,7 +363,7 @@ them.
   save failed in between. The file is now 0600 on Unix from its creation,
   and a key file that already exists is made 0600 before the key is written
   to it. `Keypair::load_or_generate`, which the stock hosts use, already
-  created the file 0600. Affects 0.3.0 through 0.9.13.
+  created the file 0600. Affects 0.3.0 through 0.9.14.
 
 ### Upgrade notes
 
@@ -396,15 +399,18 @@ them.
   only its owner can read (0600 on Unix), whatever the umask and whatever
   mode the older file had. What changes for an install that relied on the
   old write:
-  - A symbolic link at the path is replaced by a regular file. Before, the
-    binding was written through the link into the file it pointed to; now
-    that file is left as it was and no longer receives the binding. Give the
-    flag the path of the file itself.
+  - A symbolic link at the path is replaced by a regular file, whether it
+    pointed to a regular file or to nothing. Before, the binding was written
+    through the link into the file it named; now that file is left as it
+    was, or not created, and does not receive the binding. Give the flag
+    the path of the file itself.
   - A named pipe, a socket, a device or a directory at the path, and a
-    symbolic link that leads to one of them or to nothing, is refused and
-    left untouched. `--comms-binding-out /dev/stdout`, or a named pipe a
+    symbolic link to one of them, is refused and left untouched. So is any
+    path in `/dev` or `/proc`, whatever it holds (a file under `/dev/shm`
+    included). `--comms-binding-out /dev/stdout`, or a named pipe a
     supervisor reads the binding from, worked before and is now an error:
-    write the binding to a regular file and have the supervisor read that.
+    write the binding to a regular file outside those two directories and
+    have the supervisor read that.
   - The directory of the path must let `rkat` remove and create a file in
     it. A binding file that was created for `rkat` in a directory it cannot
     write could be rewritten in place before, and now fails.
@@ -423,6 +429,17 @@ them.
   same service at the same endpoint inside one process (two API keys of
   different organisations, two ChatGPT accounts, two Copilot accounts on one
   API host). Whether a service refuses that is not known; it was not tested.
+
+- The owner-only rule of this release (see Security) covers the
+  configuration documents, the comms binding file and `identity.key`. Two
+  other files that can hold a token still take their mode from the umask
+  alone: the mob store's database file, which stores the bootstrap token of
+  an external member's binding, and Meta's composition manifest beside a
+  persistent mob's storage, which records the mob definition with its MCP
+  servers' arguments, environment and headers (also when the adoption of
+  pre-0.9 state rewrites it: that second writer gives the file the
+  permissions the manifest had). Keep the directories that hold them closed
+  to other accounts, or run under a umask of 077.
 
 ## [0.9.13] - 2026-11-11
 

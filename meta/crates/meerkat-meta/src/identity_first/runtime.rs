@@ -2370,6 +2370,15 @@ pub(crate) struct IdentityEntry {
     /// delivery door reads that row again; the managed topology never prunes
     /// a live edge of it that this runtime's topology did not wire.
     pub created: bool,
+    /// The host's roster listed the identity's name when this runtime last
+    /// read it, while the registration is its row's (`created`): the row is
+    /// the identity's one owner, so the roster's entry for the name is not
+    /// applied. Set by the roster pass's filter
+    /// ([`IdentityRuntime::roster_without_row_identities`]), carried when a
+    /// row's registration replaces the roster's, cleared by the next read of
+    /// a roster that no longer lists the name. Process-local: a view of the
+    /// roster as last read, never a fact Core decides on.
+    pub roster_listing_superseded: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -3288,6 +3297,15 @@ impl IdentityFirstRuntimeContext {
         // the other identities only.
         let row_specs = self.runtime.tracked_row_identities().await;
         let roster_held = self.runtime.roster_without_row_identities(roster).await;
+        // The names the roster lists that are served from their rows: the
+        // pass's result names them, so its caller learns that the roster's
+        // entries for them were not applied.
+        let roster_listings_superseded = roster
+            .iter()
+            .map(|spec| &spec.identity)
+            .filter(|identity| !roster_held.iter().any(|held| held.identity == **identity))
+            .cloned()
+            .collect::<BTreeSet<_>>();
         let roster = roster_held.as_slice();
         let tracked = roster
             .iter()
@@ -3344,7 +3362,10 @@ impl IdentityFirstRuntimeContext {
             }
         };
         let result = match result {
-            Ok(result) => result,
+            Ok(mut result) => {
+                result.roster_listings_superseded = roster_listings_superseded;
+                result
+            }
             Err(error) => {
                 self.runtime.fail_identity_bootstrap(generation, &error);
                 return Err(error);
@@ -3733,6 +3754,11 @@ pub struct IdentityRuntime {
     /// on its own puts it back exactly.
     bootstrap_warming_replaced:
         StdMutex<BTreeMap<AgentIdentity, (IdentityBootstrapState, Option<String>)>>,
+    /// The names whose roster listing this process already said, in its
+    /// log, is not applied because the identity is served from its record
+    /// ([`IdentityEntry::roster_listing_superseded`]): each is logged once
+    /// per process, not once per roster pass.
+    roster_listings_noted: StdMutex<BTreeSet<AgentIdentity>>,
     /// Meta's preparer of Core's member builds, when the mob was built with
     /// one ([`super::build_preparer::IdentityBuildPreparer`]).
     member_build_preparer: StdRwLock<Option<Arc<super::build_preparer::IdentityBuildPreparer>>>,
@@ -4752,6 +4778,7 @@ impl IdentityRuntime {
             customizer_tools: RwLock::new(None),
             customizer_failures: std::sync::RwLock::new(BTreeMap::new()),
             bootstrap_warming_replaced: StdMutex::new(BTreeMap::new()),
+            roster_listings_noted: StdMutex::new(BTreeSet::new()),
             member_build_preparer: StdRwLock::new(None),
             candidate_launch: AtomicBool::new(false),
             agent_memory: RwLock::new(None),
@@ -7755,6 +7782,7 @@ impl IdentityRuntime {
                     // The host's declaration: a roster's listing of a created
                     // entry registers the roster's row.
                     created: false,
+                    roster_listing_superseded: false,
                 },
             );
         }
@@ -14025,6 +14053,7 @@ impl IdentityRuntime {
             replaced_session: None,
             session_repair_required,
             customizer_tools_pending: self.customizer_tools_pending_given(identity, tools_held),
+            roster_listing_superseded: self.roster_listing_superseded(identity).await,
             record: Default::default(),
         })
     }

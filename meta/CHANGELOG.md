@@ -29,6 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (`IdentityRecordFacts`), so a struct literal of it needs the member
   (`record: Default::default()`). The status as written on the wire is
   unchanged while the record's members are unset.
+- Rust API of `meerkat-meta`: `IdentityStatus` gains the member
+  `roster_listing_superseded` and `RestoreFlowResult` gains the member
+  `roster_listings_superseded`, so a struct literal of either needs its new
+  member (`roster_listing_superseded: false`,
+  `roster_listings_superseded: Default::default()`). The status as written
+  on the wire is unchanged while the member is `false`.
 - `runtime_options.identity_creation` (and the Rust form a native host
   returns): a policy that names the approval outcome `notify` or `review`, or
   a `preparation` other than `none`, is refused at init, with the policy path
@@ -412,6 +418,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   prompt, instructions, provider parameters, context and tools) as a
   configured agent is, and its first message runs once. Until the runtime
   is composed the agent stays owed its seat, and a send to it is refused.
+
+- A name an agent holds through its record in the mob's identity store
+  that the host's roster lists too (the host adopted the agent into the
+  store, or its configuration lists a name an agent was created under) is
+  served from the record, as before, and that is no longer silent. The
+  agent's status (`meta/status_identity` and the status lists) carries
+  `roster_listing_superseded: true`, absent for every other agent; the
+  roster pass's result names such agents
+  (`RestoreFlowResult::roster_listings_superseded`); and the gateway logs
+  one warning per name. The roster's entry for the name is still not
+  applied: change the agent through the identity methods, or remove the
+  entry from the roster, which drops the member at the next roster pass.
 
 - An agent created at run time (an identity whose record is its row) is
   built from the same host inputs as a configured agent on its profile: the

@@ -3625,7 +3625,18 @@ async fn a_roster_listing_of_an_agent_served_from_its_record_is_said_on_its_stat
         meerkat_meta::identity_first::IdentityBootstrapMode::default(),
     )
     .await;
-    rig.roster_pass().await;
+    let pass = rig
+        .runtime
+        .identity_first_context()
+        .expect("identity-first context installed")
+        .refresh_desired_topology()
+        .await
+        .expect("the roster pass runs");
+    assert_eq!(
+        pass.roster_listings_superseded,
+        std::collections::BTreeSet::from([id(CREATED)]),
+        "the pass's result names the listing its record supersedes"
+    );
     let status = rig
         .rpc("meta/status_identity", json!({"identity": CREATED}))
         .await;

@@ -2046,6 +2046,15 @@ pub struct IdentityStatus {
     /// and optional on the wire.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub customizer_tools_pending: Option<CustomizerToolsPending>,
+    /// Whether the host's roster lists this name while the agent is served
+    /// from its record in the mob's identity store (a host adopted it into
+    /// the store, or created an agent under a name its roster lists): the
+    /// record is the agent's one owner, so the roster's entry for the name
+    /// is not applied, and an edit of it changes nothing. Read from the
+    /// roster as the runtime last read it; `false` for every other agent.
+    /// Additive on the wire, and absent while `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub roster_listing_superseded: bool,
     /// What the identity's record says of it ([`IdentityRecordFacts`]): its
     /// spec digest and revision, whether it is archived or awaits its
     /// preparation, how it came to exist, and its open operations. Its

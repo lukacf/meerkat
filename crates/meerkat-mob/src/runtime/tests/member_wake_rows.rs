@@ -18,6 +18,8 @@ use crate::runtime::{
     MemberBuildPreparer, MemberBuildReport,
 };
 
+mod waking_endpoint_rows;
+
 const WAIT: Duration = Duration::from_secs(30);
 /// How long a test waits for a step the row says must happen soon (a stop
 /// landing while a wake is held).
@@ -469,6 +471,27 @@ impl WakeFixture {
         member_seats: bool,
         wake_retry_backoff: Option<(Duration, Duration)>,
     ) -> Self {
+        Self::build_with_storage(
+            label,
+            configure,
+            edit,
+            member_seats,
+            wake_retry_backoff,
+            MobStorage::in_memory(),
+        )
+        .await
+    }
+
+    /// [`Self::build_with_backoff`], over `storage` (a row that injects a
+    /// journal fault brings its own event store).
+    async fn build_with_storage(
+        label: &str,
+        configure: impl FnOnce(&mut meerkat::Config),
+        edit: impl FnOnce(&mut MobDefinition),
+        member_seats: bool,
+        wake_retry_backoff: Option<(Duration, Duration)>,
+        storage: MobStorage,
+    ) -> Self {
         let root = tempfile::Builder::new()
             .prefix("meerkat-member-wake-")
             .tempdir()
@@ -512,7 +535,7 @@ impl WakeFixture {
         let customizer = Arc::new(VersionedCustomizer::new());
         let mut definition = wake_rows_definition(label);
         edit(&mut definition);
-        let mut mob = MobBuilder::new(definition, MobStorage::in_memory())
+        let mut mob = MobBuilder::new(definition, storage)
             .with_session_service(service.clone())
             .with_default_llm_client(Arc::new(client.clone()))
             .with_member_build_preparer(preparer.clone())

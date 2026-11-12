@@ -1,0 +1,445 @@
+//! Rows for wiring with a member whose wake has not bound it.
+//!
+//! A wake creates the member's session (and with it its comms runtime) off
+//! the actor and binds its operation record afterwards; MobMachine holds the
+//! member Waking and not Bound until the wake's plan is applied. In that
+//! span the member has a comms runtime and nothing that may be wired
+//! through it. Endpoint resolution used to look the comms runtime up before
+//! it considered MobMachine's recorded endpoint (it fell back to the
+//! recorded endpoint only when no comms runtime existed), so every caller
+//! that met the member in that span was answered `missing generated owner
+//! operation binding`. The rows hold a wake in exactly that span with the
+//! provision's test hold and pin what each caller gets.
+
+use super::*;
+use crate::runtime::provisioner::provision_finish_test_hooks::{self, BindHold};
+
+/// A released (Dormant) worker whose next wake holds between the creation
+/// of its session and the binding of its operation record.
+async fn peer_held_before_bind(fixture: &WakeFixture, label: &str) -> (AgentIdentity, BindHold) {
+    let peer = fixture.spawn(label).await;
+    fixture.release(&peer).await;
+    let hold = provision_finish_test_hooks::hold_before_bind(&fixture.session(&peer).await);
+    (peer, hold)
+}
+
+fn start_wake(
+    fixture: &WakeFixture,
+    peer: &AgentIdentity,
+) -> tokio::task::JoinHandle<Result<(), MobError>> {
+    let handle = fixture.handle.clone();
+    let woken = peer.clone();
+    tokio::spawn(async move { handle.ensure_member_live(&woken).await })
+}
+
+/// Wait until `peer`'s wake reached its bind, and check the span the rows
+/// are about: MobMachine holds the peer Waking and not Bound, and its comms
+/// runtime exists.
+async fn wait_held_before_bind(fixture: &WakeFixture, peer: &AgentIdentity, hold: &mut BindHold) {
+    tokio::time::timeout(WAIT, hold.entered.wait_for(|entered| *entered))
+        .await
+        .expect("the peer's wake reaches its bind")
+        .expect("the bind hold stays armed");
+    let key = mob_dsl::AgentIdentity::from_domain(peer);
+    {
+        let state = fixture.handle.machine_state_watch_rx.borrow();
+        assert_eq!(
+            state.member_materialization.get(&key).copied(),
+            Some(mob_dsl::MemberMaterializationPhase::Waking),
+            "the held peer is Waking"
+        );
+        assert!(
+            !state.member_wake_bound.contains(&key),
+            "the held peer's wake is not Bound"
+        );
+    }
+    let session = fixture.session(peer).await;
+    assert!(
+        fixture.service.comms_runtime(&session).await.is_some(),
+        "the held wake built the peer's comms runtime"
+    );
+}
+
+/// Let the held wake bind and wait for it to end Live.
+async fn finish_held_wake(
+    fixture: &WakeFixture,
+    peer: &AgentIdentity,
+    hold: BindHold,
+    wake: tokio::task::JoinHandle<Result<(), MobError>>,
+) {
+    hold.release.send_replace(true);
+    tokio::time::timeout(WAIT, wake)
+        .await
+        .expect("the held wake answers once it may bind")
+        .expect("the wake task ends")
+        .expect("the held wake succeeds");
+    fixture
+        .wait_residency(peer, Some(mob_dsl::MemberMaterializationPhase::Live))
+        .await;
+}
+
+/// A durable turn-driven worker's spawn, answered as the caller sees it.
+async fn spawn_worker(fixture: &WakeFixture, label: &str) -> (AgentIdentity, Result<(), MobError>) {
+    let member = AgentIdentity::from(format!("{label}-{}", Uuid::new_v4().simple()));
+    let mut spec = SpawnMemberSpec::new("worker", member.clone());
+    spec.continuity_intent = SpawnContinuityIntent::DurableIdentity {
+        continuity_key: member.to_string(),
+    };
+    let spawned = tokio::time::timeout(WAIT, fixture.handle.spawn_spec(spec))
+        .await
+        .expect("the spawn answers")
+        .map(|_| ());
+    (member, spawned)
+}
+
+fn edge_held(fixture: &WakeFixture, a: &AgentIdentity, b: &AgentIdentity) -> bool {
+    fixture
+        .handle
+        .machine_state_watch_rx
+        .borrow()
+        .wiring_edges
+        .iter()
+        .any(|edge| {
+            (edge.a.0 == a.as_str() && edge.b.0 == b.as_str())
+                || (edge.a.0 == b.as_str() && edge.b.0 == a.as_str())
+        })
+}
+
+/// The peer ids `member`'s own comms runtime trusts.
+async fn trusted_by(fixture: &WakeFixture, member: &AgentIdentity) -> BTreeSet<String> {
+    fixture
+        .comms(member)
+        .await
+        .peers()
+        .await
+        .into_iter()
+        .map(|peer| peer.peer_id.to_string())
+        .collect()
+}
+
+/// The peer id MobMachine recorded for `member`.
+fn recorded_peer_id(fixture: &WakeFixture, member: &AgentIdentity) -> String {
+    fixture
+        .handle
+        .machine_state_watch_rx
+        .borrow()
+        .member_peer_ids
+        .get(&mob_dsl::AgentIdentity::from_domain(member))
+        .expect("the member's recorded peer id")
+        .0
+        .clone()
+}
+
+/// One message each way between two Live members is delivered once: each
+/// side trusts the other.
+async fn assert_both_directions_deliver(
+    fixture: &WakeFixture,
+    a: &AgentIdentity,
+    b: &AgentIdentity,
+) {
+    for (from, to) in [(a, b), (b, a)] {
+        let body = token("we-both-ways");
+        fixture
+            .raw_peer_send(from, to, &body)
+            .await
+            .expect("the message is admitted over the edge");
+        assert_eq!(
+            fixture.delivered_count(to, &body).await,
+            1,
+            "{from}'s message reaches {to} once"
+        );
+    }
+}
+
+/// A member spawned while a peer it is wired to by role is being woken, and
+/// that wake has not bound the peer yet, is admitted with its declared edge:
+/// the member trusts the peer's recorded endpoint, and the peer's wake
+/// realizes its own side from MobMachine's edges.
+///
+/// RED before the fix: the spawn's wiring looked the peer's comms runtime
+/// up, found it, and asked to mark the peer ready on an operation record
+/// the wake had not bound: `WiringError("... missing generated owner
+/// operation binding")`, the member rolled back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_spawn_wired_by_role_to_a_peer_whose_wake_has_not_bound_it_takes_its_declared_edge() {
+    let fixture = kickoff_notice_fixture("we-spawn-unbound").await;
+    let (peer, mut hold) = peer_held_before_bind(&fixture, "we-spawn-peer").await;
+    let wake = start_wake(&fixture, &peer);
+    wait_held_before_bind(&fixture, &peer, &mut hold).await;
+
+    let (member, spawned) = spawn_worker(&fixture, "we-spawn-member").await;
+    assert!(
+        spawned.is_ok(),
+        "a spawn wired by role to a peer whose wake has not bound it is admitted: {spawned:?}"
+    );
+    assert!(
+        edge_held(&fixture, &member, &peer),
+        "MobMachine holds the declared edge"
+    );
+    assert_eq!(
+        fixture.residency(&peer),
+        Some(mob_dsl::MemberMaterializationPhase::Waking),
+        "the spawn neither waited for the peer's wake nor ended it"
+    );
+    assert!(
+        trusted_by(&fixture, &member)
+            .await
+            .contains(&recorded_peer_id(&fixture, &peer)),
+        "the member trusts the peer's recorded endpoint"
+    );
+
+    finish_held_wake(&fixture, &peer, hold, wake).await;
+    assert_both_directions_deliver(&fixture, &member, &peer).await;
+    fixture.finish().await;
+}
+
+/// A kickoff notice owed to a peer whose wake has not bound it is delivered
+/// once, like the notice that started the wake.
+///
+/// RED before the fix: the started notice was prepared against the peer's
+/// comms runtime, failed `missing generated owner operation binding`, and
+/// was dropped with a record; the peer held only the starting notice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_kickoff_notice_to_a_peer_whose_wake_has_not_bound_it_is_delivered_once() {
+    let fixture = kickoff_notice_fixture("we-notice-unbound").await;
+    let (peer, mut hold) = peer_held_before_bind(&fixture, "we-notice-peer").await;
+
+    // The member's starting notice wakes the peer; the wake holds at its bind.
+    fixture.client.block();
+    let member = spawn_kickoff_member(&fixture, "we-notice-member").await;
+    wait_held_before_bind(&fixture, &peer, &mut hold).await;
+
+    // The kickoff resolves while the peer is held: its started notice is
+    // owed to a peer that is Waking, not Bound, with a comms runtime.
+    fixture.client.release();
+    wait_kickoff_started(&fixture, &member).await;
+    assert!(
+        actor_answer_time(&fixture).await < ACTOR_ANSWER_BOUND,
+        "the notice does not hold the actor"
+    );
+    assert_eq!(
+        fixture.residency(&peer),
+        Some(mob_dsl::MemberMaterializationPhase::Waking),
+        "the peer's wake is still held"
+    );
+
+    hold.release.send_replace(true);
+    fixture
+        .wait_residency(&peer, Some(mob_dsl::MemberMaterializationPhase::Live))
+        .await;
+    let received = kickoff_notices_settled(
+        &fixture,
+        std::slice::from_ref(&peer),
+        std::slice::from_ref(&member),
+        WAIT,
+    )
+    .await;
+    assert_eq!(
+        received,
+        vec![starting_then_started()],
+        "the peer holds the member's kickoff notices once each, in order"
+    );
+    fixture.finish().await;
+}
+
+/// A host peer message to a member whose wake has not bound it joins that
+/// wake and is delivered once.
+///
+/// RED before the fix: the send answered `Internal("... missing generated
+/// owner operation binding")` and nothing was sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_host_peer_message_to_a_peer_whose_wake_has_not_bound_it_is_delivered_once() {
+    let fixture = WakeFixture::new("we-send-unbound").await;
+    let sender = fixture.spawn("we-send-sender").await;
+    let peer = fixture.spawn("we-send-peer").await;
+    fixture.wire(&sender, &peer).await;
+    fixture.release(&peer).await;
+    let mut hold = provision_finish_test_hooks::hold_before_bind(&fixture.session(&peer).await);
+    let wake = start_wake(&fixture, &peer);
+    wait_held_before_bind(&fixture, &peer, &mut hold).await;
+
+    let body = token("we-send");
+    let mut send = {
+        let handle = fixture.handle.clone();
+        let (from, to, body) = (sender.clone(), peer.clone(), body.clone());
+        tokio::spawn(async move {
+            handle
+                .send_peer_message(from, to, body.as_str(), HandlingMode::Queue)
+                .await
+        })
+    };
+    // While the wake is held the send waits for it (or is already handed
+    // off): it is never refused. A refusal answers well inside this wait.
+    let early = match tokio::time::timeout(Duration::from_secs(2), &mut send).await {
+        Ok(answered) => Some(
+            answered
+                .expect("the send task ends")
+                .expect("a host peer message to a peer whose wake has not bound it is handed off"),
+        ),
+        Err(_) => None,
+    };
+    assert!(
+        actor_answer_time(&fixture).await < ACTOR_ANSWER_BOUND,
+        "the send does not hold the actor while the peer's wake is held"
+    );
+
+    finish_held_wake(&fixture, &peer, hold, wake).await;
+    let receipt = match early {
+        Some(receipt) => receipt,
+        None => tokio::time::timeout(WAIT, send)
+            .await
+            .expect("the send answers once the peer is woken")
+            .expect("the send task ends")
+            .expect("a host peer message to a peer whose wake has not bound it is handed off"),
+    };
+    assert_eq!(receipt.to, peer);
+    assert_eq!(fixture.delivered_count(&peer, &body).await, 1);
+    fixture.finish().await;
+}
+
+/// A spawn whose wiring fails for another reason (its edge cannot be
+/// journaled) is rolled back at once beside a peer whose wake has not bound
+/// it: the rollback's endpoint stage reads the peer's recorded endpoint.
+///
+/// RED before the fix: the spawn already failed on the peer's missing
+/// binding, and with the resolver alone fixed the rollback's own endpoint
+/// stage failed on it (`rollback remains owned for retry`), leaving the
+/// member seated until a later attempt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_spawn_rollback_beside_a_peer_whose_wake_has_not_bound_it_completes_at_once() {
+    let events = Arc::new(FaultInjectedMobEventStore::new());
+    let fixture = WakeFixture::build_with_storage(
+        "we-rollback-unbound",
+        |_| {},
+        |definition| {
+            definition.wiring.role_wiring = vec![RoleWiringRule {
+                a: ProfileName::from("worker"),
+                b: ProfileName::from("worker"),
+            }];
+        },
+        false,
+        None,
+        MobStorage::with_events(events.clone()),
+    )
+    .await;
+    let (peer, mut hold) = peer_held_before_bind(&fixture, "we-rollback-peer").await;
+    let wake = start_wake(&fixture, &peer);
+    wait_held_before_bind(&fixture, &peer, &mut hold).await;
+
+    events.fail_appends_for("MembersWired").await;
+    let (member, spawned) = spawn_worker(&fixture, "we-rollback-member").await;
+    events.allow_appends_for("MembersWired").await;
+    let refused = spawned.expect_err("the spawn's edge cannot be journaled");
+    let text = refused.to_string();
+    assert!(
+        !text.contains("missing generated owner operation binding"),
+        "the refusal is the journal's, not the peer's missing binding: {refused:?}"
+    );
+    assert!(
+        !text.contains("rollback remains owned for retry"),
+        "the rollback completed on its first attempt: {refused:?}"
+    );
+    assert!(
+        fixture
+            .handle
+            .get_member(&member)
+            .await
+            .expect("roster read")
+            .is_none(),
+        "the refused member is rolled back when its spawn answers"
+    );
+    assert!(
+        !edge_held(&fixture, &member, &peer),
+        "no edge of the refused member is left"
+    );
+
+    finish_held_wake(&fixture, &peer, hold, wake).await;
+    fixture.finish().await;
+}
+
+/// Two wired members woken together realize their edge with no repair
+/// owed: the first one's topology step meets the second while its wake has
+/// not bound it, and trusts its recorded endpoint.
+///
+/// RED before the fix: that step failed `missing generated owner operation
+/// binding` and MobMachine recorded the edge as owing a repair.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_members_woken_together_realize_their_edge_with_no_repair_owed() {
+    let fixture = WakeFixture::new("we-pair-unbound").await;
+    let first = fixture.spawn("we-pair-first").await;
+    let second = fixture.spawn("we-pair-second").await;
+    fixture.wire(&first, &second).await;
+    fixture.release(&first).await;
+    fixture.release(&second).await;
+    let mut hold = provision_finish_test_hooks::hold_before_bind(&fixture.session(&second).await);
+    let second_wake = start_wake(&fixture, &second);
+    wait_held_before_bind(&fixture, &second, &mut hold).await;
+
+    fixture
+        .ensure_live(&first)
+        .await
+        .expect("the first member wakes while the second's wake is held");
+    {
+        let state = fixture.handle.machine_state_watch_rx.borrow();
+        assert!(
+            state.owed_edge_repairs.is_empty(),
+            "the woken member's edge to a peer whose wake has not bound it owes no repair: {:?}",
+            state.owed_edge_repairs
+        );
+    }
+    assert!(
+        trusted_by(&fixture, &first)
+            .await
+            .contains(&recorded_peer_id(&fixture, &second)),
+        "the woken member trusts the held peer's recorded endpoint"
+    );
+
+    finish_held_wake(&fixture, &second, hold, second_wake).await;
+    assert_both_directions_deliver(&fixture, &first, &second).await;
+    fixture.finish().await;
+}
+
+/// Control: a spawn wired by role to a peer whose wake IS Bound (its plan is
+/// applied, its readiness is owed) installs both sides at once, on the
+/// peer's own comms runtime too, before the wake ends. The peer's topology
+/// step may already have planned its edges by then, so a Bound member is
+/// never treated as not materialized.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_spawn_wired_to_a_peer_whose_wake_is_bound_installs_both_sides_before_the_wake_ends() {
+    let fixture = kickoff_notice_fixture("we-spawn-bound").await;
+    let (peer, readiness) = peer_held_at_wake_readiness(&fixture, "we-bound-peer").await;
+    let wake = start_wake(&fixture, &peer);
+    wait_wake_bound(&fixture, &peer).await;
+
+    let (member, spawned) = spawn_worker(&fixture, "we-bound-member").await;
+    assert!(
+        spawned.is_ok(),
+        "a spawn wired to a Bound waking peer is admitted: {spawned:?}"
+    );
+    assert_eq!(
+        fixture.residency(&peer),
+        Some(mob_dsl::MemberMaterializationPhase::Waking),
+        "the peer's wake is still held at its readiness"
+    );
+    assert!(
+        trusted_by(&fixture, &peer)
+            .await
+            .contains(&recorded_peer_id(&fixture, &member)),
+        "the Bound peer's own comms runtime trusts the member before its wake ends"
+    );
+    assert!(
+        trusted_by(&fixture, &member)
+            .await
+            .contains(&recorded_peer_id(&fixture, &peer)),
+        "the member trusts the Bound peer"
+    );
+
+    let _ = readiness.send(true);
+    tokio::time::timeout(WAIT, wake)
+        .await
+        .expect("the wake answers")
+        .expect("the wake task ends")
+        .expect("the wake succeeds");
+    assert_both_directions_deliver(&fixture, &member, &peer).await;
+    fixture.finish().await;
+}

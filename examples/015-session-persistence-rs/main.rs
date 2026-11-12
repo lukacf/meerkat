@@ -103,8 +103,9 @@ SqliteSessionStore also supports:
 
 # Feature flags in Cargo.toml:
 [dependencies]
-meerkat = {{ version = "0.8.24", features = ["jsonl-store", "session-store"] }}
-"#
+meerkat = {{ version = "={version}", features = ["jsonl-store", "session-store"] }}
+"#,
+        version = env!("CARGO_PKG_VERSION")
     );
 
     Ok(())

@@ -99,6 +99,8 @@ pub mod confinement_config;
 pub mod connection;
 pub mod context_budget;
 mod digest_observability;
+#[cfg(not(target_arch = "wasm32"))]
+mod document_file;
 pub mod error;
 pub mod event;
 pub mod event_injector;
@@ -744,8 +746,9 @@ pub use tool_surface::{
     ToolSurfaceGateSlot, ToolSurfaceRefusal, ToolSurfaceSelection,
 };
 pub use transcript_replay::{
-    ReplayApplication, ReplayAssistantBlockIndex, ReplayCapability, ReplayDisposition,
-    ReplayMessageIndex, ReplayPlan, ReplayPlanEntry, ReplayPlanError, ReplayReasoningProjection,
+    OpenAiContinuityLedger, OpenAiContinuityMaterial, OpenAiContinuityTarget, ReplayApplication,
+    ReplayAssistantBlockIndex, ReplayCapability, ReplayDisposition, ReplayMessageIndex, ReplayPlan,
+    ReplayPlanEntry, ReplayPlanError, ReplayReasoningProjection, ReplayStepAdmission,
     ReplaySubject, ReplaySystemNoticeBlockIndex, ReplaySystemNoticeContentIndex, ReplayTarget,
     ReplayToolResultContentIndex, ReplayToolResultIndex, ReplayToolResultProjection,
     ReplayUserContentIndex, ReplayWireFamily, replay_provider_metadata,
@@ -767,21 +770,21 @@ pub use types::{
     InstructionActivationIdentity, InstructionContentDigest, InstructionKey, InstructionNamespace,
     InstructionRevisionId, InstructionRevisionRef, InvalidInstructionContentDigest,
     InvalidInstructionIdentifier, LiveContextObservationId, MemoryIndexExclusion,
-    MemoryIndexableContent, Message, OutputSchema, PROVIDER_STOP_DETAIL_TEXT_CAP,
-    PROVIDER_STOP_DETAIL_TRUNCATION_MARKER, ProviderMeta, ProviderStopDetail,
-    RetiredInstructionBody, RunInput, RunResult, SUPPORTED_VIDEO_MEDIA_TYPES, SecurityMode,
-    ServerToolKind, SessionId, StopReason, SystemMessage, SystemMessageIdentity, SystemNoticeBlock,
-    SystemNoticeDirection, SystemNoticeKind, SystemNoticeMessage, SystemNoticePeer,
-    SystemNoticeRecord, SystemPromptKey, SystemPromptVersion, SystemPromptVersionIdentity,
-    TOOL_ARTIFACT_REF_PART_MAX_BYTES, ToolArtifactRef, ToolArtifactRefError, ToolArtifactRefPart,
-    ToolArtifactRefusal, ToolAudience, ToolCall, ToolCallIter, ToolCallView, ToolDef, ToolIdentity,
-    ToolName, ToolNameSet, ToolProvenance, ToolResult, ToolSourceId, ToolSourceKind,
-    TranscriptMessageIdentity, TranscriptSource, TranscriptUserRole, TurnRequester, TurnUsage,
-    TurnUsageAccountingMissing, Usage, UserMessage, VideoData,
-    assistant_blocks_have_visible_or_actionable_output, has_images, has_non_text_content,
-    has_video, is_supported_video_media_type, materialize_latest_system_prompt_versions,
-    superseded_system_prompt_offsets, validate_inline_video_blocks,
-    validate_system_prompt_version_order,
+    MemoryIndexableContent, Message, OpenAiContinuityIssuer, OpenAiContinuityService, OutputSchema,
+    PROVIDER_STOP_DETAIL_TEXT_CAP, PROVIDER_STOP_DETAIL_TRUNCATION_MARKER, ProviderMeta,
+    ProviderStopDetail, RetiredInstructionBody, RunInput, RunResult, SUPPORTED_VIDEO_MEDIA_TYPES,
+    SecurityMode, ServerToolKind, SessionId, StopReason, SystemMessage, SystemMessageIdentity,
+    SystemNoticeBlock, SystemNoticeDirection, SystemNoticeKind, SystemNoticeMessage,
+    SystemNoticePeer, SystemNoticeRecord, SystemPromptKey, SystemPromptVersion,
+    SystemPromptVersionIdentity, TOOL_ARTIFACT_REF_PART_MAX_BYTES, ToolArtifactRef,
+    ToolArtifactRefError, ToolArtifactRefPart, ToolArtifactRefusal, ToolAudience, ToolCall,
+    ToolCallIter, ToolCallView, ToolDef, ToolIdentity, ToolName, ToolNameSet, ToolProvenance,
+    ToolResult, ToolSourceId, ToolSourceKind, TranscriptMessageIdentity, TranscriptSource,
+    TranscriptUserRole, TurnRequester, TurnUsage, TurnUsageAccountingMissing, Usage, UserMessage,
+    VideoData, assistant_blocks_have_visible_or_actionable_output, has_images,
+    has_non_text_content, has_video, is_supported_video_media_type,
+    materialize_latest_system_prompt_versions, superseded_system_prompt_offsets,
+    validate_inline_video_blocks, validate_system_prompt_version_order,
 };
 pub use web_search::*;
 

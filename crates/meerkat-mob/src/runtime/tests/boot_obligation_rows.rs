@@ -603,6 +603,21 @@ async fn owed_work_whose_host_asks_to_retry_its_build_runs_after_the_retry() {
         2,
         "the retry asked the host once more"
     );
+    // The owed turn starts inside the wake's restore, while the member is
+    // still Waking; its readiness and topology follow, then Live (see
+    // `member_wake_turn`). No caller waits on a timer's wake, so the row
+    // waits for the published phase under its own bound; the read below
+    // judges it.
+    let owed_key = dsl::AgentIdentity::from_domain(&owed_member);
+    let mut published = handle.machine_state_watch_rx.clone();
+    let _ = tokio::time::timeout(
+        ROW_STEP,
+        published.wait_for(|state| {
+            state.member_materialization.get(&owed_key)
+                == Some(&dsl::MemberMaterializationPhase::Live)
+        }),
+    )
+    .await;
     assert_eq!(
         phase_of(&handle, &owed_member),
         Some(dsl::MemberMaterializationPhase::Live)

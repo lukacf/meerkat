@@ -1398,7 +1398,7 @@ async fn init_project_config() -> anyhow::Result<()> {
         )
     })?;
 
-    tokio::fs::write(&project_config, content)
+    write_new_config_document(&project_config, content.as_bytes())
         .await
         .map_err(|e| {
             anyhow::anyhow!(
@@ -1410,6 +1410,48 @@ async fn init_project_config() -> anyhow::Result<()> {
 
     println!("Initialized {}", project_config.display());
     Ok(())
+}
+
+/// Create the configuration document at `path`, which must not exist, and
+/// write `bytes`, by the rule `meerkat-core` applies to the documents it
+/// writes. The document can hold credential material, so on Unix the file is
+/// readable by its owner only (0600), from its creation and whatever the
+/// process umask. In a directory whose setgid bit says it is shared through
+/// its group on purpose it is also readable by that group (0640), which the
+/// directory gives it.
+///
+/// The file is always one this call created: a file or a symbolic link
+/// already at `path` (a link to nothing included) fails the open, so the
+/// document is never written, and no mode is ever set, through a link or
+/// into a file that appeared after the caller's "already exists" check.
+async fn write_new_config_document(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    let shared = {
+        use std::os::unix::fs::PermissionsExt as _;
+        const SETGID: u32 = 0o2000;
+        let directory = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        tokio::fs::metadata(directory)
+            .await
+            .is_ok_and(|directory| directory.permissions().mode() & SETGID != 0)
+    };
+    #[cfg(unix)]
+    options.mode(if shared { 0o640 } else { 0o600 });
+    let mut file = options.open(path).await?;
+    // The umask may have taken the group's read bit: the mode of a shared
+    // directory's document is exact whatever the umask.
+    #[cfg(unix)]
+    if shared {
+        use std::os::unix::fs::PermissionsExt as _;
+        file.set_permissions(std::fs::Permissions::from_mode(0o640))
+            .await?;
+    }
+    file.write_all(bytes).await?;
+    file.flush().await
 }
 
 #[derive(Parser)]
@@ -5597,12 +5639,213 @@ async fn write_comms_binding_out(
         binding["bootstrap_token"] = serde_json::Value::String(bootstrap_token);
     }
 
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
     let bytes = serde_json::to_vec_pretty(&binding)?;
-    tokio::fs::write(path, bytes).await?;
+    write_private_file(path, &bytes).await.map_err(|error| {
+        anyhow::Error::new(error).context("--comms-binding-out could not write the binding file")
+    })?;
     eprintln!("Wrote comms external binding to {}", path.display());
+    Ok(())
+}
+
+/// What stands at a path, when it is not something a new file may take the
+/// place of.
+#[cfg(feature = "comms")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathEntry {
+    Directory,
+    #[cfg(unix)]
+    NamedPipe,
+    #[cfg(unix)]
+    Socket,
+    #[cfg(unix)]
+    Device,
+    /// A path in `/dev` or `/proc`, whatever it holds.
+    #[cfg(unix)]
+    InDevOrProc,
+    /// Not a regular file, and none of the kinds above.
+    Other,
+}
+
+/// What [`write_private_file`] found at its path and will not replace.
+#[cfg(feature = "comms")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NotAFile {
+    entry: PathEntry,
+    /// The path is a symbolic link, and `entry` is what it leads to.
+    through_link: bool,
+}
+
+#[cfg(feature = "comms")]
+impl std::fmt::Display for NotAFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.through_link {
+            f.write_str("a symbolic link to ")?;
+        }
+        f.write_str(match self.entry {
+            PathEntry::Directory => "a directory",
+            #[cfg(unix)]
+            PathEntry::NamedPipe => "a named pipe",
+            #[cfg(unix)]
+            PathEntry::Socket => "a socket",
+            #[cfg(unix)]
+            PathEntry::Device => "a device",
+            #[cfg(unix)]
+            PathEntry::InDevOrProc => "in /dev or /proc",
+            PathEntry::Other => "something that is not a regular file",
+        })
+    }
+}
+
+/// Why [`write_private_file`] wrote nothing.
+#[cfg(feature = "comms")]
+#[derive(Debug, thiserror::Error)]
+enum PrivateFileError {
+    /// The path holds something the file cannot take the place of. Nothing
+    /// was removed, created or written.
+    #[error(
+        "{} is {found}. The file is written as a new file in place of the one at its path, \
+         never into what is there: give a path outside /dev and /proc (/dev/shm will do) \
+         that holds a regular file, or nothing yet",
+        .path.display()
+    )]
+    NotReplaceable { path: PathBuf, found: NotAFile },
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+}
+
+/// Whether `path` would be an entry of `/dev` or `/proc`: its directory,
+/// with every symbolic link resolved, is one of the two or lies under one.
+/// `/dev/shm` and what lies under it is the exception: it is a memory file
+/// system for ordinary files. A directory that does not exist yet is judged
+/// by its nearest ancestor that does, since it would be created inside that
+/// one.
+#[cfg(all(unix, feature = "comms"))]
+async fn in_dev_or_proc(path: &Path) -> std::io::Result<bool> {
+    let directory = path.parent().unwrap_or(path);
+    for ancestor in directory.ancestors() {
+        let ancestor = if ancestor.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            ancestor
+        };
+        match tokio::fs::canonicalize(ancestor).await {
+            Ok(resolved) => {
+                let in_dev = resolved.starts_with("/dev") && !resolved.starts_with("/dev/shm");
+                return Ok(in_dev || resolved.starts_with("/proc"));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(false)
+}
+
+/// What stands at `path`, when a new file may not take its place. Nothing,
+/// a regular file, and a symbolic link to a regular file or to nothing may
+/// be replaced (`None`). A named pipe, a socket, a device or a directory
+/// may not, and neither may a symbolic link to one of them.
+#[cfg(feature = "comms")]
+async fn not_replaceable(path: &Path) -> std::io::Result<Option<NotAFile>> {
+    let absent = |error: &std::io::Error| error.kind() == std::io::ErrorKind::NotFound;
+    let entry = match tokio::fs::symlink_metadata(path).await {
+        Ok(entry) => entry,
+        Err(error) if absent(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let through_link = entry.file_type().is_symlink();
+    let target = if through_link {
+        match tokio::fs::metadata(path).await {
+            Ok(target) => target.file_type(),
+            // A link to nothing: removing it loses nothing, and the new
+            // file is created at the path, not where the link pointed.
+            Err(error) if absent(&error) => return Ok(None),
+            Err(error) => return Err(error),
+        }
+    } else {
+        entry.file_type()
+    };
+    if target.is_file() {
+        return Ok(None);
+    }
+    #[cfg(unix)]
+    let special = {
+        use std::os::unix::fs::FileTypeExt as _;
+        if target.is_fifo() {
+            Some(PathEntry::NamedPipe)
+        } else if target.is_socket() {
+            Some(PathEntry::Socket)
+        } else if target.is_char_device() || target.is_block_device() {
+            Some(PathEntry::Device)
+        } else {
+            None
+        }
+    };
+    #[cfg(not(unix))]
+    let special = None;
+    let entry = match special {
+        Some(entry) => entry,
+        None if target.is_dir() => PathEntry::Directory,
+        None => PathEntry::Other,
+    };
+    Ok(Some(NotAFile {
+        entry,
+        through_link,
+    }))
+}
+
+/// Write `bytes` to a new file at `path` that only its owner can read on
+/// Unix (0600, given when the file is created, which the umask can only
+/// narrow), creating the path's directory when it is missing. The new file
+/// takes the place of what is at `path`, so the bytes are never written
+/// into an older file with a wider mode.
+///
+/// The rule for what is at `path`: a regular file is removed. A symbolic
+/// link is never followed: a link to a regular file or to nothing is
+/// replaced by the new file (the link itself is removed, never its target),
+/// and a link to a named pipe, a socket, a device or a directory is
+/// refused, as those things themselves are. A path in `/dev` or `/proc` is
+/// refused whatever it holds, except under `/dev/shm`, a memory file system
+/// for ordinary files: `/dev/stdout` is a symbolic link to a regular
+/// file when standard output is redirected to one, and a root process must
+/// never replace a link there.
+///
+/// A refusal ([`PrivateFileError::NotReplaceable`]) is decided before
+/// anything is removed or created: removing a named pipe a reader waits on,
+/// or a device, would leave a regular file holding the bytes where none was
+/// asked for.
+#[cfg(feature = "comms")]
+async fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), PrivateFileError> {
+    let refused = |found: NotAFile| PrivateFileError::NotReplaceable {
+        path: path.to_path_buf(),
+        found,
+    };
+    #[cfg(unix)]
+    {
+        if in_dev_or_proc(path).await? {
+            return Err(refused(NotAFile {
+                entry: PathEntry::InDevOrProc,
+                through_link: false,
+            }));
+        }
+    }
+    if let Some(directory) = path.parent() {
+        tokio::fs::create_dir_all(directory).await?;
+    }
+    if let Some(found) = not_replaceable(path).await? {
+        return Err(refused(found));
+    }
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(path).await?;
+    file.write_all(bytes).await?;
+    file.flush().await?;
     Ok(())
 }
 
@@ -5890,15 +6133,25 @@ pub(crate) fn with_cli_confinement(
             .and_then(meerkat::HostConfinement::credential_store_input),
     );
     confinement.admit_host_inputs(&inputs)?;
-    report_cli_confinement(
-        &confinement,
-        &inputs,
-        &meerkat::HostConfinement::convention_sources(
-            Some(scope.context_root.as_deref().unwrap_or(workspace_root)),
-            scope.user_config_root.as_deref(),
-        ),
+    let convention_sources = meerkat::HostConfinement::convention_sources(
+        Some(scope.context_root.as_deref().unwrap_or(workspace_root)),
+        scope.user_config_root.as_deref(),
     );
-    Ok(factory.with_host_confinement(&confinement))
+    report_cli_confinement(&confinement, &inputs, &convention_sources);
+    // The agent's in-process file tools never write these, in any
+    // confinement mode: the inputs and convention sources above, and the
+    // documents of the realm this scope names and of the realm the factory
+    // serves (its storage realm, when the two differ).
+    let mut realm_documents = meerkat::HostConfinement::realm_documents(
+        &meerkat_store::realm_paths_in(&scope.locator.state_root, scope.locator.realm.as_str())
+            .root,
+    );
+    if let Some(served) = factory.runtime_root.as_deref() {
+        realm_documents.extend(meerkat::HostConfinement::realm_documents(served));
+    }
+    Ok(factory
+        .with_host_confinement(&confinement)
+        .with_protected_host_inputs(&inputs, &realm_documents, &convention_sources))
 }
 
 /// The project root a CLI factory in `scope` works in: the context root,
@@ -19400,17 +19653,223 @@ async fn export_session_atif(
     if let Some(parent) = destination.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
+    write_trajectory_file(&destination, trajectory.to_json()?.as_bytes()).await?;
+    Ok(destination)
+}
+
+/// Write an exported trajectory to `destination`: a temporary file beside it,
+/// synced, then renamed onto it. A write, sync or rename that fails publishes
+/// nothing and removes the temporary file: an earlier export at `destination`
+/// stays as it was.
+#[cfg(feature = "session-store")]
+async fn write_trajectory_file(destination: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let temporary = destination.with_extension(format!("json.tmp-{}", uuid::Uuid::new_v4()));
     let mut file = tokio::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&temporary)
         .await?;
-    file.write_all(trajectory.to_json()?.as_bytes()).await?;
-    file.sync_all().await?;
-    drop(file);
-    tokio::fs::rename(&temporary, &destination).await?;
-    Ok(destination)
+    let published = async {
+        file.write_all(bytes).await?;
+        // tokio's `sync_all` waits for the write but keeps its error for the
+        // next write or flush: the flush is what reports a write the
+        // operating system refused (a file size limit, a quota, a full
+        // filesystem, an I/O error). Without it the sync of the empty file
+        // succeeds and the rename publishes it.
+        file.flush().await?;
+        file.sync_all().await?;
+        drop(file);
+        tokio::fs::rename(&temporary, destination).await
+    }
+    .await;
+    if published.is_err() {
+        let _ = tokio::fs::remove_file(&temporary).await;
+    }
+    published
+}
+
+/// A trajectory write the operating system refuses (a file size limit, a
+/// quota, a full filesystem that allocates at write time, an I/O error) fails
+/// the export and publishes nothing: an earlier export at the destination
+/// stays as it was.
+///
+/// RED before, for both rows: the export wrote the temporary file through
+/// tokio's `File` and synced it without a flush. `sync_all` waits for the
+/// write but keeps its error for the next write or flush, so the refused
+/// write went unseen: the export returned `Ok` and renamed the EMPTY
+/// temporary file onto the destination.
+#[cfg(all(test, unix, feature = "session-store"))]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod trajectory_export_refused_write_tests {
+    use super::*;
+
+    /// Set, to the directory the scenario works in, in the child process a
+    /// scenario runs in.
+    const REFUSED_CHILD: &str = "RKAT_TEST_WRITES_REFUSED_CHILD";
+    /// Printed by that child once the scenario ran to its end.
+    const REFUSED_CHILD_DONE: &str = "export scenario ran with every file write refused";
+    /// Printed by that child instead, when a probe write succeeded.
+    const REFUSED_CHILD_NOT_REFUSED: &str =
+        "NOT exercised: this platform did not refuse a write past a zero file size limit";
+
+    /// Run `scenario`, part of this module's test `test`, in a process that
+    /// can create, rename and read files but whose every write of at least
+    /// one byte to a regular file fails (EFBIG): a zero file size limit with
+    /// `SIGXFSZ` ignored. Both are process-wide, so the shared test process
+    /// never sets them: the scenario runs in a child process of this test
+    /// binary, started by a shell that sets them before exec, that runs
+    /// `test` alone.
+    ///
+    /// `prepare` runs first, in this process, where writes work: it stores
+    /// whatever content the scenario must not destroy and returns what
+    /// `verify` compares against. `verify` runs last, in this process again.
+    /// All three get the same fresh directory.
+    ///
+    /// On Linux the limit always refuses the write, so a probe write that
+    /// succeeded there means the recipe broke: the row FAILS, because a
+    /// proof that did not run must not pass. Elsewhere, where a platform may
+    /// not enforce the limit this way, the row is skipped, with a line on
+    /// stderr that says so.
+    fn with_writes_refused<T>(
+        test: &str,
+        prepare: impl FnOnce(&Path) -> T,
+        scenario: impl FnOnce(&Path),
+        verify: impl FnOnce(&Path, T),
+    ) {
+        if let Some(root) = std::env::var_os(REFUSED_CHILD) {
+            let root = PathBuf::from(root);
+            if std::fs::write(root.join("probe").join("byte"), b"x").is_ok() {
+                println!("\n{REFUSED_CHILD_NOT_REFUSED}");
+                return;
+            }
+            scenario(&root.join("scenario"));
+            println!("\n{REFUSED_CHILD_DONE}");
+            return;
+        }
+        let root = tempfile::tempdir().expect("a temporary directory");
+        let work = root.path().join("scenario");
+        std::fs::create_dir(&work).expect("the scenario directory");
+        std::fs::create_dir(root.path().join("probe")).expect("the probe directory");
+        let before = prepare(&work);
+        let binary = std::env::current_exe().expect("the test binary");
+        let test_path = format!("trajectory_export_refused_write_tests::{test}");
+        #[allow(clippy::disallowed_methods)] // the test re-runs its own binary
+        let output = std::process::Command::new("/bin/sh")
+            .args([
+                "-c",
+                "trap '' XFSZ && ulimit -f 0 && exec \"$@\"",
+                "export-writes-refused",
+            ])
+            .arg(binary.as_os_str())
+            .args([
+                "--exact",
+                test_path.as_str(),
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(REFUSED_CHILD, root.path())
+            .output()
+            .expect("start the test with writes refused");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let not_refused = output.status.success() && stdout.contains(REFUSED_CHILD_NOT_REFUSED);
+        if not_refused && !cfg!(target_os = "linux") {
+            eprintln!("SKIPPED {test}: {REFUSED_CHILD_NOT_REFUSED}");
+            return;
+        }
+        assert!(
+            !not_refused,
+            "{test} proved nothing: {REFUSED_CHILD_NOT_REFUSED}, and Linux always does"
+        );
+        assert!(
+            output.status.success() && stdout.contains(REFUSED_CHILD_DONE),
+            "{test} failed with writes refused ({}):\n{stdout}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        verify(&work, before);
+    }
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime")
+    }
+
+    /// The names in `dir`, sorted.
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .expect("read the directory")
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_refused_write_fails_the_export_and_keeps_the_earlier_export() {
+        with_writes_refused(
+            "a_refused_write_fails_the_export_and_keeps_the_earlier_export",
+            |root| {
+                runtime()
+                    .block_on(write_trajectory_file(
+                        &root.join("session.json"),
+                        b"{\"earlier\":true}",
+                    ))
+                    .expect("the earlier export");
+                std::fs::read(root.join("session.json")).expect("the earlier export")
+            },
+            |root| {
+                let written = runtime().block_on(write_trajectory_file(
+                    &root.join("session.json"),
+                    b"{\"later\":true}",
+                ));
+                assert!(
+                    written.is_err(),
+                    "the refused write fails the export: {written:?}"
+                );
+                assert_eq!(
+                    names_in(root),
+                    ["session.json"],
+                    "the failed export leaves no temporary file"
+                );
+            },
+            |root, before| {
+                assert_eq!(
+                    std::fs::read(root.join("session.json")).expect("the earlier export"),
+                    before,
+                    "the earlier export is byte-identical"
+                );
+                assert_eq!(names_in(root), ["session.json"]);
+            },
+        );
+    }
+
+    #[test]
+    fn a_refused_write_publishes_no_export() {
+        with_writes_refused(
+            "a_refused_write_publishes_no_export",
+            |_root| (),
+            |root| {
+                let written = runtime().block_on(write_trajectory_file(
+                    &root.join("session.json"),
+                    b"{\"later\":true}",
+                ));
+                assert!(
+                    written.is_err(),
+                    "the refused write fails the export: {written:?}"
+                );
+                assert_eq!(
+                    names_in(root),
+                    Vec::<String>::new(),
+                    "no export and no temporary file"
+                );
+            },
+            |root, ()| {
+                assert_eq!(names_in(root), Vec::<String>::new());
+            },
+        );
+    }
 }
 
 #[cfg(not(feature = "session-store"))]
@@ -29421,6 +29880,566 @@ default_model = "gemma"
         }
     }
 
+    /// `--comms-binding-out` writes a file that carries the comms runtime's
+    /// bootstrap token, so the file is 0600 on Unix: over a binding file an
+    /// earlier run left readable by group and others, and when it is new.
+    /// RED before: the file was written with the umask's mode, and an
+    /// existing file kept its own (the 0644 here under any umask).
+    #[cfg(all(unix, feature = "comms"))]
+    #[tokio::test]
+    async fn comms_binding_out_writes_an_owner_only_file() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = |path: &Path| {
+            std::fs::metadata(path)
+                .expect("the binding file")
+                .permissions()
+                .mode()
+                & 0o7777
+        };
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = TestCommsRuntime::new("binding-out");
+
+        let existing = temp.path().join("existing.binding.json");
+        std::fs::write(&existing, "{}").expect("an earlier binding file");
+        std::fs::set_permissions(&existing, std::fs::Permissions::from_mode(0o644))
+            .expect("readable by group and others");
+        write_comms_binding_out(&existing, &runtime)
+            .await
+            .expect("write the binding");
+        let binding: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&existing).expect("read the binding"))
+                .expect("binding JSON");
+        assert_eq!(binding["kind"], "external");
+        assert_eq!(binding["address"], "inproc://binding-out");
+        assert_eq!(mode(&existing), 0o600, "over an earlier binding file");
+
+        let new = temp.path().join("created").join("new.binding.json");
+        write_comms_binding_out(&new, &runtime)
+            .await
+            .expect("write the binding");
+        assert_eq!(mode(&new), 0o600, "a new binding file");
+    }
+
+    /// A symbolic link at the `--comms-binding-out` path is replaced by the
+    /// binding file: the path ends as a regular 0600 file that holds the
+    /// binding, and the file the link pointed to keeps its bytes and its
+    /// mode. Before the file was created owner-only, the binding was written
+    /// through the link into that file, with that file's mode.
+    #[cfg(all(unix, feature = "comms"))]
+    #[tokio::test]
+    async fn comms_binding_out_replaces_a_symbolic_link_at_its_path() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = TestCommsRuntime::new("binding-out-link");
+
+        let target = temp.path().join("target.json");
+        std::fs::write(&target, "the link's target").expect("the link's target");
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644))
+            .expect("readable by group and others");
+        let link = temp.path().join("link.binding.json");
+        std::os::unix::fs::symlink(&target, &link).expect("a symbolic link at the path");
+
+        write_comms_binding_out(&link, &runtime)
+            .await
+            .expect("write the binding");
+
+        let at_path = std::fs::symlink_metadata(&link).expect("the binding path");
+        assert!(
+            at_path.file_type().is_file(),
+            "the link is replaced by a regular file"
+        );
+        assert_eq!(at_path.permissions().mode() & 0o7777, 0o600);
+        let binding: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&link).expect("read the binding"))
+                .expect("binding JSON");
+        assert_eq!(binding["kind"], "external");
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("read the link's target"),
+            "the link's target",
+            "the file the link pointed to is not written"
+        );
+        assert_eq!(
+            std::fs::metadata(&target)
+                .expect("the link's target")
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o644,
+            "the file the link pointed to keeps its mode"
+        );
+    }
+
+    /// A symbolic link to nothing at the `--comms-binding-out` path is
+    /// replaced like a link to a regular file: a link at the path is never
+    /// followed, so nothing is created where it pointed, and the path ends
+    /// as a regular 0600 file that holds the binding. RED before: such a
+    /// link was refused, although removing it loses nothing and the write
+    /// before the owner-only rule created the file it named.
+    #[cfg(all(unix, feature = "comms"))]
+    #[tokio::test]
+    async fn comms_binding_out_replaces_a_link_to_nothing() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = TestCommsRuntime::new("binding-out-dangling");
+
+        let absent = temp.path().join("absent.json");
+        let link = temp.path().join("dangling.binding.json");
+        std::os::unix::fs::symlink(&absent, &link).expect("a link to nothing at the path");
+
+        write_comms_binding_out(&link, &runtime)
+            .await
+            .expect("the link is replaced by the binding file");
+
+        let at_path = std::fs::symlink_metadata(&link).expect("the binding path");
+        assert!(
+            at_path.file_type().is_file(),
+            "the link is replaced by a regular file"
+        );
+        assert_eq!(at_path.permissions().mode() & 0o7777, 0o600);
+        let binding: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&link).expect("read the binding"))
+                .expect("binding JSON");
+        assert_eq!(binding["kind"], "external");
+        assert!(
+            std::fs::symlink_metadata(&absent).is_err(),
+            "nothing is created where the link pointed"
+        );
+    }
+
+    /// `--comms-binding-out` replaces the file at its path, so it refuses a
+    /// path that holds anything else, before it removes anything: a named
+    /// pipe a supervisor reads from stays a named pipe, a socket stays a
+    /// socket, a directory stays a directory, and a symbolic link to a named
+    /// pipe or to a device stays that link. RED before: the pipe and the
+    /// links were unlinked and a regular file took their place (a reader of
+    /// the pipe then waits for ever).
+    #[cfg(all(unix, feature = "comms"))]
+    #[tokio::test]
+    async fn comms_binding_out_refuses_a_path_that_is_not_a_file_and_leaves_it() {
+        use std::os::unix::fs::FileTypeExt as _;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = TestCommsRuntime::new("binding-out-not-a-file");
+        let entry = |path: &Path| {
+            std::fs::symlink_metadata(path)
+                .expect("the entry at the path")
+                .file_type()
+        };
+        // The refusal is typed: it names what stands at the path.
+        let found = |error: anyhow::Error| match error.downcast_ref::<PrivateFileError>() {
+            Some(PrivateFileError::NotReplaceable { found, .. }) => *found,
+            other => panic!("not the refusal of the path: {other:?} ({error:#})"),
+        };
+
+        let pipe = temp.path().join("binding.pipe");
+        #[allow(clippy::disallowed_methods)] // the test's own mkfifo
+        let made = std::process::Command::new("mkfifo")
+            .arg(&pipe)
+            .status()
+            .expect("run mkfifo");
+        assert!(made.success(), "mkfifo {}", pipe.display());
+        let error = write_comms_binding_out(&pipe, &runtime)
+            .await
+            .expect_err("a named pipe at the path is refused");
+        assert!(
+            format!("{error:#}").contains("is a named pipe"),
+            "the message says what is at the path: {error:#}"
+        );
+        assert_eq!(
+            found(error),
+            NotAFile {
+                entry: PathEntry::NamedPipe,
+                through_link: false
+            }
+        );
+        assert!(entry(&pipe).is_fifo(), "the named pipe is still there");
+
+        let link_to_pipe = temp.path().join("pipe.link");
+        std::os::unix::fs::symlink(&pipe, &link_to_pipe).expect("a link to the pipe");
+        let error = write_comms_binding_out(&link_to_pipe, &runtime)
+            .await
+            .expect_err("a link to a named pipe is refused");
+        assert_eq!(
+            found(error),
+            NotAFile {
+                entry: PathEntry::NamedPipe,
+                through_link: true
+            }
+        );
+        assert!(entry(&link_to_pipe).is_symlink(), "the link is still there");
+        assert!(entry(&pipe).is_fifo(), "and so is the named pipe");
+
+        let socket = temp.path().join("binding.sock");
+        let _listener =
+            std::os::unix::net::UnixListener::bind(&socket).expect("a socket at the path");
+        let error = write_comms_binding_out(&socket, &runtime)
+            .await
+            .expect_err("a socket at the path is refused");
+        assert_eq!(
+            found(error),
+            NotAFile {
+                entry: PathEntry::Socket,
+                through_link: false
+            }
+        );
+        assert!(entry(&socket).is_socket(), "the socket is still there");
+
+        let link_to_device = temp.path().join("device.link");
+        std::os::unix::fs::symlink("/dev/null", &link_to_device).expect("a link to a device");
+        let error = write_comms_binding_out(&link_to_device, &runtime)
+            .await
+            .expect_err("a link to a device is refused");
+        assert_eq!(
+            found(error),
+            NotAFile {
+                entry: PathEntry::Device,
+                through_link: true
+            }
+        );
+        assert!(
+            entry(&link_to_device).is_symlink(),
+            "the link is still there"
+        );
+        assert!(
+            entry(Path::new("/dev/null")).is_char_device(),
+            "and so is the device"
+        );
+
+        let directory = temp.path().join("binding.dir");
+        std::fs::create_dir(&directory).expect("a directory at the path");
+        let error = write_comms_binding_out(&directory, &runtime)
+            .await
+            .expect_err("a directory at the path is refused");
+        assert_eq!(
+            found(error),
+            NotAFile {
+                entry: PathEntry::Directory,
+                through_link: false
+            }
+        );
+        assert!(entry(&directory).is_dir(), "the directory is still there");
+    }
+
+    /// `--comms-binding-out /dev/stdout` is refused by the rule, before
+    /// anything is unlinked: a path in `/dev` is never replaced, whatever it
+    /// holds (here a pipe: a symbolic link to it on Linux, a device
+    /// elsewhere). The scenario runs in a child
+    /// process of this test binary, whose standard output is always a pipe.
+    /// RED before: the write tried to unlink `/dev/stdout`; the refusal was
+    /// only the operating system's permission error, and a root process
+    /// (the usual case in a container) removed the link and left a regular
+    /// file holding the bootstrap token in its place.
+    #[cfg(all(unix, feature = "comms"))]
+    #[tokio::test]
+    async fn comms_binding_out_refuses_dev_stdout() {
+        const CHILD: &str = "RKAT_TEST_BINDING_OUT_STDOUT_CHILD";
+        const CHILD_DONE: &str = "binding-out to /dev/stdout was refused by the rule";
+        if std::env::var_os(CHILD).is_none() {
+            #[allow(clippy::disallowed_methods)] // the test re-runs its own binary
+            let output =
+                std::process::Command::new(std::env::current_exe().expect("the test binary"))
+                    .args([
+                        "--exact",
+                        "tests::comms_binding_out_refuses_dev_stdout",
+                        "--nocapture",
+                        "--test-threads=1",
+                    ])
+                    .env(CHILD, "1")
+                    .stdin(std::process::Stdio::null())
+                    .output()
+                    .expect("run the scenario in a child process");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                output.status.success() && stderr.contains(CHILD_DONE),
+                "the scenario failed in its child process ({}):\n{}\n{stderr}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+            );
+            return;
+        }
+
+        let stdout = Path::new("/dev/stdout");
+        let before = std::fs::symlink_metadata(stdout)
+            .expect("/dev/stdout")
+            .file_type();
+        let runtime = TestCommsRuntime::new("binding-out-stdout");
+        let error = write_comms_binding_out(stdout, &runtime)
+            .await
+            .expect_err("/dev/stdout is refused");
+        assert!(
+            error.downcast_ref::<std::io::Error>().is_none(),
+            "the refusal is the rule's, made before any unlink, not the operating system's \
+             answer to one: {error:#}"
+        );
+        assert!(
+            matches!(
+                error.downcast_ref::<PrivateFileError>(),
+                Some(PrivateFileError::NotReplaceable {
+                    found: NotAFile {
+                        entry: PathEntry::InDevOrProc,
+                        through_link: false
+                    },
+                    ..
+                })
+            ),
+            "the typed refusal of a path in /dev: {error:#}"
+        );
+        assert_eq!(
+            std::fs::symlink_metadata(stdout)
+                .expect("/dev/stdout is still there")
+                .file_type(),
+            before,
+            "/dev/stdout is what it was"
+        );
+        eprintln!("{CHILD_DONE}");
+    }
+
+    /// `--comms-binding-out /dev/stdout` is refused when standard output is
+    /// redirected to a file, too. `/dev/stdout` is then a symbolic link to a
+    /// regular file, which the rule for a link at the path would replace: a
+    /// root process would remove the link from `/dev` and leave a regular
+    /// file with the bootstrap token there. The scenario runs in a child
+    /// process of this test binary whose standard output is a file, as the
+    /// test user: the refusal is the typed one, made before any unlink,
+    /// `/dev/stdout` is what it was, and the file standard output goes to
+    /// is the same file and holds no binding. RED before: the write tried
+    /// to unlink `/dev/stdout`, and what stopped the test user was the
+    /// operating system's permission error.
+    #[cfg(all(target_os = "linux", feature = "comms"))]
+    #[tokio::test]
+    async fn comms_binding_out_refuses_dev_stdout_redirected_to_a_file() {
+        use std::os::unix::fs::MetadataExt as _;
+        const CHILD: &str = "RKAT_TEST_BINDING_OUT_REDIRECTED_STDOUT_CHILD";
+        const CHILD_DONE: &str = "binding-out to a redirected /dev/stdout was refused by the rule";
+        if std::env::var_os(CHILD).is_none() {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let redirect = temp.path().join("stdout.txt");
+            let file = std::fs::File::create(&redirect).expect("the file standard output goes to");
+            let inode = file.metadata().expect("its metadata").ino();
+            #[allow(clippy::disallowed_methods)] // the test re-runs its own binary
+            let output =
+                std::process::Command::new(std::env::current_exe().expect("the test binary"))
+                    .args([
+                        "--exact",
+                        "tests::comms_binding_out_refuses_dev_stdout_redirected_to_a_file",
+                        "--nocapture",
+                        "--test-threads=1",
+                    ])
+                    .env(CHILD, "1")
+                    .stdin(std::process::Stdio::null())
+                    .stdout(file)
+                    .output()
+                    .expect("run the scenario in a child process");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                output.status.success() && stderr.contains(CHILD_DONE),
+                "the scenario failed in its child process ({}):\n{stderr}",
+                output.status,
+            );
+            assert_eq!(
+                std::fs::metadata(&redirect)
+                    .expect("the file standard output went to")
+                    .ino(),
+                inode,
+                "the file standard output went to is the same file"
+            );
+            let written = std::fs::read_to_string(&redirect).expect("read it");
+            assert!(
+                !written.contains("\"kind\"") && !written.contains("bootstrap_token"),
+                "no binding was written into it: {written}"
+            );
+            return;
+        }
+
+        let stdout = Path::new("/dev/stdout");
+        assert!(
+            std::fs::metadata(stdout)
+                .expect("what /dev/stdout leads to")
+                .is_file(),
+            "standard output is a regular file in this child"
+        );
+        let before = std::fs::symlink_metadata(stdout)
+            .expect("/dev/stdout")
+            .file_type();
+        let runtime = TestCommsRuntime::new("binding-out-redirected-stdout");
+        let error = write_comms_binding_out(stdout, &runtime)
+            .await
+            .expect_err("/dev/stdout is refused");
+        assert!(
+            matches!(
+                error.downcast_ref::<PrivateFileError>(),
+                Some(PrivateFileError::NotReplaceable {
+                    found: NotAFile {
+                        entry: PathEntry::InDevOrProc,
+                        through_link: false
+                    },
+                    ..
+                })
+            ),
+            "the typed refusal of a path in /dev, made before any unlink: {error:#}"
+        );
+        assert_eq!(
+            std::fs::symlink_metadata(stdout)
+                .expect("/dev/stdout is still there")
+                .file_type(),
+            before,
+            "/dev/stdout is what it was"
+        );
+        eprintln!("{CHILD_DONE}");
+    }
+
+    /// The `/dev` and `/proc` rule looks at where the binding path's
+    /// directory really is: a path in `/proc`, a path whose directory is a
+    /// symbolic link into `/dev`, and a path whose directory does not exist
+    /// yet below such a link are all refused with the typed error, and
+    /// nothing is created or removed. Without the rule each of them ends in
+    /// whatever the operating system answers to an unlink or a create
+    /// there, which for a root process is success.
+    #[cfg(all(target_os = "linux", feature = "comms"))]
+    #[tokio::test]
+    async fn comms_binding_out_refuses_a_path_that_resolves_into_dev_or_proc() {
+        use std::os::unix::fs::FileTypeExt as _;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = TestCommsRuntime::new("binding-out-dev-proc");
+        let devices = temp.path().join("devices");
+        std::os::unix::fs::symlink("/dev", &devices).expect("a link to /dev");
+
+        for path in [
+            PathBuf::from("/proc/self/binding.json"),
+            devices.join("null"),
+            devices.join("binding-out-row-absent").join("binding.json"),
+        ] {
+            let error = write_comms_binding_out(&path, &runtime)
+                .await
+                .expect_err("a path in /dev or /proc is refused");
+            assert!(
+                matches!(
+                    error.downcast_ref::<PrivateFileError>(),
+                    Some(PrivateFileError::NotReplaceable {
+                        found: NotAFile {
+                            entry: PathEntry::InDevOrProc,
+                            through_link: false
+                        },
+                        ..
+                    })
+                ),
+                "{}: the typed refusal of a path in /dev or /proc: {error:#}",
+                path.display()
+            );
+        }
+        assert!(
+            std::fs::symlink_metadata("/dev/null")
+                .expect("/dev/null")
+                .file_type()
+                .is_char_device(),
+            "/dev/null is still the device"
+        );
+        assert!(
+            std::fs::symlink_metadata("/dev/binding-out-row-absent").is_err(),
+            "no directory was created in /dev"
+        );
+        assert!(
+            std::fs::symlink_metadata("/proc/self/binding.json").is_err(),
+            "nothing was created in /proc"
+        );
+    }
+
+    /// `/dev/shm` is the exception to the `/dev` rule: it is a memory file
+    /// system for ordinary files and a usual place for a short-lived secret,
+    /// so a binding path there is written like any other. The row writes the
+    /// binding into a directory under `/dev/shm` that does not exist yet:
+    /// the file holds the binding and is 0600. What stands at the path is
+    /// still judged there: a named pipe in `/dev/shm` is refused and stays.
+    /// Where `/dev/shm` is absent or cannot be written, the row says so on
+    /// standard error and does not run. RED before: the path was refused
+    /// like every path in `/dev`.
+    #[cfg(all(target_os = "linux", feature = "comms"))]
+    #[tokio::test]
+    async fn comms_binding_out_writes_into_dev_shm() {
+        use std::os::unix::fs::{FileTypeExt as _, PermissionsExt as _};
+        let Ok(temp) = tempfile::Builder::new()
+            .prefix("rkat-binding-out-row-")
+            .tempdir_in("/dev/shm")
+        else {
+            eprintln!(
+                "comms_binding_out_writes_into_dev_shm: NOT exercised: /dev/shm is absent or \
+                 not writable here"
+            );
+            return;
+        };
+        let runtime = TestCommsRuntime::new("binding-out-dev-shm");
+
+        let path = temp.path().join("fresh").join("binding.json");
+        write_comms_binding_out(&path, &runtime)
+            .await
+            .expect("a binding path in /dev/shm is written");
+        let written = std::fs::symlink_metadata(&path).expect("the binding file");
+        assert!(written.file_type().is_file());
+        assert_eq!(written.permissions().mode() & 0o7777, 0o600);
+        let binding: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("read the binding"))
+                .expect("binding JSON");
+        assert_eq!(binding["kind"], "external");
+
+        let pipe = temp.path().join("binding.pipe");
+        #[allow(clippy::disallowed_methods)] // the test's own mkfifo
+        let made = std::process::Command::new("mkfifo")
+            .arg(&pipe)
+            .status()
+            .expect("run mkfifo");
+        assert!(made.success(), "mkfifo {}", pipe.display());
+        let error = write_comms_binding_out(&pipe, &runtime)
+            .await
+            .expect_err("a named pipe in /dev/shm is refused");
+        assert!(
+            matches!(
+                error.downcast_ref::<PrivateFileError>(),
+                Some(PrivateFileError::NotReplaceable {
+                    found: NotAFile {
+                        entry: PathEntry::NamedPipe,
+                        through_link: false
+                    },
+                    ..
+                })
+            ),
+            "the typed refusal of the named pipe: {error:#}"
+        );
+        assert!(
+            std::fs::symlink_metadata(&pipe)
+                .expect("the named pipe")
+                .file_type()
+                .is_fifo(),
+            "the named pipe is still there"
+        );
+    }
+
+    /// `rkat init` writes the project document only into a file it creates:
+    /// a symbolic link at the document's path, here one whose target does not
+    /// exist (which the "already exists" check before the write does not
+    /// see), fails the write, and nothing is created through the link. RED
+    /// before: the write opened create-or-truncate, followed the link and
+    /// wrote the document, with the mode rule's bits, into a file elsewhere.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn init_never_writes_its_document_through_a_link() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let elsewhere = temp.path().join("elsewhere.toml");
+        let document = temp.path().join("config.toml");
+        std::os::unix::fs::symlink(&elsewhere, &document).expect("a link at the document path");
+
+        let error = write_new_config_document(&document, b"max_tokens = 100\n")
+            .await
+            .expect_err("the document is not written through the link");
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert!(!elsewhere.exists(), "nothing is created through the link");
+        assert!(
+            std::fs::symlink_metadata(&document)
+                .expect("the link")
+                .file_type()
+                .is_symlink(),
+            "the link is still there"
+        );
+    }
+
     struct TestMobSessionActor {
         witness: meerkat_session::LiveSessionActorWitness,
         comms: Arc<TestCommsRuntime>,
@@ -39370,6 +40389,63 @@ supports_reasoning = true
             tokio::fs::try_exists(&corrupt_path).await.unwrap(),
             "corrupt lease must not be auto-deleted by the inspect call"
         );
+    }
+
+    /// An EMPTY lease record is the mark of a holder that is alive but
+    /// could not write its heartbeat (a full disk): the holder empties its
+    /// own record so that it never comes to look gone. Delete and prune must
+    /// keep such a realm without `--force`, and must not clean the record up.
+    #[tokio::test]
+    async fn realm_delete_and_prune_refuse_while_a_lease_record_is_empty() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let state_root = temp.path().join("realms");
+        let realm_id = "holder-on-a-full-disk";
+
+        let _manifest = meerkat_store::ensure_realm_manifest_in(
+            &state_root,
+            realm_id,
+            Some(meerkat_store::RealmBackend::Sqlite),
+            Some(meerkat_store::RealmOrigin::Generated),
+        )
+        .await
+        .expect("create manifest");
+        let paths = meerkat_store::realm_paths_in(&state_root, realm_id);
+        let lease_dir = meerkat_store::realm_lease_dir(&paths);
+        tokio::fs::create_dir_all(&lease_dir)
+            .await
+            .expect("create lease dir");
+        let record = lease_dir.join("holder.json");
+        tokio::fs::write(&record, b"")
+            .await
+            .expect("the emptied lease record");
+
+        let refused = delete_realm(&state_root, realm_id, false)
+            .await
+            .expect_err("delete refuses without --force");
+        assert!(
+            refused.to_string().contains("1 unreadable lease file(s)"),
+            "the refusal names the lease: {refused}"
+        );
+        let outcome = prune_realms_inner(&state_root, true, 0, false)
+            .await
+            .expect("prune outcome");
+        assert_eq!(outcome.skipped_active, 1, "prune keeps the realm");
+        assert_eq!(outcome.removed, 0);
+        assert!(
+            tokio::fs::try_exists(&paths.root).await.unwrap(),
+            "the realm survives delete and prune without --force"
+        );
+        assert_eq!(
+            tokio::fs::read(&record).await.expect("the lease record"),
+            b"",
+            "the emptied record is neither cleaned up nor rewritten"
+        );
+
+        // `--force` stays the way out for a holder that is known to be gone.
+        delete_realm(&state_root, realm_id, true)
+            .await
+            .expect("delete with --force");
+        assert!(!tokio::fs::try_exists(&paths.root).await.unwrap());
     }
 
     #[test]

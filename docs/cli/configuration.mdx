@@ -214,6 +214,14 @@ A project `mcp.toml` or `.rkat/config.toml` that a confined process can write
 is not trusted: its MCP servers and hooks are refused, and `rkat` says so on
 stderr.
 
+With or without confinement, the agent's file tools (`apply_patch`,
+`blob_save_file`) never write `<project>/.rkat/` (or a `.rkat` directory
+below it), the realm state root or the other files `rkat` reads its own
+configuration from; see
+[paths the file tools never write](/reference/builtin-tools#paths-the-file-tools-never-write).
+Change them with `rkat mcp add`, `rkat config`, `rkat auth` and
+`rkat skill add`, or edit them yourself.
+
 ## Custom model registry entries
 
 Uncatalogued models served by a first-party API provider are declared once
@@ -445,6 +453,12 @@ expanding it would let an API caller copy host environment variables into a
 request to a server of its choice. Writes refuse a realm server holding `${`,
 and a realm config that already holds one fails when its MCP servers are
 resolved. Put env-derived values in an `mcp.toml` server.
+
+A literal token in a server's args, env or headers is in the file as written.
+On Unix `rkat` writes `mcp.toml`, like every config document, readable by its
+owner only (mode 0600), or by the directory's group too (0640) when its
+`.rkat` directory has the setgid bit (see
+[File permissions](/concepts/configuration#file-permissions)).
 
 `rkat run` (and `--resume`) starts the servers of all three scopes, and
 `rkat mcp login` resolves them. The RPC and REST servers do not start configured

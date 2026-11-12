@@ -1,6 +1,6 @@
 [package]
 name = "meerkat-toolkit"
-version = "0.9.11"
+version = "0.9.14"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

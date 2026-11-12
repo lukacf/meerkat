@@ -55,6 +55,275 @@ Meerkat is pre-1.0, and patch releases can carry declared breaking changes.
 - `rkat storage doctor` reports no new problems.
 - An SDK `connect()` succeeds.
 
+## Upgrading to 0.9.14
+
+This section is for systems running 0.9.13. The full list of changes is in
+the CHANGELOG under `## [0.9.14]`.
+
+Meerkat 0.9.14 is Core 0.9.14, Meta 0.9.14 and Connect 0.9.14, released
+together.
+
+### Replay to OpenAI-wire services (Rust)
+
+`meerkat-core`: `ReplayPlan::build` with an OpenAI-wire `ReplayTarget`, and
+`ReplayWireFamily::OpenAi.strip_foreign_metadata`, no longer keep
+OpenAI-family provider metadata: a target planned that way names no service,
+so none of that metadata is its own. Anthropic and Gemini targets are
+unchanged.
+
+**Do:** a provider adapter for an OpenAI-wire service plans with
+`ReplayPlan::build_with_openai_continuity` and asks
+`ReplayPlan::step_admission`.
+
+### Sessions on OpenAI-family routes after a restart
+
+Encrypted reasoning items, hosted-tool items, item ids and response ids are
+replayed only to the service the running process received them from (the
+public OpenAI API, the ChatGPT backend, Azure OpenAI, GitHub Copilot or a
+self-hosted server). A process knows the issuer only of what it received
+itself, and that knowledge is not stored. So after the restart of this
+upgrade, and after any later restart or a resume from the store in a new
+process, earlier turns are replayed without their encrypted reasoning,
+hosted-tool call items and item ids, on the same service too; the steps of
+the new process replay in full. The first request after a restart renders
+those earlier turns differently than the request before it did, and the
+provider's prompt cache misses once from the first such turn on. Nothing in
+a stored session, an event, an export or an SDK payload changes.
+
+### A request refused inside a Responses stream fails once
+
+On the Responses stream of `OpenAiClient` (the OpenAI API, the ChatGPT
+backend, Azure OpenAI, GitHub Copilot `/responses` and a self-hosted server
+in Responses mode), a request refused with the stream error code
+`invalid_request_body`, `invalid_encrypted_content`, `invalid_prompt`,
+`invalid_value`, `invalid_argument`, `unsupported_value` or
+`unsupported_parameter` is now `LlmError::InvalidRequest`
+(`provider_error_kind` `invalid_request`, non-retryable), or the
+context-overflow, oversized-request or exhausted-quota class when the
+message names one, and `model_not_found` is `LlmError::ModelNotFound`
+(`reason_type` `llm_invalid_model`). Through 0.9.13 such a request was sent
+again until the retry policy was used up and the turn ended as
+`retry exhausted`; the turn now fails once, on the LLM failure itself.
+`usage_limit_reached` (the ChatGPT backend's plan usage limit) is
+`LlmError::QuotaExhausted`, non-retryable, wherever that list is read; in an
+HTTP 429 body it was a rate limit, which is retried.
+
+**Do:** code that matched the `retry exhausted` outcome for these refusals
+matches the new class, and code that treated `usage_limit_reached` as a rate
+limit treats it as an exhausted quota.
+
+### GitHub Copilot routes: the default client identity
+
+The default client identity a Copilot route sends is
+`Editor-Version: vscode/1.145.2` (was `vscode/1.107.0`),
+`Editor-Plugin-Version: copilot-chat/0.73.0` (was `copilot-chat/0.35.0`) and
+`User-Agent: GitHubCopilotChat/0.73.0` (was `GitHubCopilotChat/0.35.0`). Two
+public values change with it: the constant
+`meerkat_auth_core::github_copilot::GITHUB_COPILOT_USER_AGENT` and what
+`meerkat_copilot::CopilotBackendConfig::default()` returns. A route whose
+backend `options` set `user_agent`, `editor_version` or
+`editor_plugin_version` keeps its own values on the token exchange, the
+identity lookup, the model listing and inference.
+
+**Do:** code that compares against the earlier value of the constant or of
+the default configuration compares against the new one.
+
+### File writes the operating system refuses
+
+A file write that the operating system refuses (a file size limit, a quota,
+a full filesystem that allocates at write time, or an I/O error) now fails
+the operation with the error it already returns for a failed open or rename,
+publishes nothing and removes its temporary file: the file it would have
+replaced stays as it was, and a file that did not exist is not created.
+Through 0.9.13 such a write could replace the file with an empty one while
+the operation reported success. A realm lease record is the one file that is
+still emptied, on purpose and only at a heartbeat that cannot replace it. A
+file an earlier release already emptied is not restored.
+
+**Do:** where a write may have been refused under an earlier release, check
+these files for an empty one:
+
+- a credential file of the file credential store
+  (`<credentials>/<realm>/<slot>.json`): an empty one no longer loads;
+- `realm_manifest.json`: with an empty one every open of that realm fails to
+  parse it, and so do `rkat realm list` and `rkat realm prune` for the whole
+  state root;
+- `.rkat/tasks.json`, the builtin task tools' JSON task file: with an empty
+  one every stored task was lost. Only the file task store writes this file;
+  the shipped `rkat`, `rkat-rpc`, `rkat-rest` and `rkat-mcp` binaries keep
+  tasks in SQLite.
+
+### Meta 0.9.14
+
+Meta 0.9.14 pins Core `=0.9.14`. The full list is in `meta/CHANGELOG.md`
+under `## [0.9.14]`.
+
+- Security: a mob that a member private to a person creates with its own
+  `mob_create` stays private to that person after a restart, so every member
+  spawned into it after the restart is private to that person too. In 0.9.11
+  through 0.9.13 such a mob came back private to no one. A mob whose
+  creation record says that several rosters named the session that created
+  it, and picks none (`MobProvenance::Ambiguous`), no longer comes back
+  private to no one: after a restart a spawn into it is refused, and the
+  members already seated in it keep the owner their own spawn gave them.
+
+### Connect 0.9.14
+
+Connect 0.9.14 is GitHub release `connect-v0.9.14` in `lukacf/meerkat`, a
+full release that is never the repository's latest. The full list is in
+`connect/CHANGELOG.md` under `## [0.9.14]`.
+
+- `@rkat/toolkit` accepts its optional peers `@rkat/sdk` and
+  `@rkat/meta-sdk` from 0.9.14 below 0.10.0 (`>=0.9.14 <0.10.0`; it accepted
+  them from 0.9.10). **Do:** upgrade `@rkat/toolkit`, `@rkat/sdk` and
+  `@rkat/meta-sdk` together.
+
+### Rolling back to 0.9.13
+
+No stored format changed: 0.9.13 and 0.9.14 write the same rows for the same
+response.
+
+## Upgrading to 0.9.13
+
+Meerkat 0.9.13 is Core 0.9.13, Meta 0.9.13 and Connect 0.9.13, released
+together. It changed the packaging of the `meerkat-meta` crate only: the
+crate is published without its integration test directory, which brings it
+back under the registry's limit. Core 0.9.13 has no code changes, and Meta
+0.9.13 and Connect 0.9.13 hold every change of their 0.9.12, so there is no
+step beyond those of "Upgrading to 0.9.12" below. The `meerkat-meta` 0.9.12
+crate was never published: a Rust host moves from `meerkat-meta` 0.9.11 to
+0.9.13.
+
+## Upgrading to 0.9.12
+
+This section is for systems running 0.9.11. The full list of changes is in
+the CHANGELOG under `## [0.9.12]`.
+
+Meerkat 0.9.12 is Core 0.9.12, Meta 0.9.12 and Connect 0.9.12, released
+together.
+
+### rusqlite 0.41 (Rust)
+
+Meerkat moves to rusqlite 0.41 (libsqlite3-sys 0.39). libsqlite3-sys links
+one SQLite per build (`links = "sqlite3"`), so Cargo refuses a graph that
+holds rusqlite 0.37 next to Meerkat's rusqlite 0.41. Every public signature
+of `meerkat-sqlite`, `meerkat-store`, `meerkat-runtime` and
+`meerkat-workgraph` that names a rusqlite type names rusqlite 0.41's, for
+example `meerkat_sqlite::Connection` (a re-export of `rusqlite::Connection`)
+and the `rusqlite::Error` that `meerkat_sqlite::SqliteStoreError::Sqlite`
+carries. In Meta,
+`meta_extension_state::SqliteExtensionDocumentStore::from_connection` and
+`meerkat_meta::mob_announcements::SqliteAnnouncementStore::from_connection`
+take a rusqlite 0.41 `Connection`.
+
+**Do:** an application or host that depends on rusqlite (or libsqlite3-sys)
+itself moves to rusqlite 0.41 (libsqlite3-sys 0.39) in the same change that
+moves it to Meerkat 0.9.12.
+
+### Agents and engine configuration files
+
+Agents cannot change engine configuration with the file tools any more, and
+an agent can no longer write a `.rkat` directory anywhere under its project
+root, not only the one at the root: a nested project's `.rkat/mcp.toml`,
+hooks, skills or realm is changed by its operator. The CHANGELOG's Security
+and Changed sections describe the change.
+
+**Do:**
+
+- If you asked an agent to edit `.rkat/mcp.toml`, `.rkat/config.toml` or a
+  file under `.rkat/skills/`, make the change with `rkat mcp add`,
+  `rkat config set` or `rkat config patch`, `rkat skill add`, or edit the
+  file yourself.
+- If you run `rkat-rpc` or `rkat-mcp` (directly or through the Python or
+  TypeScript SDK) and let agents write files, start the server with a
+  context root: `--context-root <dir>`, or the SDK option `context_root` /
+  `contextRoot`. Agents then work in that directory and the realm's state
+  lies outside it. Without one, files still land in the realm directory as
+  before, the realm's documents are refused, and the realm's stores remain
+  writable by the file tools.
+- A Rust host that keeps its realm state, config documents or credential
+  store inside the project root it gives its tools, outside `.rkat`,
+  declares them with `AgentFactory::with_protected_host_inputs`.
+
+### `rkat auth profile` prints no credential values
+
+`rkat auth profile <PROFILE_ID>` prints only the profile's `id`, `provider`,
+`auth_method` and `source_kind`, the `auth_profile` shape JSON-RPC
+`auth/profile/get` returns. Its `source`, `constraints` and
+`metadata_defaults` are no longer printed.
+
+**Do:** a script that read a credential value from that output reads it
+where the profile's source keeps it instead: the realm config that declares
+an `inline_secret` source, the environment variable, file descriptor or
+credential command another source names, or the credential store. To check
+that a binding's credential resolves without reading it, run
+`rkat auth test <BINDING_ID>`.
+
+### Catalog models you had defined yourself
+
+Model IDs are unique across the catalog, `[models.<id>]` entries and
+self-hosted models, and this release adds `claude-fable-5-2` and
+`gemini-4-carbon` to the catalog. A realm or project configuration that has
+`[models.claude-fable-5-2]` or `[models.gemini-4-carbon]` (for example
+because you ran the model before the catalog listed it) is now refused by
+configuration validation with
+`model id '<id>' must be unique across built-in, custom, and self-hosted entries`.
+
+**Do:** remove the entry. The catalog row then serves the model with its own
+limits and capabilities. The same applies whenever a release adds a model
+you had defined yourself.
+
+### Member send results (Rust)
+
+`meerkat-contracts`: `MobMemberSendResult` gains the field
+`admission: Option<WireMemberInputAdmission>`. On the wire the field is
+optional and left out when absent, so a client that does not read it is
+unaffected.
+
+**Do:** code that builds `MobMemberSendResult` with a struct literal sets
+the new field; `None` keeps the earlier answer.
+
+### Meta 0.9.12
+
+Meta 0.9.12 pins Core `=0.9.12`. The full list is in `meta/CHANGELOG.md`
+under `## [0.9.12]`.
+
+- Rust: `ErrorEvent::LifecycleEffectFailed` gains `cause`
+  (`LifecycleEffectFailureCause`), left off the wire while it is `failed`, so
+  a serialized event reads as before. **Do:** a host that builds the variant
+  literally adds `cause: LifecycleEffectFailureCause::Failed`, and one that
+  destructures it without `..` names the field.
+- `IdentityRuntimeError` gains `IdentityStoreOwned` and `IdentityArchived`.
+  A lifecycle verb (reload, retire, respawn, reset, delete, materialize) of
+  a store-owned identity answers `-32603` with the new kind
+  `identity_store_owned`, and a delivery to an identity created at runtime
+  that Core archived answers `-32603` with the new kind `identity_archived`.
+  **Do:** add the new arms, or a wildcard arm, to each exhaustive match on
+  the enum.
+- `SessionBridge` has two new methods, `created_identities` and
+  `created_identity`. Their defaults answer `BridgeError::Unsupported`: over
+  a bridge that does not implement them the identity runtime serves no
+  identity created at runtime, as before. **Do:** a host's own wrapper of a
+  session bridge forwards them to the bridge it wraps.
+- Forge: the Guide moves from Meta 0.9.3 to the Meta release Forge is built
+  from, so an existing Forge folder starts a fresh setup team in its state
+  directory on its first start. Saved setups, proposals, provider settings
+  and installed applications stay, and the previous setup team's state is
+  kept unchanged, but the new team does not recall earlier conversations.
+  **Do:** to carry them over, follow the installer README's "Work with the
+  setup team" before that first start.
+
+### Connect 0.9.12
+
+Connect 0.9.12 is GitHub release `connect-v0.9.12` in `lukacf/meerkat`, a
+full release that is never the repository's latest. The full list is in
+`connect/CHANGELOG.md` under `## [0.9.12]`.
+
+- Downgrade: an access decision the next host ended as not issued records
+  the issuance state `not_issued`. A Connect without this change answers a
+  conflict when that decision is applied or read again; other decisions are
+  unaffected.
+
 ## Upgrading to 0.9.11
 
 This section is for systems running 0.9.10. The full list of changes is in

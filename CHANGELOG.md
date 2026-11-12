@@ -37,6 +37,553 @@ them.
 
 ### Breaking
 
+- Behaviour-only (not measured by the gate): `meerkat-core`, `rkat`: on Unix
+  a config document the engine writes is readable by its owner only, so an
+  account that read one through group permissions loses that access at the
+  document's next write unless its directory has the setgid bit. See
+  Security and the Upgrade notes.
+
+- Behaviour-only (not measured by the gate): `rkat`: `--comms-binding-out`
+  replaces what is at its path with a new owner-only file instead of writing
+  into it. A named pipe, a socket, a device or a directory at the path, a
+  symbolic link to one of them, and any path in `/proc` or in `/dev` outside
+  `/dev/shm` (`/dev/stdout`) is refused, and another account can no longer
+  read the binding file. See Security and the Upgrade notes.
+
+### Fixed
+
+- `meerkat-core`: a turn that fails because a provider failure outlasted the
+  retries now says what failed. Its typed turn error (`error.data.error` of
+  a JSON-RPC turn, `details.error` of REST, the `error=` JSON of the CLI's
+  `turn abandoned` line, and the error of a runtime completion) kept
+  `kind: "retry_exhausted"` and its detail text but left out `provider`,
+  `retryable` and `reason`, the fields a provider failure that is not
+  retried (`kind: "llm_failure"`, a 400 for example) fills, so a caller
+  could tell a rate limit from an overloaded or unreachable provider only by
+  reading the detail text. It now carries `provider`, `reason` and
+  `retryable: true`. `reason` is the typed reason of the last failed
+  attempt: `llm_rate_limited` (with `retry_after_ms` when the provider sent
+  a hint), `llm_network_timeout`, `llm_call_timeout` (a call timeout or a
+  stalled stream), or `llm_provider_error` with the provider's error kind,
+  such as `server_overloaded`, `server_error` or `connection_reset`. After a
+  model fallback, `provider` and `reason` are those of the fallback target's
+  last failure. `retryable: true` names the class of the failure: one
+  Meerkat retries, which ended the turn after the retries its policy
+  allowed. A failure of that class can succeed on a later attempt; the field
+  does not say that this one will, least of all for the `unknown` and
+  `connection_reset` provider error kinds and for `llm_call_timeout`. It is
+  advice for the caller, and the number and timing of Meerkat's own retries
+  are unchanged. `kind`, `detail`, the JSON-RPC code and the `run_failed`
+  event are unchanged, and no field is new: a stored turn error without the
+  three fields still reads, and an earlier release reads one that has them.
+  Affects 0.8.0 through 0.9.14.
+
+- `meerkat-core`: a configuration write that failed at the write itself was
+  reported as saved and replaced the document with an empty file. When the
+  filesystem refused the bytes of a config document or of its
+  `config_state.json` (a full disk on a filesystem that allocates at write
+  time, a quota, a file size limit, an I/O error), the store synced and
+  renamed its temporary file without the write's result, so the empty file
+  took the document's place and the caller (`rkat config set` and `patch`,
+  JSON-RPC `config/set` and `config/patch`, the REST and MCP config writes)
+  saw success. The write now fails with the filesystem's error, publishes
+  nothing and removes its temporary file: the document it could not replace
+  stays as it was, the contract the credential, realm, blob, task and
+  trajectory file writes have since 0.9.14. A write that fails at
+  its sync or its rename removes its temporary file too, where it left a
+  `.config.tmp.<id>` or `.config_state.tmp.<id>` file behind on every
+  attempt, and so does a failed `mcp.toml` write. Affects 0.3.3 through
+  0.9.14.
+
+### Security
+
+- `meerkat-core`, `rkat`: the configuration documents the engine writes are
+  owner-only on Unix, whatever the process umask. They are a config document
+  (`~/.rkat/config.toml`, a project's `.rkat/config.toml`, a realm's own
+  `config.toml`), the `config_state.json` beside it, and `mcp.toml`
+  (`~/.rkat/mcp.toml`, a project's `.rkat/mcp.toml`). Every write gave them
+  the umask's mode (0644 under the common 022, 0664 under 002), and so did
+  the temporary file of the write before it was renamed into place, so every
+  local user could read them. A document can hold credential material by
+  documented configuration: an auth profile's
+  `source = { kind = "inline_secret", ... }`, the `env` values of a
+  `command` source, and the literal `args`, `env` and `headers` of an MCP
+  server (a realm's `[[tools.mcp_servers]]`, or `mcp.toml`). One rule now
+  decides the mode, and the file has it from its creation, before any byte
+  is written: 0640, readable by the directory's group, when the document's
+  directory has the setgid bit (a directory shared through its group on
+  purpose), and 0600 in every other directory. A document is never
+  group-writable and never readable by others, and a rewrite never adds a
+  permission the file lacked: a document its owner made 0400 stays 0400.
+  `rkat init` writes the project document it copies from the user document
+  by the same rule, and only into a file it creates: a symbolic link at the
+  document's path now fails the command, where a link to nothing was
+  followed. The engine changes the mode of no directory. The
+  documents have had the umask's mode since 0.3.0, and the inline secret
+  source since 0.6.0. Affects 0.3.0 through 0.9.14.
+
+- `rkat`: `--comms-binding-out` wrote its binding file, which carries the
+  comms runtime's bootstrap token, with the umask's mode (0644 under the
+  common 022) and into whatever was at its path: a file already there kept
+  its own mode, and a symbolic link was followed. The binding file is now a
+  new file that takes the place of the one at its path, with three limits:
+  - The path is replaced, never written through. A regular file at the path
+    is removed. A symbolic link at the path is never followed: a link to a
+    regular file or to nothing is replaced by the binding file (the file it
+    pointed to stays as it was, and nothing is created where it pointed),
+    and a link to a named pipe, a socket, a device or a directory is
+    refused, as those things themselves are. A path in `/proc`, or in `/dev`
+    other than under `/dev/shm` (a memory file system for ordinary files),
+    is refused whatever it holds: `/dev/stdout`, for one, also when standard
+    output is redirected to a file. A refusal comes before anything is
+    removed or created, with an error that names what is there. The
+    directory of the path must allow the removal and the creation of a file.
+  - On Unix the file is 0600 from its creation, whatever the umask and
+    whatever mode the file before it had.
+  - A supervisor that runs under another account than `rkat` cannot read
+    it.
+
+  Affects 0.6.33 through 0.9.14.
+
+- `meerkat-comms`: `Keypair::save` created `identity.key` with the umask's
+  mode and made it 0600 only after it had written the key, so the secret
+  key was readable by every local user for a moment, and stayed so when the
+  save failed in between. The file is now 0600 on Unix from its creation,
+  and a key file that already exists is made 0600 before the key is written
+  to it. `Keypair::load_or_generate`, which the stock hosts use, already
+  created the file 0600. Affects 0.3.0 through 0.9.14.
+
+### Upgrade notes
+
+- A configuration document an earlier release wrote keeps its mode until
+  the engine next rewrites it. To make the existing ones owner-only now, run
+  `chmod 600` on each that exists: `~/.rkat/config.toml`,
+  `~/.rkat/config_state.json` and `~/.rkat/mcp.toml`; a project's
+  `.rkat/config.toml` and `.rkat/mcp.toml`; and each realm's `config.toml`
+  and `config_state.json` in its realm directory
+  (`<project-root>/.rkat/realms/<realm>/` for the CLI, or
+  `<state-root>/<realm>/`). A binding file `--comms-binding-out` wrote
+  earlier keeps its mode until it is written again: `chmod 600` it, or
+  delete it once the supervisor has read it.
+
+- A configuration document that several local accounts read through group
+  permissions (a project checkout or a realm directory shared by a group,
+  or an install that runs a helper or a verifier under another account) is
+  no longer readable by the group after a rewrite, unless its directory has
+  the setgid bit. Set it once on each shared directory, `chmod g+s <dir>`
+  (the `.rkat` directory of a shared project, a shared realm directory),
+  and the documents written there are 0640 with the directory's group. A
+  document the engine already rewrote as 0600 stays 0600: `chmod g+r` it
+  once. An install that cannot set the bit grants the read itself after each
+  write, with `chmod g+r` or an ACL on the document: a write replaces the
+  file, so a grant on the file before it does not carry over, and a default
+  ACL on the directory does not reach a file that is created 0600. Other
+  accounts never get write access through the document's mode, and nothing
+  is readable by others. The admission fence file keeps its own rule:
+  `admission.lock` is 0640 with its directory's group in every directory.
+
+- `rkat run --comms-binding-out <PATH>` no longer writes into what is
+  already at the path: it removes the file there and creates a new one that
+  only its owner can read (0600 on Unix), whatever the umask and whatever
+  mode the older file had. What changes for an install that relied on the
+  old write:
+  - A symbolic link at the path is replaced by a regular file, whether it
+    pointed to a regular file or to nothing. Before, the binding was written
+    through the link into the file it named; now that file is left as it
+    was, or not created, and does not receive the binding. Give the flag
+    the path of the file itself.
+  - A named pipe, a socket, a device or a directory at the path, and a
+    symbolic link to one of them, is refused and left untouched. So is any
+    path in `/proc` or in `/dev`, whatever it holds; `/dev/shm`, a memory
+    file system for ordinary files, is the one exception.
+    `--comms-binding-out /dev/stdout`, or a named pipe a
+    supervisor reads the binding from, worked before and is now an error:
+    write the binding to a regular file (one under `/dev/shm` will do) and
+    have the supervisor read that.
+  - The directory of the path must let `rkat` remove and create a file in
+    it. A binding file that was created for `rkat` in a directory it cannot
+    write could be rewritten in place before, and now fails.
+  - A supervisor that runs under another account than `rkat` can no longer
+    read the binding file (under the common umask 022 it could). Run the
+    supervisor under the same account, or grant it the read after each
+    write (`chmod`, or an ACL on the file): the file is a new one every
+    time, so a grant on the older file does not carry over. The descriptor
+    file of `rkat mob host --descriptor-out` is owner-only in the same way.
+
+### Known limitations
+
+- The owner-only rule of this release (see Security) covers the
+  configuration documents, the comms binding file and `identity.key`. Two
+  other files that can hold a token still take their mode from the umask
+  alone: the mob store's database file, which stores the bootstrap token of
+  an external member's binding, and Meta's composition manifest beside a
+  persistent mob's storage, which records the mob definition with its MCP
+  servers' arguments, environment and headers (also when the adoption of
+  pre-0.9 state rewrites it: that second writer gives the file the
+  permissions the manifest had). Keep the directories that hold them closed
+  to other accounts, or run under a umask of 077.
+
+## [0.9.14] - 2026-11-11
+
+### Highlights
+
+- A session whose history one OpenAI-family service produced no longer
+  fails its first turn on another (the OpenAI API, the ChatGPT backend, Azure
+  OpenAI, GitHub Copilot, a self-hosted server): encrypted reasoning and the
+  other opaque items of a response are replayed only to the service that
+  issued them (0.5.2 through 0.9.13). After a restart, earlier turns are
+  replayed without that material. See Breaking, Added, Fixed and Known
+  limitations.
+
+- A request that an OpenAI-family service refuses inside a response stream
+  fails once, with the service's cause, instead of being sent again until
+  the retry policy is used up (0.8.25 through 0.9.13). See Fixed.
+
+- GitHub Copilot routes send a current client identity, so the Copilot API
+  no longer marks every listed model `client_version_deprecated`. See
+  Changed.
+
+- A file write that the operating system refuses (a full disk, a quota, a
+  file size limit) no longer replaces a stored credential, a realm manifest,
+  a task file or an export with an empty file while the operation reports
+  success (0.3.0 through 0.9.13). See Fixed.
+
+### Breaking
+
+- Behaviour-only (not measured by the gate): `meerkat-core`:
+  `ReplayPlan::build` with an OpenAI-wire `ReplayTarget`, and
+  `ReplayWireFamily::OpenAi.strip_foreign_metadata`, no longer keep
+  OpenAI-family provider metadata: a target planned that way names no service,
+  so none of that metadata is its own. A provider adapter for an OpenAI-wire
+  service plans with `ReplayPlan::build_with_openai_continuity` and asks
+  `ReplayPlan::step_admission` (see Added and Fixed). Anthropic and Gemini
+  targets are unchanged.
+
+### Added
+
+- `meerkat-core`: `OpenAiContinuityIssuer` (a kind of service,
+  `OpenAiContinuityService`, at an endpoint: `at_base_url`,
+  `self_hosted_server`, `service`), `OpenAiContinuityLedger` (what the
+  running process received from which service: `new`, `with_generation`,
+  `process`, `record_response`, `record_step`, `received_step_from`),
+  `OpenAiContinuityMaterial`, `OpenAiContinuityTarget`,
+  `ReplayStepAdmission` (`of`, `admits`, `admits_provider_items`,
+  `strip_foreign_metadata`: the one owner of whether a step's provider
+  material is replayed to a target), `ReplayPlan::
+  build_with_openai_continuity` and `ReplayPlan::step_admission`. None of
+  them has a serialized form.
+
+- `meerkat-llm-core`: `LlmReplayProjection::with_replay_witness` and
+  `messages`, and `PreparedLlmRequest::replay_witness`: a projecting client's
+  own evidence of what it decided, carried with the request beside the route
+  witness.
+
+- `meerkat-openai`: `OpenAiClient::continuity_issuer`, `continuity_ledger`
+  and `with_continuity_ledger`, and `OpenAiCompatibleClient::
+  with_self_hosted_server`, `continuity_issuer` and `with_continuity_ledger`.
+  A client is the issuer its service kind and base URL make it; a self-hosted
+  client that declares its configured server is that server.
+  `with_continuity_ledger` gives a client a record of its own in place of
+  the process's.
+
+### Changed
+
+- `meerkat-copilot`, `meerkat-auth-core` (GitHub Copilot routes): the
+  default client identity a Copilot route sends is a recent one again:
+  `Editor-Version: vscode/1.145.2` (was `vscode/1.107.0`),
+  `Editor-Plugin-Version: copilot-chat/0.73.0` (was `copilot-chat/0.35.0`)
+  and `User-Agent: GitHubCopilotChat/0.73.0` (was
+  `GitHubCopilotChat/0.35.0`). Two public values change with it: the
+  constant `meerkat_auth_core::github_copilot::GITHUB_COPILOT_USER_AGENT`
+  and what `meerkat_copilot::CopilotBackendConfig::default()` returns. With
+  the values sent through 0.9.13 the Copilot API answered a model listing
+  with a `client_version_deprecated` warning on every entry. Live list
+  reads show that the warning follows `Editor-Version` alone
+  (`vscode/1.118.0` is marked, `vscode/1.130.0` is not) and that the plugin
+  and User-Agent versions do not move it; all three are raised together so
+  that the identity stays one client (the plugin version is the one the
+  editor's public repository pairs with that editor release). Nothing else
+  in the listing changes with the new values: the same entries and the same
+  `capabilities.limits`. The headers go on the token exchange, the identity
+  lookup (User-Agent only), the model listing and inference, as before, and
+  on those requests a route whose backend `options` set `user_agent`,
+  `editor_version` or `editor_plugin_version` keeps its own values. The
+  device sign-in's own OAuth requests to GitHub, the device-code request
+  and the token poll among them, send the same User-Agent constant; no
+  backend option changes it there. Rows now pin the three values, the
+  User-Agent of the device sign-in's requests, and the
+  `X-GitHub-Api-Version` of the model listing and of inference, which
+  nothing asserted before.
+
+### Fixed
+
+- `meerkat-openai`, `meerkat-core`: a session whose history one OpenAI-wire
+  service produced no longer fails its first turn on another. Before, the
+  turn ended with a provider refusal (for example `Invalid request:
+  {"error":{"message":"","code":"invalid_request_body"}}` from GitHub
+  Copilot for a history the public OpenAI API produced), because encrypted
+  reasoning items, hosted-tool items, item ids and response ids were replayed
+  to every backend that speaks the Responses grammar (the public OpenAI API,
+  the ChatGPT backend, Azure OpenAI, GitHub Copilot, self-hosted servers),
+  and only the service that issued such material can read it. This could
+  happen between a self-hosted `responses` server and another backend since
+  0.5.2, and between the public OpenAI API and GitHub Copilot since 0.8.31,
+  through 0.9.13. A model or route fallback inside one turn took the same
+  path.
+
+  Such material is now replayed only to the service the running process
+  received it from. A service is a kind of backend at an endpoint: the base
+  URL requests go to, or the configured self-hosted server
+  (`[self_hosted.servers.<id>]`); two Azure OpenAI resources, two
+  self-hosted servers, and the public API behind another base URL are
+  different services. A step (one provider response) the process received
+  from the target service replays exactly as before. Any other step is sent
+  as the conversation it was, in the form a history from another provider
+  family already takes: the assistant text as a plain message, each tool
+  call and its output paired by `call_id`, and no reasoning item, hosted-tool
+  item, item id, phase or `previous_response_id`. A step is replayed whole
+  or in that form, never in part, and one request can carry both kinds.
+
+  The cost, stated plainly: a process knows the issuer only of what it
+  received itself, and that knowledge is not stored. It is shared by every
+  session and mob of the process (the issuer is the service, not the
+  session) and is lost when the process starts again and, a generation of
+  4,096 responses at a time, once the process has received 4,096 to 8,192
+  later responses (sooner when responses carry very many items: a generation
+  also closes at 262,144 pieces of material; a response is always recorded
+  whole). So after a restart, or a resume from the store in a new
+  process, earlier turns are replayed without their encrypted reasoning,
+  hosted-tool call items (a web search's queries, sources and citations;
+  the answer text stays) and item ids, on the same service too; the steps
+  of the new process replay in full. The first request after a restart, and
+  the first after a generation is forgotten, therefore renders those earlier
+  turns differently than the request before it did, and the provider's
+  prompt cache misses once from the first such turn on. Nothing in a stored
+  session, an event, an export or an SDK payload changes: 0.9.13 and this
+  release write the same rows for the same response.
+
+  With `store: true`, the `previous_response_id` shortcut is taken only when
+  the last step is one the process received from the target service. The
+  existing resend without it, when the service no longer has the response,
+  is unchanged.
+
+  An embedder that builds an `OpenAiCompatibleClient` itself and declares no
+  server (`with_self_hosted_server`) is the self-hosted server at its base
+  URL. Anthropic thinking signatures and Gemini thought signatures are still
+  replayed to every backend of their wire family.
+
+- `meerkat-openai`, `meerkat-llm-core` (the Responses stream parser of
+  `OpenAiClient`, which serves the OpenAI API, the ChatGPT backend, Azure
+  OpenAI, GitHub Copilot `/responses` and a self-hosted server in Responses
+  mode): how the client reads a failure reported inside an HTTP 200 stream.
+  - Given a `response.failed` event without an error object (`error` null,
+    or an object that names no code, type or message), the client ended the
+    response there as `ServerError { status: 500, message: "response
+    failed" }`, a retryable class, and did not read an `error` event after
+    it (0.6.7 through 0.9.13). It now reads on for the cause: an `error`
+    event that carries a code and a message, at the top level of the event
+    or under `error`, or a `response.failed` that carries them. Nothing in
+    between is read as output. When no cause comes (the stream ends, a frame
+    cannot be read, or sixteen other frames follow) the response fails as
+    `ServerError { status: 500 }` with a message that says so, retryable as
+    before; an `error` event that carries nothing ends the wait as the
+    unknown class, and a reset connection as `ConnectionReset`, both
+    retryable too. While it waits the client reports no stream liveness, so
+    the stream-inactivity window keeps running. This stream shape was not
+    observed from a live service and its rows are synthetic; a live request
+    that the Copilot route refused was answered with HTTP 400 and the code
+    `invalid_request_body`, which was terminal already.
+  - As stream error codes, `invalid_request_body`,
+    `invalid_encrypted_content`, `invalid_prompt`, `invalid_value`,
+    `invalid_argument`, `unsupported_value`, `unsupported_parameter` and
+    `model_not_found` were the unknown class, which is retried (0.8.25
+    through 0.9.13): a request refused with one of them in a stream `error`
+    or `response.failed` event was sent again until the retry policy was
+    used up (four attempts with the default `max_retries = 3`) and the turn
+    ended as `retry exhausted`, where the same refusal over HTTP fails at
+    once. The first seven, and `invalid_request_error`, which had that class
+    already, are now classified as an HTTP 400 with the same message is:
+    `LlmError::InvalidRequest` (`provider_error_kind` `invalid_request`,
+    non-retryable) with the message `<code>: <the service's message>`, or
+    the context-overflow, oversized-request or exhausted-quota class when
+    the message names one. `model_not_found` is `LlmError::ModelNotFound`
+    (`reason_type` `llm_invalid_model`), the class of an HTTP 404 with that
+    code and of the realtime adapter. The message is read as text: one that
+    is itself a JSON object never selects a policy stop. The turn fails
+    once, on the LLM failure itself and not on used-up retries. A code
+    outside this list is classified the same way, as the invalid request,
+    when its error object's `type` is `invalid_request_error` (this includes
+    a code that names an authentication fault: terminal, though not the
+    class an HTTP 401 has); with any other type, or with none, it is still
+    the unknown class and is retried.
+  - An error object that names no `code` is classified by its `type` when
+    the type is `invalid_request_error` or an exhausted-quota code. Any
+    other type selects no class: the event keeps its default, as before
+    (the retryable server error for a `response.failed`, the unknown class
+    for an `error` event), so a type alone is never a policy stop.
+  - `usage_limit_reached` (the ChatGPT backend's plan usage limit) is now an
+    exhausted-quota code wherever that list is read:
+    `LlmError::QuotaExhausted`, non-retryable, as a Responses stream code or
+    type, in an HTTP 429 body of any provider (a rate limit, retried,
+    through 0.9.13), in another HTTP 4xx body (an invalid request before),
+    on the OpenAI realtime and live error paths and in an Anthropic stream
+    rate-limit object.
+
+  The cause is provider text. On a client with an authorizer it passes the
+  authorizer's credential redaction, like every other error a stream ends
+  with. No request is changed and nothing is retried in another form.
+
+- `meerkat-auth-core`, `meerkat-store`, `meerkat-tools`, `rkat`: a file write
+  that the operating system refuses no longer replaces the file with an empty
+  one while the operation reports success. These writers write a temporary
+  file, sync it and rename it onto the target. They wrote through tokio's
+  `File`, whose `sync_all` waits for the write but does not return the
+  write's error, so a write refused by a file size limit (`RLIMIT_FSIZE`), a
+  quota, a full filesystem that allocates at write time, or an I/O error
+  went unreported: the sync of the empty temporary file succeeded and the
+  rename published it. A payload above 2 MiB could instead end short. The
+  files, through 0.9.13:
+  - a credential file of the file credential store
+    (`<credentials>/<realm>/<slot>.json`, since 0.6.0): a login, a token
+    refresh or a secret save returned success, and the stored credential was
+    replaced by an empty file that no longer loads;
+  - `realm_manifest.json` (since 0.3.3): the first open of a realm, or
+    selecting governance for one, returned success and left an empty
+    manifest; every later open of that realm failed to parse it, and so did
+    `rkat realm list` and `rkat realm prune` for the whole state root;
+  - a realm lease record (`leases/<instance>.json`, since 0.3.3), at a
+    surface's start and at each heartbeat: an empty record is counted as
+    unreadable, so the instance was not listed as active and `rkat realm
+    delete` refused without `--force`;
+  - a blob object (since 0.7.27): the put itself failed at its read-back,
+    but the empty or short object stayed at the content address, where reads
+    report it as corrupt, until an identical put rewrote it;
+  - the builtin task tools' JSON task file (`.rkat/tasks.json`, since 0.3.0):
+    creating, updating or deleting a task returned success, and every stored
+    task was lost. Only the file task store writes this file: a Rust
+    embedding that builds the `meerkat` facade without its `session-store`
+    feature, or that builds its tools with the SDK helpers
+    `create_dispatcher_with_builtins_persisted` or
+    `create_dispatcher_with_builtins_in_project`. The shipped `rkat`,
+    `rkat-rpc`, `rkat-rest` and `rkat-mcp` binaries are built with
+    `session-store` and keep tasks in SQLite;
+  - an ATIF trajectory export (`rkat session export-atif`, `rkat run
+    --export-atif`, since 0.8.22): reported as written, and empty or short.
+
+  Each of these writes now fails with the error the operation already
+  returns for a failed open or rename, publishes nothing and removes its
+  temporary file: the file it would have replaced stays as it was, and a
+  file that did not exist is not created. A realm whose first open fails
+  this way opens normally once writes work again. A lease record is the one
+  file that is still emptied, now on purpose and only at a heartbeat: a
+  holder whose heartbeat cannot replace its record (the write is refused, or
+  the temporary file cannot be created or renamed) empties its own record,
+  which needs no free space. An empty record is counted as unreadable, so
+  `rkat realm delete` and `rkat realm prune` keep refusing without `--force`
+  while the holder is alive on a full disk. Left as it was, the last good
+  record would go stale 30 seconds later and both commands would remove the
+  realm under the running holder, as they could through 0.9.13 when a
+  heartbeat failed to create or rename its temporary file. The next
+  heartbeat that succeeds restores the record; a refused write at a
+  surface's start still fails the start and writes nothing. The realm
+  manifest lock and the first-start marker (since 0.8.4), which such a write
+  left empty without effect, now fail the same way and are removed, so
+  neither stays behind to be waited on. A file an earlier release already
+  emptied is not restored.
+
+### Known limitations
+
+- The issuer of OpenAI-family continuity material is the service (a kind of
+  backend at an endpoint), not the account or organisation. Material one
+  credential received is still replayed under another credential of the
+  same service at the same endpoint inside one process (two API keys of
+  different organisations, two ChatGPT accounts, two Copilot accounts on one
+  API host). Whether a service refuses that is not known; it was not tested.
+
+- `rustix` 1.1.5 in Cargo.lock is named by RUSTSEC-2026-0486, as in 0.9.12
+  and 0.9.13: the `getxattr` and `listxattr` functions of `rustix::fs` (with
+  their `l` and `f` forms) mark bytes they never wrote as initialized when
+  they are given a zero-length buffer. `meerkat-core` depends on `rustix`
+  directly, and it is also taken through `fs4`, `tempfile`, `which`, and
+  `xattr` through `tar`. No Meerkat crate calls those functions. Of the
+  crates Meerkat builds with only `xattr` does, and `tar`, the one crate
+  that uses `xattr`, calls it only to set attributes while unpacking, so
+  Meerkat's own use is not known to be affected. `rustix` 1.1.6 has the
+  fix; this release still builds with 1.1.5.
+
+## [0.9.13] - 2026-11-11
+
+### Changed
+
+- No code changes. Core 0.9.13 is released so that Core, Meta and Connect keep
+  one version: the `meerkat-meta` 0.9.12 crate was larger than the crates.io
+  upload limit and was never published, so Meta and Connect are released
+  again as 0.9.13.
+
+## [0.9.12] - 2026-11-10
+
+### Highlights
+
+- `rkat auth profile <PROFILE_ID>` no longer prints credential values: it
+  prints the profile's `id`, `provider`, `auth_method` and `source_kind`,
+  as JSON-RPC `auth/profile/get` returns them. See Security.
+
+- The in-process file tools (`apply_patch`, `blob_save_file`) no longer
+  write the engine's own `.rkat` directory, at the project root or in any
+  directory under it, or the paths a host declares as its own state and
+  inputs, so a session without command execution can no longer plant what
+  the next start runs (0.4.6 through 0.9.11). Three limits remain. See
+  Security and Upgrade notes.
+
+- The bundled SQLite is 3.54.1, which closes RUSTSEC-2026-0459: a database
+  opened together with a write-ahead log of another page size could expose
+  the process's memory (0.4.7 through 0.9.11). An application that depends
+  on rusqlite itself moves to rusqlite 0.41 with Meerkat. See Breaking,
+  Security and Upgrade notes.
+
+- On a GitHub Copilot route a Claude model whose ID carries a minor
+  version (`claude-opus-5-5`, `claude-fable-5-2`) runs under its catalog ID,
+  so the default Claude model of such a route works again. Before, the
+  request failed when its client was built (0.8.42 through 0.9.11). See
+  Fixed.
+
+- A run whose operation records an authorization audit observation after
+  its terminal input rows were written settles in the same process again.
+  Before, its terminal completion failed every retry, and so did
+  unregistering its session (a mob teardown included), until a restart
+  (0.8.52 through 0.9.11). See Fixed.
+
+- Credential rotation and OAuth sign-ins keep working after a process drops
+  a second handle of a realm's SQLite runtime store (0.6.0 through 0.9.11).
+  See Fixed.
+
+- An unkeyed `mob/member_send` names the input the member's runtime admitted
+  for it (`admission`), so a client can tell its own send from another
+  client's, and `session/input_status` by idempotency key finds an input
+  `session/external_event` admitted under the caller's key. See Breaking,
+  Added and Fixed.
+
+- Every grant surface answers alike: Core's `tool_grants/grant` and
+  `tool_grants/list`, and now Meta's `meta/tool_grants/grant` and
+  `meta/tool_grants/list`, report whether a grant to a mob member identity
+  applies to the member's running build (`applies`) and the member's gate
+  (`gate`). See Added.
+
+- Claude Fable 5.2 (`claude-fable-5-2`) is a recommended catalog model. The
+  Anthropic default model stays `claude-opus-5-5`. See Added.
+
+- Gemini 4 Carbon (`gemini-4-carbon`) is a recommended catalog model, served
+  only on paid Gemini API tiers. The Gemini default model stays
+  `gemini-4-argon`. See Added.
+
+- `meerkat_schedule_list` filters by `phase` and `target_id` before its page
+  cut. See Added.
+
+- Intel macOS binaries (`x86_64-apple-darwin`) need macOS 11.0 or later
+  (previously 10.12). See Changed.
+
+### Breaking
+
 - `meerkat-contracts`: `MobMemberSendResult` gains the field
   `admission: Option<WireMemberInputAdmission>` (see Added). Code that builds
   it with a struct literal sets the new field; `None` keeps the earlier
@@ -80,6 +627,17 @@ them.
   (`claude-mythos-5-2`), which Anthropic serves only to organizations it
   has verified, is not a catalog model, as Claude Mythos 5.1 is not. The
   Anthropic default model stays `claude-opus-5-5`.
+
+- `meerkat-models`: Gemini 4 Carbon (`gemini-4-carbon`) is a recommended
+  catalog model with the limits and parameters of Gemini 4 Argon: a
+  1,048,576-token context window shared by input, thinking and output, 64K
+  output, text, image, video, audio and PDF input, thinking levels `low`,
+  `medium` and `high` (default `medium`), no sampling parameters, and
+  forced tool choice. An explicit `minimal` thinking level is refused
+  locally with the typed `LlmError::InvalidRequest`, or with
+  `BuildAgentError::Config` when it is a build parameter. Its call timeout
+  and stream-inactivity window are 900 s. Google serves it only on paid
+  Gemini API tiers. The Gemini default model stays `gemini-4-argon`.
 
 - `meerkat`: `member_tool_grant_applies`, whether a grant to a mob member
   identity applies to the member's running build (a grant's `applies`), and
@@ -133,11 +691,38 @@ them.
   and `same_account_model_id(left, right)`, whether two IDs name the same
   model on a GitHub Copilot account (see Fixed).
 
+- `meerkat`, `meerkat-tools`: a host can tell the in-process file tools which
+  paths inside the project root are its own state and inputs (see Security).
+  `AgentFactory::with_protected_host_inputs(inputs, realm_documents,
+  convention_sources)` takes the lists a host already builds with
+  `HostConfinement::host_inputs`, `HostConfinement::credential_store_input`
+  and `HostConfinement::convention_sources`, and the new
+  `HostConfinement::realm_documents(realm_root)`, which names the documents a
+  realm keeps at its root: `config.toml`, `config_state.json`,
+  `realm_manifest.json` and the `authorization` directory.
+  `CompositeDispatcher::protect_host_paths(paths)` sets such paths on a
+  dispatcher built without the factory. `rkat`, `rkat-rpc`, `rkat-rest` and
+  `rkat-mcp` call the builder. `<project root>/.rkat` is refused without it;
+  an embedder that keeps engine state elsewhere inside its project root (a
+  realm state root, a config document, a credential store) should call the
+  builder with those paths.
+
 ### Changed
 
 - Intel macOS binaries (`x86_64-apple-darwin`) now need macOS 11.0 or later
-  (previously 10.12). They are built on the BuildBuddy release lane for macOS
-  11.0, and the release refuses one that needs a newer macOS.
+  (previously 10.12), and a release refuses one that needs a newer macOS.
+  They carry no code signature: `codesign -v` reports none, and a policy that
+  allows binaries by their code directory hash cannot list them (see the
+  deployment guide).
+
+- `meerkat-tools`: an agent can no longer edit files under `.rkat/` with the
+  file tools (see Security). Asking an agent to add an MCP server to
+  `.rkat/mcp.toml`, to add a hook to `.rkat/config.toml` or to write a skill
+  under `.rkat/skills/` now ends in a tool error that says so. Make such a
+  change with the CLI (`rkat mcp add`, `rkat config set`, `rkat config patch`,
+  `rkat skill add`) or by editing the file yourself. Reading those files is
+  unchanged, and so is the shell tool: a session that has it runs commands
+  with whatever access its confinement leaves.
 
 ### Fixed
 
@@ -210,18 +795,6 @@ them.
   end, and writes them. Any other difference from the stored row still
   refuses the rewrite. Affects 0.8.52 through 0.9.11.
 
-- `meerkat-runtime`: every archive of a terminal input row now writes the
-  authorization audit observations recorded on the row since it was last
-  written before the row leaves memory, not only the archive after its
-  completion or publication receipt. The archives that follow an abandon,
-  retire, reset, destroy or stop of inputs, a resumable run's settlement, a
-  queued input's cancel, an admission that supersedes or coalesces a queued
-  input, the end of unstageable queued inputs, a live boundary join's
-  cancel, and a run's terminal dropped such an observation. Once a row is
-  archived, its audit refuses any later observation, so an operation that
-  records after its run's rows were archived is refused as observation
-  unavailable instead of losing the record. Affects 0.8.52 through 0.9.11.
-
 - `meerkat-runtime`: a process that opens a second handle of a realm's SQLite
   runtime store and drops it no longer breaks that realm's credential
   rotation and OAuth sign-ins. Every handle of one database shares the
@@ -243,6 +816,23 @@ them.
   its receipt (`continuation.status`, or `session/input_status` by its
   `delivery_id` or `input_id`), not by its caller key. Affects 0.9.5 through
   0.9.11.
+
+- `meerkat-runtime`: every archive of a terminal input row now writes the
+  authorization audit observations recorded on the row since it was last
+  written before the row leaves memory, not only the archive after its
+  completion or publication receipt. The archives that follow an abandon,
+  retire, reset, destroy or stop of inputs, a resumable run's settlement, a
+  queued input's cancel, an admission that supersedes or coalesces a queued
+  input, the end of unstageable queued inputs, a live boundary join's
+  cancel, and a run's terminal dropped such an observation. Once a row is
+  archived, its audit refuses any later observation, so an operation that
+  records after its run's rows were archived is refused as observation
+  unavailable instead of losing the record. Affects 0.8.52 through 0.9.11.
+
+- `meerkat-meta`: a retirement's harvest and its transcript distillation
+  wait for a busy agent memory background budget instead of ending failed
+  or being skipped, the two 0.9.11 known limitations on that budget. See
+  Meta's 0.9.12 notes.
 
 ### Security
 
@@ -288,6 +878,68 @@ them.
   feature, which keeps the range-checked u64 and usize conversions that
   rusqlite 0.37 had. Affects 0.4.7 through 0.9.11.
 
+- `meerkat-tools`: the in-process file tools `apply_patch` and
+  `blob_save_file` wrote any path inside the project root, the engine's own
+  directory `<project root>/.rkat/` included. A host reads that directory at
+  its next start and acts on it: the project's MCP servers
+  (`.rkat/mcp.toml`), hooks and skills, and, with the CLI's default
+  project-local state, the realm's config document and stores. So a session
+  that was given no command execution (the default `safe` tool preset of
+  `rkat run` has the file tools and no shell) could have its model write
+  files there that the next `rkat` start in that project loads, a server
+  command or a credential command that the host then runs as the user among
+  them. `--confinement workspace` on macOS did not prevent it: its `.rkat`
+  protection covers confined processes, and these tools run in the host. The
+  file tools now refuse to create, change, delete or move a path in a `.rkat`
+  directory, at the project root and in any directory under it (in any
+  letter case, through `..`, an absolute path or a symbolic link, and when
+  the directory does not exist yet), and a path the host declares as its own
+  state or input wherever it lies inside the project root: the realm state
+  root (`--state-root` included), the realm's config document, the user
+  config document, the MCP, hook and skill sources and a file credential
+  store. A `.rkat` directory deeper in the project is refused like the one
+  at the root, because a host started from that directory reads it as its
+  own. The call fails with an invalid-arguments tool error, nothing is
+  written, and a patch that names one such path applies none of its
+  operations. Three limits remain. A hard link that already exists in the
+  project to such a file is written through. Where a protected directory
+  holds a symbolic link to another place, that place is not refused: the
+  rule follows a link at `<project root>/.rkat` and at each declared path,
+  not links deeper inside them. And a `.rkat` below the project root that
+  is itself a symbolic link is refused by its name, not where it leads. To
+  change engine
+  configuration, use the CLI (`rkat mcp add`, `rkat config`, `rkat auth`,
+  `rkat skill add`) or edit the files yourself. `apply_patch` is affected
+  from 0.4.6 and `blob_save_file` from 0.6.2, both through 0.9.11.
+
+- `meerkat-rpc`, `meerkat-mcp-server`: `rkat-rpc` and `rkat-mcp` started
+  without `--context-root` root the file tools in the realm directory
+  itself, so `apply_patch` could rewrite the realm's own `config.toml` there
+  as an ordinary project file. The realm's documents (`config.toml`,
+  `config_state.json`, `realm_manifest.json` and the `authorization`
+  directory) are now refused in that layout as well, and so are the hooks
+  and skills these servers read from that directory's `.rkat`. Other files
+  there are still written as before, and that includes the realm's stores
+  (sessions, runtime, jobs, tasks, blobs and the rest): in this layout the
+  file tools can still write them. Start the server with
+  `--context-root <dir>` (the SDK option `context_root` / `contextRoot`) to
+  give agents a project directory of their own and keep the whole realm out
+  of the file tools' reach. `rkat-rpc` and `rkat-mcp` sessions have the shell
+  tool on unless a request turns it off, so this matters for sessions and
+  hosts that run without it or confine it. `rkat-rest` without a context
+  root roots the tools in its own instance directory, which does not hold
+  the realm, and mounts no built-in tools unless its configuration turns
+  them on; what it declares is refused there in the same way. Affects 0.4.6
+  through 0.9.11.
+
+- `meerkat-tools`: `apply_patch` and `blob_save_file` wrote through a
+  symbolic link whose target does not exist, which a repository can contain:
+  adding or moving a file onto such a link, or saving a blob onto it with
+  `overwrite`, created the link's target, outside the project root too. A
+  write path with a symbolic link that leads nowhere is now refused.
+  `apply_patch` is affected from 0.4.6 and `blob_save_file` from 0.6.2, both
+  through 0.9.11.
+
 ### Upgrade notes
 
 - An application that depends on rusqlite (or libsqlite3-sys) itself moves
@@ -298,6 +950,82 @@ them.
   `meerkat_sqlite::Connection` (a re-export of `rusqlite::Connection`) and
   the `rusqlite::Error` that `meerkat_sqlite::SqliteStoreError::Sqlite`
   carries.
+
+- Agents cannot change engine configuration with the file tools any more
+  (see Security and Changed). If you asked an agent to edit `.rkat/mcp.toml`,
+  `.rkat/config.toml` or a file under `.rkat/skills/`, make the change with
+  `rkat mcp add`, `rkat config set` or `rkat config patch`, `rkat skill add`,
+  or edit the file yourself.
+
+- If you run `rkat-rpc` or `rkat-mcp` (directly or through the Python or
+  TypeScript SDK) and let agents write files, start the server with a
+  context root: `--context-root <dir>`, or the SDK option `context_root` /
+  `contextRoot`. Agents then work in that directory and the realm's state
+  lies outside it. Without one, files still land in the realm directory as
+  before, the realm's documents are refused, and the realm's stores remain
+  writable by the file tools.
+
+- An agent can no longer write a `.rkat` directory anywhere under its
+  project root, not only the one at the root: a nested project's
+  `.rkat/mcp.toml`, hooks, skills or realm is changed by its operator.
+
+- A Rust host that keeps its realm state, config documents or credential
+  store inside the project root it gives its tools, outside `.rkat`, should
+  declare them with `AgentFactory::with_protected_host_inputs`.
+
+- `rkat auth profile <PROFILE_ID>` prints only the profile's `id`,
+  `provider`, `auth_method` and `source_kind`, the `auth_profile` shape
+  JSON-RPC `auth/profile/get` returns; its `source`, `constraints` and
+  `metadata_defaults` are no longer printed (see Security). A script that
+  read a credential value from that output reads it where the profile's
+  source keeps it instead: the realm config that declares an
+  `inline_secret` source, the environment variable, file descriptor or
+  credential command another source names, or the credential store. To
+  check that a binding's credential resolves without reading it, run
+  `rkat auth test <BINDING_ID>`.
+
+- A configuration that defines one of this release's new catalog models
+  itself must drop that entry when upgrading. Model IDs are unique across
+  the catalog, `[models.<id>]` entries and self-hosted models, and this
+  release adds `claude-fable-5-2` and `gemini-4-carbon` to the catalog. If
+  your realm or project configuration has `[models.claude-fable-5-2]` or
+  `[models.gemini-4-carbon]` (for example because you ran the model before
+  the catalog listed it), configuration validation now refuses it with
+  "model id '<id>' must be unique across built-in, custom, and self-hosted
+  entries". Remove the entry; the catalog row then serves the model with
+  its own limits and capabilities. The same applies whenever a release adds
+  a model you had defined yourself.
+
+### Known limitations
+
+- File tools: `apply_patch` and `blob_save_file` check a path against the
+  protected paths, then open it (`blob_save_file` reads the blob in between).
+  A second process that retargets a symbolic link in the project in that
+  window can land the write in a protected directory; a session with only the
+  file tools cannot. The next release checks again at the open.
+
+- Provider errors: when a provider, or a proxy in front of it, answers with
+  an error that repeats the credential a request carried (its
+  `Authorization` or API-key header), the value reaches stderr, RPC error
+  data and events unredacted on every provider route but GitHub Copilot.
+  The next release removes credentials and credential-looking values from
+  provider error text.
+
+- Release binaries: the Linux and macOS archives of `rkat`, `rkat-rpc`,
+  `rkat-rest` and `rkat-mcp` are built with more features than a
+  `cargo install` of the same packages, as in every release since 0.9.3 (the
+  Intel macOS archive joins them in this release; the Windows archive is
+  built with the default features). In those archives `rkat-rpc` accepts
+  `--live-webrtc` and serves `live/webrtc/answer`, and all four binaries
+  link the WebRTC stack (`webrtc` 0.14), although the deploying guide says
+  no shipped binary enables it. That stack carries RUSTSEC-2026-0387
+  (`crypto-bigint` 0.5.5, timing variability in operations meant to be
+  constant-time; it affects the DTLS key exchange of a live WebRTC session,
+  which only `rkat-rpc --live-webrtc` starts) and three unmaintained-crate
+  advisories (RUSTSEC-2025-0141, RUSTSEC-2026-0150, RUSTSEC-2026-0441); the
+  default-feature dependency audit does not cover them. The next release
+  declares each archive's feature set, builds it the same way on every
+  platform and audits it; `rkat-rpc` keeps GPT Live and WebRTC there.
 
 ## [0.9.11] - 2026-11-09
 
@@ -47619,7 +48347,10 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.11...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.14...HEAD
+[0.9.14]: https://github.com/lukacf/meerkat/compare/v0.9.13...v0.9.14
+[0.9.13]: https://github.com/lukacf/meerkat/compare/v0.9.12...v0.9.13
+[0.9.12]: https://github.com/lukacf/meerkat/compare/v0.9.11...v0.9.12
 [0.9.11]: https://github.com/lukacf/meerkat/compare/v0.9.10...v0.9.11
 [0.9.10]: https://github.com/lukacf/meerkat/compare/v0.9.9...v0.9.10
 [0.9.9]: https://github.com/lukacf/meerkat/compare/v0.9.8...v0.9.9

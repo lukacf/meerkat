@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.14] - 2026-11-11
+
+Meta 0.9.14 is part of Meerkat 0.9.14 (Core 0.9.14, Meta 0.9.14 and Connect
+0.9.14, released together) and pins Core `=0.9.14`.
+
+A mob that a member private to a person creates itself stays private to
+that person after a restart. See Security.
+
+### Security
+
+- A mob that a member private to a person creates with its own `mob_create`
+  stays private to that person after a restart, so every member spawned into
+  it after the restart is private to that person too, as the members spawned
+  before it are. The restart reads who each such mob is private to from the
+  mob's creation record, and in 0.9.11 through 0.9.13 (0.9.11 is the first
+  release with members private to a person) it read the creating member
+  only from the record of a create a host makes for a member's session
+  (`MobProvenance::Member`):
+  a member's own `mob_create` (`MobProvenance::OperatorMember`) came back
+  private to no one, so a member spawned into that mob after the restart
+  carried no private owner, the label that hides it from other people. Both
+  records now name the creating member, and the mob is private to whoever
+  that member is private to. A mob whose record names no member (a host's
+  create, a session that is no member's) stays private to no one, as does a
+  mob a shared member creates. A mob whose record says that several rosters
+  named the session that created it, and picks none
+  (`MobProvenance::Ambiguous`), no longer comes back private to no one: the
+  restart cannot read who it is private to, so a spawn into it is refused
+  from then on, and the members already seated in it keep the owner their
+  own spawn gave them.
+
+### Known limitations
+
+- `rustix` 1.1.5 in Cargo.lock is named by RUSTSEC-2026-0486, as in 0.9.12
+  and 0.9.13: the `getxattr` and `listxattr` functions of `rustix::fs` (with
+  their `l` and `f` forms) mark bytes they never wrote as initialized when
+  they are given a zero-length buffer. `meerkat-meta` depends on `rustix`
+  directly, and it is also taken through Meerkat Core, `tempfile`, and
+  `xattr` through `tar`. No Meta crate calls those functions. Of the crates
+  Meta builds with only `xattr` does, and `tar`, the one crate that uses
+  `xattr`, calls it only to set attributes while unpacking, so Meta's own
+  use is not known to be affected. `rustix` 1.1.6 has the fix; this release
+  still builds with 1.1.5.
+
+## [0.9.13] - 2026-11-11
+
+Meta 0.9.13 is part of Meerkat 0.9.13 (Core 0.9.13, Meta 0.9.13 and Connect
+0.9.13, released together) and pins Core `=0.9.13`.
+
+Meta 0.9.13 holds every change of Meta 0.9.12 and one fix: the `meerkat-meta`
+crate fits the crates.io upload limit. Meta 0.9.12 was released in part,
+without that crate. See Fixed and Upgrade.
+
+Meta serves identities created at runtime: a send by name, a dispatch, a
+member mutation or a schedule fire to one goes through the identity's door
+instead of answering `-32001`. See Breaking, Fixed and Known limitations.
+
+`meta_gateway` with persistent sessions keeps its metadata and its console
+log across a restart, and a retirement's harvest and distillation wait out a
+busy agent memory budget instead of ending failed. See Fixed.
+
+Forge runs the Meerkat release it is built from. An existing Forge folder
+starts a fresh setup team on its first start. See Upgrade and Changed.
+
 ### Breaking
 
 - Rust: `ErrorEvent::LifecycleEffectFailed` gains `cause`
@@ -59,10 +123,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `fallible_uint` feature keeps the u64 and usize conversions that rusqlite
   0.37 had.
 
+- A member's file tools (`apply_patch`, `blob_save_file`) can no longer
+  write `<workspace>/.rkat/`, which holds the gateway's Meerkat host config
+  (`meerkat_config_path` defaults to `<workspace>/.rkat/config.toml`) and the
+  comms identity keys: Meerkat's in-process file tools now refuse a `.rkat`
+  directory at the project root and in any directory under it, so a member's
+  patch cannot rewrite the config every agent of its gateway starts from.
+  The call returns an invalid-arguments tool error and writes nothing. Every
+  other workspace file is written as before, the gateway's state directory
+  included, and a member that has the shell tool is not restricted by this.
+  The gateway declares no further paths, so a symbolic link inside `.rkat`
+  that leads elsewhere is not covered. Change the gateway's config yourself,
+  not through a member.
+
 ### Upgrade
 
+- Meta 0.9.12 was released in part, and 0.9.13 replaces it. The GitHub release
+  `meta-v0.9.12` (gateways for Linux x86_64, Linux arm64 and Apple silicon
+  macOS), the Python SDK `meerkat-meta` 0.9.12 on PyPI, the TypeScript SDK
+  `@rkat/meta-sdk` 0.9.12 on npm and the `meta-extension-state` 0.9.12 crate
+  exist. The `meerkat-meta` 0.9.12 crate does not: crates.io refused it, so a
+  Rust host moves from `meerkat-meta` 0.9.11 to 0.9.13. Move a 0.9.12 gateway
+  or SDK to 0.9.13 as well: Meta 0.9.13 pins Core `=0.9.13`.
+
 - Forge: the Guide moves from Meta 0.9.3 to the Meta release Forge is built
-  from (0.9.11), so an existing Forge folder starts a fresh setup team in its
+  from, so an existing Forge folder starts a fresh setup team in its
   state directory on its first start. Saved setups, proposals, provider
   settings and installed applications stay, and the previous setup team's
   state is kept unchanged, but the new team does not recall earlier
@@ -133,9 +218,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   timeout.
 
 - Forge runs the Meerkat release it is built from instead of older pinned
-  releases. Its Guide runs that release's Meta and Core (0.9.11; until now
+  releases. Its Guide runs that release's Meta and Core (until now
   Meta 0.9.3 with Core 0.9.3), compiled agent teams install that release's
-  published Meta from the monorepo's `meta-v` release (0.9.11; until now the
+  published Meta from the monorepo's `meta-v` release (until now the
   standalone repository's 0.9.6), and the protected application receiver
   selects that release (until now Meta 0.9.7 with Core 0.9.8). A source
   checkout installs its own `sdk/python` for the Guide, and a packaged Forge
@@ -148,6 +233,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   names it in each of its profiles, which Core's mob profiles apply.
 
 ### Fixed
+
+- The `meerkat-meta` crate is published without its integration test
+  directory (`tests/`), which brings the package back under the registry's
+  10 MiB limit (8.4 MiB). Meta 0.9.12's crate was 44 KB over that limit, the
+  registry refused it, and `meerkat-meta` 0.9.12 was never published on
+  crates.io. The pull request and release checks now fail when a packaged
+  crate exceeds 9.5 MiB.
 
 - Meta's grant answers report `applies` and the member's gate, as Meerkat's
   own `tool_grants/grant` and `tool_grants/list` report them:
@@ -213,7 +305,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   persistent. A store that does not open refuses `meta/init` with `-32014`.
   The first start after the upgrade begins with both stores empty, as every
   start of an earlier release did. A launch without persistent sessions
-  keeps both in memory, as before.
+  keeps both in memory, as before. With persistent sessions, the two 0.9.11
+  known limitations on `meta_gateway`'s metadata and console log no longer
+  apply.
 
 - Forge: **Rebuild with updated runtime** on an application built without a
   selected product runtime (an ordinary application an earlier Forge built)
@@ -328,6 +422,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   Meta's build preparer before it wakes or restores a member, not before
   the member it starts at a create, and Meta attaches its tool dispatcher
   to the builds of a registered identity's member only.
+
+- The realm's agent memory background budget still admits at most
+  `runtime_options.agent_memory.distiller.runs_per_hour` runs an hour (12
+  by default): in a burst of retirements past it, the harvests and
+  distillations that no run frees up for within their wait end unrun
+  (`budget_busy`), and their discards stay in the session's memory scope.
+  Raise `runs_per_hour`, or spread the retirements out.
+
+- On a console whose visibility policy includes nested mob members (the policy
+  trait's default; the stock gateway policy does not), a temporary council's
+  participants are listed as members, and their stored history holds a copy of
+  the source member's earlier turns: a caller denied the source can read them
+  through a participant. Affects 0.8.27 through 0.9.13. Keep the stock policy,
+  or deny the participants by name (`council-p0`, ...). The next release no
+  longer lists them.
+
+- A mob that a member private to one person created with the agent mob
+  tools is recorded as private to no one once the process restarts. A host
+  whose console visibility policy lists nested mobs can then show that
+  mob's members to people the private member itself is hidden from. The
+  stock console lists no nested mob, so it does not show them.
+
+## [0.9.12] - 2026-11-10
+
+Meta 0.9.12 was released in part: the GitHub release `meta-v0.9.12`, the
+Python SDK `meerkat-meta` 0.9.12 (PyPI), the TypeScript SDK `@rkat/meta-sdk`
+0.9.12 (npm) and the `meta-extension-state` 0.9.12 crate exist; the
+`meerkat-meta` 0.9.12 crate does not (crates.io refused it as larger than its
+upload limit). Its changes are listed under 0.9.13, which replaces it.
 
 ## [0.9.11] - 2026-11-09
 

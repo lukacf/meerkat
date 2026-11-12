@@ -864,14 +864,26 @@ impl AppState {
         );
         host_inputs.extend(credential_store_input);
         host_confinement.admit_host_inputs(&host_inputs)?;
-        host_confinement.log_startup(
-            &host_inputs,
-            &meerkat::HostConfinement::convention_sources(
-                conventions_context_root.as_deref(),
-                bootstrap.context.user_config_root.as_deref(),
-            ),
+        let convention_sources = meerkat::HostConfinement::convention_sources(
+            conventions_context_root.as_deref(),
+            bootstrap.context.user_config_root.as_deref(),
         );
-        factory = factory.with_host_confinement(&host_confinement);
+        host_confinement.log_startup(&host_inputs, &convention_sources);
+        // The agents' in-process file tools never write the host's inputs,
+        // the realm's own documents or the convention sources, in any
+        // confinement mode. Without --context-root the tools are rooted in
+        // the instance root and the factory reads its hooks and skills from
+        // that root, so its convention sources are the ones declared.
+        factory = factory
+            .with_host_confinement(&host_confinement)
+            .with_protected_host_inputs(
+                &host_inputs,
+                &meerkat::HostConfinement::realm_documents(&realm_paths.root),
+                &meerkat::HostConfinement::convention_sources(
+                    Some(&task_project_root),
+                    bootstrap.context.user_config_root.as_deref(),
+                ),
+            );
         if let Some(context_root) = conventions_context_root {
             factory = factory.context_root(context_root);
         }
@@ -17860,6 +17872,23 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
         // failures now exhaust the bounded retry policy before terminalizing.
         assert_eq!(payload["details"]["error"]["kind"], "retry_exhausted");
         assert_eq!(payload["details"]["error"]["terminal"], true);
+        // The exhausted retry keeps the facts of its last failed attempt in
+        // the fields a non-retryable provider failure fills.
+        let turn_error = &payload["details"]["error"];
+        assert_eq!(turn_error["provider"], "openai", "{payload}");
+        assert_eq!(turn_error["retryable"], true, "{payload}");
+        assert_eq!(
+            turn_error["reason"]["reason_type"], "llm_provider_error",
+            "{payload}"
+        );
+        assert_eq!(
+            turn_error["reason"]["provider_error_kind"], "unknown",
+            "{payload}"
+        );
+        assert_eq!(
+            turn_error["reason"]["provider_error_retryability"], "retryable",
+            "{payload}"
+        );
     }
 
     #[test]
@@ -19811,6 +19840,108 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
                 Some(meerkat::PersistenceError::RealmGoverned { .. })
             ),
             "{refused}"
+        );
+    }
+
+    /// One `apply_patch` add of `path` through a builtin dispatcher of
+    /// `factory`: whether the tool wrote the file.
+    async fn file_tool_writes(factory: &AgentFactory, path: &str) -> bool {
+        let dispatcher = factory
+            .build_builtin_dispatcher(
+                Arc::new(meerkat::MemoryTaskStore::new()),
+                meerkat::BuiltinToolConfig::default(),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("a builtin dispatcher builds");
+        let args = json!({
+            "patch": format!("*** Begin Patch\n*** Add File: {path}\n+written by the model\n*** End Patch")
+        });
+        let raw = serde_json::value::RawValue::from_string(args.to_string()).expect("raw args");
+        let result = dispatcher
+            .dispatch(meerkat_core::ToolCallView {
+                id: "file-tool",
+                name: "apply_patch",
+                args: &raw,
+            })
+            .await;
+        match result {
+            Ok(_) => true,
+            Err(meerkat_core::ToolError::InvalidArguments { reason, .. })
+                if reason.contains("engine's own directory") =>
+            {
+                false
+            }
+            Err(other) => panic!("{path}: unexpected tool error {other:?}"),
+        }
+    }
+
+    /// The server's own construction declares its inputs to its agents'
+    /// in-process file tools: the factory it builds its sessions with
+    /// refuses the realm state root and the realm's documents under it, the
+    /// user config document, and the hooks and skills it reads from its
+    /// tool root (the instance root when no context root is given), also
+    /// where the skills directory is a link to a directory beside it. An
+    /// ordinary file under the instance root is still written.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rest_file_tools_never_write_the_servers_own_inputs() {
+        let temp = TempDir::new().unwrap();
+        let instance_root = temp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(instance_root.join(".rkat")).unwrap();
+        std::fs::create_dir_all(instance_root.join("shared-skills")).unwrap();
+        std::os::unix::fs::symlink("../shared-skills", instance_root.join(".rkat/skills")).unwrap();
+        let mut bootstrap = RuntimeBootstrap::default();
+        bootstrap.realm.state_root = Some(instance_root.join("realms"));
+        bootstrap.context.user_config_root = Some(instance_root.join("user"));
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        let slot = Arc::clone(&captured);
+        let state = AppState::load_from_with_bootstrap_confinement_and_factory(
+            instance_root.clone(),
+            bootstrap,
+            false,
+            test_credential_store(&instance_root),
+            None,
+            move |factory| {
+                *slot.lock().unwrap() = Some(factory.clone());
+                factory
+            },
+        )
+        .await
+        .unwrap();
+        let factory = captured
+            .lock()
+            .unwrap()
+            .take()
+            .expect("the server finished its factory");
+        let realm = state.realm.as_str().to_string();
+
+        for path in [
+            format!("realms/{realm}/config.toml"),
+            format!("realms/{realm}/authorization/grant-owner.jsonl"),
+            format!("realms/{realm}/tasks.db"),
+            "realms/another-realm/config.toml".to_string(),
+            "user/.rkat/config.toml".to_string(),
+            ".rkat/config.toml".to_string(),
+            "shared-skills/planted/SKILL.md".to_string(),
+        ] {
+            assert!(
+                !file_tool_writes(&factory, &path).await,
+                "{path} is the server's own and was written"
+            );
+            assert!(!instance_root.join(&path).exists(), "{path} exists");
+        }
+        assert!(
+            file_tool_writes(&factory, "workspace/out.txt").await,
+            "an ordinary file under the instance root is written"
+        );
+        assert_eq!(
+            std::fs::read_to_string(instance_root.join("workspace/out.txt")).unwrap(),
+            "written by the model\n"
         );
     }
 }

@@ -97,20 +97,49 @@ impl ScheduleRef {
 /// they stand after the change, whichever asking brought each there: a
 /// change that is asked again after one that followed only a part answers
 /// as a whole one does.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+///
+/// The list is the host's and an administrator's: a schedule that targets
+/// an agent may be anybody's. Every other caller (an agent that asks for
+/// the change, a Console caller without `runtime.admin`) is answered
+/// `effect` and `count`, and no `schedules` member. The family itself
+/// withholds the list only for an agent requester, and Meta's own surfaces
+/// withhold it for their other callers: a host that serves any caller
+/// other than its operator through `IdentityFamily` withholds the list
+/// itself, before it writes the answer for that caller.
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SchedulesFollowed {
     /// What was done to them.
     pub effect: ScheduleEffect,
     /// How many.
     pub count: usize,
-    /// Which, in the schedule owner's order.
+    /// Which, in the schedule owner's order. Empty, whatever `count` says,
+    /// on a value whose list is withheld from its caller.
     pub schedules: Vec<ScheduleRef>,
     /// Whether a schedule could not be read or changed: the list is then
     /// what was done so far, and the same request asked again follows the
     /// rest. Written only when it is so.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub incomplete: bool,
+    /// Whether the list is withheld from the caller the value is for.
+    list_withheld: bool,
+}
+
+impl Serialize for SchedulesFollowed {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+
+        let members = 2 + usize::from(!self.list_withheld) + usize::from(self.incomplete);
+        let mut answer = serializer.serialize_struct("SchedulesFollowed", members)?;
+        answer.serialize_field("effect", &self.effect)?;
+        answer.serialize_field("count", &self.count)?;
+        if !self.list_withheld {
+            answer.serialize_field("schedules", &self.schedules)?;
+        }
+        if self.incomplete {
+            answer.serialize_field("incomplete", &true)?;
+        }
+        answer.end()
+    }
 }
 
 impl SchedulesFollowed {
@@ -122,7 +151,18 @@ impl SchedulesFollowed {
             count: schedules.len(),
             schedules,
             incomplete,
+            list_withheld: false,
         }
+    }
+
+    /// The same answer for a caller that is not given the list: what was
+    /// done and how many, with no schedule named. It is written without
+    /// the `schedules` member.
+    #[must_use]
+    pub(crate) fn without_list(mut self) -> Self {
+        self.schedules = Vec::new();
+        self.list_withheld = true;
+        self
     }
 }
 

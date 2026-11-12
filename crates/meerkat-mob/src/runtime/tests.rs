@@ -92243,6 +92243,9 @@ fn mob_runtime_parity_field_value(
         "member_dispatch_admission_lineage" => {
             Some(MobRuntimeParityExprValue::Map(BTreeMap::new()))
         }
+        // The fork lineage for operator instructions: the parity probes seat
+        // no fork.
+        "member_instruction_lineage" => Some(MobRuntimeParityExprValue::Map(BTreeMap::new())),
         "member_wake_attempt_sequence" | "member_materialization_drift_count" => {
             Some(MobRuntimeParityExprValue::U64(0))
         }

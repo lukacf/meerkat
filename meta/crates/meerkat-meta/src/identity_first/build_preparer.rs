@@ -68,11 +68,11 @@
 //!   Dormant, and a fresh spawn (the kickoff spawn of its create, a seat
 //!   the mob's start owes it) leaves the identity owed its seat;
 //! - decided with a customizer, by an identity bootstrap that finds one
-//!   ([`IdentityBuildPreparer::bind_publishing`]): from then on it is the
+//!   (`IdentityBuildPreparer::bind_publishing`): from then on it is the
 //!   preparer of a composition that composes one;
 //! - decided without one, by an identity bootstrap that finds none or by
 //!   the activation without an identity context
-//!   ([`IdentityBuildPreparer::decide_without_customizer`]): inert, and the
+//!   (`IdentityBuildPreparer::decide_without_customizer`): inert, and the
 //!   call that made the decision asks Core once to seat the identities owed
 //!   their seat. An identity bootstrap that finds a customizer later still
 //!   decides for it.

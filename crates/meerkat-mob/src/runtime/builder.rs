@@ -1316,6 +1316,59 @@ fn apply_seeded_mob_input(
     Ok(())
 }
 
+/// Record a fork-derived member's fork lineage root for operator
+/// instructions again, from the spawn row that stores it
+/// (`RecordMemberInstructionLineage`), right after the replay seated the
+/// row's member.
+///
+/// A refusal never fails the resume. MobMachine refuses the record for a
+/// member whose session already recorded a snapshot under this seat, which
+/// a replay can meet where the live mob could not: a second row of one
+/// incarnation whose seat replays through an arm that keeps what the first
+/// row's seat recorded. When MobMachine already holds this root for the
+/// member (an earlier row of the same seat recorded it) nothing is lost. A
+/// refused record that leaves the member without its root is logged: the
+/// member is then not under the records written for that root and its
+/// forks until it is seated as a fork again. (The live seat's own record is
+/// different: a refusal there stops the actor.)
+fn recover_member_instruction_lineage(
+    authority: &mut crate::machines::mob_machine::MobMachineAuthority,
+    agent_identity: &AgentIdentity,
+    root: &AgentIdentity,
+    context: &'static str,
+) {
+    use crate::machines::mob_machine as mob_dsl;
+
+    let member = mob_dsl::AgentIdentity::from_domain(agent_identity);
+    let root_identity = mob_dsl::AgentIdentity::from_domain(root);
+    let Err(error) = apply_seeded_mob_input(
+        authority,
+        mob_dsl::MobMachineInput::RecordMemberInstructionLineage {
+            agent_identity: member.clone(),
+            root_identity: root_identity.clone(),
+        },
+        context,
+    ) else {
+        return;
+    };
+    if authority.state().member_instruction_lineage.get(&member) == Some(&root_identity) {
+        tracing::debug!(
+            agent_identity = %agent_identity,
+            root = %root,
+            context,
+            "a spawn row's operator instruction lineage root was already recorded for its member"
+        );
+    } else {
+        tracing::warn!(
+            agent_identity = %agent_identity,
+            root = %root,
+            context,
+            %error,
+            "the replay could not record a member's operator instruction lineage root again; the member is not under the records written for that root and its forks until it is seated as a fork again"
+        );
+    }
+}
+
 fn bind_owner_bridge_session_authority_for_create(
     authority: &mut crate::machines::mob_machine::MobMachineAuthority,
     binding: &OwnerBridgeSessionCreateAuthority,
@@ -3418,6 +3471,10 @@ struct PlacedCarrierRecoveryEntry {
     /// (a placed member a spawn holding the entry's custody created): the
     /// replay records the entry again once the carrier seats the member.
     identity_entry: Option<crate::runtime::IdentityEntryOrigin>,
+    /// The fork lineage root the carrier's exact MemberSpawned row stores
+    /// for operator instructions (a placed helper fork): the replay records
+    /// it again once the carrier seats the member.
+    instruction_lineage_root: Option<AgentIdentity>,
 }
 
 #[cfg(feature = "runtime-adapter")]
@@ -3792,10 +3849,13 @@ fn classify_placed_spawn_recovery(
         };
         let identity_entry =
             exact_projection.and_then(|projection| projection.event.identity_entry());
+        let instruction_lineage_root = exact_projection
+            .and_then(|projection| projection.event.instruction_lineage_root().cloned());
         plan.entries.push(PlacedCarrierRecoveryEntry {
             record,
             disposition,
             identity_entry,
+            instruction_lineage_root,
         });
     }
 
@@ -4008,6 +4068,29 @@ async fn commit_placed_spawn_event_repairs(
             )
             .await?;
     }
+
+    // A repaired row is written from the carrier, which holds no fork
+    // lineage root for operator instructions (the root lives on the row the
+    // stop cut off, and in MobMachine, which this start rebuilds from the
+    // rows). A repaired member that was seated as a helper fork is therefore
+    // seated outside its fork family: no record written for the family's
+    // first member and its forks reaches it. One warning names the members;
+    // it carries no record body.
+    let repaired_members: Vec<&str> = initial_plan
+        .entries
+        .iter()
+        .filter(|entry| repair_spawn_ids.contains(&entry.record.spawn_id))
+        .map(|entry| entry.record.agent_identity.as_str())
+        .collect();
+    tracing::warn!(
+        mob_id = %mob_id,
+        repaired = repaired_members.len(),
+        members = ?repaired_members,
+        "placed members were seated again from their spawn carriers after a stop in the middle \
+         of their seat; a carrier holds no operator instruction fork lineage, so a member among \
+         them that was seated as a fork is outside its fork family and is not selected by the \
+         records written for that family's first member and its forks"
+    );
 
     event_store.append_batch(repairs).await?;
     *mob_events = event_store
@@ -4398,6 +4481,24 @@ fn seed_mob_authority_sync_from_events(
                         },
                         "recover_member_dispatch_admission_lineage",
                     )?;
+                }
+                // A fork-derived member: its row stores its fork lineage
+                // root for operator instructions (the root its seat
+                // recorded, or the entry MobMachine held for the identity
+                // at a later seat of the same fork), and the replay records
+                // it again here, directly after the row seated the member
+                // and before the next journal row, so the records written
+                // for that root and its forks select the member after the
+                // restart as before it. A row without it (a member that is
+                // not fork-derived, or an earlier release's row) records
+                // nothing.
+                if let Some(root) = member_spawned.instruction_lineage_root() {
+                    recover_member_instruction_lineage(
+                        authority,
+                        &member_spawned.agent_identity,
+                        root,
+                        "recover_member_instruction_lineage",
+                    );
                 }
                 // The member of an identity entry: its row records the
                 // entry's origin, and the replay records the entry again
@@ -5799,6 +5900,18 @@ fn recover_current_committed_placed_carrier_signals(
                 },
                 "recover_placed_identity_entry",
             )?;
+        }
+        // A placed fork-derived member: its row stores its fork lineage
+        // root for operator instructions, and the replay records it again
+        // now that the carrier seated the member (the journal replay skips
+        // the row itself).
+        if let Some(root) = entry.instruction_lineage_root.as_ref() {
+            recover_member_instruction_lineage(
+                authority,
+                &identity,
+                root,
+                "recover_placed_member_instruction_lineage",
+            );
         }
     }
     Ok(())
@@ -9734,6 +9847,7 @@ impl MobBuilder {
                 machine_state_watch_rx,
                 operator_instruction_delivery:
                     super::operator_instruction_delivery::OperatorInstructionDeliveryShared::new(
+                        definition.id.clone(),
                         wiring.member_residency.instruction_delivery_concurrency,
                     ),
                 reachability_observations,
@@ -10803,6 +10917,8 @@ impl MobBuilder {
             host_read_handle: &host_read_handle,
             unreadable_view_is_retryable: false,
             operator_instruction_bodies: &operator_instruction_bodies,
+            operator_instruction_journal: Some(epoch_events),
+            operator_instruction_member_rows: None,
         };
         restore_resumed_members(
             &restore_context,
@@ -11451,6 +11567,7 @@ impl MobBuilder {
             // member's release waits on the member's delivery lock).
             let operator_instruction_delivery =
                 super::operator_instruction_delivery::OperatorInstructionDeliveryShared::new(
+                    definition.id.clone(),
                     member_residency.instruction_delivery_concurrency,
                 );
             let handle = MobHandle {
@@ -12387,9 +12504,25 @@ pub(super) struct ResumeMemberRestoreContext<'a> {
     /// with the read failure as its diagnostic (the boot rule).
     pub(super) unreadable_view_is_retryable: bool,
     /// The bodies of the mob's Active operator-instruction records: a member
-    /// whose restore mints its session carries its snapshot in it.
+    /// whose restore mints its session carries its snapshot in it. A wake
+    /// hands the shared records' bodies and where the woken member's own
+    /// are (`operator_instruction_member_rows`); a start hands what its
+    /// journal holds in memory and where each member's own body is in
+    /// `operator_instruction_journal`.
     pub(super) operator_instruction_bodies:
         &'a super::operator_instruction_delivery::OperatorInstructionBodies,
+    /// The mob's events of the epoch a start replays, in cursor order: a
+    /// member-targeted record's body is read from its row there. None for a
+    /// wake.
+    pub(super) operator_instruction_journal: Option<&'a [crate::event::MobEvent]>,
+    /// A wake's own member-targeted records: the mob's journal and the rows
+    /// that hold their bodies (slot key, digest, cursor). They are read only
+    /// when the restore mints the member's session, off the mob's actor, so
+    /// a wake that continues a session reads no journal row for them.
+    pub(super) operator_instruction_member_rows: Option<(
+        &'a dyn crate::store::MobEventStore,
+        &'a [(String, String, u64)],
+    )>,
 }
 
 /// Everything a member's restore writes, applied in the member's turn.
@@ -14448,14 +14581,39 @@ async fn provision_fresh_member_session(
         super::actor::admit_bridge_session_for_spawn(&mut provision_request.create_session);
     // The session this restore mints is born with the member's operator
     // instruction snapshot (an unborn seat's first wake, a recreated
-    // session).
+    // session). A wake's own member-targeted bodies are read from their
+    // journal rows here, and only for a build that carries the snapshot.
+    let member_bodies = match ctx.operator_instruction_member_rows {
+        Some((events, rows))
+            if !rows.is_empty()
+                && super::operator_instruction_delivery::birth_carries_member_instructions(
+                    &provision_request.create_session,
+                    base.state(),
+                ) =>
+        {
+            let read =
+                super::operator_instruction_delivery::read_journaled_bodies(events, rows.to_vec())
+                    .await?;
+            Some(ctx.operator_instruction_bodies.for_member(read))
+        }
+        _ => None,
+    };
+    // The member is seated: its fork lineage root is MobMachine's own.
+    let lineage_root = super::operator_instruction_delivery::member_lineage_root(
+        base.state(),
+        &entry.agent_identity,
+    );
     super::operator_instruction_delivery::carry_member_instruction_birth(
         &mut provision_request.create_session,
         base.state(),
-        ctx.operator_instruction_bodies,
+        member_bodies
+            .as_ref()
+            .unwrap_or(ctx.operator_instruction_bodies),
+        ctx.operator_instruction_journal,
         &definition.id,
         &entry.agent_identity,
         entry.role.as_str(),
+        lineage_root.as_ref(),
     )?;
     provision_request.generated_self_owned_operation_owner =
         Some(authorize_seeded_session_provision_operation_owner(
@@ -16494,6 +16652,7 @@ mod tests {
                 record: record.clone(),
                 disposition: PlacedCarrierRecoveryDisposition::CommittedCurrent,
                 identity_entry: None,
+                instruction_lineage_root: None,
             }],
             current_committed_event_keys: BTreeSet::from([(
                 record.agent_identity.clone(),

@@ -6,6 +6,8 @@ mod tool_application_projection;
 
 #[cfg(test)]
 mod assistant_message_identity_tests;
+#[cfg(test)]
+mod conflict_signal_replay_tests;
 mod delta_compaction;
 #[cfg(test)]
 mod delta_compaction_tests;

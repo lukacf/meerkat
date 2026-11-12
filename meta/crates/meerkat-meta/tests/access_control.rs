@@ -1275,6 +1275,130 @@ async fn a_memory_conflicts_reason_text_in_the_gating_audit_is_for_an_administra
     }
 }
 
+/// A memory conflict's text reaches a caller through the audit read alone.
+/// An action blocked on a conflict is answered as a safe draft and never
+/// becomes a pending request, so the pending list holds nothing of it, and
+/// the gating stream only says that something changed: its frame carries no
+/// data. Read as a signed-in person who is not an administrator, who holds
+/// `gating.view` and may view the acting agent.
+#[tokio::test]
+async fn a_memory_conflict_reaches_neither_the_pending_list_nor_the_gating_stream() {
+    const REASON: &str = "words written from records the caller may not read";
+    let (_temp_dir, mut runtime) = build_access_runtime_fixture().await;
+    let controller = AccessController::new(gating_router_only_config()).expect("controller");
+    runtime.set_access_controller(controller);
+    let app = runtime.build_reference_app_router(decision_state(false));
+    let alice = person_token("alice@example.test");
+    runtime
+        .memory_index(meerkat_meta::MemoryIndexRequest {
+            entity: "delivery".to_string(),
+            topic: "email_send".to_string(),
+            store: None,
+            fact: None,
+            metadata: None,
+            conflict: Some(true),
+            conflict_reason: Some(REASON.to_string()),
+        })
+        .await
+        .expect("the conflict is indexed");
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/console/gating/stream")
+                .header(header::AUTHORIZATION, format!("Bearer {alice}"))
+                .body(Body::empty())
+                .expect("stream request"),
+        )
+        .await
+        .expect("stream response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body().into_data_stream();
+    let mut buffered = String::new();
+    let wait = Duration::from_secs(10);
+    assert_eq!(
+        next_gating_frame(&mut body, &mut buffered, wait)
+            .await
+            .as_deref(),
+        Some("gating.resync_required")
+    );
+
+    // An action that would wait for an approval, blocked on the conflict.
+    let blocked = runtime
+        .evaluate_gating_action_with_origin(
+            serde_json::from_value::<meerkat_meta::GatingEvaluateRequest>(json!({
+                "action": "send_email", "actor_id": "worker", "risk_tier": "r3",
+                "entity": "delivery", "topic": "email_send",
+            }))
+            .expect("request"),
+            Some(meerkat_meta::GatingOrigin {
+                identity: "router".to_string(),
+                conversation_id: None,
+                interaction_id: None,
+            }),
+        )
+        .await;
+    assert_eq!(
+        (blocked.fallback_reason.as_deref(), &blocked.pending_id),
+        (Some("memory_conflict"), &None),
+        "the blocked action is no pending request: {blocked:?}"
+    );
+    assert_eq!(
+        next_complete_gating_frame(&mut body, &mut buffered, wait)
+            .await
+            .as_deref(),
+        Some("event: gating.changed\ndata: {}\n\n"),
+        "the stream says only that something changed"
+    );
+    let pending = rpc_as(&app, &alice, "meta/gating/pending", json!({})).await;
+    assert_eq!(
+        pending["result"]["pending"],
+        json!([]),
+        "the conflict block is not on the pending list: {pending:#}"
+    );
+
+    // A request that does wait for an approval (it names an entity and topic
+    // no conflict is indexed for) is listed, and holds nothing of the
+    // conflict either.
+    let waiting = runtime
+        .evaluate_gating_action_with_origin(
+            serde_json::from_value::<meerkat_meta::GatingEvaluateRequest>(json!({
+                "action": "send_invoice", "actor_id": "worker", "risk_tier": "r3",
+                "entity": "billing", "topic": "invoice",
+            }))
+            .expect("request"),
+            Some(meerkat_meta::GatingOrigin {
+                identity: "router".to_string(),
+                conversation_id: None,
+                interaction_id: None,
+            }),
+        )
+        .await;
+    assert!(waiting.pending_id.is_some(), "{waiting:?}");
+    assert_eq!(
+        next_complete_gating_frame(&mut body, &mut buffered, wait)
+            .await
+            .as_deref(),
+        Some("event: gating.changed\ndata: {}\n\n")
+    );
+    let pending = rpc_as(&app, &alice, "meta/gating/pending", json!({})).await;
+    assert_eq!(
+        pending["result"]["pending"].as_array().map(Vec::len),
+        Some(1),
+        "{pending:#}"
+    );
+    assert!(
+        !pending.to_string().contains(REASON) && !pending.to_string().contains("conflict"),
+        "the pending list names no conflict: {pending:#}"
+    );
+    assert!(
+        !buffered.contains(REASON),
+        "the stream carried no conflict text: {buffered}"
+    );
+}
+
 /// Withdrawal belongs to the requester side (the embedding host's RPC): the
 /// console has no route for it, so even a session allowed to decide cannot
 /// withdraw a request, and the request stays pending until the host does.
@@ -5306,6 +5430,78 @@ async fn the_dream_history_counts_the_memory_of_an_identity_the_console_does_not
             "{what}, no deny: listed for a signed-in person"
         );
     }
+
+    let _ = runtime.mob_handle().stop().await;
+}
+
+/// With the access rules off nothing withholds a realm's dream history: a
+/// console that can identify a person lists it to a signed-in person who is
+/// not an administrator and to the caller with no token as it does to the
+/// administrator, also while the realm names the harvest of an identity the
+/// console does not know. Rules that are off deny nobody's memory.
+#[tokio::test]
+async fn with_the_access_rules_off_the_dream_history_names_an_identity_the_console_does_not_know() {
+    const RUN: &str = "run-plain-1";
+    let listed = vec![(true, json!(false)); 2];
+
+    let (_temp_dir, mut runtime) = build_access_runtime_fixture().await;
+    let memory_dir = tempfile::tempdir().expect("memory dir");
+    let store = plain_dream_store(memory_dir.path()).await;
+    store
+        .record_pending_harvest("default", "retiree", None, "retired")
+        .await
+        .expect("pending harvest");
+    runtime.set_memory_panel_store(Arc::new(store.clone()));
+    runtime.set_access_controller(
+        AccessController::new(AccessControlConfig {
+            enabled: false,
+            admins: vec!["root@example.test".to_string()],
+            ..AccessControlConfig::default()
+        })
+        .expect("controller"),
+    );
+    let app = runtime.build_reference_app_router(decision_state(false));
+
+    // The harvest itself stays withheld from the callers the console keeps
+    // apart: only the history of runs is listed.
+    for (who, bearer) in [
+        ("a signed-in person", Some("alice@example.test")),
+        ("the caller with no token", None),
+        ("the administrator", Some("root@example.test")),
+    ] {
+        let harvests = match bearer {
+            Some(subject) => {
+                rpc_as(
+                    &app,
+                    &person_token(subject),
+                    "meta/memory/panel/harvests",
+                    json!({}),
+                )
+                .await
+            }
+            None => rpc(&app, "meta/memory/panel/harvests", json!({})).await,
+        };
+        assert_eq!(harvests["error"], Value::Null, "{who}: {harvests:#?}");
+        let names_retiree = harvests["result"]["harvests"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["identity"] == json!("retiree")));
+        assert_eq!(
+            names_retiree,
+            bearer == Some("root@example.test"),
+            "{who}: the harvest row of an identity the console does not know: {harvests:#?}"
+        );
+    }
+    assert_eq!(
+        dream_history_as(&app, "alice@example.test", RUN).await,
+        listed,
+        "rules off: listed for a signed-in person"
+    );
+    assert_dream_history(&app, RUN, false, "rules off, the caller with no token").await;
+    assert_eq!(
+        dream_history_as(&app, "root@example.test", RUN).await,
+        listed,
+        "rules off: listed for the administrator"
+    );
 
     let _ = runtime.mob_handle().stop().await;
 }

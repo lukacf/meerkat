@@ -1593,7 +1593,7 @@ runtime-alias record.
 
 ### `meta/console/inspect_identity`
 
-Return `{identity: ConsoleIdentityRecord, peers: string[]}` for one console identity. The record includes health and addressability; affordances are projected by `/console/experience`, not this response. An identity whose last wake Core held for the audited-endpoint repair (a `session_repair_required` hold) reports `health: "needs_repair"`, and the console status and inspect payloads carry the hold as `session_repair` (the same object as `meta/member_health.session_repair_required`), which the console renders as the **needs repair** state with the two repair commands. Older servers may only support the legacy `meta/inspect_identity`; the headless console controller keeps that as a compatibility fallback.
+Return `{identity: ConsoleIdentityRecord, peers: string[]}` for one console identity. An agent for which no member is seated is decided on its own record (its profile as its role, and its labels), as a seated agent is decided on its member. The record includes health and addressability; affordances are projected by `/console/experience`, not this response. An identity whose last wake Core held for the audited-endpoint repair (a `session_repair_required` hold) reports `health: "needs_repair"`, and the console status and inspect payloads carry the hold as `session_repair` (the same object as `meta/member_health.session_repair_required`), which the console renders as the **needs repair** state with the two repair commands. Older servers may only support the legacy `meta/inspect_identity`; the headless console controller keeps that as a compatibility fallback.
 
 ### `meta/console/query_timeline`
 

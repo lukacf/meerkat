@@ -37,6 +37,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   Core holds a member as an identity entry, and a session bridge has
   neither trait. No Meerkat code relied on them.
 
+### Security
+
+- The Console decides an agent for which no member is seated on the
+  agent's own record (its profile as its role, and its labels) wherever a
+  call or a stream names it: the reads of one agent by name
+  (`meta/console/inspect_identity`, `meta/identity/resolved_tools`,
+  `meta/identity/routing_status`) and every other check that names an
+  agent. Through 0.9.14, an agent its host configures that had no member
+  yet was not decided by an access rule scoped by role or by label, nor by
+  the rule about an agent private to a person (`console.private_to`), on
+  these calls. The same now holds for an agent of the identity store that
+  is owed its seat or archived. An agent whose record cannot be read is
+  shown to an access administrator only.
+- A deny by role also applies to the list entry of an agent that has no
+  live member (`GET /console/identities`, `meta/console/list_identities`
+  and, on a Console that serves other runtimes, the agent rows of
+  `GET /console/experience`). In 0.9.10 through 0.9.14 such an entry was
+  decided without the agent's role.
+- An open Console or event stream reads the roster and the agents' records
+  again before it decides its next item once its last read is 20 seconds
+  old, so a stream opened before an agent's record changed decides on the
+  record as it is.
+- `SameProcessTopologyCoordinator` reads both runtimes' agents before it
+  decides what a principal is shown under an enforcing access controller,
+  and shows an endpoint of a runtime that none of its agents holds to an
+  access administrator only.
+
 ### Added
 
 - `meta/identity/*`: host methods that change a mob's long-term agents while
@@ -361,6 +388,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   identity holds through its row answers
   `HeldBootstrapRefusal::ExistingContinuity`, as the add of a configured
   identity that has continuity does. It answered `IdentityStoreOwned`.
+- For an agent no member is seated for, a person a deny by role or by label
+  names is refused `access_denied` by `meta/identity/get`,
+  `meta/identity/plan` and every change of the agent, as for a seated
+  agent the deny names. These calls answered `identity_unknown` there.
+- The list record of an agent with no live member
+  (`GET /console/identities`, `meta/console/list_identities`) carries the
+  label `role` with the agent's profile, unless the agent's declared
+  labels name a role, as the record of a live member carries its role.
 
 ### Fixed
 
@@ -443,6 +478,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   boundary for agent memory, and a retirement's hooks name the member.
   They were skipped, because the member carried no mark of an
   identity-first spawn.
+- `meta/access/preview` on a Console that serves other runtimes reads
+  those runtimes' agents before it decides, as the call it previews does.
 
 ### Known limitations
 
@@ -460,6 +497,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   generated runtime aliases). It admitted such names before.
 - `identity_creation::IdentityRefusalKind::AdmissionUnsettled` is retryable
   (`is_retryable`), as Core's refusal of the same name is.
+- A change of the row of an agent no member is seated for that a host
+  writes through the runtime's own mob handle, past `meta/identity/*`, is
+  decided on by the Console at the latest 20 seconds after it.
+- The SSE routers a host builds itself without a runtime
+  (`agent_events_sse_router`, `mob_events_sse_router` and their
+  `_with_access` forms) decide on the agent attributes the host records in
+  the access controller it passes: they read no roster and no agent
+  record.
 
 ## [0.9.13] - 2026-11-11
 

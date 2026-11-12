@@ -114,6 +114,9 @@ fn build_agent_error_to_session_error(
         BuildAgentError::GrantGate(refusal) => SessionError::Agent(
             meerkat_core::error::AgentError::ToolGrantGateRefused(Box::new(refusal)),
         ),
+        BuildAgentError::ReasoningEffortRefused(refusal) => SessionError::Agent(
+            meerkat_core::error::AgentError::ReasoningEffortRefused(refusal),
+        ),
         other => SessionError::Agent(meerkat_core::error::AgentError::BuildError(
             other.to_string(),
         )),

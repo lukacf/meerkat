@@ -179,6 +179,10 @@ impl CoreApplyFailureCause {
                 .with_reason(crate::event::AgentErrorReason::ToolGrantGateRefused {
                     refusal: (**refusal).clone(),
                 }),
+            AgentError::ReasoningEffortRefused(refusal) => Self::runtime_turn(error.to_string())
+                .with_reason(crate::event::AgentErrorReason::ReasoningEffortRefused {
+                    refusal: (**refusal).clone(),
+                }),
             _ => Self::runtime_turn(error.to_string()),
         }
     }

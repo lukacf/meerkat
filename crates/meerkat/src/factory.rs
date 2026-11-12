@@ -2810,6 +2810,13 @@ pub enum BuildAgentError {
     #[error("keep_alive requires comms_name to be set")]
     #[cfg(feature = "comms")]
     KeepAliveRequiresCommsName,
+
+    /// The build's `reasoning_effort` level was refused for the model and
+    /// the route of the client the build made. Nothing of the build was
+    /// published and no provider request was made. Boxed to keep the error
+    /// small.
+    #[error("{0}")]
+    ReasoningEffortRefused(Box<meerkat_core::ReasoningEffortRefusal>),
 }
 
 /// Authoritative, side-effect-free-with-respect-to-session-state LLM

@@ -270,6 +270,20 @@ pub enum ReasoningEffortRefusalReason {
     ConflictingReasoningMode,
 }
 
+impl ReasoningEffortRefusalReason {
+    /// Whether the reason is retryable in meaning: an identical later
+    /// request can succeed with no configuration change. True only for
+    /// [`Self::SupportedLevelsUnavailable`] (the account's model list is not
+    /// loaded). [`Self::SupportedLevelsUnknown`] is not transient: it holds
+    /// until a configuration changes, like every other reason.
+    ///
+    /// Meerkat itself never retries a refused level; the caller decides
+    /// when to ask again.
+    pub const fn is_transient(self) -> bool {
+        matches!(self, Self::SupportedLevelsUnavailable)
+    }
+}
+
 /// The source of the effort levels a route accepts for a model. Each
 /// backend kind names its own (`reasoning_levels_source()` on the
 /// provider-matrix kinds, [`ReasoningBackend::levels_source`]); a refusal

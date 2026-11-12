@@ -398,6 +398,14 @@ pub enum AgentErrorReason {
     ToolGrantGateRefused {
         refusal: crate::tool_grant::GrantGateRefusal,
     },
+    // The requested `reasoning_effort` level was refused for the model and
+    // route (`AgentError::ReasoningEffortRefused`): at a build, at a
+    // reconfiguration or before a provider request. A turn that failed for
+    // it carries the refusal, so a surface answers the turn with the
+    // refusal it answers the session error with.
+    ReasoningEffortRefused {
+        refusal: crate::ReasoningEffortRefusal,
+    },
 }
 
 impl AgentErrorReason {
@@ -521,6 +529,9 @@ impl AgentErrorReason {
             AgentError::ToolGrantGateRefused(refusal) => Some(Self::ToolGrantGateRefused {
                 refusal: (**refusal).clone(),
             }),
+            AgentError::ReasoningEffortRefused(refusal) => Some(Self::ReasoningEffortRefused {
+                refusal: (**refusal).clone(),
+            }),
             _ => None,
         }
     }
@@ -595,7 +606,10 @@ impl From<&AgentError> for AgentErrorClass {
             | AgentError::InstructionActivation(_)
             // A directed turn refused while a staged prompt is pending is a
             // precondition refusal of the same class.
-            | AgentError::StagedPromptDirectedTurnRefused => Self::Config,
+            | AgentError::StagedPromptDirectedTurnRefused
+            // A refused `reasoning_effort` level is the request's own
+            // configuration, refused before any provider request.
+            | AgentError::ReasoningEffortRefused(_) => Self::Config,
         }
     }
 }

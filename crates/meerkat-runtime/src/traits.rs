@@ -255,9 +255,32 @@ pub enum RuntimeDriverError {
     /// started: its requeue max age is under one millisecond or over the cap.
     #[error("unregister queued-input disposition refused: {0}")]
     QueuedInputsRefused(crate::meerkat_machine::UnregisterQueuedInputsError),
+
+    /// A live session's LLM reconfiguration was refused for the
+    /// `reasoning_effort` level its target identity carries: the route of
+    /// the client built for the target does not accept the level. Nothing
+    /// was applied: the session keeps its identity, its client and its
+    /// stored params. The message is the refusal's own text; read the
+    /// refusal's fields. Boxed to keep the error small.
+    #[error("{0}")]
+    ReasoningEffortRefused(Box<meerkat_core::ReasoningEffortRefusal>),
 }
 
 impl RuntimeDriverError {
+    /// The typed session error for a reconfiguration refused for its
+    /// `reasoning_effort` level ([`Self::ReasoningEffortRefused`]), or
+    /// `None` for any other error. Surfaces use it so the refusal keeps the
+    /// wire form a refused build and a refused turn have, instead of
+    /// becoming an internal error.
+    pub fn reasoning_effort_refused_session_error(&self) -> Option<meerkat_core::SessionError> {
+        match self {
+            Self::ReasoningEffortRefused(refusal) => Some(meerkat_core::SessionError::Agent(
+                meerkat_core::AgentError::ReasoningEffortRefused(refusal.clone()),
+            )),
+            _ => None,
+        }
+    }
+
     /// The typed session refusal for a session this runtime owner may not
     /// host (#1813): another runtime owner hosts it, or its hosting claim is
     /// unavailable. `None` for any other error. Surfaces use it so the

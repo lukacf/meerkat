@@ -507,6 +507,10 @@ pub fn agent_transport_error_code(error: &meerkat_core::AgentError) -> ErrorCode
         // A scoped tool grant gate no grant could honour is the caller's
         // request, refused with the typed refusal as the error's data.
         AgentError::ToolGrantGateRefused(_) => ErrorCode::InvalidParams,
+        // A `reasoning_effort` level the model's route does not accept is
+        // the caller's request, refused with the typed refusal as the
+        // error's data.
+        AgentError::ReasoningEffortRefused(_) => ErrorCode::InvalidParams,
         AgentError::HookDenied { .. } => ErrorCode::HookDenied,
         AgentError::Llm { .. } | AgentError::BuildError(_) => ErrorCode::ProviderError,
         AgentError::SessionNotFound(_) => ErrorCode::SessionNotFound,

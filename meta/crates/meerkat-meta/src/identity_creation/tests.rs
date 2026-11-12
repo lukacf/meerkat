@@ -979,9 +979,11 @@ fn a_constructed_preparation_needs_its_deadline_and_a_native_host() {
         );
     }
     // A required preparation needs no native host and is served: the host
-    // settles it.
-    value["preparation"] = json!({"analyst": {"mode": "required"}});
-    let required = parse(&value);
+    // settles it. The policy is one a launch serves in every other
+    // respect too (no rule names an outcome nothing carries out).
+    let mut served_value = served_policy_json();
+    served_value["preparation"] = json!({"analyst": {"mode": "required"}});
+    let required = parse(&served_value);
     assert!(!required.needs_native_host());
     let served = resolve(None, RuntimeOptionPolicy::Enabled(Box::new(required)), true)
         .expect("a launch serves a required preparation")

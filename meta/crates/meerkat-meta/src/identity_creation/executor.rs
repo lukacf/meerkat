@@ -627,6 +627,10 @@ fn refused_before_core(commit: &ChangeCommit<'_>) -> Option<IdentityRefusal> {
     None
 }
 
+/// The `unsupported` feature of an update that would move an agent into a
+/// profile whose agents the launch's policy says the host prepares.
+pub const MOVE_INTO_PREPARED_PROFILE: &str = "move_into_prepared_profile";
+
 /// The feature an adoption, and an update of labels, answer through an
 /// executor that was given nothing to read the mob's agents with
 /// ([`CoreChangeExecutor::with_agent_specs`]).
@@ -695,6 +699,26 @@ async fn commit_update(
     }
     let mut spec = current.clone();
     if let Some(profile) = &update.profile {
+        // The host prepares an agent of a prepared profile before its first
+        // use, which a move cannot give an agent that exists already: it
+        // would run on the profile unprepared. A move out of such a
+        // profile, and every other update, asks for no preparation.
+        if profile.to != current.profile
+            && core_commit::preparation_of(commit, profile.to.as_str())
+                != meerkat_mob::IdentityPreparationMode::None
+        {
+            return refused(
+                IdentityRefusal::new(IdentityRefusalKind::Unsupported {
+                    feature: MOVE_INTO_PREPARED_PROFILE.to_owned(),
+                })
+                .at("set.profile")
+                .with_detail(
+                    "An agent is not moved into a profile its host prepares: the host prepares \
+                     an agent of that profile before its first use, and this agent was not. \
+                     Create the agent in that profile instead. Nothing was changed.",
+                ),
+            );
+        }
         spec.profile = profile.to.clone();
     }
     if let Some(addressability) = update.addressability {

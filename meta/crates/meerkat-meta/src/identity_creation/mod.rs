@@ -118,7 +118,7 @@ pub use executor::{
     InstructionStep, committed_outcome, consent_of_plan, refusal_of_core, refusal_of_error,
 };
 // The settle of an agent's preparation, as the seam and the family take it.
-pub use executor::PreparationSettle;
+pub use executor::{MOVE_INTO_PREPARED_PROFILE, PreparationSettle};
 pub use family::{
     AgentEntered, AgentPage, AgentProvenance, AgentReadiness, AgentRecord, AgentRef, AgentSet,
     AgentSpec, AgentSummary, ChangePlan, ChangesHold, ChangesHoldRequest, ConsentSummary,

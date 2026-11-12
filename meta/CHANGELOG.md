@@ -109,7 +109,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `effect` one of `paused`, `resumed`, `ended`: the schedules paused for the
   agent, the agent's schedules that are active after an unarchive, the
   ended ones), and a plan of the change carries the same member with what
-  the change would answer. Whose pause a pause is, the schedule's own
+  the change would answer. The list (`schedules`) is the host's: it is
+  written for the stdio gateway's caller and for a Console caller with
+  `runtime.admin`; an agent that asks for the change and a Console caller
+  without `runtime.admin` are answered `effect` and `count` and no list,
+  since a schedule that targets an agent may be anybody's. From Rust, the
+  family (`IdentityFamily`) withholds the list only for an agent requester:
+  a host that serves any caller other than its operator through the family
+  withholds the list itself. Whose pause a
+  pause is, the schedule's own
   lifecycle records (Core: `ScheduleService::pause_for_target`,
   `resume_for_target`). The stdio gateway gives the family its schedules; a
   Rust host does with `IdentityFamilyOptions::with_schedules`
@@ -493,14 +501,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   with the state `broken` for an agent refused at its first wake. To seat
   the agent, put the label in its row: at its create, or by an update. An
   update seats an agent that is owed its seat (one created with a first
-  message) at once; an agent Core already holds a member of takes its
-  row's labels when it is respawned or reset (`meta/respawn`,
-  `meta/reset`), and is built at its next wake. The same holds after a
-  later label change of a row: until the member is seated again its seat
-  carries the old labels, and its next build is refused. A customizer that
+  message) at once; an agent Core already holds a member of is refused
+  until its row carries the label, takes its row's labels at the update
+  itself while its member is idle, and is served at its next send, with
+  no respawn or reset (a member that held work then takes them at a
+  retry of the update, at its next update, or at a respawn or a reset).
+  The same holds after a later label change of a row. A customizer that
   sets no labels refuses nothing. An archive and a removal of a refused
   agent are served.
 
+- A declared definition update (`runtime_options.declare_spec_update` on
+  the stdio gateway, `spec_update_ceremony` from Rust) that drops a profile
+  agents were created on, or renames it, is refused: Meerkat answers the
+  diagnostic `profile_held_by_identity` at `profiles.<name>`, naming the
+  agents, and the gateway's init fails with `declared mob spec update
+  refused: ...`. Nothing is written, and a launch without the declaration
+  that carries the definition the mob had starts as before (one that
+  carries the edited definition is refused, as any undeclared edit is).
+  Keep the profile, or update those agents to another
+  profile or remove them, then declare the update. While this release
+  cannot read the record of one of the mob's created agents (one a later
+  release wrote, after a rollback), such an update is refused the same
+  way, at `profiles`, naming those agents, since that record may name the
+  profile: keep the profile, or declare the update on the release that
+  reads the records. It was accepted before,
+  and such an agent then failed each restore with a profile-not-found
+  reason.
 - On the Console, a read, a plan and a change of one agent
   (`meta/identity/get`, `plan`, `update`, `archive`, `unarchive`, `remove`
   and `adopt`) answer an agent the caller may not view exactly as a name no
@@ -830,12 +856,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   schedule methods (`schedule/create`, `schedule/update`, REST) do not judge
   the target, and neither does a schedule tool call for a target that names
   only a session: such a schedule for an archived agent is active and each
-  of its fires is refused at the delivery. An agent's schedule tool call
+  of its fires is refused at the delivery (one that names only the session
+  ends each fire as a missing target instead: `misfired`, failure class
+  `target_missing`, under the default missing-target policy; `skipped` for
+  a schedule created with `skip`). A schedule that names only a
+  session and is created while the session's agent is archived is active
+  the same way; a later archive of the agent is followed. An agent's
+  schedule tool call
   that reads its target just before the target's archive and writes just
   after it can leave an active schedule the same way (the Console's create
   closes that window). A change of a paused schedule's target through
   Meerkat's own methods (its prompt, for one) makes its pause a pause by
   name: the agent's unarchive does not resume it.
+- A schedule that names only the session of a removed agent is not ended
+  by the removal: it stays active, each of its fires is refused as a
+  missing target and no turn runs. End it by hand.
+- A hold of the agents' changes (`meta/identity/changes_hold`) does not
+  survive a restart of the host. After a restart, a deploy or a crash the
+  changes are carried out again until the hold is set again: a host that
+  means to keep them held sets the hold as soon as its start has answered,
+  before it serves callers. The start itself is not held: what a launch
+  carries out before the host's call (a held change that was approved, a
+  change asked by an agent a schedule wakes) is carried out.
 
 - `meta/set_instruction` cannot write a record for a member and its forks:
   it writes for the member alone and refuses a target that carries

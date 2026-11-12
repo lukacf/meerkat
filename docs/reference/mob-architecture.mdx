@@ -718,7 +718,9 @@ composition without the built-in identity and member store commits no change
   seat (the mob's next start asks again); at a wake or a restore a
   retryable refusal leaves the member Dormant and its next wake asks again
   once the retry is due, and a refusal for good records the member broken
-  until it is respawned or reset. The seat's labels are its row's labels:
+  until it is respawned or reset, or, for a label refusal, until its row
+  carries the label: after that update it is served at the next send, with
+  no respawn or reset. The seat's labels are its row's labels:
   Core lowers them from the row at a fresh spawn; at a wake or a restore
   they are the labels the member was last seated with, or the row's
   labels while the row records that the seat is owed a label restamp

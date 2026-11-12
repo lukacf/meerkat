@@ -229,7 +229,10 @@ never writable by it and never readable by others. Set the bit once on a
 directory that several accounts read (`chmod g+s <dir>`), such as the `.rkat`
 directory of a shared project or a realm directory a helper under another
 account reads. A document that is already 0600 there stays 0600 until its
-owner runs `chmod g+r` on it.
+owner runs `chmod g+r` on it. Where the bit cannot be set, grant the read
+after each write, with `chmod g+r` or an ACL on the document: a write
+replaces the file, so a grant on the file before it does not carry over, and
+a default ACL on the directory does not reach a file that is created 0600.
 
 The engine changes the mode of no directory: a directory it creates takes
 the umask's mode, and an existing one keeps its own. A document written

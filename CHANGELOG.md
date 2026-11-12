@@ -46,6 +46,19 @@ them.
   `ReplayPlan::step_admission` (see Added and Fixed). Anthropic and Gemini
   targets are unchanged.
 
+- Behaviour-only (not measured by the gate): `meerkat-core`, `rkat`: on Unix
+  a config document the engine writes is readable by its owner only, so an
+  account that read one through group permissions loses that access at the
+  document's next write unless its directory has the setgid bit. See
+  Security and the Upgrade notes.
+
+- Behaviour-only (not measured by the gate): `rkat`: `--comms-binding-out`
+  replaces what is at its path with a new owner-only file instead of writing
+  into it. A path that holds a named pipe, a device (`/dev/stdout`), a
+  directory or a symbolic link whose target is not a regular file is
+  refused, and another account can no longer read the binding file. See
+  Security and the Upgrade notes.
+
 ### Added
 
 - `meerkat-core`: `OpenAiContinuityIssuer` (a kind of service,
@@ -286,9 +299,13 @@ them.
   renamed its temporary file without the write's result, so the empty file
   took the document's place and the caller (`rkat config set` and `patch`,
   JSON-RPC `config/set` and `config/patch`, the REST and MCP config writes)
-  saw success. The write now fails with the filesystem's error, and the
-  file it could not write stays as it was; the temporary file is left
-  beside it. Affects 0.3.3 through 0.9.12.
+  saw success. The write now fails with the filesystem's error, publishes
+  nothing and removes its temporary file: the document it could not replace
+  stays as it was, as for the files of the entry above. A write that fails at
+  its sync or its rename removes its temporary file too, where it left a
+  `.config.tmp.<id>` or `.config_state.tmp.<id>` file behind on every
+  attempt, and so does a failed `mcp.toml` write. Affects 0.3.3 through
+  0.9.13.
 
 ### Security
 
@@ -311,15 +328,31 @@ them.
   group-writable and never readable by others, and a rewrite never adds a
   permission the file lacked: a document its owner made 0400 stays 0400.
   `rkat init` writes the project document it copies from the user document
-  by the same rule. The engine changes the mode of no directory. The
+  by the same rule, and only into a file it creates: a symbolic link at the
+  document's path now fails the command, where a link to nothing was
+  followed. The engine changes the mode of no directory. The
   documents have had the umask's mode since 0.3.0, and the inline secret
-  source since 0.6.0. Affects 0.3.0 through 0.9.12.
+  source since 0.6.0. Affects 0.3.0 through 0.9.13.
 
 - `rkat`: `--comms-binding-out` wrote its binding file, which carries the
   comms runtime's bootstrap token, with the umask's mode (0644 under the
-  common 022). The file is now 0600 on Unix from its creation: a binding
-  file already at the path is removed, and a new one is written in its
-  place. Affects 0.6.33 through 0.9.12.
+  common 022) and into whatever was at its path: a file already there kept
+  its own mode, and a symbolic link was followed. The binding file is now a
+  new file that takes the place of the one at its path, with three limits:
+  - The path is replaced, never written through. A regular file at the path
+    is removed, and a symbolic link to a regular file is replaced by the
+    binding file while the file it pointed to stays as it was. A path that
+    holds anything else (a named pipe, a socket, a device such as
+    `/dev/stdout`, a directory, or a symbolic link that leads to one of
+    these or to nothing) is refused before anything is removed, with an
+    error that names what is there. The directory of the path must allow
+    the removal and the creation of a file.
+  - On Unix the file is 0600 from its creation, whatever the umask and
+    whatever mode the file before it had.
+  - A supervisor that runs under another account than `rkat` cannot read
+    it.
+
+  Affects 0.6.33 through 0.9.13.
 
 - `meerkat-comms`: `Keypair::save` created `identity.key` with the umask's
   mode and made it 0600 only after it had written the key, so the secret
@@ -327,7 +360,7 @@ them.
   save failed in between. The file is now 0600 on Unix from its creation,
   and a key file that already exists is made 0600 before the key is written
   to it. `Keypair::load_or_generate`, which the stock hosts use, already
-  created the file 0600. Affects 0.3.0 through 0.9.12.
+  created the file 0600. Affects 0.3.0 through 0.9.13.
 
 ### Upgrade notes
 
@@ -350,11 +383,37 @@ them.
   (the `.rkat` directory of a shared project, a shared realm directory),
   and the documents written there are 0640 with the directory's group. A
   document the engine already rewrote as 0600 stays 0600: `chmod g+r` it
-  once. An install that cannot set the bit grants read another way (an
-  ACL, or its own `chmod g+r` after a write). Other accounts never get
-  write access through the document's mode, and nothing is readable by
-  others. The admission fence file keeps its own rule: `admission.lock` is
-  0640 with its directory's group in every directory.
+  once. An install that cannot set the bit grants the read itself after each
+  write, with `chmod g+r` or an ACL on the document: a write replaces the
+  file, so a grant on the file before it does not carry over, and a default
+  ACL on the directory does not reach a file that is created 0600. Other
+  accounts never get write access through the document's mode, and nothing
+  is readable by others. The admission fence file keeps its own rule:
+  `admission.lock` is 0640 with its directory's group in every directory.
+
+- `rkat run --comms-binding-out <PATH>` no longer writes into what is
+  already at the path: it removes the file there and creates a new one that
+  only its owner can read (0600 on Unix), whatever the umask and whatever
+  mode the older file had. What changes for an install that relied on the
+  old write:
+  - A symbolic link at the path is replaced by a regular file. Before, the
+    binding was written through the link into the file it pointed to; now
+    that file is left as it was and no longer receives the binding. Give the
+    flag the path of the file itself.
+  - A named pipe, a socket, a device or a directory at the path, and a
+    symbolic link that leads to one of them or to nothing, is refused and
+    left untouched. `--comms-binding-out /dev/stdout`, or a named pipe a
+    supervisor reads the binding from, worked before and is now an error:
+    write the binding to a regular file and have the supervisor read that.
+  - The directory of the path must let `rkat` remove and create a file in
+    it. A binding file that was created for `rkat` in a directory it cannot
+    write could be rewritten in place before, and now fails.
+  - A supervisor that runs under another account than `rkat` can no longer
+    read the binding file (under the common umask 022 it could). Run the
+    supervisor under the same account, or grant it the read after each
+    write (`chmod`, or an ACL on the file): the file is a new one every
+    time, so a grant on the older file does not carry over. The descriptor
+    file of `rkat mob host --descriptor-out` is owner-only in the same way.
 
 ### Known limitations
 

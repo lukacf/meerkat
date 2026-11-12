@@ -140,10 +140,10 @@ them.
   member on a session service that keeps no durable sessions), whose
   update answers `Kept` as before. The roster is not the journal: the
   member's last seat row keeps the labels it was seated with until its
-  next restamp (a label change while it is idle, a respawn, a reset), and
-  so do the readers of that row, the binding journal's labels and
-  `seats_stale`. A retry of the same update replays and restamps nothing,
-  since the seat already reads its row's labels. A seat that trails its
+  restamp, and so do the readers of that row, the binding journal's labels
+  and `seats_stale`. The restamp stays owed: a retry of the same update
+  (it replays) or the identity's next update carries it out once the
+  member is idle, as a respawn or a reset does. A seat that trails its
   row for any other cause (the mob stopped between an update's commit and
   its restamp, or an earlier release left it so) takes its row's labels on
   the roster at the mob's next start, which reads the rows anyway and
@@ -199,7 +199,8 @@ them.
   that sets labels. A start reads the row's labels into the member's
   roster entry, and its next build carries them, so a host that answers
   the seat from its row is not refused. No start writes a seat row: the
-  member's last seat row keeps the old labels until its next restamp, and
+  member's last seat row keeps the old labels until its restamp (the
+  identity's next update while the member is idle, a respawn, a reset), and
   `MobHandle::identity_record_census()` counts it in `seats_stale` until
   then. Before a downgrade to a release that seats members from that row,
   respawn each such member with its row's labels

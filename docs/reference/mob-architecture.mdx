@@ -764,10 +764,11 @@ composition without the built-in identity and member store commits no change
   same-session successor cannot serve (placed, wired to a placed member,
   or on a session service that keeps no durable sessions), whose update
   answers `Kept`. The roster is not the journal: the member's last seat
-  row keeps the labels it was seated with until its next restamp (a label
-  change while it is idle, a respawn, a reset), and so do the binding
-  journal's labels and `IdentityRecordCensus::seats_stale`, which read
-  that row; a retry of the same update restamps nothing. A seat that
+  row keeps the labels it was seated with until its restamp, and so do
+  the binding journal's labels and `IdentityRecordCensus::seats_stale`,
+  which read that row. The restamp stays owed: a retry of the same update
+  (it replays) or the identity's next update carries it out once the
+  member is idle, as a respawn or a reset does. A seat that
   trails its row for any other cause takes its row's labels on the roster
   at the mob's next start (which reads the rows and builds nothing) and at
   its next build before the host is asked, so no answered label update

@@ -2002,13 +2002,6 @@ pub(super) enum IdentityChangeCommand {
     /// Realize every owned edge whose ends are both seated and which the mob
     /// has not wired yet.
     RealizeOwnedEdges { reply_tx: oneshot::Sender<()> },
-    /// Set the labels of a store-owned identity's seat to its row's on the
-    /// mob's roster ([`crate::roster::Roster::set_store_owned_seat_labels`]):
-    /// a label update's member step did not restamp the member.
-    SeatRowLabels {
-        identity: AgentIdentity,
-        reply_tx: oneshot::Sender<Result<(), MobError>>,
-    },
     /// Commit one adoption into store custody.
     CommitAdoption {
         commit: Box<super::adoption::AdoptionCommit>,
@@ -2448,9 +2441,6 @@ impl IdentityChangeCommand {
             // A realization pass answers nothing but its end.
             Self::RealizeOwnedEdges { reply_tx } => {
                 let _ = reply_tx.send(());
-            }
-            Self::SeatRowLabels { reply_tx, .. } => {
-                let _ = reply_tx.send(Err(error));
             }
             Self::CommitAdoption { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
@@ -3617,42 +3607,6 @@ impl super::MobHandle {
         }
     }
 
-    /// Set the labels of `identity`'s seat to its row's on the mob's roster,
-    /// in an actor step of its own ([`IdentityChangeCommand::SeatRowLabels`];
-    /// [`crate::roster::Roster::set_store_owned_seat_labels`] says what
-    /// changes and what does not): the member step of a label update did
-    /// not restamp the member, so the roster, which every reader of a
-    /// member's labels reads, follows the row at once. Under the mob's own
-    /// authority, as its comparison of the seat with the row is. Never
-    /// fails its caller: a seat it could not set takes its row's labels at
-    /// its next build or at the mob's next start, and the failure is
-    /// logged.
-    pub(super) async fn seat_store_owned_row_labels(&self, identity: &AgentIdentity) {
-        let owner = self.non_owning().with_command_authority(
-            crate::control_policy::CommandAuthority::principal(
-                crate::control_policy::MobControlPrincipal::Owner,
-            ),
-        );
-        let agent_identity = identity.clone();
-        let seated = owner
-            .send_actor_command(move |reply_tx| {
-                super::MobCommand::IdentityChange(Box::new(IdentityChangeCommand::SeatRowLabels {
-                    identity: agent_identity,
-                    reply_tx,
-                }))
-            })
-            .await
-            .and_then(|seated| seated);
-        if let Err(error) = seated {
-            tracing::warn!(
-                mob_id = %self.mob_id(),
-                agent_identity = %identity,
-                error = %error,
-                "a store-owned seat's roster entry was not set to its row's labels"
-            );
-        }
-    }
-
     /// The spec `identity`'s store-owned row holds, with whether its host
     /// holds its creation; `None` for a row that holds no spec.
     pub(super) async fn store_owned_seat_facts(
@@ -3807,11 +3761,11 @@ impl super::MobHandle {
     /// sessions), whose update answers
     /// [`super::DeclaredEntryOutcome::Kept`]. The roster is not the
     /// journal: the member's last seat row keeps the labels it was seated
-    /// with until its next restamp (a label change while it is idle, a
-    /// respawn, a reset), and so do the readers of that row, the binding
-    /// journal's labels and `seats_stale`
-    /// ([`Self::identity_record_census`]). A retry of the update restamps
-    /// nothing, since the seat already reads its row's labels. A seat that
+    /// with until its restamp, and so do the readers of that row, the
+    /// binding journal's labels and `seats_stale`
+    /// ([`Self::identity_record_census`]). The restamp stays owed: a retry
+    /// of the update (it replays) or the identity's next update carries it
+    /// out once the member is idle, as a respawn or a reset does. A seat that
     /// trails its row for another cause (the mob stopped between the
     /// update's commit and its restamp) takes the row's labels on the
     /// roster at the mob's next start, and at its next build before its

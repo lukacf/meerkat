@@ -783,19 +783,20 @@ impl Roster {
     ///
     /// A store-owned member's seat carries its row's labels and no others,
     /// and the row is the identity's record. So the roster follows the row
-    /// wherever no restamp seated the row's labels: after a label update
-    /// whose member step did not restamp the member (it held work, the step
-    /// failed, or no same-session successor can serve it), at a start, and
-    /// at a build of a seat that trailed its row. Only the roster entry
+    /// before any restamp seats the row's labels: in the step that commits
+    /// an update of the identity (whatever its member step then answers: a
+    /// restamp, or none because the member holds work, the step failed or
+    /// no same-session successor can serve it), at a start, and at a build
+    /// of a seat that trailed its row. Only the roster entry
     /// changes: no seat row is written, the member keeps its generation,
     /// fence and session, and its live session keeps the labels it was
     /// built with until its next build.
     ///
     /// The roster is not the journal. The journal's last seat row of the
-    /// member keeps the labels it was seated with until the member's next
-    /// restamp (a label change while it is idle, a respawn, a reset), and
-    /// with it its three readers: a predecessor build, which seats the
-    /// member from that row; the binding journal's labels
+    /// member keeps the labels it was seated with until the member's
+    /// restamp (an update of the identity while it is idle, a respawn, a
+    /// reset), and with it its three readers: a predecessor build, which
+    /// seats the member from that row; the binding journal's labels
     /// (`MemberBinding::labels`); and the record census
     /// (`IdentityRecordCensus::seats_stale`), which counts the row until
     /// then.

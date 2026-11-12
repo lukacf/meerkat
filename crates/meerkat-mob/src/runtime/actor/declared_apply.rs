@@ -410,12 +410,15 @@ impl MobActor {
         let written = receipt.clone();
         let update = row.is_some();
         // A store-owned update's descriptive inputs, which its member's seat
-        // carries to the first build of a session no build created yet.
+        // carries to the first build of a session no build created yet, and
+        // its labels, which its member's roster entry reads from this step
+        // on.
         let seat_inputs = match &change.kind {
             DeclaredChangeKind::StoreOwnedUpdate { spec, .. } => Some((
                 spec.identity.clone(),
                 spec.context.clone(),
                 spec.additional_instructions.clone(),
+                spec.labels.clone(),
             )),
             DeclaredChangeKind::Roster => None,
         };
@@ -439,16 +442,31 @@ impl MobActor {
             Box::pin(self.unwire_ended_owned_edges(&ended_edges)).await;
             Box::pin(self.realize_owned_edges_of(std::slice::from_ref(&owner))).await;
         }
-        if let Some((identity, context, instructions)) = seat_inputs
-            && super::super::boot_plan::domain_member_seat_session_unborn(
-                self.dsl_authority.state(),
-                &identity,
-            )
-        {
-            self.roster
+        if let Some((identity, context, instructions, labels)) = seat_inputs {
+            // The roster follows the row in the step that committed it,
+            // whatever the update's member step then answers and whether
+            // or not its caller is still there: what decides on a member's
+            // labels reads the roster. No seat row is written here; the
+            // member's restamp writes it
+            // ([`crate::roster::Roster::set_store_owned_seat_labels`]).
+            let relabelled = self
+                .roster
                 .write()
                 .await
-                .set_store_owned_seat_inputs(&identity, context, instructions);
+                .set_store_owned_seat_labels(&identity, &labels);
+            if relabelled {
+                self.publish_machine_state_projection();
+            }
+            if super::super::boot_plan::domain_member_seat_session_unborn(
+                self.dsl_authority.state(),
+                &identity,
+            ) {
+                self.roster.write().await.set_store_owned_seat_inputs(
+                    &identity,
+                    context,
+                    instructions,
+                );
+            }
         }
         Ok(DeclarationStep {
             verdicts,

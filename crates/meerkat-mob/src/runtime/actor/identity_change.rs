@@ -94,10 +94,6 @@ impl MobActor {
                 Box::pin(self.realize_every_owned_edge()).await;
                 let _ = reply_tx.send(());
             }
-            IdentityChangeCommand::SeatRowLabels { identity, reply_tx } => {
-                let result = Box::pin(self.seat_store_owned_row_labels(&identity)).await;
-                let _ = reply_tx.send(result);
-            }
             IdentityChangeCommand::CommitAdoption { commit, reply_tx } => {
                 let result = Box::pin(self.commit_identity_adoption(*commit)).await;
                 let _ = reply_tx.send(result);
@@ -143,39 +139,6 @@ impl MobActor {
                 let _ = reply_tx.send(self.abort_identity_construction_step(identity, attempt));
             }
         }
-    }
-
-    /// Set the labels of `identity`'s seat to its row's on the roster
-    /// ([`crate::roster::Roster::set_store_owned_seat_labels`]), read from
-    /// the identity's row in this step: the roster takes what the record
-    /// holds, never a caller's copy. An identity the store holds no row
-    /// with a spec of, and one no member holds, change nothing. Watchers
-    /// are woken when the entry changed: member lists combine the roster.
-    async fn seat_store_owned_row_labels(
-        &mut self,
-        identity: &AgentIdentity,
-    ) -> Result<(), MobError> {
-        let Some(store) = self.identity_member.clone() else {
-            return Ok(());
-        };
-        let Some(labels) = crate::runtime::identity_change::store_owned_row_labels(
-            store.as_ref(),
-            &self.definition.id,
-            identity,
-        )
-        .await?
-        else {
-            return Ok(());
-        };
-        let changed = self
-            .roster
-            .write()
-            .await
-            .set_store_owned_seat_labels(identity, &labels);
-        if changed {
-            self.publish_machine_state_projection();
-        }
-        Ok(())
     }
 
     /// The store's receipt of `operation`, as the machine reads it: none, the

@@ -3408,10 +3408,16 @@ jobs:
           -p 'test_historical_g_current_binding.py' -v
 
       - name: Check inert package construction and validation
+        # The pinned-input fetch step, the kit packager and the consumer
+        # installer and verifier run with a transport or fixtures the tests
+        # supply: no download, no Cargo.
         run: |
           python3 -B -m unittest discover -s scripts -p 'test_package_connect_resource*.py' -v
           python3 -B -m unittest -v scripts.test_assemble_connect_product
           python3 -B -m unittest -v scripts.test_package_library_release.ReleaseTests scripts.test_package_github_enterprise
+          python3 -B -m unittest -v scripts.test_agent_install_kit
+          python3 -B -m unittest -v scripts.test_fetch_pinned_inputs
+          python3 -B -m unittest -v scripts.test_library_consumer_install scripts.test_library_consumer_verify
           python3 -B -m unittest -v scripts.test_release_payload_privacy_scan
 
       - name: Install candidate and preparation test dependencies
@@ -3422,6 +3428,7 @@ jobs:
           python3 -B -m pytest -q -p no:cacheprovider
           scripts/test_connect_candidate_cli.py
           scripts/test_connect_candidate_publication.py
+          scripts/test_connect_candidate_recorder.py
 
       - name: Check documentation
         run: python3 scripts/check-docs.py

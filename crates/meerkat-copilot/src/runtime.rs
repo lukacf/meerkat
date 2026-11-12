@@ -1344,6 +1344,16 @@ impl meerkat_llm_core::LlmClient for CopilotRoutedClient {
         self.sync_client().prompt_token_limit(output_budget)
     }
 
+    /// Reports no route. The route of a Copilot request is this client's
+    /// own to state: the endpoint the account's model list gives the model,
+    /// with what that entry says about effort levels. The adapter it wraps
+    /// knows the backend and the API but not the account's list, so its
+    /// answer is never passed on as this client's; until this client states
+    /// the whole route it reports none.
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        None
+    }
+
     async fn prepare_controller_credential(&self) -> Result<(), AuthError> {
         self.connection
             .resolved_authorizer()
@@ -1676,6 +1686,11 @@ fn account_prompt_limit(limits: &crate::CopilotModelLimits, output_budget: u32) 
 impl meerkat_llm_core::LlmClient for CopilotCapabilityGatedClient {
     async fn prepare_controller_credential(&self) -> Result<(), AuthError> {
         self.inner.prepare_controller_credential().await
+    }
+
+    /// The route of the adapter this gate stands in front of.
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        self.inner.reasoning_route()
     }
 
     /// The account model's own output limit, the one the gate enforces.

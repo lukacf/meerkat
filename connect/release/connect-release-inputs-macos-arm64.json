@@ -1,71 +1,32 @@
 {
-  "schema_version": 1,
-  "kind": "connect-candidate-inputs",
+  "schema_version": 2,
+  "kind": "connect-macos-producer-inputs",
   "target": "macos-arm64",
-  "scope": "installed_gateway_schema4_resource_startup_and_shutdown_preview",
-  "connect_version": null,
   "rust_toolchain": "1.97.0",
-  "native_release": {
-    "core": {
-      "repository": "lukacf/meerkat",
-      "version": "0.9.4",
-      "tag": "v0.9.4",
-      "source_sha": null
+  "features": "meerkat-connect/console,toolkit-mobkit/native-host",
+  "source": {
+    "repository": "lukacf/meerkat",
+    "export_commit": "cd727ee5e281d2d5dbeea978c70b88d99bdf0db0"
+  },
+  "minimum_macos": "13.5",
+  "minimum_free_bytes": 21474836480,
+  "sdk_build_tools": {
+    "build": "1.6.1",
+    "packaging": "26.3",
+    "pyproject_hooks": "1.3.3",
+    "setuptools": "84.2.1",
+    "wheel": "0.48.0"
+  },
+  "node_prebuilt_policy": {
+    "path": "release/node-prebuilt-policy-macos-arm64.json",
+    "sha256": "4a9ea2a27cab1b1aebef8c2896b72cc9b9aab46c5e2a4570f5008cc03cc8a0e4"
+  },
+  "library": {
+    "state": "pending",
+    "pins": {
+      "path": "release/library-pins-macos-arm64.json",
+      "sha256": null
     },
-    "meta": {
-      "repository": "lukacf/meerkat-meta",
-      "version": "0.9.4",
-      "tag": "v0.9.4",
-      "source_sha": null
-    }
-  },
-  "source_pins": {
-    "native-candidate/Cargo.toml": null,
-    "native-candidate/Cargo.lock": null
-  },
-  "expected_package_ids": null,
-  "expected_features": null,
-  "native_family_packages": null,
-  "files": null,
-  "resources": {
-    "upstream": null,
-    "library": null,
-    "acquisition_node": null,
-    "npm": null,
-    "node_prebuilt_policy": null,
-    "node_build_profile": ""
-  },
-  "sdks": {
-    "meta": {
-      "distribution": "meerkat-meta",
-      "version": "0.9.4",
-      "wheel": null,
-      "source_files": null
-    },
-    "toolkit": {
-      "distribution": null,
-      "version": null,
-      "source_files": null
-    }
-  },
-  "dependencies": {
-    "requirements": null,
-    "wheels": null
-  },
-  "expected_resolve": null,
-  "sdk_build": {
-    "requirements": null,
-    "wheels": null
-  },
-  "forge_reader_source": {
-    "repository": "lukacf/meerkat-meta",
-    "source_sha": null,
-    "tag": ""
-  },
-  "forge_reader_source_pins": {
-    "installer/launchkit/runtime_selection.py": null,
-    "installer/launchkit/runtime_candidates.py": null,
-    "installer/launchkit/sdk_wheel_integrity.py": null,
-    "installer/launchkit/templates/install_candidate.py": null
+    "reason": "PENDING: the macOS integration library is built in the run from the committed pin file. Until that pin file and the library packagers are in this tree, its digest is unbound and every macos step of connect-candidate.py refuses. To complete: set pins.sha256 to the sha256 of the committed pin file and state to selected."
   }
 }

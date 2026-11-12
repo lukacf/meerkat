@@ -501,6 +501,11 @@ fn changes_of(agent: &str, digest: &Value, tag: &str) -> Vec<(&'static str, Valu
     ]
 }
 
+/// `answer` with the name `name` spelled `other` wherever it stands.
+fn renamed(answer: &Value, name: &str, other: &str) -> Value {
+    serde_json::from_str(&answer.to_string().replace(name, other)).expect("an answer is JSON")
+}
+
 /// A create of one agent that names `peer` as its peer.
 fn create_near(peer: &str, tag: &str) -> Value {
     json!({"request_id": format!("near-{tag}"),
@@ -637,10 +642,10 @@ async fn a_deny_by_role_or_by_label_holds_for_an_agent_owed_its_seat() {
 
 /// The same rules hold for an archived agent once its member has left the
 /// roster: the denied person's get, plan and every change of an archived
-/// agent a deny names answer exactly as for a name no agent holds, nothing
-/// changes it, it is not in their list and it is no peer of a create of
-/// theirs. A person the rules allow reads it, and the denied person reads
-/// an archived agent no deny names.
+/// agent a deny names are refused as those of a seated agent the deny names
+/// are, nothing changes it, it is not in their list and it is no peer of a
+/// create of theirs. A person the rules allow reads it, and the denied
+/// person reads an archived agent no deny names.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_deny_by_role_or_by_label_holds_for_an_archived_agent() {
     let temp = tempfile::tempdir().unwrap();
@@ -706,38 +711,34 @@ async fn a_deny_by_role_or_by_label_holds_for_an_archived_agent() {
     let plain = console_get(&app, BOB, "plain-archived").await;
     assert_eq!(console_ok(&plain)["archived"], json!(true), "{plain:#}");
 
-    let absent = console_get(&app, BOB, "nobody").await;
-    let absent = console_refused(&absent).clone();
-    assert_eq!(
-        absent["data"]["kind"],
-        json!("identity_unknown"),
-        "{absent:#}"
-    );
     for name in ["rev-archived", "sealed-archived"] {
         let digest = digests[name].clone();
         // A person the rules allow reads it.
         let allowed = console_get(&app, ANN, name).await;
         assert_eq!(console_ok(&allowed)["archived"], json!(true), "{allowed:#}");
 
-        // The denied person's get answers as for a name no agent holds.
+        // The denied person's get is refused exactly as their get of the
+        // seated agent the same deny names.
+        let seated = name.replace("archived", "seated");
         let got = console_get(&app, BOB, name).await;
         assert_eq!(
-            console_refused(&got),
-            &absent,
-            "{name}: a get of it answers as for a name no agent holds"
+            console_refused(&got)["data"]["kind"],
+            json!("access_denied"),
+            "{got:#}"
+        );
+        assert_eq!(
+            renamed(&got, name, &seated),
+            console_get(&app, BOB, &seated).await,
+            "{name}: a get of it answers as the get of a seated agent the deny names"
         );
 
-        // So do a plan and every change of it.
-        for ((method, hidden), (_, unheld)) in changes_of(name, &digest, name)
-            .into_iter()
-            .zip(changes_of("nobody", &digest, &format!("{name}-absent")))
-        {
-            let refused = console_rpc(&app, BOB, method, hidden).await;
-            let unheld = console_rpc(&app, BOB, method, unheld).await;
+        // So are a plan and every change of it.
+        for (method, params) in changes_of(name, &digest, name) {
+            let refused = console_rpc(&app, BOB, method, params).await;
             assert_eq!(
-                console_refused(&refused),
-                console_refused(&unheld),
-                "{name}: {method} answers as for a name no agent holds"
+                console_refused(&refused)["data"]["kind"],
+                json!("access_denied"),
+                "{name}: {method}: {refused:#}"
             );
         }
         let still = console_get(&app, ROOT, name).await;

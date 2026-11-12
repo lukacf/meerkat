@@ -27,6 +27,9 @@ mod adoption;
 // The downgrade cycle (0.9.11): export, purge, the reservation of a purged
 // row's name, and import.
 mod cycle;
+// A definition update against the created agents' rows (0.9.15): an update
+// that drops a profile a row names is refused.
+mod definition_update;
 mod owned_edges;
 
 const STEP: Duration = Duration::from_mins(1);

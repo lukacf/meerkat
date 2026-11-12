@@ -1345,6 +1345,7 @@ def test_official_playwright_install_is_the_backends_command_with_the_closures_n
     assert p.read_json(selected) == p.PLAYWRIGHT_CONFIGURATION
     record = p.read_json(work / "cli-qualification/official-playwright.json")
     assert record["status"] == "passed" and "a browser start" in record["not_claimed"]
+    assert record["route"] == "official-playwright" and record["npm_version"] == "11.17.0"
     assert p.binding(run / "install/npm-runtime.stdout") in record["evidence"]
     # The profile, the operations and the server name are the installer's own fixed values.
     installer = (CONNECT / "scripts/install-library-consumer.py").read_text()
@@ -1367,9 +1368,14 @@ def test_a_failed_official_install_fails_the_stage(lane, fault):
             return original(name, argv, cwd, env)
 
         lane.effect = effect
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="the official-playwright install route failed"):
         lane.step("check-official-install")
     assert not (lane.work / "cli-qualification/official-playwright.json").exists()
+    # The failure names the route and keeps what the installer said about its npm.
+    refused = p.read_json(lane.work / "cli-qualification/official-playwright.refused.json")
+    assert refused["status"] == "refused" and refused["route"] == "official-playwright" and refused["reason"]
+    assert refused["npm_version"] == ("11.17.0" if fault == "no_receipt" else None)
+    assert p.macos_main(["check-official-install", "--work", str(lane.work)]) == 1
     with pytest.raises(ValueError, match="earlier step has no record: check-official-install"):
         lane.stage_record()
 

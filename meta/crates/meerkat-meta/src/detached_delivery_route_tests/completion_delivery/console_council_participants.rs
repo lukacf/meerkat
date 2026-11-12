@@ -1213,9 +1213,9 @@ async fn an_ordinary_mob_under_a_settled_councils_mob_id_is_listed_and_its_frame
     realm.fixture.stop().await;
 }
 
-/// A council's record that reads settled but holds no cleanup receipt saying
-/// its temporary mob is destroyed (no council writes one) still owns its mob
-/// id: a mob held under it stays unlisted.
+/// A council's record that reads settled while its cleanup receipt does not
+/// say its temporary mob is destroyed (no council writes one) still owns its
+/// mob id: a mob held under it stays unlisted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_settled_record_without_a_destroyed_receipt_keeps_its_mob_id() {
     let realm = Realm::start().await;
@@ -1240,12 +1240,14 @@ async fn a_settled_record_without_a_destroyed_receipt_keeps_its_mob_id() {
             .is_some_and(|cleanup| cleanup.temporary_mob_destroyed),
         "a settled council's receipt says its temporary mob is destroyed"
     );
-    record.cleanup = None;
+    // The receipt stays, and says the temporary mob is not destroyed.
+    record
+        .cleanup
+        .as_mut()
+        .expect("a settled council's receipt")
+        .temporary_mob_destroyed = false;
     let record = store.commit(&record).await.expect("rewrite the record");
-    assert!(
-        !record.is_unfinished(),
-        "the record still reads settled without its receipt"
-    );
+    assert!(!record.is_unfinished(), "the record still reads settled");
 
     seat_nested_mob(&state, &council.mob, REUSE_MEMBER).await;
     let identities = listed(&aggregator).await;

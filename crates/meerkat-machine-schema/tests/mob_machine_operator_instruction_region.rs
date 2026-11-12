@@ -21,7 +21,7 @@ use meerkat_machine_schema::catalog::dsl::mob_machine::{
     MobMachineState, MobMachineTransition, MobMachineTransitionError, MobPhase,
     OperatorInstructionRefusal, PeerAddress, PeerId, PeerName, PeerSigningKey,
     PlacedCompletionLifecycleIntentKind, SessionId, SpawnExecPhase, SpawnPolicyRuntimeMode,
-    operator_instruction_target_applies,
+    operator_instruction_target_applies, operator_instruction_target_applies_to_lineage,
 };
 
 type Authority = MobMachineAuthority;
@@ -171,6 +171,7 @@ enum Target {
     Mob,
     Profile(&'static str),
     Member(&'static str),
+    MemberAndForks(&'static str),
 }
 
 impl Target {
@@ -185,8 +186,37 @@ impl Target {
                 String::new(),
                 Some(identity(member)),
             ),
+            Self::MemberAndForks(member) => (
+                InstructionTargetKind::MemberAndForks,
+                String::new(),
+                Some(identity(member)),
+            ),
         }
     }
+}
+
+/// Record that the seated member `child` was forked from a member whose
+/// lineage root is `root`.
+fn record_lineage(
+    authority: &mut Authority,
+    child: &str,
+    root: &str,
+) -> Result<MobMachineTransition, MobMachineTransitionError> {
+    MobMachineMutator::apply(
+        authority,
+        MobMachineInput::RecordMemberInstructionLineage {
+            agent_identity: identity(child),
+            root_identity: identity(root),
+        },
+    )
+}
+
+fn lineage_root(authority: &Authority, child: &str) -> Option<AgentIdentity> {
+    authority
+        .state()
+        .member_instruction_lineage
+        .get(&identity(child))
+        .cloned()
 }
 
 fn prepare(name: &str) -> Signal {
@@ -852,8 +882,10 @@ fn the_active_budget_bounds_a_members_snapshot() {
 /// refused `slot_limit_exceeded` exactly when the snapshot of some member
 /// would hold more than 64 records after it, `active_set_budget_exceeded`
 /// exactly when some member's Active bodies would pass 1 MiB (and the slot
-/// limit holds), and commits otherwise. The count here is made per member
-/// from the record maps, without the machine's helpers.
+/// limit holds), and commits otherwise. A record for a member and its forks
+/// counts in the snapshot of every other name too (any name may be seated
+/// as a fork of that member). The count here is made per member from the
+/// record maps, without the machine's helpers.
 #[test]
 fn every_write_verdict_agrees_with_an_independent_snapshot_count() {
     const MEMBERS: [&str; 4] = ["agent-a", "agent-b", "agent-c", "agent-d"];
@@ -866,15 +898,18 @@ fn every_write_verdict_agrees_with_an_independent_snapshot_count() {
         bytes: u64,
     ) -> (u64, u64) {
         let (kind, _, member) = target.parts();
-        let mut records: Vec<(Option<AgentIdentity>, u64)> = state
+        // Each record: the name it is member-targeted at, whether its forks
+        // take it, and its Active bytes.
+        let mut records: Vec<(Option<AgentIdentity>, bool, u64)> = state
             .operator_instruction_revision
             .keys()
             .filter(|other| other.as_str() != slot)
             .map(|other| {
-                let own = (state.operator_instruction_target_kind.get(other)
-                    == Some(&InstructionTargetKind::Member))
-                .then(|| state.operator_instruction_target_member.get(other).cloned())
-                .flatten();
+                let other_kind = state.operator_instruction_target_kind.get(other);
+                let forks = other_kind == Some(&InstructionTargetKind::MemberAndForks);
+                let own = (forks || other_kind == Some(&InstructionTargetKind::Member))
+                    .then(|| state.operator_instruction_target_member.get(other).cloned())
+                    .flatten();
                 let active = state.operator_instruction_effect.get(other)
                     == Some(&InstructionEffect::Active);
                 let bytes = if active {
@@ -886,29 +921,51 @@ fn every_write_verdict_agrees_with_an_independent_snapshot_count() {
                 } else {
                     0
                 };
-                (own, bytes)
+                (own, forks, bytes)
             })
             .collect();
+        let forks = kind == InstructionTargetKind::MemberAndForks;
         records.push((
-            (kind == InstructionTargetKind::Member)
+            (forks || kind == InstructionTargetKind::Member)
                 .then_some(member)
                 .flatten(),
+            forks,
             bytes,
         ));
-        let shared_count = records.iter().filter(|(own, _)| own.is_none()).count() as u64;
+        let shared_count = records.iter().filter(|(own, _, _)| own.is_none()).count() as u64;
         let shared_bytes: u64 = records
             .iter()
-            .filter(|(own, _)| own.is_none())
-            .map(|(_, bytes)| bytes)
+            .filter(|(own, _, _)| own.is_none())
+            .map(|(_, _, bytes)| bytes)
             .sum();
         let mut widest = (shared_count, shared_bytes);
         for member in MEMBERS {
             let own = records
                 .iter()
-                .filter(|(own, _)| own.as_ref() == Some(&identity(member)));
-            let count = shared_count + own.clone().count() as u64;
-            let bytes = shared_bytes + own.map(|(_, bytes)| bytes).sum::<u64>();
-            widest = (widest.0.max(count), widest.1.max(bytes));
+                .filter(|(own, _, _)| own.as_ref() == Some(&identity(member)));
+            let own_count = own.clone().count() as u64;
+            let own_bytes = own.map(|(_, _, bytes)| bytes).sum::<u64>();
+            // Any name may be seated as a fork of another name: the most
+            // another name's records pass to its forks.
+            let mut from_another = (0_u64, 0_u64);
+            for root in MEMBERS {
+                if root == member {
+                    continue;
+                }
+                let passed = records
+                    .iter()
+                    .filter(|(own, forks, _)| *forks && own.as_ref() == Some(&identity(root)));
+                from_another = (
+                    from_another.0.max(passed.clone().count() as u64),
+                    from_another
+                        .1
+                        .max(passed.map(|(_, _, bytes)| bytes).sum::<u64>()),
+                );
+            }
+            widest = (
+                widest.0.max(shared_count + own_count + from_another.0),
+                widest.1.max(shared_bytes + own_bytes + from_another.1),
+            );
         }
         widest
     }
@@ -933,9 +990,10 @@ fn every_write_verdict_agrees_with_an_independent_snapshot_count() {
             signal(&mut authority, revoke(&slot, current.unwrap_or(0) + 1));
             continue;
         }
-        let target = match next(8) {
+        let target = match next(10) {
             0 => Target::Mob,
             1 => Target::Profile("alpha"),
+            other @ 2..=4 => Target::MemberAndForks(MEMBERS[(other % 4) as usize]),
             other => Target::Member(MEMBERS[(other % 4) as usize]),
         };
         // Mostly small bodies, sometimes a large one.
@@ -1897,6 +1955,414 @@ fn the_rust_target_predicate_agrees_with_the_machines_owed_set() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Forks: a record for a member and its forks
+// ---------------------------------------------------------------------------
+
+/// A fork-derived member's lineage root is recorded for a seated member
+/// that is not its own root; from then on a record written for the root and
+/// its forks owes the member too, while a record for the root alone does
+/// not. The Rust predicate agrees with the machine.
+#[test]
+fn a_record_for_a_member_and_its_forks_owes_its_seated_forks() {
+    let mut authority = Authority::new();
+    for name in ["root", "fork", "bystander"] {
+        seat(&mut authority, name, "alpha");
+    }
+    assert!(
+        record_lineage(&mut authority, "fork", "fork").is_err(),
+        "a member is never its own root"
+    );
+    assert!(
+        record_lineage(&mut authority, "unseated", "root").is_err(),
+        "only a seated member records a lineage"
+    );
+    record_lineage(&mut authority, "fork", "root").expect("the fork records its root");
+    assert_eq!(lineage_root(&authority, "fork"), Some(identity("root")));
+    assert_eq!(
+        owed(&authority, "fork"),
+        None,
+        "no generation, no obligation"
+    );
+
+    // A record for the root alone leaves the fork out.
+    signal(
+        &mut authority,
+        set(SLOT, 1, DIGEST_A, 10, Target::Member("root")),
+    );
+    assert_eq!(owed(&authority, "root"), Some(1));
+    assert_eq!(owed(&authority, "fork"), None);
+    assert_eq!(owed(&authority, "bystander"), None);
+
+    // The same slot rewritten for the root and its forks owes the fork.
+    signal(
+        &mut authority,
+        set(SLOT, 2, DIGEST_B, 10, Target::MemberAndForks("root")),
+    );
+    assert_eq!(owed(&authority, "root"), Some(2));
+    assert_eq!(owed(&authority, "fork"), Some(2));
+    assert_eq!(owed(&authority, "bystander"), None);
+    for (name, root) in [("root", None), ("fork", Some("root")), ("bystander", None)] {
+        assert_eq!(
+            operator_instruction_target_applies_to_lineage(
+                InstructionTargetKind::MemberAndForks,
+                "",
+                Some("root"),
+                Some("alpha"),
+                name,
+                root,
+            ),
+            owed(&authority, name).is_some(),
+            "{name}: the machine and the predicate agree"
+        );
+    }
+
+    // The revoke owes them both again, and so does a move to another
+    // member, which the fork then leaves.
+    signal(&mut authority, record("root", 2));
+    signal(&mut authority, record("fork", 2));
+    signal(&mut authority, revoke(SLOT, 3));
+    assert_eq!(owed(&authority, "root"), Some(3));
+    assert_eq!(owed(&authority, "fork"), Some(3));
+    signal(&mut authority, record("root", 3));
+    signal(&mut authority, record("fork", 3));
+    signal(
+        &mut authority,
+        set(SLOT, 4, DIGEST_A, 10, Target::Member("bystander")),
+    );
+    assert_eq!(
+        owed(&authority, "fork"),
+        Some(4),
+        "the fork leaves the record"
+    );
+    assert_eq!(owed(&authority, "root"), Some(4));
+    assert_eq!(owed(&authority, "bystander"), Some(4));
+}
+
+/// A member whose lineage is recorded after a write is owed the mob's
+/// snapshot at the generation the mob holds: the records for its root and
+/// its forks select it from then on. A fork of a fork names its source and
+/// the machine records the root, so it is selected the same way. A member
+/// seated beside them with no lineage is not.
+#[test]
+fn a_fork_seated_after_the_write_is_owed_through_its_lineage() {
+    let mut authority = Authority::new();
+    seat(&mut authority, "root", "alpha");
+    signal(
+        &mut authority,
+        set(SLOT, 1, DIGEST_A, 10, Target::MemberAndForks("root")),
+    );
+    seat(&mut authority, "fork", "alpha");
+    record_lineage(&mut authority, "fork", "root").expect("the fork records its root");
+    assert_eq!(
+        owed(&authority, "fork"),
+        Some(1),
+        "the fork is owed the snapshot the mob holds"
+    );
+    signal(&mut authority, record("fork", 1));
+    assert_eq!(owed(&authority, "fork"), None);
+    seat(&mut authority, "fork-of-fork", "alpha");
+    record_lineage(&mut authority, "fork-of-fork", "fork")
+        .expect("a fork of a fork names its source");
+    assert_eq!(
+        lineage_root(&authority, "fork-of-fork"),
+        Some(identity("root")),
+        "the machine records the root, never the fork between"
+    );
+    signal(&mut authority, record("fork-of-fork", 1));
+    seat(&mut authority, "bystander", "alpha");
+    signal(&mut authority, record("bystander", 1));
+    signal(
+        &mut authority,
+        set(SLOT, 2, DIGEST_B, 10, Target::MemberAndForks("root")),
+    );
+    assert_eq!(owed(&authority, "fork"), Some(2));
+    assert_eq!(owed(&authority, "fork-of-fork"), Some(2));
+    assert_eq!(
+        owed(&authority, "bystander"),
+        None,
+        "a member with no lineage is outside the record's selection"
+    );
+}
+
+/// The lineage record is refused for a member whose session already
+/// recorded a snapshot under this seat (that snapshot was built without the
+/// lineage, and a generation is recorded once), for a member named as its
+/// own root and for a name that is not seated. A refusal changes nothing.
+/// A member whose named root descends from the member's own name records
+/// no entry.
+#[test]
+fn a_lineage_record_is_refused_when_it_cannot_hold() {
+    let mut authority = Authority::new();
+    seat(&mut authority, "root", "alpha");
+    signal(
+        &mut authority,
+        set(SLOT, 1, DIGEST_A, 10, Target::MemberAndForks("root")),
+    );
+    seat(&mut authority, "late", "alpha");
+    signal(&mut authority, record("late", 1));
+    assert!(
+        matches!(
+            record_lineage(&mut authority, "late", "root"),
+            Err(MobMachineTransitionError::GuardRejected { .. })
+        ),
+        "a member that recorded a snapshot takes no lineage"
+    );
+    assert_eq!(lineage_root(&authority, "late"), None);
+    assert_eq!(owed(&authority, "late"), None);
+    assert_eq!(recorded(&authority, "late"), Some(1));
+
+    assert!(
+        matches!(
+            record_lineage(&mut authority, "root", "root"),
+            Err(MobMachineTransitionError::GuardRejected { .. })
+        ),
+        "a member is never its own root"
+    );
+    seat(&mut authority, "fork", "alpha");
+    record_lineage(&mut authority, "fork", "root").expect("the fork records its root");
+    // A name that lives again as a fork of one of its earlier forks
+    // descends from its own name: the records for that name select it
+    // already, so the record commits and writes no entry.
+    record_lineage(&mut authority, "root", "fork")
+        .expect("a member that descends from its own name records nothing");
+    assert_eq!(lineage_root(&authority, "root"), None);
+    assert_eq!(lineage_root(&authority, "fork"), Some(identity("root")));
+    assert!(
+        matches!(
+            record_lineage(&mut authority, "nobody", "root"),
+            Err(MobMachineTransitionError::GuardRejected { .. })
+        ),
+        "a name that is not seated takes no lineage"
+    );
+    assert_eq!(lineage_root(&authority, "root"), None);
+    assert_eq!(lineage_root(&authority, "nobody"), None);
+}
+
+/// A fork's lineage ends with the fork's identity: a member seated later
+/// under the same name is not selected by its predecessor's root's records.
+/// A reset clears every lineage.
+#[test]
+fn a_forks_lineage_ends_with_its_identity() {
+    let mut authority = Authority::new();
+    seat(&mut authority, "root", "alpha");
+    seat(&mut authority, "fork", "alpha");
+    record_lineage(&mut authority, "fork", "root").expect("the fork records its root");
+    signal(
+        &mut authority,
+        Signal::EndIdentityLife {
+            agent_identity: identity("fork"),
+        },
+    );
+    assert_eq!(
+        lineage_root(&authority, "fork"),
+        None,
+        "the end of the identity ends its lineage"
+    );
+    signal(
+        &mut authority,
+        set(SLOT, 1, DIGEST_A, 10, Target::MemberAndForks("root")),
+    );
+    assert_eq!(owed(&authority, "root"), Some(1));
+    assert_eq!(
+        owed(&authority, "fork"),
+        None,
+        "the name is no longer a fork of the root"
+    );
+
+    record_lineage(&mut authority, "fork", "root").expect("a new fork records its root");
+    unseat(&mut authority, "fork");
+    unseat(&mut authority, "root");
+    assert_eq!(
+        lineage_root(&authority, "fork"),
+        Some(identity("root")),
+        "a retirement that does not end the identity keeps its lineage"
+    );
+    MobMachineMutator::apply(
+        &mut authority,
+        MobMachineInput::BeginPlacedCompletionLifecycleQuiesce {
+            intent: PlacedCompletionLifecycleIntentKind::Reset,
+        },
+    )
+    .expect("begin the reset quiesce");
+    MobMachineMutator::apply(&mut authority, MobMachineInput::Reset).expect("reset the mob");
+    assert_eq!(lineage_root(&authority, "fork"), None, "a reset clears it");
+}
+
+/// The replay of a record for a member and its forks owes the forks the
+/// replayed lineage names.
+#[test]
+fn the_replay_of_a_record_for_forks_owes_the_forks() {
+    let mut authority = Authority::new();
+    seat(&mut authority, "root", "alpha");
+    seat(&mut authority, "fork", "alpha");
+    seat(&mut authority, "bystander", "alpha");
+    record_lineage(&mut authority, "fork", "root").expect("the replayed lineage");
+    signal(
+        &mut authority,
+        Signal::RecoverOperatorInstruction {
+            slot: SLOT.to_string(),
+            revision: 1,
+            effect: InstructionEffect::Active,
+            digest: DIGEST_A.to_string(),
+            body_bytes: 10,
+            target_kind: InstructionTargetKind::MemberAndForks,
+            target_profile: String::new(),
+            target_member: Some(identity("root")),
+            generation: 1,
+        },
+    );
+    assert_eq!(owed(&authority, "root"), Some(1));
+    assert_eq!(owed(&authority, "fork"), Some(1));
+    assert_eq!(owed(&authority, "bystander"), None);
+}
+
+/// Any name may be seated as a fork of another, so a record for a member
+/// and its forks has to fit beside the records of every other name: the
+/// widest snapshot is the shared records, the most one name holds of its
+/// own, and what another name's records pass to its forks. A record for the
+/// member alone is bounded by the member's own snapshot, as before.
+#[test]
+fn a_record_for_forks_fits_beside_another_names_records() {
+    let mut authority = Authority::new();
+    for index in 0..60 {
+        signal(
+            &mut authority,
+            set(&shared_slot(index), 1, DIGEST_A, 1, Target::Mob),
+        );
+    }
+    // Another name holds three records of its own.
+    for index in 0..3 {
+        assert!(commits(
+            &mut authority,
+            set(
+                &format!("[\"own\",\"b{index}\"]"),
+                1,
+                DIGEST_A,
+                1,
+                Target::Member("agent-b"),
+            ),
+        ));
+    }
+    // One record for agent a and its forks: 60 shared, agent b's three and
+    // the one a fork of agent a takes are 64.
+    assert!(commits(
+        &mut authority,
+        set(
+            "[\"own\",\"a0\"]",
+            1,
+            DIGEST_A,
+            1,
+            Target::MemberAndForks("agent-a"),
+        ),
+    ));
+    // A second one would be the 65th record of a fork of agent a seated
+    // under agent b's name.
+    assert_verdict_only(
+        &mut authority,
+        set(
+            "[\"own\",\"a1\"]",
+            1,
+            DIGEST_A,
+            1,
+            Target::MemberAndForks("agent-a"),
+        ),
+        &refused(
+            "[\"own\",\"a1\"]",
+            OperatorInstructionRefusal::SlotLimitExceeded,
+            None,
+        ),
+    );
+    // For agent a alone it fits: agent a's own snapshot holds 62.
+    assert!(commits(
+        &mut authority,
+        set(
+            "[\"own\",\"a1\"]",
+            1,
+            DIGEST_A,
+            1,
+            Target::Member("agent-a"),
+        ),
+    ));
+    // Widening that record to agent a's forks is the same 65th record.
+    assert_verdict_only(
+        &mut authority,
+        set(
+            "[\"own\",\"a1\"]",
+            2,
+            DIGEST_B,
+            1,
+            Target::MemberAndForks("agent-a"),
+        ),
+        &refused(
+            "[\"own\",\"a1\"]",
+            OperatorInstructionRefusal::SlotLimitExceeded,
+            Some(1),
+        ),
+    );
+    Authority::recover_from_state(authority.state().clone())
+        .unwrap_or_else(|error| panic!("the reached state recovers: {error}"));
+}
+
+/// The active budget bounds the same widest snapshot: the bodies another
+/// name holds and the bodies a record passes to forks count together.
+#[test]
+fn the_active_budget_counts_what_forks_take() {
+    let mut authority = Authority::new();
+    // Agent b holds three full bodies of its own.
+    for index in 0..3 {
+        assert!(commits(
+            &mut authority,
+            set(
+                &format!("[\"own\",\"b{index}\"]"),
+                1,
+                DIGEST_A,
+                BODY_LIMIT,
+                Target::Member("agent-b"),
+            ),
+        ));
+    }
+    // One full body for agent a and its forks: a fork of agent a under
+    // agent b's name holds four full bodies, the whole budget.
+    assert!(commits(
+        &mut authority,
+        set(
+            "[\"own\",\"a0\"]",
+            1,
+            DIGEST_A,
+            BODY_LIMIT,
+            Target::MemberAndForks("agent-a"),
+        ),
+    ));
+    assert_verdict_only(
+        &mut authority,
+        set(
+            "[\"own\",\"a1\"]",
+            1,
+            DIGEST_A,
+            1,
+            Target::MemberAndForks("agent-a"),
+        ),
+        &refused(
+            "[\"own\",\"a1\"]",
+            OperatorInstructionRefusal::ActiveSetBudgetExceeded,
+            None,
+        ),
+    );
+    // For agent a alone the byte fits.
+    assert!(commits(
+        &mut authority,
+        set(
+            "[\"own\",\"a1\"]",
+            1,
+            DIGEST_A,
+            1,
+            Target::Member("agent-a"),
+        ),
+    ));
+    assert_eq!(ACTIVE_BUDGET, 4 * BODY_LIMIT);
 }
 
 fn consistent_state() -> MobMachineState {

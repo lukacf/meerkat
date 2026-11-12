@@ -1273,6 +1273,10 @@ const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
             // arms in the catalog, where first-match dispatch needs it.
             "SetOperatorInstructionAdvanceSlotLimitExceededRunning",
             "SetOperatorInstructionAdvanceSlotLimitExceededStopped",
+            // The record of a fork-derived member's lineage root for
+            // operator instructions (0.9.15).
+            "RecordMemberInstructionLineageRunning",
+            "RecordMemberInstructionLineageStopped",
         ],
     ),
     // The end of a grant with its subject (0.9.11), after every arm 0.9.10

@@ -1139,6 +1139,17 @@ fn mob_instruction_snapshot_refusal_arms_follow_every_published_variant() {
         MOB_INSTRUCTION_SNAPSHOT_REFUSAL_ARMS.to_vec(),
         "the snapshot refusal's arms directly follow the last variant 0.9.13 published"
     );
+    // The record of a fork-derived member's lineage root (0.9.15) directly
+    // follows them.
+    let lineage = published_last + 1 + MOB_INSTRUCTION_SNAPSHOT_REFUSAL_ARMS.len();
+    assert_eq!(
+        variants[lineage..lineage + 2].to_vec(),
+        vec![
+            "RecordMemberInstructionLineageRunning".to_string(),
+            "RecordMemberInstructionLineageStopped".to_string(),
+        ],
+        "the lineage record's arms directly follow the snapshot refusal's"
+    );
 }
 
 /// The build preparation retry's arms are contiguous, after every variant

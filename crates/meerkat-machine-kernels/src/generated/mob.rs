@@ -4422,6 +4422,8 @@ pub enum InstructionTargetKind {
     Profile,
     #[serde(rename = "Member")]
     Member,
+    #[serde(rename = "MemberAndForks")]
+    MemberAndForks,
 }
 impl InstructionTargetKind {
     pub fn as_str(&self) -> &'static str {
@@ -4429,6 +4431,7 @@ impl InstructionTargetKind {
             Self::Mob => "Mob",
             Self::Profile => "Profile",
             Self::Member => "Member",
+            Self::MemberAndForks => "MemberAndForks",
         }
     }
 }
@@ -4439,6 +4442,7 @@ impl std::convert::TryFrom<&str> for InstructionTargetKind {
             "Mob" => Ok(Self::Mob),
             "Profile" => Ok(Self::Profile),
             "Member" => Ok(Self::Member),
+            "MemberAndForks" => Ok(Self::MemberAndForks),
             other => Err(format!("invalid InstructionTargetKind value `{other}`")),
         }
     }
@@ -11240,6 +11244,7 @@ pub struct State {
         std::collections::BTreeMap<AgentIdentity, MemberInstructionBlock>,
     pub member_dispatch_admission_lineage:
         std::collections::BTreeMap<AgentIdentity, AgentRuntimeId>,
+    pub member_instruction_lineage: std::collections::BTreeMap<AgentIdentity, AgentIdentity>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -12881,6 +12886,11 @@ pub mod inputs {
         pub agent_identity: AgentIdentity,
         pub agent_runtime_id: AgentRuntimeId,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordMemberInstructionLineage {
+        pub agent_identity: AgentIdentity,
+        pub root_identity: AgentIdentity,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -13151,6 +13161,7 @@ pub enum Input {
     RestoreOwnedIdentityEdge(inputs::RestoreOwnedIdentityEdge),
     ResolveMemberDispatchAdmission(inputs::ResolveMemberDispatchAdmission),
     RecordMemberDispatchAdmissionLineage(inputs::RecordMemberDispatchAdmissionLineage),
+    RecordMemberInstructionLineage(inputs::RecordMemberInstructionLineage),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -13499,6 +13510,7 @@ impl Input {
             Self::RecordMemberDispatchAdmissionLineage(_) => {
                 InputKind::RecordMemberDispatchAdmissionLineage
             }
+            Self::RecordMemberInstructionLineage(_) => InputKind::RecordMemberInstructionLineage,
         }
     }
 }
@@ -13762,6 +13774,7 @@ pub enum InputKind {
     RestoreOwnedIdentityEdge,
     ResolveMemberDispatchAdmission,
     RecordMemberDispatchAdmissionLineage,
+    RecordMemberInstructionLineage,
 }
 
 pub mod signals {
@@ -18479,6 +18492,8 @@ pub enum TransitionId {
     ResolveSubmitWorkRejectionIdentityMemberUnreadableName,
     SetOperatorInstructionAdvanceSlotLimitExceededRunning,
     SetOperatorInstructionAdvanceSlotLimitExceededStopped,
+    RecordMemberInstructionLineageRunning,
+    RecordMemberInstructionLineageStopped,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -18889,5 +18904,6 @@ pub fn initial_state() -> State {
         member_instruction_recorded: Default::default(),
         member_instruction_blocked: Default::default(),
         member_dispatch_admission_lineage: Default::default(),
+        member_instruction_lineage: Default::default(),
     }
 }

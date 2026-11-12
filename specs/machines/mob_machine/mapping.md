@@ -6132,6 +6132,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecordMemberDispatchAdmissionLineageStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `RecordMemberInstructionLineageRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberInstructionLineageStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `EndIdentityLifeRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -7100,6 +7106,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `destroyed_mob_holds_no_operator_instructions`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `member_instruction_lineage_names_another_member`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 

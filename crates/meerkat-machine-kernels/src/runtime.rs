@@ -1797,9 +1797,8 @@ impl GeneratedMachineKernel {
         Ok((kinds, members))
     }
 
-    /// The records of the widest snapshot that holds the written slot once
-    /// the write is applied: the written member's snapshot for a
-    /// member-targeted write, the widest of all for a shared one.
+    /// The records of the widest member snapshot once the write is applied:
+    /// the widest snapshot of the maps the write leaves.
     fn eval_mob_machine_instruction_write_snapshot_slots(
         &self,
         args: Vec<KernelValue>,
@@ -1820,28 +1819,14 @@ impl GeneratedMachineKernel {
             member,
             transition_name,
         )?;
-        let written = self
-            .instruction_slot_member(&slot, &kinds, &members, transition_name)?
-            .cloned();
-        let Some(written) = written else {
-            return self.eval_mob_machine_instruction_widest_snapshot_slots(
-                vec![KernelValue::Map(kinds), KernelValue::Map(members)],
-                transition_name,
-            );
-        };
-        let mut records = 0_u64;
-        for other in kinds.keys() {
-            let other_member =
-                self.instruction_slot_member(other, &kinds, &members, transition_name)?;
-            if other_member.is_none_or(|other_member| *other_member == written) {
-                records = records.saturating_add(1);
-            }
-        }
-        Ok(KernelValue::U64(records))
+        self.eval_mob_machine_instruction_widest_snapshot_slots(
+            vec![KernelValue::Map(kinds), KernelValue::Map(members)],
+            transition_name,
+        )
     }
 
-    /// The Active body bytes of the same snapshot, with the written slot
-    /// Active at its body bytes.
+    /// The Active body bytes of the widest member snapshot once the write is
+    /// applied, with the written slot Active at its body bytes.
     fn eval_mob_machine_instruction_write_snapshot_active_bytes(
         &self,
         args: Vec<KernelValue>,
@@ -1884,67 +1869,71 @@ impl GeneratedMachineKernel {
         };
         effects.insert(slot.clone(), active);
         slot_bytes.insert(slot.clone(), body_bytes);
-        let written = self
-            .instruction_slot_member(&slot, &kinds, &members, transition_name)?
-            .cloned();
-        let Some(written) = written else {
-            return self.eval_mob_machine_instruction_widest_snapshot_active_bytes(
-                vec![
-                    KernelValue::Map(effects),
-                    KernelValue::Map(slot_bytes),
-                    KernelValue::Map(kinds),
-                    KernelValue::Map(members),
-                ],
-                transition_name,
-            );
-        };
-        let mut total = 0_u64;
-        for (other, other_effect) in &effects {
-            let active = other_effect
-                .as_named_variant("InstructionEffect")
-                .map_err(|error| self.eval_error(transition_name, error))?
-                == "Active";
-            if !active {
-                continue;
-            }
-            let other_member =
-                self.instruction_slot_member(other, &kinds, &members, transition_name)?;
-            if other_member.is_none_or(|other_member| *other_member == written) {
-                let other_bytes = match slot_bytes.get(other) {
-                    Some(value) => value
-                        .as_u64()
-                        .map_err(|error| self.eval_error(transition_name, error))?,
-                    None => 0,
-                };
-                total = total.saturating_add(other_bytes);
-            }
-        }
-        Ok(KernelValue::U64(total))
+        self.eval_mob_machine_instruction_widest_snapshot_active_bytes(
+            vec![
+                KernelValue::Map(effects),
+                KernelValue::Map(slot_bytes),
+                KernelValue::Map(kinds),
+                KernelValue::Map(members),
+            ],
+            transition_name,
+        )
     }
 
-    /// Whether `slot` is a member-targeted record: its kind is Member and the
-    /// member map names it. Answers that member.
+    /// Whether `slot` is a member-targeted record: its kind is Member or
+    /// MemberAndForks and the member map names it. Answers that member and
+    /// whether the record is also for the member's forks.
     fn instruction_slot_member<'a>(
         &self,
         slot: &KernelValue,
         target_kind: &BTreeMap<KernelValue, KernelValue>,
         target_member: &'a BTreeMap<KernelValue, KernelValue>,
         transition_name: &TransitionId,
-    ) -> Result<Option<&'a KernelValue>, TransitionRefusal> {
-        let member_kind = match target_kind.get(slot) {
+    ) -> Result<Option<(&'a KernelValue, bool)>, TransitionRefusal> {
+        let (member_kind, for_forks) = match target_kind.get(slot) {
             Some(kind) => {
-                kind.as_named_variant("InstructionTargetKind")
-                    .map_err(|error| self.eval_error(transition_name, error))?
-                    == "Member"
+                let kind = kind
+                    .as_named_variant("InstructionTargetKind")
+                    .map_err(|error| self.eval_error(transition_name, error))?;
+                (
+                    kind == "Member" || kind == "MemberAndForks",
+                    kind == "MemberAndForks",
+                )
             }
-            None => false,
+            None => (false, false),
         };
-        Ok(target_member.get(slot).filter(|_| member_kind))
+        Ok(target_member
+            .get(slot)
+            .filter(|_| member_kind)
+            .map(|member| (member, for_forks)))
+    }
+
+    /// The widest member snapshot the records allow: what is shared, plus
+    /// the most one name holds of its own, alone or together with what the
+    /// records of another name pass to that name's forks (any name may be
+    /// seated as a fork of another). `tallies` holds per name what it holds
+    /// of its own and how much of that is for its forks. Every pair of
+    /// names is tried.
+    fn widest_instruction_snapshot(
+        shared: u64,
+        tallies: &BTreeMap<&KernelValue, (u64, u64)>,
+    ) -> u64 {
+        let mut widest = 0_u64;
+        for (name, (own, _)) in tallies {
+            widest = widest.max(*own);
+            for (root, (_, for_forks)) in tallies {
+                if root != name {
+                    widest = widest.max(own.saturating_add(*for_forks));
+                }
+            }
+        }
+        shared.saturating_add(widest)
     }
 
     /// The records of the widest member snapshot: the shared records (every
     /// slot that is not member-targeted) plus the most member-targeted
-    /// records any one member holds.
+    /// records one name holds, alone or with the records another name's
+    /// forks take.
     fn eval_mob_machine_instruction_widest_snapshot_slots(
         &self,
         args: Vec<KernelValue>,
@@ -1963,7 +1952,7 @@ impl GeneratedMachineKernel {
             .into_map()
             .map_err(|error| self.eval_error(transition_name, error))?;
         let mut shared = 0_u64;
-        let mut own = BTreeMap::<&KernelValue, u64>::new();
+        let mut tallies = BTreeMap::<&KernelValue, (u64, u64)>::new();
         for slot in target_kind.keys() {
             match self.instruction_slot_member(
                 slot,
@@ -1971,16 +1960,19 @@ impl GeneratedMachineKernel {
                 &target_member,
                 transition_name,
             )? {
-                Some(member) => {
-                    let count = own.entry(member).or_insert(0);
-                    *count = count.saturating_add(1);
+                Some((member, for_forks)) => {
+                    let tally = tallies.entry(member).or_insert((0, 0));
+                    tally.0 = tally.0.saturating_add(1);
+                    if for_forks {
+                        tally.1 = tally.1.saturating_add(1);
+                    }
                 }
                 None => shared = shared.saturating_add(1),
             }
         }
-        Ok(KernelValue::U64(
-            shared.saturating_add(own.values().copied().max().unwrap_or(0)),
-        ))
+        Ok(KernelValue::U64(Self::widest_instruction_snapshot(
+            shared, &tallies,
+        )))
     }
 
     /// The Active body bytes of the widest member snapshot: the shared
@@ -2011,7 +2003,7 @@ impl GeneratedMachineKernel {
             .into_map()
             .map_err(|error| self.eval_error(transition_name, error))?;
         let mut shared = 0_u64;
-        let mut own = BTreeMap::<&KernelValue, u64>::new();
+        let mut tallies = BTreeMap::<&KernelValue, (u64, u64)>::new();
         for (slot, slot_effect) in &effect {
             let active = slot_effect
                 .as_named_variant("InstructionEffect")
@@ -2032,16 +2024,19 @@ impl GeneratedMachineKernel {
                 &target_member,
                 transition_name,
             )? {
-                Some(member) => {
-                    let total = own.entry(member).or_insert(0);
-                    *total = total.saturating_add(slot_bytes);
+                Some((member, for_forks)) => {
+                    let tally = tallies.entry(member).or_insert((0, 0));
+                    tally.0 = tally.0.saturating_add(slot_bytes);
+                    if for_forks {
+                        tally.1 = tally.1.saturating_add(slot_bytes);
+                    }
                 }
                 None => shared = shared.saturating_add(slot_bytes),
             }
         }
-        Ok(KernelValue::U64(
-            shared.saturating_add(own.values().copied().max().unwrap_or(0)),
-        ))
+        Ok(KernelValue::U64(Self::widest_instruction_snapshot(
+            shared, &tallies,
+        )))
     }
 
     /// One session's slot map with one slot set: `current` with `slot`
@@ -5948,8 +5943,8 @@ mod tests {
             KernelValue::U64(1130)
         );
         let empty = || KernelValue::Map(BTreeMap::new());
-        // With a write applied: the written member's snapshot for a
-        // member-targeted write, the widest of all for a shared one.
+        // With a write applied: the widest snapshot of the maps the write
+        // leaves.
         let write_slots = |written: &str, kind_after: &str, member: KernelValue| {
             kernel
                 .eval_native_helper(
@@ -5971,12 +5966,12 @@ mod tests {
             write_slots("b2", "Member", to("agent.b")),
             KernelValue::U64(5)
         );
-        // A first record of agent c: three shared and its one.
+        // A first record of agent c: agent a's snapshot stays the widest.
         assert_eq!(
             write_slots("c1", "Member", to("agent.c")),
-            KernelValue::U64(4)
+            KernelValue::U64(5)
         );
-        // Agent a's record moves to agent b: agent b's snapshot, not agent a's.
+        // Agent a's record moves to agent b: three shared and agent b's two.
         assert_eq!(
             write_slots("a1", "Member", to("agent.b")),
             KernelValue::U64(5)
@@ -5995,6 +5990,28 @@ mod tests {
         assert_eq!(
             write_slots("was-member", "Member", to("agent.b")),
             KernelValue::U64(4)
+        );
+        // A new record for agent b and its forks: a fork of agent b may be
+        // seated under agent a's name, so the widest snapshot is three
+        // shared, agent a's two and the one agent b's forks take.
+        assert_eq!(
+            write_slots("b2", "MemberAndForks", to("agent.b")),
+            KernelValue::U64(6)
+        );
+        // A record for a member and its forks counts once for the member
+        // itself: no name is its own fork.
+        assert_eq!(
+            kernel
+                .eval_native_helper(
+                    "mob_machine_instruction_widest_snapshot_slots",
+                    vec![
+                        KernelValue::Map(BTreeMap::from([(slot("x"), kind("MemberAndForks"))])),
+                        KernelValue::Map(BTreeMap::from([(slot("x"), agent("agent.a"))])),
+                    ],
+                    &transition,
+                )
+                .expect("one record for a member and its forks"),
+            KernelValue::U64(1)
         );
         let write_bytes = |written: &str, body: u64, kind_after: &str, member: KernelValue| {
             kernel
@@ -6019,15 +6036,17 @@ mod tests {
             write_bytes("b2", 50, "Member", to("agent.b")),
             KernelValue::U64(1180)
         );
-        // A new revision of agent a's Active record: its other one is Absent.
+        // A new revision of agent a's Active record: agent b's 30 stay the
+        // most any one name holds.
         assert_eq!(
             write_bytes("a1", 9, "Member", to("agent.a")),
-            KernelValue::U64(1109)
+            KernelValue::U64(1130)
         );
-        // A revoked record written again counts at its new body.
+        // A revoked record written again counts at its new body: agent a
+        // holds 12, agent b's 30 stay the most.
         assert_eq!(
             write_bytes("a2", 5, "Member", to("agent.a")),
-            KernelValue::U64(1112)
+            KernelValue::U64(1130)
         );
         // A new shared body: 1600 shared and agent b's 30, the widest.
         assert_eq!(
@@ -6037,6 +6056,12 @@ mod tests {
         // Agent a's record moves to agent b.
         assert_eq!(
             write_bytes("a1", 9, "Member", to("agent.b")),
+            KernelValue::U64(1139)
+        );
+        // Agent a's record becomes one for agent a and its forks: a fork of
+        // agent a seated under agent b's name holds agent b's 30 and the 9.
+        assert_eq!(
+            write_bytes("a1", 9, "MemberAndForks", to("agent.a")),
             KernelValue::U64(1139)
         );
         assert_eq!(

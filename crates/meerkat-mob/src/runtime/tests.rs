@@ -2085,6 +2085,9 @@ enum PersistedSessionReadRefusal {
     RevisionConflict,
     /// Any other store failure.
     StoreFailure,
+    /// The session's stored state does not decode: a failure that does not
+    /// clear on its own.
+    Corrupted,
 }
 
 impl PersistedSessionReadRefusal {
@@ -2100,6 +2103,9 @@ impl PersistedSessionReadRefusal {
             Self::StoreFailure => SessionError::Store(Box::new(std::io::Error::other(format!(
                 "durable read of session {session_id} failed"
             )))),
+            Self::Corrupted => SessionError::Store(Box::new(
+                meerkat_core::SessionStoreError::Corrupted(session_id.clone()),
+            )),
         }
     }
 }

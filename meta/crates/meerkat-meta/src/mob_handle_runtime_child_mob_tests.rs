@@ -3687,7 +3687,7 @@ async fn a_socket_composition_serves_one_member_across_the_root_and_the_child_mo
         .collect();
     assert_eq!(
         root_members,
-        [coordinator.clone()],
+        std::slice::from_ref(&coordinator),
         "no refused member is seated"
     );
     let child = state.handle_for(&child_id).await.expect("child handle");

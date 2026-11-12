@@ -4682,10 +4682,12 @@ async fn a_call_attributed_to_another_agent_than_its_sessions_member_is_never_he
 const PRIVATE_TO: &str = "console.private_to";
 
 /// A host's roster with an agent that is private to a person: the two
-/// agents every row has, and `confidant`, whose labels name its person and
-/// whose first message runs at the launch, so the mob's record of its
-/// build names whom it is private to.
-struct RosterWithPrivate;
+/// agents every row has, and `confidant`, whose labels name its person.
+/// With `first_message` its first message runs at the launch, so this
+/// process builds it; without, it is seated dormant and never built here.
+struct RosterWithPrivate {
+    first_message: bool,
+}
 
 #[async_trait]
 impl RosterProvider for RosterWithPrivate {
@@ -4694,7 +4696,9 @@ impl RosterProvider for RosterWithPrivate {
         confidant
             .labels
             .insert(PRIVATE_TO.to_owned(), "person-1".to_owned());
-        confidant.initial_message = Some("Keep this between us.".to_owned().into());
+        if self.first_message {
+            confidant.initial_message = Some("Keep this between us.".to_owned().into());
+        }
         Ok(vec![
             roster_spec(HOST_A, "worker"),
             roster_spec(PLANNER, "planner"),
@@ -4760,7 +4764,9 @@ async fn an_agent_is_shown_no_agent_that_is_private_to_a_person() {
         &fresh_mob_id(),
         false,
         false,
-        Arc::new(RosterWithPrivate),
+        Arc::new(RosterWithPrivate {
+            first_message: true,
+        }),
     )
     .await;
     assert!(runtime.attach_identity_policy(in_process_policy(), IdentityFamilyOptions::new()));
@@ -4841,6 +4847,156 @@ async fn an_agent_is_shown_no_agent_that_is_private_to_a_person() {
         .expect("the family as a caller that sees the two others");
     assert_eq!(listed_to(&hidden, &mob, &person).await, others);
     assert_eq!(offered_to(&hidden, &mob, &person).await, others);
+    rig.shutdown().await;
+}
+
+/// Who is private to a person is said by the agent's own record, not by
+/// what this process happened to build: a private agent that is seated
+/// dormant and never ran here is shown to no agent either. It is not
+/// listed, the directory does not offer it, it is no peer, and a get, a
+/// plan and every kind of change of it answer an agent exactly as a name
+/// no agent holds. The host still reads it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_is_shown_no_private_agent_that_never_ran() {
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, asked, fail_next_session) = launch_roster(
+        temp.path(),
+        &fresh_mob_id(),
+        false,
+        false,
+        Arc::new(RosterWithPrivate {
+            first_message: false,
+        }),
+    )
+    .await;
+    assert!(runtime.attach_identity_policy(in_process_policy(), IdentityFamilyOptions::new()));
+    let mut rig = Rig {
+        runtime,
+        asked,
+        step: Arc::new(RecordingStep::default()),
+        fail_next_session,
+    };
+    let family = rig.family();
+    let mob = rig.runtime.mob_handle();
+    let host = ChangeRequester::host("ops");
+    let planner = ChangeRequester::agent_recorded(PLANNER);
+    let everyone = vec![
+        "confidant".to_owned(),
+        HOST_A.to_owned(),
+        PLANNER.to_owned(),
+    ];
+    let others = vec![HOST_A.to_owned(), PLANNER.to_owned()];
+
+    assert_eq!(listed_to(&family, &mob, &host).await, everyone);
+    let digest = rig.digest("confidant").await;
+    assert!(
+        !rig.was_asked("Keep this between us."),
+        "the private agent never ran here"
+    );
+
+    // The reads.
+    assert_eq!(listed_to(&family, &mob, &planner).await, others);
+    assert_eq!(offered_to(&family, &mob, &planner).await, others);
+    let got = family
+        .read(
+            &mob,
+            &planner,
+            IdentityRead::Get(GetAgent::new("confidant")),
+        )
+        .await
+        .expect_err("an agent gets no private agent");
+    let absent = family
+        .read(&mob, &planner, IdentityRead::Get(GetAgent::new("nobody")))
+        .await
+        .expect_err("a name no agent holds");
+    assert_eq!(got.kind_token(), "identity_unknown", "{got}");
+    assert_eq!(
+        (got.kind_token(), &got.field),
+        (absent.kind_token(), &absent.field),
+        "nothing tells the two apart"
+    );
+
+    // A peer of a change.
+    let named = rig
+        .change(
+            &planner,
+            "peer-1",
+            create_of(json!([{"name": "gamma", "profile": "worker", "peers": ["confidant"]}])),
+        )
+        .await;
+    assert_eq!(
+        refusal_of(&named),
+        (
+            "peer_unknown".to_owned(),
+            Some("agents[0].peers[0]".to_owned())
+        ),
+        "{named:?}"
+    );
+
+    // A plan and every kind of change of it, as of a name no agent holds.
+    let changes = |name: &str| {
+        vec![
+            (
+                "update",
+                IdentityChangeSpec::Update(
+                    serde_json::from_value(json!({
+                        "name": name, "expected_spec_digest": digest.as_str(),
+                        "set": {"display_name": "Friend"},
+                    }))
+                    .expect("an update as a surface writes it"),
+                ),
+            ),
+            (
+                "archive",
+                IdentityChangeSpec::Archive(agent_ref(name, &digest)),
+            ),
+            (
+                "unarchive",
+                IdentityChangeSpec::Unarchive(agent_ref(name, &digest)),
+            ),
+            (
+                "remove",
+                IdentityChangeSpec::Remove(agent_ref(name, &digest)),
+            ),
+            ("adopt", IdentityChangeSpec::Adopt(agent_ref(name, &digest))),
+        ]
+    };
+    for ((kind, private), (_, unheld)) in changes("confidant").into_iter().zip(changes("nobody")) {
+        let planned = family
+            .read(
+                &mob,
+                &planner,
+                IdentityRead::Plan(Box::new(IdentityChangeCall::new(
+                    OperationId::for_request(&planner.recorded(), &format!("plan-{kind}"))
+                        .expect("a request id"),
+                    private.clone(),
+                ))),
+            )
+            .await
+            .expect_err("an agent plans no change of a private agent");
+        assert_eq!(
+            planned.kind_token(),
+            "identity_unknown",
+            "{kind}: {planned}"
+        );
+        let refused = rig.change(&planner, &format!("c-{kind}"), private).await;
+        let absent = rig.change(&planner, &format!("n-{kind}"), unheld).await;
+        assert_eq!(
+            refusal_of(&refused).0,
+            "identity_unknown",
+            "{kind}: {refused:?}"
+        );
+        assert_eq!(
+            refusal_of(&refused),
+            refusal_of(&absent),
+            "{kind}: nothing tells the two apart"
+        );
+    }
+    assert_eq!(
+        rig.digest("confidant").await,
+        digest,
+        "nothing changed the private agent"
+    );
     rig.shutdown().await;
 }
 

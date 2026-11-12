@@ -235,6 +235,22 @@ from a legacy constructor (`UnifiedRuntime::bootstrap` and the
 context withdraws a completion not yet taken, because the identity bootstrap
 that follows mints again; attaching one leaves it as it is.
 
+A runtime from a legacy constructor must complete its bootstrap (an identity
+bootstrap, or `activate_without_identity_context`) before an agent created at
+run time can be built. Until one of them returns, every build of such an agent
+is refused for now with a reason that names both calls: the runtime does not
+know yet whether its host composes an agent customizer whose build step
+applies to that agent. An agent that starts at its creation (it was given a
+first message, or its profile runs as an autonomous host, the default) and one
+the mob's start owes its seat stay owed their seat, and the call that
+completes the bootstrap seats them, once. A delivery to an agent seated
+dormant is refused retryable (`host_preparation_pending`), nothing is
+delivered, and the sender sends it again once the bootstrap is complete; work
+the agent already owes is retried by the mob.
+Creating an agent that builds nothing (no first message, a turn-driven
+profile) is unchanged. Through 0.9.14 such an agent was built from its record
+at once.
+
 `publish(f)` runs `f` once, only while the runtime has not begun to close and
 its mob still admits work. The runtime's close (`shutdown`, a failed
 bootstrap's cleanup, or the retained teardown of a dropped composition) begins
@@ -512,8 +528,12 @@ the context carries, which becomes the runtime's own. That covers the builds
 from the mob's lift on, so a clean restart (the mob stays stopped until the
 identity bootstrap lifts it) is covered, but a crash resume is not: the
 members a killed process left owing work are built at the start, before the
-identity bootstrap, without their tools until their next build. Without any
-customizer the identity bootstrap changes nothing.
+identity bootstrap, without their tools until their next build. An agent
+created at run time is not among them: every build of it is refused until the
+identity bootstrap, which then seats one the start owes its seat through the
+customizer's build step, so its labels are compared with the seat's before
+anything is built. Without any customizer the identity bootstrap leaves the
+member builds as they are and seats such an agent from its record.
 
 ### Member restore
 

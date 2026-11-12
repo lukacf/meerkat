@@ -176,10 +176,15 @@ impl MemberBuildWiring {
     }
 
     /// The wiring of a `UnifiedRuntime::bootstrap` composition whose spec
-    /// declares no agent customizer: it learns only at its identity
-    /// bootstrap whether it composes one, so its spawn customizer attaches
-    /// nothing and its preparer is inert until
-    /// [`Self::bind_at_identity_bootstrap`] finds one.
+    /// declares no agent customizer: it learns only when its host completes
+    /// the bootstrap whether it composes one, so its spawn customizer
+    /// attaches nothing and its preparer is undecided until
+    /// [`Self::bind_at_identity_bootstrap`] finds one, or finds none, or
+    /// the activation without an identity context decides that there is
+    /// none ([`Self::decide_without_customizer`]). While it is undecided
+    /// the preparer refuses, retryable, every build of the member of an
+    /// identity whose record is its row: no such member is built before the
+    /// host's build step, if it has one, could be asked.
     pub(crate) fn deferred() -> Self {
         Self {
             registry: None,
@@ -187,6 +192,24 @@ impl MemberBuildWiring {
             preparer: Some(IdentityBuildPreparer::deferred()),
             declared_customizer: None,
         }
+    }
+
+    /// Decide a deferred wiring for a composition that composes no agent
+    /// customizer: its preparer stays inert and lets every build through as
+    /// Core lowered it (`IdentityBuildPreparer::decide_without_customizer`).
+    /// Answers whether this call made the decision, so its caller asks Core
+    /// once to seat the identities owed their seat: `false` for a wiring
+    /// decided before, either way, and for one that was never deferred.
+    pub(crate) fn decide_without_customizer(&self) -> bool {
+        self.preparer
+            .as_ref()
+            .is_some_and(|preparer| preparer.decide_without_customizer())
+    }
+
+    /// The preparer this wiring installs on its mob, when it installs one.
+    #[cfg(test)]
+    pub(crate) fn preparer(&self) -> Option<&Arc<IdentityBuildPreparer>> {
+        self.preparer.as_ref()
     }
 
     /// Install the spawn customizer, composed after those `spec` carries,
@@ -252,7 +275,12 @@ impl MemberBuildWiring {
     /// A declared customizer allows the runtime and the context to carry the
     /// same customizer or none: any other one is refused, as is a runtime
     /// whose customizer tool registry is not the one the mob was built with.
-    /// Without any customizer nothing changes: a deferred wiring stays inert.
+    /// Without any customizer a deferred wiring is decided for none: its
+    /// preparer stays inert, and the call that made that decision asks Core
+    /// once to seat the identities whose record is their row that are owed
+    /// their seat (the preparer refused their fresh seat while it was
+    /// undecided). A later identity bootstrap that finds a customizer still
+    /// binds it.
     /// With one, it becomes the runtime's own when none is installed, the
     /// runtime gets the composition's registry when it has none, the spawn
     /// customizer attaches from the runtime's registry, and the preparer
@@ -287,7 +315,19 @@ impl MemberBuildWiring {
             }
             None => match installed.clone().or_else(|| context.customizer.clone()) {
                 Some(customizer) => customizer,
-                None => return Ok(()),
+                None => {
+                    // The composition composes no agent customizer: the
+                    // preparer lets every build through from now on. The
+                    // fresh seats it refused while that was undecided are
+                    // owed, and the call that makes the decision asks Core
+                    // once to seat them. A mob this bootstrap has not
+                    // lifted yet seats nothing here: its lift runs the
+                    // same pass.
+                    if self.decide_without_customizer() {
+                        runtime.seat_created_identities_owed_their_seat().await;
+                    }
+                    return Ok(());
+                }
             },
         };
         let registry = match (

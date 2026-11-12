@@ -1141,10 +1141,19 @@ impl UnifiedRuntime {
         // preparer gets the bootstrap's wiring. With a declared agent
         // customizer it is armed now, before the mob restores anything, so a
         // member the start builds is held until the roster pass publishes its
-        // tools. Without one it is deferred: inert until the identity
-        // bootstrap finds a customizer, and from then on it publishes each
-        // identity member's tools right before Core builds the member, as
-        // the builder's and the gateways' wiring do. The declaration comes
+        // tools. Without one it is deferred: undecided until the host
+        // completes the bootstrap. An identity bootstrap that finds a
+        // customizer decides for it, and from then on the wiring publishes
+        // each identity member's tools right before Core builds the member,
+        // as the builder's and the gateways' wiring do; an identity
+        // bootstrap that finds none, and the activation without an identity
+        // context, decide that there is none. While it is undecided, every
+        // build of an agent created at run time is refused for now, so no
+        // such agent is built from its row before the host's build step, if
+        // it has one, was asked: a wake leaves it dormant, and a fresh seat
+        // (one the start owes it, or its create's kickoff spawn) stays
+        // owed until the call that decides has Core seat it. The
+        // declaration comes
         // off the spec here: `MobRuntime::prepare` refuses a spec that still
         // carries one, which nothing would wire.
         let declared_customizer = mob_spec.agent_customizer.take();
@@ -1243,6 +1252,14 @@ impl UnifiedRuntime {
     /// (`InvalidConfig`): it holds every identity member it builds until an
     /// identity bootstrap publishes the member's tools, so without one they
     /// would stay held for good.
+    ///
+    /// On a runtime from [`Self::bootstrap`] or the `bootstrap_with_*`
+    /// family whose spec declares no agent customizer, the first `Ok` call
+    /// also settles that the composition has none: an agent created at run
+    /// time whose fresh seat was refused until the bootstrap completed (one
+    /// the mob's start owed its seat, or one created with a first message
+    /// since) is seated from its record now, once. A later call asks for
+    /// nothing again.
     pub async fn activate_without_identity_context(&mut self) -> Result<(), MobRuntimeError> {
         if self.identity_first_context.is_some() {
             return Err(MobRuntimeError::InvalidConfig(
@@ -1263,6 +1280,15 @@ impl UnifiedRuntime {
                     .to_string(),
             ));
         }
+        // The host declares that no identity context will be installed, so
+        // a wiring that waited to learn of an agent customizer composes
+        // none. Decided before the lift: a seat the lift's own start owes
+        // an agent created at run time is built from its record, as it is
+        // on a composition that never had a customizer.
+        let decided_without_customizer = self
+            .bootstrap_member_build_wiring
+            .as_ref()
+            .is_some_and(crate::gateway_wiring::MemberBuildWiring::decide_without_customizer);
         let pending = self.pending_mob_activation.lock().await.take();
         if let Some(pending) = pending {
             self.report_bootstrap_phase(UnifiedRuntimeBootstrapPhase::Activate);
@@ -1272,6 +1298,27 @@ impl UnifiedRuntime {
                 return Err(error);
             }
             self.reconcile_bootstrap_edges_if_configured().await;
+        }
+        if decided_without_customizer {
+            // The fresh seats the wiring refused while it was undecided are
+            // owed: the call that made the decision asks Core once to seat
+            // them (a mob that was already running when the runtime was
+            // bootstrapped ran its start's pass before the decision). It
+            // never fails the activation: an agent Core could not seat
+            // stays owed its seat, and Core's next start, or the next
+            // change of the mob's identities, seats it.
+            let still_owed = self
+                .mob_runtime
+                .handle()
+                .seat_owed_store_owned_identities()
+                .await;
+            if !still_owed.is_empty() {
+                tracing::warn!(
+                    identities = ?still_owed,
+                    "agents created at run time stay owed their seat after the activation \
+                     without an identity context asked Core to seat them"
+                );
+            }
         }
         self.mint_bootstrap_completion();
         Ok(())
@@ -1639,7 +1686,11 @@ impl UnifiedRuntime {
     /// carry the declared customizer or none; another one is refused here:
     /// the context is installed by then, but the customizer, its tool
     /// registry and the build preparer are not, and the runtime shuts down.
-    /// Without a customizer nothing changes. The held variants do the same.
+    /// Without a customizer the member builds stay as Core makes them, and
+    /// the bootstrap settles that the composition has none: an agent
+    /// created at run time whose fresh seat was refused until the bootstrap
+    /// completed is seated from its record, once. The held variants do the
+    /// same.
     pub async fn bootstrap_installed_identity_first_context(
         &mut self,
         roster: &[crate::identity_first::DurableAgentSpec],
@@ -1850,7 +1901,9 @@ impl UnifiedRuntime {
     /// binds it before it lifts the mob, so with an agent customizer every
     /// build from the lift on is prepared, and the builds a declared wiring
     /// held before are published by the roster pass; without one a deferred
-    /// wiring stays inert. A customizer or registry that conflicts with the
+    /// wiring is decided for none, stays inert, and has Core seat the agents
+    /// created at run time whose fresh seat it refused while undecided. A
+    /// customizer or registry that conflicts with the
     /// spec's declaration is refused before the customizer, its registry or
     /// the preparer is installed.
     async fn bind_bootstrap_member_build_wiring(

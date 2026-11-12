@@ -6146,6 +6146,26 @@ pub trait SessionBridge: Send + Sync {
         })
     }
 
+    /// Ask Core to seat, while the mob runs, every identity whose record is
+    /// its row that is owed its seat
+    /// (`MobHandle::seat_owed_store_owned_identities`: the pass a start
+    /// runs, so a seat whose spec owes a kickoff is embodied and its kickoff
+    /// runs once), and answer the identities still owed their seat
+    /// afterwards, in identity order, each as the identity its member id
+    /// names. Core never fails the call: an identity it could not seat stays
+    /// owed its seat. The identity runtime asks once, when it is composed:
+    /// a seat the mob's start embodied before that was refused its build,
+    /// since no host build step could run. The default answers
+    /// [`BridgeError::Unsupported`]: a bridge that cannot read rows serves
+    /// no identity that has one. A bridge that wraps another forwards it.
+    async fn seat_created_identities_owed_their_seat(
+        &self,
+    ) -> Result<Vec<AgentIdentity>, BridgeError> {
+        Err(BridgeError::Unsupported {
+            operation: "seat_created_identities_owed_their_seat",
+        })
+    }
+
     /// The peers `identity`'s row in the mob's identity store declares as
     /// its owned edges (`CreatedIdentityRecord::owned_edges`), each as the
     /// identity its member id names: one store read, no actor command, no
@@ -11051,6 +11071,18 @@ impl SessionBridge for MobSessionBridge {
         }
     }
 
+    async fn seat_created_identities_owed_their_seat(
+        &self,
+    ) -> Result<Vec<AgentIdentity>, BridgeError> {
+        Ok(self
+            .handle
+            .seat_owed_store_owned_identities()
+            .await
+            .iter()
+            .filter_map(served_identity_of_member)
+            .collect())
+    }
+
     async fn owned_peers(
         &self,
         identity: &AgentIdentity,
@@ -12352,6 +12384,12 @@ impl SessionBridge for super::PublicSessionBridge {
 
     async fn created_identity_names(&self) -> Result<Vec<AgentIdentity>, BridgeError> {
         self.bridge.created_identity_names().await
+    }
+
+    async fn seat_created_identities_owed_their_seat(
+        &self,
+    ) -> Result<Vec<AgentIdentity>, BridgeError> {
+        self.bridge.seat_created_identities_owed_their_seat().await
     }
 
     async fn owned_peers(

@@ -99,6 +99,7 @@ export const CONSOLE_RPC_METHODS = {
   identityAdopt: "meta/identity/adopt",
   identityChangesHold: "meta/identity/changes_hold",
   identityPlan: "meta/identity/plan",
+  identitySettlePreparation: "meta/identity/settle_preparation",
 } as const;
 
 export const CONSOLE_BLOB_PATH_PREFIX = "/blobs/";

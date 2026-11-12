@@ -3029,6 +3029,37 @@
               "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. The reads are served on every launch that has agents of its own, with or without an identity policy; a change, and a plan, on a launch without an enabled identity policy is refused kind change_denied. -32601 only on a launch without agents of its own, or once its mob stopped."
             }
           ]
+        },
+        "meta/identity/settle_preparation": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied",
+            "#/surfaces/rpc/policy_errors/candidate_launch"
+          ],
+          "request": {
+            "required_fields": [
+              "request_id",
+              "name"
+            ],
+            "optional_fields": [],
+            "note": "Settles the preparation of one agent that waits for its host: the agent is seated. It is the host's operator's, which no console caller is: the console RPC does not list the method in meta/capabilities and refuses it for every caller (kind change_denied; the settle completes a create, so the refusal names change create). It is gated on a writable console and runtime.admin all the same, so a caller without that reads a plain access refusal. A host settles on the stdio gateway. The stock console does not call it and offers no settle."
+          },
+          "success": {
+            "required_fields": [
+              "outcome",
+              "operation_id"
+            ],
+            "note": "No console caller is answered a success. To its host's operator the settle answers a change's typed outcome: done {operation_id, agents: [{name, state committed, spec_digest, spec_revision, session_id?, seat}]}."
+          },
+          "errors": [
+            {
+              "codes": [
+                -32058,
+                -32601
+              ],
+              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. The reads are served on every launch that has agents of its own, with or without an identity policy; a change, and a plan, on a launch without an enabled identity policy is refused kind change_denied. -32601 only on a launch without agents of its own, or once its mob stopped."
+            }
+          ]
         }
       }
     },

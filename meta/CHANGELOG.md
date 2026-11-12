@@ -436,7 +436,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `withdraw`, `get`, `list`, `operation`, `directory` and `plan` from the
   roster and an agent's panes. The console contract
   (`docs/rct/console-rest-sse-contract-v0.5.0.json`) documents the family's
-  thirteen methods, `adopt` and `changes_hold` included, and what a launch
+  fourteen methods, `adopt`, `changes_hold` and `settle_preparation`
+  included (the last is its host's operator's: the Console RPC refuses it
+  for every caller), and what a launch
   without an identity policy answers: its reads are served, and a change or
   a plan is refused `change_denied`. It names `addressability` and
   `runtime_mode_override` on a create, an update and the reads, `schedules`

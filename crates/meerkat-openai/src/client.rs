@@ -1550,7 +1550,12 @@ impl OpenAiClient {
         let reasoning_enabled = Self::request_supports_reasoning_payload(request);
 
         if let Some(tag) = wire_tag.as_deref() {
+            // A level that carries the marker was resolved against the
+            // facts of the request's route (an account's model list, say),
+            // so the direct-API catalog row does not judge it. A level
+            // without the marker is a caller's raw param and keeps the check.
             if reasoning_enabled
+                && !tag.reasoning_effort_resolved
                 && let Some(effort) = tag.reasoning_effort
                 && crate::request_support::supports_reasoning_effort(&request.model, effort)
                     == Some(false)
@@ -1791,9 +1796,20 @@ impl OpenAiClient {
                 }
             }
 
-            if reasoning_enabled && let Some(effort) = tag.reasoning_effort {
+            if let Some(effort) = tag.reasoning_effort {
                 let s = effort.as_legacy_str();
-                body["reasoning"]["effort"] = Value::String(s.to_string());
+                if reasoning_enabled {
+                    body["reasoning"]["effort"] = Value::String(s.to_string());
+                } else if tag.reasoning_effort_resolved {
+                    // The catalog enables no reasoning payload for this
+                    // model (no row, or a row without reasoning), and the
+                    // level was resolved for the request's route: send the
+                    // level alone. `summary` and `include` belong to the
+                    // payload of a catalogued reasoning model and are not
+                    // sent here. A level without the marker is dropped, as
+                    // it always was.
+                    body["reasoning"] = serde_json::json!({ "effort": s });
+                }
             }
             if reasoning_enabled && let Some(mode) = tag.reasoning_mode {
                 body["reasoning"]["mode"] = Value::String(mode.as_wire_str().to_string());
@@ -4026,6 +4042,18 @@ impl LlmClient for OpenAiClient {
             &self.responses_endpoint(),
             self.wire_model_for(logical_model),
         )
+    }
+
+    /// The Responses API on the backend of this client's wire. No account
+    /// list and no operator levels are this client's to state; the GitHub
+    /// Copilot routed client adds the account's statement for its route.
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        Some(meerkat_core::ReasoningRouteObservation {
+            backend: meerkat_core::ReasoningBackend::OpenAi(self.backend_wire.backend_kind()),
+            api: meerkat_core::ModelApi::Responses,
+            account: meerkat_core::AccountLevelStatement::NotApplicable,
+            operator_levels: None,
+        })
     }
 
     /// Project for this client's service and freeze the decision into

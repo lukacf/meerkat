@@ -45,6 +45,19 @@ them.
   stored form changes, and a serialized tag that names it is refused as an
   unknown field.
 
+- `meerkat-copilot`: `CopilotModelSupports` gains the field
+  `reasoning_effort: Option<Vec<String>>` (see Added). Code that builds it
+  with a struct literal sets the new field or ends the literal with
+  `..Default::default()`; `None` is an entry that states no levels.
+
+- `meerkat-core`: `SelfHostedModelConfig` and `SelfHostedServerRef` each
+  gain the public field `reasoning_effort_levels:
+  Option<Vec<EffortLevel>>` (see Added). Code that builds either with a
+  struct literal sets the new field: `None` declares no levels, and a
+  `SelfHostedModelConfig` literal may end with `..Default::default()`
+  instead. A config that does not declare the field parses and serializes
+  as before.
+
 ### Added
 
 - `meerkat-core`, `meerkat-llm-core`: the vocabulary of a provider-neutral
@@ -116,6 +129,119 @@ them.
     a client that reports no route is still resolved as unknown. A refusal
     raised with no observation names no route (`route: null`): the route
     of a client that reports none is never guessed.
+
+- `meerkat-copilot`: Meerkat reads the reasoning effort levels a GitHub
+  Copilot account's model list states per model
+  (`capabilities.supports.reasoning_effort`). `CopilotModelSupports` keeps
+  the statement in `reasoning_effort` in one stored form (each word once,
+  the level words from `none` to `max`, then the words that name no level
+  in ascending order), and
+  `CopilotModelSupports::stated_effort_levels` returns it as `EffortLevel`s:
+  `None` when the entry states none, otherwise the stated levels, each once,
+  from `none` to `max`; a word that names no level is left out. The read is
+  tolerant: a value that is not an array states no levels, array elements
+  that are not strings are skipped, and neither fails the model list. No
+  request changes: nothing Meerkat sends to Copilot reads the levels yet,
+  and the account capability gate does not check them. The levels are part
+  of what a Copilot route compares, so when a refreshed list states other
+  levels for a session's model, the session's prepared route is rebuilt, as
+  it already is when the list changes another capability of the model. A
+  list that only writes the same levels in another order, or writes one
+  twice, states nothing new and changes no route.
+
+- `meerkat-openai`, `meerkat-anthropic`, `meerkat-gemini`,
+  `meerkat-copilot`, `meerkat-llm-core`, `meerkat`: every LLM client a
+  factory builds reports, without I/O, the route it serves through
+  `reasoning_route()` (the accessor above): the provider-matrix backend,
+  the provider API, and the reasoning effort levels the route itself
+  states. Nothing reads the reports yet, and no request changes.
+  - OpenAI: `OpenAiClient` reports the Responses API on the backend of its
+    wire. `OpenAiCompatibleClient` reports the API of its mode on the
+    backend it was declared for (`with_openai_backend`, or the new
+    `with_self_hosted_backend`), and no route when no backend was
+    declared. `OpenAiRealtimeTextAdapter` reports the realtime API.
+  - Claude: `AnthropicClient` reports the Messages API on the backend the
+    new `AnthropicClientBuilder::backend` records. The builder starts from
+    `anthropic_api`, and the provider runtime names the backend of every
+    client it builds.
+  - Gemini: `GeminiClient` reports `generateContent` on the backend it was
+    built for; the GitHub Copilot route's Gemini client reports Chat
+    Completions on the Copilot backend.
+  - GitHub Copilot: a session's routed client reports the endpoint the
+    account's model list gives the model, and what the model's entry
+    states: its levels (`Stated`), `NotStated` for an entry that states
+    none, and `ListUnavailable` while the account holds no list (the route
+    is then on its family's optimistic endpoint). The entry is the one the
+    route resolved for the session's model, so a catalog ID the account
+    writes with a dot reads that entry. A model the list does not serve
+    has no route to report. The report is of the route the account's list
+    resolves when it is asked, not of the route the session last sent a
+    request on: a session built before the list loaded reports the list's
+    statement once it has loaded, and a refreshed list's statement once it
+    has changed, with no new session. On the Messages endpoint an entry
+    that states levels and also states `adaptive_thinking: false` is
+    reported as `NotStated`; an empty statement stays `Stated` and empty
+    there, as on every endpoint. An entry whose statement holds only words
+    this release does not know as levels is reported as `NotStated`: what
+    it states cannot be read.
+  - Wrappers forward: the fallback client reports its active candidate's
+    route, and the selected-target wrapper and the Copilot account
+    capability gate report their client's. `TestClient` reports a route a
+    test sets with the new `with_reasoning_route`.
+
+  A client of your own reports no route until it implements
+  `reasoning_route()`, and a wrapper of your own hides its client's route
+  until it forwards the call.
+
+- `meerkat-openai`: the Responses client honours the request-local marker
+  `OpenAiProviderTag.reasoning_effort_resolved`. A level on a request that
+  carries the marker is not checked against the model's direct-API catalog
+  row, and for a model whose reasoning payload the catalog does not enable
+  (no row, or a row without reasoning) it is sent as
+  `reasoning: {"effort": "<level>"}` with no `summary` and no `include`.
+  Nothing sets the marker yet. A level without it behaves as before: it is
+  checked against the row, and dropped for a model without a reasoning
+  row. A request without a marked level builds the same body as before.
+  On the Chat Completions wire of `OpenAiCompatibleClient` a marked level
+  is written as any level is; a client built for a model without reasoning
+  support (`supports_reasoning: false`), which has no place for a level,
+  refuses a request that carries a marked one (`LlmError::InvalidRequest`)
+  instead of building it without the level. A level without the marker is
+  still dropped there.
+
+- `meerkat-core`, `meerkat-openai`, `meerkat`: an operator can declare the
+  reasoning effort levels a self-hosted model accepts, with
+  `reasoning_effort_levels = ["low", "medium", "high"]` under
+  `[self_hosted.models.<id>]`
+  (`SelfHostedModelConfig.reasoning_effort_levels`). Omitted declares
+  none; an empty list declares that the model takes no effort level; a
+  word that is not a level (`none`, `minimal`, `low`, `medium`, `high`,
+  `xhigh`, `max`) does not parse. Declaring levels needs
+  `supports_reasoning = true`: config validation refuses a declaration
+  without it. Config layers merge the field by presence. The model
+  registry holds each declared level once, from `none` to `max`
+  (`SelfHostedServerRef.reasoning_effort_levels`), and the model's client
+  reports them with its route
+  (`OpenAiCompatibleClient::with_operator_reasoning_effort_levels`).
+  Nothing else reads the declaration yet, and no request changes.
+
+### Fixed
+
+- `meerkat-copilot` (GitHub Copilot device sign-in): an account no longer
+  keeps the model list and the API base of an earlier sign-in after a new
+  sign-in whose token exchange is temporarily unavailable. Through 0.9.14
+  the list the earlier sign-in's token had fetched, and the API base that
+  token had named, stayed on the account until an exchange succeeded, so in
+  that window the account's routes resolved from them: which models the
+  account lists, the endpoint that serves each, and what each entry states
+  about the model. No request could be sent in that window (no token
+  serves), and the next successful exchange replaced both. The account now
+  holds no list, and the default API base, until the new sign-in's own
+  token brings its own, and its routes resolve as they do before a first
+  listing. A new sign-in of the same account fetched the same list, so only
+  a sign-in as another account under the same credential was affected. The
+  account also no longer holds the earlier sign-in's token in that window
+  (it was refused there and served no request).
 
 ## [0.9.14] - 2026-11-11
 

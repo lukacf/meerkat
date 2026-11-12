@@ -471,12 +471,17 @@ impl LlmClient for GeminiCopilotChatClient {
         self.inner.prepare_controller_credential().await
     }
 
-    /// Reports no route. This client serves a Gemini model on Chat
-    /// Completions on the Copilot backend; the Chat Completions client it
-    /// wraps is built for another family and does not know that route, so
-    /// its answer is never passed on as this client's.
+    /// Chat Completions on the Copilot backend of the Gemini family. This
+    /// client answers for itself: the Chat Completions client it wraps is
+    /// built for another family and does not know this route. The GitHub
+    /// Copilot routed client adds the account's statement.
     fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
-        None
+        Some(meerkat_core::ReasoningRouteObservation {
+            backend: meerkat_core::ReasoningBackend::Google(GoogleBackendKind::Copilot),
+            api: meerkat_core::ModelApi::ChatCompletions,
+            account: meerkat_core::AccountLevelStatement::NotApplicable,
+            operator_levels: None,
+        })
     }
 
     fn stream_prepared<'a>(
@@ -1800,7 +1805,11 @@ mod copilot_wire_model_tests {
         let copilot = Arc::new(meerkat_copilot::CopilotRuntime::new());
         let listed: meerkat_copilot::CopilotModelsEnvelope =
             serde_json::from_value(serde_json::json!({
-                "data": [{"id": ACCOUNT_ID, "supported_endpoints": ["/chat/completions"]}]
+                "data": [{
+                    "id": ACCOUNT_ID,
+                    "supported_endpoints": ["/chat/completions"],
+                    "capabilities": {"supports": {"reasoning_effort": ["low", "medium", "high"]}}
+                }]
             }))
             .expect("the account's list");
         let _seated = copilot
@@ -1858,6 +1867,26 @@ mod copilot_wire_model_tests {
             [ACCOUNT_ID.to_string()],
             "the route asks for the Chat Completions client of the account's id"
         );
+        // The session's client reports the route the account's list gives
+        // the model, with the levels the entry it resolved states.
+        {
+            use meerkat_core::model_profile::capabilities::EffortLevel;
+            assert_eq!(
+                client.reasoning_route(),
+                Some(meerkat_core::ReasoningRouteObservation {
+                    backend: meerkat_core::ReasoningBackend::Google(
+                        super::GoogleBackendKind::Copilot
+                    ),
+                    api: meerkat_core::ModelApi::ChatCompletions,
+                    account: meerkat_core::AccountLevelStatement::Stated(vec![
+                        EffortLevel::Low,
+                        EffortLevel::Medium,
+                        EffortLevel::High,
+                    ]),
+                    operator_levels: None,
+                })
+            );
+        }
 
         let messages = vec![Message::User(UserMessage::text("hello"))];
         let projection = client
@@ -2399,6 +2428,69 @@ mod tests {
             Err(meerkat_llm_core::LlmError::InvalidRequest { message })
                 if message.contains("top_p")
         ));
+    }
+
+    /// R2.1: the Gemini family's Copilot client serves Chat Completions on
+    /// the Copilot backend. It answers for itself: the Chat Completions
+    /// client it wraps is another family's and reports no route here. The
+    /// account's statement is the routed client's to add.
+    #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
+    #[test]
+    fn every_adapter_reports_its_route() {
+        let inner = Arc::new(CapturingCopilotChatClient {
+            seen_provider_params: Arc::new(Mutex::new(None)),
+        });
+        assert_eq!(inner.reasoning_route(), None);
+        let client = GeminiCopilotChatClient { inner };
+        assert_eq!(
+            client.reasoning_route(),
+            Some(meerkat_core::ReasoningRouteObservation {
+                backend: meerkat_core::ReasoningBackend::Google(GoogleBackendKind::Copilot),
+                api: meerkat_core::ModelApi::ChatCompletions,
+                account: meerkat_core::AccountLevelStatement::NotApplicable,
+                operator_levels: None,
+            })
+        );
+    }
+
+    /// R2.2, Chat Completions for the Gemini family on Copilot: the level
+    /// Core writes on the Gemini tag (`thinking_level`) is handed to the
+    /// Chat Completions client as its typed effort, which that client writes
+    /// as `reasoning_effort` and `reasoning.effort` (pinned in
+    /// `meerkat-openai`).
+    #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
+    #[test]
+    fn translated_level_reaches_the_wire() {
+        use meerkat_core::lifecycle::run_primitive::{
+            GeminiProviderTag, GeminiThinkingLevel, ProviderTag, ReasoningEffort,
+        };
+
+        for (level, effort) in [
+            (GeminiThinkingLevel::Low, ReasoningEffort::Low),
+            (GeminiThinkingLevel::Medium, ReasoningEffort::Medium),
+            (GeminiThinkingLevel::High, ReasoningEffort::High),
+        ] {
+            let seen = Arc::new(Mutex::new(None));
+            let client = GeminiCopilotChatClient {
+                inner: Arc::new(CapturingCopilotChatClient {
+                    seen_provider_params: Arc::clone(&seen),
+                }),
+            };
+            let mut request = meerkat_llm_core::LlmRequest::new("gemini-test", Vec::new());
+            request.provider_params = Some(ProviderTag::Gemini(GeminiProviderTag {
+                thinking_level: Some(level),
+                ..Default::default()
+            }));
+            client
+                .request_pressure(&request)
+                .expect("Gemini Copilot request lowers");
+            let captured = seen.lock().expect("capture lock").clone();
+            let Some(ProviderTag::OpenAi(tag)) = captured else {
+                panic!("Gemini Copilot must lower into the Chat Completions wire tag");
+            };
+            assert_eq!(tag.reasoning_effort, Some(effort), "{level:?}");
+            assert_eq!(tag.supports_reasoning_override, Some(true), "{level:?}");
+        }
     }
 
     #[test]

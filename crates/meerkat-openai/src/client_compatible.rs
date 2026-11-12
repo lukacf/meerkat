@@ -114,6 +114,13 @@ pub struct OpenAiCompatibleClient {
     /// ([`meerkat_core::provider_matrix::OpenAiBackendKind::admits_prompt_cache_fields`]),
     /// so a server outside the OpenAI backend matrix receives none.
     openai_backend: Option<meerkat_core::provider_matrix::OpenAiBackendKind>,
+    /// The self-hosted backend kind this client was built for; see
+    /// [`Self::with_self_hosted_backend`].
+    self_hosted_backend: Option<meerkat_core::provider_matrix::SelfHostedBackendKind>,
+    /// The reasoning effort levels the operator declared for the model; see
+    /// [`Self::with_operator_reasoning_effort_levels`].
+    operator_reasoning_effort_levels:
+        Option<Vec<meerkat_core::model_profile::capabilities::EffortLevel>>,
     /// GitHub Copilot's Chat Completions stream discipline; see
     /// [`Self::with_copilot_chat_stream`].
     copilot_chat_stream: bool,
@@ -186,6 +193,8 @@ impl OpenAiCompatibleClient {
             post_finish_trailer_window: DEFAULT_POST_FINISH_TRAILER_WINDOW,
             static_credential: false,
             openai_backend: None,
+            self_hosted_backend: None,
+            operator_reasoning_effort_levels: None,
             copilot_chat_stream: false,
         }
     }
@@ -251,6 +260,35 @@ impl OpenAiCompatibleClient {
         backend: meerkat_core::provider_matrix::OpenAiBackendKind,
     ) -> Self {
         self.openai_backend = Some(backend);
+        self
+    }
+
+    /// Declare the self-hosted backend kind this client was built for: the
+    /// backend of the connection that resolved its server (`self_hosted` or
+    /// `openai_compatible`). The client reports it as its route
+    /// (`LlmClient::reasoning_route`) and nothing else reads it: no request
+    /// changes with it. A client declared for an OpenAI backend
+    /// ([`Self::with_openai_backend`]) reports that backend instead.
+    #[must_use]
+    pub fn with_self_hosted_backend(
+        mut self,
+        backend: meerkat_core::provider_matrix::SelfHostedBackendKind,
+    ) -> Self {
+        self.self_hosted_backend = Some(backend);
+        self
+    }
+
+    /// The reasoning effort levels the operator declared for this client's
+    /// model (`[self_hosted.models.<id>] reasoning_effort_levels`, as the
+    /// model registry holds them), or `None` when the operator declared
+    /// none. The client reports them with its route, as it was given them,
+    /// and nothing else reads them: no request changes with them.
+    #[must_use]
+    pub fn with_operator_reasoning_effort_levels(
+        mut self,
+        levels: Option<Vec<meerkat_core::model_profile::capabilities::EffortLevel>>,
+    ) -> Self {
+        self.operator_reasoning_effort_levels = levels;
         self
     }
 
@@ -570,6 +608,21 @@ impl OpenAiCompatibleClient {
                 {
                     body["thinking"] = thinking.as_value();
                 }
+            } else if tag.reasoning_effort_resolved
+                && let Some(effort) = tag.reasoning_effort
+            {
+                // A level that was resolved for this request's route is sent
+                // or refused, never dropped. This client was built for a
+                // model without reasoning support, so its body has no place
+                // for the level. A raw level (no marker) is still dropped
+                // here, as it always was.
+                return Err(LlmError::InvalidRequest {
+                    message: format!(
+                        "reasoning effort '{}' was resolved for this request, but this client \
+                         was built for a model without reasoning support and cannot send it",
+                        effort.as_legacy_str()
+                    ),
+                });
             }
             if let Some(output_schema) = tag.structured_output.as_ref() {
                 let compiled =
@@ -1484,6 +1537,30 @@ impl LlmClient for OpenAiCompatibleClient {
                 &self.remote_model,
             ),
         }
+    }
+
+    /// The API of this client's mode on the backend it was declared for: an
+    /// OpenAI backend ([`Self::with_openai_backend`]), else a self-hosted
+    /// backend kind ([`Self::with_self_hosted_backend`]), with the levels
+    /// the operator declared for the model
+    /// ([`Self::with_operator_reasoning_effort_levels`]). A client that was
+    /// not told which backend it speaks to reports no route: nothing infers
+    /// one from a base URL.
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        let backend = match (self.openai_backend, self.self_hosted_backend) {
+            (Some(backend), _) => meerkat_core::ReasoningBackend::OpenAi(backend),
+            (None, Some(backend)) => meerkat_core::ReasoningBackend::SelfHosted(backend),
+            (None, None) => return None,
+        };
+        Some(meerkat_core::ReasoningRouteObservation {
+            backend,
+            api: match self.mode {
+                OpenAiCompatibleMode::Responses => meerkat_core::ModelApi::Responses,
+                OpenAiCompatibleMode::ChatCompletions => meerkat_core::ModelApi::ChatCompletions,
+            },
+            account: meerkat_core::AccountLevelStatement::NotApplicable,
+            operator_levels: self.operator_reasoning_effort_levels.clone(),
+        })
     }
 
     /// Project for this client's server and, on the Responses wire, freeze
@@ -5071,6 +5148,55 @@ mod tests {
         };
         assert_eq!(tag.supports_temperature_override, Some(true));
         assert_eq!(tag.supports_reasoning_override, Some(true));
+    }
+
+    /// A level resolved for the route of a self-hosted Responses server
+    /// keeps its marker on the way to the Responses delegate, so the
+    /// delegate writes it and does not judge it by the direct-API catalog
+    /// row of a model whose id the server's remote model happens to share.
+    /// The same level without the marker is still judged by that row.
+    #[test]
+    fn a_resolved_level_keeps_its_marker_for_the_responses_delegate() {
+        use meerkat_core::lifecycle::run_primitive::ReasoningEffort;
+
+        // A remote model named like a catalog model whose row has no `max`.
+        let client = OpenAiCompatibleClient::new_with_options(
+            OpenAiCompatibleMode::Responses,
+            "gpt-5.5".to_string(),
+            "http://localhost:11434/v1".to_string(),
+            None,
+            options(true, true, true, true),
+        );
+        let delegate = client
+            .responses_delegate
+            .as_ref()
+            .expect("a Responses-mode client has its delegate");
+        let request = || {
+            LlmRequest::new(
+                "local-model",
+                vec![Message::User(UserMessage::text("hello".to_string()))],
+            )
+        };
+
+        let resolved = request().with_openai_tag_merge(|tag| {
+            tag.reasoning_effort = Some(ReasoningEffort::Max);
+            tag.reasoning_effort_resolved = true;
+        });
+        let body = delegate
+            .build_request_body(&client.request_with_remote_model(&resolved))
+            .expect("a resolved level is not refused by the catalog row");
+        assert_eq!(body["reasoning"]["effort"], "max");
+
+        let raw = request().with_openai_tag_merge(|tag| {
+            tag.reasoning_effort = Some(ReasoningEffort::Max);
+        });
+        assert!(
+            matches!(
+                delegate.build_request_body(&client.request_with_remote_model(&raw)),
+                Err(LlmError::InvalidRequest { .. })
+            ),
+            "a raw level is judged by the catalog row as before"
+        );
     }
 
     #[test]

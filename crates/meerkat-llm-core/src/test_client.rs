@@ -7,6 +7,7 @@ pub struct TestClient {
     events: Vec<LlmEvent>,
     provider: meerkat_core::Provider,
     synthesize_usage: bool,
+    reasoning_route: Option<meerkat_core::ReasoningRouteObservation>,
 }
 
 impl TestClient {
@@ -15,6 +16,7 @@ impl TestClient {
             events,
             provider: meerkat_core::Provider::Other,
             synthesize_usage: false,
+            reasoning_route: None,
         }
     }
 
@@ -24,7 +26,18 @@ impl TestClient {
             events: Self::default_events(),
             provider,
             synthesize_usage: true,
+            reasoning_route: None,
         }
+    }
+
+    /// Report `route` as the route this client serves
+    /// ([`LlmClient::reasoning_route`]), so a test can script the route a
+    /// request's reasoning effort is resolved against. A test client
+    /// reports no route unless one is set here.
+    #[must_use]
+    pub fn with_reasoning_route(mut self, route: meerkat_core::ReasoningRouteObservation) -> Self {
+        self.reasoning_route = Some(route);
+        self
     }
 
     fn default_events() -> Vec<LlmEvent> {
@@ -46,6 +59,7 @@ impl Default for TestClient {
             events: Self::default_events(),
             provider: meerkat_core::Provider::Other,
             synthesize_usage: true,
+            reasoning_route: None,
         }
     }
 }
@@ -53,6 +67,10 @@ impl Default for TestClient {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl LlmClient for TestClient {
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        self.reasoning_route.clone()
+    }
+
     fn project_replay_messages(
         &self,
         messages: &[meerkat_core::Message],
@@ -97,5 +115,47 @@ impl LlmClient for TestClient {
 
     async fn health_check(&self) -> Result<(), LlmError> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use std::sync::Arc;
+
+    use meerkat_core::model_profile::capabilities::EffortLevel;
+    use meerkat_core::provider_matrix::SelfHostedBackendKind;
+    use meerkat_core::{
+        AccountLevelStatement, AgentLlmClient, ModelApi, Provider, ReasoningBackend,
+        ReasoningRouteObservation,
+    };
+
+    use super::TestClient;
+    use crate::adapter::LlmClientAdapter;
+    use crate::types::LlmClient;
+
+    /// A test client reports no route until a test sets one, then reports
+    /// exactly that one, also through the adapter the agent loop holds.
+    #[test]
+    fn every_adapter_reports_its_route() {
+        assert_eq!(TestClient::default().reasoning_route(), None);
+        assert_eq!(TestClient::new(Vec::new()).reasoning_route(), None);
+        assert_eq!(
+            TestClient::for_provider(Provider::OpenAI).reasoning_route(),
+            None
+        );
+
+        let route = ReasoningRouteObservation {
+            backend: ReasoningBackend::SelfHosted(SelfHostedBackendKind::SelfHosted),
+            api: ModelApi::ChatCompletions,
+            account: AccountLevelStatement::NotApplicable,
+            operator_levels: Some(vec![EffortLevel::Low, EffortLevel::High]),
+        };
+        let client =
+            TestClient::for_provider(Provider::SelfHosted).with_reasoning_route(route.clone());
+        assert_eq!(client.reasoning_route(), Some(route.clone()));
+
+        let adapter = LlmClientAdapter::new(Arc::new(client), "test-model".to_string());
+        assert_eq!(AgentLlmClient::reasoning_route(&adapter), Some(route));
     }
 }

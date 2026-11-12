@@ -859,6 +859,10 @@ impl Config {
                         merged.stream_inactivity_timeout_secs =
                             model_layer.stream_inactivity_timeout_secs;
                     }
+                    if model_table.contains_key("reasoning_effort_levels") {
+                        merged.reasoning_effort_levels =
+                            model_layer.reasoning_effort_levels.clone();
+                    }
                     merged_models.insert(model_id.clone(), merged);
                 }
                 self.self_hosted.models = merged_models;
@@ -1654,6 +1658,42 @@ pub struct SelfHostedModelConfig {
     /// [`crate::MIN_MODEL_STREAM_INACTIVITY_TIMEOUT`] (60 s).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_inactivity_timeout_secs: Option<u64>,
+    /// The reasoning effort levels the operator declares this model accepts
+    /// (for example `["low", "medium", "high"]`), for the provider-neutral
+    /// `reasoning_effort` option: a self-hosted server publishes no list of
+    /// its own, so the operator's declaration is the only statement of the
+    /// levels. Omitted declares none. An empty list declares that the model
+    /// takes no effort level. Declaring levels requires
+    /// `supports_reasoning = true`; config validation refuses a declaration
+    /// without it. The effective model registry holds each declared level
+    /// once, from `none` to `max`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort_levels: Option<Vec<crate::model_profile::capabilities::EffortLevel>>,
+}
+
+impl SelfHostedModelConfig {
+    /// The declared reasoning effort levels as the effective model registry
+    /// holds them: each level once, from `none` to `max`. A declaration on a
+    /// model that does not declare `supports_reasoning` is refused, an empty
+    /// one included: the operator stated levels for a model the same entry
+    /// says takes no reasoning control.
+    pub(crate) fn declared_reasoning_effort_levels(
+        &self,
+        model_id: &str,
+    ) -> Result<Option<Vec<crate::model_profile::capabilities::EffortLevel>>, ConfigError> {
+        let Some(levels) = self.reasoning_effort_levels.as_ref() else {
+            return Ok(None);
+        };
+        if !self.supports_reasoning {
+            return Err(ConfigError::Validation(format!(
+                "self_hosted.models.{model_id}.reasoning_effort_levels is declared, but the \
+                 model does not declare supports_reasoning = true; reasoning effort levels can \
+                 be declared only for a model that supports reasoning"
+            )));
+        }
+        let levels: std::collections::BTreeSet<_> = levels.iter().copied().collect();
+        Ok(Some(levels.into_iter().collect()))
+    }
 }
 
 impl Default for SelfHostedModelConfig {
@@ -1676,6 +1716,7 @@ impl Default for SelfHostedModelConfig {
             supports_web_search: false,
             call_timeout_secs: None,
             stream_inactivity_timeout_secs: None,
+            reasoning_effort_levels: None,
         }
     }
 }
@@ -5132,6 +5173,174 @@ stream_inactivity_timeout_secs = 600
             profile("default-window").stream_inactivity_timeout_secs,
             None
         );
+    }
+
+    /// R2.3: the reasoning effort levels an operator declares for a
+    /// self-hosted model merge by presence, reach the model's registry entry
+    /// (each level once, from `none` to `max`), and need
+    /// `supports_reasoning`: a declaration without it, an empty one
+    /// included, refuses the config.
+    #[test]
+    fn operator_levels_require_supports_reasoning() {
+        use crate::model_profile::capabilities::EffortLevel;
+
+        let catalog = *crate::model_profile::test_catalog::TEST_CATALOG;
+        let registry_levels = |config: &Config, model: &str| {
+            config
+                .model_registry(catalog)
+                .expect("registry")
+                .entry_for_provider(crate::Provider::SelfHosted, model)
+                .and_then(|entry| entry.self_hosted.as_ref())
+                .expect("a self-hosted entry")
+                .reasoning_effort_levels
+                .clone()
+        };
+
+        let mut config = Config::default();
+        config
+            .merge_toml_str(
+                r#"
+[self_hosted]
+default_model = "reasoner"
+[self_hosted.servers.local]
+base_url = "http://localhost:11434"
+[self_hosted.models.reasoner]
+server = "local"
+remote_model = "reasoner"
+supports_reasoning = true
+reasoning_effort_levels = ["high", "low", "high", "medium"]
+[self_hosted.models.plain]
+server = "local"
+remote_model = "plain"
+"#,
+            )
+            .expect("base");
+        assert_eq!(
+            config.self_hosted.models["reasoner"].reasoning_effort_levels,
+            Some(vec![
+                EffortLevel::High,
+                EffortLevel::Low,
+                EffortLevel::High,
+                EffortLevel::Medium
+            ]),
+            "the config keeps the declaration as the operator wrote it"
+        );
+        assert_eq!(
+            config.self_hosted.models["plain"].reasoning_effort_levels,
+            None
+        );
+        config
+            .validate(catalog)
+            .expect("declared levels with supports_reasoning are accepted");
+        assert_eq!(
+            registry_levels(&config, "reasoner"),
+            Some(vec![
+                EffortLevel::Low,
+                EffortLevel::Medium,
+                EffortLevel::High
+            ]),
+            "the registry holds each declared level once, from none to max"
+        );
+        assert_eq!(registry_levels(&config, "plain"), None);
+
+        // A layer that does not name the field keeps the declaration.
+        config
+            .merge_toml_str(
+                r"
+[self_hosted.models.reasoner]
+max_output_tokens = 100
+",
+            )
+            .expect("unrelated overlay");
+        assert_eq!(
+            registry_levels(&config, "reasoner"),
+            Some(vec![
+                EffortLevel::Low,
+                EffortLevel::Medium,
+                EffortLevel::High
+            ])
+        );
+
+        // A layer that names it replaces it; an empty list is a declaration
+        // (the model takes no effort level), not an omission.
+        config
+            .merge_toml_str(
+                r"
+[self_hosted.models.reasoner]
+reasoning_effort_levels = []
+",
+            )
+            .expect("replacing overlay");
+        assert_eq!(
+            config.self_hosted.models["reasoner"].reasoning_effort_levels,
+            Some(Vec::new())
+        );
+        assert_eq!(registry_levels(&config, "reasoner"), Some(Vec::new()));
+
+        // Declared levels on a model without reasoning support: refused,
+        // naming the model and the field.
+        for declaration in [r#"["low"]"#, "[]"] {
+            let mut refused = config.clone();
+            refused
+                .merge_toml_str(&format!(
+                    "[self_hosted.models.plain]\nreasoning_effort_levels = {declaration}\n"
+                ))
+                .expect("the layer parses");
+            let error = refused
+                .validate(catalog)
+                .expect_err("levels declared without supports_reasoning must fail");
+            assert!(matches!(error, ConfigError::Validation(_)), "{error}");
+            assert_eq!(
+                error.to_string(),
+                "Validation error: self_hosted.models.plain.reasoning_effort_levels is declared, \
+                 but the model does not declare supports_reasoning = true; reasoning effort \
+                 levels can be declared only for a model that supports reasoning",
+                "{declaration}"
+            );
+            assert!(refused.model_registry(catalog).is_err(), "{declaration}");
+        }
+
+        // A word that is not an effort level does not parse.
+        assert!(
+            config
+                .clone()
+                .merge_toml_str(
+                    "[self_hosted.models.reasoner]\nreasoning_effort_levels = [\"ultra\"]\n"
+                )
+                .is_err()
+        );
+    }
+
+    /// A self-hosted model that declares no reasoning effort levels
+    /// serializes as it did before the field existed; a declaration
+    /// round-trips in the level words.
+    #[test]
+    fn operator_levels_serialize_only_when_declared() {
+        use crate::model_profile::capabilities::EffortLevel;
+
+        let undeclared = serde_json::to_value(SelfHostedModelConfig::default()).expect("json");
+        assert!(undeclared.get("reasoning_effort_levels").is_none());
+        assert!(
+            !toml::to_string(&SelfHostedModelConfig::default())
+                .expect("toml")
+                .contains("reasoning_effort_levels")
+        );
+
+        let declared = SelfHostedModelConfig {
+            supports_reasoning: true,
+            reasoning_effort_levels: Some(vec![EffortLevel::Low, EffortLevel::Xhigh]),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(&declared).expect("json");
+        assert_eq!(
+            value["reasoning_effort_levels"],
+            serde_json::json!(["low", "xhigh"])
+        );
+        let restored: SelfHostedModelConfig = serde_json::from_value(value).expect("roundtrip");
+        assert_eq!(restored, declared);
+        let from_toml: SelfHostedModelConfig =
+            toml::from_str(&toml::to_string(&declared).expect("toml")).expect("toml roundtrip");
+        assert_eq!(from_toml, declared);
     }
 
     #[test]

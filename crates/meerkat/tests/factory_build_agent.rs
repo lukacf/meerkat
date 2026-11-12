@@ -1486,6 +1486,7 @@ async fn build_agent_resolves_self_hosted_alias_from_registry() {
             supports_web_search: false,
             call_timeout_secs: Some(600),
             stream_inactivity_timeout_secs: None,
+            reasoning_effort_levels: None,
         },
     );
 
@@ -1644,6 +1645,7 @@ async fn build_llm_client_for_identity_rejects_self_hosted_server_mismatch() {
             supports_web_search: false,
             call_timeout_secs: Some(600),
             stream_inactivity_timeout_secs: None,
+            reasoning_effort_levels: None,
         },
     );
 
@@ -3732,6 +3734,7 @@ async fn explicit_mob_override_passes_the_resolved_provider_route_to_the_mob_too
             supports_web_search: false,
             call_timeout_secs: Some(600),
             stream_inactivity_timeout_secs: None,
+            reasoning_effort_levels: None,
         },
     );
 

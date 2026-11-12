@@ -82,6 +82,9 @@ pub struct AnthropicClient {
     /// request's: the request's model and the id the wire names for it. Set
     /// by the GitHub Copilot route (the builder's `wire_model`).
     wire_model: Option<(String, String)>,
+    /// The backend this client's requests go to; see
+    /// [`AnthropicClientBuilder::backend`].
+    backend: meerkat_core::provider_matrix::AnthropicBackendKind,
 }
 
 /// Builder for AnthropicClient
@@ -96,6 +99,7 @@ pub struct AnthropicClientBuilder {
     thinking_binding_controls_supported: bool,
     authorizer: Option<std::sync::Arc<dyn meerkat_core::HttpAuthorizer>>,
     wire_model: Option<(String, String)>,
+    backend: meerkat_core::provider_matrix::AnthropicBackendKind,
 }
 
 impl AnthropicClientBuilder {
@@ -111,7 +115,21 @@ impl AnthropicClientBuilder {
             thinking_binding_controls_supported: true,
             authorizer: None,
             wire_model: None,
+            backend: meerkat_core::provider_matrix::AnthropicBackendKind::AnthropicApi,
         }
+    }
+
+    /// Declare the backend this client's requests go to. The builder starts
+    /// from the Claude API (`anthropic_api`), the backend of its default base
+    /// URL; provider runtimes set the backend of the connection they build
+    /// the client for. The client reports it as its route
+    /// (`LlmClient::reasoning_route`) and nothing else reads it: no request,
+    /// header or default changes with it. A direct builder user who points
+    /// the client at Amazon Bedrock, Google Cloud, Microsoft Foundry or a
+    /// GitHub Copilot account names that backend here.
+    pub fn backend(mut self, backend: meerkat_core::provider_matrix::AnthropicBackendKind) -> Self {
+        self.backend = backend;
+        self
     }
 
     /// Name `wire_model` on the wire for requests whose model is `model`.
@@ -127,7 +145,9 @@ impl AnthropicClientBuilder {
         self
     }
 
-    /// Set custom base URL
+    /// Set custom base URL. The route the client reports
+    /// (`LlmClient::reasoning_route`) does not follow the URL: a client
+    /// pointed at another backend names it with [`Self::backend`].
     pub fn base_url(mut self, url: String) -> Self {
         self.base_url = url;
         self
@@ -250,6 +270,7 @@ impl AnthropicClientBuilder {
             thinking_binding_controls_supported: self.thinking_binding_controls_supported,
             authorizer: self.authorizer,
             wire_model: self.wire_model,
+            backend: self.backend,
         })
     }
 }
@@ -1127,7 +1148,10 @@ impl AnthropicClient {
         AnthropicClientBuilder::new(api_key)
     }
 
-    /// Set custom base URL
+    /// Set custom base URL. The route the client reports
+    /// (`LlmClient::reasoning_route`) does not follow the URL: it stays the
+    /// backend the client was built for, which
+    /// [`AnthropicClientBuilder::backend`] names.
     pub fn with_base_url(self, url: String) -> Self {
         #[cfg(not(target_arch = "wasm32"))]
         let builder = reqwest::Client::builder()
@@ -3174,6 +3198,19 @@ impl LlmClient for AnthropicClient {
             &self.messages_endpoint(),
             self.wire_model_for(logical_model),
         )
+    }
+
+    /// The Messages API on the backend this client was built for. No
+    /// account list and no operator levels are this client's to state; the
+    /// GitHub Copilot routed client adds the account's statement for its
+    /// route.
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        Some(meerkat_core::ReasoningRouteObservation {
+            backend: meerkat_core::ReasoningBackend::Anthropic(self.backend),
+            api: meerkat_core::ModelApi::Messages,
+            account: meerkat_core::AccountLevelStatement::NotApplicable,
+            operator_levels: None,
+        })
     }
 
     fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {

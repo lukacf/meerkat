@@ -3647,6 +3647,9 @@ struct SelfHostedClientSpec {
     supports_reasoning: bool,
     supports_image_input: bool,
     supports_image_tool_results: bool,
+    /// The reasoning effort levels the operator declared for the model, as
+    /// the registry entry holds them.
+    reasoning_effort_levels: Option<Vec<meerkat_core::model_profile::capabilities::EffortLevel>>,
 }
 
 struct SelfHostedClientBuild {
@@ -7829,6 +7832,7 @@ impl AgentFactory {
             supports_reasoning: profile.supports_reasoning,
             supports_image_input: profile.image_input,
             supports_image_tool_results: profile.image_tool_results,
+            reasoning_effort_levels: self_hosted.reasoning_effort_levels.clone(),
         })
     }
 
@@ -7900,26 +7904,37 @@ impl AgentFactory {
             // Authorizer-backed auth is refused above, so the credential is
             // fixed here: the resolved static secret, or none for an
             // authless server.
-            let client: Arc<dyn LlmClient> = Arc::new(
-                OpenAiCompatibleClient::new_with_options(
-                    spec.mode,
-                    spec.remote_model,
-                    base_url,
-                    bearer_token,
-                    OpenAiCompatibleClientOptions {
-                        supports_temperature: spec.supports_temperature,
-                        supports_thinking: spec.supports_thinking,
-                        supports_reasoning: spec.supports_reasoning,
-                        supports_image_tool_results: spec.supports_image_tool_results,
-                    },
-                )
-                .with_image_input_support(spec.supports_image_input)
-                // The configured server that serves the model is the issuer
-                // of the continuity material this client receives: such
-                // material is replayed to that server only.
-                .with_self_hosted_server(spec.server_id)
-                .with_static_credential(),
-            );
+            let client = OpenAiCompatibleClient::new_with_options(
+                spec.mode,
+                spec.remote_model,
+                base_url,
+                bearer_token,
+                OpenAiCompatibleClientOptions {
+                    supports_temperature: spec.supports_temperature,
+                    supports_thinking: spec.supports_thinking,
+                    supports_reasoning: spec.supports_reasoning,
+                    supports_image_tool_results: spec.supports_image_tool_results,
+                },
+            )
+            .with_image_input_support(spec.supports_image_input)
+            // The configured server that serves the model is the issuer
+            // of the continuity material this client receives: such
+            // material is replayed to that server only.
+            .with_self_hosted_server(spec.server_id)
+            .with_static_credential()
+            .with_operator_reasoning_effort_levels(spec.reasoning_effort_levels);
+            // The route the client reports names the backend of the
+            // connection that resolved its server. A connection that names
+            // no self-hosted backend declares none, and the client then
+            // reports no route.
+            let client: Arc<dyn LlmClient> = Arc::new(match connection.backend {
+                meerkat_providers::NormalizedBackendKind::SelfHosted(backend) => {
+                    client.with_self_hosted_backend(backend)
+                }
+                meerkat_providers::NormalizedBackendKind::OpenAi(_)
+                | meerkat_providers::NormalizedBackendKind::Anthropic(_)
+                | meerkat_providers::NormalizedBackendKind::Google(_) => client,
+            });
             // The selected target the session identity will carry: the
             // durable binding it records, and the actual resolved backend
             // and credential owner, as for a registry-built client.
@@ -21942,6 +21957,9 @@ mod tests {
     struct RecordingSelfHostedRuntime {
         calls: Arc<std::sync::Mutex<Vec<RecordedSelfHostedResolve>>>,
         authless: bool,
+        /// The backend the resolved connection names, when a row wants one
+        /// other than the binding's own.
+        backend: Option<meerkat_providers::NormalizedBackendKind>,
     }
 
     #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
@@ -21985,7 +22003,7 @@ mod tests {
             };
             Ok(meerkat_llm_core::provider_runtime::ResolvedConnection {
                 provider: Provider::SelfHosted,
-                backend: binding.backend(),
+                backend: self.backend.unwrap_or_else(|| binding.backend()),
                 backend_profile: Arc::clone(binding.backend_profile()),
                 credential_identity: binding.credential_identity().clone(),
                 auth_lease,
@@ -22011,10 +22029,29 @@ mod tests {
                 Arc::new(RecordingSelfHostedRuntime {
                     calls: Arc::clone(&calls),
                     authless: false,
+                    backend: None,
                 }),
             ),
         );
         calls
+    }
+
+    /// A self-hosted runtime whose resolved connection names `backend`,
+    /// whatever backend the binding names.
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    fn install_self_hosted_runtime_on_backend(
+        factory: &mut AgentFactory,
+        backend: meerkat_providers::NormalizedBackendKind,
+    ) {
+        factory.provider_registry = Arc::new(
+            meerkat_llm_core::provider_runtime::ProviderRuntimeRegistry::empty().with_runtime(
+                Arc::new(RecordingSelfHostedRuntime {
+                    calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+                    authless: false,
+                    backend: Some(backend),
+                }),
+            ),
+        );
     }
 
     #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
@@ -22027,6 +22064,7 @@ mod tests {
                 Arc::new(RecordingSelfHostedRuntime {
                     calls: Arc::clone(&calls),
                     authless: true,
+                    backend: None,
                 }),
             ),
         );
@@ -22068,6 +22106,7 @@ mod tests {
                 supports_web_search: false,
                 call_timeout_secs: Some(600),
                 stream_inactivity_timeout_secs: None,
+                reasoning_effort_levels: None,
             },
         );
         config
@@ -22293,6 +22332,7 @@ mod tests {
             supports_web_search: false,
             call_timeout_secs: Some(600),
             stream_inactivity_timeout_secs: None,
+            reasoning_effort_levels: None,
         }
     }
 
@@ -22913,6 +22953,219 @@ mod tests {
                 .prepare_controller_credential()
                 .await
                 .unwrap_or_else(|error| panic!("authless={authless}: {error}"));
+        }
+    }
+
+    /// R2.3: the reasoning effort levels an operator declares for a
+    /// self-hosted model reach the route the session's client reports,
+    /// through the selected-target wrapper and the agent's adapter: the
+    /// self-hosted backend of the resolved connection, the API of the
+    /// server's style, and the declared levels. A model that declares none
+    /// reports none.
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn operator_levels_reach_the_self_hosted_clients_route() {
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+        use meerkat_core::provider_matrix::SelfHostedBackendKind;
+        use meerkat_core::{
+            AccountLevelStatement, ModelApi, ReasoningBackend, ReasoningRouteObservation,
+        };
+
+        for (api_style, api) in [
+            (
+                SelfHostedApiStyle::ChatCompletions,
+                ModelApi::ChatCompletions,
+            ),
+            (SelfHostedApiStyle::Responses, ModelApi::Responses),
+        ] {
+            for declared in [
+                None,
+                Some(vec![EffortLevel::High, EffortLevel::Low, EffortLevel::High]),
+            ] {
+                let temp = tempfile::tempdir().unwrap();
+                let mut factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+                let _calls = install_recording_self_hosted_runtime(&mut factory);
+                let mut config = config_with_self_hosted_server(SelfHostedServerConfig {
+                    transport: SelfHostedTransport::OpenAiCompatible,
+                    base_url: "http://127.0.0.1:11434".to_string(),
+                    api_style,
+                });
+                config
+                    .self_hosted
+                    .models
+                    .get_mut("gemma-4-e2b")
+                    .unwrap()
+                    .reasoning_effort_levels = declared.clone();
+                insert_self_hosted_realm_binding(
+                    &mut config,
+                    "dev",
+                    "dev_local",
+                    "http://realm.example/v1",
+                    CredentialSourceSpec::InlineSecret {
+                        secret: "realm-token".to_string(),
+                    },
+                );
+
+                let session = Session::new();
+                let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+                let bindings = runtime
+                    .prepare_bindings(session.id().clone())
+                    .await
+                    .unwrap();
+                let mut build = AgentBuildConfig::new("gemma-4-e2b");
+                build.provider = Some(Provider::SelfHosted);
+                build.realm_id = Some(RealmId::parse("dev").unwrap());
+                build.resume_session = Some(session);
+                build.runtime_build_mode =
+                    meerkat_core::RuntimeBuildMode::SessionOwned(bindings.clone());
+                build.override_builtins = ToolCategoryOverride::Disable;
+
+                let (_agent, controller) = factory
+                    .build_agent_with_controller(build, &config)
+                    .await
+                    .unwrap_or_else(|error| panic!("{api} {declared:?}: {error}"));
+                assert_eq!(
+                    controller.client().reasoning_route(),
+                    Some(ReasoningRouteObservation {
+                        backend: ReasoningBackend::SelfHosted(SelfHostedBackendKind::SelfHosted),
+                        api,
+                        account: AccountLevelStatement::NotApplicable,
+                        operator_levels: declared
+                            .as_ref()
+                            .map(|_| vec![EffortLevel::Low, EffortLevel::High]),
+                    }),
+                    "{api} {declared:?}"
+                );
+            }
+        }
+    }
+
+    /// The route a self-hosted model's session reports, built as
+    /// `operator_levels_reach_the_self_hosted_clients_route` builds it: a
+    /// Responses-style server whose model declares `high` and `low`, a realm
+    /// binding whose backend profile is of `backend_kind`, and the
+    /// self-hosted runtime `install` puts on the factory.
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    async fn self_hosted_route_observed(
+        backend_kind: &str,
+        install: impl FnOnce(&mut AgentFactory),
+    ) -> Option<meerkat_core::ReasoningRouteObservation> {
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+        install(&mut factory);
+        let mut config = config_with_self_hosted_server(SelfHostedServerConfig {
+            transport: SelfHostedTransport::OpenAiCompatible,
+            base_url: "http://127.0.0.1:11434".to_string(),
+            api_style: SelfHostedApiStyle::Responses,
+        });
+        config
+            .self_hosted
+            .models
+            .get_mut("gemma-4-e2b")
+            .unwrap()
+            .reasoning_effort_levels = Some(vec![EffortLevel::High, EffortLevel::Low]);
+        insert_self_hosted_realm_binding(
+            &mut config,
+            "dev",
+            "dev_local",
+            "http://realm.example/v1",
+            CredentialSourceSpec::InlineSecret {
+                secret: "realm-token".to_string(),
+            },
+        );
+        config
+            .realm
+            .get_mut("dev")
+            .unwrap()
+            .backend
+            .get_mut("dev_local_backend")
+            .unwrap()
+            .backend_kind = backend_kind.to_string();
+
+        let session = Session::new();
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let bindings = runtime
+            .prepare_bindings(session.id().clone())
+            .await
+            .unwrap();
+        let mut build = AgentBuildConfig::new("gemma-4-e2b");
+        build.provider = Some(Provider::SelfHosted);
+        build.realm_id = Some(RealmId::parse("dev").unwrap());
+        build.resume_session = Some(session);
+        build.runtime_build_mode = meerkat_core::RuntimeBuildMode::SessionOwned(bindings.clone());
+        build.override_builtins = ToolCategoryOverride::Disable;
+
+        let (_agent, controller) = factory
+            .build_agent_with_controller(build, &config)
+            .await
+            .unwrap_or_else(|error| panic!("{backend_kind}: {error}"));
+        controller.client().reasoning_route()
+    }
+
+    /// R2.3, the other self-hosted backend kind: a realm binding whose
+    /// backend profile is `openai_compatible` gives the session's client
+    /// that kind as its route's backend, with the operator's levels. The
+    /// kind is the resolved connection's, not a constant.
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn the_self_hosted_clients_route_names_the_connections_backend_kind() {
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+        use meerkat_core::provider_matrix::SelfHostedBackendKind;
+        use meerkat_core::{
+            AccountLevelStatement, ModelApi, ReasoningBackend, ReasoningRouteObservation,
+        };
+
+        for kind in SelfHostedBackendKind::ALL.iter().copied() {
+            assert_eq!(
+                self_hosted_route_observed(kind.as_str(), |factory| {
+                    let _calls = install_recording_self_hosted_runtime(factory);
+                })
+                .await,
+                Some(ReasoningRouteObservation {
+                    backend: ReasoningBackend::SelfHosted(kind),
+                    api: ModelApi::Responses,
+                    account: AccountLevelStatement::NotApplicable,
+                    operator_levels: Some(vec![EffortLevel::Low, EffortLevel::High]),
+                }),
+                "{}",
+                kind.as_str()
+            );
+        }
+    }
+
+    /// A self-hosted model whose resolved connection names a backend of
+    /// another provider family declares no self-hosted backend to its
+    /// client, so the session reports no route, also when the operator
+    /// declared levels: nothing guesses a route the connection does not
+    /// name, and a level asked for there has nothing to be checked against.
+    ///
+    /// This arm is a fail-closed default. The shipped self-hosted runtime
+    /// resolves a connection on the binding's own backend, so no shipped
+    /// route reaches it; the row drives it with a test runtime that answers
+    /// with another family's backend.
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn a_self_hosted_model_on_another_familys_connection_reports_no_route() {
+        use meerkat_core::provider_matrix::{
+            AnthropicBackendKind, GoogleBackendKind, OpenAiBackendKind,
+        };
+        use meerkat_providers::NormalizedBackendKind;
+
+        for backend in [
+            NormalizedBackendKind::OpenAi(OpenAiBackendKind::OpenAiApi),
+            NormalizedBackendKind::Anthropic(AnthropicBackendKind::AnthropicApi),
+            NormalizedBackendKind::Google(GoogleBackendKind::GoogleGenAi),
+        ] {
+            assert_eq!(
+                self_hosted_route_observed("self_hosted", |factory| {
+                    install_self_hosted_runtime_on_backend(factory, backend);
+                })
+                .await,
+                None,
+                "{backend:?}"
+            );
         }
     }
 
@@ -25264,6 +25517,7 @@ mod tests {
                 supports_web_search: false,
                 call_timeout_secs: Some(600),
                 stream_inactivity_timeout_secs: None,
+                reasoning_effort_levels: None,
             },
         );
 

@@ -3432,6 +3432,79 @@ async fn two_label_updates_of_a_busy_member_owe_one_restamp_with_the_last_rows_l
     assert!(!label_restamp_owed(&mob, "desk").await);
 }
 
+/// Row: a restamp owed already stays owed across an update that returns the
+/// row to the labels its seat carries, until a settle observes the seat.
+/// `desk` holds work at a label update, so its row records the owed
+/// restamp. A second update, the member still busy, moves the row back to
+/// the labels the member was seated with. Its commit keeps the record (its
+/// caller leaves here before anything reads the row again): the commit
+/// compares the row with the seat row it read, and a restamp the earlier
+/// update owes may be on its way to that seat, so the record is let go by
+/// an observation made after the commit, never by the commit itself. A
+/// retry of the update, the member still busy, observes that the seat row
+/// carries the row's labels and lets the owed restamp go; no member step
+/// ran.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restamp_owed_already_stays_owed_across_an_update_back_to_the_seats_labels() {
+    let mut storage = MobStorage::in_memory();
+    let store = FailingChangeCommit::wrap(&mut storage, |_| false);
+    let mob = StoreOwnedMob::build(
+        store_owned_definition("label-deferred-and-back"),
+        storage,
+        |builder| builder,
+    )
+    .await;
+    let (before, _session) = working_desk(&mob).await;
+    let seated = seat(&mob, "desk").await;
+    let moved = before.clone().with_labels(moved_team("desk"));
+    label_update_deferred_by_work(&mob, &before, &moved.labels).await;
+    assert!(label_restamp_owed(&mob, "desk").await);
+
+    let back = moved.clone().with_labels(before.labels.clone());
+    store.park_row_reads_after_an_update();
+    {
+        let expected = spec_digest(&moved);
+        let update = mob.update("relabel-desk-back", back.clone(), &expected);
+        tokio::select! {
+            answered = update => panic!("the update answered before its caller left: {answered:?}"),
+            () = store.parked() => {}
+        }
+    }
+    store.serve_row_reads();
+    let row = mob.row("desk").await;
+    assert_eq!(
+        row.spec.as_ref().map(|spec| &spec.labels),
+        Some(&before.labels),
+        "the second update committed: the row carries the seat's own labels again"
+    );
+    assert_eq!(mob.spawn_row("desk").await.labels, before.labels);
+    assert!(
+        label_restamp_owed(&mob, "desk").await,
+        "the commit keeps a restamp owed already, whatever the seat row it read carried"
+    );
+    assert_eq!(seat(&mob, "desk").await.labels, before.labels);
+
+    let retried = mob
+        .update("relabel-desk-back", back.clone(), &spec_digest(&moved))
+        .await
+        .expect("the retry answers");
+    assert!(
+        matches!(retried.change, IdentityChangeOutcome::Replayed { .. }),
+        "{retried:?}"
+    );
+    assert!(
+        !label_restamp_owed(&mob, "desk").await,
+        "the seat row carries the row's labels: the settle lets the owed restamp go"
+    );
+    let now = seat(&mob, "desk").await;
+    assert_eq!(
+        (now.generation, now.fence_token),
+        (seated.generation, seated.fence_token),
+        "no member step ran"
+    );
+    assert_eq!(mob.spawn_row("desk").await.labels, before.labels);
+}
+
 /// Row (RED): the owed label restamp is let go by whatever seat row first
 /// carries the row's labels. `desk` holds work when one update moves its
 /// labels and its runtime mode, and `mover` when one update moves its
@@ -3691,6 +3764,51 @@ async fn a_hosts_declaration_restamps_no_label_the_row_lacks() {
     assert_eq!(mob.spawn_row("quiet").await.labels, row_labels);
 }
 
+/// Row: a host's own declaration of a store-owned identity restamps no seat
+/// whose row owes no restamp, whatever the seat carries. Its host seated
+/// `quiet` with a label its row never held; no update moved the row, so
+/// nothing is owed. The host then declares `quiet` under created custody
+/// with the row's own spec: the member is kept as it is, no seat row is
+/// written, and the seat keeps the label. Only a restamp the row records
+/// as owed is carried out by a declaration.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hosts_declaration_keeps_a_label_only_the_seat_carries() {
+    let mob = StoreOwnedMob::new("declared-seat-label-kept").await;
+    committed(
+        mob.create(host_create("create-quiet", &["quiet"]), ALLOW)
+            .await,
+    );
+    let labels = seated_with_a_host_label(&mob, "quiet").await;
+    let seated = seat(&mob, "quiet").await;
+    assert_eq!(seated.labels, labels);
+    let lowered = super::super::identity_change::lower_created_spec(&spec("quiet", "worker"))
+        .expect("lower the spec");
+    let answer = mob
+        .handle
+        .apply_declared_roster(DeclaredRoster::partial([DeclaredEntry::new(lowered)]))
+        .await
+        .expect("the declaration answers");
+    assert_eq!(
+        answer_kind(
+            answer
+                .entries
+                .get(&id("quiet"))
+                .expect("the declaration's answer")
+        ),
+        "kept",
+        "{answer:?}"
+    );
+    let now = seat(&mob, "quiet").await;
+    assert_eq!(
+        (now.generation, now.fence_token),
+        (seated.generation, seated.fence_token),
+        "no restamp"
+    );
+    assert_eq!(now.labels, labels, "the seat keeps the label");
+    assert_eq!(mob.spawn_row("quiet").await.labels, labels);
+    assert!(!label_restamp_owed(&mob, "quiet").await);
+}
+
 /// Row (RED): a row the store cannot serve at a build ends the build for a
 /// retry of its own kind. `quiet`'s row read fails once at its first wake:
 /// the wake is refused retryable as a store that cannot serve now, not as
@@ -3737,6 +3855,69 @@ async fn a_row_the_store_cannot_serve_at_a_build_ends_it_retryable_as_a_store_fa
     assert!(serves(&mob, "quiet"), "the member is not Broken");
     assert!(mob.seated_dormant("quiet"), "the member stays Dormant");
 
+    let deadline = tokio::time::Instant::now() + STEP;
+    while let Err(error) = wake(&mob, "quiet").await {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the member was never built once its row read again: {error}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(mob.builds().await, 1, "the next wake built the member");
+    assert_eq!(preparer.seats().len(), composed + 1, "the host was asked");
+}
+
+/// Row: a row this build cannot read at a build ends the build for a retry,
+/// as a row the store cannot serve does. `quiet`'s row reads unreadable (a
+/// row a later release wrote, say): its wake is refused retryable as a
+/// store that cannot serve the member now, never as its host's refusal,
+/// and a second wake builds nothing either; the host is asked nothing,
+/// nothing is built on labels the row may not hold, and the member is not
+/// Broken and stays Dormant. Once the row reads again its next wake builds
+/// it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_row_this_build_cannot_read_at_a_build_ends_it_retryable_and_asks_the_host_nothing() {
+    let preparer = ScriptedPreparer::new();
+    let mut storage = MobStorage::in_memory();
+    let store = FailingChangeCommit::wrap(&mut storage, |_| false);
+    let mob = StoreOwnedMob::build(store_owned_definition("row-unreadable"), storage, {
+        let preparer = preparer.clone();
+        move |builder| builder.with_member_build_preparer(preparer)
+    })
+    .await;
+    mob.service.set_keep_alive_turns_complete_immediately(true);
+    committed(
+        mob.create(host_create("create-quiet", &["quiet"]), ALLOW)
+            .await,
+    );
+    let (composed, prepared) = (preparer.seats().len(), preparer.asked().len());
+    store.answer_row_reads_unreadable(true);
+    let refused = wake(&mob, "quiet").await;
+    assert!(
+        matches!(
+            refused,
+            Err(MobError::MemberWakeRefused {
+                refusal: crate::MemberWakeRefusal::ResumeGateUnavailable,
+                ..
+            })
+        ),
+        "a row this build cannot read is a store that cannot serve the member now: {refused:?}"
+    );
+    let again = wake(&mob, "quiet").await;
+    assert!(
+        again.is_err(),
+        "the row still reads unreadable: the next wake builds nothing either"
+    );
+    assert_eq!(
+        (preparer.seats().len(), preparer.asked().len()),
+        (composed, prepared),
+        "the host was asked nothing"
+    );
+    assert_eq!(mob.builds().await, 0, "nothing was built");
+    assert!(serves(&mob, "quiet"), "the member is not Broken");
+    assert!(mob.seated_dormant("quiet"), "the member stays Dormant");
+
+    store.answer_row_reads_unreadable(false);
     let deadline = tokio::time::Instant::now() + STEP;
     while let Err(error) = wake(&mob, "quiet").await {
         assert!(
@@ -8369,6 +8550,9 @@ struct FailingChangeCommit {
     page_reads: AtomicU64,
     /// How many of the next reads of one identity's row fail.
     row_read_failures: AtomicU64,
+    /// Whether the reads of one identity's row answer a row this build
+    /// cannot read.
+    rows_unreadable: AtomicBool,
     /// Whether the reads of one identity's row park once an update
     /// committed, and whether they park now.
     parks_after_an_update: AtomicBool,
@@ -8380,6 +8564,12 @@ impl FailingChangeCommit {
     /// Fail the next `count` reads of one identity's row.
     fn fail_row_reads(&self, count: u64) {
         self.row_read_failures.store(count, Ordering::SeqCst);
+    }
+
+    /// Answer every read of one identity's row as a row this build cannot
+    /// read (a row a later release wrote, say), or serve the rows again.
+    fn answer_row_reads_unreadable(&self, unreadable: bool) {
+        self.rows_unreadable.store(unreadable, Ordering::SeqCst);
     }
 
     /// From the next committed update on, park every read of one
@@ -8415,6 +8605,7 @@ impl FailingChangeCommit {
             row_reads: AtomicU64::new(0),
             page_reads: AtomicU64::new(0),
             row_read_failures: AtomicU64::new(0),
+            rows_unreadable: AtomicBool::new(false),
             parks_after_an_update: AtomicBool::new(false),
             parking: AtomicBool::new(false),
             parked: tokio::sync::Notify::new(),
@@ -8561,6 +8752,12 @@ impl crate::store::MobIdentityMemberStore for FailingChangeCommit {
             return Err(MobStoreError::ReadFailed(
                 "the row's store cannot serve the read now".to_string(),
             ));
+        }
+        if self.rows_unreadable.load(Ordering::SeqCst) {
+            return Ok(Some(CreatedIdentityObservation::Unreadable {
+                evidence_digest: digest("a row this build cannot read"),
+                detail: "unknown field `a_later_releases_key`".to_string(),
+            }));
         }
         self.inner.observe_created_identity(mob_id, identity).await
     }

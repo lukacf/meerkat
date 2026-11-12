@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import copy
 import gzip
 import hashlib
@@ -2175,6 +2176,12 @@ def selected_consumer_closure(inputs: Inputs, files: dict, selection: dict, targ
     accepted = manifest.get("accepted_inputs")
     if not isinstance(accepted, dict) or accepted.get(path) != expected:
         raise PackageError("selected_consumer_closure_binding_mismatch")
+    check_consumer_closure(record, manifest, files, target)
+    return raw
+
+
+def check_consumer_closure(record: dict, manifest: dict, files: dict, target: str) -> None:
+    """The record's platform, its component bindings and the export's runtime contract."""
     platform = record.get("python_platform") if isinstance(record, dict) else None
     system, machine = {"macos-arm64": ("Darwin", "arm64"), "linux-x86_64": ("Linux", "x86_64")}[target]
     if (not isinstance(record, dict) or type(record.get("schema_version")) is not int
@@ -2207,7 +2214,6 @@ def selected_consumer_closure(inputs: Inputs, files: dict, selection: dict, targ
                 or type(runtime["python"].get("pointer_bits")) is not int or runtime["python"]["pointer_bits"] != 64
                 or runtime["node"].get("platform") != "linux" or runtime["node"].get("arch") != "x64"))):
         raise PackageError("selected_consumer_target_mismatch")
-    return raw
 
 
 def validate_selected_tool_record(name: str, target: str, selected: dict,
@@ -2544,6 +2550,11 @@ def python_document(source: str, destination: str, raw: bytes, *, target: str | 
         if settings is None:
             destinations.update({path: name for name, (path, _) in donor.get("sources", {}).items()})
         destinations.update({path: name for name, path in donor.get("contracts", {}).items()})
+    return relocate_links(source, destination, raw, destinations)
+
+
+def relocate_links(source: str, destination: str, raw: bytes, destinations: dict) -> bytes:
+    """Rewrite relative Markdown links for the shipped layout; `destinations` maps source path to member."""
 
     def replace(match):
         label, url = match.groups()
@@ -2663,7 +2674,22 @@ def package(root: Path, target: str, output: Path, *, input_selection: Path | No
         raise PackageError("output_inside_input")
     files = collect(root, target, settings=settings if input_selection is not None else None)
     edition = settings["selection"].get("edition", EDITION)
-    root_name = f"toolkit-library-{edition}-{target}"
+    destination, checksum = write_release(output, f"toolkit-library-{edition}-{target}", files)
+    result = {"target": target, "archive": str(destination), "sha256": checksum, "files": len(files)}
+    if input_selection is not None:
+        if digest(Path(__file__).read_bytes()) != source_sha256:
+            raise PackageError("packager_source_changed")
+        result.update({"schema_version": 1, "archive_bytes": destination.stat().st_size,
+                       "packager_source_sha256": source_sha256,
+                       "input_selection": settings["input_selection"],
+                       "scope": "explicit_selected_library_packaging_not_execution_qualification"})
+        with (output / "build.json").open("x", encoding="utf-8") as stream:
+            stream.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    return result
+
+
+def write_release(output: Path, root_name: str, files: dict) -> tuple[Path, str]:
+    """Write the deterministic archive and its checksum into a new output directory."""
     archive_name = root_name + ".tar.gz"
     os.mkdir(output, 0o700)
     temporary = output / (archive_name + ".part")
@@ -2690,16 +2716,495 @@ def package(root: Path, target: str, output: Path, *, input_selection: Path | No
         checksum = hashlib.file_digest(stream, "sha256").hexdigest()
     with (output / "SHA256SUMS").open("x", encoding="ascii", newline="\n") as stream:
         stream.write(f"{checksum}  {archive_name}\n")
-    result = {"target": target, "archive": str(destination), "sha256": checksum, "files": len(files)}
-    if input_selection is not None:
-        if digest(Path(__file__).read_bytes()) != source_sha256:
-            raise PackageError("packager_source_changed")
-        result.update({"schema_version": 1, "archive_bytes": destination.stat().st_size,
-                       "packager_source_sha256": source_sha256,
-                       "input_selection": settings["input_selection"],
-                       "scope": "explicit_selected_library_packaging_not_execution_qualification"})
-        with (output / "build.json").open("x", encoding="utf-8") as stream:
-            stream.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    return destination, checksum
+
+
+# The macOS run route, selected only by --pins. Every input is the checkout's at the release
+# commit, a pinned public file, or something this run built: no retained file, no donor
+# archive at a constant digest, no history row. The tables above stay the Linux route's.
+RUN_TEXTS = "release/library-macos-arm64"
+RUN_KIT_ROOT = "agent-install-kit-macos-arm64"
+RUN_KIT_SCOPE = "run-built-selected-tools-kit"
+RUN_TOOLS = ("toolkit-local-recipes", "toolkit-package-inspect", "toolkit-python-plan",
+             "toolkit-node-plan", "toolkit-compose-plan", "toolkit-mcpb-install")
+# MCPB archive inspection and installation exist only in local-artifacts builds.
+RUN_ARTIFACT_TOOLS = ("toolkit-package-inspect", "toolkit-mcpb-install")
+RUN_CAPABILITIES = ["agent-plugin-files", "mcpb-archive-inspection", "compose-local-execution"]
+RUN_INSTALLER = "scripts/install-library-consumer.py"
+RUN_KIT_CONTRACTS = {
+    "selected/contracts/INSPECT.md": "crates/toolkit-package/INSPECT.md",
+    "selected/contracts/PYTHON-INSTALL.md": "crates/toolkit-package/PYTHON-INSTALL.md",
+    "selected/contracts/NODE-INSTALL.md": "crates/toolkit-package/NODE-INSTALL.md",
+    "selected/contracts/MCPB-INSTALL.md": "crates/toolkit-package/MCPB-INSTALL.md",
+    "selected/contracts/LOCAL-RECIPES.md": "crates/toolkit-package/LOCAL-RECIPES.md",
+}
+RUN_CONTRACTS = {
+    "selected/contracts/HOSTED-METADATA.md": "sdk/consumer-setup/HOSTED-METADATA.md",
+    "selected/contracts/SETUP-RECIPES.md": "sdk/consumer-setup/RECIPES.md",
+    "selected/contracts/HOSTED-RECIPES.md": "sdk/consumer-setup/HOSTED-RECIPES.md",
+}
+# Two contract files the checkout carries for this route (the Linux route reads retained copies).
+RUN_TEXT_ROWS = {
+    "selected/contracts/COMPOSE-CONTRACT.md": RUN_TEXTS + "/selected/contracts/COMPOSE-CONTRACT.md",
+    "selected/contracts/COMPOSE-request.example.json": RUN_TEXTS + "/selected/contracts/COMPOSE-request.example.json",
+}
+RUN_KIT_FIXED = {"bin/install-library-consumer.py", "licenses/rust/COPYRIGHT-library.html",
+                 "licenses/toolkit/LICENSE-MIT", "licenses/toolkit/LICENSE-APACHE", "provenance/dependencies.json",
+                 *("bin/" + tool for tool in RUN_TOOLS), *("provenance/tools/" + tool + ".build.json" for tool in RUN_TOOLS),
+                 *(name.removeprefix("selected/") for name in RUN_KIT_CONTRACTS)}
+RUN_KIT_TREES = ("licenses/crates/", "provenance/crates/")
+# Guide option to the placeholder the packager renders; no digest is kept in the template.
+RUN_GUIDE_PINS = {"--contents-sha256": "CONSUMERS_CONTENTS_SHA256", "--official-contents-sha256": "OFFICIAL_CONTENTS_SHA256",
+                  "--official-installer-sha256": "OFFICIAL_INSTALLER_SHA256", "--verifier-sha256": "VERIFIER_SHA256"}
+# A thin arm64 Mach-O executable: magic, CPU type, CPU subtype, file type.
+MACHO_ARM64_EXECUTABLE = bytes.fromhex("cffaedfe0c0000010000000002000000")
+OFFICIAL_ASSET_MEMBERS = {"github-mcp-server": "github/github-mcp-server", "LICENSE": "github/notices/upstream-LICENSE"}
+OFFICIAL_NOTICE = re.compile(r"(?i)(licen[cs]e|notice|copying|thirdpartynotices)[A-Za-z0-9_.-]*\Z")
+# The installer's fixed launch template for the isolated Chrome profile.
+PLAYWRIGHT_TEMPLATE = {"mcpServers": {"playwright-isolated": {
+    "command": "ABS_NODE_EXECUTABLE",
+    "args": ["ABS_PLAYWRIGHT_INSTALL/node_modules/@playwright/mcp/cli.js", "--headless", "--isolated",
+             "--browser", "chrome", "--executable-path", "ABS_CHROME_EXECUTABLE", "--output-dir",
+             "ABS_PROCESS_OUTPUT", "--timeout-action", "5000", "--timeout-navigation", "10000"],
+    "cwd": "ABS_PROCESS_WORKSPACE",
+    "env": {"PATH": "/usr/bin:/bin", "HOME": "ABS_PROCESS_HOME", "TMPDIR": "ABS_PROCESS_TMP",
+            "PWTEST_SOCKETS_DIR": "ABS_SHORT_PROCESS_SOCKET_DIRECTORY"}}}}
+
+
+def encode_json(value) -> bytes:
+    return (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
+
+
+def read_outside(path: Path) -> bytes:
+    """One regular file by absolute path through the bounded reader; a link at the leaf is refused."""
+    return Inputs(path.parent.resolve(strict=True)).read(path.name)
+
+
+def run_sources(target: str) -> dict:
+    """Library member to checkout path: the selection base is the release commit (no kept digest)."""
+    selection = TARGETS[target]
+    rows = {name: SOURCES[name][0] for name in ("LICENSE-MIT", "LICENSE-APACHE")}
+    rows.update({name: path for name, (path, _) in selection["setup_assets"].items()})
+    rows["setup/backend.py"] = selection["setup_backend"][0]
+    rows["setup/mcp_adapter.py"] = selection["setup_adapter"][0]
+    rows["setup/install-library-consumer.py"] = RUN_INSTALLER
+    rows.update({name: path for name, (path, _) in PYTHON_SOURCES.items()})
+    rows.update(RUN_CONTRACTS)
+    rows.update(RUN_TEXT_ROWS)
+    return rows
+
+
+def run_pins(path: Path) -> tuple[bytes, list]:
+    """The committed pin file (connect-library-pins/1). Nothing is fetched here."""
+    raw = read_outside(path)
+    document = json.loads(raw, object_pairs_hook=unique_object)
+    rows = document.get("pins") if isinstance(document, dict) else None
+    if (not isinstance(document, dict) or document.get("schema") != "connect-library-pins/1"
+            or document.get("target") != "macos-arm64" or not isinstance(rows, list)):
+        raise PackageError("invalid_pin_file")
+    seen = set()
+    for row in rows:
+        if (not isinstance(row, dict)
+                or row.get("kind") not in {"pypi-wheel", "npm-tarball", "crate", "release-download"}
+                or any(not isinstance(row.get(key), str) or not row[key] for key in ("name", "version", "file", "use"))
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.+@-]{0,199}", row["file"])
+                or any(row.get(key) is not None and (not isinstance(row[key], str)
+                       or not re.fullmatch("[0-9a-f]{%d}" % size, row[key]))
+                       for key, size in (("sha256", 64), ("sha512", 128)))
+                or row.get("sha256") is None and row.get("sha512") is None
+                or (row["kind"], row["file"]) in seen):
+            raise PackageError("invalid_pin_file")
+        seen.add((row["kind"], row["file"]))
+    return raw, rows
+
+
+def run_pinned(directory: Path, row: dict) -> bytes:
+    """Read <directory>/<kind>/<file> and check it against its pin row again."""
+    try:
+        data = Inputs(directory).read(row["kind"] + "/" + row["file"])
+    except OSError:
+        raise PackageError("pinned_input_unavailable") from None
+    if (row.get("sha256") is not None and digest(data) != row["sha256"]
+            or row.get("sha512") is not None and hashlib.sha512(data).hexdigest() != row["sha512"]):
+        raise PackageError("pinned_input_digest_mismatch")
+    return data
+
+
+def npm_package(raw: bytes) -> tuple[dict, dict]:
+    """Read one registry tarball's members without extracting them: (package.json, files)."""
+    try:
+        with gzip.GzipFile(fileobj=io.BytesIO(raw)) as compressed:
+            expanded = compressed.read(MAX_TOTAL_BYTES + 1)
+        files, wrapper = {}, None
+        with tarfile.open(fileobj=io.BytesIO(expanded), mode="r:") as archive:
+            for member in archive:
+                parts = (member.name.rstrip("/") if member.isdir() else member.name).split("/")
+                wrapper = parts[0] if wrapper is None else wrapper
+                if (parts[0] != wrapper or any(part in ("", ".", "..") for part in parts)
+                        or not (member.isdir() or member.isfile()) or len(files) >= MAX_ENTRIES):
+                    raise ValueError
+                if member.isfile():
+                    if len(parts) < 2 or member.size > MAX_FILE_BYTES:
+                        raise ValueError
+                    files["/".join(parts[1:])] = archive.extractfile(member).read()
+        if len(expanded) > MAX_TOTAL_BYTES:
+            raise ValueError
+        meta = json.loads(files["package.json"], object_pairs_hook=unique_object)
+        if not isinstance(meta, dict):
+            raise ValueError
+    except (OSError, EOFError, KeyError, ValueError, tarfile.TarError):
+        raise PackageError("official_archive_mismatch") from None
+    return meta, files
+
+
+def compose_official(inputs: Inputs, rows: list, pinned_inputs: Path) -> tuple[dict, dict]:
+    """Compose the official bundle from the upstream release archive and the registry tarballs.
+
+    The GitHub server is the upstream asset's own executable with that archive's licence; the
+    Playwright component is the three registry tarballs with a lock written from them. Records
+    are generated here; the two profile texts and the guide come from the checkout. Nothing is
+    executed, and the installer still owns admission at installation.
+    """
+    components = json.loads(inputs.read(RUN_TEXTS + "/official/components.json"), object_pairs_hook=unique_object)
+    try:
+        github, playwright = components["github"], components["playwright"]
+        packages = playwright["packages"]
+        if (set(components) != {"schema_version", "github", "playwright"} or components["schema_version"] != 1
+                or set(github) != {"catalog_id", "version", "asset", "source_revision", "profile",
+                                   "selected_operations", "required_secret_environment"}
+                or set(playwright) != {"catalog_id", "profile", "source_revision", "selected_operations", "packages"}
+                or (github["catalog_id"], playwright["catalog_id"]) != ("github", "playwright")
+                or any(not isinstance(row["source_revision"], str) or not re.fullmatch("[0-9a-f]{40}", row["source_revision"])
+                       or not isinstance(row["profile"], str) or not isinstance(row["selected_operations"], list)
+                       or not all(isinstance(name, str) and re.fullmatch("[a-z_]{1,64}", name) for name in row["selected_operations"])
+                       for row in (github, playwright))
+                or not isinstance(github["version"], str) or not re.fullmatch(r"[0-9][0-9A-Za-z.+-]{0,63}", github["version"])
+                or not isinstance(github["asset"], str)
+                or not isinstance(github["required_secret_environment"], list)
+                or not all(isinstance(name, str) and re.fullmatch("[A-Z_]{1,64}", name) for name in github["required_secret_environment"])
+                or not isinstance(packages, dict) or list(packages)[:1] != ["@playwright/mcp"] or len(packages) != 3
+                or not all(isinstance(value, str) and value for value in packages.values())):
+            raise ValueError
+    except (KeyError, TypeError, ValueError):
+        raise PackageError("invalid_official_components") from None
+    files: dict[str, tuple[bytes, int]] = {}
+    for name in ("README.md", "github/UPSTREAM-PROFILE.md", "playwright/UPSTREAM-PROFILE.md"):
+        files[name] = (inputs.read(RUN_TEXTS + "/official/" + name), 0o644)
+    # The GitHub server: exactly the pinned upstream release archive of the declared version.
+    selected = [row for row in rows if row["kind"] == "release-download" and row["use"] == "official github"]
+    if len(selected) != 1 or selected[0]["file"] != github["asset"] or selected[0]["version"] != github["version"]:
+        raise PackageError("official_pin_mismatch")
+    asset_file = selected[0]["file"]
+    asset = run_pinned(pinned_inputs, selected[0])
+    members = {}
+    try:
+        with tarfile.open(fileobj=io.BytesIO(asset), mode="r:gz") as archive:
+            for index, member in enumerate(archive):
+                if index >= 64 or member.name in members:
+                    raise ValueError
+                if member.name in OFFICIAL_ASSET_MEMBERS:
+                    if not member.isfile() or member.size > MAX_FILE_BYTES:
+                        raise ValueError
+                    members[member.name] = archive.extractfile(member).read()
+        if set(members) != set(OFFICIAL_ASSET_MEMBERS) or not members["LICENSE"]:
+            raise ValueError
+    except (OSError, EOFError, ValueError, tarfile.TarError):
+        raise PackageError("official_archive_mismatch") from None
+    binary = members["github-mcp-server"]
+    if binary[:16] != MACHO_ARM64_EXECUTABLE:
+        raise PackageError("official_executable_mismatch")
+    files["github/github-mcp-server"] = (binary, 0o755)
+    files["github/notices/upstream-LICENSE"] = (members["LICENSE"], 0o644)
+    files["github/mcp.template.json"] = (encode_json({"mcpServers": {"github-selected-reads": {
+        "command": "ABS_GITHUB_INSTALL/github-mcp-server",
+        "args": ["stdio", "--read-only", "--gh-host", "https://github.com", "--tools", ",".join(github["selected_operations"])],
+        "cwd": "ABS_GITHUB_INSTALL", "env": {}}}}), 0o644)
+    github_record = {
+        "artifact": "github/github-mcp-server", "artifact_sha256": digest(binary), "catalog_id": "github",
+        "configuration_template": "github/mcp.template.json", "notices": "github/notices", "profile": github["profile"],
+        "required_secret_environment": github["required_secret_environment"],
+        "runtime_profile": f"GitHub MCP server v{github['version']} macOS arm64; upstream release asset, unexecuted input",
+        "selected_operations": github["selected_operations"],
+        # The upstream release archive the executable and its licence were taken from.
+        "source_archive": {"bytes": len(asset), "sha256": digest(asset)},
+        "source_revision": github["source_revision"], "target": "macos-arm64"}
+    # Playwright: the three pinned registry tarballs, a project and lock written from them.
+    selected = {row["name"]: row for row in rows if row["kind"] == "npm-tarball" and row["use"] == "official playwright"}
+    if (set(selected) != set(packages) or any(selected[name]["version"] != packages[name] for name in packages)
+            or any(row["sha512"] is None or not isinstance(row.get("url"), str)
+                   or not row["url"].startswith("https://registry.npmjs.org/") for row in selected.values())):
+        raise PackageError("official_pin_mismatch")
+    root_name = next(iter(packages))
+    project = {"name": "toolkit-official-playwright", "version": packages[root_name], "private": True,
+               "dependencies": {root_name: packages[root_name]}}
+    lock = {"name": project["name"], "version": project["version"], "lockfileVersion": 3, "requires": True,
+            "packages": {"": {"name": project["name"], "version": project["version"],
+                              "dependencies": project["dependencies"]}}}
+    closure, archives = [], []
+    for name in packages:
+        row = selected[name]
+        raw = run_pinned(pinned_inputs, row)
+        meta, members = npm_package(raw)
+        dependencies = meta.get("dependencies", {})
+        if (meta.get("name") != name or meta.get("version") != packages[name] or not isinstance(dependencies, dict)
+                or any(packages.get(key) != value for key, value in dependencies.items())
+                or any(key in meta for key in ("optionalDependencies", "peerDependencies", "bundleDependencies",
+                                               "bundledDependencies"))):
+            raise PackageError("official_archive_mismatch")
+        integrity = "sha512-" + base64.b64encode(hashlib.sha512(raw).digest()).decode()
+        entry = {"version": packages[name], "resolved": row["url"], "integrity": integrity}
+        entry.update({key: meta[key] for key in ("license", "dependencies", "bin", "engines") if key in meta})
+        lock["packages"]["node_modules/" + name] = entry
+        path = "playwright/archives/" + row["file"]
+        files[path] = (raw, 0o644)
+        archives.append(row)
+        closure.append({"id": name, "version": packages[name], "install_path": "node_modules/" + name, "path": path,
+                        "url": row["url"], "integrity": integrity, "sha256": digest(raw), "bytes": len(raw),
+                        "payload_files": len(members)})
+        folder = name.replace("@", "").replace("/", "-")
+        for leaf, data in members.items():
+            if "/" not in leaf and OFFICIAL_NOTICE.match(leaf):
+                files["playwright/notices/" + relative_path(folder + "/" + leaf)] = (data, 0o644)
+    if not any(name.startswith("playwright/notices/") for name in files):
+        raise PackageError("official_archive_mismatch")
+    project_raw = (json.dumps(project, indent=2) + "\n").encode()
+    lock_raw = (json.dumps(lock, indent=2) + "\n").encode()
+    files["playwright/package.json"] = (project_raw, 0o644)
+    files["playwright/package-lock.json"] = (lock_raw, 0o644)
+    files["playwright/closure.json"] = (encode_json({
+        "schema_version": 1, "package_json_sha256": digest(project_raw), "package_lock_sha256": digest(lock_raw),
+        "packages": closure}), 0o644)
+    files["playwright/mcp.template.json"] = (encode_json(PLAYWRIGHT_TEMPLATE), 0o644)
+    playwright_record = {
+        "browser_distributed": False, "catalog_id": "playwright", "closure": "playwright/closure.json",
+        "configuration_template": "playwright/mcp.template.json", "notices": "playwright/notices",
+        "package_json": "playwright/package.json", "package_lock": "playwright/package-lock.json",
+        "profile": playwright["profile"],
+        "runtime_profile": f"Playwright MCP {packages[root_name]} macOS arm64; registry packages, unexecuted input; "
+                           "no browser is distributed",
+        "selected_operations": playwright["selected_operations"], "source_revision": playwright["source_revision"],
+        "target": "macos-arm64", "whole_endpoint_exposed": True}
+    files["delivery.json"] = (encode_json({
+        "catalog_ids": ["github", "playwright"], "components": [github_record, playwright_record],
+        "format": "meerkat-toolkit.official-consumers.v1", "role": "service_connector"}), 0o644)
+    contents = encode_json({"format": 1, "files": {name: {"sha256": digest(data), "bytes": len(data)}
+                                                   for name, (data, _) in sorted(files.items())}})
+    sums = {name: digest(data) for name, (data, _) in files.items()}
+    sums["CONTENTS.json"] = digest(contents)
+    files["CONTENTS.json"] = (contents, 0o644)
+    files["SHA256SUMS"] = ("".join(f"{value}  {name}\n" for name, value in sorted(sums.items())).encode(), 0o644)
+    facts = {"contents_sha256": digest(contents), "components_sha256": digest(encode_json(components)),
+             "github": {"file": asset_file, "sha256": digest(asset), "version": github["version"],
+                        "source_revision": github["source_revision"], "executable_sha256": digest(binary)},
+             "playwright": [{"file": row["file"], "sha512": row["sha512"]} for row in archives]}
+    return files, facts
+
+
+def collect_run_kit(raw: bytes, target: str) -> tuple[dict, dict]:
+    """Take the tools, contracts, notices and crate archives of the kit this run built.
+
+    Only the run-built scope is accepted, its own record must name exactly the members present,
+    and nothing outside the fixed members and the two crate trees may be in it: a donor-shaped
+    archive, a history tree or another tool cannot enter the library through this route.
+    """
+    members = {}
+    try:
+        with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as archive:
+            expanded = 0
+            for member in archive:
+                name = member.name.removeprefix(RUN_KIT_ROOT + "/")
+                if (member.name != RUN_KIT_ROOT + "/" + name or name in members or not member.isfile()
+                        or member.mode not in (0o644, 0o755)):
+                    raise PackageError("invalid_kit_member")
+                relative_path(name)
+                expanded += member.size
+                if len(members) >= MAX_DONOR_ENTRIES or member.size > MAX_FILE_BYTES or expanded > MAX_TOTAL_BYTES:
+                    raise PackageError("kit_too_large")
+                members[name] = (archive.extractfile(member).read(), member.mode)
+    except (tarfile.TarError, EOFError):
+        raise PackageError("invalid_kit_member") from None
+    try:
+        record = json.loads(members["provenance/kit.json"][0], object_pairs_hook=unique_object)
+        if record["scope"] != RUN_KIT_SCOPE or record["platform"] != target:
+            raise KeyError
+    except (KeyError, TypeError, ValueError):
+        raise PackageError("kit_scope_mismatch") from None
+    payload = {name: value for name, value in members.items() if name not in ("provenance/kit.json", "SHA256SUMS")}
+    listed = record.get("files")
+    if (not isinstance(listed, dict) or set(listed) != set(payload) or not RUN_KIT_FIXED <= set(payload)
+            or any(name not in RUN_KIT_FIXED and not name.startswith(RUN_KIT_TREES) for name in payload)
+            or any(not isinstance(listed[name], dict) or listed[name].get("sha256") != digest(data)
+                   or listed[name].get("mode") != mode or mode != (0o755 if name.startswith("bin/") else 0o644)
+                   for name, (data, mode) in payload.items())):
+        raise PackageError("kit_inventory_mismatch")
+    for tool in RUN_TOOLS:
+        data, build = payload["bin/" + tool][0], payload["provenance/tools/" + tool + ".build.json"][0]
+        validate_selected_tool_record("bin/" + tool, target, {"source": "tools/" + tool, "sha256": digest(data)},
+                                      data, build, digest(build))
+        features = json.loads(build, object_pairs_hook=unique_object).get("features")
+        if tool in RUN_ARTIFACT_TOOLS and (not isinstance(features, list) or "local-artifacts" not in features):
+            raise PackageError("selected_tool_build_features_mismatch")
+    result = {"selected/" + name: value for name, value in payload.items()}
+    result["selected/provenance/kit.json"] = members["provenance/kit.json"]
+    selection = {"scope": "retained_selected_tools", "platform": target,
+                 "kit": {"sha256": digest(raw), "scope": RUN_KIT_SCOPE},
+                 "files": {name: digest(data) for name, (data, _) in sorted(payload.items())},
+                 "capabilities": list(RUN_CAPABILITIES)}
+    result["selected/provenance/selection.json"] = (encode_json(selection), 0o644)
+    return result, record
+
+
+def render_run_guide(template: bytes, values: dict, files: dict) -> bytes:
+    """Render the guide's pins from the payload being packaged, then check every literal pin."""
+    text = template.decode("utf-8")
+    names = set(re.findall(r"\{\{([^{}]*)\}\}", text))
+    if not names <= set(values):
+        raise PackageError("guide_placeholder_unknown")
+    if any(values[name] is None for name in names):
+        raise PackageError("guide_input_missing")
+    for name in names:
+        text = text.replace("{{" + name + "}}", values[name])
+    if "{{" in text or "}}" in text:
+        raise PackageError("guide_placeholder_unknown")
+    for flag, name in RUN_GUIDE_PINS.items():
+        pins = re.findall(re.escape(flag) + r"(?:[\"']\s*,\s*[\"']|\s+)([0-9a-f]{64})", text)
+        if not pins:
+            raise PackageError("guide_pin_missing")
+        if any(pin != values[name] for pin in pins):
+            raise PackageError("guide_command_digest_mismatch")
+    validate_guide_commands(text.encode("utf-8"), files)
+    return text.encode("utf-8")
+
+
+def collect_run(root: Path, target: str, *, edition: str, pins: Path, pinned_inputs: Path, consumers: Path,
+                consumers_contents_sha256: str, consumer_closure: Path, kit: Path, kit_sha256: str
+                ) -> tuple[dict, dict]:
+    """Collect the macOS library of a run. Reads only; nothing fetched, built or executed here."""
+    for value in (consumers_contents_sha256, kit_sha256):
+        if not isinstance(value, str) or not HEX.fullmatch(value):
+            raise PackageError("incomplete_run_selection")
+    inputs = Inputs(root)
+    sources = run_sources(target)
+    # The exporter's bundle, exactly as its manifest names it.
+    bundle = Inputs(consumers.parent)
+    sums = bundle.read(consumers.name + "/SHA256SUMS")
+    consumer = collect_bundle(bundle, {"bundle": consumers.name, "contents": consumers_contents_sha256,
+                                       "sums": digest(sums)})
+    closure = read_outside(consumer_closure)
+    record = json.loads(closure, object_pairs_hook=unique_object)
+    manifest = json.loads(consumer["CONTENTS.json"][0], object_pairs_hook=unique_object)
+    accepted = manifest.get("accepted_inputs")
+    # Bound by digest: the manifest names this record's bytes, under any key.
+    if not isinstance(accepted, dict) or digest(closure) not in accepted.values():
+        raise PackageError("selected_consumer_closure_binding_mismatch")
+    check_consumer_closure(record, manifest, consumer, target)
+    result = {"consumers/" + name: value for name, value in consumer.items()}
+    result["selected/provenance/consumer-dependency-closure.json"] = (closure, 0o644)
+    # The kit this run built, at the digest its step printed.
+    kit_raw = read_outside(kit)
+    if digest(kit_raw) != kit_sha256:
+        raise PackageError("kit_digest_mismatch")
+    selected, _ = collect_run_kit(kit_raw, target)
+    result.update(selected)
+    # Checkout rows at the release commit: bytes as they are, each recorded with its digest.
+    recorded = {}
+    documents = {}
+    destinations = {path: name for name, path in sources.items()}
+    destinations.update({path: name for name, path in RUN_KIT_CONTRACTS.items()})
+    for name, path in sources.items():
+        data = inputs.read(path)
+        recorded[name] = {"path": path, "sha256": digest(data)}
+        if name.endswith(".md") and (name.startswith("selected/contracts/") or name == "selected/agent/instructions.md"):
+            original = data
+            data = relocate_links(path, name, data, destinations)
+            documents[name] = {"source": path, "source_sha256": digest(original), "output_sha256": digest(data)}
+        result[relative_path(name)] = (data, 0o644)
+    for name, path in RUN_KIT_CONTRACTS.items():
+        original, mode = result[name]
+        data = relocate_links(path, name, original, destinations)
+        result[name] = (data, mode)
+        documents[name] = {"kit_member": name.removeprefix("selected/"), "source": path,
+                           "source_sha256": digest(original), "output_sha256": digest(data)}
+    if result["selected/bin/install-library-consumer.py"][0] != result["setup/install-library-consumer.py"][0]:
+        raise PackageError("kit_checkout_mismatch")
+    static_files, static_dirs = inputs.file_set("sdk/consumer-setup/static")
+    if static_files != {"index.html", "app.js", "form.js", "style.css"} or static_dirs:
+        raise PackageError("setup_file_set_mismatch")
+    result["selected/provenance/document-sources.json"] = (
+        encode_json({"scope": "checkout_documents_at_the_release_commit", "files": documents}), 0o644)
+    # The official bundle and its routes in the consumer bundle.
+    pins_raw, rows = run_pins(pins)
+    official, official_facts = compose_official(inputs, rows, pinned_inputs)
+    result.update({"official/" + name: value for name, value in official.items()})
+    for name in ("README.md", "github/UPSTREAM-PROFILE.md", "playwright/UPSTREAM-PROFILE.md"):
+        recorded["official/" + name] = {"path": RUN_TEXTS + "/official/" + name, "sha256": digest(official[name][0])}
+    compose_official_routes(result, OFFICIAL_ROUTE_BINDINGS[target])
+    # The guide, rendered last: its pins are digests of the final payload.
+    template = inputs.read(RUN_TEXTS + "/README.md")
+    recorded["README.md"] = {"path": RUN_TEXTS + "/README.md", "sha256": digest(template)}
+    installer = digest(result["setup/install-library-consumer.py"][0])
+    example = result.get("consumers/agno/hackernews.json")
+    guide = render_run_guide(template, {
+        "EDITION": edition, "CONSUMERS_CONTENTS_SHA256": digest(result["consumers/CONTENTS.json"][0]),
+        "OFFICIAL_CONTENTS_SHA256": digest(result["official/CONTENTS.json"][0]),
+        "OFFICIAL_INSTALLER_SHA256": installer, "VERIFIER_SHA256": installer,
+        "HACKERNEWS_CONFIG_SHA256": digest(example[0]) if example is not None else None,
+        "GITHUB_VERSION": official_facts["github"]["version"],
+        "GITHUB_SOURCE_REVISION": official_facts["github"]["source_revision"],
+        "GITHUB_EXECUTABLE_SHA256": official_facts["github"]["executable_sha256"]}, result)
+    result["README.md"] = (guide, 0o644)
+    facts = {
+        "pins": {"sha256": digest(pins_raw), "bytes": len(pins_raw)},
+        "kit": {"sha256": kit_sha256, "bytes": len(kit_raw)},
+        "consumers": {"contents_sha256": consumers_contents_sha256, "sums_sha256": digest(sums)},
+        "consumer_closure": {"sha256": digest(closure)},
+        "official": {"contents_sha256": official_facts["contents_sha256"],
+                     "components_sha256": official_facts["components_sha256"],
+                     "github": {"file": official_facts["github"]["file"], "sha256": official_facts["github"]["sha256"]},
+                     "playwright": official_facts["playwright"]},
+        "guide": {"template_sha256": digest(template), "rendered_sha256": digest(guide)}}
+    result["selected/provenance/run-inputs.json"] = (encode_json({
+        "schema_version": 1, "scope": "run_built_library_inputs", "target": target, "edition": edition,
+        "sources": recorded, "inputs": facts}), 0o644)
+    if (any(len(data) > MAX_FILE_BYTES for data, _ in result.values())
+            or sum(len(data) for data, _ in result.values()) > MAX_TOTAL_BYTES):
+        raise PackageError("output_too_large")
+    return result, facts
+
+
+def package_run(root: Path, target: str, output: Path, *, edition: str, pins: Path, pinned_inputs: Path,
+                consumers: Path, consumers_contents_sha256: str, consumer_closure: Path, kit: Path,
+                kit_sha256: str) -> dict:
+    """Package the macOS library from this run's inputs (the route --pins selects)."""
+    paths = (output, pins, pinned_inputs, consumers, consumer_closure, kit)
+    if (target not in TARGETS or any(not isinstance(path, Path) or not path.is_absolute() for path in paths)
+            or output.name in {"", ".", ".."}):
+        raise PackageError("invalid_output_or_target")
+    if target != "macos-arm64":
+        raise PackageError("run_route_is_macos_only")
+    if not isinstance(edition, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}", edition):
+        raise PackageError("invalid_edition")
+    if output.exists() or output.is_symlink():
+        raise PackageError("output_exists")
+    output = output.parent.resolve(strict=True) / output.name
+    root = root.resolve(strict=True)
+    pinned_inputs, consumers = pinned_inputs.resolve(strict=True), consumers.resolve(strict=True)
+    if any(output.is_relative_to(path) for path in (pinned_inputs, consumers, root / "sdk/consumer-setup/static",
+                                                    root / RUN_TEXTS)):
+        raise PackageError("output_inside_input")
+    source_sha256 = digest(Path(__file__).read_bytes())
+    files, facts = collect_run(root, target, edition=edition, pins=pins, pinned_inputs=pinned_inputs,
+                               consumers=consumers, consumers_contents_sha256=consumers_contents_sha256,
+                               consumer_closure=consumer_closure, kit=kit, kit_sha256=kit_sha256)
+    destination, checksum = write_release(output, f"toolkit-library-{edition}-{target}", files)
+    if digest(Path(__file__).read_bytes()) != source_sha256:
+        raise PackageError("packager_source_changed")
+    result = {"schema_version": 2, "target": target, "edition": edition, "archive": str(destination),
+              "sha256": checksum, "archive_bytes": destination.stat().st_size, "files": len(files),
+              "packager_source_sha256": source_sha256, "inputs": facts,
+              "scope": "run_built_library_packaging_not_execution_qualification"}
+    with (output / "build.json").open("x", encoding="utf-8") as stream:
+        stream.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
     return result
 
 
@@ -2709,10 +3214,30 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True, help="New absolute output directory; its parent must exist")
     parser.add_argument("--input-selection", type=Path)
     parser.add_argument("--input-selection-sha256")
+    run = parser.add_argument_group(
+        "the macOS run route (selected by --pins; never with --input-selection): every input is the "
+        "checkout's, a pinned public file or something this run built")
+    run.add_argument("--edition", help="edition label of the archive name")
+    run.add_argument("--pins", type=Path, help="the committed pin file (connect-library-pins/1)")
+    run.add_argument("--pinned-inputs", type=Path, help="directory of fetched pinned files: <kind>/<file>")
+    run.add_argument("--consumers", type=Path, help="the exporter's consumer bundle directory")
+    run.add_argument("--consumers-contents-sha256", help="sha256 of the bundle's CONTENTS.json")
+    run.add_argument("--consumer-closure", type=Path, help="the bundle's dependency closure record")
+    run.add_argument("--kit", type=Path, help="the agent install kit archive this run built")
+    run.add_argument("--kit-sha256", help="sha256 the kit step printed")
     args = parser.parse_args()
+    selected = {name: getattr(args, name) for name in (
+        "edition", "pins", "pinned_inputs", "consumers", "consumers_contents_sha256", "consumer_closure",
+        "kit", "kit_sha256")}
     try:
-        result = package(ROOT, args.target, args.output, input_selection=args.input_selection,
-                         input_selection_sha256=args.input_selection_sha256)
+        if any(value is not None for value in selected.values()):
+            if (any(value is None for value in selected.values())
+                    or args.input_selection is not None or args.input_selection_sha256 is not None):
+                raise PackageError("incomplete_run_selection")
+            result = package_run(ROOT, args.target, args.output, **selected)
+        else:
+            result = package(ROOT, args.target, args.output, input_selection=args.input_selection,
+                             input_selection_sha256=args.input_selection_sha256)
     except PackageError as error:
         parser.exit(1, f"Packaging refused: {error}. Inputs and earlier outputs were not replaced.\n")
     except (OSError, ValueError, TypeError, UnicodeError, RecursionError):

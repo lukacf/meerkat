@@ -1600,3 +1600,62 @@ def test_a_status_says_when_the_roster_lists_an_agent_served_from_its_record():
         ).roster_listing_superseded
         is False
     )
+
+
+def test_a_status_says_when_an_agent_is_archived_or_waits_for_its_host():
+    from meerkat_meta.identity_first_models import IdentityStatus
+
+    wire = {
+        "identity": "scout",
+        "state": "dormant",
+        "profile": "researcher",
+        "addressability": "addressable",
+        "labels": {},
+        "intent_managed": False,
+    }
+    # Each is written only when it is so: an absent member reads False, and
+    # a seated agent's status is written as before.
+    seated = IdentityStatus.from_dict(wire)
+    assert (seated.archived, seated.preparation_pending) == (False, False)
+    assert not {"archived", "preparation_pending"} & set(seated.to_dict())
+
+    archived = IdentityStatus.from_dict(dict(wire, archived=True))
+    assert (archived.archived, archived.preparation_pending) == (True, False)
+    assert archived.to_dict()["archived"] is True
+    assert "preparation_pending" not in archived.to_dict()
+
+    waiting = IdentityStatus.from_dict(dict(wire, preparation_pending=True))
+    assert (waiting.archived, waiting.preparation_pending) == (False, True)
+    assert waiting.to_dict()["preparation_pending"] is True
+    assert "archived" not in waiting.to_dict()
+
+    # Only the boolean true says so.
+    loose = IdentityStatus.from_dict(dict(wire, archived="true", preparation_pending=1))
+    assert (loose.archived, loose.preparation_pending) == (False, False)
+
+
+def test_a_status_carries_none_of_what_get_and_list_read():
+    """An agent's spec digest and revision, its provenance and its open
+    operations are read with ``get`` and ``list``, never on the status."""
+    from meerkat_meta.identity_first_models import IdentityStatus
+
+    read_elsewhere = {"spec_digest", "spec_revision", "provenance", "open_operations"}
+    assert not read_elsewhere & {field.name for field in dataclasses.fields(IdentityStatus)}
+
+
+@pytest.mark.asyncio
+async def test_an_agent_with_nothing_open_names_no_operation():
+    """``open_operations`` is left out when nothing is open, never sent
+    empty: an agent then reads an empty tuple."""
+    identities, _ = make_identities(
+        results={
+            "meta/identity/get": summary(instructions=[], labels={}, peers=[]),
+            "meta/identity/list": {
+                "agents": [summary("scout"), summary("editor", open_operations=[OPERATION_ID])]
+            },
+        }
+    )
+    assert (await identities.get("scout")).open_operations == ()
+    scout, editor = (await identities.list()).agents
+    assert scout.open_operations == ()
+    assert editor.open_operations == (OPERATION_ID,)

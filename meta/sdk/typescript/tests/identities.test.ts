@@ -1451,3 +1451,62 @@ describe("identity family: who reaches an agent, its schedules, host preparation
     );
   });
 });
+
+describe("identity family: what a status says and what get and list read", () => {
+  const wire = {
+    identity: "scout",
+    state: "dormant",
+    profile: "researcher",
+    addressability: "addressable",
+    labels: {},
+    intent_managed: false,
+  };
+
+  it("a status says when an agent is archived or waits for its host", () => {
+    // Each is written only when it is so: an absent member reads false.
+    const seated = sdk.parseIdentityStatus(wire);
+    assert.deepEqual([seated.archived, seated.preparationPending], [false, false]);
+
+    const archived = sdk.parseIdentityStatus({ ...wire, archived: true });
+    assert.deepEqual([archived.archived, archived.preparationPending], [true, false]);
+
+    const waiting = sdk.parseIdentityStatus({ ...wire, preparation_pending: true });
+    assert.deepEqual([waiting.archived, waiting.preparationPending], [false, true]);
+
+    // Only the boolean true says so.
+    const loose = sdk.parseIdentityStatus({ ...wire, archived: "true", preparation_pending: 1 });
+    assert.deepEqual([loose.archived, loose.preparationPending], [false, false]);
+  });
+
+  // An agent's spec digest and revision, its provenance and its open
+  // operations are read with `get` and `list`, never on the status.
+  it("a status carries none of what get and list read", () => {
+    const status = sdk.parseIdentityStatus({
+      ...wire,
+      spec_digest: DIGEST,
+      spec_revision: 3,
+      provenance: { entered: "created" },
+      open_operations: [OPERATION_ID],
+    });
+    for (const key of ["specDigest", "specRevision", "provenance", "openOperations"]) {
+      assert.ok(!(key in status), key);
+    }
+  });
+
+  // `open_operations` is left out when nothing is open, never sent empty:
+  // an agent then reads an empty list.
+  it("an agent with nothing open names no operation", async () => {
+    const { identities } = await scripted([
+      { result: summary("scout", { instructions: [], labels: {}, peers: [] }) },
+      {
+        result: {
+          agents: [summary("scout"), summary("editor", { open_operations: [OPERATION_ID] })],
+        },
+      },
+    ]);
+    assert.deepEqual((await identities.get("scout")).openOperations, []);
+    const [scout, editor] = (await identities.list()).agents;
+    assert.deepEqual(scout.openOperations, []);
+    assert.deepEqual(editor.openOperations, [OPERATION_ID]);
+  });
+});

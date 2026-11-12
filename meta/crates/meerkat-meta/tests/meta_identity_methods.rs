@@ -4417,7 +4417,10 @@ async fn an_agent_requester_is_judged_by_its_own_profile_and_never_changes_itsel
 /// admitted by its grant.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_agent_call_attributed_to_another_agent_than_its_sessions_member_is_refused() {
-    use meerkat_meta::identity_creation::core_member_name;
+    use meerkat_meta::identity_creation::{
+        ChangeCommit, CoreChangeExecutor, IdentityChangeExecutor, RequestContext, RequestEnvelope,
+        RequesterFacts, consent_of_plan, core_member_name, normalize_create,
+    };
 
     let temp = tempfile::tempdir().unwrap();
     let (runtime, asked, fail_next_session) = launch(temp.path(), false).await;
@@ -4433,7 +4436,8 @@ async fn an_agent_call_attributed_to_another_agent_than_its_sessions_member_is_r
     }))
     .expect("the policy parses")
     .expect("the policy is enabled");
-    assert!(runtime.attach_identity_policy(Arc::new(policy), IdentityFamilyOptions::new()));
+    let policy = Arc::new(policy);
+    assert!(runtime.attach_identity_policy(Arc::clone(&policy), IdentityFamilyOptions::new()));
     let mut rig = Rig {
         runtime,
         asked,
@@ -4490,7 +4494,7 @@ async fn an_agent_call_attributed_to_another_agent_than_its_sessions_member_is_r
     assert_eq!(answered.token(), "done", "{answered:?}");
 
     // Attributed to scout, in the chief's session.
-    let crossed = ChangeRequester::agent_session("scout", session);
+    let crossed = ChangeRequester::agent_session("scout", session.clone());
     let refused = rig
         .change(
             &crossed,
@@ -4504,6 +4508,173 @@ async fn an_agent_call_attributed_to_another_agent_than_its_sessions_member_is_r
         "{refused:?}"
     );
     assert!(rig.agent("third").await.is_none(), "nothing was created");
+
+    // The seam asks again, for a caller that reaches it another way than
+    // through the family: the same create committed there is refused the
+    // same, and nothing is created; the session's own member is admitted.
+    let seam = CoreChangeExecutor::new();
+    let profiles: std::collections::BTreeSet<String> = [
+        "worker".to_owned(),
+        "planner".to_owned(),
+        "runner".to_owned(),
+    ]
+    .into();
+    let peers = BTreeMap::new();
+    let create_as = |identity: &str, profile: &str, name: &str| {
+        let create: CreateAgents =
+            serde_json::from_value(json!({"agents": [{"name": name, "profile": "worker"}]}))
+                .expect("a create as a surface writes it");
+        normalize_create(
+            &policy,
+            &RequestContext {
+                requester: &RequesterFacts::agent(identity, profile, BTreeMap::new()),
+                profiles: &profiles,
+                peers: &peers,
+            },
+            RequestEnvelope::default(),
+            &create.to_create_specs().expect("the agents of a create"),
+        )
+        .expect("the create is allowed")
+    };
+    let request = create_as("scout", "worker", "fifth");
+    let operation = OperationId::for_request(&crossed.recorded(), "seam-1").expect("an id");
+    let refused = seam
+        .commit(ChangeCommit::new(
+            &mob,
+            &operation,
+            &crossed,
+            consent_of_plan(&request.plan).expect("the rules allow it"),
+            &request.request,
+        ))
+        .await
+        .expect("a typed outcome");
+    assert_eq!(
+        refusal_of(&refused.outcome),
+        ("invalid_request".to_owned(), None),
+        "{refused:?}"
+    );
+    assert!(rig.agent("fifth").await.is_none(), "nothing was created");
+    let request = create_as("chief", "planner", "fifth");
+    let own = ChangeRequester::agent_session("chief", session);
+    let operation = OperationId::for_request(&own.recorded(), "seam-1").expect("an id");
+    let admitted = seam
+        .commit(ChangeCommit::new(
+            &mob,
+            &operation,
+            &own,
+            consent_of_plan(&request.plan).expect("the rules allow it"),
+            &request.request,
+        ))
+        .await
+        .expect("a typed outcome");
+    assert_eq!(admitted.outcome.token(), "done", "{admitted:?}");
+    rig.shutdown().await;
+}
+
+/// A person is never asked to decide a call whose attribution is not its
+/// session's member: under a rule that needs approval, a create attributed
+/// to one agent in the session of another is refused `invalid_request` at
+/// once, before anything is held. No decision holds its operation, and
+/// nothing is created. The same create by the session's own member is
+/// held for a person, as the rule says.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_call_attributed_to_another_agent_than_its_sessions_member_is_never_held() {
+    use meerkat_meta::identity_creation::core_member_name;
+
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, asked, fail_next_session) =
+        launch_with(temp.path(), &fresh_mob_id(), false, true).await;
+    let approval = json!({"kind": "require_approval", "approver": {"id": APPROVERS}});
+    let policy = IdentityCreationPolicy::parse(&json!({
+        "enabled": true,
+        "approval": {"rules": [
+            {"change": ["create"], "requester": {"kind": "host"},
+             "target": {"profile": ["worker", "planner"]}, "outcome": {"kind": "allow"}},
+            {"change": ["create"],
+             "requester": {"kind": "agent", "profile": ["worker", "planner"]},
+             "target": {"profile": ["worker"]}, "outcome": approval},
+        ]},
+    }))
+    .expect("the policy parses")
+    .expect("the policy is enabled");
+    assert!(runtime.attach_identity_policy(Arc::new(policy), IdentityFamilyOptions::new()));
+    let mut rig = Rig {
+        runtime,
+        asked,
+        step: Arc::new(RecordingStep::default()),
+        fail_next_session,
+    };
+    let host = ChangeRequester::host("ops");
+    let created = rig
+        .change(
+            &host,
+            "create-1",
+            create_of(json!([
+                {"name": "chief", "profile": "planner", "first_message": "Begin the day."},
+                {"name": "scout", "profile": "worker"},
+            ])),
+        )
+        .await;
+    assert_eq!(created.token(), "done", "{created:?}");
+    assert!(
+        rig.asked("Begin the day.").await,
+        "the chief's first message runs"
+    );
+    let mob = rig.runtime.mob_handle();
+    let chief = core_member_name("chief").expect("a member name");
+    let session = match mob.identity_entry(&chief) {
+        Ok(meerkat_mob::IdentityEntryRead::Entry(view)) => match view.standing {
+            meerkat_mob::EntryStanding::Seated(seated) => {
+                seated.session_id.expect("the chief has a session")
+            }
+            _ => panic!("the chief is seated"),
+        },
+        _ => panic!("the chief is an entry of the mob"),
+    };
+
+    // Attributed to scout, in the chief's session: refused at once.
+    let crossed = ChangeRequester::agent_session("scout", session.clone());
+    let refused = rig
+        .change(
+            &crossed,
+            "r-1",
+            create_of(json!([{"name": "third", "profile": "worker"}])),
+        )
+        .await;
+    assert_eq!(
+        refusal_of(&refused),
+        ("invalid_request".to_owned(), None),
+        "{refused:?}"
+    );
+    let unheld = rig
+        .family()
+        .read(
+            &mob,
+            &host,
+            IdentityRead::Operation(
+                OperationId::for_request(&crossed.recorded(), "r-1").expect("a request id"),
+            ),
+        )
+        .await;
+    assert!(
+        matches!(
+            unheld,
+            Ok(IdentityReadAnswer::Operation(OperationState::Unknown))
+        ),
+        "no decision holds a refused call: {unheld:?}"
+    );
+    assert!(rig.agent("third").await.is_none(), "nothing was created");
+
+    // The session's own member, under the same rule, is held for a person.
+    let own = ChangeRequester::agent_session("chief", session);
+    let held = rig
+        .change(
+            &own,
+            "r-1",
+            create_of(json!([{"name": "fourth", "profile": "worker"}])),
+        )
+        .await;
+    assert_eq!(held.token(), "pending_decision", "{held:?}");
     rig.shutdown().await;
 }
 

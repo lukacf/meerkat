@@ -97,8 +97,8 @@
     },
     {
       "path": "guides/host-composition.mdx",
-      "source_sha256": "8aa812fab101d6962701b093f093691cb85b5e2d65569b0f5689055baffc152b",
-      "rendered_sha256": "61044da132f284bd6294aec9ffc88c9ff25a2182b03b7af1869c88982b91ddc8"
+      "source_sha256": "db814b5ba086859b221722a6b12fb0bf57c94c9fe4fcd23be17d0672002a3c24",
+      "rendered_sha256": "013e2ac4e870afc3b8137791a0d2b61ed5281aa05464701789c303e7b18f82b2"
     },
     {
       "path": "guides/manage-connections.mdx",

@@ -2068,12 +2068,17 @@ impl super::MobHandle {
     /// and every build of it is refused when the labels its host answers
     /// are not its seat's
     /// ([`super::MemberBuildPreparationRefusal::store_owned_seat_labels`]).
-    /// So a seat that kept the labels it was seated with after its row's
-    /// labels moved would be refused its next build for good. A member that
-    /// holds work is answered deferred and keeps its seat: the restamp is
-    /// owed until its update is retried. A member a same-session successor
-    /// cannot serve (a placed one, one wired to a placed member, one on a
-    /// service that keeps no durable sessions) keeps its seat and labels.
+    /// A member that holds work is answered deferred and is not
+    /// interrupted, and a member a same-session successor cannot serve (a
+    /// placed one, one wired to a placed member, one on a service that
+    /// keeps no durable sessions) is kept. Whenever the restamp did not
+    /// seat the row's labels (deferred, failed, or kept), the member's
+    /// roster entry takes them at once
+    /// ([`Self::seat_store_owned_row_labels`]): what decides on a member's
+    /// labels reads the roster, and the member's next build then carries
+    /// what its row holds. The journal's seat row follows at the member's
+    /// next restamp; a retry of the same declaration finds the seat equal
+    /// to its row and restamps nothing.
     async fn restamp_store_owned_seat_labels(
         &self,
         entry: &DeclaredEntry,
@@ -2112,8 +2117,15 @@ impl super::MobHandle {
         };
         match restamped {
             Ok(generation) => Some(DeclaredEntryOutcome::Restamped { generation }),
-            Err(MobError::UnsupportedForMode { .. }) => None,
-            Err(error) => Some(failure_outcome(error)),
+            Err(error) => {
+                // No restamp seated the row's labels: the roster entry
+                // takes them, in an actor step of its own.
+                self.seat_store_owned_row_labels(identity).await;
+                match error {
+                    MobError::UnsupportedForMode { .. } => None,
+                    error => Some(failure_outcome(error)),
+                }
+            }
         }
     }
 

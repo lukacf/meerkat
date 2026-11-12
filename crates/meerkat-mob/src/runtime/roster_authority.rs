@@ -165,6 +165,21 @@ impl RosterAuthority {
             .set_store_owned_seat_inputs(identity, context, instructions);
     }
 
+    /// Set a store-owned identity's seat labels to its row's
+    /// ([`Roster::set_store_owned_seat_labels`]). Counted as a mutation
+    /// when the entry changed, which the answer says.
+    pub(crate) fn set_store_owned_seat_labels(
+        &mut self,
+        identity: &AgentIdentity,
+        labels: &std::collections::BTreeMap<String, String>,
+    ) -> bool {
+        let changed = self.roster.set_store_owned_seat_labels(identity, labels);
+        if changed {
+            self.bump();
+        }
+        changed
+    }
+
     /// The continuity intent the current incarnation of `identity` was
     /// spawned with ([`Roster::spawn_continuity_intent`]).
     pub(crate) fn spawn_continuity_intent(

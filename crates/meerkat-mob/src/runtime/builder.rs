@@ -4069,6 +4069,29 @@ async fn commit_placed_spawn_event_repairs(
             .await?;
     }
 
+    // A repaired row is written from the carrier, which holds no fork
+    // lineage root for operator instructions (the root lives on the row the
+    // stop cut off, and in MobMachine, which this start rebuilds from the
+    // rows). A repaired member that was seated as a helper fork is therefore
+    // seated outside its fork family: no record written for the family's
+    // first member and its forks reaches it. One warning names the members;
+    // it carries no record body.
+    let repaired_members: Vec<&str> = initial_plan
+        .entries
+        .iter()
+        .filter(|entry| repair_spawn_ids.contains(&entry.record.spawn_id))
+        .map(|entry| entry.record.agent_identity.as_str())
+        .collect();
+    tracing::warn!(
+        mob_id = %mob_id,
+        repaired = repaired_members.len(),
+        members = ?repaired_members,
+        "placed members were seated again from their spawn carriers after a stop in the middle \
+         of their seat; a carrier holds no operator instruction fork lineage, so a member among \
+         them that was seated as a fork is outside its fork family and is not selected by the \
+         records written for that family's first member and its forks"
+    );
+
     event_store.append_batch(repairs).await?;
     *mob_events = event_store
         .replay_all()

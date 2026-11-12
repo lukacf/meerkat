@@ -265,6 +265,12 @@ fn journaled_body<'a>(event: &'a MobEvent, key: &str, digest: &str) -> Option<&'
     }
 }
 
+/// How many journal rows [`read_journaled_bodies`] has read in this process:
+/// a row's probe that a step read none.
+#[cfg(test)]
+pub(crate) static JOURNALED_BODY_ROW_READS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 /// Read from the mob's journal the member-targeted bodies a snapshot needs
 /// ([`OperatorInstructionBodies::member_journal_reads`]): one row per
 /// record, by its cursor. A row that is not the record's committed row at
@@ -276,6 +282,8 @@ pub(crate) async fn read_journaled_bodies(
 ) -> Result<Vec<(String, String, Arc<str>)>, MobError> {
     let mut read = Vec::with_capacity(reads.len());
     for (key, digest, cursor) in reads {
+        #[cfg(test)]
+        JOURNALED_BODY_ROW_READS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let rows = events
             .poll(cursor.saturating_sub(1), 1)
             .await
@@ -2163,10 +2171,6 @@ mod tests {
                 PlacedInstructionFailure::Refused(InstructionSetErrorCode::SlotManagedByActivation),
                 mob_dsl::MemberInstructionBlock::SlotManagedByActivation,
             ),
-            (
-                PlacedInstructionFailure::Refused(InstructionSetErrorCode::DurabilityUnavailable),
-                mob_dsl::MemberInstructionBlock::DurabilityUnavailable,
-            ),
         ] {
             assert!(
                 matches!(
@@ -2180,14 +2184,67 @@ mod tests {
                 "{expected:?}"
             );
         }
+        // A store that cannot take the record now (`durability_unavailable`)
+        // leaves the member owed, as every failure but the three owner
+        // refusals does: this path no longer produces the block kind.
         for failure in [
             PlacedInstructionFailure::Stale,
             PlacedInstructionFailure::Refused(InstructionSetErrorCode::MalformedInstructionHistory),
+            PlacedInstructionFailure::Refused(InstructionSetErrorCode::DurabilityUnavailable),
             PlacedInstructionFailure::Failed(MobError::Internal(
                 "the round trip timed out".to_string(),
             )),
         ] {
             assert!(matches!(classify(Err(failure)), DeliveryResult::Retry(_)));
+        }
+    }
+
+    /// A local session's answer blocks the member only for the three
+    /// refusals an operator has to clear (the session, another mob or an
+    /// activation owns the target or a slot). Every other failure leaves the
+    /// member owed and is retried: a store that cannot take the record now
+    /// (`durability_unavailable`) included, so no answer of a session
+    /// produces the `durability_unavailable` block kind any more.
+    #[test]
+    fn a_local_sessions_answer_blocks_only_on_the_three_owner_refusals() {
+        use meerkat_core::service::{SessionError, SessionInstructionError};
+        let identity = AgentIdentity::from("member");
+        let session_id = SessionId::new();
+        let classify = |result| classify_delivery_result(&identity, &session_id, 3, result);
+        for (refusal, expected) in [
+            (
+                InstructionWriteError::OwnedBySession,
+                mob_dsl::MemberInstructionBlock::OwnedBySession,
+            ),
+            (
+                InstructionWriteError::OwnedByOtherMob,
+                mob_dsl::MemberInstructionBlock::OwnedByOtherMob,
+            ),
+        ] {
+            assert!(
+                matches!(
+                    classify(Err(SessionInstructionError::Refused(refusal))),
+                    DeliveryResult::Settled(MemberInstructionDeliveryOutcome::Blocked {
+                        generation: 3,
+                        block,
+                        ..
+                    }) if block == expected
+                ),
+                "{expected:?}"
+            );
+        }
+        for failure in [
+            SessionInstructionError::DurabilityUnavailable,
+            SessionInstructionError::Session(SessionError::NotFound {
+                id: session_id.clone(),
+            }),
+            SessionInstructionError::Refused(InstructionWriteError::OwnedByMob),
+        ] {
+            let shown = failure.to_string();
+            assert!(
+                matches!(classify(Err(failure)), DeliveryResult::Retry(_)),
+                "{shown} leaves the member owed"
+            );
         }
     }
 

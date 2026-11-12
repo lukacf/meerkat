@@ -163,6 +163,9 @@ struct Fixture {
     client: ScriptedClient,
     service: Arc<Service>,
     mob_service: Arc<dyn MobSessionService>,
+    /// The record seam of the mob's session service double, when the mob
+    /// runs over [`ServiceDouble::RecordsNeedALiveActor`].
+    records: Arc<RecordSeam>,
 }
 
 impl Fixture {
@@ -223,6 +226,16 @@ impl Fixture {
         double: ServiceDouble,
         fork_instruction_policy: Option<meerkat_core::ForkInstructionPolicy>,
     ) -> (Self, SessionId) {
+        Self::unseated_with(double, fork_instruction_policy, None).await
+    }
+
+    /// [`Self::unseated`] in a mob that materializes its members under
+    /// `member_restore_policy` when it is lifted after a stop.
+    async fn unseated_with(
+        double: ServiceDouble,
+        fork_instruction_policy: Option<meerkat_core::ForkInstructionPolicy>,
+        member_restore_policy: Option<crate::runtime::MemberRestorePolicy>,
+    ) -> (Self, SessionId) {
         let root = tempfile::Builder::new()
             .prefix("meerkat-member-instruction-")
             .tempdir()
@@ -274,15 +287,18 @@ impl Fixture {
             ..ToolConfig::default()
         };
         let mob_id = definition.id.clone();
+        let records = RecordSeam::new();
         let mob_service: Arc<dyn MobSessionService> = match double {
             ServiceDouble::Real => service.clone(),
             ServiceDouble::NonForwarding => Arc::new(NonForwardingDecorator {
                 inner: service.clone(),
                 records_need_a_live_actor: false,
+                records: Arc::clone(&records),
             }),
             ServiceDouble::RecordsNeedALiveActor => Arc::new(NonForwardingDecorator {
                 inner: service.clone(),
                 records_need_a_live_actor: true,
+                records: Arc::clone(&records),
             }),
         };
         let mut builder = MobBuilder::new(definition, MobStorage::in_memory())
@@ -290,6 +306,9 @@ impl Fixture {
             .with_default_llm_client(Arc::new(client.clone()));
         if let Some(policy) = fork_instruction_policy {
             builder = builder.with_fork_instruction_policy(policy);
+        }
+        if let Some(policy) = member_restore_policy {
+            builder = builder.with_member_restore_policy(policy);
         }
         let handle = builder.create().await.expect("create real turn-driven mob");
 
@@ -334,6 +353,7 @@ impl Fixture {
                 client,
                 service,
                 mob_service,
+                records,
             },
             created.session_id,
         )
@@ -2985,6 +3005,94 @@ async fn a_fork_of_a_running_source_names_a_tool_the_child_cannot_call() {
 struct NonForwardingDecorator {
     inner: Arc<Service>,
     records_need_a_live_actor: bool,
+    records: Arc<RecordSeam>,
+}
+
+/// What [`NonForwardingDecorator`] answers a record for a session that has a
+/// live actor (with `records_need_a_live_actor`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LiveRecord {
+    /// The real service takes it.
+    Forward,
+    /// It waits for the seam's gate, then the real service takes it: a
+    /// session that is waiting for its turn boundary or its store.
+    Hold,
+    /// The session's store cannot take it now (`durability_unavailable`).
+    StoreUnavailable,
+    /// The session answers `session not found`, live as it is.
+    SessionGone,
+    /// Another mob owns the session's target (`owned_by_other_mob`).
+    OwnedByOtherMob,
+}
+
+/// The operator instruction record seam of [`NonForwardingDecorator`], as a
+/// row drives and reads it.
+struct RecordSeam {
+    live: std::sync::Mutex<LiveRecord>,
+    /// Every record waits for the gate, whatever its session.
+    hold_all: std::sync::atomic::AtomicBool,
+    gate: tokio::sync::watch::Sender<bool>,
+    calls: std::sync::atomic::AtomicUsize,
+    held: std::sync::atomic::AtomicUsize,
+}
+
+impl RecordSeam {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            live: std::sync::Mutex::new(LiveRecord::Forward),
+            hold_all: std::sync::atomic::AtomicBool::new(false),
+            gate: tokio::sync::watch::channel(false).0,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            held: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+
+    fn set_live(&self, live: LiveRecord) {
+        *self.live.lock().expect("record seam") = live;
+    }
+
+    fn hold_all(&self) {
+        self.hold_all
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Let every held record go on, and hold none from here on.
+    fn open(&self) {
+        self.hold_all
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        let mut live = self.live.lock().expect("record seam");
+        if *live == LiveRecord::Hold {
+            *live = LiveRecord::Forward;
+        }
+        drop(live);
+        self.gate.send_replace(true);
+    }
+
+    /// Records that reached the double.
+    fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Records that waited, or wait, for the gate.
+    fn held(&self) -> usize {
+        self.held.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    async fn wait_held(&self, count: usize) {
+        tokio::time::timeout(WAIT, async {
+            while self.held() < count {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("a record reaches the gate");
+    }
+
+    async fn pass_gate(&self) {
+        self.held.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut gate = self.gate.subscribe();
+        let _ = gate.wait_for(|open| *open).await;
+    }
 }
 
 /// Which session service a fixture's mob runs over.
@@ -3325,11 +3433,37 @@ impl MobSessionService for NonForwardingDecorator {
             return Err(meerkat_core::service::SessionInstructionError::DurabilityUnavailable);
         }
         let session_id = delivery.session_id().clone();
+        self.records
+            .calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self
+            .records
+            .hold_all
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            self.records.pass_gate().await;
+        }
         let live =
             <Service as MobSessionService>::live_session_actor_registered(&self.inner, &session_id)
                 .await?;
         if !live {
             return Err(SessionError::NotFound { id: session_id }.into());
+        }
+        let answer = *self.records.live.lock().expect("record seam");
+        match answer {
+            LiveRecord::Forward => {}
+            LiveRecord::Hold => self.records.pass_gate().await,
+            LiveRecord::StoreUnavailable => {
+                return Err(meerkat_core::service::SessionInstructionError::DurabilityUnavailable);
+            }
+            LiveRecord::SessionGone => {
+                return Err(SessionError::NotFound { id: session_id }.into());
+            }
+            LiveRecord::OwnedByOtherMob => {
+                return Err(meerkat_core::service::SessionInstructionError::Refused(
+                    meerkat_core::InstructionWriteError::OwnedByOtherMob,
+                ));
+            }
         }
         <Service as MobSessionService>::record_member_instruction_target(
             Arc::clone(&self.inner),

@@ -220,8 +220,24 @@ async fn every_writer_that_can_name_its_member_stores_its_witness() -> TestResul
         .await;
     assert!(reserved.is_ok(), "the send is reserved with no session");
 
-    // Two kickoffs: one under a name no member holds, then one for a member
-    // a spawn seated.
+    // A kickoff aimed at a seated member by a spawner its lineage does not
+    // name, then two from the spawn sink: one under a name no member holds,
+    // one for a member a spawn seated.
+    events
+        .append_envelope(crate::console_contracts::ConsoleIdentityEventEnvelope {
+            event_id: "witness-kickoff-foreign".to_string(),
+            interaction_id: None,
+            identity: "alpha".to_string(),
+            event_type: "user_input".to_string(),
+            timestamp_ms: 3_500,
+            data: json!({
+                "content": [{ "type": "text", "text": "kickoff-foreign" }],
+                "source_event_type": "spawn_initial_message",
+                "parent_identity": "someone-else",
+                "member_id": "alpha",
+            }),
+        })
+        .await;
     runtime
         .spawn(SpawnMemberSpec::new("worker", AgentIdentity::from("beta")))
         .await?;
@@ -266,7 +282,32 @@ async fn every_writer_that_can_name_its_member_stores_its_witness() -> TestResul
             "the {canary} frame ({}) carries its member's witness",
             frame.kind
         );
+        if canary == "memory-with-session" {
+            assert_eq!(
+                frame.session_id.as_deref(),
+                Some(session.as_str()),
+                "a memory event that names its session names it on its frame"
+            );
+        }
     }
+    // A kickoff that names a spawner is written only for a member whose
+    // lineage names that spawner: the one aimed at `alpha`, which the host
+    // seated, is not stored.
+    let of_alpha = aggregator
+        .store()
+        .query_frames(ConsoleTimelineQuery {
+            identity: Some("alpha".to_string()),
+            limit: 1_000,
+            ..Default::default()
+        })
+        .await?;
+    assert!(
+        !of_alpha
+            .frames
+            .iter()
+            .any(|frame| frame.payload.to_string().contains("kickoff-foreign")),
+        "no kickoff is written for a member another spawn did not make"
+    );
     // The kickoffs are projected in order: the one under the unseated name
     // was decided before the one that is stored.
     let unseated = aggregator

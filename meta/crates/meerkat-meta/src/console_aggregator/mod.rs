@@ -711,12 +711,18 @@ async fn member_provenance_for_identity(
     if crate::console_contracts::is_runtime_plane_identity(identity) {
         return None;
     }
-    // A witness belongs to the incarnation that wrote the frame, and only the
-    // frame's session names it. A frame that names no session records none,
-    // and is decided as uncaptured: a member live under the identity now, a
-    // retained witness and the durable search could all be another member
-    // under the same identity than the one that wrote it.
-    let session_id = session_id?;
+    // A witness belongs to the incarnation that wrote the frame. A frame
+    // that names a session is witnessed by that session's member only: a
+    // member live under the identity now, a retained witness and the durable
+    // search could all be another member under the same identity. A frame
+    // that names no session is a record made about the member as it stands
+    // when the record is written (a lifecycle or failure record, a memory
+    // event, a send to a member with no session yet): the member that holds
+    // the identity at this moment is its witness, and when none does the
+    // frame has none.
+    let Some(session_id) = session_id else {
+        return live_member_provenance(inner, entry, identity, None).await;
+    };
     let key = (
         entry.runtime_key.clone(),
         identity.to_string(),

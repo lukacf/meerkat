@@ -4760,7 +4760,19 @@ impl crate::memory::events::MemoryEventSink for ConsoleMemoryEventSink {
         let store = self.store.clone();
         let identity = event.identity().map(str::to_string);
         let event_type = event.event_type().to_string();
-        let data = event.data();
+        let mut data = event.data();
+        // A member's memory event that names its session (`session_key`)
+        // names it to the console too (`session_id`), so the console
+        // witnesses the frame by that session's member.
+        if identity.is_some()
+            && let Some(object) = data.as_object_mut()
+            && let Some(session) = object
+                .get("session_key")
+                .filter(|session| session.is_string())
+                .cloned()
+        {
+            object.entry("session_id").or_insert(session);
+        }
         self.handle.spawn(async move {
             match identity {
                 // A member's memory event: the store refuses it under a

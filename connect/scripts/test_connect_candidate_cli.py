@@ -352,7 +352,8 @@ class MacosLane:
     """One simulated macOS run. `sign` selects what the codesign stand-in leaves in the file."""
 
     ORDER = ("preflight", "library", "resources", "build", "stage", "check-gateway", "check-cli",
-             "check-consumer", "check-conversation")
+             "check-consumer", "check-conversation", "check-official-install")
+    LAST = "check-official-install"
 
     def __init__(self, root, monkeypatch, *, sign=ADHOC):
         self.root, self.sign, self.calls = root, sign, []
@@ -362,6 +363,9 @@ class MacosLane:
         self.versions = p.macos_versions()
         self.gateway_status = "passed"
         self.after = {}
+        self.chrome = root / "Inert Chrome"
+        self.chrome.write_bytes(b"inert browser - never started")
+        self.chrome.chmod(0o755)
         policy = CONNECT / "release/node-prebuilt-policy-macos-arm64.json"
         value = p.read_json(CONNECT / "release/connect-release-inputs-macos-arm64.json")
         # The committed record is pending. This completed copy stands for the integrated tree.
@@ -535,6 +539,7 @@ class MacosLane:
                 staged.parent.mkdir(parents=True)
                 shutil.copyfile(binary, staged)
                 (staged.parent / "linked").symlink_to(kind)
+                self.closure(out / "meerkat-connect-macos-arm64/libexec/meerkat-connect")
                 dump(out / "staging.json", {"candidate": {"target": "macos-arm64", "binary_kind": kind,
                     "resources_sha256": RESOURCES, "binary": {"sha256": p.digest(binary), "size": binary.stat().st_size}},
                     "build_record_sha256": p.digest(option(argv, "--build-record"))})
@@ -548,10 +553,38 @@ class MacosLane:
                 dump(out / "assembly.json", {"archive": leaf, "release_version": version,
                                              "binary_sha256": p.digest(binary)})
             return ""
+        if name == "official-playwright-install":
+            out = option(argv, "--destination")
+            (out / "ready").mkdir(parents=True)
+            dump(out / "ready/installed.json", {"schema_version": 1, "scope": self.official_scope,
+                                                "family": "official-playwright"})
+            dump(out / "ready/mcp.json", {"mcpServers": {}})
+            (out / "npm-runtime.stdout").write_text("11.17.0\n")
+            return ""
         assert name in ("cargo-version", "cargo-paths", "python-version", "system", "system-version", "system-sdk",
                         "zstd-version", "identity-check-before-build", "identity-check-after-build",
                         "sdk-build-tools", "sdk-build-inventory", "verifier-install", "verifier-inventory"), name
         return "inert\n"
+
+    official_scope = "observed_software_installation_only"
+    LIBRARY = "toolkit-library-20260921-connect-aaaaaaaa-macos-arm64"
+
+    def closure(self, resources):
+        """The staged resource closure, as far as the official install check reads it."""
+        names = {"python": "runtime/python/bin/python3.11", "node": "runtime/node/bin/node",
+                 "npm_cli": "runtime/node/lib/node_modules/npm/bin/npm-cli.js",
+                 "archive": "archives/" + self.LIBRARY + ".tar.gz"}
+        for key in ("python", "node", "npm_cli"):
+            (resources / names[key]).parent.mkdir(parents=True, exist_ok=True)
+            (resources / names[key]).write_bytes(("inert " + key).encode())
+        (resources / "archives").mkdir()
+        with tarfile.open(resources / names["archive"], "w:gz") as archive:
+            for leaf, data in (("official/CONTENTS.json", b'{"format": 1}\n'),
+                               ("setup/install-library-consumer.py", b"# inert installer\n")):
+                info = tarfile.TarInfo(self.LIBRARY + "/" + leaf)
+                info.size = len(data)
+                archive.addfile(info, io.BytesIO(data))
+        dump(resources / "resources.json", {"schema_version": 1, **names})
 
     def wheel(self, directory, distribution, version, requires=None):
         import zipfile
@@ -595,6 +628,8 @@ class MacosLane:
                 archive = self.rkat_archive()
                 options = {"archive": archive, "archive_sha256": p.digest(archive)}
             return p.macos_check_consumer(self.work, **options)
+        if name == "check-official-install":
+            return p.macos_check_official_install(self.work, options.get("chrome", self.chrome))
         return getattr(p, "macos_" + name.replace("-", "_"))(self.work)
 
     def through(self, last, *, skip=()):
@@ -887,7 +922,7 @@ def test_supplied_meta_wheel_is_recorded_as_supplied(lane):
 
 
 def test_installed_checks_run_products_with_a_complete_environment_only(lane):
-    lane.through("check-conversation")
+    lane.through(lane.LAST)
     work = lane.work
     products = [call for call in lane.calls if call[0] in (p.CLI_COMPOSITION, p.CLI_SHUTDOWN, p.CLI_CONSUMER,
                 "gateway-verify", "conversation", "version-meerkat-connect", "version-toolkit_gateway")]
@@ -979,7 +1014,7 @@ def test_conversation_runs_on_a_real_terminal_and_closes_the_program(tmp_path):
 
 
 def test_stage_record_holds_the_gateway_product_and_a_pending_review_never_the_cli_product(lane):
-    lane.through("check-conversation")
+    lane.through(lane.LAST)
     # A check may leave a socket or a pipe behind: it holds no bytes and is listed, not archived.
     os.mkfifo(lane.work / "gateway-verification/control.pipe")
     stage = lane.stage_record()
@@ -989,7 +1024,8 @@ def test_stage_record_holds_the_gateway_product_and_a_pending_review_never_the_c
     assert stage["gates"]["shutdown_review"] == {"status": "pending"}
     assert stage["gates"]["consumer"] == {"status": "passed", "rkat": "published_archive"}
     assert {name: gate["status"] for name, gate in stage["gates"].items() if name != "shutdown_review"} == {
-        "gateway_verification": "passed", "cli_composition": "passed", "consumer": "passed", "conversation_start": "passed"}
+        "gateway_verification": "passed", "cli_composition": "passed", "consumer": "passed", "conversation_start": "passed",
+        "official_playwright_install": "passed"}
     assert stage["revision"] == REVISION and stage["work_root"] == str(lane.work)
     assert stage["checkout_root"] == str(CONNECT.parent) and stage["resources_sha256"] == RESOURCES
     paths = [row["path"] for row in stage["files"]]
@@ -1011,7 +1047,8 @@ def test_stage_record_holds_the_gateway_product_and_a_pending_review_never_the_c
                    "resources/meerkat-connect-resources-macos-arm64.tar.gz", "binary/meerkat-connect",
                    "binary/toolkit_gateway", "binary/packaged_setup", "binary/cli_paired_host",
                    "binary/meerkat-connect.signature.json", "binary/toolkit_gateway.facts.json",
-                   "tools/toolkit-node-plan.build.json", "records/native-build.json", "records/native-build.log",
+                   "tools/toolkit-node-plan.build.json", "tools/dependencies.txt", "components/components.json",
+                   "records/native-build.json", "records/native-build.log",
                    "records/gateway-build-record.json", "records/cli-build-record.json", "sdk/SDK-WHEELS.json",
                    "cli-qualification/installed-composition.json", "cli-qualification/consumer.json",
                    "cli-qualification/native-shutdown-review.pending.json",
@@ -1023,7 +1060,9 @@ def test_stage_record_holds_the_gateway_product_and_a_pending_review_never_the_c
                 and not path.endswith(".json")]
     # The network section says what was read from the records and that nothing was captured.
     network = stage["network"]
-    assert set(network) == {"library", "check-gateway", "check-cli", "check-consumer", "check-conversation"}
+    assert set(network) == {"library", "check-gateway", "check-cli", "check-consumer", "check-conversation",
+                            "check-official-install"}
+    assert "--offline" in network["check-official-install"]["expected"]
     assert all(entry["captured"] is False for entry in network.values())
     assert network["library"]["hosts_named_in_records"] == ["registry.npmjs.org"]
     assert "registry.npmjs.org" in network["library"]["expected"]
@@ -1036,7 +1075,7 @@ def test_stage_record_holds_the_gateway_product_and_a_pending_review_never_the_c
 
 
 def test_stage_record_states_a_consumer_check_that_did_not_run(lane):
-    lane.through("check-conversation", skip=("check-consumer",))
+    lane.through(lane.LAST, skip=("check-consumer",))
     with pytest.raises(ValueError, match="consumer check either ran"):
         lane.stage_record()
     stage = lane.stage_record(consumer_not_run="Core's archive of this version is not published")
@@ -1057,6 +1096,7 @@ def test_a_checkout_built_rkat_proves_the_check_but_never_assembles_a_release(la
     lane.through("check-cli")
     lane.step("check-consumer", from_checkout=True)
     lane.step("check-conversation")
+    lane.step("check-official-install")
     assert "rkat-build" in lane.names()
     assert p.read_json(lane.work / "cli-qualification/consumer.json")["rkat"]["source"] == "built_from_checkout"
     assert lane.stage_record()["gates"]["consumer"] == {"status": "passed", "rkat": "built_from_checkout"}
@@ -1065,7 +1105,7 @@ def test_a_checkout_built_rkat_proves_the_check_but_never_assembles_a_release(la
 
 
 def test_assemble_restores_the_stage_and_runs_only_the_cli_assembly(lane):
-    lane.through("check-conversation")
+    lane.through(lane.LAST)
     stage = lane.stage_record()
     work = lane.work
     review = lane.accepted_review()
@@ -1099,7 +1139,7 @@ def test_assemble_restores_the_stage_and_runs_only_the_cli_assembly(lane):
 @pytest.mark.parametrize("fault", (None, "refused", "cli_not_scanned", "gateway_not_scanned", "digest",
                                    "changed_archive", "twice"))
 def test_nothing_is_publishable_without_a_clean_scan_of_both_exact_archives(lane, fault):
-    lane.through("check-conversation")
+    lane.through(lane.LAST)
     lane.stage_record()
     lane.assemble()
     final = lane.root / "final"
@@ -1130,7 +1170,7 @@ def test_nothing_is_publishable_without_a_clean_scan_of_both_exact_archives(lane
     "other_work_root", "changed_file", "changed_executable", "changed_gateway_product", "pending_selection",
     "cli_product_in_stage"))
 def test_assemble_refuses_before_any_assembly(lane, fault):
-    lane.through("check-conversation")
+    lane.through(lane.LAST)
     lane.stage_record()
     stage_path = lane.root / "stage/STAGE.json"
     changes = {}
@@ -1218,3 +1258,125 @@ def test_recorder_runs_a_child_with_exactly_the_given_environment(tmp_path, monk
     inherited, log = record.run("inherited", [p.sys.executable, "-I", "-c",
         "import os; print('CONNECT_INERT_SECRET_API_KEY' in os.environ)"], cwd=tmp_path)
     assert log.read_text().strip() == "True" and "CONNECT_INERT_SECRET_API_KEY" not in inherited["env"]
+
+
+def test_official_playwright_install_is_the_backends_command_with_the_closures_node_and_npm(lane):
+    lane.through(lane.LAST)
+    work = lane.work
+    closure = work / "cli-stage/meerkat-connect-macos-arm64/libexec/meerkat-connect"
+    run = work / "cli-qualification/official-run"
+    library = run / "library" / lane.LIBRARY
+    call = next(call for call in lane.calls if call[0] == "official-playwright-install")
+    profile, selected = run / "playwright-host.json", run / "selected.json"
+    assert call[1] == [str(closure / "runtime/python/bin/python3.11"), "-I", "-B",
+        str(library / "setup/install-library-consumer.py"), "--official-bundle", str(library / "official"),
+        "--contents-sha256", p.digest(library / "official/CONTENTS.json"), "--component", "playwright",
+        "--playwright-host-profile", str(profile), "--playwright-host-profile-sha256", p.digest(profile),
+        "--node", str(closure / "runtime/node/bin/node"),
+        "--npm-cli", str(closure / "runtime/node/lib/node_modules/npm/bin/npm-cli.js"),
+        "--destination", str(run / "install"), "--config", str(selected), "--config-sha256", p.digest(selected),
+        "--server-name", "playwright-isolated"]
+    assert call[3] is False and set(call[2]) == {"HOME", "TMPDIR", "PATH", "LC_ALL"}
+    assert p.read_json(profile) == {"schema_version": 1, "chrome_executable": str(lane.chrome),
+        "chrome_sha256": p.digest(lane.chrome), "process_parent": str(run / "process")}
+    assert p.read_json(selected) == p.PLAYWRIGHT_CONFIGURATION
+    record = p.read_json(work / "cli-qualification/official-playwright.json")
+    assert record["status"] == "passed" and "a browser start" in record["not_claimed"]
+    assert p.binding(run / "install/npm-runtime.stdout") in record["evidence"]
+    # The profile, the operations and the server name are the installer's own fixed values.
+    installer = (CONNECT / "scripts/install-library-consumer.py").read_text()
+    assert 'PLAYWRIGHT_PROFILE = "' + p.PLAYWRIGHT_CONFIGURATION["profile"] + '"' in installer
+    assert "PLAYWRIGHT_OPERATIONS = " + json.dumps(p.PLAYWRIGHT_CONFIGURATION["operations"]) in installer
+    assert '"mcpServers": {"' + p.PLAYWRIGHT_SERVER + '"' in installer
+
+
+@pytest.mark.parametrize("fault", ("install_failed", "no_receipt"))
+def test_a_failed_official_install_fails_the_stage(lane, fault):
+    lane.through("check-conversation")
+    if fault == "no_receipt":
+        lane.official_scope = "nothing_was_installed"
+    else:
+        original = lane.effect
+
+        def effect(name, argv, cwd, env):
+            if name == "official-playwright-install":
+                raise ValueError("command did not succeed: official-playwright-install")
+            return original(name, argv, cwd, env)
+
+        lane.effect = effect
+    with pytest.raises(ValueError):
+        lane.step("check-official-install")
+    assert not (lane.work / "cli-qualification/official-playwright.json").exists()
+    with pytest.raises(ValueError, match="earlier step has no record: check-official-install"):
+        lane.stage_record()
+
+
+def test_an_official_install_that_could_not_run_is_stated_and_never_assembles(lane):
+    lane.through("check-conversation")
+    lane.step("check-official-install", chrome=lane.root / "no-such-browser")
+    assert "official-playwright-install" not in lane.names()
+    stage = lane.stage_record()
+    gate = stage["gates"]["official_playwright_install"]
+    assert gate["status"] == "not_run" and gate["reason"].startswith("no Chrome executable at ")
+    with pytest.raises(ValueError, match="stage gates did not pass: official_playwright_install"):
+        lane.assemble()
+
+
+def test_accept_review_records_the_acceptance_of_one_exact_stage(lane, capsys):
+    lane.through(lane.LAST)
+    lane.stage_record()
+    stage, review = lane.root / "stage", lane.root / "accepted.json"
+    assert p.macos_main(["accept-review", "--stage", str(stage), "--output", str(review)]) == 0
+    assert capsys.readouterr().out.strip().endswith("accepted shutdown review sha256 " + p.digest(review))
+    accepted = p.read_json(review)
+    pending = p.read_json(stage / "cli-qualification/native-shutdown-review.pending.json")
+    assert accepted["disposition"] == "accepted" and accepted["evidence"] == pending["evidence"]
+    assert accepted["pending_record_sha256"] == p.digest(stage / "cli-qualification/native-shutdown-review.pending.json")
+    assert accepted["stage_sha256"] == p.digest(stage / "STAGE.json")
+    value = lane.assemble(review=review)
+    assert value["shutdown_review_sha256"] == p.digest(review)
+    # The same command refuses a stage whose bound observation is missing or changed, and an existing output.
+    assert p.macos_main(["accept-review", "--stage", str(stage), "--output", str(review)]) == 1
+    (stage / "records" / (p.CLI_SHUTDOWN + ".log")).write_text("another observation\n")
+    assert p.macos_main(["accept-review", "--stage", str(stage), "--output", str(lane.root / "second.json")]) == 1
+    assert not (lane.root / "second.json").exists()
+
+
+def test_the_repository_scanners_own_report_is_an_accepted_report(tmp_path):
+    # The real payload scanner with the synthetic rules: its report.json is the form release-check takes.
+    files = []
+    for name in ("meerkat-connect-1.2.3-macos-arm64.tar.gz.sha256", "meerkat-connect-gateway-1.2.3-macos-arm64.tar.gz.sha256"):
+        (tmp_path / name).write_text("0" * 64 + "  " + name.removesuffix(".sha256") + "\n")
+        files.append(tmp_path / name)
+    report = p.privacy_scan(files, (SCAN["rules"], SCAN["exemptions"], None), tmp_path / "scan")
+    assets = [p.checked_file(path) for path in files]
+    assert p.checked_scan_report(report, assets) == report and report["status"] == "clean"
+    assert report["schema"] == "release-payload-privacy-scan/report/1" and p.HEX.fullmatch(report["rules_sha256"])
+
+
+@pytest.mark.parametrize("change,accepted", (
+    ({}, True),
+    ({"rules_sha256": "d" * 64, "engine": {"sha256": "e" * 64, "exit_code": 0, "result": "clean"},
+      "hits": {"accepted": {}, "refused": {}}, "coverage": {"files": 4, "bytes": 123}, "tool_version": "8.30.1",
+      "schema": "release-payload-privacy-scan/report/1"}, True),
+    ({"matched": ["a private name"]}, False),
+    ({"hits": {"refused": {"names": 1}}, "detail": "the token text"}, False),
+    ({"engine": {"result": "found a private name"}}, False),
+    ({"note": "reviewed by hand"}, False),
+    ({"a key with spaces": 1}, False),
+    ({"tool_version": "version one"}, False),
+    ({"status": "refused"}, False)))
+def test_scan_report_may_hold_counts_and_digests_but_no_free_text(change, accepted):
+    assets = [{"name": "meerkat-connect-1.2.3-macos-arm64.tar.gz", "size": 10, "sha256": "a" * 64},
+              {"name": "meerkat-connect-1.2.3-macos-arm64.tar.gz.sha256", "size": 99, "sha256": "b" * 64}]
+    report = {"status": "clean", "payload": [{"name": row["name"], "bytes": row["size"], "sha256": row["sha256"]}
+                                             for row in assets], **change}
+    if accepted:
+        assert p.checked_scan_report(report, assets) == report
+    else:
+        with pytest.raises(ValueError):
+            p.checked_scan_report(report, assets)
+    # A file that is not one of the product files is never named by an accepted report.
+    report["payload"].append({"name": "notes.txt", "bytes": 1, "sha256": "c" * 64})
+    with pytest.raises(ValueError, match="not one of the product files"):
+        p.checked_scan_report(report, assets)

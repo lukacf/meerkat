@@ -77,7 +77,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   written for the stdio gateway's caller and for a Console caller with
   `runtime.admin`; an agent that asks for the change and a Console caller
   without `runtime.admin` are answered `effect` and `count` and no list,
-  since a schedule that targets an agent may be anybody's. Whose pause a
+  since a schedule that targets an agent may be anybody's. From Rust, the
+  family (`IdentityFamily`) withholds the list only for an agent requester:
+  a host that serves any caller other than its operator through the family
+  withholds the list itself. Whose pause a
   pause is, the schedule's own
   lifecycle records (Core: `ScheduleService::pause_for_target`,
   `resume_for_target`). The stdio gateway gives the family its schedules; a
@@ -324,8 +327,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   diagnostic `profile_held_by_identity` at `profiles.<name>`, naming the
   agents, and the gateway's init fails with `declared mob spec update
   refused: ...`. Nothing is written, and a launch without the declaration
-  starts as before. Keep the profile, or update those agents to another
-  profile or remove them, then declare the update. It was accepted before,
+  that carries the definition the mob had starts as before (one that
+  carries the edited definition is refused, as any undeclared edit is).
+  Keep the profile, or update those agents to another
+  profile or remove them, then declare the update. While this release
+  cannot read the record of one of the mob's created agents (one a later
+  release wrote, after a rollback), such an update is refused the same
+  way, at `profiles`, naming those agents, since that record may name the
+  profile: keep the profile, or declare the update on the release that
+  reads the records. It was accepted before,
   and such an agent then failed each restore with a profile-not-found
   reason.
 - On the Console, a read, a plan and a change of one agent
@@ -509,7 +519,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   schedule methods (`schedule/create`, `schedule/update`, REST) do not judge
   the target, and neither does a schedule tool call for a target that names
   only a session: such a schedule for an archived agent is active and each
-  of its fires is refused at the delivery. A schedule that names only a
+  of its fires is refused at the delivery (one that names only the session
+  ends each fire as a missing target instead: `misfired`, failure class
+  `target_missing`). A schedule that names only a
   session and is created while the session's agent is archived is active
   the same way; a later archive of the agent is followed. An agent's
   schedule tool call
@@ -524,8 +536,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A hold of the agents' changes (`meta/identity/changes_hold`) does not
   survive a restart of the host. After a restart, a deploy or a crash the
   changes are carried out again until the hold is set again: a host that
-  means to keep them held sets the hold at its start, before it serves
-  callers.
+  means to keep them held sets the hold as soon as its start has answered,
+  before it serves callers. The start itself is not held: what a launch
+  carries out before the host's call (a held change that was approved, a
+  change asked by an agent a schedule wakes) is carried out.
 - A member of an identity whose record is its row that the mob's start
   restores before the identity runtime is bound (one that owes work) is
   built without the host customizer's tools until its next build, as

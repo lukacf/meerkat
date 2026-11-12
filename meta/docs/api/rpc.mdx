@@ -1503,11 +1503,14 @@ gateway's caller and, on the Console, for a caller with `runtime.admin`. A
 schedule that targets an agent may be anybody's, so every other caller (an
 agent that asks for the change, a Console caller without `runtime.admin`)
 is answered `{effect, count, incomplete?}` with no `schedules` list, on the
-change's answer, on its plan and on `meta/identity/operation`.
+change's answer and on its plan. A read of the operation
+(`meta/identity/operation`) carries no `schedules` member for any caller.
 
 A schedule a person resumes by name while its agent is archived is theirs
 from then on: it stays Active, its fires end as delivery failures while the
-agent is archived, and the unarchive leaves it as it is. A person's pause
+agent is archived (as a missing target, `misfired` with the failure class
+`target_missing`, for a schedule that names only the session), and the
+unarchive leaves it as it is. A person's pause
 by name of a schedule paused for its target takes it over the same way: the
 unarchive does not resume it. A change asked again under the same
 `request_id` follows its schedules again where the agent still stands by
@@ -1531,7 +1534,9 @@ Known limitations: Meerkat's own schedule methods (`schedule/create`,
 `schedule/update`, REST) do not judge the target, and neither does a
 schedule tool call for a target that names only a session, so such a
 schedule for an archived agent is active and each of its fires is refused
-at the delivery. A schedule that names only a session and is created while
+at the delivery (one that names only the session ends each fire as a
+missing target instead: `misfired`, failure class `target_missing`). A
+schedule that names only a session and is created while
 the session's agent is archived is active the same way; a later archive of
 the agent is followed. An agent's schedule tool call that reads its target
 just before the target's archive and writes just after it can leave an
@@ -1609,8 +1614,10 @@ operator's on the stdio gateway, or a signed-in person's with
 `runtime.admin` on the Console; an agent holds nothing. A hold does not
 survive a restart of the host: after a restart, a deploy or a crash the
 changes are carried out again until the hold is set again, so a host that
-means to keep changes held sets the hold at its start, before it serves
-callers.
+means to keep changes held sets the hold as soon as its start has answered,
+before it serves callers. The start itself is not held: what a launch
+carries out before the host's call (a held change that was approved, a
+change asked by an agent a schedule wakes) is carried out.
 
 ### `meta/identity/directory` and `meta/identity/plan`
 

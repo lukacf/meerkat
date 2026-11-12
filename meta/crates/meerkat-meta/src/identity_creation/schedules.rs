@@ -101,7 +101,11 @@ impl ScheduleRef {
 /// The list is the host's and an administrator's: a schedule that targets
 /// an agent may be anybody's. Every other caller (an agent that asks for
 /// the change, a Console caller without `runtime.admin`) is answered
-/// `effect` and `count`, and no `schedules` member.
+/// `effect` and `count`, and no `schedules` member. The family itself
+/// withholds the list only for an agent requester, and Meta's own surfaces
+/// withhold it for their other callers: a host that serves any caller
+/// other than its operator through `IdentityFamily` withholds the list
+/// itself, before it writes the answer for that caller.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SchedulesFollowed {

@@ -363,6 +363,33 @@ pub trait SessionLlmReconfigureHost: Send + Sync {
         Ok(())
     }
 
+    /// Judge the target a caller asked `session_id` to be reconfigured to
+    /// (`SessionServiceRuntimeExt::reconfigure_session_llm_identity` and its
+    /// under-boundary form), after the target is resolved and before
+    /// anything is staged.
+    ///
+    /// It is a pre-stage judgement and nothing more. An `Err` refuses the
+    /// caller's request with nothing staged, applied or persisted: the
+    /// session keeps its identity, its client and its stored params. An `Ok`
+    /// promises nothing about the apply that follows. It decides nothing
+    /// about the lifecycle of a committed model-routing handoff, which the
+    /// routing machine owns: a handoff's realization and a switch-turn
+    /// request do not ask it, and their targets are judged by the checks
+    /// that run before each provider request.
+    ///
+    /// A host that builds real clients judges the target's
+    /// `reasoning_effort` level against the route of the client it builds
+    /// for the target, and refuses a level the route does not accept with
+    /// [`RuntimeDriverError::ReasoningEffortRefused`]. The default accepts
+    /// every target.
+    async fn judge_requested_target_session_llm_identity(
+        &self,
+        _session_id: &SessionId,
+        _target_identity: &meerkat_core::SessionLlmIdentity,
+    ) -> Result<(), RuntimeDriverError> {
+        Ok(())
+    }
+
     /// Whether every request a switch onto `target_model` would serve can
     /// carry `session_id`'s transcript as it stands: the operator-instruction
     /// entry rows the session wrote itself, where they stand, and its ordered

@@ -2456,6 +2456,57 @@ mod tests {
         );
     }
 
+    /// A refused `reasoning_effort` level stays typed on the session error
+    /// path: the agent error carries the refusal the build raised, and the
+    /// error's structured data is the documented object. A refusal that
+    /// names no route keeps `"route": null`.
+    #[test]
+    fn reasoning_effort_build_failure_keeps_its_typed_refusal() {
+        for (route, retryable, reason) in [
+            (
+                serde_json::json!({"backend": "anthropic_api", "api": "messages"}),
+                false,
+                "unsupported_level",
+            ),
+            (serde_json::Value::Null, false, "supported_levels_unknown"),
+            (
+                serde_json::json!({"backend": "copilot", "api": "responses"}),
+                true,
+                "supported_levels_unavailable",
+            ),
+        ] {
+            let document = serde_json::json!({
+                "requested": "max", "provider": "anthropic", "model": "claude-opus-4-5",
+                "route": route, "reason": reason, "supported": null, "facts": null,
+            });
+            let refusal: meerkat_core::ReasoningEffortRefusal =
+                serde_json::from_value(document.clone()).expect("a refusal document reads");
+            let error = build_agent_error_to_session_error(
+                BuildAgentError::ReasoningEffortRefused(Box::new(refusal.clone())),
+                Some(Provider::Anthropic),
+                None,
+            );
+            assert!(
+                matches!(
+                    &error,
+                    SessionError::Agent(
+                        meerkat_core::error::AgentError::ReasoningEffortRefused(carried)
+                    ) if **carried == refusal
+                ),
+                "got: {error:?}"
+            );
+            assert_eq!(error.to_string(), format!("agent error: {refusal}"));
+            assert_eq!(
+                error.structured_data(),
+                Some(serde_json::json!({
+                    "kind": "reasoning_effort_refused",
+                    "retryable": retryable,
+                    "reasoning_effort_refusal": document,
+                }))
+            );
+        }
+    }
+
     #[test]
     fn provider_auth_build_failure_keeps_typed_session_payload() {
         let binding = meerkat_core::AuthBindingRef {

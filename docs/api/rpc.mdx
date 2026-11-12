@@ -4487,6 +4487,53 @@ and `data`, never on the message text.
 | -32038 | Admission in progress | A realm admission fence the request needs is held, by an admission or another fenced write, beyond the request's bound: `config/set` and `config/patch` (with or without a config runtime). Nothing started and nothing was written. It may be retried once the hold ends, which after an interrupted admission can be only when the holding process restarts, so an immediate retry is not promised to succeed |
 | -32039 | Admission fence unavailable | A realm admission fence the request needs could not be opened, created, locked or identity-checked. Nothing started and nothing was written (fail closed) |
 
+### Reasoning effort refusal data
+
+A `reasoning_effort` level that the model's route does not accept is refused
+with `-32602` (invalid params) and this `error.data`:
+
+```json
+{
+  "kind": "reasoning_effort_refused",
+  "retryable": false,
+  "reasoning_effort_refusal": {
+    "requested": "max",
+    "provider": "anthropic",
+    "model": "claude-opus-4-5",
+    "route": {"backend": "anthropic_api", "api": "messages"},
+    "reason": "unsupported_level",
+    "supported": ["low", "medium", "high"],
+    "facts": "catalog"
+  }
+}
+```
+
+`reason` is one of `unsupported_level`, `supported_levels_unknown`,
+`supported_levels_unavailable`, `conflicting_provider_effort`,
+`conflicting_thinking_budget`, `conflicting_thinking_type`,
+`conflicting_reasoning_body` and `conflicting_reasoning_mode`. `route` is
+`null` when the client that serves the session reports no route. `supported`
+and `facts` are `null` when no source states the levels the route accepts, or
+the source cannot be read now. A conflict also names `conflicting_param`, and
+`conflicting_level` when the conflicting setting is itself a level.
+`retryable` is `true` only for `supported_levels_unavailable` (the account's
+model list is not loaded): the same request can succeed later with no change.
+Meerkat does not retry a refused level for the caller.
+
+The answer is the same wherever the level is refused. A session's level is
+checked when its agent is built: `session/create` answers the refusal (a
+deferred create reports it at its first `turn/start`), and so does the build
+of a resumed or recovered session, whose stored identity stays as it was. A
+`turn/start` whose overrides move a live session to a model or level its
+route does not accept is refused the same way, and the session keeps its
+model, its level and its stored params. Such a turn is attempted once; its
+stored input ends as abandoned with the reason `stopped`, not with the
+refusal, and the session's live registration is rebuilt from the stored
+session at the next turn. A run that fails for the refusal
+reports it in `run_failed` as the `error_report` reason
+`{"reason_type": "reasoning_effort_refused", "refusal": {...}}` with class
+`config`. No provider request is made for a refused level.
+
 ### comms/send error data
 
 A failed `comms/send` returns `-32603` (`-32602` for `invalid_command`) with a

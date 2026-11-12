@@ -3112,6 +3112,45 @@ fn validate_gemini_request_shaping(
     }
 }
 
+/// Refuse a provider-neutral `reasoning_effort` level the route of the
+/// client that will serve the session does not accept, when the agent is
+/// built or a caller reconfigures it, instead of at its first request.
+///
+/// The level `provider_params` carry is resolved strictly
+/// ([`meerkat_core::resolve_reasoning_effort`]) for `model` of `provider`
+/// against `observation`, what the built client reports about its route
+/// (`None` when it reports none), and `catalog_row`, the model's catalog
+/// row. The resolution runs on a scratch copy: the params themselves are
+/// not rewritten, so the session keeps the level in the neutral field and
+/// every request resolves it again for the route that serves it. Params
+/// that carry no level are not judged.
+pub(crate) fn validate_reasoning_effort_for_route(
+    provider: Provider,
+    model: &str,
+    provider_params: Option<&meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
+    observation: Option<&meerkat_core::ReasoningRouteObservation>,
+    catalog_row: Option<&meerkat_core::model_profile::capabilities::ModelCapabilities>,
+) -> Result<(), Box<meerkat_core::ReasoningEffortRefusal>> {
+    let Some(requested) = provider_params.and_then(|params| params.reasoning_effort) else {
+        return Ok(());
+    };
+    let mut scratch = provider_params.cloned();
+    meerkat_core::resolve_reasoning_effort(
+        meerkat_core::ReasoningResolveInput::new(
+            requested,
+            provider,
+            model,
+            observation,
+            catalog_row,
+            meerkat_core::ReasoningEffortDecidedBy::Request,
+        ),
+        &mut scratch,
+        meerkat_core::ReasoningResolveMode::Strict,
+    )
+    .map(|_resolution| ())
+    .map_err(Box::new)
+}
+
 /// Typed create-session model hints supplied by a public surface.
 ///
 /// `None` means omitted by the caller. In particular, this type does not carry
@@ -11180,6 +11219,19 @@ impl AgentFactory {
             build_config.provider_params.as_ref(),
         )?;
         validate_gemini_request_shaping(provider, &model, build_config.provider_params.as_ref())?;
+        // The provider-neutral reasoning effort level is judged against the
+        // route of the client this build made, with the catalog row of the
+        // model as its backend serves it.
+        validate_reasoning_effort_for_route(
+            provider,
+            &model,
+            build_config.provider_params.as_ref(),
+            llm_adapter.reasoning_route().as_ref(),
+            registry
+                .profile_witness_for_identity(config, &resolved_llm_identity)
+                .and_then(|witness| witness.catalog_capabilities()),
+        )
+        .map_err(BuildAgentError::ReasoningEffortRefused)?;
         if let Some(params) = build_config.provider_params.clone() {
             builder = builder.provider_params(params);
         }
@@ -12633,6 +12685,9 @@ mod brain_swap_runtime_loop_ab_tests;
 #[cfg(all(test, feature = "session-compaction", not(target_arch = "wasm32")))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod compaction_summary_budget_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod reasoning_effort_build_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod resume_provider_override_binding_tests;

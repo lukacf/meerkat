@@ -317,6 +317,9 @@ impl UnifiedRuntime {
         // publication finishes first, and every later one is refused.
         self.close_gate.close();
         self.shutting_down.store(true, Ordering::SeqCst);
+        // No peer message of another mob of this process wakes a member of
+        // a runtime that is closing: its links go first.
+        self.close_cross_mob_links();
         // Nothing is delivered once teardown starts: stop the mob
         // announcement dispatcher first, whichever surface composed it.
         // Stopping is idempotent; a gateway may already have stopped it.
@@ -570,6 +573,9 @@ impl UnifiedRuntime {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clear();
         }
+        // The members' inboxes are gone: so are the routes between them and
+        // the members of other mobs of this process.
+        self.clear_cross_mob_wake_routes();
         UnifiedRuntimeShutdownReport {
             drain,
             module_shutdown,
@@ -814,6 +820,8 @@ impl UnifiedRuntime {
         &self,
         options: meerkat_mob::StopOptions,
     ) -> Result<(), MobRuntimeError> {
+        // A stopped mob holds no link to another mob of this process.
+        self.close_cross_mob_links();
         super::mob_stop::settle_flow_runs_then_stop(
             &super::mob_stop::HandleStopTarget(&self.mob_handle(), options),
             super::mob_stop::MOB_STOP_FLOW_SETTLE_BUDGET,

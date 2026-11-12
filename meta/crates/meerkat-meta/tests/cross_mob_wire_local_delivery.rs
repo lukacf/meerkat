@@ -59,8 +59,16 @@ struct Observation {
 /// body=<text>` makes it call `send_message` once; every other call is
 /// recorded and answered with plain text.
 struct PeerScriptClient {
-    sent: Mutex<HashSet<String>>,
+    /// The bodies already sent, for the whole test process: a member built
+    /// again over its state still has its earlier `SCRIPTED-SEND` message
+    /// in its history, and must not send it a second time.
+    sent: Arc<Mutex<HashSet<String>>>,
     observations: tokio::sync::mpsc::UnboundedSender<Observation>,
+}
+
+fn sent_bodies() -> Arc<Mutex<HashSet<String>>> {
+    static SENT: std::sync::OnceLock<Arc<Mutex<HashSet<String>>>> = std::sync::OnceLock::new();
+    Arc::clone(SENT.get_or_init(|| Arc::new(Mutex::new(HashSet::new()))))
 }
 
 fn scripted_send(request: &LlmRequest) -> Option<(String, String)> {
@@ -243,7 +251,7 @@ comms = true
         .expect("definition");
         let (observations, received) = tokio::sync::mpsc::unbounded_channel();
         let client: Arc<dyn LlmClient> = Arc::new(PeerScriptClient {
-            sent: Mutex::new(HashSet::new()),
+            sent: sent_bodies(),
             observations,
         });
         let mob_spec = MobBootstrapSpec::new(definition, MobStorage::in_memory(), session_service)
@@ -1349,7 +1357,7 @@ comms = true
         .expect("definition");
         let (observations, received) = tokio::sync::mpsc::unbounded_channel();
         let client: Arc<dyn LlmClient> = Arc::new(PeerScriptClient {
-            sent: Mutex::new(HashSet::new()),
+            sent: sent_bodies(),
             observations,
         });
         let runtime = meerkat_meta::UnifiedRuntimeBuilder::default()
@@ -1967,6 +1975,347 @@ async fn a_stopped_mob_refuses_the_wake_and_builds_nobody() {
     );
     assert_eq!(right.route_to(&bob.comms_name), None, "bob was built");
     assert_eq!(left.route_to(&bob.comms_name), None);
+
+    left.stop().await;
+    right.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// A mob's own sends beside another mob's wake route; a destroyed mob; and
+// the Console caller who is no access admin.
+// ---------------------------------------------------------------------------
+
+impl Mob {
+    /// `member` of this mob calls `send_message` to `peer_id`; the tool
+    /// result its model was handed.
+    async fn send_from(&mut self, member: &str, peer_id: &str, body: &str) -> String {
+        self.runtime
+            .mob_handle()
+            .member(&MeerkatId::from(member))
+            .await
+            .expect("member handle")
+            .send(
+                format!("{SEND_TRIGGER}{peer_id} body={body}"),
+                HandlingMode::Queue,
+            )
+            .await
+            .expect("trigger the sending turn");
+        self.observation(Duration::from_secs(20), |observation| {
+            observation.after_tool
+        })
+        .await
+        .unwrap_or_else(|| panic!("{}: no send_message result for {body:?}", self.mob_id))
+        .last
+    }
+
+    /// A second member, wired to the fixture's member inside this mob.
+    async fn spawn_wired_second_member(&self, member: &str) {
+        self.spawn_second_member(member).await;
+        self.runtime
+            .mob_handle()
+            .wire(
+                MeerkatId::from(member),
+                meerkat_mob::PeerTarget::Local(MeerkatId::from(self.member.as_str())),
+            )
+            .await
+            .expect("wire two members of one mob");
+    }
+
+    fn has_wake_route_for(&self, peer: &PeerInfo) -> bool {
+        use base64::Engine;
+        let key: [u8; 32] = base64::engine::general_purpose::STANDARD
+            .decode(
+                peer.pubkey_b64
+                    .as_deref()
+                    .expect("peer_info reports the member's key"),
+            )
+            .expect("base64 key")
+            .try_into()
+            .expect("a 32-byte key");
+        InprocRegistry::global()
+            .has_wake_route_in_namespace(&self.namespace(), &meerkat_comms::PubKey::new(key))
+    }
+}
+
+/// Each mob's namespace holds a wake route under the OTHER mob's member's
+/// key (the forwarder's), beside that member's own mob's route in its own
+/// namespace. A mob's own sends to its own member are not touched by it: a
+/// member's peer message inside its mob, and a host message, still build
+/// the member and reach it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mobs_own_sends_still_build_its_member_beside_another_mobs_wake_route() {
+    let root = tempfile::tempdir().expect("root");
+    let left = Mob::start_persistent(root.path(), "wake-own-a", "alice", true).await;
+    let right = Mob::start_persistent(root.path(), "wake-own-b", "bob", true).await;
+    left.spawn_wired_second_member("dave").await;
+    right.spawn_wired_second_member("carol").await;
+    let alice = left.peer_info().await;
+    let bob = right.peer_info().await;
+    sdk_wire_cross_mob(&left, &right)
+        .await
+        .expect("the helper's call sequence");
+
+    let left = left.built_again(root.path()).await;
+    let right = right.built_again(root.path()).await;
+    let (mut left, mut right) = (left, right);
+    assert!(left.has_wake_route_for(&bob), "mob A forwards for bob");
+    assert!(right.has_wake_route_for(&alice), "mob B forwards for alice");
+    assert_eq!(right.routed_names(), Vec::<String>::new());
+
+    // Mob B's own member carol sends to bob, who is not built: bob's own
+    // mob builds him, and he is handed carol's message.
+    let result = right
+        .send_from("carol", &bob.peer_id, "own carol-to-bob")
+        .await;
+    assert!(!result.contains(NOT_ROUTABLE), "{result}");
+    assert!(
+        right.receives("own carol-to-bob", DELIVERY_WAIT).await,
+        "bob was not handed his own mob's peer message: {result}"
+    );
+    assert_eq!(right.route_to(&bob.comms_name), Some(bob.peer_id.clone()));
+
+    // Mob A's host sends alice a message: it builds her.
+    assert_eq!(left.route_to(&alice.comms_name), None, "alice is not built");
+    left.wake("own host-to-alice").await;
+    assert_eq!(
+        left.route_to(&alice.comms_name),
+        Some(alice.peer_id.clone())
+    );
+
+    // And the link between the two mobs still delivers both ways.
+    assert_delivers(&mut left, &mut right, "own a-to-b").await;
+    assert_delivers(&mut right, &mut left, "own b-to-a").await;
+
+    left.stop().await;
+    right.stop().await;
+}
+
+/// A mob the runtime stopped for its teardown holds no link any more: the
+/// other mob's send is refused as a peer that is not found, and nothing is
+/// asked of the stopped mob.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mob_stopped_for_teardown_holds_no_link() {
+    let root = tempfile::tempdir().expect("root");
+    let mut left = Mob::start_persistent(root.path(), "wake-teardown-a", "alice", true).await;
+    let right = Mob::start_persistent(root.path(), "wake-teardown-b", "bob", true).await;
+    let bob = right.peer_info().await;
+    sdk_wire_cross_mob(&left, &right)
+        .await
+        .expect("the helper's call sequence");
+
+    let mut right = right.built_again(root.path()).await;
+    assert!(matches!(
+        right.runtime.stop_mob_for_teardown().await,
+        meerkat_meta::MobStopOutcome::Stopped
+    ));
+    assert_wakes_nobody(&mut left, &mut right, &bob, "wake-teardown a-to-b").await;
+
+    left.stop().await;
+    right.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_destroyed_mob_is_refused_and_builds_nobody() {
+    let root = tempfile::tempdir().expect("root");
+    let mut left = Mob::start_persistent(root.path(), "wake-destroyed-a", "alice", true).await;
+    let mut right = Mob::start_persistent(root.path(), "wake-destroyed-b", "bob", true).await;
+    let bob = right.peer_info().await;
+    sdk_wire_cross_mob(&left, &right)
+        .await
+        .expect("the helper's call sequence");
+    assert_delivers(&mut left, &mut right, "wake-destroyed before a-to-b").await;
+
+    let left = left.built_again(root.path()).await;
+    let right = right.built_again(root.path()).await;
+    let (mut left, mut right) = (left, right);
+
+    // Bob's mob is destroyed while its runtime lives on.
+    right
+        .runtime
+        .mob_handle()
+        .destroy()
+        .await
+        .expect("destroy bob's mob");
+    let result = left.send(&bob.peer_id, "wake-destroyed a-to-b").await;
+    assert!(
+        result.contains("peer_wake_refused") || result.contains(NOT_ROUTABLE),
+        "a destroyed mob wakes nobody, and the send is refused: {result}"
+    );
+    assert!(
+        !right
+            .receives("wake-destroyed a-to-b", NO_DELIVERY_WAIT)
+            .await,
+        "a member of a destroyed mob was handed a peer message"
+    );
+    assert_eq!(right.route_to(&bob.comms_name), None, "bob was built");
+    assert_eq!(left.route_to(&bob.comms_name), None);
+
+    left.stop().await;
+    let _ = right.runtime.shutdown().await;
+}
+
+/// A Console over `mob` on which everyone may operate the wiring and one
+/// named subject is the access admin.
+fn console_for_everyone(mob: &mut Mob) -> axum::Router {
+    mob.runtime.set_access_controller(
+        meerkat_meta::AccessController::new(meerkat_meta::AccessControlConfig {
+            approvers: Default::default(),
+            enabled: true,
+            admins: vec!["root@example.test".to_string()],
+            groups: Default::default(),
+            rules: vec![meerkat_meta::AccessRule {
+                id: "everyone-operates-wiring".to_string(),
+                actions: vec!["runtime.admin".to_string(), "agent.view".to_string()],
+                ..meerkat_meta::AccessRule::default()
+            }],
+        })
+        .expect("controller"),
+    );
+    mob.runtime.build_reference_app_router(console_decisions())
+}
+
+/// A descriptor shaped like a member of `mob_id` under a key nobody holds.
+fn nobody_of(mob_id: &str) -> PeerInfo {
+    use base64::Engine;
+    let key = meerkat_comms::Keypair::generate().public_key();
+    let comms_name = format!("{mob_id}/worker/nobody");
+    let pubkey_b64 = base64::engine::general_purpose::STANDARD.encode(key.as_bytes());
+    PeerInfo {
+        address: format!("inproc://{comms_name}"),
+        comms_name,
+        peer_id: key.to_peer_id().to_string(),
+        key: Some(pubkey_b64.clone()),
+        pubkey_b64: Some(pubkey_b64),
+        dialable_address: None,
+        answer: Value::Null,
+    }
+}
+
+/// A Console caller who is no access admin wires alice, with the key, to a
+/// member of another mob that exists and to a key nobody holds. While the
+/// other mob does not hold the edge, the two are not told apart: the same
+/// wire answer, no route, and the same refusal of alice's send, which wakes
+/// nobody.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_keyed_wire_by_a_caller_who_is_no_admin_tells_an_existing_member_from_nobody_in_nothing()
+{
+    let root = tempfile::tempdir().expect("root");
+    let mut left = Mob::start_persistent(root.path(), "wake-oracle-a", "alice", true).await;
+    let right = Mob::start_persistent(root.path(), "wake-oracle-b", "bob", true).await;
+    let bob = keyed(&right.peer_info().await);
+    let nobody = nobody_of("wake-oracle-b");
+    // Bob's runtime is built again: bob exists and is not built.
+    let mut right = right.built_again(root.path()).await;
+    let console = console_for_everyone(&mut left);
+
+    let mut wire_answers = Vec::new();
+    let mut send_answers = Vec::new();
+    for (info, body) in [(&bob, "oracle to-bob"), (&nobody, "oracle to-nobody")] {
+        let wired = console_rpc(
+            &console,
+            None,
+            "meta/cross_mob/wire_local",
+            left.wire_params(info),
+        )
+        .await
+        .expect("a keyed in-process wire is accepted");
+        wire_answers.push(wired.to_string().replace(&info.comms_name, "<name>"));
+        assert_eq!(
+            left.route_to(&info.comms_name),
+            None,
+            "the wire installed a route"
+        );
+
+        let result = left.send(&info.peer_id, body).await;
+        assert!(result.contains(NOT_ROUTABLE), "{result}");
+        send_answers.push(
+            result
+                .replace(&info.peer_id, "<peer>")
+                .replace(body, "<body>"),
+        );
+        assert_eq!(
+            left.route_to(&info.comms_name),
+            None,
+            "the send installed a route"
+        );
+        assert!(!right.receives(body, NO_DELIVERY_WAIT).await);
+        assert_eq!(
+            right.routed_names(),
+            Vec::<String>::new(),
+            "somebody was built"
+        );
+
+        console_rpc(
+            &console,
+            None,
+            "meta/cross_mob/unwire_local",
+            left.wire_params(info),
+        )
+        .await
+        .expect("unwire");
+    }
+    assert_eq!(wire_answers[0], wire_answers[1], "the wire answers differ");
+    let stamp = |answer: &str| -> String {
+        // The tool result carries a time and the tool call's id.
+        answer
+            .split("\"content\":")
+            .nth(1)
+            .and_then(|rest| rest.split("\"is_error\"").next())
+            .unwrap_or(answer)
+            .to_string()
+    };
+    assert_eq!(
+        stamp(&send_answers[0]),
+        stamp(&send_answers[1]),
+        "the send answers differ"
+    );
+
+    left.stop().await;
+    right.stop().await;
+}
+
+/// The edge a caller who is no access admin wired is an edge of the mob's
+/// state like any other, before and after a restart: alone it wakes nobody,
+/// and once the other mob holds it too a peer message builds the member.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_edge_wired_by_a_caller_who_is_no_admin_behaves_the_same_after_a_restart() {
+    let root = tempfile::tempdir().expect("root");
+    let mut left = Mob::start_persistent(root.path(), "wake-same-a", "alice", true).await;
+    let right = Mob::start_persistent(root.path(), "wake-same-b", "bob", true).await;
+    let alice = keyed(&left.peer_info().await);
+    let bob = keyed(&right.peer_info().await);
+    let mut right = right.built_again(root.path()).await;
+    let console = console_for_everyone(&mut left);
+    console_rpc(
+        &console,
+        None,
+        "meta/cross_mob/wire_local",
+        left.wire_params(&bob),
+    )
+    .await
+    .expect("a keyed in-process wire is accepted");
+
+    // The Console app holds its runtime's state: it goes before the runtime
+    // is built again.
+    drop(console);
+
+    // Only alice's mob holds the edge: nobody is woken, before a restart
+    // and after one.
+    assert_wakes_nobody(&mut left, &mut right, &bob, "same alone before").await;
+    let left = left.built_again(root.path()).await;
+    let right = right.built_again(root.path()).await;
+    let (mut left, mut right) = (left, right);
+    assert_wakes_nobody(&mut left, &mut right, &bob, "same alone after").await;
+
+    // Bob's mob wires the edge back: a peer message builds bob, before a
+    // restart and after one.
+    right.wire_local(&alice).await.expect("wire bob to alice");
+    assert_delivers(&mut left, &mut right, "same whole before").await;
+    let left = left.built_again(root.path()).await;
+    let right = right.built_again(root.path()).await;
+    let (mut left, mut right) = (left, right);
+    assert_eq!(right.routed_names(), Vec::<String>::new());
+    assert_delivers(&mut left, &mut right, "same whole after").await;
 
     left.stop().await;
     right.stop().await;

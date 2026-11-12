@@ -2837,6 +2837,10 @@ impl UnifiedRuntime {
             remote_pubkey,
         )?;
         let member_alias = local_member_id.to_string();
+        // The link this wire declares is held in the runtime's part of the
+        // link table, which its start-time read creates: a no-op here for
+        // every runtime whose mob was started through its bootstrap.
+        self.restore_cross_mob_wake_routes().await;
         with_member_under_authority(
             self.mob_runtime.handle(),
             identity_runtime.or_else(|| self.identity_runtime_ref()),
@@ -3158,7 +3162,7 @@ fn mob_inproc_namespace(runtime: &UnifiedRuntime) -> Result<String, CrossMobErro
     mob_inproc_namespace_for_id(&runtime.mob_id())
 }
 
-fn mob_inproc_namespace_for_id(mob_id: &str) -> Result<String, CrossMobError> {
+pub(super) fn mob_inproc_namespace_for_id(mob_id: &str) -> Result<String, CrossMobError> {
     meerkat_core::mob_realm_id(mob_id)
         .map(|realm| realm.as_str().to_string())
         .map_err(|error| CrossMobError::InprocAlias(error.to_string()))
@@ -3222,7 +3226,7 @@ fn ensure_alias_slot(
 /// The one owner of a cross-namespace route install: the bilateral
 /// same-process wire installs both directions through it, and a one-sided
 /// local wire installs its own direction.
-fn install_route_alias(
+pub(super) fn install_route_alias(
     namespace: &str,
     canonical_namespace: &str,
     name: &str,
@@ -3332,7 +3336,7 @@ impl LocalWireRoute {
 
 /// The namespace of the mob an in-process descriptor's comms name belongs
 /// to: `None` for a socket address or a name that is no member comms name.
-fn inproc_peer_namespace(spec: &TrustedPeerDescriptor) -> Option<String> {
+pub(super) fn inproc_peer_namespace(spec: &TrustedPeerDescriptor) -> Option<String> {
     if !matches!(
         spec.address.transport,
         meerkat_core::comms::PeerTransport::Inproc
@@ -3535,7 +3539,10 @@ async fn refuse_replacing_wire(
 /// The local half of a one-sided wire, for a roster member already resolved
 /// under its authority: refuse a wire that would replace an edge, install
 /// the route of a same-process peer, then the trust; a failed trust takes
-/// back the route this call installed. The one body of
+/// back the route this call installed. Once the wire is committed, the
+/// member's links to in-process members of other mobs are read from its row
+/// (`cross_mob_routes`): a wire to a member that is not built holds its link
+/// from here on, so a peer message can wake that member. The one body of
 /// `UnifiedRuntime::wire_local` and the Console's `wire_local`.
 pub(crate) async fn wire_local_edge(
     handle: &MobHandle,
@@ -3552,14 +3559,22 @@ pub(crate) async fn wire_local_edge(
         SameProcessPeers::Resolve => install_local_wire_route(&mob_id, spec)?,
         SameProcessPeers::Unresolved => local_wire_without_route(&mob_id, spec)?,
     };
-    let wired = handle
-        .wire(member, PeerTarget::External(spec))
-        .await
-        .map_err(CrossMobError::Mob);
-    if wired.is_err()
-        && let Some(route) = route
-    {
-        route.roll_back();
+    // A key a member of this mob is seated under is never routed to
+    // another mob's member, built or not.
+    let wired = match super::cross_mob_routes::refuse_locally_seated_key(&mob_id, &spec) {
+        Ok(()) => handle
+            .wire(member.clone(), PeerTarget::External(spec))
+            .await
+            .map_err(CrossMobError::Mob),
+        Err(refusal) => Err(refusal),
+    };
+    match &wired {
+        Ok(()) => super::cross_mob_routes::sync_member_links(handle, &member).await,
+        Err(_) => {
+            if let Some(route) = route {
+                route.roll_back();
+            }
+        }
     }
     wired
 }
@@ -3567,8 +3582,10 @@ pub(crate) async fn wire_local_edge(
 /// The local half of an unwire, for a roster member already resolved under
 /// its authority: the trust goes, and the route this mob's namespace holds
 /// under the peer's name goes with it unless another member of the mob is
-/// still wired to that peer. The one body of `UnifiedRuntime::unwire_local`
-/// and the Console's `unwire_local`.
+/// still wired to that peer. The member's link to an in-process member of
+/// another mob goes first, before the row changes (`cross_mob_routes`); an
+/// unwire that fails reads the link back from the row. The one body of
+/// `UnifiedRuntime::unwire_local` and the Console's `unwire_local`.
 pub(crate) async fn unwire_local_edge(
     handle: &MobHandle,
     member: AgentIdentity,
@@ -3577,10 +3594,15 @@ pub(crate) async fn unwire_local_edge(
     let mob_id = handle.mob_id().to_string();
     let (spec, route) = installed_local_wire_route(&mob_id, spec)?;
     let peer_name = spec.name.as_str().to_string();
-    handle
-        .unwire(member, PeerTarget::External(spec))
+    super::cross_mob_routes::drop_member_link(&mob_id, &member, &peer_name);
+    if let Err(error) = handle
+        .unwire(member.clone(), PeerTarget::External(spec))
         .await
-        .map_err(CrossMobError::Mob)?;
+    {
+        // The edge is still in the row, so the link is still held.
+        super::cross_mob_routes::sync_member_links(handle, &member).await;
+        return Err(CrossMobError::Mob(error));
+    }
     if let Some(route) = route {
         route.remove_unless_referenced(handle, &peer_name).await;
     }

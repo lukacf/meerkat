@@ -6232,7 +6232,12 @@ class MobHandle:
         in-process address) and no key. The gateway takes the key of a live
         member of another mob in its own process from that member's
         registration, and installs the route with the trust. A member that
-        process does not have is refused in plain words.
+        process does not have is refused in plain words. When the member may
+        not be running (a mob built again over its state builds a member on
+        its first message), pass ``pubkey_b64`` from its ``peer_info`` as
+        well: the wire then needs no running member and starts none. Once
+        both mobs hold the edge, a peer message to a member that is not
+        running is handed to that member's own mob, which starts it.
         """
         params: dict[str, str] = {
             "local_member_id": local_member_id,

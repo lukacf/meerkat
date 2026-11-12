@@ -80,14 +80,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   no mob of the process has live also says what to do when the process
   hosts it and it is not running (pass its key from `peer_info`).
 
+  Between two mobs of one process, an edge both mobs hold keeps working
+  when a runtime is stopped and built again over its state, with no second
+  wire: a peer message to a member that is not built is handed to that
+  member's own mob, which builds it and delivers, or refuses with its own
+  typed answer (a stopped mob refuses, and builds nobody). The route to
+  the member's inbox is installed once its mob answered ready. A wake is
+  forwarded only for an edge BOTH mobs hold in their state, each naming
+  the other member by its key, and only for a send of the member that
+  holds it. An edge only one mob holds, an edge one side unwired, another
+  sender or another key wake nobody, and the sender gets
+  `peer_not_found_or_not_trusted`. The in-process form with the member's
+  key (`remote_pubkey_b64` from `peer_info`) wires a member that is not
+  built; that wire builds nobody. A runtime that shuts down takes the
+  routes between its members and the other mobs' members with it; through
+  0.9.14 they stayed and led to inboxes that were gone (a send was
+  answered `peer_admission_dropped ... classification_rejected`). What a
+  runtime holds is read from its mob's state once when it starts (one
+  member listing, one row for each member wired to a member of another
+  mob; nobody is built).
+
   On the Console, `meta/cross_mob/wire_local` resolves a member of
   another mob of its process (the route, the member's key) only for an
   access admin, a subject the access configuration's `admins` names (and
   for every caller of a Console assembled with no access controller at
-  all). Any other caller (the action `runtime.admin` can be granted to
-  one) gets, for such a member, the answer of a name no mob has, and no
-  route. On a Console with an access controller and no admins
-  configured, the same-process route is available through the host RPC
+  all). For any other caller (the action `runtime.admin` can be granted to
+  one) the wire reads nothing of another mob and installs no route: such
+  a member gets the answer of a name no mob has. An edge that caller
+  wires with the member's key is an edge of the mob's state like any
+  other: it delivers once the other mob holds it too, as above. On a
+  Console with an access controller and no admins configured, the
+  same-process route at wire time is available through the host RPC
   only. The two new `peer_info` fields are answered on the stdio RPC;
   the Console's `peer_info` is unchanged.
 

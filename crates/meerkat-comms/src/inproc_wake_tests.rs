@@ -642,6 +642,110 @@ fn wake_route_retraction_is_owner_exact() {
     assert!(!registry.publish_wake_route("realm", PubKey([0u8; 32]), "zero", owner.weak()));
 }
 
+/// The owner read answers the published owner and the owner's name for the
+/// member, only for the namespace and key the route was published under, and
+/// no longer after the retract.
+#[test]
+fn the_wake_route_owner_read_answers_the_published_owner_and_member_name() {
+    let registry = InprocRegistry::new();
+    let member = make_keypair().public_key();
+    let other_key = make_keypair().public_key();
+    let owner = ScriptedOwner::new(OnWake::ReadyWithoutRoute);
+    let other_owner = ScriptedOwner::new(OnWake::ReadyWithoutRoute);
+    assert!(registry.publish_wake_route("realm-b", member, "worker-1", owner.weak()));
+    assert!(registry.publish_wake_route("realm-b", other_key, "worker-2", other_owner.weak()));
+
+    let (name, found) = registry
+        .wake_route_owner_in_namespace("realm-b", &member)
+        .expect("the published route is read");
+    assert_eq!(name, "worker-1");
+    assert!(Weak::ptr_eq(&found, &owner.weak()));
+    assert!(!Weak::ptr_eq(&found, &other_owner.weak()));
+    let (other_name, other_found) = registry
+        .wake_route_owner_in_namespace("realm-b", &other_key)
+        .expect("each key reads its own route");
+    assert_eq!(other_name, "worker-2");
+    assert!(Weak::ptr_eq(&other_found, &other_owner.weak()));
+
+    assert!(
+        registry
+            .wake_route_owner_in_namespace("realm-a", &member)
+            .is_none(),
+        "another namespace has no route for the key"
+    );
+    assert!(
+        registry
+            .wake_route_owner_in_namespace("realm-b", &make_keypair().public_key())
+            .is_none(),
+        "another key has no route"
+    );
+
+    assert!(registry.retract_wake_route("realm-b", &member, &owner.weak()));
+    assert!(
+        registry
+            .wake_route_owner_in_namespace("realm-b", &member)
+            .is_none(),
+        "a retracted route is no longer read"
+    );
+    assert!(
+        registry
+            .wake_route_owner_in_namespace("realm-b", &other_key)
+            .is_some(),
+        "the other key's route stays"
+    );
+}
+
+/// The owner read alone wakes nobody and changes nothing: no owner is asked,
+/// no route appears in the reader's namespace, no live route is created, and
+/// a send from the other namespace still finds no member.
+#[tokio::test]
+async fn the_wake_route_owner_read_alone_wakes_nobody_and_publishes_nothing() {
+    let registry = InprocRegistry::new();
+    let sender = make_keypair();
+    let member = make_keypair().public_key();
+    let owner = ScriptedOwner::new(OnWake::ReadyWithoutRoute);
+    assert!(registry.publish_wake_route("realm-b", member, "worker-1", owner.weak()));
+
+    for _ in 0..3 {
+        assert!(
+            registry
+                .wake_route_owner_in_namespace("realm-b", &member)
+                .is_some()
+        );
+    }
+    assert_eq!(owner.calls(), 0, "a read asks no owner");
+    assert!(owner.requests.lock().is_empty());
+    assert!(!registry.has_wake_route_in_namespace("realm-a", &member));
+    assert!(registry.has_wake_route_in_namespace("realm-b", &member));
+    assert!(
+        registry
+            .get_by_pubkey_in_namespace("realm-b", &member)
+            .is_none(),
+        "a read hands out and creates no inbox"
+    );
+    assert!(registry.peers_in_namespace("realm-a").is_empty());
+    assert!(registry.peers_in_namespace("realm-b").is_empty());
+
+    let refused = registry
+        .send_to_pubkey_in_namespace_with_id_wait(
+            "realm-a",
+            &sender,
+            &member,
+            Uuid::new_v4(),
+            message("across"),
+            false,
+            BUDGET,
+            None,
+        )
+        .await
+        .expect_err("the registry itself never wakes a member from another namespace");
+    assert!(
+        matches!(refused, InprocSendError::PeerNotFound(_)),
+        "{refused:?}"
+    );
+    assert_eq!(owner.calls(), 0);
+}
+
 /// A wake route never claims a name: a live registration under the member's
 /// name still succeeds, and a lifecycle notice classifies as lifecycle.
 #[test]

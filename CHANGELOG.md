@@ -35,6 +35,17 @@ them.
 
 ## [Unreleased]
 
+### Added
+
+- `meerkat-comms`: `InprocRegistry::wake_route_owner_in_namespace` reads the
+  owner of the wake route published for a key in a namespace, with the
+  owner's name for the member. It is a read for a host that runs two
+  namespaces in one process and declared a link between them: the host hands
+  a wake to the member's own owner, which still answers from its machine.
+  The read publishes and retracts nothing, wakes nobody and hands out no
+  inbox, and the registry itself still never wakes a member from another
+  namespace.
+
 ## [0.9.14] - 2026-11-11
 
 ### Highlights

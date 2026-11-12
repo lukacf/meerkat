@@ -867,6 +867,26 @@ impl InprocRegistry {
             .is_some_and(|ns| ns.wake_routes.contains_key(pubkey))
     }
 
+    /// The owner of the wake route published for `pubkey` in `namespace`,
+    /// with the owner's own name for the member.
+    ///
+    /// A host-composition read: a host that runs two namespaces in one
+    /// process and declared a link between them uses it to hand a wake to
+    /// the member's own owner, which still answers from its machine. The
+    /// read publishes and retracts nothing, wakes nobody and hands out no
+    /// inbox; `None` when the namespace has no wake route for the key.
+    pub fn wake_route_owner_in_namespace(
+        &self,
+        namespace: &str,
+        pubkey: &PubKey,
+    ) -> Option<(String, Weak<dyn InprocPeerWaker>)> {
+        self.state
+            .read()
+            .namespace(namespace)
+            .and_then(|ns| ns.wake_routes.get(pubkey))
+            .map(|route| (route.member.clone(), Weak::clone(&route.waker)))
+    }
+
     fn live_route(&self, scope: RouteScope<'_>, pubkey: &PubKey) -> Option<InboxSender> {
         match scope {
             RouteScope::Namespace(namespace) => self.get_by_pubkey_in_namespace(namespace, pubkey),
@@ -977,8 +997,11 @@ impl InprocRegistry {
     /// re-derived from the global registry between an isolation check and the
     /// inbox handoff - a second any-namespace lookup would open a window where
     /// the peer re-registers elsewhere and delivery crosses the namespace
-    /// boundary. A wake route is looked up in the same namespace, so a member
-    /// is never woken from another namespace.
+    /// boundary. A wake route is looked up in the same namespace, so the
+    /// registry itself never wakes a member from another namespace. A host
+    /// that declared a link between two namespaces may publish an owner of
+    /// its own in the sender's namespace and forward the wake to the
+    /// member's own owner (see [`Self::wake_route_owner_in_namespace`]).
     // Over the lint's threshold: the extra arguments are the `namespace`
     // delivery authority that distinguishes this send from its any-namespace
     // sibling, and the process-local governed origin that rides beside the

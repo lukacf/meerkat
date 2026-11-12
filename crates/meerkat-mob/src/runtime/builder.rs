@@ -8062,6 +8062,19 @@ fn apply_recovered_flow_signal(
     Ok(())
 }
 
+/// Seed MobMachine with the restore failures a start recorded for its
+/// members.
+///
+/// A start whose mob was stopped or completed has finished its seeded
+/// authority's phase when this runs, and MobMachine takes a restore failure
+/// only while Running. Such a start owes one failure at most by then: the one
+/// its replay recorded, while the authority still replayed as Running, for a
+/// row whose endpoint carries another member's transport key. MobMachine
+/// already holds that failure, with that reason, so it is not stated again.
+/// Every other diagnostic is seeded as before, and refused by an authority
+/// that is not Running: the start fails rather than list a member broken
+/// that MobMachine does not hold broken. A Running start seeds every
+/// diagnostic, as before.
 fn seed_mob_authority_restore_failures(
     authority: &mut crate::machines::mob_machine::MobMachineAuthority,
     restore_diagnostics: &HashMap<AgentIdentity, super::handle::RestoreFailureDiagnostic>,
@@ -8072,6 +8085,16 @@ fn seed_mob_authority_restore_failures(
             identity.as_str(),
         ));
         let reason = diagnostic.reason.clone();
+        if diagnostic.registration_refusal.is_none()
+            && authority.state().lifecycle_phase != mob_dsl::MobPhase::Running
+            && authority
+                .state()
+                .member_restore_failures
+                .get(&agent_identity)
+                == Some(&reason)
+        {
+            continue;
+        }
         // A host refusal of the member's registration keeps its typed code
         // (instead of the plain failure, whose transition clears the code).
         let signal = match diagnostic.registration_refusal {
@@ -19213,6 +19236,92 @@ mod tests {
                 state.member_restore_failures.get(&dsl_second),
                 Some(&member_endpoint_key_held_reason(&second)),
                 "{label}: the row's member is recorded the key-held restore failure"
+            );
+        }
+    }
+
+    /// A start states its restore failures to MobMachine. Once the mob is no
+    /// longer Running, the one failure MobMachine already holds with the same
+    /// reason (the replay recorded it) is not stated again; a failure it
+    /// holds with another reason, and one it does not hold, are stated and
+    /// refused, so the start fails closed. A Running start states them all.
+    #[test]
+    fn a_start_states_no_restore_failure_twice_to_a_mob_that_is_no_longer_running() {
+        let definition = MobDefinition::explicit("test-restore-failure-stopped-mob");
+        let (holder, second) = (AgentIdentity::from("alice"), AgentIdentity::from("carol"));
+        let key = [7u8; 32];
+        let events = vec![
+            member_spawned_row_with_key(&definition, 1, &holder, key),
+            member_spawned_row_with_key(&definition, 2, &second, key),
+        ];
+        let mut authority = seed_mob_authority();
+        seed_mob_authority_sync_from_events(
+            &mut authority,
+            &events,
+            &definition,
+            false,
+            &BTreeSet::new(),
+        )
+        .expect("the journal replays");
+        let reason = member_endpoint_key_held_reason(&second);
+        assert_eq!(
+            authority
+                .state()
+                .member_restore_failures
+                .get(&mob_dsl::AgentIdentity::from_domain(&second)),
+            Some(&reason),
+            "the replay recorded the row's member its restore failure"
+        );
+        let diagnostic = |member: &AgentIdentity, reason: &str| {
+            HashMap::from([(
+                member.clone(),
+                crate::runtime::handle::RestoreFailureDiagnostic {
+                    bridge_session_id: None,
+                    reason: reason.to_string(),
+                    hold: None,
+                    cause_data: None,
+                    registration_refusal: None,
+                },
+            )])
+        };
+
+        let epoch = authority.state().topology_epoch.clone();
+        seed_mob_authority_restore_failures(&mut authority, &diagnostic(&second, &reason))
+            .expect("a Running start states the failure again");
+        assert_ne!(
+            authority.state().topology_epoch,
+            epoch,
+            "a Running start states the failure to MobMachine, which takes it"
+        );
+
+        finish_seeded_mob_authority_phase(&mut authority, MobState::Stopped)
+            .expect("the mob was stopped");
+        let epoch = authority.state().topology_epoch.clone();
+        seed_mob_authority_restore_failures(&mut authority, &diagnostic(&second, &reason))
+            .expect("the failure MobMachine holds is not stated to a stopped mob again");
+        assert_eq!(
+            authority.state().topology_epoch,
+            epoch,
+            "nothing is stated to the stopped mob"
+        );
+        assert_eq!(
+            authority
+                .state()
+                .member_restore_failures
+                .get(&mob_dsl::AgentIdentity::from_domain(&second)),
+            Some(&reason),
+            "MobMachine holds the failure as the replay recorded it"
+        );
+        for (label, member, stated) in [
+            ("held with another reason", &second, "another reason"),
+            ("not held", &holder, reason.as_str()),
+        ] {
+            let error =
+                seed_mob_authority_restore_failures(&mut authority, &diagnostic(member, stated))
+                    .expect_err(label);
+            assert!(
+                error.to_string().contains("phase Stopped"),
+                "{label}: a stopped mob refuses the failure: {error}"
             );
         }
     }

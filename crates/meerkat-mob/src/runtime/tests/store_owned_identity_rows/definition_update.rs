@@ -2,7 +2,9 @@
 //! drops, or renames, a profile a created agent's row names is refused
 //! before anything is written, an archived agent holds its profile as a
 //! seated one does, a removed one holds nothing, and a start that carries
-//! no update seats the agents as before.
+//! no update seats the agents as before. While a row of the mob cannot be
+//! read by this build, an update that drops a profile is refused too, since
+//! such a row may name it; an update that drops none judges no row.
 
 use super::*;
 
@@ -270,4 +272,182 @@ async fn after_a_refused_definition_update_a_start_without_it_seats_the_agents()
         "shelved is seated again: {:?}",
         mob.read("shelved")
     );
+}
+
+/// A row a later build wrote, in a schema this build cannot read.
+fn later_build_row() -> Vec<u8> {
+    br#"{"schema_version":3,"a_later_field":true}"#.to_vec()
+}
+
+/// In-memory storage, paired as [`MobStorage::in_memory`] pairs its stores,
+/// and its identity store, which a row writes rows into as another build
+/// left them.
+fn storage_with_identity_rows() -> (MobStorage, InMemoryMobIdentityStore) {
+    let events = InMemoryMobEventStore::new();
+    let identity = InMemoryMobIdentityStore::paired_with_event_store(
+        &events,
+        Arc::new(crate::store::SystemMobIdentityStoreClock),
+    );
+    let identity_member: Arc<dyn crate::store::MobIdentityMemberStore> = Arc::new(identity.clone());
+    let storage = MobStorage {
+        events: Arc::new(events),
+        identity: Arc::new(identity.clone()),
+        identity_member: Some(identity_member),
+        ..MobStorage::in_memory()
+    };
+    (storage, identity)
+}
+
+/// A stopped mob of `definition` with the agent `alpha` created on
+/// `alphas_profile`, and with the rows of `later-1` and `later-2` as a
+/// later build wrote them: this build reads neither, so it cannot say
+/// which profile they name.
+async fn stopped_mob_with_unreadable_rows(
+    definition: &MobDefinition,
+    alphas_profile: &str,
+) -> StoreOwnedMob {
+    let (storage, identity) = storage_with_identity_rows();
+    let mob = StoreOwnedMob::build(definition.clone(), storage, |b| b).await;
+    committed(
+        mob.create(create_on("create-1", "alpha", alphas_profile), ALLOW)
+            .await,
+    );
+    stopped(&mob).await;
+    for name in ["later-1", "later-2"] {
+        identity
+            .put_raw_identity_row(&definition.id, &id(name), later_build_row())
+            .await;
+    }
+    mob
+}
+
+#[tokio::test]
+async fn a_definition_update_that_drops_a_profile_is_refused_while_an_agents_row_cannot_be_read() {
+    let definition = definition_with_spare_profiles("definition-unreadable");
+    let mut mob = stopped_mob_with_unreadable_rows(&definition, "worker").await;
+    let before = stored(&mob).await;
+
+    // The courier profile is on no row this build reads: the rows it
+    // cannot read may name it.
+    let refused = refused_update(
+        mob.storage
+            .update_definition(1, without_profile(&definition, "courier"))
+            .await,
+    );
+    assert_eq!(
+        refused.len(),
+        1,
+        "one diagnostic for the rows that cannot be read: {refused:?}"
+    );
+    let (code, location, message) = &refused[0];
+    assert_eq!(code, "profile_held_by_identity");
+    assert_eq!(location.as_deref(), Some("profiles"));
+    for named in ["later-1", "later-2", "courier"] {
+        assert!(message.contains(named), "{named} is named: {message}");
+    }
+    assert!(
+        !message.contains("alpha"),
+        "an agent whose row reads is not among them: {message}"
+    );
+    assert!(
+        message.contains("keep") && message.contains("build that reads"),
+        "the refusal says what the operator can do: {message}"
+    );
+    assert_eq!(stored(&mob).await, before, "nothing was written");
+
+    // A start that declares no update is as it was: the stored definition,
+    // alpha seated, and the rows still unreadable, each alone.
+    mob.restart_as(MobCompositionAuthority::Authoritative).await;
+    assert_eq!(stored(&mob).await.0, Some(definition));
+    assert!(mob.seated_dormant("alpha"), "alpha is seated as before");
+    for name in ["later-1", "later-2"] {
+        assert!(
+            matches!(
+                mob.read(name),
+                IdentityEntryRead::Unreadable { member: None }
+            ),
+            "{name} reads unreadable as before: {:?}",
+            mob.read(name)
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_refused_update_names_the_agents_on_a_dropped_profile_and_then_the_rows_it_cannot_read() {
+    let definition = definition_with_spare_profiles("definition-unreadable-both");
+    let mob = stopped_mob_with_unreadable_rows(&definition, "spare").await;
+    let before = stored(&mob).await;
+
+    let refused = refused_update(
+        mob.storage
+            .update_definition(1, without_profile(&definition, "spare"))
+            .await,
+    );
+    assert_eq!(
+        refused
+            .iter()
+            .map(|(code, location, _)| (code.as_str(), location.as_deref()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("profile_held_by_identity", Some("profiles.spare")),
+            ("profile_held_by_identity", Some("profiles")),
+        ]
+    );
+    assert!(refused[0].2.contains("alpha"), "{}", refused[0].2);
+    assert!(!refused[0].2.contains("later-"), "{}", refused[0].2);
+    assert!(
+        refused[1].2.contains("later-1") && refused[1].2.contains("later-2"),
+        "{}",
+        refused[1].2
+    );
+    assert!(!refused[1].2.contains("alpha"), "{}", refused[1].2);
+    assert_eq!(stored(&mob).await, before, "nothing was written");
+}
+
+#[tokio::test]
+async fn a_definition_update_that_drops_no_profile_passes_while_an_agents_row_cannot_be_read() {
+    let definition = definition_with_spare_profiles("definition-unreadable-keep");
+    let mob = stopped_mob_with_unreadable_rows(&definition, "spare").await;
+
+    // An update that adds a profile and drops none judges no row.
+    let mut next = definition.clone();
+    let worker = next.profiles[&ProfileName::from("worker")].clone();
+    next.profiles.insert(ProfileName::from("extra"), worker);
+    let revision = mob
+        .storage
+        .update_definition(1, next.clone())
+        .await
+        .expect("an update that drops no profile");
+    assert_eq!(revision.epoch, 2);
+    assert_eq!(stored(&mob).await.0, Some(next));
+}
+
+#[tokio::test]
+async fn a_created_row_scan_whose_cursor_does_not_advance_fails_the_update_and_writes_nothing() {
+    let definition = definition_with_spare_profiles("definition-cursor");
+    let (storage, identity) = storage_with_identity_rows();
+    let mob = StoreOwnedMob::build(definition.clone(), storage, |b| b).await;
+    committed(
+        mob.create(create_on("create-1", "alpha", "worker"), ALLOW)
+            .await,
+    );
+    stopped(&mob).await;
+    identity.repeat_created_scan_cursor_for_test().await;
+    let before = stored(&mob).await;
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(20),
+        mob.storage
+            .update_definition(1, without_profile(&definition, "courier")),
+    )
+    .await
+    .expect("the update answers: its scan does not follow a cursor that stands still");
+    assert!(
+        matches!(
+            &result,
+            Err(MobError::Internal(detail)) if detail.contains("non-advancing cursor")
+        ),
+        "the update fails on the cursor: {result:?}"
+    );
+    assert_eq!(stored(&mob).await, before, "nothing was written");
 }

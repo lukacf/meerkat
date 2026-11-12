@@ -625,6 +625,11 @@ pub(super) struct InMemoryMobAggregateState {
     /// so a row can show that a scan page reads only its own rows.
     #[cfg(test)]
     pub(super) identity_scan_classifications: std::sync::atomic::AtomicUsize,
+    /// Test builds only: whether the created identity scan answers a cursor
+    /// that does not advance, as a store that pages wrongly would, so a row
+    /// can show that a reader of the scan stops on it.
+    #[cfg(test)]
+    pub(super) created_scan_repeats_cursor: std::sync::atomic::AtomicBool,
 }
 
 /// In-memory runtime metadata store for tests and ephemeral mobs.
@@ -853,6 +858,19 @@ impl InMemoryMobIdentityStore {
             .await
             .identity_scan_classifications
             .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Test builds only: from now on every page of the created identity
+    /// scan names a following page at a cursor that does not advance (the
+    /// page's own last row, then the cursor the scan was given), as a store
+    /// that pages wrongly would.
+    #[cfg(test)]
+    pub(crate) async fn repeat_created_scan_cursor_for_test(&self) {
+        self.aggregate
+            .read()
+            .await
+            .created_scan_repeats_cursor
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Remove `identity`'s row from the intents table, whatever it holds, as
@@ -1608,6 +1626,8 @@ impl MobIdentityStore for InMemoryMobIdentityStore {
                 super::IDENTITY_INTENT_SCAN_PAGE_MAX
             )));
         }
+        #[cfg(test)]
+        let given = after.cloned();
         let after = in_memory_scan_after(after, "created identity")?;
         let aggregate = self.aggregate.read().await;
         let state = &aggregate.identity;
@@ -1663,6 +1683,17 @@ impl MobIdentityStore for InMemoryMobIdentityStore {
                 ),
             };
             observations.insert(identity.clone(), observation);
+        }
+        #[cfg(test)]
+        if aggregate
+            .created_scan_repeats_cursor
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            next = match given {
+                Some(cursor) => Some(cursor),
+                None if observations.is_empty() => None,
+                None => Some(in_memory_next_cursor(&observations)?),
+            };
         }
         Ok(super::CreatedIdentityScanPage { observations, next })
     }

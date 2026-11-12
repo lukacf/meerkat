@@ -3289,6 +3289,9 @@ pub enum AgentEvent {
     /// request, a controller request, a model-fallback attempt), after the
     /// request settled; a request refused before it was sent reports
     /// nothing. Requests of a session that sets no level report nothing.
+    /// The event states what was sent, never what was planned: a request
+    /// that is prepared again (after a route change, say) reports the
+    /// resolution of the preparation that was sent.
     ///
     /// Appended after every released variant: declaration order is the
     /// implicit discriminant (the xtask `released_enum_ordinals` test).

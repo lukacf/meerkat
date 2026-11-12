@@ -395,6 +395,23 @@ impl LlmClientAdapter {
             .client
             .project_replay_request(messages)
             .map_err(|error| error.into_agent_error(self.provider.as_str()))?;
+        // A reasoning effort level that was resolved for a route is sent on
+        // that route only. The request carries what the client observed
+        // about its route when the level was resolved; the route this
+        // projection is bound to must be the same one. A difference means
+        // the route changed in between: the request is refused as a route
+        // change, so the agent prepares it again and resolves the level for
+        // the route as it is now.
+        if let Some(witness) =
+            provider_params.and_then(|params| params.reasoning_route_witness.as_ref())
+            && self.client.reasoning_route_of(&projection).as_ref() != Some(witness)
+        {
+            return Err(LlmError::AuthorizationRouteChanged {
+                message: "the route changed after the reasoning effort level was resolved for it"
+                    .to_string(),
+            }
+            .into_agent_error(self.provider.as_str()));
+        }
 
         Ok(PreparedLlmRequest::from_projection(
             LlmRequest {

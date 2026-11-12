@@ -41598,7 +41598,9 @@ mod tests {
         assert_eq!(stored_meta.provider_params, Some(provider_params));
     }
 
-    const REASONING_EFFORT_UNRESOLVED: &str = "reasoning_effort cannot be resolved by this build";
+    /// What the refusal of a level says on a route whose levels no source
+    /// states: the test client reports no route.
+    const REASONING_EFFORT_LEVELS_UNKNOWN: &str = "no source states the levels this route accepts";
 
     fn level_only_params(
         level: meerkat_core::model_profile::capabilities::EffortLevel,
@@ -41671,8 +41673,9 @@ mod tests {
 
     /// A direct turn on a live session whose only override is the level: the
     /// hot swap runs, the session's identity carries the level, and the turn
-    /// is refused before any provider request because nothing resolves the
-    /// level yet. The level is sticky until a turn clears it.
+    /// is refused before any provider request because the level is resolved
+    /// for the session's route, whose levels no source states here. The
+    /// level is sticky until a turn clears it.
     #[tokio::test]
     async fn turn_reasoning_effort_hot_swaps_a_live_session_and_is_refused_unresolved() {
         use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
@@ -41723,9 +41726,9 @@ mod tests {
             EffortLevel::High,
         ))))
         .await
-        .expect_err("a turn that sets the level is refused until it can be resolved");
+        .expect_err("a turn that sets a level no source states for the route is refused");
         assert!(
-            refused.message.contains(REASONING_EFFORT_UNRESOLVED),
+            refused.message.contains(REASONING_EFFORT_LEVELS_UNKNOWN),
             "{refused:?}"
         );
         assert_eq!(
@@ -41738,7 +41741,7 @@ mod tests {
             .await
             .expect_err("the level stays on the session");
         assert!(
-            refused.message.contains(REASONING_EFFORT_UNRESOLVED),
+            refused.message.contains(REASONING_EFFORT_LEVELS_UNKNOWN),
             "{refused:?}"
         );
 
@@ -41789,9 +41792,9 @@ mod tests {
             EffortLevel::High,
         ))))
         .await
-        .expect_err("a turn that sets the level is refused until it can be resolved");
+        .expect_err("a turn that sets a level no source states for the route is refused");
         assert!(
-            refused.message.contains(REASONING_EFFORT_UNRESOLVED),
+            refused.message.contains(REASONING_EFFORT_LEVELS_UNKNOWN),
             "{refused:?}"
         );
         let live = runtime

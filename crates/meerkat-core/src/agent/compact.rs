@@ -988,6 +988,12 @@ pub(crate) struct CompactionInvocation<'a> {
     /// client use its own, and a provider-native tool policy that disables
     /// native tools passes the session's tag with them stripped.
     pub(crate) provider_params: Option<crate::lifecycle::run_primitive::ProviderParamsOverride>,
+    /// The level the session itself is configured with, and the model the
+    /// summary client serves: what a level on `provider_params` is resolved
+    /// with, for the summary client's own route, before each summary
+    /// request.
+    pub(crate) session_reasoning_effort: Option<crate::model_profile::capabilities::EffortLevel>,
+    pub(crate) summary_model: Option<crate::ModelProfileWitness>,
     /// Where the summary request's owner-change waits are reported, for a
     /// host that installed an operation refusal observer.
     pub(crate) wait_report: Option<crate::authorization::WaitReport>,
@@ -1757,6 +1763,33 @@ pub(crate) struct UncommittedSummaryCall {
 pub(crate) struct CompactionAttempt {
     pub(crate) result: Result<CompactionOutcome, CompactionError>,
     pub(crate) uncommitted_call: Option<UncommittedSummaryCall>,
+    /// The resolution of each summary request that was sent with the
+    /// session's `reasoning_effort` level, whatever the attempt's result.
+    pub(crate) sent_reasoning_effort: Vec<crate::ReasoningEffortResolution>,
+}
+
+/// Whether a summary request that settled as `result` was handed to the
+/// provider: every outcome but a refusal raised before dispatch (an
+/// authorization refusal, or a route that changed after the level was
+/// resolved).
+fn summary_request_was_sent(
+    result: &Result<crate::LlmStreamResult, crate::error::AgentError>,
+) -> bool {
+    match result {
+        Ok(_) => true,
+        Err(error) => {
+            !(error.operation_refusal().is_some()
+                || error.operation_authorization_unavailable()
+                || matches!(
+                    error,
+                    crate::error::AgentError::Llm {
+                        reason: crate::error::LlmFailureReason::ProviderError(provider_error),
+                        ..
+                    } if provider_error.kind
+                        == crate::error::LlmProviderErrorKind::AuthorizationRouteChanged
+                ))
+        }
+    }
 }
 
 pub(crate) async fn run_compaction<C>(
@@ -1771,6 +1804,7 @@ where
     C: crate::agent::AgentLlmClient + ?Sized,
 {
     let mut uncommitted_call = None;
+    let mut sent_reasoning_effort = Vec::new();
     let result = compact_history(
         client,
         compactor,
@@ -1779,11 +1813,13 @@ where
         event_tx,
         event_tap,
         &mut uncommitted_call,
+        &mut sent_reasoning_effort,
     )
     .await;
     CompactionAttempt {
         result,
         uncommitted_call,
+        sent_reasoning_effort,
     }
 }
 
@@ -1814,6 +1850,7 @@ async fn compact_history<C>(
     event_tx: &Option<mpsc::Sender<AgentEvent>>,
     event_tap: &crate::event_tap::EventTap,
     uncommitted_call: &mut Option<UncommittedSummaryCall>,
+    sent_reasoning_effort: &mut Vec<crate::ReasoningEffortResolution>,
 ) -> Result<CompactionOutcome, CompactionError>
 where
     C: crate::agent::AgentLlmClient + ?Sized,
@@ -1828,6 +1865,8 @@ where
         parent_revision,
         summarization_budget,
         provider_params,
+        session_reasoning_effort,
+        summary_model,
         wait_report,
         scope,
         projection,
@@ -1941,29 +1980,57 @@ where
         // same operation; any other refusal fails this compaction as before.
         let mut owner_change_churn = crate::authorization::OwnerChangeChurn::reporting(wait_report);
         let llm_result = loop {
-            // Interim reasoning-effort guard, as at the agent's request
-            // preparation (this request does not go through it): a summary
-            // request whose params carry the provider-neutral level reaches
-            // no client. The per-request `resolve_reasoning_effort` call
-            // replaces this guard.
-            if provider_params
-                .as_ref()
-                .is_some_and(|params| params.reasoning_effort.is_some())
-            {
-                break Err(crate::error::AgentError::ConfigError(
-                    "reasoning_effort cannot be resolved by this build".to_string(),
-                ));
-            }
+            // The summary request does not go through the agent's request
+            // preparation, so its level is resolved here, before each ask,
+            // for the summary client's own route: a refusal fails this
+            // compaction with the typed error and reaches no client.
+            let mut request_params = provider_params.clone();
+            let resolution =
+                match crate::agent::request_reasoning_effort::resolve_request_reasoning_effort(
+                    &crate::agent::request_reasoning_effort::RequestReasoningTarget::of(
+                        client,
+                        summary_model.as_ref(),
+                    ),
+                    session_reasoning_effort,
+                    &mut request_params,
+                ) {
+                    Ok(resolution) => resolution,
+                    Err(refusal) => {
+                        break Err(crate::error::AgentError::ReasoningEffortRefused(refusal));
+                    }
+                };
             let result = client
                 .stream_response_authorized(
                     &compaction_messages,
                     &[],
                     max_summary_tokens,
                     None,
-                    provider_params.as_ref(),
+                    request_params.as_ref(),
                     authorization.clone(),
                 )
                 .await;
+            // A summary request that was handed to the provider reports the
+            // level it was sent with; one refused before it was sent (an
+            // authorization refusal, a route that changed) reports nothing.
+            if let Some(resolution) = resolution
+                && summary_request_was_sent(&result)
+            {
+                if event_stream_open
+                    && !crate::event_tap::tap_emit(
+                        event_tap,
+                        event_tx.as_ref(),
+                        AgentEvent::RequestReasoningEffortResolved {
+                            turn_number: None,
+                            fallback_attempt: None,
+                            resolution: resolution.clone(),
+                        },
+                    )
+                    .await
+                {
+                    event_stream_open = false;
+                }
+                sent_reasoning_effort.push(resolution);
+            }
             if let Err(error) = &result
                 && error.operation_refusal().is_some_and(|refusal| {
                     refusal.kind() == crate::OperationRefusalKind::ReprepareRequired
@@ -2694,6 +2761,8 @@ mod tests {
             compactor,
             None,
             CompactionInvocation {
+                summary_model: None,
+                session_reasoning_effort: None,
                 authorization: None,
                 budget: None,
                 model_messages: &model_messages,
@@ -2916,13 +2985,13 @@ mod tests {
     }
 
     /// The summary request does not go through the agent's request
-    /// preparation, so it carries the interim reasoning-effort guard itself:
-    /// a summary request whose params carry the provider-neutral level fails
-    /// this compaction with the configuration refusal, the client (a plain
+    /// preparation, so its level is resolved at the summary call itself. A
+    /// summary client that reports no route gives no source for the levels:
+    /// the compaction fails with the typed refusal, the client (a plain
     /// `AgentLlmClient`, not the provider adapter) is never called, nothing
     /// is charged, and the history stays as it was.
     #[tokio::test]
-    async fn core_refuses_an_unresolved_level_before_any_client_call() {
+    async fn a_summary_request_resolves_its_level_before_any_client_call() {
         let session = session_with_unmeasured_voice();
         let before = serde_json::to_vec(&session).unwrap();
         let compactor: Arc<dyn Compactor> = Arc::new(ObservationCompactor);
@@ -2945,8 +3014,10 @@ mod tests {
         assert!(
             matches!(
                 &attempt.result,
-                Err(CompactionError::LlmFailed(crate::error::AgentError::ConfigError(message)))
-                    if message == "reasoning_effort cannot be resolved by this build"
+                Err(CompactionError::LlmFailed(
+                    crate::error::AgentError::ReasoningEffortRefused(refusal)
+                )) if refusal.reason == crate::ReasoningEffortRefusalReason::SupportedLevelsUnknown
+                    && refusal.route.is_none()
             ),
             "the summary request must be refused: {:?}",
             attempt.result.as_ref().err()
@@ -3260,6 +3331,8 @@ mod tests {
             &compactor,
             Some(&curator),
             CompactionInvocation {
+                summary_model: None,
+                session_reasoning_effort: None,
                 authorization: None,
                 budget: None,
                 model_messages: &model_messages,

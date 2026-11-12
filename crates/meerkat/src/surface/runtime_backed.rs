@@ -4033,8 +4033,9 @@ mod tests {
     /// its first attempt with the refusal as its durable reason.
     ///
     /// A turn that names the state the session is already at goes on, and
-    /// with a level on the session it fails inside the run with the
-    /// unresolved-level refusal, its input consumed.
+    /// with a level on the session it fails inside the run with the typed
+    /// refusal of a level no source states for the route (the test client
+    /// reports no route), its input consumed.
     #[tokio::test]
     async fn turn_reasoning_effort_not_applied_is_refused_and_ends_at_the_retry_cap_today() {
         use meerkat_core::lifecycle::run_primitive::{
@@ -4044,7 +4045,7 @@ mod tests {
 
         const NOT_APPLIED: &str =
             "the turn's reasoning_effort was not applied to the session before the turn";
-        const UNRESOLVED: &str = "reasoning_effort cannot be resolved by this build";
+        const UNRESOLVED: &str = "no source states the levels this route accepts";
 
         let temp = tempfile::tempdir().expect("tempdir");
         let provider_requests = Arc::new(AtomicUsize::new(0));
@@ -4164,8 +4165,8 @@ mod tests {
             );
             assert_refused_start_terminal(terminal);
         };
-        // Refused inside the run by the unresolved-level guard: the run
-        // failed through the turn authority and consumed its input.
+        // Refused inside the run when its level is resolved for the route:
+        // the run failed through the turn authority and consumed its input.
         let refused_inside_the_run = |(outcome, terminal): &Settled| {
             assert!(
                 matches!(
@@ -4173,7 +4174,7 @@ mod tests {
                     CompletionOutcome::AbandonedWithError { reason, error }
                         if reason.contains(UNRESOLVED) && error.terminal
                 ),
-                "expected the unresolved-level refusal: {outcome:?}"
+                "expected the refusal of a level no source states: {outcome:?}"
             );
             assert_eq!(terminal, &meerkat_runtime::InputTerminalOutcome::Consumed);
         };

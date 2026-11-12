@@ -1211,18 +1211,30 @@ where
     /// build-time tag (which may name native search) does not apply.
     /// Otherwise `None`: the client uses its own.
     fn compaction_provider_params(&self) -> Option<ProviderParamsOverride> {
+        // A session that sets the provider-neutral `reasoning_effort` level
+        // sends its summary request with it too: the level rides the
+        // request's params and is resolved for the summary client's route.
+        let level_only = self
+            .session_reasoning_effort()
+            .map(|level| ProviderParamsOverride {
+                reasoning_effort: Some(level),
+                ..ProviderParamsOverride::default()
+            });
         if !matches!(
             self.config.provider_native_tools,
             crate::ProviderNativeToolPolicy::DisableAll
         ) {
-            return None;
+            return level_only;
         }
-        let tag = match self.config.provider_params.effective_params() {
+        let Some(tag) = (match self.config.provider_params.effective_params() {
             Ok(params) => params.provider_tag,
             Err(_) => self.config.provider_params.params.provider_tag.clone(),
-        }?;
+        }) else {
+            return level_only;
+        };
         let mut params = ProviderParamsOverride {
             provider_tag: Some(tag),
+            reasoning_effort: self.session_reasoning_effort(),
             ..ProviderParamsOverride::default()
         };
         params.clear_provider_native_tools();
@@ -1238,22 +1250,7 @@ where
         provider_params: Option<ProviderParamsOverride>,
         authorization: Option<crate::LlmRequestAuthorization>,
     ) -> Result<PreparedModelAttempt, AgentError> {
-        // Interim reasoning-effort guard: nothing resolves the
-        // provider-neutral level for a route yet, so a request whose params
-        // carry it reaches no client, the provider adapter's or any other.
-        // The per-request `resolve_reasoning_effort` call replaces this
-        // guard: it translates the level for the route here, or refuses.
-        if provider_params
-            .as_ref()
-            .is_some_and(|params| params.reasoning_effort.is_some())
-        {
-            return Err(AgentError::ConfigError(
-                "reasoning_effort cannot be resolved by this build".to_string(),
-            ));
-        }
-        let provider_params = self.provider_params_under_native_tool_policy(provider_params);
-        // Nothing is resolved while the guard above stands.
-        let reasoning_effort = None;
+        let mut provider_params = self.provider_params_under_native_tool_policy(provider_params);
         if authorization.as_ref().is_some_and(|authorization| {
             authorization.usage()
                 == crate::authorization::ModelAuthorizationUse::ControllerInference
@@ -1267,6 +1264,13 @@ where
                         crate::OperationRefusalKind::MalformedFacts,
                     ),
                 })?;
+            // The controller serves this request: the level is resolved
+            // against the controller client's own route and model.
+            let reasoning_effort = self.resolve_request_reasoning_effort(
+                controller.client().as_ref(),
+                self.request_model_profile(true).as_ref(),
+                &mut provider_params,
+            )?;
             // Use the admitted immutable provider client. A mutable fallback
             // wrapper cannot silently move the controller to another route.
             return Arc::clone(controller.client())
@@ -1283,6 +1287,14 @@ where
                     reasoning_effort,
                 });
         }
+        // Every preparation resolves the level again, against the route the
+        // serving client observes now: a preparation repeated after a route
+        // change never reuses an earlier translation.
+        let reasoning_effort = self.resolve_request_reasoning_effort(
+            self.client.as_ref(),
+            self.active_model_profile.as_ref(),
+            &mut provider_params,
+        )?;
         Arc::clone(&self.client)
             .prepare_request_attempt_authorized(
                 messages,
@@ -1296,6 +1308,57 @@ where
                 attempt,
                 reasoning_effort,
             })
+    }
+
+    /// The provider-neutral `reasoning_effort` level the session itself is
+    /// configured with.
+    fn session_reasoning_effort(&self) -> Option<crate::model_profile::capabilities::EffortLevel> {
+        self.config.provider_params.params.reasoning_effort
+    }
+
+    /// Resolve the level `params`, one request's own copy, carries for the
+    /// client that serves the request and the model `profile` describes
+    /// ([`crate::agent::request_reasoning_effort`]). A refusal is the typed
+    /// error and nothing reaches the client.
+    fn resolve_request_reasoning_effort<L>(
+        &self,
+        client: &L,
+        profile: Option<&crate::ModelProfileWitness>,
+        params: &mut Option<ProviderParamsOverride>,
+    ) -> Result<Option<Box<crate::ReasoningEffortResolution>>, AgentError>
+    where
+        L: crate::AgentLlmClient + ?Sized,
+    {
+        crate::agent::request_reasoning_effort::resolve_request_reasoning_effort(
+            &crate::agent::request_reasoning_effort::RequestReasoningTarget::of(client, profile),
+            self.session_reasoning_effort(),
+            params,
+        )
+        .map(|resolution| resolution.map(Box::new))
+        .map_err(AgentError::ReasoningEffortRefused)
+    }
+
+    /// The session's level as it resolves on the session's route now, for
+    /// the run-start report: the session's own params on a scratch copy,
+    /// against the session client. Nothing is sent and nothing is stored.
+    fn resolve_run_start_reasoning_effort(
+        &self,
+    ) -> Result<Option<crate::ReasoningEffortResolution>, AgentError> {
+        if self.session_reasoning_effort().is_none() {
+            return Ok(None);
+        }
+        let mut scratch = Some(
+            self.config
+                .provider_params
+                .effective_params()
+                .unwrap_or_else(|_| self.config.provider_params.params.clone()),
+        );
+        self.resolve_request_reasoning_effort(
+            self.client.as_ref(),
+            self.active_model_profile.as_ref(),
+            &mut scratch,
+        )
+        .map(|resolution| resolution.map(|resolution| *resolution))
     }
 
     /// Report one provider request that was sent with a resolved
@@ -1483,9 +1546,22 @@ where
     /// request copy (`profile` is the model this attempt actually selected)
     /// and describe what the attempt sent. `None` when the turn carries no
     /// preference, which leaves the request and the event stream untouched.
+    ///
+    /// `route` is what the client that serves the attempt observes about its
+    /// route and the tag it applies by default: the preference is judged by
+    /// that route (on a route whose levels an account states, by the
+    /// account's statement). `None` judges it by the direct route of the
+    /// model's provider, as before a client could report its route.
+    ///
+    /// A copy that carries the session's provider-neutral `reasoning_effort`
+    /// level is not written here: where the route takes the preferred level,
+    /// that level replaces the neutral one on the copy, and the request
+    /// preparation resolves it (and reports it as decided by the
+    /// preference).
     fn lower_turn_reasoning_preference(
         &self,
         profile: Option<&crate::ModelProfileWitness>,
+        route: Option<&crate::agent::reasoning_preference::PreferenceRoute>,
         turn_number: Option<u32>,
         fallback_attempt: Option<u32>,
         params: &mut Option<ProviderParamsOverride>,
@@ -1495,9 +1571,11 @@ where
         let (baseline, outcome) = match requested.applied_level() {
             Some(level) => {
                 let (baseline, outcome) =
-                    crate::agent::reasoning_preference::lower_reasoning_preference(
+                    crate::agent::reasoning_preference::lower_reasoning_preference_on_route(
                         profile.and_then(crate::ModelProfileWitness::catalog_capabilities),
                         provider.unwrap_or(crate::Provider::Other),
+                        profile.map(crate::ModelProfileWitness::model),
+                        route,
                         level,
                         params,
                     );
@@ -1626,6 +1704,35 @@ where
         });
         *ctx.controller_feedback = true;
         true
+    }
+
+    /// What the client that serves the next request observes about its
+    /// route, for judging the turn's reasoning preference: the controller
+    /// client's for a controller request, else the session client's. `None`
+    /// when that client reports no route.
+    fn request_preference_route(
+        &self,
+        controller_feedback: bool,
+    ) -> Option<crate::agent::reasoning_preference::PreferenceRoute> {
+        let (observation, default_tag) = if controller_feedback {
+            let controller = self
+                .tool_dispatch_context
+                .work_authorization()?
+                .controller_client()?;
+            (
+                controller.client().reasoning_route(),
+                controller.client().default_provider_tag(),
+            )
+        } else {
+            (
+                self.client.reasoning_route(),
+                self.client.default_provider_tag(),
+            )
+        };
+        Some(crate::agent::reasoning_preference::PreferenceRoute {
+            observation: observation?,
+            default_tag,
+        })
     }
 
     fn request_model_profile(
@@ -2744,6 +2851,8 @@ where
         if extraction_output_schema.is_none()
             && let Some(event) = self.lower_turn_reasoning_preference(
                 Some(&switch.target_profile),
+                // Judged by the direct route of the target's provider.
+                None,
                 None,
                 Some(request.attempt),
                 &mut provider_params,
@@ -5150,6 +5259,8 @@ where
                                     parent_revision,
                                     summarization_budget,
                                     provider_params: self.compaction_provider_params(),
+                                    session_reasoning_effort: self.session_reasoning_effort(),
+                                    summary_model: self.request_model_profile(controller.is_some()),
                                     wait_report: self.refusal_wait_report(
                                         self.tool_dispatch_context.run_id().cloned(),
                                         crate::authorization::OperationRefusalSurface::Compaction,
@@ -5213,6 +5324,15 @@ where
                                 // that was rejected is not committed, but it
                                 // was real provider work: charge it whatever
                                 // the result.
+                                // Each summary request that was sent with
+                                // the session's level counts into the run's
+                                // report; its event is already published.
+                                for resolution in &attempt.sent_reasoning_effort {
+                                    crate::agent::request_reasoning_effort::record_sent_reasoning_effort(
+                                        &mut self.run_reasoning_effort,
+                                        resolution,
+                                    );
+                                }
                                 if let Some(call) = attempt.uncommitted_call {
                                     self.charge_compaction_summary_call(
                                         &call.usage,
@@ -7080,15 +7200,37 @@ where
         // model output, without minting an observability id. A resumed run
         // announces its resumption instead, and restores what its cursor
         // carries before its first boundary.
+        // The session's `reasoning_effort` level is resolved against the
+        // session's route before the run is announced: a level the route
+        // does not take ends the run with the typed refusal, and no
+        // `run_started` is published for it.
+        let run_start_reasoning_effort = match self.resolve_run_start_reasoning_effort() {
+            Ok(resolution) => resolution,
+            Err(error) => {
+                self.terminalize_fatal_error(&run_id, turn_count, &event_tx, &error)
+                    .await?;
+                return Err(error);
+            }
+        };
         match resumed {
             Some((cursor, custody)) => {
-                self.emit_run_resumed_event(&run_id, &cursor, event_tx.as_ref())
-                    .await;
+                self.emit_run_resumed_event(
+                    &run_id,
+                    &cursor,
+                    run_start_reasoning_effort,
+                    event_tx.as_ref(),
+                )
+                .await;
                 self.restore_resumed_run(&run_id, cursor, custody)?;
             }
             None => {
                 if let Some(input) = run_input {
-                    self.emit_run_started_event(input, event_tx.as_ref()).await;
+                    self.emit_run_started_event(
+                        input,
+                        run_start_reasoning_effort,
+                        event_tx.as_ref(),
+                    )
+                    .await;
                 }
             }
         }
@@ -8708,8 +8850,11 @@ where
         // copy against the model this attempt selected. Extraction is a
         // separate tool-free request and keeps its baseline.
         if !in_extraction
+            && self.active_turn_request_reasoning.is_some()
             && let Some(event) = self.lower_turn_reasoning_preference(
                 self.request_model_profile(*ctx.controller_feedback)
+                    .as_ref(),
+                self.request_preference_route(*ctx.controller_feedback)
                     .as_ref(),
                 Some(ctx.turn_count),
                 None,
@@ -42098,6 +42243,39 @@ mod tests {
                 }
             }
             assert!(controller_feedback_params(crate::Provider::Other, None).is_none());
+        }
+
+        /// A controller request keeps the session's provider-neutral
+        /// `reasoning_effort` level on its params copy, untranslated: the
+        /// request preparation resolves it for the controller client's own
+        /// route. A provider outside the typed families carries no params
+        /// and so no level.
+        #[test]
+        fn controller_feedback_keeps_the_neutral_reasoning_effort_level() {
+            use crate::model_profile::capabilities::EffortLevel;
+            let current = ProviderParamsOverride {
+                reasoning_effort: Some(EffortLevel::High),
+                ..Default::default()
+            };
+            for provider in [
+                crate::Provider::Anthropic,
+                crate::Provider::OpenAI,
+                crate::Provider::Gemini,
+                crate::Provider::SelfHosted,
+            ] {
+                let params = controller_feedback_params(provider, Some(&current)).unwrap();
+                assert_eq!(
+                    params.reasoning_effort,
+                    Some(EffortLevel::High),
+                    "{provider:?}"
+                );
+                assert_eq!(
+                    crate::reasoning_effort::explicit_provider_effort(Some(&params)),
+                    None,
+                    "{provider:?}: no typed effort is written before the resolution"
+                );
+            }
+            assert!(controller_feedback_params(crate::Provider::Other, Some(&current)).is_none());
         }
 
         #[cfg(feature = "workspace-tests")]

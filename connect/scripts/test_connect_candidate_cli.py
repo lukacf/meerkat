@@ -1134,9 +1134,18 @@ def test_assemble_restores_the_stage_and_runs_only_the_cli_assembly(lane):
     work = lane.work
     review = lane.accepted_review()
     before = len(lane.calls)
-    # A fresh stage-two host: nothing but the stage record is there.
+    # A fresh stage-two host: nothing but the stage record is there, and a downloaded workflow artifact
+    # keeps no file mode: every plain file of the stage record is 0644 (the trees travel as tar members).
     shutil.rmtree(work)
+    plain = [path for path in (lane.root / "stage").rglob("*") if path.is_file()]
+    for path in plain:
+        path.chmod(0o644)
+    assert len(plain) > 40 and not [path for path in plain if os.access(path, os.X_OK)]
     value = lane.assemble(review=review)
+    for name in (*p.MACOS_SHIPPED, *p.MACOS_TESTS):
+        assert (work / "binary" / name).stat().st_mode & 0o777 == 0o755
+    assert (work / "cli-stage/meerkat-connect-macos-arm64/bin/packaged_setup").stat().st_mode & 0o777 == 0o755
+    assert (work / "gateway-stage/meerkat-connect-macos-arm64/bin/toolkit_gateway").is_file()
     assert [call[0] for call in lane.calls[before:]] == ["cli-final"]
     assert value["native_execution"] is False and value["publication"] == "not_performed"
     assert value["private_text_scan"] == "required_before_publication"
@@ -1389,6 +1398,15 @@ def test_accept_review_records_the_acceptance_of_one_exact_stage(lane, capsys):
     assert accepted["stage_sha256"] == p.digest(stage / "STAGE.json")
     value = lane.assemble(review=review)
     assert value["shutdown_review_sha256"] == p.digest(review)
+    # The record is a function of the stage: a second run (the hosted stage two) with the digest the reader
+    # stated writes the same bytes, and refuses any other stated digest before it writes anything.
+    again = lane.root / "accepted-again.json"
+    assert p.macos_main(["accept-review", "--stage", str(stage), "--review-sha256", p.digest(review),
+                         "--output", str(again)]) == 0
+    assert again.read_bytes() == review.read_bytes()
+    assert p.macos_main(["accept-review", "--stage", str(stage), "--review-sha256", "0" * 64,
+                         "--output", str(lane.root / "not-stated.json")]) == 1
+    assert not (lane.root / "not-stated.json").exists()
     # The same command refuses a stage whose bound observation is missing or changed, and an existing output.
     assert p.macos_main(["accept-review", "--stage", str(stage), "--output", str(review)]) == 1
     (stage / "records" / (p.CLI_SHUTDOWN + ".log")).write_text("another observation\n")

@@ -104,14 +104,6 @@ machine! {
             SyncTargetSnapshot { target_binding_key: TargetBindingId },
             Pause { at_utc_ms: u64 },
             Resume { at_utc_ms: u64 },
-            // The schedule follows its target: the target stopped taking
-            // deliveries for now, or takes them again. Both are accepted in
-            // every phase and change nothing where they have nothing to do,
-            // so the owner of the target's lifecycle sends them without
-            // reading the schedule's phase first, and sends them again
-            // after a crash.
-            PauseForTarget { at_utc_ms: u64 },
-            ResumeForTarget { at_utc_ms: u64 },
             Delete { at_utc_ms: u64 },
             // Reciprocal ack (wave-d D-f): OccurrenceLifecycleMachine
             // reports back the occurrence_id it superseded along with
@@ -119,6 +111,15 @@ machine! {
             // side records the ack so the SupersedePendingOccurrences
             // route has an observable completion signal.
             ConfirmOccurrencesSuperseded { occurrence_id: OccurrenceId, superseding_revision: u64 },
+            // The schedule follows its target: the target stopped taking
+            // deliveries for now, or takes them again. Both are accepted in
+            // every phase and change nothing where they have nothing to do,
+            // so the owner of the target's lifecycle sends them without
+            // reading the schedule's phase first, and sends them again
+            // after a crash. Appended last: no existing input's
+            // discriminant moves.
+            PauseForTarget { at_utc_ms: u64 },
+            ResumeForTarget { at_utc_ms: u64 },
         }
 
         effect ScheduleLifecycleEffect {
@@ -244,6 +245,13 @@ machine! {
             }
             guard { self.lifecycle_phase == Phase::Paused }
             update {
+                // A pause for the target was for the target the schedule
+                // had. Pointed at another one, the schedule stays Paused
+                // and the pause is the reviser's own: nothing that follows
+                // the old or the new target resumes it.
+                if target_binding_key != self.target_binding_key {
+                    self.paused_for_target = false;
+                }
                 self.trigger_key = trigger_key;
                 self.target_binding_key = target_binding_key;
                 self.misfire_policy = misfire_policy;
@@ -378,72 +386,6 @@ machine! {
             emit EmitScheduleNotice { new_state: self.lifecycle_phase, revision: self.revision }
         }
 
-        // --- Pause / Resume that follow the target ---
-        //
-        // PauseForTarget pauses an Active schedule and marks the pause as
-        // its target's. A schedule that is already Paused keeps the pause
-        // it has: somebody's own pause stays theirs, and a pause for the
-        // target stays one. Like Pause it emits no supersession.
-        //
-        // ResumeForTarget resumes exactly the schedules paused for their
-        // target. A schedule paused by name, an Active one and a Deleted
-        // one are left as they are.
-
-        transition PauseForTargetActive {
-            on input PauseForTarget { at_utc_ms }
-            guard { self.lifecycle_phase == Phase::Active }
-            update {
-                self.paused_for_target = true;
-            }
-            to Paused
-            emit EmitScheduleNotice { new_state: self.lifecycle_phase, revision: self.revision }
-        }
-
-        transition PauseForTargetPaused {
-            on input PauseForTarget { at_utc_ms }
-            guard { self.lifecycle_phase == Phase::Paused }
-            update {}
-            to Paused
-        }
-
-        transition PauseForTargetDeleted {
-            on input PauseForTarget { at_utc_ms }
-            guard { self.lifecycle_phase == Phase::Deleted }
-            update {}
-            to Deleted
-        }
-
-        transition ResumeForTargetPausedForTarget {
-            on input ResumeForTarget { at_utc_ms }
-            guard { self.lifecycle_phase == Phase::Paused && self.paused_for_target == true }
-            update {
-                self.paused_for_target = false;
-            }
-            to Active
-            emit EmitScheduleNotice { new_state: self.lifecycle_phase, revision: self.revision }
-        }
-
-        transition ResumeForTargetPausedByName {
-            on input ResumeForTarget { at_utc_ms }
-            guard { self.lifecycle_phase == Phase::Paused && self.paused_for_target == false }
-            update {}
-            to Paused
-        }
-
-        transition ResumeForTargetActive {
-            on input ResumeForTarget { at_utc_ms }
-            guard { self.lifecycle_phase == Phase::Active }
-            update {}
-            to Active
-        }
-
-        transition ResumeForTargetDeleted {
-            on input ResumeForTarget { at_utc_ms }
-            guard { self.lifecycle_phase == Phase::Deleted }
-            update {}
-            to Deleted
-        }
-
         // --- Delete (per-phase, bumps revision) ---
         //
         // Delete supersedes like a revise: it drops every recorded
@@ -536,6 +478,72 @@ machine! {
                     self.superseded_ack_ids.insert(occurrence_id);
                 }
             }
+            to Deleted
+        }
+
+        // --- Pause / Resume that follow the target ---
+        //
+        // PauseForTarget pauses an Active schedule and marks the pause as
+        // its target's. A schedule that is already Paused keeps the pause
+        // it has: somebody's own pause stays theirs, and a pause for the
+        // target stays one. Like Pause it emits no supersession.
+        //
+        // ResumeForTarget resumes exactly the schedules paused for their
+        // target. A schedule paused by name, an Active one and a Deleted
+        // one are left as they are.
+
+        transition PauseForTargetActive {
+            on input PauseForTarget { at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Active }
+            update {
+                self.paused_for_target = true;
+            }
+            to Paused
+            emit EmitScheduleNotice { new_state: self.lifecycle_phase, revision: self.revision }
+        }
+
+        transition PauseForTargetPaused {
+            on input PauseForTarget { at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Paused }
+            update {}
+            to Paused
+        }
+
+        transition PauseForTargetDeleted {
+            on input PauseForTarget { at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Deleted }
+            update {}
+            to Deleted
+        }
+
+        transition ResumeForTargetPausedForTarget {
+            on input ResumeForTarget { at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Paused && self.paused_for_target == true }
+            update {
+                self.paused_for_target = false;
+            }
+            to Active
+            emit EmitScheduleNotice { new_state: self.lifecycle_phase, revision: self.revision }
+        }
+
+        transition ResumeForTargetPausedByName {
+            on input ResumeForTarget { at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Paused && self.paused_for_target == false }
+            update {}
+            to Paused
+        }
+
+        transition ResumeForTargetActive {
+            on input ResumeForTarget { at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Active }
+            update {}
+            to Active
+        }
+
+        transition ResumeForTargetDeleted {
+            on input ResumeForTarget { at_utc_ms }
+            guard { self.lifecycle_phase == Phase::Deleted }
+            update {}
             to Deleted
         }
     }
@@ -858,6 +866,84 @@ mod tests {
         }
         assert_eq!(auth.state().revision, revision);
         assert!(!auth.state().paused_for_target);
+    }
+
+    /// A revise that points a schedule paused for its target at another
+    /// target ends that pause: the schedule stays Paused, as somebody's
+    /// own, and neither target's return resumes it. A revise that keeps
+    /// the target keeps the pause.
+    #[test]
+    fn a_revise_to_another_target_ends_a_pause_for_the_old_target() {
+        let revise_to = |auth: &mut ScheduleLifecycleMachineAuthority, target: &str| {
+            follow(
+                auth,
+                ScheduleLifecycleInput::Revise {
+                    trigger_key: "trigger-0".into(),
+                    target_binding_key: target.into(),
+                    misfire_policy: MisfirePolicy::Skip,
+                    overlap_policy: OverlapPolicy::SkipIfRunning,
+                    missing_target_policy: MissingTargetPolicy::MarkMisfired,
+                    planning_horizon_days: 30,
+                    planning_horizon_occurrences: 64,
+                    at_utc_ms: 2,
+                },
+            )
+        };
+        let mut auth = ScheduleLifecycleMachineAuthority::new();
+        follow(
+            &mut auth,
+            ScheduleLifecycleInput::PauseForTarget { at_utc_ms: 1 },
+        );
+        let same = auth.state().target_binding_key.0.clone();
+        revise_to(&mut auth, &same);
+        assert!(auth.state().paused_for_target, "the same target keeps it");
+
+        revise_to(&mut auth, "target-other");
+        assert_eq!(auth.state().lifecycle_phase, ScheduleLifecycleState::Paused);
+        assert!(!auth.state().paused_for_target);
+        // The new target is stopped and returns: the schedule is not its.
+        let paused = follow(
+            &mut auth,
+            ScheduleLifecycleInput::PauseForTarget { at_utc_ms: 3 },
+        );
+        assert!(paused.effects.is_empty(), "{:?}", paused.effects);
+        let resumed = follow(
+            &mut auth,
+            ScheduleLifecycleInput::ResumeForTarget { at_utc_ms: 4 },
+        );
+        assert_eq!(resumed.to_phase, ScheduleLifecycleState::Paused);
+        assert!(resumed.effects.is_empty(), "{:?}", resumed.effects);
+    }
+
+    /// The inputs that change a paused schedule without ending its pause
+    /// keep whose pause it is: a planning config update, a target snapshot
+    /// sync and a supersession acknowledgement.
+    #[test]
+    fn a_paused_schedules_other_inputs_keep_a_pause_for_the_target() {
+        let mut auth = ScheduleLifecycleMachineAuthority::new();
+        follow(
+            &mut auth,
+            ScheduleLifecycleInput::PauseForTarget { at_utc_ms: 1 },
+        );
+        let target = auth.state().target_binding_key.clone();
+        let revision = auth.state().revision;
+        for input in [
+            ScheduleLifecycleInput::UpdatePlanningConfig {
+                planning_horizon_days: 7,
+                planning_horizon_occurrences: 8,
+            },
+            ScheduleLifecycleInput::SyncTargetSnapshot {
+                target_binding_key: target,
+            },
+            ScheduleLifecycleInput::ConfirmOccurrencesSuperseded {
+                occurrence_id: "occurrence-1".into(),
+                superseding_revision: revision,
+            },
+        ] {
+            let kept = follow(&mut auth, input.clone());
+            assert_eq!(kept.to_phase, ScheduleLifecycleState::Paused, "{input:?}");
+            assert!(auth.state().paused_for_target, "{input:?}");
+        }
     }
 
     fn ack_ids(auth: &ScheduleLifecycleMachineAuthority) -> std::collections::BTreeSet<String> {

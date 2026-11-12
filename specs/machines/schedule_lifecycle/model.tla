@@ -52,6 +52,7 @@ TerminalStutter ==
 \* that leaves those variables unchanged references the definition by name.
 UnchangedFrame_3d1791026e64249f == UNCHANGED << schedule_id, trigger_key, target_binding_key, misfire_policy, overlap_policy, missing_target_policy, planning_horizon_days, planning_horizon_occurrences, next_occurrence_ordinal >>
 UnchangedFrame_58255f1a58d90420 == UNCHANGED << schedule_id, revision, trigger_key, target_binding_key, misfire_policy, overlap_policy, missing_target_policy, planning_horizon_days, planning_horizon_occurrences, planning_cursor_utc_ms, next_occurrence_ordinal, paused_for_target >>
+UnchangedFrame_5be21f58c94c5cb2 == UNCHANGED << schedule_id, next_occurrence_ordinal >>
 UnchangedFrame_744ee7e24ed036eb == UNCHANGED << schedule_id, revision, trigger_key, target_binding_key, misfire_policy, overlap_policy, missing_target_policy, planning_horizon_days, planning_horizon_occurrences, planning_cursor_utc_ms, next_occurrence_ordinal, superseded_ack_ids >>
 UnchangedFrame_76a2fa652322ebd8 == UNCHANGED << schedule_id, revision, trigger_key, target_binding_key, misfire_policy, overlap_policy, missing_target_policy, planning_cursor_utc_ms, next_occurrence_ordinal, superseded_ack_ids, paused_for_target >>
 UnchangedFrame_922049e3cf613bd2 == UNCHANGED << schedule_id, revision, trigger_key, misfire_policy, overlap_policy, missing_target_policy, planning_horizon_days, planning_horizon_occurrences, planning_cursor_utc_ms, next_occurrence_ordinal, superseded_ack_ids, paused_for_target >>
@@ -107,7 +108,8 @@ RevisePaused(arg_trigger_key, arg_target_binding_key, arg_misfire_policy, arg_ov
     /\ planning_horizon_occurrences' = arg_planning_horizon_occurrences
     /\ planning_cursor_utc_ms' = None
     /\ superseded_ack_ids' = {}
-    /\ UnchangedFrame_ce9dac18e6d97fa8
+    /\ paused_for_target' = IF (arg_target_binding_key # target_binding_key) THEN FALSE ELSE paused_for_target
+    /\ UnchangedFrame_5be21f58c94c5cb2
 
 
 UpdatePlanningConfigActive(arg_planning_horizon_days, arg_planning_horizon_occurrences) ==
@@ -171,6 +173,58 @@ ResumeActiveOrPaused(at_utc_ms) ==
     /\ UnchangedFrame_744ee7e24ed036eb
 
 
+DeleteActive(at_utc_ms) ==
+    /\ phase = "Active"
+    /\ phase' = "Deleted"
+    /\ model_step_count' = model_step_count + 1
+    /\ revision' = (revision) + 1
+    /\ planning_cursor_utc_ms' = None
+    /\ superseded_ack_ids' = {}
+    /\ UnchangedFrame_e7edc30957a3390b
+
+
+DeletePaused(at_utc_ms) ==
+    /\ phase = "Paused"
+    /\ phase' = "Deleted"
+    /\ model_step_count' = model_step_count + 1
+    /\ revision' = (revision) + 1
+    /\ planning_cursor_utc_ms' = None
+    /\ superseded_ack_ids' = {}
+    /\ paused_for_target' = FALSE
+    /\ UnchangedFrame_3d1791026e64249f
+
+
+DeleteDeleted(at_utc_ms) ==
+    /\ phase = "Deleted"
+    /\ phase' = "Deleted"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_f36ec3338ba8be1f
+
+
+ConfirmOccurrencesSupersededActive(occurrence_id, superseding_revision) ==
+    /\ phase = "Active"
+    /\ phase' = "Active"
+    /\ model_step_count' = model_step_count + 1
+    /\ superseded_ack_ids' = IF (superseding_revision = revision) THEN (superseded_ack_ids \cup {occurrence_id}) ELSE superseded_ack_ids
+    /\ UnchangedFrame_58255f1a58d90420
+
+
+ConfirmOccurrencesSupersededPaused(occurrence_id, superseding_revision) ==
+    /\ phase = "Paused"
+    /\ phase' = "Paused"
+    /\ model_step_count' = model_step_count + 1
+    /\ superseded_ack_ids' = IF (superseding_revision = revision) THEN (superseded_ack_ids \cup {occurrence_id}) ELSE superseded_ack_ids
+    /\ UnchangedFrame_58255f1a58d90420
+
+
+ConfirmOccurrencesSupersededDeleted(occurrence_id, superseding_revision) ==
+    /\ phase = "Deleted"
+    /\ phase' = "Deleted"
+    /\ model_step_count' = model_step_count + 1
+    /\ superseded_ack_ids' = IF (superseding_revision = revision) THEN (superseded_ack_ids \cup {occurrence_id}) ELSE superseded_ack_ids
+    /\ UnchangedFrame_58255f1a58d90420
+
+
 PauseForTargetActive(at_utc_ms) ==
     /\ phase = "Active"
     /\ phase' = "Paused"
@@ -224,58 +278,6 @@ ResumeForTargetDeleted(at_utc_ms) ==
     /\ UnchangedFrame_f36ec3338ba8be1f
 
 
-DeleteActive(at_utc_ms) ==
-    /\ phase = "Active"
-    /\ phase' = "Deleted"
-    /\ model_step_count' = model_step_count + 1
-    /\ revision' = (revision) + 1
-    /\ planning_cursor_utc_ms' = None
-    /\ superseded_ack_ids' = {}
-    /\ UnchangedFrame_e7edc30957a3390b
-
-
-DeletePaused(at_utc_ms) ==
-    /\ phase = "Paused"
-    /\ phase' = "Deleted"
-    /\ model_step_count' = model_step_count + 1
-    /\ revision' = (revision) + 1
-    /\ planning_cursor_utc_ms' = None
-    /\ superseded_ack_ids' = {}
-    /\ paused_for_target' = FALSE
-    /\ UnchangedFrame_3d1791026e64249f
-
-
-DeleteDeleted(at_utc_ms) ==
-    /\ phase = "Deleted"
-    /\ phase' = "Deleted"
-    /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_f36ec3338ba8be1f
-
-
-ConfirmOccurrencesSupersededActive(occurrence_id, superseding_revision) ==
-    /\ phase = "Active"
-    /\ phase' = "Active"
-    /\ model_step_count' = model_step_count + 1
-    /\ superseded_ack_ids' = IF (superseding_revision = revision) THEN (superseded_ack_ids \cup {occurrence_id}) ELSE superseded_ack_ids
-    /\ UnchangedFrame_58255f1a58d90420
-
-
-ConfirmOccurrencesSupersededPaused(occurrence_id, superseding_revision) ==
-    /\ phase = "Paused"
-    /\ phase' = "Paused"
-    /\ model_step_count' = model_step_count + 1
-    /\ superseded_ack_ids' = IF (superseding_revision = revision) THEN (superseded_ack_ids \cup {occurrence_id}) ELSE superseded_ack_ids
-    /\ UnchangedFrame_58255f1a58d90420
-
-
-ConfirmOccurrencesSupersededDeleted(occurrence_id, superseding_revision) ==
-    /\ phase = "Deleted"
-    /\ phase' = "Deleted"
-    /\ model_step_count' = model_step_count + 1
-    /\ superseded_ack_ids' = IF (superseding_revision = revision) THEN (superseded_ack_ids \cup {occurrence_id}) ELSE superseded_ack_ids
-    /\ UnchangedFrame_58255f1a58d90420
-
-
 Next ==
     \/ (phase = "Active") /\ \E arg_schedule_id \in ScheduleIdValues : \E arg_trigger_key \in TriggerKeyValues : \E arg_target_binding_key \in TargetBindingIdValues : \E arg_misfire_policy \in MisfirePolicyValues : \E arg_overlap_policy \in OverlapPolicyValues : \E arg_missing_target_policy \in MissingTargetPolicyValues : \E arg_planning_horizon_days \in OptionU64Values : \E arg_planning_horizon_occurrences \in OptionU64Values : CreateSchedule(arg_schedule_id, arg_trigger_key, arg_target_binding_key, arg_misfire_policy, arg_overlap_policy, arg_missing_target_policy, arg_planning_horizon_days, arg_planning_horizon_occurrences)
     \/ (phase = "Active") /\ \E arg_trigger_key \in TriggerKeyValues : \E arg_target_binding_key \in TargetBindingIdValues : \E arg_misfire_policy \in MisfirePolicyValues : \E arg_overlap_policy \in OverlapPolicyValues : \E arg_missing_target_policy \in MissingTargetPolicyValues : \E arg_planning_horizon_days \in 0..2 : \E arg_planning_horizon_occurrences \in 0..2 : \E at_utc_ms \in 0..2 : ReviseActive(arg_trigger_key, arg_target_binding_key, arg_misfire_policy, arg_overlap_policy, arg_missing_target_policy, arg_planning_horizon_days, arg_planning_horizon_occurrences, at_utc_ms)
@@ -287,6 +289,12 @@ Next ==
     \/ (phase = "Paused") /\ \E arg_target_binding_key \in TargetBindingIdValues : SyncTargetSnapshotPaused(arg_target_binding_key)
     \/ (phase = "Active" \/ phase = "Paused") /\ \E at_utc_ms \in 0..2 : PauseActiveOrPaused(at_utc_ms)
     \/ (phase = "Active" \/ phase = "Paused") /\ \E at_utc_ms \in 0..2 : ResumeActiveOrPaused(at_utc_ms)
+    \/ (phase = "Active") /\ \E at_utc_ms \in 0..2 : DeleteActive(at_utc_ms)
+    \/ (phase = "Paused") /\ \E at_utc_ms \in 0..2 : DeletePaused(at_utc_ms)
+    \/ (phase = "Deleted") /\ \E at_utc_ms \in 0..2 : DeleteDeleted(at_utc_ms)
+    \/ (phase = "Active") /\ \E occurrence_id \in OccurrenceIdValues : \E superseding_revision \in 0..2 : ConfirmOccurrencesSupersededActive(occurrence_id, superseding_revision)
+    \/ (phase = "Paused") /\ \E occurrence_id \in OccurrenceIdValues : \E superseding_revision \in 0..2 : ConfirmOccurrencesSupersededPaused(occurrence_id, superseding_revision)
+    \/ (phase = "Deleted") /\ \E occurrence_id \in OccurrenceIdValues : \E superseding_revision \in 0..2 : ConfirmOccurrencesSupersededDeleted(occurrence_id, superseding_revision)
     \/ (phase = "Active") /\ \E at_utc_ms \in 0..2 : PauseForTargetActive(at_utc_ms)
     \/ (phase = "Paused") /\ \E at_utc_ms \in 0..2 : PauseForTargetPaused(at_utc_ms)
     \/ (phase = "Deleted") /\ \E at_utc_ms \in 0..2 : PauseForTargetDeleted(at_utc_ms)
@@ -294,12 +302,6 @@ Next ==
     \/ (phase = "Paused") /\ \E at_utc_ms \in 0..2 : ResumeForTargetPausedByName(at_utc_ms)
     \/ (phase = "Active") /\ \E at_utc_ms \in 0..2 : ResumeForTargetActive(at_utc_ms)
     \/ (phase = "Deleted") /\ \E at_utc_ms \in 0..2 : ResumeForTargetDeleted(at_utc_ms)
-    \/ (phase = "Active") /\ \E at_utc_ms \in 0..2 : DeleteActive(at_utc_ms)
-    \/ (phase = "Paused") /\ \E at_utc_ms \in 0..2 : DeletePaused(at_utc_ms)
-    \/ (phase = "Deleted") /\ \E at_utc_ms \in 0..2 : DeleteDeleted(at_utc_ms)
-    \/ (phase = "Active") /\ \E occurrence_id \in OccurrenceIdValues : \E superseding_revision \in 0..2 : ConfirmOccurrencesSupersededActive(occurrence_id, superseding_revision)
-    \/ (phase = "Paused") /\ \E occurrence_id \in OccurrenceIdValues : \E superseding_revision \in 0..2 : ConfirmOccurrencesSupersededPaused(occurrence_id, superseding_revision)
-    \/ (phase = "Deleted") /\ \E occurrence_id \in OccurrenceIdValues : \E superseding_revision \in 0..2 : ConfirmOccurrencesSupersededDeleted(occurrence_id, superseding_revision)
     \/ TerminalStutter
 
 revision_is_positive == (revision > 0)

@@ -413,14 +413,6 @@ pub mod inputs {
         pub at_utc_ms: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct PauseForTarget {
-        pub at_utc_ms: u64,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ResumeForTarget {
-        pub at_utc_ms: u64,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Delete {
         pub at_utc_ms: u64,
     }
@@ -428,6 +420,14 @@ pub mod inputs {
     pub struct ConfirmOccurrencesSuperseded {
         pub occurrence_id: OccurrenceId,
         pub superseding_revision: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PauseForTarget {
+        pub at_utc_ms: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResumeForTarget {
+        pub at_utc_ms: u64,
     }
 }
 
@@ -440,10 +440,10 @@ pub enum Input {
     SyncTargetSnapshot(inputs::SyncTargetSnapshot),
     Pause(inputs::Pause),
     Resume(inputs::Resume),
-    PauseForTarget(inputs::PauseForTarget),
-    ResumeForTarget(inputs::ResumeForTarget),
     Delete(inputs::Delete),
     ConfirmOccurrencesSuperseded(inputs::ConfirmOccurrencesSuperseded),
+    PauseForTarget(inputs::PauseForTarget),
+    ResumeForTarget(inputs::ResumeForTarget),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -455,10 +455,10 @@ impl Input {
             Self::SyncTargetSnapshot(_) => InputKind::SyncTargetSnapshot,
             Self::Pause(_) => InputKind::Pause,
             Self::Resume(_) => InputKind::Resume,
-            Self::PauseForTarget(_) => InputKind::PauseForTarget,
-            Self::ResumeForTarget(_) => InputKind::ResumeForTarget,
             Self::Delete(_) => InputKind::Delete,
             Self::ConfirmOccurrencesSuperseded(_) => InputKind::ConfirmOccurrencesSuperseded,
+            Self::PauseForTarget(_) => InputKind::PauseForTarget,
+            Self::ResumeForTarget(_) => InputKind::ResumeForTarget,
         }
     }
 }
@@ -471,10 +471,10 @@ pub enum InputKind {
     SyncTargetSnapshot,
     Pause,
     Resume,
-    PauseForTarget,
-    ResumeForTarget,
     Delete,
     ConfirmOccurrencesSuperseded,
+    PauseForTarget,
+    ResumeForTarget,
 }
 
 pub mod effects {
@@ -523,6 +523,12 @@ pub enum TransitionId {
     SyncTargetSnapshotPaused,
     PauseActiveOrPaused,
     ResumeActiveOrPaused,
+    DeleteActive,
+    DeletePaused,
+    DeleteDeleted,
+    ConfirmOccurrencesSupersededActive,
+    ConfirmOccurrencesSupersededPaused,
+    ConfirmOccurrencesSupersededDeleted,
     PauseForTargetActive,
     PauseForTargetPaused,
     PauseForTargetDeleted,
@@ -530,12 +536,6 @@ pub enum TransitionId {
     ResumeForTargetPausedByName,
     ResumeForTargetActive,
     ResumeForTargetDeleted,
-    DeleteActive,
-    DeletePaused,
-    DeleteDeleted,
-    ConfirmOccurrencesSupersededActive,
-    ConfirmOccurrencesSupersededPaused,
-    ConfirmOccurrencesSupersededDeleted,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

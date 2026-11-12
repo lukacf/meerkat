@@ -871,18 +871,20 @@ impl crate::identity_creation::AgentSchedules for MobAgentSchedules {
         for schedule in &targeting {
             let id = &schedule.schedule_id;
             // Each call is the schedule's own lifecycle's to decide: it
-            // changes nothing where it has nothing to do.
+            // changes nothing where it has nothing to do. What is listed
+            // is read from what the call answers, never from the listing
+            // made before it.
             let done = match effect {
                 ScheduleEffect::Paused => self
                     .service
                     .pause_for_target(id)
                     .await
-                    .map(|paused| paused.paused_for_target()),
-                ScheduleEffect::Resumed => {
-                    self.service.resume_for_target(id).await.map(|resumed| {
-                        schedule.paused_for_target() && resumed.phase == SchedulePhase::Active
-                    })
-                }
+                    .map(|(paused, _)| paused.paused_for_target()),
+                ScheduleEffect::Resumed => self
+                    .service
+                    .resume_for_target(id)
+                    .await
+                    .map(|(_, resumed)| resumed),
                 ScheduleEffect::Ended => self
                     .service
                     .delete(id)

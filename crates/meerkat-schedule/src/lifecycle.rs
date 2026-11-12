@@ -46,6 +46,12 @@ pub enum ScheduleLifecycleInput {
     Resume {
         at_utc: DateTime<Utc>,
     },
+    Delete {
+        at_utc: DateTime<Utc>,
+    },
+    ConfirmOccurrencesSuperseded {
+        ack: OccurrenceSupersessionAck,
+    },
     /// The schedule's target stopped taking deliveries for now: an Active
     /// schedule is paused for its target. A schedule that is already
     /// Paused keeps the pause it has, and a Deleted one is left as it is.
@@ -57,12 +63,6 @@ pub enum ScheduleLifecycleInput {
     /// schedule somebody paused by name included.
     ResumeForTarget {
         at_utc: DateTime<Utc>,
-    },
-    Delete {
-        at_utc: DateTime<Utc>,
-    },
-    ConfirmOccurrencesSuperseded {
-        ack: OccurrenceSupersessionAck,
     },
 }
 
@@ -2555,11 +2555,13 @@ impl Schedule {
                     at_utc_ms: schedule_datetime_to_millis(at_utc, "at_utc")?,
                 };
                 let (transition, dsl_state) = run_schedule_dsl(&schedule, dsl_input)?;
+                // An input that had nothing to do leaves the machine's state
+                // as it was, and the schedule with it, its update time
+                // included.
+                let changed = dsl_state != schedule.machine_state;
                 write_back_schedule(&dsl_state, &mut schedule)?;
                 let effects = map_schedule_effects(&transition)?;
-                // An input that had nothing to do emits nothing and leaves
-                // the schedule as it was, its update time included.
-                if !effects.is_empty() {
+                if changed {
                     schedule.config.updated_at_utc = at_utc;
                 }
                 Ok(schedule_lifecycle_mutator(
@@ -2577,11 +2579,13 @@ impl Schedule {
                     at_utc_ms: schedule_datetime_to_millis(at_utc, "at_utc")?,
                 };
                 let (transition, dsl_state) = run_schedule_dsl(&schedule, dsl_input)?;
+                // An input that had nothing to do leaves the machine's state
+                // as it was, and the schedule with it, its update time
+                // included.
+                let changed = dsl_state != schedule.machine_state;
                 write_back_schedule(&dsl_state, &mut schedule)?;
                 let effects = map_schedule_effects(&transition)?;
-                // An input that had nothing to do emits nothing and leaves
-                // the schedule as it was, its update time included.
-                if !effects.is_empty() {
+                if changed {
                     schedule.config.updated_at_utc = at_utc;
                 }
                 Ok(schedule_lifecycle_mutator(

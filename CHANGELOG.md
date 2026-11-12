@@ -37,18 +37,37 @@ them.
 
 ### Breaking
 
-- Rust API of `meerkat-schedule`: `ScheduleLifecycleInput` gains the variants
-  `PauseForTarget` and `ResumeForTarget`. A match on it needs both arms.
-- Rust API of `meerkat-machine-schema` and `meerkat-machine-kernels`: the
-  generated types of the `ScheduleLifecycleMachine` follow its new state
-  field and inputs. The state gains the field `paused_for_target`, the input
-  enums gain `PauseForTarget` and `ResumeForTarget`, and the transition enum
-  gains the seven arms of those two inputs (`PauseForTargetActive`,
-  `PauseForTargetPaused`, `PauseForTargetDeleted`,
+- Rust API of `meerkat-schedule`, `meerkat-machine-schema` and
+  `meerkat-machine-kernels`: the schedule lifecycle machine gains a state
+  field and two inputs, and its public types follow.
+  `meerkat_schedule::ScheduleLifecycleInput` gains the variants
+  `PauseForTarget` and `ResumeForTarget`. In `meerkat-machine-schema`
+  (`catalog::dsl::schedule_lifecycle`), `ScheduleLifecycleInput` and
+  `ScheduleLifecycleInputVariant` gain `PauseForTarget` and
+  `ResumeForTarget`, and `ScheduleLifecycleMachineState` gains the public
+  field `paused_for_target: bool`. In `meerkat-machine-kernels`
+  (`generated::schedule_lifecycle`), `Input` and `InputKind` gain
+  `PauseForTarget` and `ResumeForTarget`, `TransitionId` gains
+  `PauseForTargetActive`, `PauseForTargetPaused`, `PauseForTargetDeleted`,
   `ResumeForTargetPausedForTarget`, `ResumeForTargetPausedByName`,
-  `ResumeForTargetActive`, `ResumeForTargetDeleted`). A match on one of
-  those enums needs the new arms, and a struct literal of the state names
-  the field.
+  `ResumeForTargetActive` and `ResumeForTargetDeleted`, and `State` gains
+  the public field `paused_for_target: bool`. Every new variant is appended
+  last, so no existing variant's implicit discriminant moves. Exhaustive
+  matches must add the new variants, code that builds
+  `ScheduleLifecycleMachineState` or the kernel `State` literally must set
+  the field, and a serialized kernel `State` without the field no longer
+  deserializes.
+
+### Upgrade notes
+
+- Schedules paused for their target, and a rollback. A schedule paused for
+  its target (see Added) is stored as a paused schedule whose machine state
+  carries `paused_for_target: true`. An earlier release reads it as paused,
+  never resumes it on its own, ignores the mark, and drops the mark when it
+  writes the schedule while it is paused. After a rollback and a return to
+  this release such a schedule stays paused when its target takes
+  deliveries again: resume it by name. A schedule the earlier release did
+  not write keeps the mark. See `docs/guides/upgrading.mdx`.
 
 ### Added
 
@@ -57,17 +76,21 @@ them.
   now, and the schedule remembers that the pause is its target's
   (`Schedule::paused_for_target`). `ScheduleService::resume_for_target`
   resumes exactly the schedules paused that way and plans their occurrences
-  again. A schedule somebody paused by name keeps that pause through both
-  calls, and a pause or a resume by name of a schedule paused for its target
-  takes it over: it is no longer the target's. Both calls answer a schedule
-  they have nothing to do with unchanged and write nothing, a deleted one
-  included, so the owner of the target's lifecycle can make them again after
-  a crash. The `ScheduleLifecycleMachine` owns the fact (state
+  as a resume by name does. Both answer `(Schedule, bool)`: the schedule
+  after the call and whether this call changed it. A schedule somebody
+  paused by name keeps that pause through both calls. A pause or a resume by
+  name of a schedule paused for its target takes it over: it is no longer
+  the target's. So does a revise that points it at another target: the
+  schedule stays paused until somebody resumes it. A call that has nothing
+  to do answers the schedule unchanged and writes nothing, for a deleted
+  schedule too, so the owner of the target's lifecycle can make it again
+  after a crash. The `ScheduleLifecycleMachine` owns the fact (state
   `paused_for_target`, inputs `PauseForTarget` and `ResumeForTarget`); a
   stored schedule carries it in its machine state only while it is true, so
   a schedule that is not paused for its target is stored as before, and one
   stored by an earlier release loads as not paused for its target. No
-  schedule method, tool or wire type changes.
+  `schedule/*` RPC method, REST route, schedule tool or wire type changes,
+  and no read of a schedule on those surfaces says whose pause it is yet.
 
 - `MobHandle::seat_owed_store_owned_identities` seats, while the mob runs,
   every store-owned identity that is owed its seat (the spawn of its

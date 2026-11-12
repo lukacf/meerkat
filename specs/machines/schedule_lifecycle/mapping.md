@@ -45,6 +45,24 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResumeActiveOrPaused`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `DeleteActive`
+  - anchors: `schedule_lifecycle`
+  - scenarios: (unclaimed)
+- `DeletePaused`
+  - anchors: `schedule_lifecycle`
+  - scenarios: (unclaimed)
+- `DeleteDeleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConfirmOccurrencesSupersededActive`
+  - anchors: (unclaimed)
+  - scenarios: `schedule_revision_and_planning`
+- `ConfirmOccurrencesSupersededPaused`
+  - anchors: (unclaimed)
+  - scenarios: `schedule_revision_and_planning`
+- `ConfirmOccurrencesSupersededDeleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `PauseForTargetActive`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -64,24 +82,6 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ResumeForTargetDeleted`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
-- `DeleteActive`
-  - anchors: `schedule_lifecycle`
-  - scenarios: (unclaimed)
-- `DeletePaused`
-  - anchors: `schedule_lifecycle`
-  - scenarios: (unclaimed)
-- `DeleteDeleted`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
-- `ConfirmOccurrencesSupersededActive`
-  - anchors: (unclaimed)
-  - scenarios: `schedule_revision_and_planning`
-- `ConfirmOccurrencesSupersededPaused`
-  - anchors: (unclaimed)
-  - scenarios: `schedule_revision_and_planning`
-- `ConfirmOccurrencesSupersededDeleted`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 

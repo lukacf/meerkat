@@ -90,6 +90,7 @@ vars == << occurrence_phase, occurrence_occurrence_id, occurrence_schedule_id, o
 
 \* Named UNCHANGED frames. One definition per distinct frame; every action
 \* that leaves those variables unchanged references the definition by name.
+UnchangedFrame_01860362e1f5d496 == UNCHANGED << occurrence_phase, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, occurrence_late_completion_recorded_at_utc_ms, occurrence_late_completion_resolution, occurrence_late_completion_detail, occurrence_stale_completion_arrivals, schedule_schedule_id, schedule_next_occurrence_ordinal, witness_current_script_input, witness_remaining_script_inputs >>
 UnchangedFrame_086374e603fe6287 == UNCHANGED << occurrence_phase, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, occurrence_late_completion_recorded_at_utc_ms, occurrence_late_completion_resolution, occurrence_late_completion_detail, occurrence_stale_completion_arrivals, schedule_revision, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, schedule_paused_for_target, witness_current_script_input, witness_remaining_script_inputs >>
 UnchangedFrame_08e35d19da049be2 == UNCHANGED << occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, occurrence_stale_completion_arrivals, schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_overlap_policy, schedule_missing_target_policy, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, schedule_paused_for_target, witness_current_script_input, witness_remaining_script_inputs >>
 UnchangedFrame_0dd527a5b8dc8d8c == UNCHANGED << occurrence_phase, occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_receipt_recorded_at_utc_ms, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_receipt_stage, occurrence_receipt_failure_class, occurrence_receipt_detail, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_completed_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, occurrence_late_completion_recorded_at_utc_ms, occurrence_late_completion_resolution, occurrence_late_completion_detail, occurrence_stale_completion_arrivals, schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_overlap_policy, schedule_missing_target_policy, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, schedule_paused_for_target, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
@@ -5118,7 +5119,8 @@ schedule_RevisePaused(arg_trigger_key, arg_target_binding_key, arg_misfire_polic
        /\ schedule_planning_horizon_occurrences' = packet.payload.planning_horizon_occurrences
        /\ schedule_planning_cursor_utc_ms' = None
        /\ schedule_superseded_ack_ids' = {}
-       /\ UnchangedFrame_63cedaccdedf0692
+       /\ schedule_paused_for_target' = IF (packet.payload.target_binding_key # schedule_target_binding_key) THEN FALSE ELSE schedule_paused_for_target
+       /\ UnchangedFrame_01860362e1f5d496
        /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "occurrence", variant |-> "Supersede", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, superseded_by_revision |-> ((schedule_revision) + 1)], source_kind |-> "route", source_route |-> "revision_supersede_enters_occurrence_authority", source_machine |-> "schedule", source_effect |-> "SupersedePendingOccurrences", effect_id |-> (model_step_count + 1)])
        /\ observed_inputs' = observed_inputs \cup {[machine |-> "occurrence", variant |-> "Supersede", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, superseded_by_revision |-> ((schedule_revision) + 1)], source_kind |-> "route", source_route |-> "revision_supersede_enters_occurrence_authority", source_machine |-> "schedule", source_effect |-> "SupersedePendingOccurrences", effect_id |-> (model_step_count + 1)]}
        /\ pending_routes' = pending_routes
@@ -5269,6 +5271,127 @@ schedule_ResumeActiveOrPaused(arg_at_utc_ms) ==
        /\ model_step_count' = model_step_count + 1
 
 
+schedule_DeleteActive(arg_at_utc_ms) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "schedule"
+       /\ packet.variant = "Delete"
+       /\ packet.payload.at_utc_ms = arg_at_utc_ms
+       /\ ~HigherPriorityReady("schedule_authority")
+       /\ schedule_phase = "Active"
+       /\ schedule_phase' = "Deleted"
+       /\ schedule_revision' = (schedule_revision) + 1
+       /\ schedule_planning_cursor_utc_ms' = None
+       /\ schedule_superseded_ack_ids' = {}
+       /\ UnchangedFrame_69c0f5fa2cb86f1b
+       /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "occurrence", variant |-> "Supersede", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, superseded_by_revision |-> ((schedule_revision) + 1)], source_kind |-> "route", source_route |-> "revision_supersede_enters_occurrence_authority", source_machine |-> "schedule", source_effect |-> "SupersedePendingOccurrences", effect_id |-> (model_step_count + 1)])
+       /\ observed_inputs' = observed_inputs \cup {[machine |-> "occurrence", variant |-> "Supersede", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, superseded_by_revision |-> ((schedule_revision) + 1)], source_kind |-> "route", source_route |-> "revision_supersede_enters_occurrence_authority", source_machine |-> "schedule", source_effect |-> "SupersedePendingOccurrences", effect_id |-> (model_step_count + 1)]}
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes \cup { [route |-> "revision_supersede_enters_occurrence_authority", source_machine |-> "schedule", effect |-> "SupersedePendingOccurrences", target_machine |-> "occurrence", target_input |-> "Supersede", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, superseded_by_revision |-> ((schedule_revision) + 1)], actor |-> "occurrence_authority", effect_id |-> (model_step_count + 1), source_transition |-> "DeleteActive"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "schedule", variant |-> "EmitScheduleNotice", payload |-> [new_state |-> "Deleted", revision |-> ((schedule_revision) + 1)], effect_id |-> (model_step_count + 1), source_transition |-> "DeleteActive"], [machine |-> "schedule", variant |-> "SupersedePendingOccurrences", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, superseding_revision |-> ((schedule_revision) + 1)], effect_id |-> (model_step_count + 1), source_transition |-> "DeleteActive"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "schedule", transition |-> "DeleteActive", actor |-> "schedule_authority", step |-> (model_step_count + 1), from_phase |-> schedule_phase, to_phase |-> "Deleted"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+schedule_DeletePaused(arg_at_utc_ms) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "schedule"
+       /\ packet.variant = "Delete"
+       /\ packet.payload.at_utc_ms = arg_at_utc_ms
+       /\ ~HigherPriorityReady("schedule_authority")
+       /\ schedule_phase = "Paused"
+       /\ schedule_phase' = "Deleted"
+       /\ schedule_revision' = (schedule_revision) + 1
+       /\ schedule_planning_cursor_utc_ms' = None
+       /\ schedule_superseded_ack_ids' = {}
+       /\ schedule_paused_for_target' = FALSE
+       /\ UnchangedFrame_6ca3fff62437b347
+       /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "occurrence", variant |-> "Supersede", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, superseded_by_revision |-> ((schedule_revision) + 1)], source_kind |-> "route", source_route |-> "revision_supersede_enters_occurrence_authority", source_machine |-> "schedule", source_effect |-> "SupersedePendingOccurrences", effect_id |-> (model_step_count + 1)])
+       /\ observed_inputs' = observed_inputs \cup {[machine |-> "occurrence", variant |-> "Supersede", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, superseded_by_revision |-> ((schedule_revision) + 1)], source_kind |-> "route", source_route |-> "revision_supersede_enters_occurrence_authority", source_machine |-> "schedule", source_effect |-> "SupersedePendingOccurrences", effect_id |-> (model_step_count + 1)]}
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes \cup { [route |-> "revision_supersede_enters_occurrence_authority", source_machine |-> "schedule", effect |-> "SupersedePendingOccurrences", target_machine |-> "occurrence", target_input |-> "Supersede", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, superseded_by_revision |-> ((schedule_revision) + 1)], actor |-> "occurrence_authority", effect_id |-> (model_step_count + 1), source_transition |-> "DeletePaused"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "schedule", variant |-> "EmitScheduleNotice", payload |-> [new_state |-> "Deleted", revision |-> ((schedule_revision) + 1)], effect_id |-> (model_step_count + 1), source_transition |-> "DeletePaused"], [machine |-> "schedule", variant |-> "SupersedePendingOccurrences", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, superseding_revision |-> ((schedule_revision) + 1)], effect_id |-> (model_step_count + 1), source_transition |-> "DeletePaused"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "schedule", transition |-> "DeletePaused", actor |-> "schedule_authority", step |-> (model_step_count + 1), from_phase |-> schedule_phase, to_phase |-> "Deleted"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+schedule_DeleteDeleted(arg_at_utc_ms) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "schedule"
+       /\ packet.variant = "Delete"
+       /\ packet.payload.at_utc_ms = arg_at_utc_ms
+       /\ ~HigherPriorityReady("schedule_authority")
+       /\ schedule_phase = "Deleted"
+       /\ schedule_phase' = "Deleted"
+       /\ UnchangedFrame_339e7c0fb546ccdd
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "schedule", transition |-> "DeleteDeleted", actor |-> "schedule_authority", step |-> (model_step_count + 1), from_phase |-> schedule_phase, to_phase |-> "Deleted"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+schedule_ConfirmOccurrencesSupersededActive(arg_occurrence_id, arg_superseding_revision) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "schedule"
+       /\ packet.variant = "ConfirmOccurrencesSuperseded"
+       /\ packet.payload.occurrence_id = arg_occurrence_id
+       /\ packet.payload.superseding_revision = arg_superseding_revision
+       /\ ~HigherPriorityReady("schedule_authority")
+       /\ schedule_phase = "Active"
+       /\ schedule_phase' = "Active"
+       /\ schedule_superseded_ack_ids' = IF (packet.payload.superseding_revision = schedule_revision) THEN (schedule_superseded_ack_ids \cup {packet.payload.occurrence_id}) ELSE schedule_superseded_ack_ids
+       /\ UnchangedFrame_4e23981725a6a1b8
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "schedule", transition |-> "ConfirmOccurrencesSupersededActive", actor |-> "schedule_authority", step |-> (model_step_count + 1), from_phase |-> schedule_phase, to_phase |-> "Active"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+schedule_ConfirmOccurrencesSupersededPaused(arg_occurrence_id, arg_superseding_revision) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "schedule"
+       /\ packet.variant = "ConfirmOccurrencesSuperseded"
+       /\ packet.payload.occurrence_id = arg_occurrence_id
+       /\ packet.payload.superseding_revision = arg_superseding_revision
+       /\ ~HigherPriorityReady("schedule_authority")
+       /\ schedule_phase = "Paused"
+       /\ schedule_phase' = "Paused"
+       /\ schedule_superseded_ack_ids' = IF (packet.payload.superseding_revision = schedule_revision) THEN (schedule_superseded_ack_ids \cup {packet.payload.occurrence_id}) ELSE schedule_superseded_ack_ids
+       /\ UnchangedFrame_4e23981725a6a1b8
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "schedule", transition |-> "ConfirmOccurrencesSupersededPaused", actor |-> "schedule_authority", step |-> (model_step_count + 1), from_phase |-> schedule_phase, to_phase |-> "Paused"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+schedule_ConfirmOccurrencesSupersededDeleted(arg_occurrence_id, arg_superseding_revision) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "schedule"
+       /\ packet.variant = "ConfirmOccurrencesSuperseded"
+       /\ packet.payload.occurrence_id = arg_occurrence_id
+       /\ packet.payload.superseding_revision = arg_superseding_revision
+       /\ ~HigherPriorityReady("schedule_authority")
+       /\ schedule_phase = "Deleted"
+       /\ schedule_phase' = "Deleted"
+       /\ schedule_superseded_ack_ids' = IF (packet.payload.superseding_revision = schedule_revision) THEN (schedule_superseded_ack_ids \cup {packet.payload.occurrence_id}) ELSE schedule_superseded_ack_ids
+       /\ UnchangedFrame_4e23981725a6a1b8
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "schedule", transition |-> "ConfirmOccurrencesSupersededDeleted", actor |-> "schedule_authority", step |-> (model_step_count + 1), from_phase |-> schedule_phase, to_phase |-> "Deleted"]}
+       /\ model_step_count' = model_step_count + 1
+
+
 schedule_PauseForTargetActive(arg_at_utc_ms) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "schedule"
@@ -5396,127 +5519,6 @@ schedule_ResumeForTargetDeleted(arg_at_utc_ms) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "schedule", transition |-> "ResumeForTargetDeleted", actor |-> "schedule_authority", step |-> (model_step_count + 1), from_phase |-> schedule_phase, to_phase |-> "Deleted"]}
-       /\ model_step_count' = model_step_count + 1
-
-
-schedule_DeleteActive(arg_at_utc_ms) ==
-    /\ \E packet \in SeqElements(pending_inputs) :
-       /\ packet.machine = "schedule"
-       /\ packet.variant = "Delete"
-       /\ packet.payload.at_utc_ms = arg_at_utc_ms
-       /\ ~HigherPriorityReady("schedule_authority")
-       /\ schedule_phase = "Active"
-       /\ schedule_phase' = "Deleted"
-       /\ schedule_revision' = (schedule_revision) + 1
-       /\ schedule_planning_cursor_utc_ms' = None
-       /\ schedule_superseded_ack_ids' = {}
-       /\ UnchangedFrame_69c0f5fa2cb86f1b
-       /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "occurrence", variant |-> "Supersede", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, superseded_by_revision |-> ((schedule_revision) + 1)], source_kind |-> "route", source_route |-> "revision_supersede_enters_occurrence_authority", source_machine |-> "schedule", source_effect |-> "SupersedePendingOccurrences", effect_id |-> (model_step_count + 1)])
-       /\ observed_inputs' = observed_inputs \cup {[machine |-> "occurrence", variant |-> "Supersede", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, superseded_by_revision |-> ((schedule_revision) + 1)], source_kind |-> "route", source_route |-> "revision_supersede_enters_occurrence_authority", source_machine |-> "schedule", source_effect |-> "SupersedePendingOccurrences", effect_id |-> (model_step_count + 1)]}
-       /\ pending_routes' = pending_routes
-       /\ delivered_routes' = delivered_routes \cup { [route |-> "revision_supersede_enters_occurrence_authority", source_machine |-> "schedule", effect |-> "SupersedePendingOccurrences", target_machine |-> "occurrence", target_input |-> "Supersede", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, superseded_by_revision |-> ((schedule_revision) + 1)], actor |-> "occurrence_authority", effect_id |-> (model_step_count + 1), source_transition |-> "DeleteActive"] }
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "schedule", variant |-> "EmitScheduleNotice", payload |-> [new_state |-> "Deleted", revision |-> ((schedule_revision) + 1)], effect_id |-> (model_step_count + 1), source_transition |-> "DeleteActive"], [machine |-> "schedule", variant |-> "SupersedePendingOccurrences", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, superseding_revision |-> ((schedule_revision) + 1)], effect_id |-> (model_step_count + 1), source_transition |-> "DeleteActive"] }
-       /\ observed_transitions' = observed_transitions \cup {[machine |-> "schedule", transition |-> "DeleteActive", actor |-> "schedule_authority", step |-> (model_step_count + 1), from_phase |-> schedule_phase, to_phase |-> "Deleted"]}
-       /\ model_step_count' = model_step_count + 1
-
-
-schedule_DeletePaused(arg_at_utc_ms) ==
-    /\ \E packet \in SeqElements(pending_inputs) :
-       /\ packet.machine = "schedule"
-       /\ packet.variant = "Delete"
-       /\ packet.payload.at_utc_ms = arg_at_utc_ms
-       /\ ~HigherPriorityReady("schedule_authority")
-       /\ schedule_phase = "Paused"
-       /\ schedule_phase' = "Deleted"
-       /\ schedule_revision' = (schedule_revision) + 1
-       /\ schedule_planning_cursor_utc_ms' = None
-       /\ schedule_superseded_ack_ids' = {}
-       /\ schedule_paused_for_target' = FALSE
-       /\ UnchangedFrame_6ca3fff62437b347
-       /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "occurrence", variant |-> "Supersede", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, superseded_by_revision |-> ((schedule_revision) + 1)], source_kind |-> "route", source_route |-> "revision_supersede_enters_occurrence_authority", source_machine |-> "schedule", source_effect |-> "SupersedePendingOccurrences", effect_id |-> (model_step_count + 1)])
-       /\ observed_inputs' = observed_inputs \cup {[machine |-> "occurrence", variant |-> "Supersede", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, superseded_by_revision |-> ((schedule_revision) + 1)], source_kind |-> "route", source_route |-> "revision_supersede_enters_occurrence_authority", source_machine |-> "schedule", source_effect |-> "SupersedePendingOccurrences", effect_id |-> (model_step_count + 1)]}
-       /\ pending_routes' = pending_routes
-       /\ delivered_routes' = delivered_routes \cup { [route |-> "revision_supersede_enters_occurrence_authority", source_machine |-> "schedule", effect |-> "SupersedePendingOccurrences", target_machine |-> "occurrence", target_input |-> "Supersede", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, superseded_by_revision |-> ((schedule_revision) + 1)], actor |-> "occurrence_authority", effect_id |-> (model_step_count + 1), source_transition |-> "DeletePaused"] }
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "schedule", variant |-> "EmitScheduleNotice", payload |-> [new_state |-> "Deleted", revision |-> ((schedule_revision) + 1)], effect_id |-> (model_step_count + 1), source_transition |-> "DeletePaused"], [machine |-> "schedule", variant |-> "SupersedePendingOccurrences", payload |-> [at_utc_ms |-> packet.payload.at_utc_ms, superseding_revision |-> ((schedule_revision) + 1)], effect_id |-> (model_step_count + 1), source_transition |-> "DeletePaused"] }
-       /\ observed_transitions' = observed_transitions \cup {[machine |-> "schedule", transition |-> "DeletePaused", actor |-> "schedule_authority", step |-> (model_step_count + 1), from_phase |-> schedule_phase, to_phase |-> "Deleted"]}
-       /\ model_step_count' = model_step_count + 1
-
-
-schedule_DeleteDeleted(arg_at_utc_ms) ==
-    /\ \E packet \in SeqElements(pending_inputs) :
-       /\ packet.machine = "schedule"
-       /\ packet.variant = "Delete"
-       /\ packet.payload.at_utc_ms = arg_at_utc_ms
-       /\ ~HigherPriorityReady("schedule_authority")
-       /\ schedule_phase = "Deleted"
-       /\ schedule_phase' = "Deleted"
-       /\ UnchangedFrame_339e7c0fb546ccdd
-       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
-       /\ observed_inputs' = observed_inputs
-       /\ pending_routes' = pending_routes
-       /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects
-       /\ observed_transitions' = observed_transitions \cup {[machine |-> "schedule", transition |-> "DeleteDeleted", actor |-> "schedule_authority", step |-> (model_step_count + 1), from_phase |-> schedule_phase, to_phase |-> "Deleted"]}
-       /\ model_step_count' = model_step_count + 1
-
-
-schedule_ConfirmOccurrencesSupersededActive(arg_occurrence_id, arg_superseding_revision) ==
-    /\ \E packet \in SeqElements(pending_inputs) :
-       /\ packet.machine = "schedule"
-       /\ packet.variant = "ConfirmOccurrencesSuperseded"
-       /\ packet.payload.occurrence_id = arg_occurrence_id
-       /\ packet.payload.superseding_revision = arg_superseding_revision
-       /\ ~HigherPriorityReady("schedule_authority")
-       /\ schedule_phase = "Active"
-       /\ schedule_phase' = "Active"
-       /\ schedule_superseded_ack_ids' = IF (packet.payload.superseding_revision = schedule_revision) THEN (schedule_superseded_ack_ids \cup {packet.payload.occurrence_id}) ELSE schedule_superseded_ack_ids
-       /\ UnchangedFrame_4e23981725a6a1b8
-       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
-       /\ observed_inputs' = observed_inputs
-       /\ pending_routes' = pending_routes
-       /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects
-       /\ observed_transitions' = observed_transitions \cup {[machine |-> "schedule", transition |-> "ConfirmOccurrencesSupersededActive", actor |-> "schedule_authority", step |-> (model_step_count + 1), from_phase |-> schedule_phase, to_phase |-> "Active"]}
-       /\ model_step_count' = model_step_count + 1
-
-
-schedule_ConfirmOccurrencesSupersededPaused(arg_occurrence_id, arg_superseding_revision) ==
-    /\ \E packet \in SeqElements(pending_inputs) :
-       /\ packet.machine = "schedule"
-       /\ packet.variant = "ConfirmOccurrencesSuperseded"
-       /\ packet.payload.occurrence_id = arg_occurrence_id
-       /\ packet.payload.superseding_revision = arg_superseding_revision
-       /\ ~HigherPriorityReady("schedule_authority")
-       /\ schedule_phase = "Paused"
-       /\ schedule_phase' = "Paused"
-       /\ schedule_superseded_ack_ids' = IF (packet.payload.superseding_revision = schedule_revision) THEN (schedule_superseded_ack_ids \cup {packet.payload.occurrence_id}) ELSE schedule_superseded_ack_ids
-       /\ UnchangedFrame_4e23981725a6a1b8
-       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
-       /\ observed_inputs' = observed_inputs
-       /\ pending_routes' = pending_routes
-       /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects
-       /\ observed_transitions' = observed_transitions \cup {[machine |-> "schedule", transition |-> "ConfirmOccurrencesSupersededPaused", actor |-> "schedule_authority", step |-> (model_step_count + 1), from_phase |-> schedule_phase, to_phase |-> "Paused"]}
-       /\ model_step_count' = model_step_count + 1
-
-
-schedule_ConfirmOccurrencesSupersededDeleted(arg_occurrence_id, arg_superseding_revision) ==
-    /\ \E packet \in SeqElements(pending_inputs) :
-       /\ packet.machine = "schedule"
-       /\ packet.variant = "ConfirmOccurrencesSuperseded"
-       /\ packet.payload.occurrence_id = arg_occurrence_id
-       /\ packet.payload.superseding_revision = arg_superseding_revision
-       /\ ~HigherPriorityReady("schedule_authority")
-       /\ schedule_phase = "Deleted"
-       /\ schedule_phase' = "Deleted"
-       /\ schedule_superseded_ack_ids' = IF (packet.payload.superseding_revision = schedule_revision) THEN (schedule_superseded_ack_ids \cup {packet.payload.occurrence_id}) ELSE schedule_superseded_ack_ids
-       /\ UnchangedFrame_4e23981725a6a1b8
-       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
-       /\ observed_inputs' = observed_inputs
-       /\ pending_routes' = pending_routes
-       /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects
-       /\ observed_transitions' = observed_transitions \cup {[machine |-> "schedule", transition |-> "ConfirmOccurrencesSupersededDeleted", actor |-> "schedule_authority", step |-> (model_step_count + 1), from_phase |-> schedule_phase, to_phase |-> "Deleted"]}
        /\ model_step_count' = model_step_count + 1
 
 
@@ -5755,6 +5757,12 @@ EntryPacketAdmissible_schedule(packet) ==
     \/ /\ (packet.variant = "SyncTargetSnapshot") /\ (schedule_phase = "Paused")
     \/ /\ (packet.variant = "Pause") /\ (schedule_phase = "Active" \/ schedule_phase = "Paused")
     \/ /\ (packet.variant = "Resume") /\ (schedule_phase = "Active" \/ schedule_phase = "Paused")
+    \/ /\ (packet.variant = "Delete") /\ (schedule_phase = "Active")
+    \/ /\ (packet.variant = "Delete") /\ (schedule_phase = "Paused")
+    \/ /\ (packet.variant = "Delete") /\ (schedule_phase = "Deleted")
+    \/ /\ (packet.variant = "ConfirmOccurrencesSuperseded") /\ (schedule_phase = "Active")
+    \/ /\ (packet.variant = "ConfirmOccurrencesSuperseded") /\ (schedule_phase = "Paused")
+    \/ /\ (packet.variant = "ConfirmOccurrencesSuperseded") /\ (schedule_phase = "Deleted")
     \/ /\ (packet.variant = "PauseForTarget") /\ (schedule_phase = "Active")
     \/ /\ (packet.variant = "PauseForTarget") /\ (schedule_phase = "Paused")
     \/ /\ (packet.variant = "PauseForTarget") /\ (schedule_phase = "Deleted")
@@ -5762,12 +5770,6 @@ EntryPacketAdmissible_schedule(packet) ==
     \/ /\ (packet.variant = "ResumeForTarget") /\ (schedule_phase = "Paused") /\ ((schedule_paused_for_target = FALSE))
     \/ /\ (packet.variant = "ResumeForTarget") /\ (schedule_phase = "Active")
     \/ /\ (packet.variant = "ResumeForTarget") /\ (schedule_phase = "Deleted")
-    \/ /\ (packet.variant = "Delete") /\ (schedule_phase = "Active")
-    \/ /\ (packet.variant = "Delete") /\ (schedule_phase = "Paused")
-    \/ /\ (packet.variant = "Delete") /\ (schedule_phase = "Deleted")
-    \/ /\ (packet.variant = "ConfirmOccurrencesSuperseded") /\ (schedule_phase = "Active")
-    \/ /\ (packet.variant = "ConfirmOccurrencesSuperseded") /\ (schedule_phase = "Paused")
-    \/ /\ (packet.variant = "ConfirmOccurrencesSuperseded") /\ (schedule_phase = "Deleted")
 
 EntryPacketAdmissible(packet) ==
     CASE
@@ -6057,6 +6059,12 @@ CoreNext ==
     \/ \E arg_target_binding_key \in TargetBindingIdValues : schedule_SyncTargetSnapshotPaused(arg_target_binding_key)
     \/ \E arg_at_utc_ms \in 0..2 : schedule_PauseActiveOrPaused(arg_at_utc_ms)
     \/ \E arg_at_utc_ms \in 0..2 : schedule_ResumeActiveOrPaused(arg_at_utc_ms)
+    \/ \E arg_at_utc_ms \in 0..2 : schedule_DeleteActive(arg_at_utc_ms)
+    \/ \E arg_at_utc_ms \in 0..2 : schedule_DeletePaused(arg_at_utc_ms)
+    \/ \E arg_at_utc_ms \in 0..2 : schedule_DeleteDeleted(arg_at_utc_ms)
+    \/ \E arg_occurrence_id \in OccurrenceIdValues : \E arg_superseding_revision \in 0..2 : schedule_ConfirmOccurrencesSupersededActive(arg_occurrence_id, arg_superseding_revision)
+    \/ \E arg_occurrence_id \in OccurrenceIdValues : \E arg_superseding_revision \in 0..2 : schedule_ConfirmOccurrencesSupersededPaused(arg_occurrence_id, arg_superseding_revision)
+    \/ \E arg_occurrence_id \in OccurrenceIdValues : \E arg_superseding_revision \in 0..2 : schedule_ConfirmOccurrencesSupersededDeleted(arg_occurrence_id, arg_superseding_revision)
     \/ \E arg_at_utc_ms \in 0..2 : schedule_PauseForTargetActive(arg_at_utc_ms)
     \/ \E arg_at_utc_ms \in 0..2 : schedule_PauseForTargetPaused(arg_at_utc_ms)
     \/ \E arg_at_utc_ms \in 0..2 : schedule_PauseForTargetDeleted(arg_at_utc_ms)
@@ -6064,12 +6072,6 @@ CoreNext ==
     \/ \E arg_at_utc_ms \in 0..2 : schedule_ResumeForTargetPausedByName(arg_at_utc_ms)
     \/ \E arg_at_utc_ms \in 0..2 : schedule_ResumeForTargetActive(arg_at_utc_ms)
     \/ \E arg_at_utc_ms \in 0..2 : schedule_ResumeForTargetDeleted(arg_at_utc_ms)
-    \/ \E arg_at_utc_ms \in 0..2 : schedule_DeleteActive(arg_at_utc_ms)
-    \/ \E arg_at_utc_ms \in 0..2 : schedule_DeletePaused(arg_at_utc_ms)
-    \/ \E arg_at_utc_ms \in 0..2 : schedule_DeleteDeleted(arg_at_utc_ms)
-    \/ \E arg_occurrence_id \in OccurrenceIdValues : \E arg_superseding_revision \in 0..2 : schedule_ConfirmOccurrencesSupersededActive(arg_occurrence_id, arg_superseding_revision)
-    \/ \E arg_occurrence_id \in OccurrenceIdValues : \E arg_superseding_revision \in 0..2 : schedule_ConfirmOccurrencesSupersededPaused(arg_occurrence_id, arg_superseding_revision)
-    \/ \E arg_occurrence_id \in OccurrenceIdValues : \E arg_superseding_revision \in 0..2 : schedule_ConfirmOccurrencesSupersededDeleted(arg_occurrence_id, arg_superseding_revision)
     \/ QuiescentStutter
 
 InjectNext ==

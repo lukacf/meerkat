@@ -29,10 +29,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SyncTargetSnapshot`(target_binding_key: TargetBindingId)
 - `Pause`(at_utc_ms: u64)
 - `Resume`(at_utc_ms: u64)
-- `PauseForTarget`(at_utc_ms: u64)
-- `ResumeForTarget`(at_utc_ms: u64)
 - `Delete`(at_utc_ms: u64)
 - `ConfirmOccurrencesSuperseded`(occurrence_id: OccurrenceId, superseding_revision: u64)
+- `PauseForTarget`(at_utc_ms: u64)
+- `ResumeForTarget`(at_utc_ms: u64)
 
 ## Signals
 
@@ -109,6 +109,38 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `EmitScheduleNotice`
 - To: `Active`
 
+### `DeleteActive`
+- From: `Active`
+- On: `Delete`(at_utc_ms)
+- Emits: `EmitScheduleNotice`, `SupersedePendingOccurrences`
+- To: `Deleted`
+
+### `DeletePaused`
+- From: `Paused`
+- On: `Delete`(at_utc_ms)
+- Emits: `EmitScheduleNotice`, `SupersedePendingOccurrences`
+- To: `Deleted`
+
+### `DeleteDeleted`
+- From: `Deleted`
+- On: `Delete`(at_utc_ms)
+- To: `Deleted`
+
+### `ConfirmOccurrencesSupersededActive`
+- From: `Active`
+- On: `ConfirmOccurrencesSuperseded`(occurrence_id, superseding_revision)
+- To: `Active`
+
+### `ConfirmOccurrencesSupersededPaused`
+- From: `Paused`
+- On: `ConfirmOccurrencesSuperseded`(occurrence_id, superseding_revision)
+- To: `Paused`
+
+### `ConfirmOccurrencesSupersededDeleted`
+- From: `Deleted`
+- On: `ConfirmOccurrencesSuperseded`(occurrence_id, superseding_revision)
+- To: `Deleted`
+
 ### `PauseForTargetActive`
 - From: `Active`
 - On: `PauseForTarget`(at_utc_ms)
@@ -148,38 +180,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `ResumeForTargetDeleted`
 - From: `Deleted`
 - On: `ResumeForTarget`(at_utc_ms)
-- To: `Deleted`
-
-### `DeleteActive`
-- From: `Active`
-- On: `Delete`(at_utc_ms)
-- Emits: `EmitScheduleNotice`, `SupersedePendingOccurrences`
-- To: `Deleted`
-
-### `DeletePaused`
-- From: `Paused`
-- On: `Delete`(at_utc_ms)
-- Emits: `EmitScheduleNotice`, `SupersedePendingOccurrences`
-- To: `Deleted`
-
-### `DeleteDeleted`
-- From: `Deleted`
-- On: `Delete`(at_utc_ms)
-- To: `Deleted`
-
-### `ConfirmOccurrencesSupersededActive`
-- From: `Active`
-- On: `ConfirmOccurrencesSuperseded`(occurrence_id, superseding_revision)
-- To: `Active`
-
-### `ConfirmOccurrencesSupersededPaused`
-- From: `Paused`
-- On: `ConfirmOccurrencesSuperseded`(occurrence_id, superseding_revision)
-- To: `Paused`
-
-### `ConfirmOccurrencesSupersededDeleted`
-- From: `Deleted`
-- On: `ConfirmOccurrencesSuperseded`(occurrence_id, superseding_revision)
 - To: `Deleted`
 
 ## Coverage

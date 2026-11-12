@@ -122,6 +122,39 @@ fn preserves_request_requirements(
     }
 }
 
+/// `params`, a fallback target's effective params, as the target's client
+/// is handed them for a request: the session's reasoning effort level they
+/// carry, resolved strictly for the route that client observes now and the
+/// model's catalog row. `Ok(None)` when the params carry no level (nothing
+/// is judged); `Err` when the route refuses the level (unsupported, unknown,
+/// unavailable, or in conflict with the target's own params).
+fn resolved_for_target(
+    target: &ModelFallbackCandidate,
+    params: &ProviderParamsOverride,
+) -> Result<Option<ProviderParamsOverride>, Box<meerkat_core::ReasoningEffortRefusal>> {
+    let Some(level) = params.reasoning_effort else {
+        return Ok(None);
+    };
+    let mut resolved = params.clone();
+    resolved.reasoning_effort = None;
+    let mut resolved = Some(resolved);
+    let observation = target.client.reasoning_route();
+    meerkat_core::resolve_reasoning_effort(
+        meerkat_core::ReasoningResolveInput::new(
+            level,
+            target.identity.provider,
+            &target.identity.model,
+            observation.as_ref(),
+            target.target_profile.catalog_capabilities(),
+            meerkat_core::ReasoningEffortDecidedBy::Request,
+        ),
+        &mut resolved,
+        meerkat_core::ReasoningResolveMode::Strict,
+    )
+    .map_err(Box::new)?;
+    Ok(resolved)
+}
+
 impl ModelFallbackClient {
     pub fn new(
         candidates: Vec<ModelFallbackCandidate>,
@@ -436,12 +469,27 @@ impl AgentLlmClient for ModelFallbackClient {
             params.tool_choice = request
                 .provider_params
                 .and_then(|source| source.tool_choice.clone());
+            // A target carries the session's reasoning effort level in its
+            // own params. A target whose route refuses it is skipped before
+            // any probe or switch: a fallback never changes the effort
+            // silently. The probe below is handed the resolved copy, as a
+            // request on the target would be; the switch keeps the neutral
+            // level, which the attempt and every later turn resolve again on
+            // the target's route.
+            let Ok(resolved) = resolved_for_target(next, &params) else {
+                skipped_targets.push(AgentLlmFallbackSkippedTarget::new(
+                    next.identity.clone(),
+                    ModelFallbackSkipReason::ReasoningEffortUnsupported,
+                ));
+                continue;
+            };
+            let probe_params = resolved.as_ref().unwrap_or(&params);
             let pressure = match next.client.request_pressure(
                 request.messages,
                 request.tools,
                 request.max_tokens,
                 request.temperature,
-                Some(&params),
+                Some(probe_params),
             ) {
                 Ok(Some(pressure)) => pressure,
                 result => {

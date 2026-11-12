@@ -7663,6 +7663,18 @@ impl AgentFactory {
         let current_credential_identity =
             Self::credential_identity_for_llm_identity(config, current)
                 .map_err(BuildAgentError::LlmClient)?;
+        // A chain entry names a model, not params: a target takes none of
+        // the session's params except its reasoning effort level, which a
+        // session keeps across every identity change (the one rule of
+        // `resolve_session_provider_params`). The identity a fallback commits
+        // and the target's request policy then carry the level, and each
+        // request on the target resolves it for the target's own route.
+        let target_provider_params = meerkat_core::resolve_session_provider_params(
+            current.provider_params.as_ref(),
+            Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear),
+            None,
+        )
+        .map_err(|error| BuildAgentError::Config(error.to_string()))?;
         let mut identities = Vec::new();
         let mut skipped = Vec::new();
         for target in &config.model_fallback.chain {
@@ -7759,7 +7771,7 @@ impl AgentFactory {
                 model,
                 provider,
                 self_hosted_server_id,
-                provider_params: None,
+                provider_params: target_provider_params.clone(),
                 auth_binding,
             };
             if identity.model == current.model

@@ -5000,6 +5000,170 @@ async fn an_agent_is_shown_no_private_agent_that_never_ran() {
     rig.shutdown().await;
 }
 
+/// The requester's side of the same rule: a private agent that is seated
+/// dormant and never ran here asks for no change and plans none. Its own
+/// record says whom it is private to; nothing this process built has to.
+/// An agent private to no one is admitted on the same launch.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_private_agent_that_never_ran_asks_for_no_change() {
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, asked, fail_next_session) = launch_roster(
+        temp.path(),
+        &fresh_mob_id(),
+        false,
+        false,
+        Arc::new(RosterWithPrivate {
+            first_message: false,
+        }),
+    )
+    .await;
+    assert!(runtime.attach_identity_policy(in_process_policy(), IdentityFamilyOptions::new()));
+    let mut rig = Rig {
+        runtime,
+        asked,
+        step: Arc::new(RecordingStep::default()),
+        fail_next_session,
+    };
+    let confidant = ChangeRequester::agent_recorded("confidant");
+    let gamma = || create_of(json!([{"name": "gamma", "profile": "worker"}]));
+    let refused = rig.change(&confidant, "r-1", gamma()).await;
+    assert_eq!(
+        refusal_of(&refused),
+        ("private_requester".to_owned(), None),
+        "{refused:?}"
+    );
+    assert!(rig.agent("gamma").await.is_none(), "nothing was created");
+    let planned = rig
+        .family()
+        .read(
+            &rig.runtime.mob_handle(),
+            &confidant,
+            IdentityRead::Plan(Box::new(IdentityChangeCall::new(
+                OperationId::for_request(&confidant.recorded(), "r-2").expect("a request id"),
+                gamma(),
+            ))),
+        )
+        .await
+        .expect_err("a private agent plans no change");
+    assert_eq!(planned.kind_token(), "private_requester", "{planned}");
+    assert!(
+        !rig.was_asked("Keep this between us."),
+        "the private agent never ran here"
+    );
+
+    // An agent that is private to no one is admitted: the refusal was
+    // about whom the requester is private to.
+    let created = rig
+        .change(&ChangeRequester::agent_recorded(PLANNER), "r-1", gamma())
+        .await;
+    assert_eq!(created.token(), "done", "{created:?}");
+    rig.shutdown().await;
+}
+
+/// Who asked for an agent is shown to an agent only while the asker's own
+/// record can be read and shows it: once the asker is removed, its record
+/// says nothing any more, so an agent is not told its name. The host
+/// reads who asked as before.
+#[tokio::test(flavor = "multi_thread")]
+async fn who_asked_for_an_agent_is_not_shown_to_an_agent_once_the_asker_cannot_be_read() {
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, asked, fail_next_session) = launch(temp.path(), false).await;
+    let changes = json!(["create", "archive", "remove"]);
+    let rule = |requester: Value| {
+        json!({"change": changes, "requester": requester,
+               "target": {"profile": ["worker", "planner"]}, "outcome": {"kind": "allow"}})
+    };
+    let policy = Arc::new(
+        IdentityCreationPolicy::parse(&json!({
+            "enabled": true,
+            "peers": {"default": "allow"},
+            "approval": {"rules": [
+                rule(json!({"kind": "host"})),
+                rule(json!({"kind": "agent", "profile": ["planner"]})),
+            ]},
+        }))
+        .expect("the policy parses")
+        .expect("the policy is enabled"),
+    );
+    assert!(runtime.attach_identity_policy(policy, IdentityFamilyOptions::new()));
+    let rig = Rig {
+        runtime,
+        asked,
+        step: Arc::new(RecordingStep::default()),
+        fail_next_session,
+    };
+    let family = rig.family();
+    let mob = rig.runtime.mob_handle();
+    let host = ChangeRequester::host("ops");
+    let planner = ChangeRequester::agent_recorded(PLANNER);
+    let made = rig
+        .change(
+            &host,
+            "maker-1",
+            create_of(json!([{"name": "maker", "profile": "planner"}])),
+        )
+        .await;
+    assert_eq!(made.token(), "done", "{made:?}");
+    let created = rig
+        .change(
+            &ChangeRequester::agent_recorded("maker"),
+            "scout-1",
+            create_of(json!([{"name": "scout", "profile": "worker"}])),
+        )
+        .await;
+    assert_eq!(created.token(), "done", "{created:?}");
+    let asked_by = |requester: ChangeRequester| {
+        let family = Arc::clone(&family);
+        let mob = mob.clone();
+        async move {
+            match family
+                .read(&mob, &requester, IdentityRead::Get(GetAgent::new("scout")))
+                .await
+            {
+                Ok(IdentityReadAnswer::Get(record)) => {
+                    record.agent.provenance.map(|asked| asked.requester)
+                }
+                other => panic!("a get answers one agent: {other:?}"),
+            }
+        }
+    };
+    assert_eq!(
+        asked_by(planner.clone()).await.as_deref(),
+        Some("maker"),
+        "an agent that is shown the asker reads who asked"
+    );
+
+    let archived = rig
+        .change(
+            &host,
+            "maker-2",
+            IdentityChangeSpec::Archive(agent_ref("maker", &rig.digest("maker").await)),
+        )
+        .await;
+    assert_eq!(archived.token(), "done", "{archived:?}");
+    let removed = rig
+        .change(
+            &host,
+            "maker-3",
+            IdentityChangeSpec::Remove(agent_ref("maker", &rig.digest("maker").await)),
+        )
+        .await;
+    assert_eq!(removed.token(), "done", "{removed:?}");
+    assert!(rig.agent("maker").await.is_none(), "the asker is removed");
+
+    assert_eq!(
+        asked_by(planner).await,
+        None,
+        "an agent is not told an asker whose record cannot be read"
+    );
+    assert_eq!(
+        asked_by(host).await.as_deref(),
+        Some("maker"),
+        "the host reads who asked"
+    );
+    rig.shutdown().await;
+}
+
 /// A member private to a person asks for no change of agents: the family
 /// refuses it `private_requester` before anything is read of its request,
 /// for a change and for a plan, and nothing is created.

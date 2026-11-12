@@ -80,7 +80,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   such an agent out, and a get, a plan or a change of it answers
   `identity_unknown`, as a name no agent holds. Every read of the family
   and every peer a change names goes through this one rule; what a
-  person's view of the mob shows is unchanged.
+  person's view of the mob shows is unchanged. Who is private is read
+  from the agent's own record, so the rule holds for an agent that has
+  not run since its host started, and such an agent asks for no change
+  itself (`private_requester`). Who asked for an agent is left out of
+  what an agent reads once the asker's record can no longer be read (a
+  removed agent); the host reads it as before.
 - Every refusal of the family is one JSON-RPC error, code `-32058`
   (`meerkat_meta::rpc::IDENTITY_REFUSED_CODE`), whose `data` is `{kind,
   field?, retryable, detail}` and the kind's own members; `kind` is a closed

@@ -664,7 +664,7 @@ async fn a_release_between_the_preparation_and_the_write_writes_nothing() {
         member_release_epoch, record_owed_snapshot_at_wake,
     };
     let (fixture, session_id) = Fixture::unseated(ServiceDouble::RecordsNeedALiveActor, None).await;
-    let shared = OperatorInstructionDeliveryShared::new(1);
+    let shared = OperatorInstructionDeliveryShared::new(MobId::from("a-mob"), 1);
     let prepared_at =
         member_release_epoch(&shared, &fixture.identity, WAKE_INSTRUCTION_RECORD_BOUND)
             .await

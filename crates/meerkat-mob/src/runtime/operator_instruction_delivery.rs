@@ -319,6 +319,9 @@ pub(crate) struct OperatorInstructionShell {
 /// nothing, so no delivery lands after a release.
 #[derive(Debug)]
 pub(crate) struct OperatorInstructionDeliveryShared {
+    /// The mob this bookkeeping is of: a host serves several mobs, and a
+    /// member's name alone does not say which one a warning is about.
+    mob_id: MobId,
     last_failures: std::sync::Mutex<BTreeMap<AgentIdentity, RetryFailure>>,
     member_locks: std::sync::Mutex<BTreeMap<AgentIdentity, Arc<tokio::sync::Mutex<u64>>>>,
     pub(crate) dormant_concurrency: usize,
@@ -342,9 +345,19 @@ impl RetryFailure {
     }
 }
 
+/// What the one warning for a member's failed record names: the mob, the
+/// member and the failure's typed class. Never the failure's text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MemberFailureWarning {
+    mob_id: MobId,
+    agent_identity: AgentIdentity,
+    class: String,
+}
+
 impl OperatorInstructionDeliveryShared {
-    pub(crate) fn new(dormant_concurrency: usize) -> Arc<Self> {
+    pub(crate) fn new(mob_id: MobId, dormant_concurrency: usize) -> Arc<Self> {
         Arc::new(Self {
+            mob_id,
             last_failures: std::sync::Mutex::new(BTreeMap::new()),
             member_locks: std::sync::Mutex::new(BTreeMap::new()),
             dormant_concurrency: dormant_concurrency.max(1),
@@ -367,25 +380,35 @@ impl OperatorInstructionDeliveryShared {
     /// log it by this module's one rule: a warning at a member's first
     /// failure and again when the failure's class changes, never one per
     /// retry (a failure that never clears is retried for the life of the
-    /// mob). The warning names the member and the class, never the
-    /// failure's text. Answers whether it warned.
-    fn record_failure(&self, agent_identity: &AgentIdentity, failure: RetryFailure) -> bool {
+    /// mob). The warning names the mob, the member and the class, never the
+    /// failure's text. Answers the warning it logged, if it logged one.
+    fn record_failure(
+        &self,
+        agent_identity: &AgentIdentity,
+        failure: RetryFailure,
+    ) -> Option<MemberFailureWarning> {
         let class = failure.class.clone();
         let previous = self
             .last_failures
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(agent_identity.clone(), failure);
-        let warned = previous.is_none_or(|previous| previous.class != class);
-        if warned {
-            tracing::warn!(
-                agent_identity = %agent_identity,
-                failure = %class,
-                "a member's operator instruction record failed; the member stays owed and the \
-                 mob goes on trying (logged again only when the failure's class changes)"
-            );
+        if previous.is_some_and(|previous| previous.class == class) {
+            return None;
         }
-        warned
+        let warning = MemberFailureWarning {
+            mob_id: self.mob_id.clone(),
+            agent_identity: agent_identity.clone(),
+            class,
+        };
+        tracing::warn!(
+            mob_id = %warning.mob_id,
+            agent_identity = %warning.agent_identity,
+            failure = %warning.class,
+            "a member's operator instruction record failed; the member stays owed and the mob \
+             goes on trying (logged again only when the failure's class changes)"
+        );
+        Some(warning)
     }
 
     /// Forget the member's last failure: its session answered the record.
@@ -399,6 +422,7 @@ impl OperatorInstructionDeliveryShared {
             .remove(agent_identity);
         if let (Some(failed), true) = (failed, recorded) {
             tracing::info!(
+                mob_id = %self.mob_id,
                 agent_identity = %agent_identity,
                 failure = %failed.class,
                 "a member's operator instruction record landed after failing"
@@ -2508,10 +2532,12 @@ mod tests {
     /// retry that fails the same way keeps the last failure for the status
     /// read and does not warn, so a failure that never clears (a service
     /// that keeps no durable document) is one warning, not one per retry.
-    /// The class is the closed code as hosts read it.
+    /// The warning names the mob, the member and the class; the class is
+    /// the closed code as hosts read it.
     #[test]
     fn a_members_failure_warns_at_first_and_when_its_class_changes() {
-        let shared = OperatorInstructionDeliveryShared::new(1);
+        let mob_id = MobId::from("a-mob");
+        let shared = OperatorInstructionDeliveryShared::new(mob_id.clone(), 1);
         let member = AgentIdentity::from("member");
         let other = AgentIdentity::from("other");
         let store = record_failure_class(&SessionInstructionError::DurabilityUnavailable);
@@ -2520,18 +2546,43 @@ mod tests {
             refusal_class(InstructionSetErrorCode::OwnedByMob),
             "owned_by_mob"
         );
-        assert!(shared.record_failure(&member, RetryFailure::new(store.clone(), "first")));
-        assert!(!shared.record_failure(&member, RetryFailure::new(store.clone(), "second")));
+        let warning = |agent_identity: &AgentIdentity, class: &str| {
+            Some(MemberFailureWarning {
+                mob_id: mob_id.clone(),
+                agent_identity: agent_identity.clone(),
+                class: class.to_string(),
+            })
+        };
+        assert_eq!(
+            shared.record_failure(&member, RetryFailure::new(store.clone(), "first")),
+            warning(&member, &store)
+        );
+        assert_eq!(
+            shared.record_failure(&member, RetryFailure::new(store.clone(), "second")),
+            None
+        );
         assert_eq!(shared.last_failure(&member).as_deref(), Some("second"));
         // Another member's first failure warns on its own.
-        assert!(shared.record_failure(&other, RetryFailure::new(store.clone(), "first")));
+        assert_eq!(
+            shared.record_failure(&other, RetryFailure::new(store.clone(), "first")),
+            warning(&other, &store)
+        );
         // Another class warns; the same class again does not.
-        assert!(shared.record_failure(&member, RetryFailure::new("timed_out", "third")));
-        assert!(!shared.record_failure(&member, RetryFailure::new("timed_out", "fourth")));
+        assert_eq!(
+            shared.record_failure(&member, RetryFailure::new("timed_out", "third")),
+            warning(&member, "timed_out")
+        );
+        assert_eq!(
+            shared.record_failure(&member, RetryFailure::new("timed_out", "fourth")),
+            None
+        );
         // A record that landed ends the failure: the next one warns again.
         shared.clear_failure(&member, true);
         assert_eq!(shared.last_failure(&member), None);
-        assert!(shared.record_failure(&member, RetryFailure::new("timed_out", "fifth")));
+        assert_eq!(
+            shared.record_failure(&member, RetryFailure::new("timed_out", "fifth")),
+            warning(&member, "timed_out")
+        );
         assert_eq!(shared.last_failure(&other).as_deref(), Some("first"));
     }
 

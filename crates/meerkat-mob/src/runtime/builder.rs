@@ -9714,6 +9714,7 @@ impl MobBuilder {
                 machine_state_watch_rx,
                 operator_instruction_delivery:
                     super::operator_instruction_delivery::OperatorInstructionDeliveryShared::new(
+                        definition.id.clone(),
                         wiring.member_residency.instruction_delivery_concurrency,
                     ),
                 reachability_observations,
@@ -11432,6 +11433,7 @@ impl MobBuilder {
             // member's release waits on the member's delivery lock).
             let operator_instruction_delivery =
                 super::operator_instruction_delivery::OperatorInstructionDeliveryShared::new(
+                    definition.id.clone(),
                     member_residency.instruction_delivery_concurrency,
                 );
             let handle = MobHandle {

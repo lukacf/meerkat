@@ -4977,6 +4977,287 @@ async fn the_schedules_that_target_an_agent_follow_its_archive_unarchive_and_rem
     let _ = runtime.shutdown().await;
 }
 
+/// A one-shot schedule named `name` that targets the agent `agent`, due
+/// tomorrow.
+async fn check_in_schedule(
+    schedules: &meerkat::ScheduleService,
+    name: &str,
+    agent: &str,
+) -> meerkat::ScheduleId {
+    schedules
+        .create(meerkat::CreateScheduleRequest {
+            name: Some(name.to_owned()),
+            description: None,
+            trigger: meerkat::TriggerSpec::Once {
+                due_at_utc: chrono::Utc::now() + chrono::Duration::days(1),
+            },
+            target: meerkat::TargetBinding::identity(meerkat::IdentityTargetBinding::resumable(
+                agent,
+                meerkat::ScheduledSessionAction::Prompt {
+                    prompt: meerkat_core::ContentInput::Text("Check in.".into()),
+                    system_prompt: None,
+                    render_metadata: None,
+                    skill_refs: Vec::new(),
+                    additional_instructions: Vec::new(),
+                },
+            )),
+            misfire_policy: meerkat::MisfirePolicy::default(),
+            overlap_policy: meerkat::OverlapPolicy::default(),
+            missing_target_policy: meerkat::MissingTargetPolicy::default(),
+            labels: std::collections::BTreeMap::new(),
+            planning_horizon_days: Some(1),
+            planning_horizon_occurrences: Some(1),
+        })
+        .await
+        .unwrap_or_else(|error| panic!("the schedule {name} is created: {error}"))
+        .schedule_id
+}
+
+/// An agent that asks for an archive is told what became of the archived
+/// agent's schedules and how many they are, and is given no list of them:
+/// the schedules may be anybody's. The host, asking for the unarchive, is
+/// given the list. The same holds for a plan.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_requester_is_told_what_became_of_the_schedules_and_given_no_list() {
+    use meerkat_meta::schedule_wiring::{MobAgentSchedules, ScheduleMobTargetRegistry};
+
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, _asked, _fail_next_session) = launch(temp.path(), false).await;
+    let schedules = meerkat::ScheduleService::new(Arc::new(meerkat::MemoryScheduleStore::new()));
+    let options = IdentityFamilyOptions::new().with_schedules(Arc::new(MobAgentSchedules::new(
+        schedules.clone(),
+        ScheduleMobTargetRegistry::default(),
+    )));
+    assert!(runtime.attach_identity_policy(in_process_policy(), options));
+    let family = runtime.identity_family().expect("the family");
+    let mob = runtime.mob_handle();
+    let change = |requester: ChangeRequester, request: &'static str, change: IdentityChangeSpec| {
+        let (family, mob) = (Arc::clone(&family), mob.clone());
+        async move {
+            let operation =
+                OperationId::for_request(&requester.recorded(), request).expect("a request id");
+            family
+                .change(&mob, &requester, IdentityChangeCall::new(operation, change))
+                .await
+        }
+    };
+    let plan = |requester: ChangeRequester, change: IdentityChangeSpec| {
+        let (family, mob) = (Arc::clone(&family), mob.clone());
+        async move {
+            let operation =
+                OperationId::for_request(&requester.recorded(), "plan").expect("a request id");
+            match family
+                .read(
+                    &mob,
+                    &requester,
+                    IdentityRead::Plan(Box::new(IdentityChangeCall::new(operation, change))),
+                )
+                .await
+            {
+                Ok(IdentityReadAnswer::Plan(plan)) => {
+                    serde_json::to_value(*plan).expect("a plan as a surface writes it")
+                }
+                other => panic!("a plan answers one: {other:?}"),
+            }
+        }
+    };
+    let planner = ChangeRequester::agent_recorded(PLANNER);
+    let host = ChangeRequester::host("ops");
+    let made = change(
+        planner.clone(),
+        "r-1",
+        create_of(json!([{"name": "scout", "profile": "worker"}])),
+    )
+    .await;
+    assert_eq!(made.token(), "done", "{made:?}");
+    let digest = match family
+        .read(&mob, &host, IdentityRead::Get(GetAgent::new("scout")))
+        .await
+    {
+        Ok(IdentityReadAnswer::Get(record)) => record.agent.spec_digest,
+        other => panic!("a get answers one agent: {other:?}"),
+    };
+    let daily = check_in_schedule(&schedules, "daily", "scout").await;
+
+    // The agent's plan and its archive: what, how many, and no list.
+    let planned = plan(
+        planner.clone(),
+        IdentityChangeSpec::Archive(agent_ref("scout", &digest)),
+    )
+    .await;
+    assert_eq!(
+        planned["schedules"],
+        json!({"effect": "paused", "count": 1}),
+        "{planned:#}"
+    );
+    let archived = change(
+        planner.clone(),
+        "r-2",
+        IdentityChangeSpec::Archive(agent_ref("scout", &digest)),
+    )
+    .await;
+    assert_eq!(archived.token(), "done", "{archived:?}");
+    assert_eq!(
+        archived.to_json()["agents"][0]["schedules"],
+        json!({"effect": "paused", "count": 1}),
+        "{archived:?}"
+    );
+    let paused = schedules.get(&daily).await.expect("the schedule is read");
+    assert!(
+        paused.paused_for_target(),
+        "the schedule followed the agent"
+    );
+
+    // The host's plan and its unarchive: the list.
+    let listed = json!({
+        "effect": "resumed",
+        "count": 1,
+        "schedules": [{"schedule_id": daily.to_string(), "name": "daily"}],
+    });
+    let planned = plan(
+        host.clone(),
+        IdentityChangeSpec::Unarchive(agent_ref("scout", &digest)),
+    )
+    .await;
+    assert_eq!(planned["schedules"], listed, "{planned:#}");
+    let unarchived = change(
+        host.clone(),
+        "r-3",
+        IdentityChangeSpec::Unarchive(agent_ref("scout", &digest)),
+    )
+    .await;
+    assert_eq!(unarchived.token(), "done", "{unarchived:?}");
+    assert_eq!(
+        unarchived.to_json()["agents"][0]["schedules"],
+        listed,
+        "{unarchived:?}"
+    );
+    let _ = runtime.shutdown().await;
+}
+
+/// On the Console the list of an agent's schedules, on the answer of its
+/// archive, unarchive and removal and on their plan, is an administrator's:
+/// a signed-in person without `runtime.admin` who may change the agent is
+/// told what became of its schedules and how many they are, and no more.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_console_lists_an_agents_schedules_only_to_an_administrator() {
+    use meerkat_meta::schedule_wiring::{MobAgentSchedules, ScheduleMobTargetRegistry};
+
+    const ROOT: &str = "root@example.org";
+    const ANN: &str = "ann@example.org";
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, app) = console_under(
+        temp.path(),
+        r#"
+enabled = true
+admins = ["root@example.org"]
+
+[[rules]]
+id = "works"
+actions = ["agent.identity.create", "agent.view", "agent.identity.manage", "agent.identity.remove"]
+"#,
+    )
+    .await;
+    let policy = IdentityCreationPolicy::parse(&json!({
+        "enabled": true,
+        "peers": {"default": "allow"},
+        "approval": {"rules": [{
+            "change": ["create", "archive", "remove"],
+            "requester": {"kind": "human"},
+            "target": {"profile": ["worker"]},
+            "outcome": {"kind": "allow"},
+        }]},
+    }))
+    .expect("the policy parses")
+    .expect("the policy is enabled");
+    let schedules = meerkat::ScheduleService::new(Arc::new(meerkat::MemoryScheduleStore::new()));
+    let options = IdentityFamilyOptions::new().with_schedules(Arc::new(MobAgentSchedules::new(
+        schedules.clone(),
+        ScheduleMobTargetRegistry::default(),
+    )));
+    assert!(runtime.attach_identity_policy(Arc::new(policy), options));
+
+    let made = console_rpc(
+        &app,
+        Some(ROOT),
+        "meta/identity/create",
+        json!({"request_id": "root-1", "agents": [
+            {"name": "alpha", "profile": "worker"},
+            {"name": "beta", "profile": "worker"},
+        ]}),
+    )
+    .await;
+    assert_eq!(console_ok(&made)["outcome"], json!("done"), "{made:#}");
+    let daily = check_in_schedule(&schedules, "daily", "alpha").await;
+    let nightly = check_in_schedule(&schedules, "nightly", "beta").await;
+    let digest_of = |name: &'static str| {
+        let app = app.clone();
+        async move {
+            let read =
+                console_rpc(&app, Some(ROOT), "meta/identity/get", json!({"name": name})).await;
+            console_ok(&read)["spec_digest"].clone()
+        }
+    };
+    let call = |subject: &'static str, method: &'static str, params: Value| {
+        let app = app.clone();
+        async move {
+            let answer = console_rpc(&app, Some(subject), method, params).await;
+            console_ok(&answer).clone()
+        }
+    };
+
+    // A person who may change the agent and does not administer the
+    // runtime: what, how many, and no list, on the plan and on the answer.
+    let alpha = digest_of("alpha").await;
+    let counted = json!({"effect": "paused", "count": 1});
+    let planned = call(
+        ANN,
+        "meta/identity/plan",
+        json!({"change": "archive", "request_id": "ann-plan", "name": "alpha",
+               "expected_spec_digest": alpha.clone()}),
+    )
+    .await;
+    assert_eq!(planned["schedules"], counted, "{planned:#}");
+    let archived = call(
+        ANN,
+        "meta/identity/archive",
+        json!({"request_id": "ann-1", "name": "alpha", "expected_spec_digest": alpha}),
+    )
+    .await;
+    assert_eq!(archived["outcome"], json!("done"), "{archived:#}");
+    assert_eq!(archived["agents"][0]["schedules"], counted, "{archived:#}");
+    let paused = schedules.get(&daily).await.expect("the schedule is read");
+    assert!(
+        paused.paused_for_target(),
+        "the schedule followed the agent"
+    );
+
+    // An administrator: the list, on the plan and on the answer.
+    let beta = digest_of("beta").await;
+    let listed = json!({
+        "effect": "paused",
+        "count": 1,
+        "schedules": [{"schedule_id": nightly.to_string(), "name": "nightly"}],
+    });
+    let planned = call(
+        ROOT,
+        "meta/identity/plan",
+        json!({"change": "archive", "request_id": "root-plan", "name": "beta",
+               "expected_spec_digest": beta.clone()}),
+    )
+    .await;
+    assert_eq!(planned["schedules"], listed, "{planned:#}");
+    let archived = call(
+        ROOT,
+        "meta/identity/archive",
+        json!({"request_id": "root-2", "name": "beta", "expected_spec_digest": beta}),
+    )
+    .await;
+    assert_eq!(archived["outcome"], json!("done"), "{archived:#}");
+    assert_eq!(archived["agents"][0]["schedules"], listed, "{archived:#}");
+    let _ = runtime.shutdown().await;
+}
+
 /// A change's answer never waits on another agent's start. An agent of a
 /// profile that runs on its own is created, and its first turn is slow
 /// (its model takes 20 s to answer): a second create, and an update of the

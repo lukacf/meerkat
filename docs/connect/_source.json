@@ -272,8 +272,8 @@
     },
     {
       "path": "sdks/typescript.mdx",
-      "source_sha256": "affc4d2025ea066d1ba2f8973d1788add673b4e27378911d95e002ba3f0b8f11",
-      "rendered_sha256": "b56006c3ca973a002d605993e266ec67b72b8d5e9b7c4b010d814bcd58f3ecbd"
+      "source_sha256": "8959ce0c80892c60c1abac853b9810febfadc4c0c7ff73e79767eb9965e320ae",
+      "rendered_sha256": "ec5741178987dfb736ae0bd1bd6c62fdc79ad641f29408b0fa91a3efeda1947a"
     },
     {
       "path": "sdks/ui.mdx",

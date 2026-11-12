@@ -979,6 +979,7 @@ export function AgentChangeConfirm({
   change,
   name,
   displayName,
+  waiting,
   onClose,
   onArchiveInstead,
 }: {
@@ -986,11 +987,13 @@ export function AgentChangeConfirm({
   change: "archive" | "unarchive" | "remove";
   name: string;
   displayName: string;
+  /** The agent still waits for its host: it never started. */
+  waiting?: boolean;
   onClose: () => void;
   /** Offered beside a removal when the viewer may archive the agent. */
   onArchiveInstead?: () => void;
 }): React.JSX.Element {
-  const words = agentChangeConfirmWords(change, displayName);
+  const words = agentChangeConfirmWords(change, displayName, { waiting });
   const sender = useChangeSender(api, change, displayName);
   const request = React.useRef<Record<string, unknown> | null>(null);
   const [reading, setReading] = React.useState(false);
@@ -1086,6 +1089,7 @@ export function AgentChangePanel({
   name,
   displayName,
   controls,
+  waiting,
   onClose,
   onSwitch,
 }: {
@@ -1094,6 +1098,8 @@ export function AgentChangePanel({
   name: string;
   displayName: string;
   controls: Pick<AgentIdentityControls, "archive">;
+  /** The agent still waits for its host: it never started. */
+  waiting?: boolean;
   onClose: () => void;
   onSwitch: (change: OpenAgentChange) => void;
 }): React.JSX.Element {
@@ -1106,6 +1112,7 @@ export function AgentChangePanel({
       change={change}
       name={name}
       displayName={displayName}
+      waiting={waiting}
       onClose={onClose}
       onArchiveInstead={change === "remove" && controls.archive ? () => onSwitch("archive") : undefined}
     />
@@ -1181,6 +1188,9 @@ export function ArchivedAgents({
     return () => { active = false; };
   }, [open, api.revision]);
   const controls = archivedAgentControls(api.flags);
+  // An agent that waits can be given up where the launch offers removals:
+  // the gateway judges the removal when it is sent, as for an archived one.
+  const canGiveUp = controls.remove;
   const toggle = () => {
     // A closed list keeps nothing: opening it reads it.
     if (open) {
@@ -1215,13 +1225,20 @@ export function ArchivedAgents({
                   <div className="roster__group-head">Waiting for their host <span className="cc-count">{waiting.length}</span></div>
                   <ul className="identity-archived__list">
                     {waiting.map((agent) => (
-                      // Nothing can be done with it yet, so it has no
-                      // control: it joins the roster when its host is done.
+                      // It has no member yet, so nothing can be done with
+                      // it but to give it up: where the launch offers
+                      // removals, Remove is its one control. It joins the
+                      // roster when its host is done.
                       <li key={agent.name} className="identity-archived__row" data-testid={`roster-waiting:${agent.name}`}>
                         <span className="identity-archived__name" title={agent.name}>{agentShownName(agent)}</span>
                         <span className="identity-archived__meta">{humanizeEnum(agent.profile)}</span>
-                        <span className="identity-archived__actions">
+                        <span className="cc-btn-row identity-archived__actions">
                           <StatusPill tone="warn" variant="quiet">Waiting for its host</StatusPill>
+                          {canGiveUp ? (
+                            <Button size="sm" variant="danger" onClick={() => onOpen(agent, "remove")} data-testid={`roster-waiting-action:${agent.name}:remove`}>
+                              Remove
+                            </Button>
+                          ) : null}
                         </span>
                       </li>
                     ))}

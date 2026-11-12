@@ -1191,8 +1191,22 @@ export function requesterWords(provenance: AgentProvenance, personName: (key: st
  * leaves the team as any agent leaves it. */
 const HARVEST_WORDS = "Its last conversation is harvested, as for any agent that leaves the team.";
 
-/** What the confirmation of a change of one agent as a whole says. */
-export function agentChangeConfirmWords(change: "archive" | "unarchive" | "remove", name: string): { question: string; consequence: string; confirm: string } {
+/** What the confirmation of a change of one agent as a whole says.
+ * `state.waiting` is an agent that still waits for its host's preparation:
+ * it has no member and never started, so its removal harvests nothing and
+ * an archive is no choice for it. */
+export function agentChangeConfirmWords(
+  change: "archive" | "unarchive" | "remove",
+  name: string,
+  state: { waiting?: boolean } = {},
+): { question: string; consequence: string; confirm: string } {
+  if (change === "remove" && state.waiting === true) {
+    return {
+      question: `Remove ${name} for good?`,
+      consequence: "It never started: its host has not finished preparing it, so it has no conversation and nothing was run for it. Its name can never be used again, and this cannot be undone.",
+      confirm: "Remove for good",
+    };
+  }
   if (change === "archive") {
     return {
       question: `Archive ${name}?`,

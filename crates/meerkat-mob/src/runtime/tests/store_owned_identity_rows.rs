@@ -689,6 +689,61 @@ enum SeatScript {
     Refuse(crate::runtime::MemberBuildPreparationRefusal),
     /// Change a fact of the seat Core refuses a change of.
     Change(SeatChange),
+    /// Answer other labels than the seat's.
+    Labels(LabelChange),
+}
+
+/// How a scripted host's answer changes a store-owned seat's labels.
+#[derive(Clone, Copy, Debug)]
+enum LabelChange {
+    /// Add a label the seat does not carry.
+    Add,
+    /// Drop a label the seat carries.
+    Drop,
+    /// Give a label the seat carries another value.
+    Revalue,
+    /// Set the seat's own labels again, key by key.
+    Same,
+}
+
+impl LabelChange {
+    /// The key of the seat's labels the change touches, and the value the
+    /// scripted host uses for it: Core's refusal names the key, never the
+    /// value.
+    const ADDED: (&'static str, &'static str) = ("host_tier", "host-secret-gold");
+    const REVALUED: (&'static str, &'static str) = ("team", "host-secret-omega");
+    const DROPPED: &'static str = "desk";
+
+    fn apply(self, seat: &mut SpawnMemberSpec) {
+        let labels = seat.labels.get_or_insert_with(BTreeMap::new);
+        match self {
+            Self::Add => {
+                labels.insert(Self::ADDED.0.to_string(), Self::ADDED.1.to_string());
+            }
+            Self::Drop => {
+                labels.remove(Self::DROPPED);
+            }
+            Self::Revalue => {
+                labels.insert(Self::REVALUED.0.to_string(), Self::REVALUED.1.to_string());
+            }
+            Self::Same => {
+                let same = labels.clone();
+                labels.clear();
+                labels.extend(same);
+            }
+        }
+    }
+
+    /// How Core's refusal of the change names it: what the answer did, and
+    /// the key.
+    fn named(self) -> String {
+        match self {
+            Self::Add => format!("added [{}]", Self::ADDED.0),
+            Self::Drop => format!("dropped [{}]", Self::DROPPED),
+            Self::Revalue => format!("changed [{}]", Self::REVALUED.0),
+            Self::Same => String::new(),
+        }
+    }
 }
 
 /// A fact of a store-owned seat its host may not change.
@@ -713,8 +768,7 @@ impl SeatChange {
 }
 
 /// The build inputs a scripted host sets on a store-owned seat: a model
-/// override, a system prompt, a context and an instruction section, with a
-/// label of its own.
+/// override, a system prompt, a context and an instruction section.
 #[derive(Clone, Debug)]
 struct HostBuild {
     model: &'static str,
@@ -751,9 +805,6 @@ impl HostBuild {
         seat.additional_instructions
             .get_or_insert_with(Vec::new)
             .push(self.instruction.to_string());
-        seat.labels
-            .get_or_insert_with(BTreeMap::new)
-            .insert("host".to_string(), self.model.to_string());
     }
 
     /// Whether `build` took the model this host sets.
@@ -863,6 +914,7 @@ impl crate::runtime::MemberBuildPreparer for ScriptedPreparer {
             SeatScript::Change(SeatChange::Custody) => {
                 *seat = seat.clone().with_created_custody(false);
             }
+            SeatScript::Labels(change) => change.apply(seat),
         }
         Ok(())
     }
@@ -1464,6 +1516,115 @@ async fn a_seat_composition_that_changed_identity_role_launch_mode_or_custody_is
         mob.role("quiet").await,
         Some(ProfileName::from("worker")),
         "the member keeps its role"
+    );
+}
+
+/// A store-owned member carries its row's labels and no others, so Core
+/// refuses a seat composition that answers other labels than the seat's:
+/// `change` is what the scripted host's answer does to them. The refusal is
+/// for good, names the key and never a value, and names the remedy: the
+/// label belongs in the identity's row. At a kickoff spawn the spawn fails,
+/// the identity is owed its seat and nothing is built; at a Dormant seat's
+/// first wake the wake fails and nothing is built.
+async fn seat_label_change_is_refused(change: LabelChange) {
+    let preparer = ScriptedPreparer::new();
+    let label = format!("seat-labels-{change:?}").to_lowercase();
+    let mob = seat_composing_mob(&label, &preparer).await;
+    let names_the_key_only = |reason: &str| {
+        reason.contains(&change.named())
+            && reason.contains("row")
+            && !reason.contains(LabelChange::ADDED.1)
+            && !reason.contains(LabelChange::REVALUED.1)
+            && !reason.contains("alpha")
+    };
+    preparer.compose_seats(SeatScript::Labels(change));
+    let created = mob
+        .create_outcome(kickoff_create("kicked", "Wait."), ALLOW)
+        .await
+        .expect("the create commits");
+    match created.embodied.get(&id("kicked")) {
+        Some(crate::runtime::DeclaredEntryOutcome::Failed { error }) => assert!(
+            names_the_key_only(&error.to_string()),
+            "{change:?}: the failed spawn names the label key and the remedy, and no value: \
+             {error}"
+        ),
+        other => panic!("{change:?}: the spawn is answered failed: {other:?}"),
+    }
+    mob.unseated_for("kicked", UnseatedEntryCause::SeatOwed)
+        .await;
+    assert!(!mob.is_member("kicked").await, "{change:?}: no member");
+
+    committed(
+        mob.create(host_create("create-quiet", &["quiet"]), ALLOW)
+            .await,
+    );
+    let refused = wake(&mob, "quiet").await;
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|error| names_the_key_only(&error.to_string())),
+        "{change:?}: the wake fails naming the label key and the remedy, and no value: \
+         {refused:?}"
+    );
+    assert_eq!(mob.builds().await, 0, "{change:?}: nothing was built");
+}
+
+/// Row (RED): an answer that adds a label the seat does not carry is
+/// refused ([`seat_label_change_is_refused`]): a member is never seated
+/// with a label its row does not have, nor built without one its host
+/// requires.
+///
+/// RED on the old tree: Core dropped the labels of the host's answer and
+/// built the member with its row's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_seat_composition_that_adds_a_label_the_seat_lacks_is_refused_naming_the_key() {
+    seat_label_change_is_refused(LabelChange::Add).await;
+}
+
+/// Row (RED): an answer that drops a label the seat carries is refused
+/// ([`seat_label_change_is_refused`]).
+///
+/// RED on the old tree, as the row above.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_seat_composition_that_drops_a_label_of_the_seat_is_refused_naming_the_key() {
+    seat_label_change_is_refused(LabelChange::Drop).await;
+}
+
+/// Row (RED): an answer that gives a label of the seat another value is
+/// refused ([`seat_label_change_is_refused`]).
+///
+/// RED on the old tree, as the row above.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_seat_composition_that_changes_a_label_of_the_seat_is_refused_naming_the_key() {
+    seat_label_change_is_refused(LabelChange::Revalue).await;
+}
+
+/// Row: an answer that sets the seat's own labels again, key by key, is no
+/// difference: the member is built, and its roster labels are its row's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_seat_composition_that_answers_the_seats_own_labels_builds_the_member() {
+    let preparer = ScriptedPreparer::new();
+    let mob = seat_composing_mob("seat-labels-same", &preparer).await;
+    committed(
+        mob.create(host_create("create-same", &["same"]), ALLOW)
+            .await,
+    );
+    preparer.compose_seats(SeatScript::Labels(LabelChange::Same));
+    let session = mob.session("same").await;
+    wake(&mob, "same")
+        .await
+        .expect("an answer with the seat's own labels builds the member");
+    assert_eq!(builds_on(&mob, &session).await.len(), 1, "one build");
+    let entry = mob
+        .handle
+        .get_member(&id("same"))
+        .await
+        .expect("roster read")
+        .expect("same is a member");
+    assert_eq!(
+        entry.labels,
+        spec("same", "worker").labels,
+        "the member's roster labels are its row's"
     );
 }
 

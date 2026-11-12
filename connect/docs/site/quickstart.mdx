@@ -7,8 +7,11 @@ icon: "rocket"
 <Note>
 Download the complete CLI archive from the
 [Connect 0.9.14 release](https://github.com/lukacf/meerkat/releases/tag/connect-v0.9.14).
-Platform: Linux x86_64 with glibc 2.39. The Apple Silicon macOS archive
-(macOS 13.5 or later) is not published for 0.9.14. Verify the
+Platform: Linux x86_64 with glibc 2.39. The complete Apple Silicon macOS archive
+(macOS 13.5 or later) is not published for 0.9.14; the macOS executable
+archives a release may list (`...-aarch64-apple-darwin.tar.gz`) hold the
+executables alone and cannot run this quickstart
+(see [platforms](/availability#platforms)). Verify the
 accompanying checksum before running it.
 See [platforms and installation options](/availability) for application integration.
 </Note>
@@ -24,7 +27,7 @@ library and setup resources; you do not need to install those separately.
     Download the CLI archive and its `.sha256` companion:
 
     ```sh
-    platform=linux-x86_64 # 0.9.14 has no macos-arm64 archive.
+    platform=linux-x86_64 # 0.9.14 has no complete macos-arm64 archive.
     archive="meerkat-connect-0.9.14-$platform.tar.gz"
     release=https://github.com/lukacf/meerkat/releases/download/connect-v0.9.14
     curl -fLO "$release/$archive"

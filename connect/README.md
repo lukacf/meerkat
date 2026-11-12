@@ -6,8 +6,10 @@ catalog. Describe a task, review the proposed access and let Connect guide setup
 
 ## Install and use
 
-Connect 0.9.10 is released for Linux x86_64 with glibc 2.39. Its Apple Silicon
-macOS archives (macOS 13.5 or later) are not built yet and follow later.
+Connect 0.9.10 is released for Linux x86_64 with glibc 2.39. Its complete Apple
+Silicon macOS archive (macOS 13.5 or later) is not built yet and follows later;
+the release workflow attaches the [macOS executables](#macos-executables) on
+their own.
 Install [Meerkat Core 0.9.10](https://github.com/lukacf/meerkat/releases/tag/v0.9.10)
 for the ordinary `rkat` agent. Connect supplies its own Python, Node/npm,
 integration library and setup resources.
@@ -15,7 +17,7 @@ integration library and setup resources.
 Download the complete Connect CLI archive and verify its checksum:
 
 ```sh
-platform=linux-x86_64 # 0.9.10 has no macos-arm64 archive yet.
+platform=linux-x86_64 # 0.9.10 has no complete macos-arm64 archive yet.
 archive="meerkat-connect-0.9.10-$platform.tar.gz"
 release=https://github.com/lukacf/meerkat/releases/download/connect-v0.9.10
 curl -fLO "$release/$archive"
@@ -48,6 +50,32 @@ rkat --realm work run --wait-for-mcp --mcp-auth stored \
 Use the same realm and project context for both commands. See the
 [quickstart](docs/site/quickstart.mdx) for custom roots and the integrated Console.
 Core and `rkat` do not depend on Connect; Connect is a separate setup tool.
+
+### macOS executables
+
+The release workflow builds the `meerkat-connect` and `toolkit_gateway`
+executables for Apple Silicon macOS on a GitHub-hosted macOS runner, the way
+Core's and Meta's macOS binaries are built there, and adds them to a release as
+`meerkat-connect-<version>-aarch64-apple-darwin.tar.gz` and
+`meerkat-connect-gateway-<version>-aarch64-apple-darwin.tar.gz`. Each archive
+holds one executable and has a `.sha256` file beside it. A release published
+before this lane existed has them only if they were added afterwards: check
+its asset list.
+
+These archives are not the complete installation. They carry no bundled
+Python, Node/npm, integration library or setup resources, and an executable
+built without them refuses every step that needs them: the interactive
+`meerkat-connect` setup conversation stops at startup, and no integration can
+be prepared, installed or read back. These paths read no bundled resource, so
+its absence does not stop them: `--version` and `--help`, the `credentials`
+commands for services a realm already has, the provider sign-in and
+paired-host adapters an application drives, and gateway startup for an
+application whose setup supplies no bundled helper. The complete archive
+keeps the name
+`meerkat-connect-<version>-macos-arm64.tar.gz`. See
+[release routes](release/CONNECT-CANDIDATE.md#macos-executables-from-the-release-workflow)
+for how they are built and how to add Intel macOS (`x86_64-apple-darwin`),
+which is not built.
 
 ## Use Connect in an application
 

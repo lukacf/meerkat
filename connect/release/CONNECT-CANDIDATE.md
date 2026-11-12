@@ -13,6 +13,72 @@ product selection, file pins and relocation paths for those published bytes.
 The hosted workflow below remains available as a separate production route. It
 is not a prerequisite for the selected direct 0.9.4 release.
 
+## macOS executables from the release workflow
+
+`.github/workflows/connect-release.yml` builds Connect's two executables for
+Apple Silicon macOS the way the Core and Meta release workflows build their
+macOS binaries on a GitHub-hosted runner. This is separate from the candidate
+route below and uses none of its inputs.
+
+Job `build_macos`, on `macos-15`, target `aarch64-apple-darwin`:
+
+1. Check out the release source and refuse a checkout that is not the tag's
+   commit (or the dispatched commit of a build-only run) or whose
+   `meerkat-connect` crate is another version.
+2. Build with Cargo through the repository wrapper, with the package,
+   features and profile of the Linux producer and no resource digest:
+   `./scripts/repo-cargo build --locked --release --target aarch64-apple-darwin
+   -p meerkat-connect --features meerkat-connect/console,toolkit-mobkit/native-host
+   --bin meerkat-connect --bin toolkit_gateway`.
+3. Check each executable's architecture (`lipo -archs`, `file`).
+4. Run each with `--version`; it must print the release version.
+5. Apply the ad-hoc signing step of the Core and Meta lanes
+   (`codesign --force --sign -`). No signing identity is used.
+6. Write one archive per executable, the executable at the archive root, and
+   a `sha256sum`-format checksum file beside it:
+   `meerkat-connect-<version>-aarch64-apple-darwin.tar.gz` (`meerkat-connect`)
+   and `meerkat-connect-gateway-<version>-aarch64-apple-darwin.tar.gz`
+   (`toolkit_gateway`).
+7. Attest build provenance for those files and keep the bundle as
+   `connect-aarch64-apple-darwin-provenance.jsonl`.
+8. Upload the five files as a workflow artifact, kept 90 days.
+
+When it runs:
+
+| Trigger | Build | Publication |
+| --- | --- | --- |
+| Tag push `connect-vX.Y.Z` | The tag's commit, beside the CI and published-floor gates | `publish_macos` adds the five files to the release once the gates passed, the release object exists and the build succeeded |
+| Dispatch `mode=macos-build` | The dispatched commit | None: the files stay a workflow artifact |
+| Dispatch `mode=macos-assets`, `release_tag=connect-vX.Y.Z` | That existing tag's commit | `recover_macos` adds the five files to that tag's existing release |
+
+```sh
+# Build and check only; publishes nothing.
+gh workflow run connect-release.yml --ref main -f mode=macos-build
+# Add the macOS executables to an existing release.
+gh workflow run connect-release.yml --ref main -f mode=macos-assets -f release_tag=connect-vX.Y.Z
+```
+
+Publication is add-only (`scripts/connect_release_macos_assets.py`): it
+checks every file first, creates no release or tag, leaves an asset that is
+already there with the same bytes, fails before any upload when one is there
+with other bytes, and never replaces an asset. It does not write `SHA256SUMS`
+or `RELEASE-MANIFEST.json`; those remain the release owner's files, so they
+list the macOS files only when the release owner adds them.
+
+These archives are the executables alone. They are compiled without
+`MEERKAT_CONNECT_RESOURCES_SHA256`, so they are not the complete installation
+that `meerkat-connect-<version>-macos-arm64.tar.gz` names (executables bound to
+a bundled Python, Node/npm, integration library and setup resources): every
+step that reads those resources is refused, the interactive setup conversation
+included. This job does not build the complete macOS installation.
+
+To add Intel macOS (`x86_64-apple-darwin`), which Core and Meta build on the
+same runner label: add the row `runs-on: macos-15`, `target:
+x86_64-apple-darwin` to `build_macos`'s matrix, its architecture (`x86_64`) to
+the architecture check, a Rosetta prefix to the smoke run as Meta's workflow
+has, and the triple to `TARGETS` in `scripts/connect_release_macos_assets.py`.
+Connect's platform table does not list Intel macOS today.
+
 ## Hosted native candidate workflow
 
 This manual-only workflow is source preparation for an explicitly selected,

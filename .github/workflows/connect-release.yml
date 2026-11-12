@@ -21,6 +21,26 @@ name: Connect release
 #      SHA-256;
 #   4. publish (dispatch): `publish-accepted` adds exactly the accepted three
 #      assets to that release, never replacing one.
+# macOS executables, built the way Meta's gateways are (meta-release.yml's
+# build_binaries: Cargo on a GitHub-hosted macos-15 runner, architecture
+# check, --version smoke run, ad-hoc signing, one archive per executable,
+# build provenance):
+#   - tag push: build_macos builds meerkat-connect and toolkit_gateway for
+#     aarch64-apple-darwin from the tag's commit beside the gates above (it
+#     waits for none and writes nothing outside its run); once the release
+#     object exists, publish_macos adds the two archives, their checksum
+#     files and the provenance bundle to it, never replacing one;
+#   - `macos-build` (dispatch): the same build and checks of the dispatched
+#     commit; publishes nothing (the rehearsal);
+#   - `macos-assets` (dispatch): builds an existing tag's commit and adds the
+#     same files to that tag's existing release (add-only recovery).
+#   These archives hold the executables only. They are built without a
+#   resource digest, so they are not the complete installation the
+#   linux-x86_64 archives are (bundled Python, Node/npm, integration library
+#   and setup resources), which the release owner's producer builds.
+#   To add a target, add its row to build_macos's matrix, its architecture to
+#   the check, and the triple to TARGETS in
+#   scripts/connect_release_macos_assets.py.
 # Prerequisites (connect-candidate-monorepo patch): connect-candidate.py names
 # lukacf/meerkat and this workflow; after the workspace wire-up it must build
 # meerkat-connect from the root workspace instead of native-candidate/.
@@ -32,10 +52,15 @@ name: Connect release
   workflow_dispatch:
     inputs:
       mode:
-        description: "candidate: build one target; accept: accept an attested candidate; publish: add accepted assets"
+        description: "candidate: build one target; accept: accept an attested candidate; publish: add accepted assets; macos-build: build and check the macOS executables, publish nothing; macos-assets: build an existing tag's macOS executables and add them to its release"
         required: true
         type: choice
-        options: [candidate, accept, publish]
+        options: [candidate, accept, publish, macos-build, macos-assets]
+      release_tag:
+        description: macos-assets only - the existing connect-vX.Y.Z tag whose release gets the macOS executables
+        required: false
+        default: ""
+        type: string
       target:
         description: Native target (candidate and accept modes)
         required: false
@@ -87,6 +112,7 @@ jobs:
       mode: ${{ steps.resolve.outputs.mode }}
       version: ${{ steps.resolve.outputs.version }}
       tag: ${{ steps.resolve.outputs.tag }}
+      source_ref: ${{ steps.resolve.outputs.source_ref }}
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -99,6 +125,7 @@ jobs:
           EVENT: ${{ github.event_name }}
           REF: ${{ github.ref }}
           MODE: ${{ inputs.mode }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
           # Connect's version line: its crates carry an explicit version after
@@ -114,6 +141,10 @@ jobs:
               print(native["workspace"]["package"]["version"])
           PY
           )"
+          # source_ref is what build_macos checks out: the pushed tag, the
+          # dispatched commit of a build-only run, or the existing tag an
+          # asset recovery names (whose version is the tag's, not this
+          # checkout's).
           if [[ "${EVENT}" == "push" ]]; then
             mode=tag
             tag="${REF#refs/tags/}"
@@ -121,16 +152,32 @@ jobs:
               echo "::error::tag ${tag} does not name the Connect version ${version} (expected connect-v${version})" >&2
               exit 1
             fi
+            source_ref="${REF}"
+          elif [[ "${MODE}" == "macos-assets" ]]; then
+            mode="${MODE}"
+            tag="${RELEASE_TAG}"
+            if [[ ! "${tag}" =~ ^connect-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::macos-assets needs release_tag, an existing connect-vX.Y.Z tag; got '${tag}'" >&2
+              exit 1
+            fi
+            version="${tag#connect-v}"
+            source_ref="refs/tags/${tag}"
           else
+            if [[ -n "${RELEASE_TAG}" ]]; then
+              echo "::error::release_tag is only valid for macos-assets (mode ${MODE})" >&2
+              exit 1
+            fi
             mode="${MODE}"
             tag="connect-v${version}"
+            source_ref="${GITHUB_SHA}"
           fi
           {
             echo "mode=${mode}"
             echo "version=${version}"
             echo "tag=${tag}"
+            echo "source_ref=${source_ref}"
           } >> "${GITHUB_OUTPUT}"
-          echo "Connect ${version}: mode ${mode}, tag ${tag}"
+          echo "Connect ${version}: mode ${mode}, tag ${tag}, source ${source_ref}"
 
   # Waits (bounded) rather than refuses: the tagged commit's exact-main CI
   # (ci.yml on main) must be green. The gate polls every 30 seconds for up
@@ -322,6 +369,258 @@ jobs:
           gh release create "${TAG}" --repo "${GITHUB_REPOSITORY}" --verify-tag \
             --latest=false --title "Meerkat Connect ${TAG#connect-v}" \
             --notes "Meerkat Connect ${TAG#connect-v}. RELEASE-MANIFEST.json and SHA256SUMS name each asset and how it was produced."
+
+  # The macOS executables, built the way Meta's gateway legs are
+  # (meta-release.yml build_binaries): Cargo through the repository wrapper on
+  # a GitHub-hosted Apple silicon runner, then Meta's checks and its ad-hoc
+  # signing step, one archive per executable, build provenance. The package,
+  # features and profile are the ones the release owner's Linux producer
+  # builds with. No resource digest is compiled in (see the header), so
+  # these executables refuse every step that needs the bundled resources.
+  # It needs only the resolver: on a tag it runs beside the gates and writes
+  # nothing outside its run; publish_macos adds its archives after them.
+  build_macos:
+    name: Build macOS executables (${{ matrix.target }})
+    needs: [resolve]
+    if: >-
+      needs.resolve.outputs.mode == 'tag' ||
+      needs.resolve.outputs.mode == 'macos-build' ||
+      needs.resolve.outputs.mode == 'macos-assets'
+    runs-on: ${{ matrix.runs-on }}
+    # A bound, not an estimate: no hosted macOS build of these two
+    # executables has been measured. Meta's three gateways took 78 minutes on
+    # this label at its lighter release-meta profile.
+    timeout-minutes: 330
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runs-on: macos-15
+            target: aarch64-apple-darwin
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.resolve.outputs.version }}
+    steps:
+      - name: Checkout the release source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.resolve.outputs.source_ref }}
+          persist-credentials: false
+
+      # The archives name the release version and are attested by this run:
+      # refuse a checkout that is not the tag's commit (or, for a build-only
+      # run, the dispatched commit) or whose crate is another version.
+      - name: Check that the checkout is the release source at the release version
+        shell: bash
+        env:
+          MODE: ${{ needs.resolve.outputs.mode }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          head="$(git rev-parse HEAD)"
+          if [[ "${MODE}" == "macos-build" ]]; then
+            origin="the dispatched commit"
+            expected="${GITHUB_SHA}"
+          else
+            origin="the ${TAG} commit"
+            if ! expected="$(git rev-parse --verify --quiet "refs/tags/${TAG}^{commit}")"; then
+              git fetch --no-tags --depth=1 origin "+refs/tags/${TAG}:refs/tags/${TAG}"
+              expected="$(git rev-parse --verify "refs/tags/${TAG}^{commit}")"
+            fi
+          fi
+          if [[ "${head}" != "${expected}" ]]; then
+            echo "::error::checked-out commit ${head} is not ${origin} ${expected}" >&2
+            exit 1
+          fi
+          crate_version="$(awk -F '"' '/^version[[:space:]]*=/ { print $2; exit }' connect/crates/meerkat-connect/Cargo.toml)"
+          if [[ "${crate_version}" != "${VERSION}" ]]; then
+            echo "::error::meerkat-connect at ${head} is version ${crate_version:-unknown}, not the release version ${VERSION}" >&2
+            exit 1
+          fi
+          echo "building Connect ${VERSION} for ${TARGET} from ${origin} ${head}"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@f08ac54821369508305fcb9e0121ec6e30ae9ada # 1.97.0
+        with:
+          targets: ${{ matrix.target }}
+
+      # CARGO_BUILD_JOBS as in Meta's legs: two rustc processes bound the
+      # memory the largest crates need together on a hosted runner.
+      - name: Build the executables
+        shell: bash
+        env:
+          CARGO_TARGET_DIR: target
+          CARGO_BUILD_JOBS: "2"
+        run: |
+          set -euo pipefail
+          env -u MEERKAT_CONNECT_RESOURCES_SHA256 ./scripts/repo-cargo build --locked --release \
+            --target "${TARGET}" -p meerkat-connect \
+            --features meerkat-connect/console,toolkit-mobkit/native-host \
+            --bin meerkat-connect --bin toolkit_gateway
+
+      - name: Verify macOS binary architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${TARGET}" in
+            aarch64-apple-darwin) expected="arm64" ;;
+            *) echo "::error::no expected Mach-O architecture for ${TARGET}" >&2; exit 1 ;;
+          esac
+          file_pattern="^Mach-O 64-bit (executable ${expected}|${expected} executable)([^A-Za-z0-9_]|$)"
+          for bin in meerkat-connect toolkit_gateway; do
+            path="target/${TARGET}/release/${bin}"
+            archs="$(/usr/bin/lipo -archs "${path}")"
+            description="$(/usr/bin/file -b "${path}")"
+            echo "${path}: lipo '${archs}'; file '${description}'"
+            [[ "${archs}" == "${expected}" ]] || { echo "::error::${path} contains '${archs}', expected '${expected}'" >&2; exit 1; }
+            [[ "${description}" =~ ${file_pattern} ]] || { echo "::error::${path} is '${description}'" >&2; exit 1; }
+          done
+
+      - name: Smoke-run the executables
+        shell: bash
+        run: |
+          set -euo pipefail
+          for bin in meerkat-connect toolkit_gateway; do
+            output="$("target/${TARGET}/release/${bin}" --version)"
+            echo "${bin}: ${output}"
+            if [[ "${output}" != "${bin} ${VERSION}" && "${output}" != "${bin} ${VERSION} "* ]]; then
+              echo "::error::${bin} --version printed '${output}'" >&2
+              exit 1
+            fi
+          done
+
+      # The signing step the Core and Meta macOS lanes apply: an ad-hoc
+      # signature, no signing identity.
+      - name: Ad-hoc codesign macOS binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          for bin in meerkat-connect toolkit_gateway; do
+            /usr/bin/codesign --force --sign - "target/${TARGET}/release/${bin}"
+          done
+
+      # One archive per executable, named as Core's and Meta's are
+      # (<name>-<version>-<triple>.tar.gz) with the Linux assets' two name
+      # prefixes, and a checksum file beside each, as the Linux archives have.
+      - name: Package artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          BINS=("meerkat-connect:meerkat-connect" "toolkit_gateway:meerkat-connect-gateway")
+          for entry in "${BINS[@]}"; do
+            bin="${entry%%:*}"; prefix="${entry##*:}"
+            src="target/${TARGET}/release/${bin}"
+            [[ -f "$src" ]] || { echo "::error::missing expected binary at $src" >&2; exit 1; }
+            artifact="${prefix}-${VERSION}-${TARGET}.tar.gz"
+            tar -czf "dist/${artifact}" -C "$(dirname "$src")" "$(basename "$src")"
+            [[ -s "dist/${artifact}" ]] || { echo "::error::archive dist/${artifact} missing or empty" >&2; exit 1; }
+            (cd dist && /usr/bin/shasum -a 256 "${artifact}" > "${artifact}.sha256")
+            echo "packaged ${bin} -> dist/${artifact} ($(cut -d' ' -f1 "dist/${artifact}.sha256"))"
+          done
+
+      - name: Attest build provenance
+        id: provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
+        with:
+          subject-path: dist/*
+
+      - name: Retain original provenance bundle
+        shell: bash
+        env:
+          BUNDLE_PATH: ${{ steps.provenance.outputs.bundle-path }}
+        run: cp -- "$BUNDLE_PATH" "dist/connect-${TARGET}-provenance.jsonl"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: connect-macos-binaries-${{ matrix.target }}-${{ github.run_attempt }}
+          path: dist/*
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 90
+
+  # Adds exactly the files build_macos uploaded in this run to the release
+  # create_release made, after the gates: add-only, see
+  # scripts/connect_release_macos_assets.py. SHA256SUMS and
+  # RELEASE-MANIFEST.json stay the release owner's files.
+  publish_macos:
+    name: Add the macOS executables to the Connect release
+    needs: [resolve, create_release, build_macos]
+    if: needs.resolve.outputs.mode == 'tag'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Checkout the workflow's own publisher
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/connect_release_macos_assets.py
+          sparse-checkout-cone-mode: false
+      - name: Download this run's macOS archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download "${GITHUB_RUN_ID}" --repo "${GITHUB_REPOSITORY}" \
+            --pattern 'connect-macos-binaries-*' --dir "${RUNNER_TEMP}/macos-download"
+      - name: Add exactly the built archives (never replacing one)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 scripts/connect_release_macos_assets.py --tag "${TAG}" --version "${VERSION}" \
+            --download "${RUNNER_TEMP}/macos-download" --work "${RUNNER_TEMP}/macos-existing"
+
+  # Asset recovery (dispatch, macos-assets): the same publisher for an
+  # existing tag's existing release, after this run's own build of that tag.
+  # It creates no release and no tag. Its steps are publish_macos's, byte for
+  # byte (scripts/test_connect_release_workflow.py compares them).
+  recover_macos:
+    name: Add the macOS executables to an existing Connect release
+    needs: [resolve, build_macos]
+    if: needs.resolve.outputs.mode == 'macos-assets'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Checkout the workflow's own publisher
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/connect_release_macos_assets.py
+          sparse-checkout-cone-mode: false
+      - name: Download this run's macOS archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download "${GITHUB_RUN_ID}" --repo "${GITHUB_REPOSITORY}" \
+            --pattern 'connect-macos-binaries-*' --dir "${RUNNER_TEMP}/macos-download"
+      - name: Add exactly the built archives (never replacing one)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 scripts/connect_release_macos_assets.py --tag "${TAG}" --version "${VERSION}" \
+            --download "${RUNNER_TEMP}/macos-download" --work "${RUNNER_TEMP}/macos-existing"
 
   build:
     name: Build and verify ${{ inputs.target }}

@@ -679,14 +679,18 @@ jobs:
       # rather than report a false green, so install it and prove it is on
       # PATH before the scans run. These used to run only in make ci and the
       # uncalled cargo.yml, which let a retired route reach a release branch.
+      # scripts/install-ripgrep.sh takes the pinned ripgrep release from
+      # GitHub (through the API with the job's own token first, then the
+      # release URL), unpacks it only once its sha256 matches the pin, and
+      # runs `rg --version`. The Ubuntu package is only the fallback, for a
+      # download that fails or does not match, and the step says when it
+      # used it: on 2026-11-11 the runners could not resolve the package
+      # mirror, and the apt-only install failed this required job on main
+      # and on pull requests.
       - name: Install ripgrep for the tombstone scans
-        run: |
-          set -euo pipefail
-          if ! command -v rg >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y ripgrep
-          fi
-          rg --version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/install-ripgrep.sh
 
       - name: Legacy public surface names stay retired
         run: make legacy-surface-gate
@@ -3468,6 +3472,16 @@ jobs:
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "22"
+
+      # The TypeScript SDK's development dependencies link @rkat/sdk and
+      # @rkat/meta-sdk from this checkout (file: dependencies), so its build
+      # and tests run against the SDKs of the same commit, built here first.
+      - name: Build the Core and Meta TypeScript SDKs of this commit
+        run: |
+          npm --prefix ../sdks/typescript install --ignore-scripts --no-audit --no-fund
+          npm --prefix ../sdks/typescript run build
+          npm --prefix ../meta/sdk/typescript ci --ignore-scripts --no-audit --no-fund
+          npm --prefix ../meta/sdk/typescript run build
 
       - name: Install locked SDK and panel test dependencies
         working-directory: connect/sdk/typescript

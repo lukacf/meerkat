@@ -285,11 +285,13 @@ impl ManifestLockGuard {
                 .open(path)
                 .await
             {
-                Ok(mut file) => {
-                    file.write_all(b"realm-manifest-lock")
+                Ok(file) => {
+                    // A lock file whose write failed is removed again: left
+                    // behind, it would hold the lock for nobody until it
+                    // went stale.
+                    write_created_file(file, path, b"realm-manifest-lock")
                         .await
                         .map_err(StoreError::Io)?;
-                    file.sync_all().await.map_err(StoreError::Io)?;
                     return Ok(Self {
                         path: path.to_path_buf(),
                     });
@@ -373,6 +375,35 @@ fn remove_file_nonblocking_on_drop(path: PathBuf) {
     }
 }
 
+/// Write `payload` to `file`, which this caller just created at `path`, and
+/// sync it. On a failure the file is removed again, so a failed write leaves
+/// neither an empty file under a name that means something (a lock, a
+/// marker) nor a temporary file.
+///
+/// tokio's `File` hands a write to the blocking pool and returns before it
+/// ran, and `sync_all` waits for that write but keeps its error for the next
+/// write or flush instead of returning it. The flush is what reports a write
+/// refused by a file size limit, a quota, a full filesystem or an I/O error:
+/// without it the sync of the empty file succeeds, and a caller that renames
+/// the file replaces its target with an empty one.
+async fn write_created_file(
+    mut file: tokio::fs::File,
+    path: &Path,
+    payload: &[u8],
+) -> Result<(), std::io::Error> {
+    let written = async {
+        file.write_all(payload).await?;
+        file.flush().await?;
+        file.sync_all().await
+    }
+    .await;
+    drop(file);
+    if written.is_err() {
+        let _ = tokio::fs::remove_file(path).await;
+    }
+    written
+}
+
 fn default_realms_root() -> PathBuf {
     meerkat_core::default_state_root()
 }
@@ -447,19 +478,59 @@ async fn write_lease_record(path: &Path, record: &RealmLeaseRecord) -> Result<()
         .await
         .map_err(StoreError::Io)?;
     let tmp_path = parent.join(format!(".lease.tmp.{}", Uuid::now_v7()));
-    let mut file = tokio::fs::OpenOptions::new()
+    let file = tokio::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&tmp_path)
         .await
         .map_err(StoreError::Io)?;
-    file.write_all(&payload).await.map_err(StoreError::Io)?;
-    file.sync_all().await.map_err(StoreError::Io)?;
-    drop(file);
-    tokio::fs::rename(&tmp_path, path)
+    write_created_file(file, &tmp_path, &payload)
         .await
         .map_err(StoreError::Io)?;
+    if let Err(err) = tokio::fs::rename(&tmp_path, path).await {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(StoreError::Io(err));
+    }
     Ok(())
+}
+
+/// One heartbeat of a lease holder: replace the record at `path` with one
+/// that carries the current time.
+///
+/// A heartbeat that cannot replace the record (a full disk refuses the
+/// write, or the temporary file cannot be created or renamed) leaves the
+/// last good record in place, and that record goes stale after
+/// [`REALM_LEASE_STALE_TTL_SECS`] although its holder is alive: `rkat realm
+/// delete` and `rkat realm prune`, the commands an operator reaches for on a
+/// full disk, would then remove the realm under the holder. So the holder
+/// marks its own record instead, see [`mark_lease_record_not_current`].
+async fn heartbeat_lease_record(path: &Path, record: &mut RealmLeaseRecord) {
+    record.heartbeat_at = now_unix_secs();
+    if write_lease_record(path, record).await.is_err() {
+        mark_lease_record_not_current(path).await;
+    }
+}
+
+/// The mark of a holder that is alive but could not write its heartbeat:
+/// its own lease record, emptied in place.
+///
+/// An empty record does not parse, and [`inspect_realm_leases_in`] counts
+/// an unparseable record as a lease that may be live: it blocks destructive
+/// operations ([`RealmLeaseStatus::blocks_destructive_prune`]) and is never
+/// cleaned up as stale. Emptying a file needs no free space (it gives some
+/// back), so it works exactly when the heartbeat write does not. The next
+/// heartbeat that succeeds renames a full record over it; shutdown removes
+/// it with the record's name, as it removes the record.
+///
+/// Best effort: when even this fails (an I/O error, a read-only
+/// filesystem) the last good record stays and goes stale, as before.
+async fn mark_lease_record_not_current(path: &Path) {
+    let _ = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .await;
 }
 
 #[deprecated(
@@ -513,8 +584,7 @@ pub async fn start_realm_lease_in(
                     break;
                 }
                 _ = interval.tick() => {
-                    record.heartbeat_at = now_unix_secs();
-                    let _ = write_lease_record(&heartbeat_path, &record).await;
+                    heartbeat_lease_record(&heartbeat_path, &mut record).await;
                 }
             }
         }
@@ -843,14 +913,14 @@ async fn create_first_start_marker(path: &Path, realm_id: &str) -> Result<(), st
         created_at_unix: now_unix_secs(),
     })
     .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
-    let mut file = tokio::fs::OpenOptions::new()
+    let file = tokio::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(path)
         .await?;
-    file.write_all(&payload).await?;
-    file.sync_all().await?;
-    Ok(())
+    // A marker whose write failed is removed again: left behind, it would
+    // reserve the first start for nobody until it went stale.
+    write_created_file(file, path, &payload).await
 }
 
 /// Age-based takeover check so a crashed first start cannot brick the
@@ -1207,19 +1277,20 @@ async fn write_manifest_payload_atomically(
     let tmp_name = format!(".realm_manifest.tmp.{}", Uuid::now_v7());
     let tmp_path = paths.root.join(tmp_name);
 
-    let mut tmp = tokio::fs::OpenOptions::new()
+    let tmp = tokio::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&tmp_path)
         .await
         .map_err(StoreError::Io)?;
-    tmp.write_all(&payload).await.map_err(StoreError::Io)?;
-    tmp.sync_all().await.map_err(StoreError::Io)?;
-    drop(tmp);
-
-    tokio::fs::rename(&tmp_path, &paths.manifest_path)
+    write_created_file(tmp, &tmp_path, &payload)
         .await
         .map_err(StoreError::Io)?;
+
+    if let Err(err) = tokio::fs::rename(&tmp_path, &paths.manifest_path).await {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(StoreError::Io(err));
+    }
     sync_dir(&paths.root).await?;
     Ok(())
 }
@@ -1988,6 +2059,46 @@ mod tests {
         observe.await.unwrap();
     }
 
+    /// The manifest writer removes its temporary file when the rename onto
+    /// the manifest fails, and returns the rename's error. The rename is
+    /// made to fail while writes work: the manifest path is a directory that
+    /// is not empty. The lease, credential, task file and export writers
+    /// have the same branch in the same shape; this row stands for it.
+    #[tokio::test]
+    async fn a_failed_rename_removes_the_temporary_manifest_and_returns_the_error() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let paths = realm_paths_in(dir.path(), "team");
+        let occupant = paths.manifest_path.join("occupant");
+        std::fs::create_dir_all(&occupant).expect("a directory in the manifest's place");
+
+        let written = write_manifest_payload_atomically(&paths, b"{}".to_vec()).await;
+
+        assert!(
+            matches!(written, Err(StoreError::Io(_))),
+            "the failed rename is returned: {written:?}"
+        );
+        let mut left: Vec<String> = std::fs::read_dir(&paths.root)
+            .expect("the realm directory")
+            .map(|entry| {
+                entry
+                    .expect("a directory entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            ["realm_manifest.json"],
+            "the temporary manifest is removed"
+        );
+        assert!(
+            occupant.is_dir(),
+            "what stood in the manifest's place is untouched"
+        );
+    }
+
     mod first_start_reservation {
         use super::*;
 
@@ -2618,6 +2729,379 @@ mod tests {
         );
         let raw = raw_manifest(&realms_root, realm_id).await;
         assert_eq!(raw["backend"], "external:bigquery");
+    }
+
+    /// A realm file write the operating system refuses (a file size limit, a
+    /// quota, a full filesystem that allocates at write time, an I/O error)
+    /// fails, and publishes nothing: the file it would replace stays as it
+    /// was, and the failed call leaves no file of its own behind.
+    ///
+    /// RED before, for every row: the writers wrote through tokio's `File`
+    /// and synced without a flush. `sync_all` waits for the write but keeps
+    /// its error for the next write or flush, so the refused write went
+    /// unseen and the call returned `Ok` with an EMPTY file in place.
+    #[cfg(unix)]
+    mod refused_writes {
+        use super::*;
+        use crate::refused_writes_test_support::{files_under, runtime, with_writes_refused};
+
+        const REALM: &str = "team";
+
+        /// Run `future` to its end, then wait until the manifest lock of the
+        /// realm under `root` is gone: a lock guard removes its file on a
+        /// task of the runtime, which a current-thread runtime runs only
+        /// while it is driven.
+        fn settled<T>(root: &Path, future: impl std::future::Future<Output = T>) -> T {
+            runtime().block_on(async {
+                let output = future.await;
+                let lock = realm_paths_in(root, REALM)
+                    .root
+                    .join(".realm_manifest.lock");
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while lock.exists() && Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                output
+            })
+        }
+
+        fn lease(heartbeat_at: u64) -> RealmLeaseRecord {
+            RealmLeaseRecord {
+                realm_id: REALM.to_string(),
+                instance_id: "instance".to_string(),
+                surface: "rpc".to_string(),
+                pid: 7,
+                started_at: 1,
+                heartbeat_at,
+            }
+        }
+
+        #[test]
+        fn a_refused_write_fails_the_manifest_replace_and_keeps_the_manifest() {
+            with_writes_refused(
+                module_path!(),
+                "a_refused_write_fails_the_manifest_replace_and_keeps_the_manifest",
+                |root| {
+                    settled(root, ensure_realm_manifest_in(root, REALM, None, None))
+                        .expect("the realm");
+                    std::fs::read(realm_paths_in(root, REALM).manifest_path).expect("the manifest")
+                },
+                |root| {
+                    let paths = realm_paths_in(root, REALM);
+                    let replaced = runtime().block_on(write_manifest_payload_atomically(
+                        &paths,
+                        b"{\"replacement\":true}".to_vec(),
+                    ));
+                    assert!(
+                        matches!(replaced, Err(StoreError::Io(_))),
+                        "the refused write fails the replace: {replaced:?}"
+                    );
+                    assert_eq!(
+                        files_under(&paths.root),
+                        ["realm_manifest.json"],
+                        "the failed replace leaves no temporary file"
+                    );
+                },
+                |root, before| {
+                    let paths = realm_paths_in(root, REALM);
+                    assert_eq!(
+                        std::fs::read(&paths.manifest_path).expect("the manifest"),
+                        before,
+                        "the manifest is byte-identical"
+                    );
+                    assert_eq!(files_under(&paths.root), ["realm_manifest.json"]);
+                },
+            );
+        }
+
+        /// The realm is not left unreadable: no manifest is published, so the
+        /// next open, once writes work, creates it.
+        #[test]
+        fn a_refused_write_fails_the_first_open_and_publishes_no_manifest() {
+            with_writes_refused(
+                module_path!(),
+                "a_refused_write_fails_the_first_open_and_publishes_no_manifest",
+                |_root| (),
+                |root| {
+                    let opened = settled(root, ensure_realm_manifest_in(root, REALM, None, None));
+                    assert!(
+                        matches!(opened, Err(StoreError::Io(_))),
+                        "the refused write fails the first open: {opened:?}"
+                    );
+                    assert_eq!(
+                        files_under(&realm_paths_in(root, REALM).root),
+                        Vec::<String>::new(),
+                        "no manifest, no temporary file and no lock file"
+                    );
+                },
+                |root, ()| {
+                    assert_eq!(
+                        files_under(&realm_paths_in(root, REALM).root),
+                        Vec::<String>::new()
+                    );
+                    let manifest = runtime()
+                        .block_on(ensure_realm_manifest_in(root, REALM, None, None))
+                        .expect("the realm opens once writes work");
+                    assert_eq!(manifest.realm.as_str(), REALM);
+                },
+            );
+        }
+
+        #[test]
+        fn a_refused_write_fails_governing_a_realm_and_keeps_its_manifest() {
+            with_writes_refused(
+                module_path!(),
+                "a_refused_write_fails_governing_a_realm_and_keeps_its_manifest",
+                |root| {
+                    settled(root, ensure_realm_manifest_in(root, REALM, None, None))
+                        .expect("the realm");
+                    std::fs::read(realm_paths_in(root, REALM).manifest_path).expect("the manifest")
+                },
+                |root| {
+                    let governed = settled(root, govern_realm_in(root, REALM));
+                    assert!(
+                        matches!(governed, Err(StoreError::Io(_))),
+                        "the refused write fails the selection: {governed:?}"
+                    );
+                    assert_eq!(
+                        files_under(&realm_paths_in(root, REALM).root),
+                        ["realm_manifest.json"]
+                    );
+                },
+                |root, before| {
+                    let paths = realm_paths_in(root, REALM);
+                    assert_eq!(
+                        std::fs::read(&paths.manifest_path).expect("the manifest"),
+                        before,
+                        "the manifest is byte-identical"
+                    );
+                    let runtime = runtime();
+                    assert_eq!(
+                        runtime
+                            .block_on(read_realm_posture_in(root, REALM))
+                            .expect("the posture"),
+                        RealmPosture::Ungoverned
+                    );
+                    runtime
+                        .block_on(govern_realm_in(root, REALM))
+                        .expect("the selection once writes work");
+                },
+            );
+        }
+
+        #[test]
+        fn a_refused_write_fails_the_lease_write_and_keeps_the_lease_record() {
+            fn lease_path(root: &Path) -> PathBuf {
+                realm_lease_dir(&realm_paths_in(root, REALM)).join("instance.json")
+            }
+            with_writes_refused(
+                module_path!(),
+                "a_refused_write_fails_the_lease_write_and_keeps_the_lease_record",
+                |root| {
+                    runtime()
+                        .block_on(write_lease_record(&lease_path(root), &lease(100)))
+                        .expect("the first lease record");
+                    std::fs::read(lease_path(root)).expect("the lease record")
+                },
+                |root| {
+                    let written =
+                        runtime().block_on(write_lease_record(&lease_path(root), &lease(200)));
+                    assert!(
+                        matches!(written, Err(StoreError::Io(_))),
+                        "the refused write fails the lease write: {written:?}"
+                    );
+                    assert_eq!(
+                        files_under(&realm_lease_dir(&realm_paths_in(root, REALM))),
+                        ["instance.json"],
+                        "the failed write leaves no temporary file"
+                    );
+                },
+                |root, before| {
+                    assert_eq!(
+                        std::fs::read(lease_path(root)).expect("the lease record"),
+                        before,
+                        "the lease record is byte-identical"
+                    );
+                    assert_eq!(
+                        files_under(&realm_lease_dir(&realm_paths_in(root, REALM))),
+                        ["instance.json"]
+                    );
+                },
+            );
+        }
+
+        #[test]
+        fn a_refused_write_fails_the_lease_start_and_publishes_no_lease() {
+            with_writes_refused(
+                module_path!(),
+                "a_refused_write_fails_the_lease_start_and_publishes_no_lease",
+                |_root| (),
+                |root| {
+                    let runtime = runtime();
+                    let started = runtime.block_on(start_realm_lease_in(
+                        root,
+                        REALM,
+                        Some("instance"),
+                        "rpc",
+                    ));
+                    let error = started.as_ref().err().map(ToString::to_string);
+                    if let Ok(guard) = started {
+                        runtime.block_on(guard.shutdown());
+                    }
+                    assert!(error.is_some(), "the refused write fails the lease start");
+                    assert_eq!(
+                        files_under(&realm_lease_dir(&realm_paths_in(root, REALM))),
+                        Vec::<String>::new(),
+                        "no lease record and no temporary file"
+                    );
+                },
+                |root, ()| {
+                    assert_eq!(
+                        files_under(&realm_lease_dir(&realm_paths_in(root, REALM))),
+                        Vec::<String>::new()
+                    );
+                },
+            );
+        }
+
+        /// A holder that is alive, on a filesystem that refuses its
+        /// heartbeat writes (a full disk), must not come to look gone: its
+        /// last good record goes stale after the TTL, and `rkat realm
+        /// delete` and `rkat realm prune`, the natural commands on a full
+        /// disk, would then remove the realm under it without `--force`.
+        ///
+        /// The record the holder is left with here already carries a
+        /// heartbeat older than the TTL: what a record reads like once the
+        /// refused heartbeats have gone on for that long. Delete and prune
+        /// ask exactly what `verify` asks, the lease status with stale
+        /// records cleaned up, and remove the realm unless it blocks.
+        #[test]
+        fn a_refused_write_at_a_heartbeat_keeps_the_lease_blocking_delete_and_prune() {
+            fn lease_path(root: &Path) -> PathBuf {
+                realm_lease_dir(&realm_paths_in(root, REALM)).join("instance.json")
+            }
+            with_writes_refused(
+                module_path!(),
+                "a_refused_write_at_a_heartbeat_keeps_the_lease_blocking_delete_and_prune",
+                |root| {
+                    runtime()
+                        .block_on(write_lease_record(&lease_path(root), &lease(100)))
+                        .expect("the holder's last good lease record");
+                },
+                |root| {
+                    let mut record = lease(100);
+                    runtime().block_on(heartbeat_lease_record(&lease_path(root), &mut record));
+                    assert_eq!(
+                        files_under(&realm_lease_dir(&realm_paths_in(root, REALM))),
+                        ["instance.json"],
+                        "the refused heartbeat leaves the holder's record and no temporary file"
+                    );
+                },
+                |root, ()| {
+                    let runtime = runtime();
+                    // Asked twice: the first answer must not rest on a record
+                    // that the asking itself cleans up.
+                    for _ in 0..2 {
+                        let status = runtime
+                            .block_on(inspect_realm_leases_in(root, REALM, true))
+                            .expect("the lease status");
+                        assert!(
+                            status.blocks_destructive_prune(),
+                            "a live holder whose heartbeat write was refused still blocks \
+                             delete and prune: {status:?}"
+                        );
+                    }
+                    assert!(
+                        lease_path(root).exists(),
+                        "the holder's record is never cleaned up as stale"
+                    );
+
+                    // The next heartbeat that succeeds restores the record.
+                    let mut record = lease(100);
+                    runtime.block_on(heartbeat_lease_record(&lease_path(root), &mut record));
+                    let status = runtime
+                        .block_on(inspect_realm_leases_in(root, REALM, false))
+                        .expect("the lease status");
+                    assert_eq!(
+                        status.active.len(),
+                        1,
+                        "the restored record is live: {status:?}"
+                    );
+                    assert!(status.stale.is_empty() && status.unparseable.is_empty());
+                },
+            );
+        }
+
+        #[test]
+        fn a_refused_write_fails_the_manifest_lock_and_leaves_no_lock_file() {
+            with_writes_refused(
+                module_path!(),
+                "a_refused_write_fails_the_manifest_lock_and_leaves_no_lock_file",
+                |_root| (),
+                |root| {
+                    let lock_path = root.join(".realm_manifest.lock");
+                    let runtime = runtime();
+                    let acquired = runtime.block_on(ManifestLockGuard::acquire(&lock_path, REALM));
+                    let error = acquired.as_ref().err().map(ToString::to_string);
+                    // A guard removes its file on a task of the runtime.
+                    drop(acquired);
+                    assert!(
+                        error.is_some(),
+                        "the refused write fails the lock acquisition"
+                    );
+                    assert!(
+                        !lock_path.exists(),
+                        "the failed acquisition leaves no lock file behind"
+                    );
+                },
+                |root, ()| {
+                    assert_eq!(files_under(root), Vec::<String>::new());
+                },
+            );
+        }
+
+        #[test]
+        fn a_refused_write_fails_the_first_start_reservation_and_leaves_no_marker() {
+            with_writes_refused(
+                module_path!(),
+                "a_refused_write_fails_the_first_start_reservation_and_leaves_no_marker",
+                |_root| (),
+                |root| {
+                    let candidates = [root.join("a"), root.join("b")];
+                    let opened = runtime().block_on(ensure_realm_manifest_pin_with_candidates(
+                        &candidates[0],
+                        &candidates,
+                        REALM,
+                        None,
+                        None,
+                        None,
+                    ));
+                    assert!(
+                        matches!(opened, Err(RealmFirstStartError::Store(StoreError::Io(_)))),
+                        "the refused write fails the first start: {opened:?}"
+                    );
+                    assert_eq!(
+                        files_under(root),
+                        Vec::<String>::new(),
+                        "no marker in any candidate root, and no manifest"
+                    );
+                },
+                |root, ()| {
+                    assert_eq!(files_under(root), Vec::<String>::new());
+                    let candidates = [root.join("a"), root.join("b")];
+                    runtime()
+                        .block_on(ensure_realm_manifest_pin_with_candidates(
+                            &candidates[0],
+                            &candidates,
+                            REALM,
+                            None,
+                            None,
+                            None,
+                        ))
+                        .expect("the first start once writes work");
+                },
+            );
+        }
     }
 }
 

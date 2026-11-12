@@ -1103,7 +1103,7 @@ const MOB_IDENTITY_MEMBER_REFUSAL_ARMS: [&str; 2] = [
 ];
 
 /// MobMachine's refusal of a higher revision that would move an operator
-/// instruction record into a full member snapshot (0.9.14), in the two
+/// instruction record into a full member snapshot (0.9.15), in the two
 /// phases that write records.
 const MOB_INSTRUCTION_SNAPSHOT_REFUSAL_ARMS: [&str; 2] = [
     "SetOperatorInstructionAdvanceSlotLimitExceededRunning",
@@ -1111,7 +1111,7 @@ const MOB_INSTRUCTION_SNAPSHOT_REFUSAL_ARMS: [&str; 2] = [
 ];
 
 /// The refusal of an operator instruction move into a full member snapshot
-/// (0.9.14) is declared beside the other write arms in the catalog, where
+/// (0.9.15) is declared beside the other write arms in the catalog, where
 /// first-match dispatch needs it, and emitted on the machine's late tail:
 /// its two variants directly follow
 /// `ResolveSubmitWorkRejectionIdentityMemberUnreadableName`, the last

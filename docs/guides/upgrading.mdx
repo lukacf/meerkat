@@ -55,10 +55,10 @@ Meerkat is pre-1.0, and patch releases can carry declared breaking changes.
 - `rkat storage doctor` reports no new problems.
 - An SDK `connect()` succeeds.
 
-## Upgrading to 0.9.14
+## Upgrading to 0.9.15
 
-This section is for systems running 0.9.13 or 0.9.12. The full list of
-changes is in the CHANGELOG under `## [0.9.14]`.
+This section is for systems running 0.9.14 or 0.9.13. The full list of
+changes is in the CHANGELOG under `## [0.9.15]`.
 
 ### Operator instruction limits bound a member's snapshot
 
@@ -78,13 +78,13 @@ gains `SetOperatorInstructionAdvanceSlotLimitExceededRunning` and
 an exhaustive match needs the two arms and no existing variant's
 discriminant moves.
 
-### Rolling back to 0.9.13
+### Rolling back to 0.9.14
 
-0.9.13 and earlier releases read what 0.9.14 writes, with one exception: a
+0.9.14 and earlier releases read what 0.9.15 writes, with one exception: a
 mob whose operator instruction records are past what an earlier release
 holds in one mob. An earlier release bounds the mob as a whole at 64
 records and 1 MiB of Active bodies, and puts every record of the mob in
-every member's snapshot. Only 0.9.14 admits more, as member-targeted
+every member's snapshot. Only 0.9.15 admits more, as member-targeted
 records, in two ways:
 
 - **more than 64 records** in the mob (a revoked record keeps its slot and
@@ -110,16 +110,16 @@ mob's recovered state against the earlier bounds is refused:
   mob cannot carry its snapshot into the session.
 
 Turns of the members that are already seated, the roster and the journal
-are not affected, and 0.9.14 serves the mob again without a repair. A mob
+are not affected, and 0.9.15 serves the mob again without a repair. A mob
 within both totals is unaffected in either direction, whatever its records'
 targets.
 
-Before a rollback, run `rkat storage doctor` on 0.9.14: it lists each such
+Before a rollback, run `rkat storage doctor` on 0.9.15: it lists each such
 mob database (`operator-instruction-mob-totals`, with its record count and
 its Active bytes). A revoke lowers the bytes but not the count: a revoked
 record keeps its slot. For each listed mob, do one of these first:
 
-- keep the processes that serve that mob on 0.9.14;
+- keep the processes that serve that mob on 0.9.15;
 - bring it back within both totals where only the bytes are over: revoke
   records, or write shorter bodies, until the Active bodies of the whole
   mob are at most 1 MiB;

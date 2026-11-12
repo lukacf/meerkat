@@ -127,7 +127,7 @@ them.
 
 ### Upgrade notes
 
-- Rolling back to 0.9.13 or earlier: an earlier release cannot serve a mob
+- Rolling back to 0.9.14 or earlier: an earlier release cannot serve a mob
   whose operator instruction records are past what it holds in one mob,
   which only this release admits (as member-targeted records): more than 64
   records, or more than 1 MiB of Active bodies over all the mob's records
@@ -147,7 +147,7 @@ them.
   revoke lowers the bytes, not the count: a revoked record keeps its slot.
   Mobs within both totals are unaffected in either direction. A journal an
   earlier release wrote replays on this one without a refusal. See "Rolling
-  back to 0.9.13" in `docs/guides/upgrading.mdx`.
+  back to 0.9.14" in `docs/guides/upgrading.mdx`.
 
 ## [0.9.13] - 2026-11-11
 

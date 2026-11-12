@@ -489,7 +489,11 @@ pub enum DeclaredEntryOutcome {
     HostedOnFirstUse,
     /// Left to the next apply, for a cause that clears on its own (a member
     /// that is busy, or whose spawn, wake or retirement is in flight, or a
-    /// store that cannot serve now): nothing of it was done.
+    /// store that cannot serve now): nothing of it was done. A store-owned
+    /// identity's label restamp left this way is not owed to a later
+    /// apply: the member's roster entry reads its row's labels at once and
+    /// its next build carries them
+    /// ([`super::MobHandle::update_store_owned_identity`]).
     Deferred { reason: MobError },
     /// Refused, typed: nothing of it was written.
     Refused { refusal: DeclaredEntryRefusal },

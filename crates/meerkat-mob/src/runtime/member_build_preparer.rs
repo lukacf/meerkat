@@ -246,10 +246,10 @@ pub trait MemberBuildPreparer: Send + Sync {
     /// seat's identity, role, launch mode or custody is refused: the build
     /// fails as a [`MemberBuildPreparationRefusal::Final`] refusal does.
     ///
-    /// The seat's labels are the labels its member is seated with: its
-    /// row's labels at a fresh spawn, and the member's own seat labels at a
-    /// wake or a restore (a label update of the row seats them at once, so
-    /// they are the row's unless that restamp is still owed). The answer
+    /// The seat's labels are its row's labels: Core lowers them from the
+    /// row at a fresh spawn, and at a wake or a restore they are the
+    /// member's seat labels, which a seat that trails its row takes from
+    /// the row before this is called. The answer
     /// must leave them as given: what decides on a member's labels reads
     /// its seat. An answer whose labels are not exactly the seat's (a key
     /// added, a key dropped, a key given another value) is refused for
@@ -290,7 +290,7 @@ pub trait MemberBuildPreparer: Send + Sync {
     /// wake asks again once the retry is due; one for good
     /// ([`MemberBuildPreparationRefusal::Final`], as every label refusal
     /// is) records the member broken, and nothing asks again until it is
-    /// respawned or reset.
+    /// respawned or reset, or the mob starts again.
     ///
     /// The default changes nothing: the member is built from its row alone.
     async fn prepare_store_owned_seat(

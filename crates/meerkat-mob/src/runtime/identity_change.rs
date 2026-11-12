@@ -3788,19 +3788,35 @@ impl super::MobHandle {
     /// ([`super::DeclaredEntryOutcome::Restamped`]; the same-session respawn
     /// with [`super::MemberRespawn::with_labels`]): every build of a
     /// store-owned member must carry exactly its seat's labels
-    /// ([`super::MemberBuildPreparer::prepare_store_owned_seat`]), so a
-    /// seat that trailed its row would be refused its next build. The
+    /// ([`super::MemberBuildPreparer::prepare_store_owned_seat`]), and what
+    /// decides on a member's labels reads its seat. The
     /// member keeps its identity entry, session, conversation and edges;
     /// nothing is built or woken, and no kickoff runs again. A member that
     /// holds work is not interrupted: the update commits and answers
-    /// [`super::DeclaredEntryOutcome::Deferred`], and its restamp is owed
-    /// until the update is retried (the retry replays and carries it out);
-    /// until then the seat is counted in `seats_stale`
-    /// ([`Self::identity_record_census`]) and a cold build of the member is
-    /// refused naming the changed key. A member a same-session successor
-    /// cannot serve (a placed one, one wired to a placed member, one on a
-    /// session service that keeps no durable sessions) keeps its seat and
-    /// its labels ([`super::DeclaredEntryOutcome::Kept`]). A runtime-mode
+    /// [`super::DeclaredEntryOutcome::Deferred`]. A label update of a busy
+    /// member is recorded at once, the mob's roster reads the row's labels
+    /// at once ([`Self::get_member`] and the member lists), and the running
+    /// session takes them at its next build (a key the row dropped stays
+    /// in a resumed session's own peer metadata, as at every resume): the
+    /// member keeps its
+    /// generation, fence and session, and no seat row is written. The same
+    /// holds when the member step fails
+    /// ([`super::DeclaredEntryOutcome::Failed`]) and for a member a
+    /// same-session successor cannot serve (a placed one, one wired to a
+    /// placed member, one on a session service that keeps no durable
+    /// sessions), whose update answers
+    /// [`super::DeclaredEntryOutcome::Kept`]. The roster is not the
+    /// journal: the member's last seat row keeps the labels it was seated
+    /// with until its next restamp (a label change while it is idle, a
+    /// respawn, a reset), and so do the readers of that row, the binding
+    /// journal's labels and `seats_stale`
+    /// ([`Self::identity_record_census`]). A retry of the update restamps
+    /// nothing, since the seat already reads its row's labels. A seat that
+    /// trails its row for another cause (the mob stopped between the
+    /// update's commit and its restamp) takes the row's labels on the
+    /// roster at the mob's next start, and at its next build before its
+    /// host is asked, so an update that was answered never leaves its
+    /// member refused its build. A runtime-mode
     /// change is a restamp on
     /// the member's own session; a profile change is the declared migration
     /// from the member's current role, kept in the row until the restamp

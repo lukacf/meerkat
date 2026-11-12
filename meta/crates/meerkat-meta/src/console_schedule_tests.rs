@@ -4500,31 +4500,6 @@ async fn due_after(
     let calls = fired.model_calls.load(SeqCst);
     let after = fired.reading("scout", &scout).await;
     let schedule = fired.agents.state(&scouts.to_string()).await;
-    let told = |occurrences: &[meerkat::Occurrence]| {
-        occurrences
-            .iter()
-            .map(|occurrence| {
-                format!(
-                    "{:?} class={:?} detail={:?} attempts={} outcome={:?}",
-                    occurrence.phase,
-                    occurrence.failure_class,
-                    occurrence.failure_detail,
-                    occurrence.attempt_count,
-                    occurrence.runtime_outcome,
-                )
-            })
-            .collect::<Vec<_>>()
-    };
-    eprintln!(
-        "OBSERVED {taken:?}\n  first turns: {:?}\n  first turn calls: {woken_calls}\n  scout after \
-         its first turn: {scout_woken:?}\n  control: {:?}\n  control calls: {control_calls}\n  \
-         ledger before: {ledger_before:?}\n  ledger after: {ledger_after:?}\n  ended: {:?}\n  \
-         calls: {calls}\n  scout before: {before:?}\n  scout after: {after:?}\n  schedule: \
-         {schedule:?}",
-        told(&woken),
-        told(&control_ended),
-        told(&ended),
-    );
     let endings = |occurrences: Vec<meerkat::Occurrence>| -> Vec<Ending> {
         occurrences
             .into_iter()

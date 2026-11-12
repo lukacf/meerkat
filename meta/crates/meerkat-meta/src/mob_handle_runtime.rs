@@ -11410,9 +11410,11 @@ impl MobRuntime {
     /// identities.
     ///
     /// A runtime built this way has no session service
-    /// ([`Self::session_service`]), so its Console answers an ended session
-    /// that no member holds as absent to every caller who is not an
-    /// administrator.
+    /// ([`Self::session_service`]), so its Console attaches an ended session
+    /// that no member holds for an administrator only. Every other caller is
+    /// answered "access denied: the session has no established owner" where
+    /// access rules are enforced, and as for a session that does not exist
+    /// otherwise.
     pub fn from_handle(handle: MobHandle) -> Self {
         let workgraph_admission = Arc::new(crate::workgraph_admission::WorkGraphAdmission::new(
             handle.observer(),

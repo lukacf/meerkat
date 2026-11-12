@@ -121,9 +121,11 @@ Security, Upgrade and Changed.
   kinds listed under Changed are still stored without attributes and stay
   administrator-only.
 - A host that builds its runtime from a bare mob handle
-  (`MobRuntime::from_handle`): the Console of such a runtime answers an
-  ended session that no agent holds as a session that does not exist to
-  every caller who is not an administrator.
+  (`MobRuntime::from_handle`): the Console of such a runtime attaches an
+  ended session that no agent holds for an administrator only. Every other
+  caller is answered "access denied: the session has no established owner"
+  where access rules are enforced, and as for a session that does not
+  exist otherwise.
 
 ### Changed
 
@@ -173,9 +175,11 @@ Security, Upgrade and Changed.
   session was created with, read through the runtime's session service. A
   session no agent holds whose owner the console cannot establish (the
   read fails, or the runtime has no session service, as one made with
-  `MobRuntime::from_handle`) is answered so to every caller who is not an
-  administrator. The session of an ordinary agent that ended is attached
-  as before.
+  `MobRuntime::from_handle`) is attached for an administrator only: every
+  other caller is answered "access denied: the session has no established
+  owner" where access rules are enforced, and as for a session that does
+  not exist otherwise. The session of an ordinary agent that ended is
+  attached as before.
 - Three things this release gives up on purpose. The owner of a private
   side chat no longer sees its lifecycle markers, memory harvest records and
   the failure records of sends the console's log does not hold.
@@ -192,6 +196,8 @@ Security, Upgrade and Changed.
 - Console: the last-activity time shown for an agent name is kept per name,
   not per agent that held it. A later release decides it with the frame
   rule.
+- Gating: an audit entry or pending request is decided by the agent that
+  holds the name of its origin now. Only a host supplies an entry's origin.
 
 ## [0.9.14] - 2026-11-11
 

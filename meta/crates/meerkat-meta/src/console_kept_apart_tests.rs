@@ -1475,7 +1475,9 @@ async fn a_stored_session_that_does_not_carry_its_members_labels_establishes_no_
 /// every session no member holds as a session that does not exist to a
 /// caller who is not an administrator, the one operator of a console that
 /// can identify nobody included, also once it has read who its members are
-/// private to. An administrator attaches such a session.
+/// private to. Where access rules are enforced, a caller who is not an
+/// administrator is told that the session has no established owner. An
+/// administrator attaches such a session.
 #[tokio::test]
 async fn a_runtime_taken_from_a_bare_handle_attaches_an_ended_session_for_an_administrator_only()
 -> TestResult {
@@ -1498,6 +1500,10 @@ async fn a_runtime_taken_from_a_bare_handle_attaches_an_ended_session_for_an_adm
     .expect("access controller")
     .view_for_caller(Some(ROOT), None);
     let never_ran = meerkat_core::types::SessionId::new();
+    // A person who is not an administrator, on a console whose access rules
+    // are enforced.
+    let person = everyone_drives_every_agent().view_for_caller(Some(BOB), None);
+    assert!(person.enforced() && !person.is_admin());
     for (session, whose) in [
         (&left.beta_session, "an ordinary ended member's session"),
         (&left.side_chat_session, "an ended private member's session"),
@@ -1513,6 +1519,17 @@ async fn a_runtime_taken_from_a_bare_handle_attaches_an_ended_session_for_an_adm
             "allowed",
             "the administrator: {whose}"
         );
+        match attached_session_decision(Some(&person), &runtime, None, session).await {
+            SessionAttachDecision::Denied(error) => assert_eq!(
+                error.message, "access denied: the session has no established owner",
+                "a person who is not an administrator, access rules enforced: {whose}"
+            ),
+            SessionAttachDecision::Allowed | SessionAttachDecision::Absent => {
+                panic!(
+                    "access rules enforced: a person who is not an administrator is refused: {whose}"
+                )
+            }
+        }
     }
     Ok(())
 }

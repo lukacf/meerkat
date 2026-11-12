@@ -156,14 +156,16 @@ class ComponentBuildTests(unittest.TestCase):
         self.rows = []
         self.backend("84.0.0")
         self.backend("82.0.0")
-        self.backend("84.2.1", use="component build tool")
+        self.backend("84.2.1", use=("component build tool",))
         for name in ("packaging", "wheel"):
+            # As in the committed pin file, one row can serve two readers: `use` is a sorted list of labels.
             self.pin(*pure_wheel(name, "1.0", {name + "/__init__.py": "MARK = %r\n" % (name + "-helper")}),
-                     name=name, version="1.0", use="component build tool")
+                     name=name, version="1.0",
+                     use=("agno closure", "component build tool") if name == "packaging" else ("component build tool",))
         self.write_pins()
         self.node = self.fake_node()
 
-    def backend(self, version, unstable=False, use="component build backend"):
+    def backend(self, version, unstable=False, use=("component build backend",)):
         self.rows = [row for row in self.rows if not (row["name"] == "setuptools" and row["version"] == version)]
         filename, data = pure_wheel("setuptools", version, {
             "setuptools/__init__.py": "", "setuptools/build_meta.py": BACKEND % {"version": version, "unstable": unstable}})
@@ -175,7 +177,7 @@ class ComponentBuildTests(unittest.TestCase):
         target.write_bytes(data)
         self.rows.append({"kind": "pypi-wheel", "name": name, "version": version, "file": filename,
                           "url": "https://files.pythonhosted.org/packages/fixture/" + filename,
-                          "sha256": sha(data), "sha512": None, "digest_source": "fixture", "use": use})
+                          "sha256": sha(data), "sha512": None, "digest_source": "fixture", "use": sorted(use)})
 
     def write_pins(self):
         self.pins_path.write_text(json.dumps({"schema": "connect-library-pins/1", "target": "macos-arm64",
@@ -318,7 +320,11 @@ class ComponentBuildTests(unittest.TestCase):
             self.write_pins()
             self.refused()
         with self.subTest("helper under another use label"):
-            self.rows = [dict(row, use="agno closure") if row["name"] == "wheel" else row for row in saved]
+            self.rows = [dict(row, use=["agno closure"]) if row["name"] == "wheel" else row for row in saved]
+            self.write_pins()
+            self.refused()
+        with self.subTest("label as a string, not the pin file's list"):
+            self.rows = [dict(row, use="component build tool") if row["name"] == "wheel" else row for row in saved]
             self.write_pins()
             self.refused()
         with self.subTest("pin file schema"):

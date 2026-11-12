@@ -143,11 +143,11 @@ class Fixture:
         # Rows the exporter must leave alone.
         self.rows.append({"kind": "crate", "name": "serde", "version": "1.0.0", "file": "serde-1.0.0.crate",
                           "url": "https://static.crates.io/crates/serde/serde-1.0.0.crate", "sha256": "0" * 64,
-                          "sha512": None, "digest_source": "crates.io index cksum", "use": "tool build provenance"})
+                          "sha512": None, "digest_source": "crates.io index cksum", "use": ["tool build provenance"]})
         self.rows.append({"kind": "pypi-wheel", "name": "alpha", "version": "9.9", "file": "alpha-9.9-py3-none-any.whl",
                           "url": "https://files.pythonhosted.org/packages/fixture/alpha-9.9-py3-none-any.whl",
                           "sha256": "0" * 64, "sha512": None, "digest_source": "PyPI JSON API digests.sha256",
-                          "use": "component build tool"})
+                          "use": ["component build tool"]})
         self.carried = {
             "install-library-consumer.py": b"# fixture installer\n",
             "agno/runtime-constraints.txt": b"alpha==1.0\nshared_lib==2.0\nnative==3.0\n",
@@ -204,7 +204,7 @@ class Fixture:
         self.rows.append({"kind": kind, "name": name, "version": version, "file": file, "url": url,
                           "sha256": None if sha512 else sha(data),
                           "sha512": hashlib.sha512(data).hexdigest() if sha512 else None,
-                          "digest_source": "fixture", "use": "fixture"})
+                          "digest_source": "fixture", "use": ["agno closure"]})
         target = self.pinned / kind / file
         target.parent.mkdir(exist_ok=True)
         target.write_bytes(data)

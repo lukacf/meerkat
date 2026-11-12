@@ -3707,7 +3707,7 @@ agents = ["beta"]
     );
     assert_eq!(
         hidden["error"]["data"]["kind"],
-        json!("access_denied"),
+        json!("identity_unknown"),
         "{hidden:#}"
     );
 

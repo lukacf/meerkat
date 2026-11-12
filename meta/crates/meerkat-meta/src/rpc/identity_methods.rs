@@ -118,6 +118,16 @@ pub(crate) fn is_identity_family_method(method: &str) -> bool {
     IDENTITY_FAMILY_METHODS.contains(&method)
 }
 
+/// Whether `method` reads or plans one agent and answers an agent its
+/// caller may not view by itself: the family, handed the caller's view
+/// ([`ViewedAgents`]), answers such an agent `identity_unknown` at `name`,
+/// exactly as a name no agent holds. A surface's access layer leaves that
+/// answer to it, so nothing tells the two apart.
+#[must_use]
+pub(crate) fn answers_an_unviewed_agent_itself(method: &str) -> bool {
+    matches!(method, IDENTITY_GET | IDENTITY_PLAN)
+}
+
 /// Whether `method` changes something: a read-only Console and a candidate
 /// launch refuse it.
 #[must_use]

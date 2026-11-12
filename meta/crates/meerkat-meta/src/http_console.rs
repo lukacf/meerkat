@@ -7035,12 +7035,26 @@ pub(crate) fn live_access_violation(
 /// private to another person) never reaches this check: the request's
 /// member resolution ([`console_rpc_resolve_members`]) answered it as a
 /// member that does not exist before.
+///
+/// A read or a plan of one long-term agent that names an agent the caller
+/// may not view is not judged here either
+/// ([`crate::rpc::identity_methods::answers_an_unviewed_agent_itself`]):
+/// the family is handed the caller's view and answers such an agent
+/// exactly as a name no agent holds, at the same step of the same checks,
+/// where a denial here would tell the two apart.
 pub(crate) fn console_rpc_access_violation(
     view: Option<&AccessView>,
     method: &str,
     params: &Value,
 ) -> Option<JsonRpcError> {
     let view = view.filter(|view| view.enforced())?;
+    if crate::rpc::identity_methods::answers_an_unviewed_agent_itself(method)
+        && console_method_members(method, params)
+            .first()
+            .is_some_and(|agent| !view.can_view_agent(agent))
+    {
+        return None;
+    }
     let subjects = console_rpc_member_targets(params);
     let requirements = console_rpc_access_requirements(method, params)?;
     // Every member the request names is judged, not only the field the

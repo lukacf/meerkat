@@ -2647,7 +2647,11 @@ fn signed_console_decisions() -> meerkat_meta::RuntimeDecisionState {
         trusted_meta_toml: "modules = []\n".to_string(),
         auth: meerkat_meta::AuthPolicy {
             default_provider: meerkat_meta::AuthProvider::GoogleOAuth,
-            email_allowlist: vec!["root@example.org".to_string(), "ann@example.org".to_string()],
+            email_allowlist: vec![
+                "root@example.org".to_string(),
+                "ann@example.org".to_string(),
+                "bob@example.org".to_string(),
+            ],
         },
         trusted_oidc: meerkat_meta::TrustedOidcRuntimeConfig {
             discovery_json:

@@ -1939,6 +1939,13 @@ class PrincipalRef(TypedDict, total=False):
     qualification: NotRequired[PrincipalQualification]
 
 
+# How a turn's requester was attested at the ingress that admitted it.
+#
+# Core carries the value and never interprets it: it names which host door
+# vouched for the principal, not who the principal is or what it may do.
+RequesterOrigin = Literal['console_signed_in', 'host_attested']
+
+
 class TurnRequester(TypedDict, total=False):
     """The original requester of a turn: the principal its inputs share, and
     whether it reached them directly.
@@ -1949,6 +1956,7 @@ class TurnRequester(TypedDict, total=False):
     person, account or assurance concept for it.
     """
     carried: NotRequired[bool]
+    origin: NotRequired[Optional[RequesterOrigin]]
     principal: Required[PrincipalRef]
 
 

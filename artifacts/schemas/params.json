@@ -14462,6 +14462,21 @@
           }
         ]
       },
+      "RequesterOrigin": {
+        "description": "How a turn's requester was attested at the ingress that admitted it.\n\nCore carries the value and never interprets it: it names which host door\nvouched for the principal, not who the principal is or what it may do.",
+        "oneOf": [
+          {
+            "const": "console_signed_in",
+            "description": "A person signed in to the host's console sent the input themselves.",
+            "type": "string"
+          },
+          {
+            "const": "host_attested",
+            "description": "The host relayed the input under its own host authority and attested\nthe person it acts for.",
+            "type": "string"
+          }
+        ]
+      },
       "ResponseStatus": {
         "description": "Typed status for response interactions.\n\nMirrors `CommsStatus` from `meerkat-comms` — the comms runtime converts at the boundary.",
         "enum": [
@@ -16943,6 +16958,17 @@
           "carried": {
             "description": "Set when an input of the turn reached it through an actor other than\nthe requester: governed work another agent sent (a peer hop), or work\nanother owner admitted for the requester. Absent when the requester's\nown ingress admitted every input.",
             "type": "boolean"
+          },
+          "origin": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RequesterOrigin"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How the host's ingress attested this requester, when it said so:\nrecorded with the requester so a policy can say which attestations\ncount. Absent for requesters whose ingress names no attestation (and\nfor every row written before the field existed)."
           },
           "principal": {
             "$ref": "#/$defs/PrincipalRef"

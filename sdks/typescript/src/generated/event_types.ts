@@ -1377,6 +1377,14 @@ export type ObjectiveId = string;
 export type TranscriptTurnInput = "runtime_authored" | "typed_text";
 
 /**
+ * How a turn's requester was attested at the ingress that admitted it.
+ *
+ * Core carries the value and never interprets it: it names which host door
+ * vouched for the principal, not who the principal is or what it may do.
+ */
+export type RequesterOrigin = "console_signed_in" | "host_attested";
+
+/**
  * The original requester of a turn: the principal its inputs share, and
  * whether it reached them directly.
  *
@@ -1385,10 +1393,11 @@ export type TranscriptTurnInput = "runtime_authored" | "typed_text";
  * association names it. Core carries it and never interprets it: it has no
  * person, account or assurance concept for it.
  */
-export interface TurnRequester {
+export type TurnRequester = {
   carried?: boolean;
+  origin?: RequesterOrigin | null;
   principal: PrincipalRef;
-}
+};
 
 /**
  * Stable runtime identity for a transcript message.

@@ -31,6 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   acted on it. No notice reaches an approver for `notify` yet, no reviewer
   decides for `review` yet, and no method settles a preparation yet: write
   `allow` or `require_approval`, and leave `preparation` out.
+- Rust, source only: `CustomizerToolsSpawnCustomizer` no longer implements
+  the auto traits `UnwindSafe` and `RefUnwindSafe`. It now holds a
+  late-bound reference to the session bridge, through which it asks whether
+  Core holds a member as an identity entry, and a session bridge has
+  neither trait. No Meerkat code relied on them.
 
 ### Added
 
@@ -279,10 +284,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     in the result, always empty; an archived identity is left archived and
     fails nothing.
 
-  A verb on an archived identity answers `identity_archived`. Two things
-  still answer `identity_store_owned`: `meta/compact_member` with a
-  compaction floor, and the offline `meta_gateway identity-reset` (see
-  Known limitations).
+  A verb on an archived identity answers `identity_archived`. Nothing
+  answers `identity_store_owned` any more:
+  - `meta/compact_member` with a compaction floor rebuilds the member with
+    the floor on its own session, and again without it afterwards, as for a
+    configured identity;
+  - the offline `meta_gateway identity-reset` takes it, and the next
+    start's roster pass gives it its fresh life: a fresh session, nothing
+    built, its name and its row unchanged. A delivery that reaches it
+    before a pass carried the reset out carries it out first.
+
+  The kind `identity_store_owned`, `IdentityRuntimeError::IdentityStoreOwned`
+  and `IdentityResetRefusal::IdentityStoreOwned` stay defined and are no
+  longer produced.
 
 - `IdentityStatus.intent_managed` (`meta/status_identity`, the status
   lists, both SDKs) reads `false` for an identity whose record is its row
@@ -316,13 +330,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   one.
 
 - A roster pass reads no row of an identity it serves already: it reads
-  the names from Core's identity entries and one row for each name it has
-  not registered yet. Through 0.9.13 every pass read every row. A row Core
-  changed is read again at the identity's next delivery, as before.
+  the names from Core's identity entries and the rows of the names it has
+  not registered yet in pages (one store read per page of names, through
+  Core's `MobHandle::identity_records`), so a cold start makes no store
+  read per identity. Through 0.9.13 every pass read every row, one read
+  each. A row Core changed is read again at the identity's next delivery,
+  as before, and status and list reads answer the same before any door of
+  the identity opened.
 
-- Rust: `SessionBridge` has four new methods, each with a default:
+- Rust: `SessionBridge` has five new methods, each with a default:
   `created_identity_names` (the names of the identities whose record is
-  their row; default `BridgeError::Unsupported`), `owned_peers` (the peer
+  their row; default `BridgeError::Unsupported`), `created_identities_of`
+  (the rows of many such identities at once; the default asks
+  `created_identity` for each), `owned_peers` (the peer
   edges an identity's row declares; default none), `holds_identity_entry`
   (whether Core holds a member id as an identity entry; default `false`)
   and `respawn_member_on_own_session` (Core's same-session successor;
@@ -338,12 +358,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 
 - The first build of an identity created at run time carries the host
-  customizer's tools when Core wakes its member before a roster pass or a
-  door named the identity. Meta's spawn customizer attaches the identity's
-  tool dispatcher to each build of a member Core holds as an identity
-  entry, and the build preparer publishes the host customizer's tools into
-  it. Through 0.9.13 such a build offered none of them until the member's
-  next build.
+  customizer's tools: the member Core starts at the create to run the
+  identity's first message, and the member Core wakes before a roster pass
+  or a door named the identity. Core asks Meta's build preparer before
+  both, Meta's spawn customizer attaches the identity's tool dispatcher to
+  each build of a member Core holds as an identity entry, and the build
+  preparer publishes the host customizer's tools into it. Through 0.9.13
+  such a build offered none of them until the member's next build.
+
+- A member of an identity whose record is its row is resolved to its
+  identity wherever Meta asks which identity a member is. Meta read the
+  `agent_identity` spawn label for that, which Core does not put on the
+  seat of such an identity (its seat carries its row's labels), so several
+  reads missed it: its deliveries ran but its completion cursor never
+  moved (`meta/wait_for_completion` ended `timed_out`), the console did not
+  attribute its member's records to it, and a side chat or a control
+  target on it resolved through the member alias only. One resolver now
+  answers all of them: the label when the member has one, else, for a
+  member Core holds as an identity entry, the identity its member id
+  encodes. A member with the label resolves exactly as before, and a plain
+  worker still resolves to no identity.
+
+- The console experience read labels an agent by its registration's
+  display name when it has one, else by its name: the roster, the sidebar
+  and the topology node read the same answer the identities listing gives.
+  An agent whose record is its row was labelled by its name even after its
+  row got a display name, because the label was read from its seat's
+  labels, which do not carry one. The label now follows an update of the
+  row as soon as the registration follows it, with no restart. A configured
+  agent's label is unchanged where its seat label and its registration
+  agree; where they differ, the registration's display name is shown.
+
+- A member of an identity whose record is its row acts as that identity
+  for the extension state (the `extension-state` feature): its session
+  resolves the agent principal of its name, as a configured identity's
+  member does. It resolved no principal.
 
 - The lifecycle side effects of an identity whose record is its row run as
   a configured identity's: a reset and a delete note the old session's
@@ -353,23 +402,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Known limitations
 
-- `meta/compact_member` with a compaction floor answers
-  `identity_store_owned` for an identity whose record is its row in the
-  mob's identity store: the rebuild that carries the floor to the member is
-  a build Meta lowers, and Core's same-session successor of such an
-  identity takes none. Nothing is changed.
-
-- The offline `meta_gateway identity-reset` refuses such an identity
-  (`identity_store_owned`): the row it leaves is carried out by a roster
-  compile that lists the identity, and no roster lists it. Reset it with
-  `meta/reset` on the running gateway.
-
-- The member Core starts at such an identity's create to run its first
-  message, and a member the mob's start restores before the identity
-  runtime is bound (one that owes work), is built without the host
-  customizer's tools until its next build, as before: Core asks Meta's
-  build preparer before a wake and a restore, not before the member it
-  starts at a create.
+- A member of an identity whose record is its row that the mob's start
+  restores before the identity runtime is bound (one that owes work) is
+  built without the host customizer's tools until its next build, as
+  before.
 
 - A host customizer's model, system prompt, provider parameters, labels
   and context for a build do not reach the seat of such an identity, at its

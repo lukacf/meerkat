@@ -3009,10 +3009,14 @@ impl MetaConsoleAggregator {
         // live completion event then keyed the `{identity}:{generation}`
         // conversation while the durable conversation - the one the console
         // UI renders - showed only this user_input frame.
-        let durable_identity =
-            crate::member_comms_id::durable_identity_label(&resolved.member.labels)
-                .unwrap_or(resolved.runtime_identity.as_str())
-                .to_string();
+        let durable_identity = crate::member_comms_id::resolve_member_identity(
+            &resolved.handle,
+            &resolved.member.agent_identity,
+            &resolved.member.labels,
+        )
+        .as_deref()
+        .unwrap_or(resolved.runtime_identity.as_str())
+        .to_string();
         resolved
             .entry
             .console_events
@@ -8456,8 +8460,12 @@ fn resolved_member_matches_raw_identities(
     mids: &[AgentIdentity],
 ) -> bool {
     mids.contains(&resolved.member.agent_identity)
-        || crate::member_comms_id::durable_identity_label(&resolved.member.labels)
-            .is_some_and(|agent_identity| raw_identities.iter().any(|raw| agent_identity == raw))
+        || crate::member_comms_id::resolve_member_identity(
+            &resolved.handle,
+            &resolved.member.agent_identity,
+            &resolved.member.labels,
+        )
+        .is_some_and(|agent_identity| raw_identities.iter().any(|raw| agent_identity == *raw))
 }
 
 async fn recover_lagged_source_events(
@@ -10473,7 +10481,13 @@ async fn identity_record_for_member(
     // identity records carry the public alias.
     let runtime_member_id =
         crate::member_comms_id::runtime_alias_str(member.agent_identity.as_str()).into_owned();
-    let durable_identity = crate::member_comms_id::durable_identity_label(&member.labels)
+    let resolved_identity = crate::member_comms_id::resolve_member_identity(
+        handle,
+        &member.agent_identity,
+        &member.labels,
+    );
+    let durable_identity = resolved_identity
+        .as_deref()
         .unwrap_or(runtime_member_id.as_str());
     let identity = apply_namespace(durable_identity, &entry.identity_namespace);
     let addressable = member_is_addressable(member);
@@ -14516,6 +14530,131 @@ comms = true
 
         let _ = runtime.mob_handle().stop().await;
         Ok(())
+    }
+
+    /// The console attributes a store-owned agent's member to its identity,
+    /// as it does a configured agent's. Core seats a store-owned identity's
+    /// member with its row's labels, which carry no `agent_identity` label:
+    /// the member resolves through Core's identity entry of its member id
+    /// ([`crate::member_comms_id::resolve_member_identity`]). Its console
+    /// record, under which the frames of its turns are kept, names the
+    /// identity, and a send that names the identity selects it. A plain
+    /// worker is no identity's.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_console_attributes_a_store_owned_agent_s_member_to_its_identity() {
+        let runtime = build_empty_runtime("store-owned-attribution-test").await;
+        let handle = runtime.mob_handle();
+        let created = handle
+            .create_store_owned_identities(
+                meerkat_mob::StoreOwnedIdentityCreate::new(
+                    meerkat_mob::IdentityOperation::new(
+                        "create-keeper",
+                        meerkat_core::approval::decision::Sha256Digest::of(b"create-keeper")
+                            .as_str(),
+                    ),
+                    meerkat_mob::IdentityChangeRequesterInput::host("console"),
+                    vec![meerkat_mob::CreatedIdentityRequest::new(
+                        meerkat_mob::CreatedIdentitySpec::new("keeper", "worker"),
+                    )],
+                ),
+                meerkat_mob::IdentityChangeConsentInput::Policy(
+                    meerkat_mob::IdentityPolicyOutcome::Allow,
+                ),
+            )
+            .await
+            .map(|created| created.change);
+        assert!(
+            matches!(
+                created,
+                Ok(meerkat_mob::IdentityChangeOutcome::Committed { .. })
+            ),
+            "{created:?}"
+        );
+        // The configured twin, labelled as the identity runtime seats it,
+        // and a plain worker.
+        for (alias, labels) in [
+            (
+                "twin",
+                BTreeMap::from([("agent_identity".to_string(), "twin".to_string())]),
+            ),
+            ("helper", BTreeMap::new()),
+        ] {
+            spawn_trusted_identity_projected_member(
+                &runtime,
+                SpawnMemberSpec::from_wire(
+                    "worker".to_string(),
+                    alias.to_string(),
+                    Some("You are a test member.".into()),
+                    None,
+                    None,
+                )
+                .with_labels(labels),
+            )
+            .await;
+        }
+
+        let members = handle.list_members_including_retiring().await;
+        let resolved = |alias: &str| {
+            let member = members
+                .iter()
+                .find(|member| {
+                    member.agent_identity == crate::member_comms_id::mob_member_id(alias)
+                })
+                .unwrap_or_else(|| panic!("{alias} is on the roster"));
+            (
+                member.labels.contains_key("agent_identity"),
+                crate::member_comms_id::resolve_member_identity(
+                    &handle,
+                    &member.agent_identity,
+                    &member.labels,
+                )
+                .map(std::borrow::Cow::into_owned),
+            )
+        };
+        assert_eq!(
+            resolved("keeper"),
+            (false, Some("keeper".to_string())),
+            "a store-owned member carries no label and is its identity's by Core's entry"
+        );
+        assert_eq!(resolved("twin"), (true, Some("twin".to_string())));
+        assert_eq!(
+            resolved("helper"),
+            (false, None),
+            "a plain worker is no identity's"
+        );
+
+        let aggregator = MetaConsoleAggregator::in_memory();
+        aggregator.register_runtime_handles_with_policy(
+            "runtime-a",
+            "",
+            runtime.mob_runtime().clone(),
+            None,
+            runtime.console_events(),
+            Arc::new(AllowAllConsoleVisibilityPolicy),
+        );
+        for identity in ["keeper", "twin"] {
+            let matches = aggregator.resolve_visible_members(identity).await;
+            assert_eq!(matches.len(), 1, "{identity} resolves to its one member");
+            let record = identity_record_for_resolved_member(&matches[0])
+                .await
+                .expect("a member has a console record");
+            assert_eq!(record.identity, identity, "the record names the identity");
+            assert_eq!(record.runtime_member_id, identity);
+            // Selected by the identity it resolves to, not only by its
+            // member id (none is given here).
+            assert!(
+                resolved_member_matches_raw_identities(&matches[0], &[identity.to_string()], &[]),
+                "{identity}'s member is selected by its identity"
+            );
+        }
+        let helper = aggregator.resolve_visible_members("helper").await;
+        assert_eq!(helper.len(), 1);
+        assert!(
+            !resolved_member_matches_raw_identities(&helper[0], &["helper".to_string()], &[]),
+            "a plain worker is selected by its member id only"
+        );
+
+        let _ = runtime.mob_handle().stop().await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -12525,20 +12525,21 @@ async fn handle_console_aggregator_rpc(
     if is_console_mutating_rpc_method(request.method.as_str()) && !can_mutate {
         return console_read_only_rpc_error(response_id);
     }
-    if let Some(response) = handle_access_admin_rpc(access, access_view, &request) {
-        return response;
-    }
-    // Every agent check below, and the memory reads that judge each row's
-    // identity by the attributes recorded under the name this Console gives
-    // it, read the caller's audience: it is primed from the Console's
-    // runtimes first, as the send gate primes it, whether or not access is
-    // enforced (the private-owner rule reads it too).
+    // Every agent check below (the preview of the access rules among them),
+    // and the memory reads that judge each row's identity by the attributes
+    // recorded under the name this Console gives it, read the caller's
+    // audience: it is primed from the Console's runtimes first, as the send
+    // gate primes it, whether or not access is enforced (the private-owner
+    // rule reads it too).
     if let (Some(aggregator), Some(view)) = (&console_aggregator, access_view) {
         Box::pin(prime_access_cache_from_aggregator(
             aggregator,
             &view.controller(),
         ))
         .await;
+    }
+    if let Some(response) = handle_access_admin_rpc(access, access_view, &request) {
+        return response;
     }
     // Every member the request names is resolved through the caller's
     // audience before any rule or handler reads it: a member hidden from the

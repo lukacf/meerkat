@@ -2783,6 +2783,108 @@ async fn a_label_update_of_a_busy_member_reaches_its_roster_entry_at_once() {
     builds_with_labels(&mob, "desk", &session, &without_team).await;
 }
 
+/// Row (RED): the roster follows the row whatever arm the member step
+/// took. `desk` holds work when one update moves its labels and its
+/// runtime mode: the member step is the runtime-mode restamp, which a busy
+/// member defers. The roster entry reads the row's labels right after the
+/// answer, on the same generation, fence and session; the runtime mode
+/// waits for the restamp.
+///
+/// RED on the old tree: the roster entry keeps the labels the member was
+/// seated with.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_label_and_runtime_mode_update_of_a_busy_member_reaches_its_roster_entry_at_once() {
+    let mob = StoreOwnedMob::new("label-and-mode-deferred-roster").await;
+    let (spec_before, session) = working_desk(&mob).await;
+    let before = seat(&mob, "desk").await;
+    let after = spec_before
+        .clone()
+        .with_labels(moved_team("desk"))
+        .with_runtime_mode_override(crate::MobRuntimeMode::TurnDriven);
+    let updated = mob
+        .update("relabel-desk", after, &spec_digest(&spec_before))
+        .await
+        .expect("the update commits");
+    assert_eq!(
+        answer_kind(updated.applied.as_ref().expect("the update's answer")),
+        "deferred",
+        "{updated:?}"
+    );
+    let now = seat(&mob, "desk").await;
+    assert_eq!(
+        (now.generation, now.fence_token, now.runtime_mode),
+        (before.generation, before.fence_token, before.runtime_mode),
+        "no restamp"
+    );
+    assert_eq!(mob.session("desk").await, session, "the same session");
+    assert_eq!(
+        now.labels,
+        moved_team("desk"),
+        "the roster entry reads the row's labels right after the update"
+    );
+}
+
+/// Row (RED): a restamp a busy member deferred stays owed after the roster
+/// followed the row. `desk` holds work at its label update: the update is
+/// deferred, and the roster entry reads the row's labels at once. Once its
+/// work ended, a retry of the same update replays and carries the restamp
+/// out: the member is seated at the next generation on the same session,
+/// its seat row carries the row's labels, and no seat row counts stale.
+///
+/// RED on the old tree: the restamp was decided by comparing the roster
+/// entry with the declaration, so once the roster read the row's labels a
+/// retry restamped nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_deferred_label_restamp_is_carried_out_by_a_retry_once_the_member_is_idle() {
+    let mob = StoreOwnedMob::new("label-deferred-retry-idle").await;
+    let (spec_before, session) = working_desk(&mob).await;
+    let before = seat(&mob, "desk").await;
+    let moved = moved_team("desk");
+    label_update_deferred_by_work(&mob, &spec_before, &moved).await;
+    assert_eq!(
+        seat(&mob, "desk").await.labels,
+        moved,
+        "the roster follows the row at once"
+    );
+    assert_eq!(seats_stale(&mob).await, 1, "the seat row trails the row");
+
+    // The member's work ends; the retry finds it idle.
+    mob.service.set_keep_alive_turns_complete_immediately(true);
+    tokio::time::timeout(STEP, mob.service.wait_keep_alive_turn_entered(&session))
+        .await
+        .expect("the member's turn is running");
+    mob.service.release_keep_alive_turn(&session).await;
+    let after = spec_before.clone().with_labels(moved.clone());
+    let deadline = tokio::time::Instant::now() + STEP;
+    loop {
+        let retried = mob
+            .update("relabel-desk", after.clone(), &spec_digest(&spec_before))
+            .await
+            .expect("the retry answers");
+        assert!(
+            matches!(retried.change, IdentityChangeOutcome::Replayed { .. }),
+            "{retried:?}"
+        );
+        if mob.spawn_row("desk").await.labels == moved {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the retry never restamped the idle member"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let now = seat(&mob, "desk").await;
+    assert_eq!(
+        Some(now.generation),
+        before.generation.next(),
+        "the retry seated the next generation"
+    );
+    assert_eq!(mob.session("desk").await, session, "the same session");
+    assert_eq!(now.labels, moved);
+    assert_eq!(seats_stale(&mob).await, 0, "no seat row counts stale");
+}
+
 /// Row (guard, passes before and after): the label rule stands on a build
 /// that seats a trailing seat's row labels. `quiet`'s row moved past its
 /// seat (the update's transaction with no member step after it). A host

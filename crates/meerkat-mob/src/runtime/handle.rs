@@ -11393,19 +11393,27 @@ impl MobHandle {
 
     /// The members among `targets` that the host's member tool audience
     /// ([`MobBuilder::with_member_tool_audience`](super::MobBuilder::with_member_tool_audience))
-    /// hides from `caller`: the one check behind every member operator tool
-    /// that names or lists members (`member_status`, `retire_member`,
-    /// `force_cancel_member`, `list_members`, and the mob tools'
-    /// `mob_list_members`).
+    /// hides from `caller`: the one place the audience is asked. The member
+    /// tools that name or list members ask through it: `member_status`,
+    /// `retire_member`, `force_cancel_member`, `wire_members`,
+    /// `unwire_members` and `list_members`, and the mob tools'
+    /// `mob_check_member`, `mob_retire_member`, `mob_wire`, `mob_unwire`,
+    /// `mob_list_members` and `council`.
     ///
     /// A hidden member is one the caller's tools answer exactly as a member
     /// the mob does not hold: a tool that names it answers member not
     /// found, and a list leaves its row out whole. `caller` is the member
-    /// bound to the session that made the call; `None` is a call no
-    /// member's session made (a host's or an operator's own surface), and
-    /// what such a call is shown is the audience's to say, like every other.
+    /// the call was made for: the member bound to the session that made it,
+    /// or the placed member whose request the controlling side serves.
+    /// `None` is a call made by no member of this mob (a host's own
+    /// dispatch, a dispatch that carries no origin session, or, through the
+    /// mob tools, the session of a member of another mob), and what such a
+    /// call is shown is the audience's to say, like every other: an
+    /// audience that shows a member to `None` shows it to every such call.
     /// The audience is asked once per target, with the labels the caller
     /// and that target carry on their own roster rows, from one roster read.
+    /// A target the roster holds no row for is handed over without labels,
+    /// and the host decides from its own record.
     /// Empty when the host installed no audience.
     pub async fn members_hidden_from(
         &self,
@@ -11431,6 +11439,77 @@ impl MobHandle {
             })
             .cloned()
             .collect()
+    }
+
+    /// For the member tools that wire or unwire member `local` and member
+    /// `peer`: the end the tool answers `caller` as a member the mob does
+    /// not hold, when the host's member tool audience
+    /// ([`Self::members_hidden_from`]) hides one of the two from it.
+    ///
+    /// It is the first of the two, in the order the mob looks them up, that
+    /// is hidden or that the roster holds no row for, so the answer names
+    /// the end a name the mob does not hold would have named in the hidden
+    /// member's place. `None` when neither end is hidden (the mob answers
+    /// the call itself) and when both names are the same (a call the mob
+    /// refuses without looking a member up). `peer` is `None` for a peer
+    /// that is no member of the mob.
+    #[doc(hidden)]
+    pub async fn wire_end_answered_absent(
+        &self,
+        caller: Option<&AgentIdentity>,
+        local: &AgentIdentity,
+        peer: Option<&AgentIdentity>,
+    ) -> Option<AgentIdentity> {
+        if peer == Some(local) {
+            return None;
+        }
+        let ends: Vec<AgentIdentity> = std::iter::once(local).chain(peer).cloned().collect();
+        let hidden = self.members_hidden_from(caller, &ends).await;
+        if hidden.is_empty() {
+            return None;
+        }
+        let roster = self.roster().await;
+        ends.into_iter()
+            .find(|end| hidden.contains(end) || roster.get(end).is_none())
+    }
+
+    /// For the member tools that list members: `rows` as `caller`'s tools
+    /// show them. The rows of the members the host's member tool audience
+    /// ([`Self::members_hidden_from`]) hides from `caller` are left out
+    /// whole, and the wiring of every row that stays (its `wired_to` and its
+    /// external peer descriptors) names no member or external peer the
+    /// audience hides from it. The audience is asked once, about the listed
+    /// members and every peer a row names.
+    #[doc(hidden)]
+    pub async fn member_rows_shown_to(
+        &self,
+        caller: Option<&AgentIdentity>,
+        mut rows: Vec<MobMemberListEntry>,
+    ) -> Vec<MobMemberListEntry> {
+        if self.member_tool_audience.is_none() {
+            return rows;
+        }
+        let named: BTreeSet<AgentIdentity> = rows
+            .iter()
+            .flat_map(|row| {
+                std::iter::once(&row.agent_identity)
+                    .chain(&row.wired_to)
+                    .chain(row.external_peer_specs.keys())
+            })
+            .cloned()
+            .collect();
+        let named: Vec<AgentIdentity> = named.into_iter().collect();
+        let hidden = self.members_hidden_from(caller, &named).await;
+        if hidden.is_empty() {
+            return rows;
+        }
+        rows.retain(|row| !hidden.contains(&row.agent_identity));
+        for row in &mut rows {
+            row.wired_to.retain(|peer| !hidden.contains(peer));
+            row.external_peer_specs
+                .retain(|peer, _| !hidden.contains(peer));
+        }
+        rows
     }
 
     async fn resolve_peer_connectivity(

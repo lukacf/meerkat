@@ -1182,20 +1182,35 @@ pub(super) fn compose_external_tools_for_profile(
 /// operator tools may not know of, installed with
 /// [`MobBuilder::with_member_tool_audience`](crate::MobBuilder::with_member_tool_audience).
 ///
-/// The per-member operator tools (`member_status`, `retire_member`,
-/// `force_cancel_member`) answer a member the audience hides from the calling
-/// member exactly as a member the mob does not hold, before any ownership or
-/// manage-scope admission: nothing tells the caller it exists, and nothing is
-/// done to it.
+/// The member tools that name or list members ask it, through
+/// [`MobHandle::members_hidden_from`](crate::MobHandle::members_hidden_from),
+/// about each member they name: `member_status`, `retire_member`,
+/// `force_cancel_member`, `wire_members`, `unwire_members` and
+/// `list_members`, and the mob tools' `mob_check_member`,
+/// `mob_retire_member`, `mob_wire`, `mob_unwire`, `mob_list_members` and
+/// `council`. A member the audience hides from the calling member is
+/// answered exactly as a member the mob does not hold, before any check
+/// that answers differently for a member the mob holds: nothing tells the
+/// caller it exists, nothing is done to it, and a list leaves it out.
 pub trait MemberToolAudience: Send + Sync {
-    /// Whether member `target` of mob `mob_id` is hidden from `caller`, the
-    /// member bound to the session that made the call (`None` for a call no
-    /// member's session made).
+    /// Whether member `target` of mob `mob_id` is hidden from `caller`.
+    ///
+    /// `caller` is the member the call was made for: the member bound to the
+    /// session that made it, or the placed member whose request the
+    /// controlling side serves. It is `None` for a call made by no member of
+    /// this mob: a host's own dispatch, a dispatch that carries no origin
+    /// session, or, through the mob tools, the session of a member of
+    /// another mob. An audience that shows a member to `None` shows it to
+    /// every such call.
     ///
     /// `caller_labels` and `target_labels` are the labels each of the two
     /// carries on its own roster row at the call, `None` for one the roster
     /// holds no row for: what a member's durable row says of it reaches the
     /// audience whether or not the host built the member in this process.
+    /// A target with no roster row (a name the mob does not hold, a retired
+    /// member, an external peer a row is wired to) is handed over without
+    /// labels: Meerkat makes no guess about it, and the host decides from
+    /// its own record.
     fn hides(
         &self,
         mob_id: &MobId,
@@ -1214,6 +1229,12 @@ pub(crate) struct MobOperatorToolDispatcher {
     /// run is member-initiated (the controlling side's upcall executor sets
     /// the requesting member's recorded ceiling here).
     flow_provision_bound: Option<super::MemberOperatorAuthorityCeiling>,
+    /// The placed member whose request the controlling side's upcall
+    /// executor serves through this dispatcher. Such a call has no local
+    /// origin session; the host's member tool audience is asked about it as
+    /// about this member's own call. Read for the audience only: scope and
+    /// ownership admission do not consult it.
+    placed_requester: Option<AgentIdentity>,
 }
 
 /// The mob operator authority a dispatcher admits its calls against.
@@ -1350,7 +1371,26 @@ impl MobOperatorToolDispatcher {
             authority,
             tools: defs.into(),
             flow_provision_bound: None,
+            placed_requester: None,
         }
+    }
+
+    /// Name the placed member whose request this dispatcher serves: the
+    /// caller the host's member tool audience is asked about.
+    pub(crate) fn with_placed_requester(mut self, requester: AgentIdentity) -> Self {
+        self.placed_requester = Some(requester);
+        self
+    }
+
+    /// The caller the host's member tool audience is asked about: the
+    /// member bound to the session that dispatched the call, or, for a call
+    /// with no local origin session, the placed member whose request the
+    /// upcall executor serves.
+    fn audience_caller<'a>(
+        &'a self,
+        validated: Option<&'a AgentIdentity>,
+    ) -> Option<&'a AgentIdentity> {
+        validated.or(self.placed_requester.as_ref())
     }
 
     /// Bound every member a flow run started through this dispatcher
@@ -1477,7 +1517,10 @@ impl MobOperatorToolDispatcher {
         // one the mob does not hold, whatever the caller's scope.
         if !self
             .handle
-            .members_hidden_from(validated.as_ref(), std::slice::from_ref(target))
+            .members_hidden_from(
+                self.audience_caller(validated.as_ref()),
+                std::slice::from_ref(target),
+            )
             .await
             .is_empty()
         {
@@ -1512,6 +1555,31 @@ impl MobOperatorToolDispatcher {
     fn can_manage_current_mob(&self, authority: &MobToolAuthorityContext) -> bool {
         let mob_id = self.handle.definition().id.as_str();
         authority.can_manage_mob(mob_id, self.handle.incarnation())
+    }
+
+    /// A wire or unwire that names a member the host's audience hides from
+    /// the caller is answered as one that names a member the mob does not
+    /// hold, before the mob is asked: nothing is wired or unwired. Without
+    /// an audience the mob answers every call itself, as before.
+    async fn ensure_wire_ends_shown(
+        &self,
+        owner: Option<&SessionId>,
+        call: ToolCallView<'_>,
+        member: &AgentIdentity,
+        peer: &AgentIdentity,
+    ) -> Result<(), ToolError> {
+        if self.handle.member_tool_audience.is_none() {
+            return Ok(());
+        }
+        let validated = self.validated_caller(owner, call.name).await?;
+        match self
+            .handle
+            .wire_end_answered_absent(self.audience_caller(validated.as_ref()), member, Some(peer))
+            .await
+        {
+            Some(absent) => Err(Self::map_mob_error(call, MobError::MemberNotFound(absent))),
+            None => Ok(()),
+        }
     }
 
     async fn ensure_spawn_member_scope(
@@ -2364,11 +2432,12 @@ impl MobOperatorToolDispatcher {
                 let args: WireMembersArgs = call
                     .parse_args()
                     .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
+                let member = AgentIdentity::from(args.member_id);
+                let peer = AgentIdentity::from(args.peer_member_id);
+                self.ensure_wire_ends_shown(owner, call, &member, &peer)
+                    .await?;
                 self.handle
-                    .wire(
-                        AgentIdentity::from(args.member_id),
-                        AgentIdentity::from(args.peer_member_id),
-                    )
+                    .wire(member, peer)
                     .await
                     .map_err(|error| Self::map_mob_error(call, error))?;
                 self.record_successful_operator_action(call.name, &authority)
@@ -2379,11 +2448,12 @@ impl MobOperatorToolDispatcher {
                 let args: WireMembersArgs = call
                     .parse_args()
                     .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
+                let member = AgentIdentity::from(args.member_id);
+                let peer = AgentIdentity::from(args.peer_member_id);
+                self.ensure_wire_ends_shown(owner, call, &member, &peer)
+                    .await?;
                 self.handle
-                    .unwire(
-                        AgentIdentity::from(args.member_id),
-                        AgentIdentity::from(args.peer_member_id),
-                    )
+                    .unwire(member, peer)
                     .await
                     .map_err(|error| Self::map_mob_error(call, error))?;
                 self.record_successful_operator_action(call.name, &authority)
@@ -2413,17 +2483,13 @@ impl MobOperatorToolDispatcher {
                     members = owned;
                 }
                 // A member the host's audience hides from the caller is not
-                // in its list at all, with manage scope too: the same check
-                // the per-member tools answer by.
-                let listed: Vec<AgentIdentity> = members
-                    .iter()
-                    .map(|entry| entry.agent_identity.clone())
-                    .collect();
-                let hidden = self
+                // in its list at all, with manage scope too, and no listed
+                // member's wiring names it: the same check the per-member
+                // tools answer by.
+                let members = self
                     .handle
-                    .members_hidden_from(list_caller.as_ref(), &listed)
+                    .member_rows_shown_to(self.audience_caller(list_caller.as_ref()), members)
                     .await;
-                members.retain(|entry| !hidden.contains(&entry.agent_identity));
                 let mob_id = self.handle.definition().id.clone();
                 let members = members
                     .into_iter()

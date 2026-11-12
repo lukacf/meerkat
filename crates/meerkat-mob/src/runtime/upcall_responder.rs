@@ -530,6 +530,7 @@ impl MobUpcallSeams {
     async fn execute_via_dispatcher(
         &self,
         context: MobToolAuthorityContext,
+        requester: &AgentIdentity,
         flow_provision_bound: Option<&super::MemberOperatorAuthorityCeiling>,
         request_id: &str,
         op: MemberOperatorOp,
@@ -554,9 +555,11 @@ impl MobUpcallSeams {
             args: &raw,
         };
         // A member-initiated flow run provisions members bounded like the
-        // member's own spawns.
+        // member's own spawns. The host's member tool audience is asked
+        // about the call as about the requesting member's own.
         let dispatcher = MobOperatorToolDispatcher::new(self.handle.clone(), true, context)
-            .with_flow_provision_bound(flow_provision_bound.cloned());
+            .with_flow_provision_bound(flow_provision_bound.cloned())
+            .with_placed_requester(requester.clone());
         let outcome = match dispatcher.dispatch(call).await {
             Ok(outcome) => UpcallToolOutcome::from_tool_result(&outcome.result),
             Err(error) => UpcallToolOutcome::from_tool_error(&error),
@@ -977,7 +980,13 @@ impl UpcallServeSeams for MobUpcallSeams {
             }
             other => {
                 fenced
-                    .execute_via_dispatcher(context, spawn_bound.as_ref(), request_id, other)
+                    .execute_via_dispatcher(
+                        context,
+                        &requester,
+                        spawn_bound.as_ref(),
+                        request_id,
+                        other,
+                    )
                     .await
             }
         })

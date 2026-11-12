@@ -30432,7 +30432,7 @@ async fn owned_member_tools_hand_the_audience_the_roster_labels_of_both_members(
 
     // The lists in full: a member the audience hides from the caller is
     // not in its list at all, with manage scope, and every other member is.
-    let everyone = vec![
+    let everyone = [
         "labels-keeper".to_owned(),
         "labels-kept".to_owned(),
         "labels-other-keeper".to_owned(),
@@ -30541,6 +30541,483 @@ async fn owned_member_tools_answer_a_member_hidden_from_the_caller_as_absent() {
     dispatch_owned_member_tool(&manager_tools, "member_status", "audience-forker")
         .await
         .expect("a member not hidden from the caller is admitted as before");
+}
+
+/// A mob whose host hides the members kept for a keeper
+/// ([`HideKeptMembers`]), with `members` seated: each with the keeper its
+/// row's `kept_for` label names, if any.
+async fn mob_with_kept_members(members: &[(&str, Option<&str>)]) -> MobHandle {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    service.set_return_exact_run_result(true);
+    let handle = MobBuilder::new(sample_definition_with_mob_tools(), MobStorage::in_memory())
+        .with_session_service(service)
+        .with_member_tool_audience(Arc::new(HideKeptMembers))
+        .create()
+        .await
+        .expect("create mob");
+    for (member, keeper) in members {
+        let mut spec = crate::runtime::handle::SpawnMemberSpec::new(
+            ProfileName::from("worker"),
+            AgentIdentity::from(*member),
+        )
+        .with_initial_message(ContentInput::Text("source context".to_string()));
+        if let Some(keeper) = keeper {
+            spec = spec.with_labels(BTreeMap::from([(
+                "kept_for".to_string(),
+                (*keeper).to_string(),
+            )]));
+        }
+        handle.spawn_spec(spec).await.expect("spawn the member");
+    }
+    handle
+}
+
+/// The operator tools of member `caller` of the mob, with manage scope.
+async fn manage_scope_tools(handle: &MobHandle, caller: &str) -> Arc<dyn AgentToolDispatcher> {
+    owned_member_tool_dispatcher(
+        handle,
+        &AgentIdentity::from(caller),
+        generated_mob_operator_authority_with_scope(
+            handle.definition().id.as_str(),
+            handle.live_incarnation(),
+        ),
+    )
+    .await
+}
+
+/// One operator tool call with `args` through `dispatcher`.
+async fn dispatch_operator_tool(
+    dispatcher: &Arc<dyn AgentToolDispatcher>,
+    tool: &'static str,
+    args: serde_json::Value,
+) -> Result<ToolDispatchOutcome, ToolError> {
+    let raw = serde_json::value::RawValue::from_string(args.to_string()).unwrap();
+    dispatcher
+        .dispatch(ToolCallView {
+            id: "operator-tool-call",
+            name: tool,
+            args: &raw,
+        })
+        .await
+}
+
+/// A tool's answer with the member name `name` masked: the answers for two
+/// names compare equal when they differ in nothing but the name.
+fn masked_tool_answer(answer: &Result<ToolDispatchOutcome, ToolError>, name: &str) -> String {
+    match answer {
+        Ok(outcome) => format!("ok: {}", outcome.result.text_content()),
+        Err(error) => format!("error: {error:?}"),
+    }
+    .replace(name, "<member>")
+}
+
+/// `wire_members` and `unwire_members` ask the host's member tool audience
+/// about both members they name. A member it hides from the caller answers
+/// exactly as a name the mob does not hold, as the member and as the peer,
+/// with manage scope, and no edge is made. A caller the member is not
+/// hidden from wires and unwires it as before.
+#[tokio::test]
+async fn wire_members_answer_a_member_hidden_from_the_caller_as_absent() {
+    let handle = mob_with_kept_members(&[
+        ("wire-kept", Some("ann")),
+        ("wire-keeper", Some("ann")),
+        ("wire-plain", None),
+        ("wire-caller", None),
+    ])
+    .await;
+    let caller = manage_scope_tools(&handle, "wire-caller").await;
+    let keeper = manage_scope_tools(&handle, "wire-keeper").await;
+    let ends = |member: &str, peer: &str| serde_json::json!({ "member_id": member, "peer_member_id": peer });
+    let kept = AgentIdentity::from("wire-kept");
+
+    for tool in ["wire_members", "unwire_members"] {
+        // Each call naming the kept member, beside the same call naming a
+        // name the mob does not hold in its place.
+        for (kept_call, absent_call, position) in [
+            (
+                ends("wire-plain", "wire-kept"),
+                ends("wire-plain", "wire-gone"),
+                "as the peer",
+            ),
+            (
+                ends("wire-kept", "wire-plain"),
+                ends("wire-gone", "wire-plain"),
+                "as the member",
+            ),
+            (
+                ends("wire-nobody", "wire-kept"),
+                ends("wire-nobody", "wire-gone"),
+                "as the peer of a name the mob does not hold",
+            ),
+        ] {
+            let hidden = masked_tool_answer(
+                &dispatch_operator_tool(&caller, tool, kept_call).await,
+                "wire-kept",
+            );
+            let absent = masked_tool_answer(
+                &dispatch_operator_tool(&caller, tool, absent_call).await,
+                "wire-gone",
+            );
+            assert!(
+                absent.starts_with("error:"),
+                "{tool}: a name the mob does not hold is refused: {absent}"
+            );
+            assert_eq!(
+                hidden, absent,
+                "{tool}: a member hidden from the caller, named {position}, answers as a name \
+                 the mob does not hold"
+            );
+        }
+    }
+    assert!(
+        handle
+            .get_member(&kept)
+            .await
+            .unwrap()
+            .expect("the kept member is seated")
+            .wired_to
+            .is_empty(),
+        "no edge reaches the hidden member"
+    );
+
+    dispatch_operator_tool(&keeper, "wire_members", ends("wire-keeper", "wire-kept"))
+        .await
+        .expect("a caller the member is not hidden from wires it");
+    assert!(
+        handle
+            .get_member(&kept)
+            .await
+            .unwrap()
+            .expect("the kept member is seated")
+            .wired_to
+            .contains(&AgentIdentity::from("wire-keeper")),
+        "the keeper's wire is made"
+    );
+    dispatch_operator_tool(&keeper, "unwire_members", ends("wire-keeper", "wire-kept"))
+        .await
+        .expect("a caller the member is not hidden from unwires it");
+}
+
+/// The `wired_to` of a listed row names no member the host's member tool
+/// audience hides from the caller: a member wired to a hidden member is
+/// listed with its other peers only. A caller the member is not hidden from
+/// reads the whole wiring.
+#[tokio::test]
+async fn list_members_names_no_hidden_member_in_wired_to() {
+    let handle = mob_with_kept_members(&[
+        ("peers-kept", Some("ann")),
+        ("peers-keeper", Some("ann")),
+        ("peers-shown", None),
+        ("peers-caller", None),
+    ])
+    .await;
+    // The host wires a member every caller is shown to the kept member and
+    // to the caller.
+    for peer in ["peers-kept", "peers-caller"] {
+        handle
+            .wire(
+                AgentIdentity::from("peers-shown"),
+                AgentIdentity::from(peer),
+            )
+            .await
+            .expect("the host wires the members");
+    }
+    let wired_to_of_shown = |tools: Arc<dyn AgentToolDispatcher>| async move {
+        let listed = dispatch_operator_tool(&tools, "list_members", serde_json::json!({}))
+            .await
+            .expect("list_members dispatches");
+        let payload: serde_json::Value =
+            serde_json::from_str(&listed.result.text_content()).expect("list payload");
+        let row = payload["members"]
+            .as_array()
+            .expect("members array")
+            .iter()
+            .find(|entry| entry["agent_identity"] == "peers-shown")
+            .expect("the shown member is listed")
+            .clone();
+        let mut peers: Vec<String> = row["wired_to"]
+            .as_array()
+            .expect("wired_to array")
+            .iter()
+            .map(|peer| peer.as_str().unwrap().to_owned())
+            .collect();
+        peers.sort_unstable();
+        peers
+    };
+
+    assert_eq!(
+        wired_to_of_shown(manage_scope_tools(&handle, "peers-caller").await).await,
+        vec!["peers-caller".to_owned()],
+        "a listed row names no peer the audience hides from the caller"
+    );
+    assert_eq!(
+        wired_to_of_shown(manage_scope_tools(&handle, "peers-keeper").await).await,
+        vec!["peers-caller".to_owned(), "peers-kept".to_owned()],
+        "a caller the member is not hidden from reads the whole wiring"
+    );
+}
+
+/// A listed row names no external peer the host's member tool audience
+/// hides from the caller: neither in its `wired_to` nor with the peer's
+/// descriptor. A caller the peer is not hidden from reads both.
+#[tokio::test]
+async fn list_members_names_no_hidden_external_peer_of_a_listed_member() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    // A member of another mob, and the name its peers know it by.
+    let remote_definition = with_unique_mob_id(sample_definition(), "audience-remote");
+    let remote_mob_id = remote_definition.id.clone();
+    let remote = MobBuilder::new(remote_definition, MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create the other mob");
+    let mut remote_spec = SpawnMemberSpec::new("worker", AgentIdentity::from("ext-kept"));
+    remote_spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    remote
+        .spawn_spec(remote_spec)
+        .await
+        .expect("spawn the other mob's member");
+    let remote_entry = remote
+        .get_member(&AgentIdentity::from("ext-kept"))
+        .await
+        .expect("read the other mob's member")
+        .expect("the other mob's member is seated");
+    let descriptor = external_descriptor_from_published_member(&remote_mob_id, &remote_entry);
+    let external = AgentIdentity::from(descriptor.name.as_str());
+
+    let handle = MobBuilder::new(
+        with_unique_mob_id(sample_definition_with_mob_tools(), "audience-home"),
+        MobStorage::in_memory(),
+    )
+    .with_session_service(service.clone())
+    .with_member_tool_audience(Arc::new(HideMemberFrom {
+        caller: AgentIdentity::from("ext-caller"),
+        target: external.clone(),
+    }))
+    .create()
+    .await
+    .expect("create mob");
+    for member in ["ext-shown", "ext-caller", "ext-other"] {
+        let mut spec = SpawnMemberSpec::new("worker", AgentIdentity::from(member));
+        spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+        handle.spawn_spec(spec).await.expect("spawn the member");
+    }
+    handle
+        .wire(
+            AgentIdentity::from("ext-shown"),
+            PeerTarget::External(descriptor),
+        )
+        .await
+        .expect("the host wires the member to the external peer");
+    let row_of_shown = |caller: &'static str| {
+        let handle = handle.clone();
+        async move {
+            let tools = manage_scope_tools(&handle, caller).await;
+            let listed = dispatch_operator_tool(&tools, "list_members", serde_json::json!({}))
+                .await
+                .expect("list_members dispatches");
+            let payload: serde_json::Value =
+                serde_json::from_str(&listed.result.text_content()).expect("list payload");
+            payload["members"]
+                .as_array()
+                .expect("members array")
+                .iter()
+                .find(|entry| entry["agent_identity"] == "ext-shown")
+                .expect("the wired member is listed")
+                .clone()
+        }
+    };
+
+    let row = row_of_shown("ext-other").await;
+    assert!(
+        row["wired_to"]
+            .as_array()
+            .expect("wired_to array")
+            .contains(&serde_json::json!(external.as_str()))
+            && row["external_peer_specs"].get(external.as_str()).is_some(),
+        "a caller the external peer is not hidden from reads it in the row: {row}"
+    );
+    let row = row_of_shown("ext-caller").await;
+    assert!(
+        !row.to_string().contains(external.as_str()),
+        "a listed row names no external peer the audience hides from the caller: {row}"
+    );
+}
+
+/// A host's member tool audience that decides by the calling member alone:
+/// it hides `kept_from` from `caller`, and `kept_for` from every caller but
+/// `caller` (a call no member made included).
+struct HideAroundOneCaller {
+    caller: AgentIdentity,
+    kept_from: AgentIdentity,
+    kept_for: AgentIdentity,
+}
+
+impl MemberToolAudience for HideAroundOneCaller {
+    fn hides(
+        &self,
+        _mob_id: &MobId,
+        caller: Option<&AgentIdentity>,
+        _caller_labels: Option<&BTreeMap<String, String>>,
+        target: &AgentIdentity,
+        _target_labels: Option<&BTreeMap<String, String>>,
+    ) -> bool {
+        if target == &self.kept_from {
+            caller == Some(&self.caller)
+        } else if target == &self.kept_for {
+            caller != Some(&self.caller)
+        } else {
+            false
+        }
+    }
+}
+
+/// One operator call of the placed member `member-a`, served by the
+/// controlling side's executor as it serves the member's own request.
+async fn placed_member_operator_call(
+    seams: &crate::runtime::upcall_responder::MobUpcallSeams,
+    authority: &crate::store::MobMemberOperatorAuthorityRecord,
+    request_id: &str,
+    op: crate::runtime::bridge_protocol::MemberOperatorOp,
+) -> crate::runtime::member_upcall::UpcallToolOutcome {
+    use crate::runtime::upcall_responder::UpcallServeSeams;
+
+    let pending = crate::store::MobMemberOperatorRequestRecord::pending(
+        crate::store::MobMemberOperatorRequestKey::new(
+            "member-a",
+            0,
+            1,
+            "host-a",
+            1,
+            "member-session-a",
+            request_id,
+        ),
+        crate::store::member_operator_op_digest(&op).expect("digest the operation"),
+    );
+    UpcallServeSeams::execute(seams, &pending, authority, request_id, op)
+        .await
+        .expect("the placed member's operation executes")
+}
+
+/// A placed member's operator calls reach the host's member tool audience
+/// as that member, not as a call no member made: a member the audience
+/// hides from the placed member is not in its list and answers its
+/// `member_status` as a member the mob does not hold, and a member the
+/// audience keeps for the placed member alone is listed to it and checked
+/// by it.
+#[tokio::test]
+async fn a_placed_members_operator_calls_ask_the_audience_as_that_member() {
+    use crate::runtime::bridge_protocol::MemberOperatorOp;
+    use crate::runtime::member_upcall::UpcallToolOutcome;
+    use crate::runtime::upcall_responder::MobUpcallSeams;
+
+    let kept_from = AgentIdentity::from("placed-kept-from");
+    let kept_for = AgentIdentity::from("placed-kept-for");
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(
+        with_unique_mob_id(sample_definition(), "placed-member-audience"),
+        MobStorage::in_memory(),
+    )
+    .with_session_service(service)
+    .with_member_tool_audience(Arc::new(HideAroundOneCaller {
+        caller: AgentIdentity::from("member-a"),
+        kept_from: kept_from.clone(),
+        kept_for: kept_for.clone(),
+    }))
+    .create()
+    .await
+    .expect("create mob");
+    seed_operator_execution_residency(&handle, "member-session-a").await;
+    for member in [&kept_from, &kept_for] {
+        handle
+            .spawn(ProfileName::from("worker"), member.clone(), None)
+            .await
+            .expect("spawn a local member");
+    }
+    let metadata_store: Arc<dyn MobRuntimeMetadataStore> =
+        Arc::new(InMemoryMobRuntimeMetadataStore::new());
+    let seams = MobUpcallSeams::new(handle.clone(), metadata_store);
+    let authority = crate::store::MobMemberOperatorAuthorityRecord {
+        agent_identity: "member-a".to_string(),
+        generation: 0,
+        can_create_mobs: false,
+        can_mutate_profiles: false,
+        can_run_adaptive_packs: false,
+        managed_mob_scope: BTreeSet::from([handle.mob_id().as_str().to_string()]),
+        spawn_profile_scope: BTreeMap::new(),
+    };
+
+    let listed = match placed_member_operator_call(
+        &seams,
+        &authority,
+        "placed-audience-list",
+        MemberOperatorOp::ListMembers,
+    )
+    .await
+    {
+        UpcallToolOutcome::Ok { content, .. } => {
+            let payload: serde_json::Value = serde_json::from_str(&content).expect("list payload");
+            payload["members"]
+                .as_array()
+                .expect("members array")
+                .iter()
+                .map(|entry| entry["agent_identity"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        }
+        other => panic!("the placed member's list answers: {other:?}"),
+    };
+    assert!(
+        !listed.contains(&"placed-kept-from".to_owned()),
+        "a placed member is listed no member the audience hides from it: {listed:?}"
+    );
+    assert!(
+        listed.contains(&"placed-kept-for".to_owned()),
+        "a placed member is listed a member the audience keeps for it alone: {listed:?}"
+    );
+
+    match placed_member_operator_call(
+        &seams,
+        &authority,
+        "placed-audience-status-hidden",
+        MemberOperatorOp::MemberStatus {
+            member_id: "placed-kept-from".to_string(),
+        },
+    )
+    .await
+    {
+        UpcallToolOutcome::ToolError(error) => assert_eq!(
+            error.data.as_ref().map(|data| &data["kind"]),
+            Some(&serde_json::json!("member_not_found")),
+            "a member hidden from the placed member answers as one the mob does not hold: \
+             {error:?}"
+        ),
+        other => panic!(
+            "a member hidden from the placed member answers as one the mob does not hold: \
+             {other:?}"
+        ),
+    }
+    let own = placed_member_operator_call(
+        &seams,
+        &authority,
+        "placed-audience-status-own",
+        MemberOperatorOp::MemberStatus {
+            member_id: "placed-kept-for".to_string(),
+        },
+    )
+    .await;
+    assert!(
+        matches!(
+            own,
+            UpcallToolOutcome::Ok {
+                is_error: false,
+                ..
+            }
+        ),
+        "the placed member checks the member the audience keeps for it alone: {own:?}"
+    );
 }
 
 /// A force cancel reaches a fork child's run one of two typed ways. A run

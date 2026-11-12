@@ -5838,6 +5838,8 @@ impl MobActor {
                     let custody = rollback.custody.clone();
                     self.finish_spawn_rollback_attempt(&custody, None, Ok(()))
                         .await;
+                    // A rolled-back spawn ended a seat too.
+                    self.release_identity_reconcile_parks_for_ended_seat();
                 }
                 return;
             }
@@ -5845,6 +5847,17 @@ impl MobActor {
                 self.retirements
                     .insert(continuation.entry.agent_identity.clone(), continuation);
                 return;
+            }
+            // A member's seat ended, and with it whatever transport key it
+            // held: a declared member parked because another member holds its
+            // key is observed again. A respawn and a rotation keep the seat.
+            if result.is_ok()
+                && !matches!(
+                    continuation.reply,
+                    RetirementReply::Respawn { .. } | RetirementReply::Rotate { .. }
+                )
+            {
+                self.release_identity_reconcile_parks_for_ended_seat();
             }
             // An identity reconciliation that failed before its durable start
             // keeps its own failure handling: its disposition reads the stage

@@ -1110,6 +1110,14 @@ enum IdentityMemberActuationDisposition {
     ParkedTransportClosed {
         detail: String,
     },
+    /// The member was built and MobMachine refused its endpoint, because
+    /// another member holds its transport key. Every further build would be
+    /// refused the same way for as long as that member holds the key, and
+    /// each one takes the key's in-process route from it: the identity is
+    /// parked until its declaration changes or a member's seat ends.
+    ParkedEndpointKeyHeld {
+        detail: String,
+    },
 }
 
 /// Exact durable intent observation that owns one volatile scheduling
@@ -1355,6 +1363,10 @@ pub(super) struct IdentityReconcileBackoffState {
 #[derive(Debug, Clone)]
 pub(super) struct IdentityReconcileParkState {
     authority: IdentityReconcileAuthorityKey,
+    /// The park of a member refused for a transport key another member
+    /// holds: it also ends when a member's seat ends, since the key may be
+    /// free then. Every other park waits for its declaration alone.
+    released_when_a_seat_ends: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1875,6 +1887,24 @@ fn identity_member_actuation_disposition(
     }
 }
 
+/// The disposition of a reconciled member's settled spawn.
+/// `refused_for_held_key` is the note its refusal left when another member
+/// holds its transport key: such a failure parks the identity, where every
+/// other outcome keeps its own disposition.
+fn identity_member_spawn_disposition(
+    result: &Result<super::handle::MemberSpawnReceipt, MobError>,
+    refused_for_held_key: bool,
+) -> IdentityMemberActuationDisposition {
+    match result {
+        Err(error) if refused_for_held_key => {
+            IdentityMemberActuationDisposition::ParkedEndpointKeyHeld {
+                detail: error.to_string(),
+            }
+        }
+        _ => identity_member_actuation_disposition(result),
+    }
+}
+
 #[cfg(test)]
 mod deferred_member_custody_tests {
     use super::{DeferredMemberCustodyRegistry, identity_reconcile_backoff_delay};
@@ -2139,12 +2169,39 @@ mod identity_recovery_slice_tests {
         IDENTITY_RECONCILE_LEASE_EXPIRY_MARGIN, IDENTITY_RECONCILE_LEASE_RECHECK,
         IDENTITY_RECONCILE_LEASE_TTL_MS, IdentityMemberActuationDisposition,
         identity_actuation_error_disposition, identity_lease_wait_delay,
-        identity_member_actuation_disposition, identity_reconcile_backoff_delay,
-        identity_reconcile_failure_should_log,
+        identity_member_actuation_disposition, identity_member_spawn_disposition,
+        identity_reconcile_backoff_delay, identity_reconcile_failure_should_log,
         identity_reconciliation_slice_unsupported_obligation,
     };
     use crate::identity::IdentityReconcileDecision;
     use crate::{MobError, store::MobStoreError};
+
+    /// A reconciled member's failed spawn parks its identity only with the
+    /// note its refusal for a held transport key left: the same error
+    /// without the note backs off, and a typed disposition is never
+    /// replaced without it.
+    #[test]
+    fn a_reconciled_spawn_parks_for_a_held_key_only_with_the_refusals_note() {
+        let refused = Err::<super::super::handle::MemberSpawnReceipt, _>(MobError::WiringError(
+            "member 'carol' cannot join mob 'm'".to_string(),
+        ));
+        assert!(matches!(
+            identity_member_spawn_disposition(&refused, true),
+            IdentityMemberActuationDisposition::ParkedEndpointKeyHeld { ref detail }
+                if detail.contains("member 'carol' cannot join mob 'm'")
+        ));
+        assert!(matches!(
+            identity_member_spawn_disposition(&refused, false),
+            IdentityMemberActuationDisposition::Backoff { .. }
+        ));
+        let conflict = Err::<super::super::handle::MemberSpawnReceipt, _>(MobError::from(
+            MobStoreError::CasConflict("stale member observation".to_string()),
+        ));
+        assert!(matches!(
+            identity_member_spawn_disposition(&conflict, false),
+            IdentityMemberActuationDisposition::Conflict { .. }
+        ));
+    }
 
     #[test]
     fn divergent_wiring_remains_a_typed_unsupported_obligation() {
@@ -27592,6 +27649,9 @@ impl MobActor {
                     request.agent_identity.clone(),
                     request.expected_intent_revision,
                 );
+                // The declaration changed: a member parked for a held
+                // transport key is observed again under the new revision.
+                self.release_identity_reconcile_key_held_park(&request.agent_identity);
                 self.enqueue_identity_reconcile(request.agent_identity.clone());
                 (
                     Some(*desired_revision),
@@ -27784,6 +27844,7 @@ impl MobActor {
                     identity.clone(),
                     IdentityReconcileParkState {
                         authority: effective_authority.intent.clone(),
+                        released_when_a_seat_ends: false,
                     },
                 );
                 self.replace_identity_reconcile_status(
@@ -27863,6 +27924,7 @@ impl MobActor {
                     identity.clone(),
                     IdentityReconcileParkState {
                         authority: effective_authority.intent.clone(),
+                        released_when_a_seat_ends: false,
                     },
                 );
                 tracing::error!(
@@ -27877,6 +27939,39 @@ impl MobActor {
                     crate::identity::IdentityReconcileDecision::RepairBlocked,
                     Some(format!(
                         "parked: {detail}; the callback transport cannot recover in-process"
+                    )),
+                )
+                .await;
+                false
+            }
+            IdentityMemberActuationDisposition::ParkedEndpointKeyHeld { detail } => {
+                self.identity_reconcile_failures.write().await.insert(
+                    identity.clone(),
+                    IdentityReconcileFailureState {
+                        authority: effective_authority.intent.clone(),
+                        detail: detail.clone(),
+                    },
+                );
+                self.identity_reconcile_backoff.remove(identity);
+                self.identity_reconcile_parked.insert(
+                    identity.clone(),
+                    IdentityReconcileParkState {
+                        authority: effective_authority.intent.clone(),
+                        released_when_a_seat_ends: true,
+                    },
+                );
+                tracing::warn!(
+                    agent_identity = %identity,
+                    detail = %detail,
+                    "another member holds the member's comms key; parking identity reconciliation until its declaration changes or a member of the mob is retired"
+                );
+                self.replace_identity_reconcile_status(
+                    identity,
+                    intent_revision,
+                    lease_epoch,
+                    crate::identity::IdentityReconcileDecision::RepairBlocked,
+                    Some(format!(
+                        "parked: {detail}; '{identity}' is built again when its declaration changes or a member of the mob is retired"
                     )),
                 )
                 .await;
@@ -27913,6 +28008,38 @@ impl MobActor {
             .is_some_and(|state| &state.authority != current_authority);
         if stale_park {
             self.identity_reconcile_parked.remove(identity);
+        }
+    }
+
+    /// End the park of `identity`, if it is parked for a transport key
+    /// another member holds: its declaration changed, so the reconciler
+    /// observes it again. Any other park of it stays. Scheduling only: what
+    /// the next attempt is answered is MobMachine's.
+    fn release_identity_reconcile_key_held_park(&mut self, identity: &AgentIdentity) {
+        if self
+            .identity_reconcile_parked
+            .get(identity)
+            .is_some_and(|park| park.released_when_a_seat_ends)
+        {
+            self.identity_reconcile_parked.remove(identity);
+        }
+    }
+
+    /// A member's seat ended (it retired, or its spawn was rolled back): the
+    /// transport key a parked identity was refused for may be free. Every
+    /// identity parked for a held key is observed again by the next reconcile
+    /// pass; every other park stays. Scheduling only: whether such a member
+    /// is admitted now is MobMachine's answer to its next build.
+    pub(super) fn release_identity_reconcile_parks_for_ended_seat(&mut self) {
+        let released = self
+            .identity_reconcile_parked
+            .iter()
+            .filter(|(_, park)| park.released_when_a_seat_ends)
+            .map(|(identity, _)| identity.clone())
+            .collect::<Vec<_>>();
+        for identity in released {
+            self.identity_reconcile_parked.remove(&identity);
+            self.enqueue_identity_reconcile(identity);
         }
     }
 
@@ -42648,13 +42775,18 @@ impl MobActor {
             }
         };
 
-        // The endpoint is judged before the member's row is written: the
-        // membership step and the endpoint's registration are applied to a
-        // prepared authority that is then dropped, so MobMachine's own guards
-        // answer and nothing is committed. An endpoint MobMachine would
-        // refuse after the row (its transport key is another member's) is
-        // refused here instead, with the ladder's ordinary pre-commit unwind:
-        // no row, no membership, and the member's session rolled back.
+        // The endpoint is judged before the member's row is written, and held
+        // from the step that commits its membership: the membership step and
+        // the endpoint's registration are applied to one prepared authority,
+        // so MobMachine's own guards answer, and that authority is what the
+        // membership commit below commits. An endpoint MobMachine refuses
+        // (its transport key is another member's) is refused here, with the
+        // ladder's ordinary pre-commit unwind: no row, no membership, and the
+        // member's session rolled back. An endpoint it admits is the member's
+        // in MobMachine from the commit on, so a member admitted in the next
+        // actor turn is judged against it: two members of one key cannot
+        // both pass while the first one's activation is still running.
+        let mut prepared_membership_and_endpoint = None;
         if let Some(descriptor) = member_peer_endpoint.as_ref() {
             let peer_endpoint = mob_dsl::MemberPeerEndpoint::from(descriptor);
             let key_holder = super::builder::member_endpoint_key_holder(
@@ -42669,33 +42801,46 @@ impl MobActor {
                 fence_token: mob_dsl::FenceToken::from_domain(fence_token),
                 peer_endpoint,
             };
-            if let Err(error) = self.prepare_dsl_inputs(
+            match self.prepare_dsl_inputs(
                 &[commit_membership, register],
                 "finalize_spawn_admit_endpoint_admission",
             ) {
-                let error = match key_holder {
-                    Some(holder) => {
-                        MobError::WiringError(super::builder::member_endpoint_key_held_refusal(
-                            &self.definition.id,
-                            agent_identity,
-                            &holder,
-                            &descriptor.peer_id.to_string(),
-                        ))
+                Ok(prepared) => prepared_membership_and_endpoint = Some(prepared),
+                Err(error) => {
+                    let error = match key_holder {
+                        Some(holder) => {
+                            // The caller reads the refused member alone;
+                            // the key's holder and the peer id are named
+                            // in the log, once per refused member and
+                            // holder (a reconciled member's refusal parks
+                            // its reconcile: the spawn's settle reads the
+                            // note left here).
+                            self.note_member_endpoint_key_held(
+                                agent_identity,
+                                &holder,
+                                &descriptor.peer_id.to_string(),
+                            );
+                            self.note_spawn_refused_for_held_key(agent_identity);
+                            MobError::WiringError(super::builder::member_endpoint_key_held_refusal(
+                                &self.definition.id,
+                                agent_identity,
+                            ))
+                        }
+                        None => error,
+                    };
+                    let error = self.fold_spawn_exec_abort(
+                        &dsl_identity,
+                        agent_identity,
+                        error,
+                        "finalize_spawn_admit_endpoint_admission",
+                    );
+                    if let Err(rollback_error) = provision.rollback().await {
+                        return Err(MobError::Internal(format!(
+                            "spawn endpoint admission failed for '{agent_identity}': {error}; archive compensation failed: {rollback_error}"
+                        )));
                     }
-                    None => error,
-                };
-                let error = self.fold_spawn_exec_abort(
-                    &dsl_identity,
-                    agent_identity,
-                    error,
-                    "finalize_spawn_admit_endpoint_admission",
-                );
-                if let Err(rollback_error) = provision.rollback().await {
-                    return Err(MobError::Internal(format!(
-                        "spawn endpoint admission failed for '{agent_identity}': {error}; archive compensation failed: {rollback_error}"
-                    )));
+                    return Err(error);
                 }
-                return Err(error);
             }
         }
 
@@ -42882,7 +43027,22 @@ impl MobActor {
             agent_identity = %agent_identity,
             "MobActor::finalize_spawn_admit committing membership"
         );
-        if let Err(commit_error) = self.commit_prepared_dsl_transition(prepared_spawn) {
+        // A member with an endpoint commits the authority that judged it
+        // above: its membership and its endpoint, in one step. Its key's
+        // wake route is published by its activation, as before (see
+        // `hold_back_member_key_route`).
+        let committed = match prepared_membership_and_endpoint {
+            Some(prepared) => {
+                self.hold_back_member_key_route(&agent_runtime_id);
+                let committed = self.commit_prepared_dsl_input(prepared);
+                if committed.is_err() {
+                    self.release_member_key_route(&identity, &agent_runtime_id);
+                }
+                committed
+            }
+            None => self.commit_prepared_dsl_transition(prepared_spawn),
+        };
+        if let Err(commit_error) = committed {
             let commit_error = self.fold_spawn_exec_abort(
                 &dsl_identity,
                 agent_identity,

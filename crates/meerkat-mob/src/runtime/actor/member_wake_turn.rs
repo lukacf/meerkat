@@ -1062,7 +1062,8 @@ impl MobActor {
         {
             Ok(event) => self.roster.write().await.apply_event(&event),
             Err(recovered_error) => {
-                self.apply_dsl_signal(
+                let endpoint = mob_dsl::MemberPeerEndpoint::from(&spec);
+                let registered = self.apply_dsl_signal(
                     mob_dsl::MobMachineSignal::RecoverSpawnedMemberPeerEndpoint {
                         agent_identity: mob_dsl::AgentIdentity::from_domain(identity),
                         agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(
@@ -1070,16 +1071,37 @@ impl MobActor {
                         ),
                         fence_token: mob_dsl::FenceToken::from_domain(entry.fence_token),
                         generation: mob_dsl::Generation::from_domain(entry.generation),
-                        peer_endpoint: mob_dsl::MemberPeerEndpoint::from(&spec),
+                        peer_endpoint: endpoint.clone(),
                     },
                     "member_wake_register_spawned_member_peer_endpoint",
-                )
-                .map_err(|spawned_error| {
-                    MobError::Internal(format!(
-                        "the woken member '{identity}' could not register its endpoint: \
-                         {recovered_error}; on its spawned incarnation: {spawned_error}"
-                    ))
-                })?;
+                );
+                if let Err(spawned_error) = registered {
+                    // An endpoint whose transport key another member holds
+                    // is answered as that case (retire the member: a
+                    // respawn would load the same key), naming this member
+                    // alone; the holder is named in the log.
+                    let holder = super::super::builder::member_endpoint_key_holder(
+                        self.dsl_authority.state(),
+                        &mob_dsl::AgentIdentity::from_domain(identity),
+                        &endpoint,
+                    );
+                    return Err(match holder {
+                        Some(holder) => {
+                            self.note_member_endpoint_key_held(
+                                identity,
+                                &holder,
+                                &endpoint.peer_id.0,
+                            );
+                            MobError::WiringError(
+                                super::super::builder::member_endpoint_key_held_reason(identity),
+                            )
+                        }
+                        None => MobError::Internal(format!(
+                            "the woken member '{identity}' could not register its endpoint: \
+                             {recovered_error}; on its spawned incarnation: {spawned_error}"
+                        )),
+                    });
+                }
             }
         }
         self.publish_machine_state_projection();

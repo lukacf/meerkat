@@ -765,14 +765,16 @@ async fn commit_update(
     }
     let previous = current.additional_instructions.clone();
     let now = spec.additional_instructions.clone();
-    let preparation = core_commit::preparation_of(commit, spec.profile.as_str());
+    // An update asks no preparation: the host prepares an agent before its
+    // first use, and Core refuses an update that names a mode. The update of
+    // an agent that still awaits its preparation changes its record and
+    // leaves it waiting.
     let mut change = StoreOwnedIdentityUpdate::new(
         operation,
         requester,
         spec,
         update.expected_spec_digest.as_str(),
-    )
-    .with_preparation(preparation);
+    );
     change.peers_add = peers_add;
     change.peers_remove = peers_remove;
     let mut committed = match commit

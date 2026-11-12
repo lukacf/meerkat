@@ -46,10 +46,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `adopt` (release a configured agent from configuration: it keeps its
   member, session and history, and is changed at run time from then on),
   `withdraw` and `changes_hold`, and the reads `list`, `get`, `operation`,
-  `directory` and `plan`. An agent created this way is the same kind of
+  `directory` and `plan`; on the stdio gateway also `settle_preparation`,
+  the host operator's (below). An agent created this way is the same kind of
   agent as a configured one; who asked for it is recorded and grants or
-  limits nothing. A create seats its agents dormant and wakes nothing, and a
-  read never wakes an agent. See "Agent changes" in the RPC reference.
+  limits nothing. A create seats its agents dormant and wakes nothing (an
+  agent of a profile its host prepares waits for its host first, below), and
+  a read never wakes an agent. See "Agent changes" in the RPC reference.
 - Every launch whose mob has long-term agents serves the methods and lists
   them in `meta/capabilities`. Their changes need the launch's identity
   policy (`runtime_options.identity_creation`, which until now was checked
@@ -118,11 +120,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the agent: `done` once it is settled, and `done` with the agent `removed`
   once a host that gave up on it removed it with `meta/identity/remove`
   (the name is then retired like any removed name). An update asks no
-  preparation. The Console does not serve the method. Rust:
+  preparation, and an update that would move an agent into a prepared
+  profile is refused `unsupported` (`move_into_prepared_profile`, at
+  `set.profile`): create the agent in that profile. A reset of an agent
+  that waits is refused retryable before the host composes a build for it.
+  The method is the 14th of the family, for the host's operator only: the
+  Console does not list it and refuses it for every caller. Rust:
   `IdentityFamily::settle_preparation` (with a refusing default),
   `IdentityChangeExecutor::settle_preparation` (with a refusing default)
   and `identity_creation::{SettlePreparation, SettlePreparationCall,
-  PreparationSettle}`.
+  PreparationSettle, MOVE_INTO_PREPARED_PROFILE}`.
 - Console access actions `agent.identity.create`, `agent.identity.manage`
   (update, archive, unarchive and adopt, on the named agent) and
   `agent.identity.remove` (on the named agent). `GET /console/experience`

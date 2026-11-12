@@ -1423,7 +1423,11 @@ without one and send it its first input through the host's governed ingress.
 `set.labels` sets each key it names and keeps the agent's other labels;
 `set.labels_remove` removes keys. `set.instructions` and `set.context`
 replace theirs whole. `set.profile` moves the agent to that profile's
-model, tools and skills on the same conversation.
+model, tools and skills on the same conversation. A move into a profile
+whose agents the host prepares is refused `unsupported`
+(`feature: "move_into_prepared_profile"`): the agent would run there
+unprepared, so create it in that profile instead (see
+[Identity policy](/reference/identity-policy#preparation)).
 
 An update can touch several change classes of the policy at once; each is
 judged by its own rules and the strictest outcome applies to the whole
@@ -1501,6 +1505,10 @@ The entry of an agent whose create answered `pending_preparation` says what
 became of the agent since: `pending_preparation` while it waits for its
 host, `committed` (and the outcome `done`) once its preparation was settled,
 and `removed` once it was removed. The create asked again answers the same.
+`removed` on a create's operation is the end of a create that never
+completed. The operation of a create whose agent was seated reads the
+create as it committed (`committed`, with its spec digest) whatever became
+of the agent later, its removal included.
 
 ### `meta/identity/withdraw` and `meta/identity/changes_hold`
 
@@ -1542,11 +1550,18 @@ settle `meta/identity/operation` of the agent's create reads `done` too,
 with the agent `committed`.
 
 Only the host's operator calls it (the SDK host on the stdio gateway): any
-other caller is refused `change_denied`. An agent that waits for no
+other caller is refused `change_denied`. The settle is no change class of
+its own, so that refusal, and the one of a launch without a policy, carries
+`change: "create"`: it completes a create. An agent that waits for no
 preparation (it is seated, archived or was settled before, or its host
 configures it) is refused `preparation_not_pending`, and a name no agent
-holds `identity_unknown`. A `request_id` another change used is
-`operation_reused`.
+holds `identity_unknown`. A configured agent its host declared with a
+preparation is settled by its host's next declaration, not by this method:
+`owner_read_only`. A `request_id` another change used, or a held change
+uses, is `operation_reused`.
+
+The settle names the agent and nothing else: the agent is seated as its
+record reads at the settle, an update made while it waited included.
 
 A host that gives up on an agent it cannot prepare removes it with
 `meta/identity/remove`: the agent is gone, the operation of its create reads

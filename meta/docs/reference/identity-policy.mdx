@@ -107,7 +107,9 @@ profile waits for its host:
 - The host prepares what the agent needs and calls
   [`meta/identity/settle_preparation`](/api/rpc#metaidentitysettle_preparation)
   with the agent's `name`. The agent is seated dormant, and its first
-  message, if it has one, runs once.
+  message, if it has one, runs once. The settle names the agent, not a
+  version of it: the agent is seated as its record reads at the settle, so
+  an update made while it waited is part of what is seated.
 - A restart changes nothing of this: a waiting agent waits in the next
   process, and its settle seats it there.
 
@@ -118,9 +120,16 @@ retired like any removed name.
 
 Only the host's operator settles a preparation (the SDK host on the stdio
 gateway): the host is what prepares, so nobody else says an agent is
-prepared. The preparation applies to an agent's first use only: an update
-and an unarchive ask for none, and neither does a move to a profile the
-policy prepares.
+prepared. The preparation is of an agent's first use: an update and an
+unarchive ask for none.
+
+For the same reason an agent is not moved **into** a profile the policy
+prepares. Such an update is refused `unsupported`
+(`feature: "move_into_prepared_profile"`, at `set.profile`) and changes
+nothing: the agent ran on another profile already and would run on this one
+without ever having been prepared. Create the agent in that profile instead.
+A move out of a prepared profile is an update like any other, and an agent
+that still waits keeps waiting after it.
 
 ## Approval rules
 

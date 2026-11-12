@@ -4292,11 +4292,12 @@ async fn a_shutdown_with_a_kickoff_notice_pending_answers_without_waiting_for_it
 }
 
 /// The kickoff notices of one member that are pending for one peer are
-/// bounded. With the bound at one, the first notice owed to a waking peer is
-/// pending on the peer's wake; the started notice, owed while that one is
-/// pending, is refused on the actor's own step and recorded as not
-/// delivered, and nothing waits behind it. The pending notice is delivered
-/// once the peer is woken.
+/// bounded, and the notice being sent is never the one dropped. With the
+/// bound at one, the first notice owed to a waking peer is being sent
+/// (pending on the peer's wake); the started notice, owed meanwhile, has no
+/// queued notice to replace, so it is the one dropped, on the actor's own
+/// step, and recorded as not delivered; nothing waits behind it. The notice
+/// being sent is delivered once the peer is woken.
 ///
 /// A current-thread runtime, so the actor's warning reaches this thread's
 /// capture.

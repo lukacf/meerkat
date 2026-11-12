@@ -6391,10 +6391,11 @@ pub(super) struct PeerDeliveryInflight {
     to: AgentIdentity,
     cancel_token: tokio_util::sync::CancellationToken,
     settled: tokio::sync::watch::Receiver<bool>,
-    /// The delivery is a kickoff lifecycle notice (see
-    /// [`kickoff_notice`]): the next notice of `from` to `to` waits for it
-    /// to settle.
-    kickoff_notice: bool,
+    /// The delivery sends the kickoff lifecycle notices of `from` to `to`
+    /// (see [`kickoff_notice`]): the queue it sends from, which takes the
+    /// next notice of that pair while the delivery runs. `None` for a peer
+    /// message.
+    kickoff_notices: Option<Arc<kickoff_notice::KickoffNoticeQueue>>,
     /// Tokio task identity captured from the `AbortHandle` returned by
     /// `JoinSet::spawn`. A panicked task returns no `PeerDeliveryCompletion`,
     /// so this is the only exact bridge back to the logical delivery id.
@@ -17604,7 +17605,7 @@ impl MobActor {
                 to,
                 cancel_token,
                 settled,
-                kickoff_notice: false,
+                kickoff_notices: None,
                 #[cfg(not(target_arch = "wasm32"))]
                 task_id: abort_handle.id(),
             },

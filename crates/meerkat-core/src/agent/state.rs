@@ -35263,6 +35263,526 @@ mod tests {
         );
     }
 
+    /// The session's reasoning effort level across a model fallback.
+    #[cfg(feature = "workspace-tests")]
+    mod reasoning_effort_across_a_fallback {
+        use super::*;
+
+        type LeveledParams = crate::lifecycle::run_primitive::ProviderParamsOverride;
+
+        /// A fallback-capable client of a session that holds a reasoning effort
+        /// level. Both candidates carry the level in their identity and their
+        /// request policy, as a fallback chain is built for such a session. The
+        /// client answers `reasoning_route()` for its active candidate, records
+        /// every pressure probe and every request with the params it is handed
+        /// and, like a provider adapter, refuses a probe that still carries the
+        /// unresolved level.
+        struct LeveledFallbackClient {
+            registry: Arc<crate::ModelRegistry>,
+            active: std::sync::atomic::AtomicUsize,
+            level: crate::model_profile::capabilities::EffortLevel,
+            primary_route: crate::ReasoningRouteObservation,
+            backup_route: Mutex<crate::ReasoningRouteObservation>,
+            /// Fail the backup's next request recoverably and move the backup
+            /// onto this route at that moment.
+            backup_failure_then_route: Mutex<Option<crate::ReasoningRouteObservation>>,
+            probed: Mutex<Vec<Option<LeveledParams>>>,
+            served: Mutex<Vec<(&'static str, Option<LeveledParams>)>>,
+        }
+
+        /// The route of an account whose model list states `levels`, on `api`.
+        fn leveled_account_route(
+            api: crate::ModelApi,
+            levels: &[crate::model_profile::capabilities::EffortLevel],
+        ) -> crate::ReasoningRouteObservation {
+            crate::ReasoningRouteObservation {
+                backend: crate::ReasoningBackend::OpenAi(
+                    crate::provider_matrix::OpenAiBackendKind::Copilot,
+                ),
+                api,
+                account: crate::AccountLevelStatement::Stated(levels.to_vec()),
+                operator_levels: None,
+            }
+        }
+
+        impl LeveledFallbackClient {
+            /// A session at `high`: the primary on an account's Chat Completions
+            /// route, the backup on an account's Responses route, both stating
+            /// the level. Neither is the direct route of the provider.
+            fn new() -> Self {
+                use crate::model_profile::capabilities::EffortLevel;
+                Self {
+                    registry: fallback_activation_test_registry(),
+                    active: std::sync::atomic::AtomicUsize::new(0),
+                    level: EffortLevel::High,
+                    primary_route: leveled_account_route(
+                        crate::ModelApi::ChatCompletions,
+                        &[EffortLevel::High],
+                    ),
+                    backup_route: Mutex::new(leveled_account_route(
+                        crate::ModelApi::Responses,
+                        &[EffortLevel::Low, EffortLevel::High],
+                    )),
+                    backup_failure_then_route: Mutex::new(None),
+                    probed: Mutex::new(Vec::new()),
+                    served: Mutex::new(Vec::new()),
+                }
+            }
+
+            fn on_backup(&self) -> bool {
+                self.active.load(std::sync::atomic::Ordering::SeqCst) != 0
+            }
+
+            fn active_model(&self) -> &'static str {
+                if self.on_backup() {
+                    "backup"
+                } else {
+                    "primary"
+                }
+            }
+
+            fn level_only(&self) -> LeveledParams {
+                LeveledParams {
+                    reasoning_effort: Some(self.level),
+                    ..Default::default()
+                }
+            }
+
+            fn identity(&self, model: &str) -> crate::SessionLlmIdentity {
+                crate::SessionLlmIdentity {
+                    model: model.to_string(),
+                    provider: crate::Provider::OpenAI,
+                    self_hosted_server_id: None,
+                    provider_params: Some(self.level_only()),
+                    auth_binding: None,
+                }
+            }
+
+            fn backup_route(&self) -> crate::ReasoningRouteObservation {
+                self.backup_route.lock().unwrap().clone()
+            }
+
+            fn probed(&self) -> Vec<Option<LeveledParams>> {
+                self.probed.lock().unwrap().clone()
+            }
+
+            fn served(&self) -> Vec<(&'static str, Option<LeveledParams>)> {
+                self.served.lock().unwrap().clone()
+            }
+        }
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl AgentLlmClient for LeveledFallbackClient {
+            fn reasoning_route(&self) -> Option<crate::ReasoningRouteObservation> {
+                Some(if self.on_backup() {
+                    self.backup_route()
+                } else {
+                    self.primary_route.clone()
+                })
+            }
+
+            fn request_pressure(
+                &self,
+                _messages: &[Message],
+                _tools: &[Arc<ToolDef>],
+                _max_tokens: u32,
+                _temperature: Option<f32>,
+                params: Option<&LeveledParams>,
+            ) -> Result<Option<crate::ProviderRequestPressure>, AgentError> {
+                self.probed.lock().unwrap().push(params.cloned());
+                if params.is_some_and(|params| params.reasoning_effort.is_some()) {
+                    return Err(AgentError::InternalError(
+                        "reasoning_effort reached the provider adapter unresolved".to_string(),
+                    ));
+                }
+                Ok(Some(crate::ProviderRequestPressure::new(0, None)))
+            }
+
+            async fn stream_response(
+                &self,
+                _messages: &[Message],
+                _tools: &[Arc<ToolDef>],
+                _max_tokens: u32,
+                _temperature: Option<f32>,
+                provider_params: Option<&LeveledParams>,
+            ) -> Result<crate::LlmStreamResult, AgentError> {
+                self.served
+                    .lock()
+                    .unwrap()
+                    .push((self.active_model(), provider_params.cloned()));
+                let overloaded = || {
+                    AgentError::llm(
+                        "mock",
+                        LlmFailureReason::ProviderError(LlmProviderError::retryable(
+                            LlmProviderErrorKind::ServerOverloaded,
+                            serde_json::json!({"message": "busy"}),
+                        )),
+                        "mock overloaded",
+                    )
+                };
+                if !self.on_backup() {
+                    return Err(overloaded());
+                }
+                if let Some(next_route) = self.backup_failure_then_route.lock().unwrap().take() {
+                    *self.backup_route.lock().unwrap() = next_route;
+                    return Err(overloaded());
+                }
+                Ok(crate::LlmStreamResult::new(
+                    vec![AssistantBlock::Text {
+                        text: "ok after fallback".to_string(),
+                        meta: None,
+                    }],
+                    StopReason::EndTurn,
+                    normalized_test_usage(self, Usage::default()),
+                ))
+            }
+
+            fn provider(&self) -> crate::provider::Provider {
+                crate::provider::Provider::OpenAI
+            }
+
+            fn model(&self) -> &'static str {
+                self.active_model()
+            }
+
+            fn prepare_model_fallback(
+                &self,
+                _failure: &AgentError,
+                _request: &crate::model_fallback::ModelFallbackRequest<'_>,
+            ) -> Result<crate::AgentLlmFallbackSwitch, Vec<crate::AgentLlmFallbackSkippedTarget>>
+            {
+                if self.on_backup() {
+                    return Err(Vec::new());
+                }
+                Ok(crate::AgentLlmFallbackSwitch {
+                    policy: crate::config::ModelFallbackPolicy {
+                        cross_provider: true,
+                        require_tool_parity: false,
+                        min_context_headroom: 0.0,
+                        ..Default::default()
+                    },
+                    previous_identity: self.identity("primary"),
+                    new_identity: self.identity("backup"),
+                    target_profile: self
+                        .registry
+                        .profile_witness_for_provider(crate::Provider::OpenAI, "backup")
+                        .expect("registered backup profile"),
+                    // The switch carries the neutral level and nothing resolved.
+                    request_policy: crate::SessionLlmRequestPolicy {
+                        model: "backup".to_string(),
+                        credential_identity: None,
+                        provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
+                        operator_instruction_lowering:
+                            crate::InstructionLowering::LeadingPrefixOnly,
+                        provider_params: Some(self.level_only()),
+                        provider_tool_defaults: None,
+                    },
+                    skipped_targets: Vec::new(),
+                })
+            }
+
+            fn commit_model_fallback(
+                &self,
+                previous_identity: &crate::SessionLlmIdentity,
+                target_identity: &crate::SessionLlmIdentity,
+            ) -> Result<(), AgentError> {
+                if self.identity(self.model()) != *previous_identity {
+                    return Err(AgentError::ConfigError(
+                        "fallback test client previous identity mismatch".to_string(),
+                    ));
+                }
+                self.active.store(
+                    usize::from(target_identity.model == "backup"),
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+                Ok(())
+            }
+
+            fn active_model_fallback_identity(&self) -> Option<crate::SessionLlmIdentity> {
+                Some(self.identity(self.model()))
+            }
+        }
+
+        /// An agent of a session at the client's level on `primary`, with the
+        /// sticky fallback authorities of the rows above.
+        async fn leveled_fallback_agent(
+            client: &Arc<LeveledFallbackClient>,
+        ) -> crate::agent::Agent<LeveledFallbackClient, FullToolDispatcher, NoopStore> {
+            use crate::retry::RetryPolicy;
+
+            let mut session = explicit_hot_swap_session("primary");
+            let mut metadata = session
+                .session_metadata()
+                .expect("the session carries metadata");
+            metadata.provider_params = Some(client.level_only());
+            session
+                .set_session_metadata(metadata)
+                .expect("leveled test metadata should serialize");
+            let visibility_owner: Arc<dyn crate::ToolVisibilityOwner> =
+                Arc::new(RecordingFallbackVisibilityOwner::default());
+            let generated_visibility_owner =
+                crate::tool_scope::generated_test_tool_visibility_owner_from(Arc::clone(
+                    &visibility_owner,
+                ));
+            with_test_turn_state_handle_for_session(
+                AgentBuilder::new().provider_params(client.level_only()),
+                session,
+            )
+            .with_effective_model_registry(Arc::clone(&client.registry))
+            .max_tokens_per_turn(777)
+            .with_tool_visibility_owner(generated_visibility_owner)
+            .with_model_routing_handle(Arc::new(RecordingModelRoutingHandle::new(visibility_owner)))
+            .with_sticky_model_fallback_commit_coordinator(Arc::new(
+                RecordingStickyFallbackCoordinator::default(),
+            ))
+            .retry_policy(RetryPolicy {
+                max_retries: 1,
+                initial_delay: Duration::ZERO,
+                max_delay: Duration::ZERO,
+                multiplier: 1.0,
+                call_timeout: None,
+                stream_inactivity_timeout: None,
+            })
+            .build_standalone(
+                Arc::clone(client),
+                Arc::new(FullToolDispatcher::new(&["shell"])),
+                Arc::new(NoopStore),
+            )
+            .await
+        }
+
+        /// One run with its events drained.
+        async fn run_leveled(
+            agent: &mut crate::agent::Agent<LeveledFallbackClient, FullToolDispatcher, NoopStore>,
+            prompt: &str,
+        ) -> (
+            Result<crate::types::RunResult, AgentError>,
+            Vec<crate::AgentEvent>,
+        ) {
+            let (tx, mut rx) = mpsc::channel::<crate::AgentEvent>(1024);
+            let result = agent.run_with_events(prompt.to_string().into(), tx).await;
+            let mut events = Vec::new();
+            while let Ok(event) = rx.try_recv() {
+                events.push(event);
+            }
+            (result, events)
+        }
+
+        /// The per-request reports of a run, in order: fallback attempt, model
+        /// and reported route.
+        fn leveled_request_reports(
+            events: &[crate::AgentEvent],
+        ) -> Vec<(Option<u32>, String, crate::ReasoningRoute)> {
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    crate::AgentEvent::RequestReasoningEffortResolved {
+                        fallback_attempt,
+                        resolution,
+                        ..
+                    } => Some((
+                        *fallback_attempt,
+                        resolution.model.clone(),
+                        resolution.route.clone(),
+                    )),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// `params` carries `level` as the OpenAI family's own field, resolved,
+        /// and no neutral level.
+        fn assert_leveled_resolved(
+            params: Option<&LeveledParams>,
+            level: crate::lifecycle::run_primitive::ReasoningEffort,
+            what: &str,
+        ) {
+            let params = params.unwrap_or_else(|| panic!("{what}: carries params"));
+            assert_eq!(
+                params.reasoning_effort, None,
+                "{what}: the unresolved level never reaches the client"
+            );
+            let Some(crate::lifecycle::run_primitive::ProviderTag::OpenAi(tag)) =
+                params.provider_tag.as_ref()
+            else {
+                panic!("{what}: carries the route's typed field: {params:?}");
+            };
+            assert_eq!(tag.reasoning_effort, Some(level), "{what}");
+            assert!(tag.reasoning_effort_resolved, "{what}");
+        }
+
+        /// A fallback attempt of a session that holds a level reports its own
+        /// resolution: the origin's request is reported without a fallback
+        /// attempt on the origin's route, the attempt's request with its attempt
+        /// number on the route the TARGET's client observes (an account route
+        /// here, not the direct route of the provider), and the run result lists
+        /// the two as separate rows. Every probe and every request the target's
+        /// client is handed carries the level resolved for the target's route:
+        /// the resume admission of a session on a fallback target probes with
+        /// the resolved copy, on the attempt itself and on the next turn.
+        #[tokio::test]
+        async fn a_fallback_attempt_reports_its_own_resolution() {
+            use crate::lifecycle::run_primitive::ReasoningEffort;
+            use crate::model_profile::capabilities::EffortLevel;
+
+            let client = Arc::new(LeveledFallbackClient::new());
+            let primary_route = client.primary_route.route();
+            let backup_observation = client.backup_route();
+            let backup_route = backup_observation.route();
+            assert_ne!(
+                Some(backup_route.clone()),
+                crate::direct_route_observation(crate::Provider::OpenAI)
+                    .map(|direct| direct.route()),
+                "the target is not on the direct route of its provider"
+            );
+            let mut agent = leveled_fallback_agent(&client).await;
+
+            let (result, events) = run_leveled(&mut agent, "trigger fallback").await;
+            let result = result.expect("the fallback attempt runs at the session's level");
+            assert_eq!(result.text, "ok after fallback");
+            assert_eq!(
+                leveled_request_reports(&events),
+                vec![
+                    (None, "primary".to_string(), primary_route.clone()),
+                    (Some(1), "backup".to_string(), backup_route.clone()),
+                ],
+                "one report per request: the origin's, then the fallback attempt's own"
+            );
+            let report = result
+                .reasoning_effort
+                .expect("the run reports what it sent");
+            assert_eq!(report.requested, EffortLevel::High);
+            assert_eq!(
+                report
+                    .sent
+                    .iter()
+                    .map(|row| (
+                        row.model.as_str(),
+                        row.route.clone(),
+                        row.level,
+                        row.requests
+                    ))
+                    .collect::<Vec<_>>(),
+                vec![
+                    ("primary", primary_route, EffortLevel::High, 1),
+                    ("backup", backup_route.clone(), EffortLevel::High, 1),
+                ],
+                "the origin and the target are separate rows"
+            );
+            let served = client.served();
+            assert_eq!(
+                served.iter().map(|(model, _)| *model).collect::<Vec<_>>(),
+                vec!["primary", "backup"]
+            );
+            assert_leveled_resolved(served[1].1.as_ref(), ReasoningEffort::High, "the attempt");
+            assert_eq!(
+                served[1]
+                    .1
+                    .as_ref()
+                    .and_then(|params| params.reasoning_route_witness.as_ref()),
+                Some(&backup_observation),
+                "the attempt is resolved for the route the target's client observes"
+            );
+            let identity = agent
+                .session()
+                .session_metadata()
+                .expect("session metadata")
+                .llm_identity();
+            assert_eq!(
+                identity,
+                client.identity("backup"),
+                "the committed identity is the target with the neutral level"
+            );
+
+            // The next turn runs on the sticky target at the same level.
+            let (second, events) = run_leveled(&mut agent, "sticky fallback").await;
+            let second = second.expect("a later turn on the fallback target keeps the level");
+            assert_eq!(
+                leveled_request_reports(&events),
+                vec![(None, "backup".to_string(), backup_route)],
+                "a later turn is no fallback attempt"
+            );
+            assert_eq!(
+                second
+                    .reasoning_effort
+                    .expect("the later run reports what it sent")
+                    .sent
+                    .len(),
+                1
+            );
+            let served = client.served();
+            assert_eq!(served.len(), 3);
+            assert_leveled_resolved(
+                served[2].1.as_ref(),
+                ReasoningEffort::High,
+                "the later turn",
+            );
+
+            let probed = client.probed();
+            assert!(
+                !probed.is_empty(),
+                "the fallback target is probed before its requests"
+            );
+            for probe in &probed {
+                assert_leveled_resolved(probe.as_ref(), ReasoningEffort::High, "a probe");
+            }
+        }
+
+        /// A route that stops taking the level while the session is on its
+        /// fallback target: the retry's resume admission still probes (with a
+        /// copy that carries no level at all), and the request's own preparation
+        /// refuses with the typed refusal. The admission turns the refusal into
+        /// no other error.
+        #[tokio::test]
+        async fn a_level_refused_on_the_fallback_target_stays_the_typed_refusal() {
+            use crate::model_profile::capabilities::EffortLevel;
+
+            let client = Arc::new(LeveledFallbackClient::new());
+            let mut agent = leveled_fallback_agent(&client).await;
+            let (result, _) = run_leveled(&mut agent, "trigger fallback").await;
+            result.expect("the fallback attempt runs at the session's level");
+            let probes_before = client.probed().len();
+
+            // The target's next request fails recoverably, and from then on its
+            // account states only `low`.
+            *client.backup_failure_then_route.lock().unwrap() = Some(leveled_account_route(
+                crate::ModelApi::Responses,
+                &[EffortLevel::Low],
+            ));
+            let (result, _) = run_leveled(&mut agent, "the route changes").await;
+            let error = result.expect_err("the route no longer takes the level");
+            let AgentError::ReasoningEffortRefused(refusal) = &error else {
+                panic!("expected the typed reasoning effort refusal, got {error:?}");
+            };
+            assert_eq!(refusal.requested, EffortLevel::High);
+            assert_eq!(
+                refusal.reason,
+                crate::ReasoningEffortRefusalReason::UnsupportedLevel
+            );
+            assert_eq!(refusal.model, "backup");
+
+            let probed = client.probed();
+            let last = probed
+                .last()
+                .expect("the retry's resume admission probed")
+                .as_ref()
+                .expect("the probe carries params");
+            assert!(
+                probed.len() > probes_before,
+                "the retry's resume admission probed the target"
+            );
+            assert_eq!(
+                last.reasoning_effort, None,
+                "a refused level is dropped from the probe, never handed on unresolved"
+            );
+            assert!(
+                last.provider_tag.is_none(),
+                "and nothing is written in its place: {last:?}"
+            );
+        }
+    }
+
     fn assert_sticky_fallback_was_skipped_cleanly(
         session: &crate::Session,
         client: &FallbackSkipProbeClient,

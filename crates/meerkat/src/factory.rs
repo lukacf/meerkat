@@ -17938,6 +17938,10 @@ mod tests {
     const FALLBACK_REALM_RELOAD: &str = "fallback_reload";
     const FALLBACK_REALM_HEAD_CANONICAL: &str = "fallback_head_canonical";
     const FALLBACK_REALM_SETTLED_ACTOR: &str = "fallback_settled_actor";
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    const FALLBACK_REALM_LEVEL_KEPT: &str = "fallback_level_kept";
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    const FALLBACK_REALM_LEVEL_SKIPPED: &str = "fallback_level_skipped";
 
     fn inline_realm_section(entries: &[(&str, &str)]) -> RealmConfigSection {
         RealmConfigSection::from_inline_api_keys(entries)
@@ -19132,6 +19136,568 @@ mod tests {
             &backup_binding,
             &external_filter,
             ORIGINAL_PROMPT,
+        );
+    }
+
+    // ---- a session's reasoning effort level across a sticky fallback ----
+
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    type RecordedProviderTags =
+        Arc<std::sync::Mutex<Vec<Option<meerkat_core::lifecycle::run_primitive::ProviderTag>>>>;
+
+    /// A scripted provider client that reports the route it serves and
+    /// records the provider tag of every request it is asked to stream.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    struct LeveledStickyFallbackClient {
+        provider: Provider,
+        route: meerkat_core::ReasoningRouteObservation,
+        fail_recoverably: bool,
+        requests: RecordedProviderTags,
+    }
+
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    #[async_trait]
+    impl LlmClient for LeveledStickyFallbackClient {
+        fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+            Some(self.route.clone())
+        }
+
+        fn request_pressure(
+            &self,
+            _request: &meerkat_client::LlmRequest,
+        ) -> Result<Option<meerkat_core::ProviderRequestPressure>, meerkat_client::LlmError>
+        {
+            Ok(Some(meerkat_core::ProviderRequestPressure::new(0, None)))
+        }
+
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a meerkat_client::LlmRequest,
+        ) -> std::pin::Pin<
+            Box<
+                dyn futures::Stream<
+                        Item = Result<meerkat_client::LlmEvent, meerkat_client::LlmError>,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            self.requests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(request.provider_params.clone());
+            if self.fail_recoverably {
+                Box::pin(futures::stream::iter(vec![Err(
+                    meerkat_client::LlmError::ServerOverloaded,
+                )]))
+            } else {
+                Box::pin(futures::stream::iter(vec![
+                    Ok(meerkat_client::LlmEvent::TextDelta {
+                        delta: "backup success".to_string(),
+                        meta: None,
+                    }),
+                    Ok(meerkat_client::LlmEvent::UsageUpdate {
+                        usage: meerkat_core::TurnUsage::host_declared(
+                            self.provider,
+                            &request.model,
+                            meerkat_core::Usage::default(),
+                        ),
+                    }),
+                    Ok(meerkat_client::LlmEvent::Done {
+                        outcome: meerkat_client::LlmDoneOutcome::success(
+                            meerkat_core::StopReason::EndTurn,
+                        ),
+                    }),
+                ]))
+            }
+        }
+
+        fn provider(&self) -> Provider {
+            self.provider
+        }
+
+        async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
+            Ok(())
+        }
+    }
+
+    /// The factory of the sticky fallback rows with route-reporting clients:
+    /// an Anthropic primary on the provider's direct route that always fails
+    /// recoverably, and an OpenAI backup on an account's route whose model
+    /// list states `backup_levels`.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    fn leveled_sticky_fallback_factory(
+        store_path: PathBuf,
+        backup_levels: &[meerkat_core::model_profile::capabilities::EffortLevel],
+        primary_requests: RecordedProviderTags,
+        backup_requests: RecordedProviderTags,
+    ) -> AgentFactory {
+        let primary_client: Arc<dyn LlmClient> = Arc::new(LeveledStickyFallbackClient {
+            provider: Provider::Anthropic,
+            route: meerkat_core::direct_route_observation(Provider::Anthropic)
+                .expect("the Anthropic family has a direct route"),
+            fail_recoverably: true,
+            requests: primary_requests,
+        });
+        let backup_client: Arc<dyn LlmClient> = Arc::new(LeveledStickyFallbackClient {
+            provider: Provider::OpenAI,
+            route: meerkat_core::ReasoningRouteObservation {
+                backend: meerkat_core::ReasoningBackend::OpenAi(
+                    meerkat_core::provider_matrix::OpenAiBackendKind::Copilot,
+                ),
+                api: meerkat_core::ModelApi::Responses,
+                account: meerkat_core::AccountLevelStatement::Stated(backup_levels.to_vec()),
+                operator_levels: None,
+            },
+            fail_recoverably: false,
+            requests: backup_requests,
+        });
+        let mut factory = AgentFactory::new(store_path)
+            .without_provider_auth_persistence()
+            .builtins(false);
+        factory.provider_registry = Arc::new(
+            meerkat_llm_core::provider_runtime::ProviderRuntimeRegistry::empty()
+                .with_runtime(Arc::new(ScriptedStickyFallbackProviderRuntime {
+                    provider: Provider::Anthropic,
+                    client: primary_client,
+                }))
+                .with_runtime(Arc::new(ScriptedStickyFallbackProviderRuntime {
+                    provider: Provider::OpenAI,
+                    client: backup_client,
+                })),
+        );
+        factory
+    }
+
+    /// One prompt through the runtime, with its completion.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    async fn run_sticky_fallback_prompt(
+        adapter: &Arc<meerkat_runtime::MeerkatMachine>,
+        session_id: &meerkat_core::SessionId,
+        prompt: &str,
+    ) -> meerkat_runtime::completion::CompletionOutcome {
+        let (_accept, completion) = adapter
+            .accept_input_with_completion(
+                session_id,
+                meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(prompt, None)),
+            )
+            .await
+            .expect("accept the runtime prompt");
+        let completion = completion.expect("the prompt provides a completion handle");
+        tokio::time::timeout(std::time::Duration::from_secs(10), completion.wait())
+            .await
+            .expect("the prompt completes before the timeout")
+            .expect("the completion waiter resolves")
+    }
+
+    /// The effort an OpenAI-family request carries in its own field.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    fn openai_request_effort(
+        tag: Option<&meerkat_core::lifecycle::run_primitive::ProviderTag>,
+    ) -> Option<meerkat_core::lifecycle::run_primitive::ReasoningEffort> {
+        match tag {
+            Some(meerkat_core::lifecycle::run_primitive::ProviderTag::OpenAi(tag)) => {
+                tag.reasoning_effort
+            }
+            _ => None,
+        }
+    }
+
+    /// A session at a reasoning effort level that falls back keeps the level
+    /// on the fallback target: the fallback attempt's request carries the
+    /// target route's own effort field and the run reports the origin and
+    /// the target as two rows; the stored identity is the target with the
+    /// level and nothing else; a later turn on the target carries the field
+    /// too; and after a cold restart the session is rebuilt on the target
+    /// with the level and its next turn carries the field.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn a_sticky_fallback_keeps_the_level_through_later_turns_recovery_and_resume() {
+        use meerkat_core::lifecycle::run_primitive::{ProviderParamsOverride, ReasoningEffort};
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+        use meerkat_runtime::completion::CompletionOutcome;
+
+        const PRIMARY_MODEL: &str = "claude-sonnet-4-6";
+        const BACKUP_MODEL: &str = "custom-text-only-backup";
+        const EXTERNAL_TOOL: &str = "known_external_tool";
+
+        let level_only = ProviderParamsOverride {
+            reasoning_effort: Some(EffortLevel::High),
+            ..Default::default()
+        };
+        let backup_binding = configured_auth_binding(FALLBACK_REALM_LEVEL_KEPT, "default_openai");
+        let config = sticky_fallback_test_config(
+            FALLBACK_REALM_LEVEL_KEPT,
+            BACKUP_MODEL,
+            backup_binding.clone(),
+        );
+        let temp = tempfile::tempdir().expect("leveled fallback tempdir");
+        let sqlite_store = Arc::new(
+            meerkat_store::SqliteSessionStore::open(temp.path().join("sessions.sqlite3"))
+                .expect("open sqlite session store"),
+        );
+        let runtime_store = Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let blob_store = Arc::new(meerkat_store::MemoryBlobStore::new());
+        let recorded = |requests: &RecordedProviderTags| {
+            requests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        };
+        let session_id;
+
+        {
+            let primary_requests = RecordedProviderTags::default();
+            let backup_requests = RecordedProviderTags::default();
+            let factory = leveled_sticky_fallback_factory(
+                temp.path().join("first-factory-sessions"),
+                &[EffortLevel::Low, EffortLevel::High],
+                Arc::clone(&primary_requests),
+                Arc::clone(&backup_requests),
+            );
+            let builder = crate::FactoryAgentBuilder::new(factory, config.clone());
+            let persistence = crate::PersistenceBundle::new(
+                Arc::clone(&sqlite_store) as Arc<dyn SessionStore>,
+                Arc::clone(&runtime_store) as Arc<dyn meerkat_runtime::RuntimeStore>,
+                Arc::clone(&blob_store) as Arc<dyn BlobStore>,
+            )
+            .expect("construct runtime authority");
+            let (service, adapter) =
+                crate::surface::build_runtime_backed_service(builder, 4, persistence)
+                    .expect("compose the runtime-backed service");
+            let service = Arc::new(service);
+            let session = Session::new();
+            session_id = session.id().clone();
+            let mut request = sticky_fallback_runtime_request(
+                FALLBACK_REALM_LEVEL_KEPT,
+                PRIMARY_MODEL,
+                sticky_fallback_visibility_dispatcher(EXTERNAL_TOOL),
+            );
+            request
+                .build
+                .as_mut()
+                .expect("the request carries build options")
+                .provider_params = Some(level_only.clone());
+            Box::pin(crate::surface::materialize_session(
+                &service,
+                &adapter,
+                session,
+                request,
+                {
+                    let service = Arc::clone(&service);
+                    let adapter = Arc::clone(&adapter);
+                    move |session_id| {
+                        crate::surface::default_persistent_executor(service, adapter, session_id)
+                    }
+                },
+            ))
+            .await
+            .expect("materialize the session at the level");
+
+            // The run that falls back.
+            let completion = run_sticky_fallback_prompt(&adapter, &session_id, "first").await;
+            let CompletionOutcome::Completed(run) = completion else {
+                panic!("the fallback attempt runs at the session's level: {completion:?}");
+            };
+            assert_eq!(run.text, "backup success");
+            let report = run
+                .reasoning_effort
+                .clone()
+                .expect("the run reports what it sent");
+            assert_eq!(report.requested, EffortLevel::High);
+            assert_eq!(
+                report
+                    .sent
+                    .iter()
+                    .map(|row| (
+                        row.provider,
+                        row.model.as_str(),
+                        row.route.backend.as_str(),
+                        row.level,
+                        row.requests
+                    ))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (
+                        Provider::Anthropic,
+                        PRIMARY_MODEL,
+                        "anthropic_api",
+                        EffortLevel::High,
+                        1
+                    ),
+                    (
+                        Provider::OpenAI,
+                        BACKUP_MODEL,
+                        "copilot",
+                        EffortLevel::High,
+                        1
+                    ),
+                ],
+                "the origin and the fallback target are separate rows"
+            );
+            assert_eq!(recorded(&primary_requests).len(), 1);
+            let backup_seen = recorded(&backup_requests);
+            assert_eq!(backup_seen.len(), 1);
+            assert_eq!(
+                openai_request_effort(backup_seen[0].as_ref()),
+                Some(ReasoningEffort::High),
+                "the fallback attempt carries the target route's own effort field"
+            );
+
+            // The stored session: the target, with the level and nothing else.
+            let authoritative = service
+                .load_authoritative_session(&session_id)
+                .await
+                .expect("load the durable fallback session")
+                .expect("the durable fallback session exists");
+            let metadata = authoritative
+                .session_metadata()
+                .expect("the fallback session keeps its metadata");
+            let identity = metadata.llm_identity();
+            assert_eq!(identity.model, BACKUP_MODEL);
+            assert_eq!(identity.provider, Provider::OpenAI);
+            assert_eq!(identity.auth_binding.as_ref(), Some(&backup_binding));
+            assert_eq!(
+                identity.provider_params,
+                Some(level_only.clone()),
+                "the stored identity carries the neutral level and nothing else"
+            );
+            let provenance = metadata
+                .model_fallback
+                .as_ref()
+                .expect("the fallback record is stored");
+            assert_eq!(provenance.target, identity);
+            assert_eq!(
+                provenance.previous.provider_params,
+                Some(level_only.clone())
+            );
+
+            // A later turn on the fallback target.
+            let completion = run_sticky_fallback_prompt(&adapter, &session_id, "second").await;
+            let CompletionOutcome::Completed(run) = completion else {
+                panic!("a later turn on the fallback target keeps the level: {completion:?}");
+            };
+            let report = run
+                .reasoning_effort
+                .clone()
+                .expect("the later run reports what it sent");
+            assert_eq!(report.sent.len(), 1);
+            assert_eq!(report.sent[0].model, BACKUP_MODEL);
+            assert_eq!(recorded(&primary_requests).len(), 1, "the primary is left");
+            let backup_seen = recorded(&backup_requests);
+            assert_eq!(backup_seen.len(), 2);
+            assert_eq!(
+                openai_request_effort(backup_seen[1].as_ref()),
+                Some(ReasoningEffort::High),
+                "a later turn on the fallback target carries the field"
+            );
+        }
+
+        // A cold restart: a fresh factory, service and runtime over the
+        // retained stores.
+        let restart_primary_requests = RecordedProviderTags::default();
+        let restart_backup_requests = RecordedProviderTags::default();
+        let restart_factory = leveled_sticky_fallback_factory(
+            temp.path().join("restarted-factory-sessions"),
+            &[EffortLevel::Low, EffortLevel::High],
+            Arc::clone(&restart_primary_requests),
+            Arc::clone(&restart_backup_requests),
+        );
+        let restart_builder = crate::FactoryAgentBuilder::new(restart_factory, config);
+        let restart_persistence = crate::PersistenceBundle::new(
+            Arc::clone(&sqlite_store) as Arc<dyn SessionStore>,
+            Arc::clone(&runtime_store) as Arc<dyn meerkat_runtime::RuntimeStore>,
+            Arc::clone(&blob_store) as Arc<dyn BlobStore>,
+        )
+        .expect("construct runtime authority");
+        let (restart_service, restart_adapter) =
+            crate::surface::build_runtime_backed_service(restart_builder, 4, restart_persistence)
+                .expect("compose the runtime-backed service");
+        let restart_service = Arc::new(restart_service);
+        let resume_session = restart_service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("load the fallback session from retained persistence")
+            .expect("the retained fallback session exists");
+        // The resume names no level of its own: the session's stands.
+        let restart_request = sticky_fallback_runtime_request(
+            FALLBACK_REALM_LEVEL_KEPT,
+            PRIMARY_MODEL,
+            sticky_fallback_visibility_dispatcher(EXTERNAL_TOOL),
+        );
+        Box::pin(crate::surface::materialize_session(
+            &restart_service,
+            &restart_adapter,
+            resume_session,
+            restart_request,
+            {
+                let service = Arc::clone(&restart_service);
+                let adapter = Arc::clone(&restart_adapter);
+                move |session_id| {
+                    crate::surface::default_persistent_executor(service, adapter, session_id)
+                }
+            },
+        ))
+        .await
+        .expect("rematerialize the retained fallback session");
+        let live_identity = restart_service
+            .live_session_llm_identity(&session_id)
+            .await
+            .expect("read the rebuilt session's live identity");
+        assert_eq!(live_identity.model, BACKUP_MODEL);
+        assert_eq!(live_identity.provider, Provider::OpenAI);
+        assert_eq!(
+            live_identity.provider_params,
+            Some(level_only),
+            "the rebuilt session keeps the level on the fallback target"
+        );
+
+        let completion =
+            run_sticky_fallback_prompt(&restart_adapter, &session_id, "after the restart").await;
+        assert!(
+            matches!(completion, CompletionOutcome::Completed(_)),
+            "a turn after the restart runs on the fallback target: {completion:?}"
+        );
+        assert!(
+            recorded(&restart_primary_requests).is_empty(),
+            "the failed primary is not asked again"
+        );
+        let backup_seen = recorded(&restart_backup_requests);
+        assert_eq!(backup_seen.len(), 1);
+        assert_eq!(
+            openai_request_effort(backup_seen[0].as_ref()),
+            Some(ReasoningEffort::High),
+            "the turn after the restart carries the field"
+        );
+    }
+
+    /// The twin: a fallback target whose route does not accept the session's
+    /// level is skipped with the typed reason before any switch. The retry
+    /// runs on the session's own model, the original failure stands, the
+    /// target is never asked, and the session's identity is unchanged.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn a_fallback_target_that_refuses_the_level_leaves_the_session_as_it_was() {
+        use meerkat_core::lifecycle::run_primitive::ProviderParamsOverride;
+        use meerkat_core::model_fallback::ModelFallbackSkipReason;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        const PRIMARY_MODEL: &str = "claude-sonnet-4-6";
+        const BACKUP_MODEL: &str = "custom-text-only-backup";
+
+        let level_only = ProviderParamsOverride {
+            reasoning_effort: Some(EffortLevel::High),
+            ..Default::default()
+        };
+        let primary_binding =
+            configured_auth_binding(FALLBACK_REALM_LEVEL_SKIPPED, "default_anthropic");
+        let backup_binding =
+            configured_auth_binding(FALLBACK_REALM_LEVEL_SKIPPED, "default_openai");
+        let config =
+            sticky_fallback_test_config(FALLBACK_REALM_LEVEL_SKIPPED, BACKUP_MODEL, backup_binding);
+        let primary_requests = RecordedProviderTags::default();
+        let backup_requests = RecordedProviderTags::default();
+        let temp = tempfile::tempdir().expect("leveled fallback tempdir");
+        // The backup's account states only `low`.
+        let factory = leveled_sticky_fallback_factory(
+            temp.path().join("sessions"),
+            &[EffortLevel::Low],
+            Arc::clone(&primary_requests),
+            Arc::clone(&backup_requests),
+        );
+
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let session = Session::new();
+        let bindings = runtime
+            .prepare_bindings(session.id().clone())
+            .await
+            .expect("ephemeral machine should prepare real session-owned bindings");
+        let mut build = AgentBuildConfig::new(PRIMARY_MODEL);
+        build.max_tokens = Some(1024);
+        build.provider = Some(Provider::Anthropic);
+        build.realm_id = Some(RealmId::parse(FALLBACK_REALM_LEVEL_SKIPPED).expect("test realm"));
+        build.auth_binding = Some(primary_binding);
+        build.provider_params = Some(level_only.clone());
+        build.resume_session = Some(session);
+        build.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings);
+        build.override_builtins = ToolCategoryOverride::Disable;
+        let mut agent = factory
+            .build_agent(build, &config)
+            .await
+            .expect("the session at the level builds with its fallback chain");
+        let identity_before = agent
+            .session()
+            .session_metadata()
+            .expect("canonical session metadata")
+            .llm_identity();
+        assert_eq!(identity_before.model, PRIMARY_MODEL);
+        assert_eq!(identity_before.provider_params, Some(level_only));
+
+        agent.set_runtime_execution_kind(Some(
+            meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+        ));
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<meerkat_core::AgentEvent>(1024);
+        let error = agent
+            .run_with_events(
+                meerkat_core::ContentInput::Text("exercise fallback".to_string()),
+                tx,
+            )
+            .await
+            .expect_err("no target accepts the level: the original failure stands");
+        assert!(
+            !matches!(error, meerkat_core::AgentError::ReasoningEffortRefused(_)),
+            "the failure is the model's, not a refusal of the level: {error:?}"
+        );
+        let mut skipped = Vec::new();
+        let mut switched = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                meerkat_core::AgentEvent::ModelFallbackSkipped { target, .. } => {
+                    skipped.push((target.identity.model.clone(), target.reason));
+                }
+                meerkat_core::AgentEvent::ModelFallbackStaged { .. }
+                | meerkat_core::AgentEvent::ModelFallbackCommitted { .. } => switched = true,
+                _ => {}
+            }
+        }
+        assert!(
+            matches!(
+                skipped.as_slice(),
+                [(model, ModelFallbackSkipReason::ReasoningEffortUnsupported)]
+                    if model == BACKUP_MODEL
+            ),
+            "one skip of the target, with the typed reason: {skipped:?}"
+        );
+        assert!(!switched, "nothing was switched");
+        assert!(
+            backup_requests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "the skipped target is never asked"
+        );
+        assert_eq!(
+            primary_requests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            2,
+            "the retry runs on the session's own model"
+        );
+        assert_eq!(
+            agent
+                .session()
+                .session_metadata()
+                .expect("canonical session metadata")
+                .llm_identity(),
+            identity_before,
+            "the session's identity is unchanged"
         );
     }
 

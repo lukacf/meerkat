@@ -73,7 +73,7 @@ const APPROVERS: &str = "team:owners";
 const OWNER: &str = "U123";
 const SECOND_OWNER: &str = "U456";
 /// Bounds a failure only; a passing row never waits for it.
-const BOUND: Duration = Duration::from_secs(60);
+const BOUND: Duration = Duration::from_mins(1);
 
 static NEXT_MOB: AtomicU64 = AtomicU64::new(0);
 
@@ -1244,7 +1244,7 @@ async fn eight_concurrent_drives_commit_an_approved_change_exactly_once() {
     let mut executed = 0;
     for _ in 0..3 {
         let passes =
-            futures::future::join_all(loops.iter_mut().map(|executors| executors.pass())).await;
+            futures::future::join_all(loops.iter_mut().map(DecisionExecutorLoop::pass)).await;
         executed += passes
             .iter()
             .flat_map(|pass| &pass.outcomes)

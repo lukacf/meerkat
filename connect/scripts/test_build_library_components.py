@@ -208,10 +208,11 @@ class ComponentBuildTests(unittest.TestCase):
                 argv += ["--" + key, str(value)]
         return argv + list(extra)
 
-    def run_build(self, *extra, **changes):
+    def run_build(self, *extra, cwd=None, **changes):
         # A value in the caller's environment that no child may see.
         env = {"PATH": "/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1", "G5_TEST_SENTINEL": "present"}
-        return subprocess.run(self.argv(*extra, **changes), env=env, capture_output=True, text=True, timeout=300)
+        return subprocess.run(self.argv(*extra, **changes), env=env, capture_output=True, text=True, timeout=300,
+                              cwd=cwd)
 
     def built(self, *extra, **changes):
         result = self.run_build(*extra, **changes)
@@ -305,6 +306,13 @@ class ComponentBuildTests(unittest.TestCase):
                          {"equal": True, "second_sha256": record["components"]["activepieces"]["sha256"]})
         with tarfile.open(self.output / ARCHIVE) as archive:
             self.assertIn("package/dist/built-in.txt", archive.getnames())
+
+    def test_pin_file_may_be_named_relative_to_the_current_directory(self):
+        # The consumer guide's command runs from the Connect checkout and names the pin file as
+        # release/library-pins-macos-arm64.json.
+        result = self.run_build(cwd=self.pins_path.parent, pins=self.pins_path.name)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(set(json.loads(result.stdout)["components"]), {"agno", "services", "activepieces"})
 
     def test_the_same_epoch_gives_the_same_bytes_in_another_run(self):
         first = self.built()

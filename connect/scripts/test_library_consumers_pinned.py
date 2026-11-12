@@ -558,6 +558,20 @@ class PinnedExportTests(PinnedCase):
         self.assertEqual(summary["contents_sha256"], sha((self.fixture.output / "CONTENTS.json").read_bytes()))
         self.assertEqual(summary["closure_record"]["key"], self.fixture.closure.name)
 
+    def test_cli_takes_a_pin_file_named_relative_to_the_current_directory(self):
+        # The consumer guide's command runs from the Connect checkout and names the pin file as
+        # release/library-pins-macos-arm64.json. Every other path stays absolute.
+        argv = self.fixture.argv()
+        argv[argv.index("--pins") + 1] = self.fixture.pins_path.name
+        stdout = io.StringIO()
+        with contextlib.chdir(self.fixture.pins_path.parent), patch.object(sys, "argv", [str(SCRIPT), *argv]), \
+                contextlib.redirect_stdout(stdout):
+            self.assertEqual(MODULE.main(), 0)
+        contents = json.loads((self.fixture.output / "CONTENTS.json").read_bytes())
+        self.assertEqual(contents["accepted_inputs"][self.fixture.pins_path.name],
+                         sha(self.fixture.pins_path.read_bytes()))
+        self.assertEqual(json.loads(stdout.getvalue())["mode"], "pinned")
+
     def test_cli_refuses_the_linux_target_with_otherwise_complete_pinned_inputs(self):
         # In process, so the carried pins are the fixture's and the target is the only defect.
         stdout, stderr = io.StringIO(), io.StringIO()

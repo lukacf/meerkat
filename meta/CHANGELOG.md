@@ -193,7 +193,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   which drives a runtime's decision executors: one pass at start, one after
   each change of a decision (`RuntimeDecisions::notify_work`), and a tick
   only while a decision of its kinds waits. A host with no such decision
-  makes no further pass.
+  makes no further pass, and a pass with nothing owed reads decision records
+  only. `HeldChangeHost::realm_profile` is the read of a realm profile a
+  host gives the holder.
 - Behaviour of `identity_creation::render_v1`: the rendering of an update and
   of a removal no longer has the line `Expected spec digest`, so the subject
   digest of such a request differs from the one 0.9.13 computed for it. No
@@ -246,9 +248,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   identity's status (spec digest and revision, archived, preparation
   pending, provenance, open operations), each absent on the wire while
   unset. Nothing sets them yet.
-  makes no further pass, and a pass with nothing owed reads decision records
-  only. `HeldChangeHost::realm_profile` is the read of a realm profile a
-  host gives the holder.
 
 ### Changed
 

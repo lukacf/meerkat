@@ -11258,11 +11258,18 @@ enum SessionAttachDecision {
 /// Whether or not access is enforced, a session the caller may not know of
 /// is answered as a session that does not exist: one a member hidden from
 /// the caller owns ([`AccessView::hides_agent`]), one whose stored member
-/// labels name a private owner other than the caller, and, on a console
-/// that can identify a person, for a caller who is not an admin
+/// labels name a private owner other than the caller
+/// ([`session_stored_private_owner`], which also reads the session of a
+/// member that ended), and, on a console that can identify a person, for a
+/// caller who is not an admin
 /// ([`AccessView::kept_apart_from_other_people`]), one whose owner the
 /// console does not know ([`AccessView::withholds_unknown_member`]) or that
-/// has no owner at all.
+/// has no owner at all. A session no member holds whose owner could not be
+/// read (Core's member history did not answer, or the session's stored
+/// document could not be read or says nothing the console can decide by)
+/// is answered so to every caller who is not an admin, the one operator of
+/// a console that identifies nobody included: nothing says whether it was
+/// private to a person.
 async fn attached_session_decision(
     view: Option<&AccessView>,
     runtime: &MobRuntime,
@@ -11272,16 +11279,23 @@ async fn attached_session_decision(
     let Some(view) = view else {
         return SessionAttachDecision::Allowed;
     };
-    let owners = session_member_owners(&runtime.handle(), identity_runtime, session_id)
-        .await
-        .unwrap_or_default();
+    // Whether Core's member history answered: a failed read establishes no
+    // owner, and says nothing of whether the session had one.
+    let (owners, owners_read) =
+        match session_member_owners(&runtime.handle(), identity_runtime, session_id).await {
+            Some(owners) => (owners, true),
+            None => (Vec::new(), false),
+        };
     let stored_owner = session_stored_private_owner(runtime, session_id).await;
     let hidden = owners
         .iter()
         .any(|owner| view.hides_agent(owner) || view.withholds_unknown_member(owner))
-        || stored_owner
-            .as_deref()
-            .is_some_and(|owner| !view.is_admin() && view.private_owner_key() != Some(owner));
+        || match &stored_owner {
+            StoredPrivateOwner::Owner(owner) => {
+                !view.is_admin() && view.private_owner_key() != Some(owner.as_str())
+            }
+            StoredPrivateOwner::NoOwner | StoredPrivateOwner::Unreadable => false,
+        };
     if hidden {
         return SessionAttachDecision::Absent;
     }
@@ -11302,7 +11316,12 @@ async fn attached_session_decision(
         }
         // A console that can identify a person keeps what it cannot
         // attribute from every caller who is not an admin, signed in or not.
-        return if view.kept_apart_from_other_people() {
+        // A session whose owner could not be read is attributed by nothing,
+        // on any console.
+        return if view.kept_apart_from_other_people()
+            || !owners_read
+            || matches!(stored_owner, StoredPrivateOwner::Unreadable)
+        {
             SessionAttachDecision::Absent
         } else {
             SessionAttachDecision::Allowed
@@ -11327,19 +11346,83 @@ async fn attached_session_decision(
     SessionAttachDecision::Allowed
 }
 
-/// The private owner the stored labels of session `session_id` name
-/// ([`crate::access::PRIVATE_TO_LABEL`]), read from the runtime's session
-/// service: a private member's session keeps its owner after the member
-/// ended.
+/// What the labels a session was created with say of its private owner
+/// ([`crate::access::PRIVATE_TO_LABEL`]).
+enum StoredPrivateOwner {
+    /// The labels name this private owner.
+    Owner(String),
+    /// The labels were read and name no private owner, or the session
+    /// service holds no session of the id.
+    NoOwner,
+    /// The labels could not be read: nothing says whether the session was
+    /// private to a person.
+    Unreadable,
+}
+
+impl StoredPrivateOwner {
+    fn of_labels(labels: &std::collections::BTreeMap<String, String>) -> Self {
+        crate::access::private_owner(labels)
+            .map_or(Self::NoOwner, |owner| Self::Owner(owner.to_string()))
+    }
+
+    /// What the stored document of a session says. The build of a mob
+    /// member's session writes the member's labels into the session
+    /// metadata's peer labels ([`meerkat_core::SessionMetadata::peer_meta`]),
+    /// beside its member binding, and nothing removes them when the member
+    /// ends. A document that carries neither was built for no mob member
+    /// and has no private owner. One whose metadata is missing or does not
+    /// decode, or that names a member binding without peer labels, cannot
+    /// be decided.
+    fn of_stored_session(session: &meerkat_core::Session) -> Self {
+        let Ok(view) = meerkat_core::PersistedSessionMetadataView::try_from_session(session) else {
+            return Self::Unreadable;
+        };
+        match view.session_metadata {
+            Some(metadata) => match (&metadata.peer_meta, &metadata.mob_member_binding) {
+                (Some(peer), _) => Self::of_labels(&peer.labels),
+                (None, None) => Self::NoOwner,
+                (None, Some(_)) => Self::Unreadable,
+            },
+            None => Self::Unreadable,
+        }
+    }
+}
+
+/// The private owner the labels of session `session_id` name: a private
+/// member's session keeps its owner after the member ended. A session Core
+/// serves is read through the runtime's session service. Core answers the
+/// read of an archived session as a session it does not hold, and a member
+/// that ended leaves its session archived, so such a session is read
+/// through the same service's resume read
+/// ([`meerkat_mob::MobSessionService::load_session_for_resume`]): the read
+/// an attach loads the session through, so whatever an attach can load is
+/// decided by the labels it was created with, on every composition. The
+/// read builds, seats and wakes nothing. A session that read does not hold
+/// has no owner. A failed read, an archived session the read does not hand
+/// out, and a runtime with no session service (one taken from a bare
+/// handle) answer [`StoredPrivateOwner::Unreadable`].
 async fn session_stored_private_owner(
     runtime: &MobRuntime,
     session_id: &meerkat_core::types::SessionId,
-) -> Option<String> {
-    let service = runtime.session_service()?;
-    let view = meerkat_core::service::SessionService::read(service.as_ref(), session_id)
+) -> StoredPrivateOwner {
+    let Some(service) = runtime.session_service() else {
+        return StoredPrivateOwner::Unreadable;
+    };
+    match meerkat_core::service::SessionService::read(service.as_ref(), session_id).await {
+        Ok(view) => return StoredPrivateOwner::of_labels(&view.state.labels),
+        Err(meerkat_core::service::SessionError::NotFound { .. }) => {}
+        Err(_) => return StoredPrivateOwner::Unreadable,
+    }
+    match meerkat_mob::MobSessionService::load_session_for_resume(service.as_ref(), session_id)
         .await
-        .ok()?;
-    crate::access::private_owner(&view.state.labels).map(str::to_string)
+    {
+        Ok(
+            meerkat_mob::ResumeSessionLoad::Active(session)
+            | meerkat_mob::ResumeSessionLoad::Revivable(session),
+        ) => StoredPrivateOwner::of_stored_session(&session),
+        Ok(meerkat_mob::ResumeSessionLoad::Absent) => StoredPrivateOwner::NoOwner,
+        Ok(_) | Err(_) => StoredPrivateOwner::Unreadable,
+    }
 }
 
 /// The session a console attach goes on with, and, for a session the caller

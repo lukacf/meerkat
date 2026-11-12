@@ -1392,6 +1392,84 @@ async fn a_runtime_with_no_durable_session_store_reads_an_ended_sessions_owner_t
     Ok(())
 }
 
+/// What a session's stored document says of its private owner. The labels
+/// its mob member was built with name the owner. A document built for no
+/// mob member has none. A document that names its member and carries no
+/// labels, or that carries no session metadata at all, cannot be decided.
+#[tokio::test]
+async fn a_stored_session_that_does_not_carry_its_members_labels_establishes_no_owner() -> TestResult
+{
+    const MOB: &str = "kept-apart-stored-document";
+    const KEY: &str = meerkat_core::session::SESSION_METADATA_KEY;
+    let left = state_after_a_console_with_sign_in(MOB).await?;
+    let restarted = persistent_gateway_runtime_in(left.state.path(), MOB, "", "").await?;
+    let service = restarted
+        .session_service()
+        .cloned()
+        .ok_or("the restarted runtime keeps its session service")?;
+    let stored = match meerkat_mob::MobSessionService::load_session_for_resume(
+        service.as_ref(),
+        &left.side_chat_session,
+    )
+    .await?
+    {
+        meerkat_mob::ResumeSessionLoad::Revivable(session) => *session,
+        other => {
+            return Err(format!("the ended side chat's session is archived: {other:?}").into());
+        }
+    };
+    assert!(
+        matches!(
+            StoredPrivateOwner::of_stored_session(&stored),
+            StoredPrivateOwner::Owner(_)
+        ),
+        "the ended private side chat's stored session names its owner"
+    );
+
+    let raw = serde_json::to_value(&stored)?;
+    let edited = |edit: &dyn Fn(&mut serde_json::Map<String, serde_json::Value>)| {
+        let mut raw = raw.clone();
+        edit(
+            raw["metadata"]
+                .as_object_mut()
+                .expect("the stored session's metadata"),
+        );
+        serde_json::from_value::<meerkat_core::Session>(raw)
+    };
+    let member_without_labels = edited(&|metadata| {
+        metadata[KEY]["peer_meta"] = serde_json::Value::Null;
+    })?;
+    assert!(
+        matches!(
+            StoredPrivateOwner::of_stored_session(&member_without_labels),
+            StoredPrivateOwner::Unreadable
+        ),
+        "a document that names its member and carries no labels cannot be decided"
+    );
+    let no_metadata = edited(&|metadata| {
+        metadata.remove(KEY);
+    })?;
+    assert!(
+        matches!(
+            StoredPrivateOwner::of_stored_session(&no_metadata),
+            StoredPrivateOwner::Unreadable
+        ),
+        "a document with no session metadata cannot be decided"
+    );
+    let no_member = edited(&|metadata| {
+        metadata[KEY]["peer_meta"] = serde_json::Value::Null;
+        metadata[KEY]["mob_member_binding"] = serde_json::Value::Null;
+    })?;
+    assert!(
+        matches!(
+            StoredPrivateOwner::of_stored_session(&no_member),
+            StoredPrivateOwner::NoOwner
+        ),
+        "a document built for no mob member has no private owner"
+    );
+    Ok(())
+}
+
 /// The record of who the members of `mob` are private to, read through a
 /// gate: every read waits until the gate opens, then reads the mob's event
 /// log. Counts the reads that start (a read starts at the log's beginning).

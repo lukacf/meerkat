@@ -501,19 +501,19 @@ impl PrivateOwners {
                 self.inner
                     .first_reads
                     .0
-                    .send_modify(|reads| reads.in_flight -= 1);
+                    .send_modify(|reads| reads.in_flight = reads.in_flight.saturating_sub(1));
             }
             (SeedStage::Overdue, true) => {
                 *stage = SeedStage::Landed;
                 self.inner
                     .first_reads
                     .0
-                    .send_modify(|reads| reads.overdue -= 1);
+                    .send_modify(|reads| reads.overdue = reads.overdue.saturating_sub(1));
             }
             (SeedStage::InFlight, false) => {
                 *stage = SeedStage::Overdue;
                 self.inner.first_reads.0.send_modify(|reads| {
-                    reads.in_flight -= 1;
+                    reads.in_flight = reads.in_flight.saturating_sub(1);
                     reads.overdue += 1;
                 });
             }

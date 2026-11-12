@@ -1378,6 +1378,138 @@ async fn a_refused_seat_composition_at_a_first_wake_leaves_the_member_dormant_an
     );
 }
 
+/// Row: a seat composition its host refuses at a later build, of a member
+/// whose session a build created, ends that build as it ends a first one.
+/// After a restart the host refuses the seat for good: the wake fails with
+/// the host's reason, the host's build preparation is not asked, and
+/// nothing is built.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_seat_composition_at_a_later_build_of_a_built_session_builds_nothing() {
+    use crate::runtime::MemberBuildPreparationRefusal;
+    let preparer = ScriptedPreparer::new();
+    let mut mob = seat_composing_mob("seat-refused-at-later-build", &preparer).await;
+    committed(
+        mob.create(host_create("create-quiet", &["quiet"]), ALLOW)
+            .await,
+    );
+    let session = mob.session("quiet").await;
+    wake(&mob, "quiet")
+        .await
+        .expect("the first wake builds the member");
+    assert_eq!(builds_on(&mob, &session).await.len(), 1, "one build");
+    let asked = preparer.asked().len();
+
+    mob.restart_configured(MobCompositionAuthority::Authoritative, {
+        let preparer = preparer.clone();
+        move |builder| builder.with_member_build_preparer(preparer)
+    })
+    .await;
+    assert_eq!(mob.session("quiet").await, session, "the same session");
+    preparer.compose_seats(SeatScript::Refuse(MemberBuildPreparationRefusal::Final {
+        reason: "the host refuses this seat's later build".to_string(),
+    }));
+    let refused = wake(&mob, "quiet").await;
+    assert!(
+        refused.as_ref().is_err_and(|error| error
+            .to_string()
+            .contains("the host refuses this seat's later build")),
+        "the later build of a seat its host refused fails with the host's reason: {refused:?}"
+    );
+    assert_eq!(mob.builds().await, 0, "nothing was built after the restart");
+    assert_eq!(
+        preparer.asked().len(),
+        asked,
+        "a build its seat composition refused asks for no build preparation"
+    );
+}
+
+/// A host build preparer that asks for a hold on each build and makes the
+/// build's session fail to be created: the provision of a spawn it prepared
+/// fails after its hold was staged.
+struct HoldThenFailingProvision {
+    service: Arc<MockSessionService>,
+    held: std::sync::Mutex<Vec<SessionId>>,
+}
+
+#[async_trait::async_trait]
+impl crate::runtime::MemberBuildPreparer for HoldThenFailingProvision {
+    async fn prepare_member_build(
+        &self,
+        request: crate::runtime::MemberBuildPreparation,
+    ) -> Result<crate::runtime::MemberBuildPrepared, crate::runtime::MemberBuildPreparationRefusal>
+    {
+        self.service
+            .set_create_session_failure(&request.session_id)
+            .await;
+        self.held
+            .lock()
+            .expect("the held sessions")
+            .push(request.session_id);
+        Ok(crate::runtime::MemberBuildPrepared::HoldUntilReleased)
+    }
+}
+
+/// Row: a kickoff spawn that fails after its host asked for a hold leaves
+/// no hold staged for the session it named. The host answers
+/// `HoldUntilReleased`, Core stages the hold on the member's next
+/// registration, and the provision then fails: the spawn is answered
+/// failed, the identity is owed its seat, and the staged hold is removed,
+/// so the next spawn of the identity is prepared again and held only if
+/// its host asks again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_kickoff_spawn_leaves_no_run_start_hold_staged() {
+    let keys = tempfile::tempdir().expect("a comms identity root");
+    let service = Arc::new(MockSessionService::new());
+    let adapter = service.enable_runtime_adapter();
+    let preparer = Arc::new(HoldThenFailingProvision {
+        service: service.clone(),
+        held: std::sync::Mutex::new(Vec::new()),
+    });
+    let storage = MobStorage::in_memory();
+    let handle = MobBuilder::new(
+        store_owned_definition("kickoff-hold-unstaged"),
+        storage.clone(),
+    )
+    .with_session_service(service.clone())
+    .with_member_comms_identity_root(keys.path())
+    .with_member_build_preparer(preparer.clone())
+    .create()
+    .await
+    .expect("create the mob");
+    let mob = StoreOwnedMob {
+        keys,
+        storage,
+        handle,
+        service,
+    };
+    mob.service.set_keep_alive_turns_complete_immediately(true);
+    let created = mob
+        .create_outcome(kickoff_create("held", "Wait."), ALLOW)
+        .await
+        .expect("the create commits");
+    assert!(
+        matches!(
+            created.embodied.get(&id("held")),
+            Some(crate::runtime::DeclaredEntryOutcome::Failed { .. })
+        ),
+        "a spawn whose provision failed is answered failed: {created:?}"
+    );
+    mob.unseated_for("held", UnseatedEntryCause::SeatOwed).await;
+    let held = preparer.held.lock().expect("the held sessions").clone();
+    assert_eq!(
+        held.len(),
+        1,
+        "the host was asked once and asked for a hold"
+    );
+    assert!(
+        !adapter.registration_run_start_hold_staged(
+            &held[0],
+            meerkat_runtime::RunStartHoldReason::ToolsNotPublished
+        ),
+        "the failed spawn's staged hold is removed"
+    );
+}
+
 /// A host build preparer that keeps the trait's default seat composition.
 struct DefaultSeatPreparer;
 

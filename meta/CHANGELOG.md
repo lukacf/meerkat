@@ -589,6 +589,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   They were skipped, because the member carried no mark of an
   identity-first spawn.
 
+- An archive or a removal of an agent whose record is its row in the mob's
+  identity store (one created at run time) owes that agent what leaving the
+  roster owes a configured agent: the harvest of the compactions its last
+  session holds, that session's distillation, an exit interview and the
+  host's retirement hook, which hears the cause `unlisted`. They run from
+  Core's member lifecycle journal, as every lifecycle side effect does:
+  right after the member's retirement ended, at least once, and at the next
+  start when the gateway stopped before they ran (over a durable metadata
+  store). Before, such an agent's last conversation was kept and never
+  harvested or distilled, no exit interview was queued and the hook never
+  heard of it. A removal of an archived agent retires no member and owes
+  nothing more. No order is promised between these side effects and the
+  answer of the change that owes them.
+
+- An agent whose record is its row in the mob's identity store (one created
+  at run time) is a durable identity to every check and copy the gateway
+  keeps for its long-term agents, on any profile. With this release's Core,
+  such an agent's seat is recorded durable whether or not its profile
+  declares `durable = true`, so, as for a configured agent: the start's
+  check of a state directory counts the agent once its conversation exists
+  and refuses a start whose `runtime.sqlite` no longer holds any session;
+  the storage census of the members' comms identities names it when it is
+  restored without its key pair; the continuity mirror
+  (`UnifiedRuntimeBuilder::continuity_mirror`) carries its record and its
+  session; `storage-migrate-native` lists it among a directory's
+  identities; and the launch's WorkGraph resume gate is asked before an
+  interrupted run of it resumes. Before, each of these covered such an
+  agent only on a `durable = true` profile. An agent seated by an earlier
+  build, or adopted into the store from a plain member, gets them from its
+  next seat: a reset, an unarchive, or a respawn (`meta/respawn`), which
+  keeps its conversation.
+
 ### Known limitations
 
 - Before the identity runtime is composed, the host's customizer cannot

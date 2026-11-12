@@ -69,6 +69,14 @@ them.
   deliveries again: resume it by name. A schedule the earlier release did
   not write keeps the mark. See `docs/guides/upgrading.mdx`.
 
+- Mob: a store-owned identity's seat that was recorded ephemeral (by a
+  release from 0.9.9 on before this one, for an identity on a profile
+  without `durable = true`, or kept by an adoption from a plain worker) is
+  not converted at a start or at the adoption: the identity joins the
+  durable resume gate and Core's lists of durable identities at its next
+  seat or at a respawn of its member (`MobHandle::respawn_member`), which
+  keeps its conversation.
+
 ### Added
 
 - Schedule: a schedule can follow its target. `ScheduleService::pause_for_target`
@@ -131,10 +139,21 @@ them.
   first message), of a start's owed seat and of a rotation, and at every
   wake and boot restore. A seat Core holds Dormant asks nothing until it is
   built. Every build takes the profile and model overrides of the answer
-  (the model and the provider parameters); the first build of the member's
+  (the model and the provider parameters) and the overlays that are
+  objects of the host's process: the external tools, the compaction
+  curator and the tool dispatch admission. No journal holds those and a
+  process keeps them only for a member it built, so a build after a
+  restart has them only from this answer: a tool dispatch admission the
+  host sets here gates the member's tool calls after a restart too, and
+  its compaction curator still summarizes. In a process that already built
+  the member, the external tools overlay it kept for the member stands, as
+  for every member. The first build of the member's
   session also takes the context, the additional instructions, the system
-  prompt override and the other first-build inputs. A later build keeps
-  what its session was first built with. No build relies on an earlier
+  prompt override and the other inputs of a first build (the tool
+  policies, the budget limits, the auth binding and the shell
+  environment, which no member's rebuild on its durable session takes). A
+  later build keeps what its session was first built with. No build
+  relies on an earlier
   answer, so the host answers the same from the row and its own
   state each time, and may be asked more than once for one seat. The seat's
   runtime mode, binding, placement and first message stay as Core
@@ -182,6 +201,31 @@ them.
   and the mob's next start asks again. A hold the host asks for
   (`HoldUntilReleased`) holds the member's run starts until
   `release_member_run_starts`. Hosts with no preparer see no change.
+
+- Mob: the seat of a store-owned identity (one created at run time, whose
+  record is its row in the mob's identity store) is a durable identity's,
+  whatever its profile says of durability: its spawn row records
+  `SpawnContinuityIntent::DurableIdentity`, keyed by the identity, as the
+  seat of a `durable = true` profile's member does. Such an identity is a
+  long-term agent by definition. Its member is therefore built with the
+  mob's durable resume gate bound on its registration
+  (`MobBuilder::with_durable_resume_gate`), and it is listed by
+  `MobHandle::durable_identity_members` and
+  `MemberBindingHistory::durable_identity_bindings`, so a host's checks
+  over its durable identities cover it. Before, a store-owned identity on
+  a profile without `durable = true` was seated ephemeral and was absent
+  from all of these. A plain worker's seat is unchanged. The local refusal
+  of a `durable = true` profile on a session service that keeps no durable
+  sessions still follows the profile alone: on such a service a
+  store-owned identity is seated and recorded durable as on any other, and
+  nothing is refused; its sessions end with the service, as before. A
+  placed store-owned identity requires durable sessions on its member
+  host, as every placed durable identity does (the materialize preflight
+  follows the recorded intent). A seat recorded ephemeral (by a release
+  from 0.9.9 on, or the seat an adoption kept from a plain worker) becomes
+  a durable identity's at the identity's next seat: a reset, an unarchive,
+  or a respawn of its member (`MobHandle::respawn_member`), which keeps
+  the conversation.
 
 ## [0.9.13] - 2026-11-11
 

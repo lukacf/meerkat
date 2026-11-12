@@ -592,6 +592,11 @@ impl IdentityRuntime {
         &self,
         name: &AgentIdentity,
     ) -> Result<bool, IdentityRuntimeError> {
+        // An archive or a removal ended the identity's member, a step Core
+        // journaled: the projection of its side effects reads it now, not
+        // at its next sweep. Any other change journals none, and the wake
+        // costs one empty page read.
+        self.kick_lifecycle_projection();
         let registered_by_roster = self
             .entries
             .read()

@@ -37385,7 +37385,8 @@ impl MobActor {
                 }
             );
         }
-        let continuity_intent = continuity_intent.for_profile(&profile, &agent_identity);
+        let continuity_intent =
+            continuity_intent.for_seat(&profile, &agent_identity, created_custody);
 
         // ---------- Off-loop preparation (#1249) ----------
         // Everything below reads durable/session state or builds agent config
@@ -39840,7 +39841,8 @@ impl MobActor {
         // Its member host keeps the sessions, so that host's materialize
         // preflight, not this mob, refuses one without persistent sessions
         // (a durable identity requires durable sessions there).
-        let continuity_intent = continuity_intent.for_profile(&profile, &agent_identity);
+        let continuity_intent =
+            continuity_intent.for_seat(&profile, &agent_identity, created_custody);
 
         // §4.1(a) resume/fork normalization: the LOCAL resume fast-path is
         // skipped — member-side validation is authoritative (§19.L1). Fork
@@ -41522,7 +41524,8 @@ impl MobActor {
         ) {
             self.refuse_local_session_member_without_runtime(agent_identity, &selected_binding)?;
         }
-        let continuity_intent = continuity_intent.for_profile(&profile, agent_identity);
+        // A policy auto-spawn is a worker's: it takes no custody.
+        let continuity_intent = continuity_intent.for_seat(&profile, agent_identity, false);
         super::spec_compiler::apply_tool_category_overrides(&mut profile, tool_category_overrides);
         // ADJ-6: explicit fact captured before the inherited-open mutation.
         let explicit_workgraph = profile.tools.workgraph;

@@ -12430,6 +12430,10 @@ pub(super) struct MemberRestoreSeating {
     dispatch_admission: bool,
     profile_override: Option<crate::profile::Profile>,
     model_override: Option<String>,
+    /// The labels of a store-owned identity's row, when the seat trailed
+    /// them at this build: its roster entry takes them
+    /// ([`Roster::set_store_owned_seat_labels`]).
+    row_labels: Option<BTreeMap<String, String>>,
 }
 
 /// How far a member's restore got before its turn, and what its turn writes.
@@ -13360,7 +13364,43 @@ pub(super) async fn restore_resumed_member(
         && entry.fork_source.is_none()
         && super::created_identity::host_composes_seat(base.state(), &entry.agent_identity);
     let mut seat_refusal = None;
+    // A store-owned seat carries its row's labels and no others. A seat
+    // that trails its row (no restamp seated the row's labels: the mob
+    // stopped after a label update's commit, say) takes them here, before
+    // its host is asked: the host answers from the row, and this build
+    // carries what the row holds. The comparison below is then made with
+    // the row's labels, so a label the row lacks is refused as ever. The
+    // roster entry takes them in the member's turn; a build writes no seat
+    // row. Read at every such build: nothing but the row and the seat
+    // decides it. A row the store cannot serve now ends this build for a
+    // retry, as a host that cannot answer yet does: the member is never
+    // built, or refused for good, on labels its row may not hold.
+    let mut row_labels = None;
+    if store_owned_seat && let Some(store) = ctx.tool_handle.identity_member.as_ref() {
+        match super::identity_change::store_owned_row_labels(
+            store.as_ref(),
+            &definition.id,
+            &entry.agent_identity,
+        )
+        .await
+        {
+            Ok(labels) => row_labels = labels.filter(|labels| *labels != entry.labels),
+            Err(error) => {
+                seat_refusal = Some(super::MemberBuildPreparationRefusal::Retryable {
+                    reason: format!(
+                        "the row of store-owned '{}' could not be read: {error}",
+                        entry.agent_identity
+                    ),
+                });
+            }
+        }
+    }
+    let seat_labels = row_labels.as_ref().unwrap_or(&entry.labels);
+    if let Some(labels) = &row_labels {
+        restore_request.labels = Some(labels.clone());
+    }
     if store_owned_seat
+        && seat_refusal.is_none()
         && let Some(preparer) = ctx.member_build_preparer
         && let Err(refusal) = Box::pin(super::member_build_preparer::compose_store_owned_seat(
             preparer.as_ref(),
@@ -13405,8 +13445,8 @@ pub(super) async fn restore_resumed_member(
     if store_owned_seat && seat_refusal.is_none() {
         seat_refusal = super::MemberBuildPreparationRefusal::seat_labels_differ(
             &entry.agent_identity,
-            &entry.labels,
-            restore_spec.labels.as_ref().unwrap_or(&entry.labels),
+            seat_labels,
+            restore_spec.labels.as_ref().unwrap_or(seat_labels),
         );
     }
     if restore_spec.role_name != entry.role {
@@ -13574,6 +13614,7 @@ pub(super) async fn restore_resumed_member(
         dispatch_admission: restore_spec.tool_dispatch_admission.is_some(),
         profile_override: restore_spec.override_profile.clone(),
         model_override: restore_spec.model_override.clone(),
+        row_labels,
     };
     let seated = SeatedMemberRestore {
         restore_spec,
@@ -14490,6 +14531,20 @@ pub(super) async fn apply_member_restore_plan(
     if let Some(roster_entry) = commit.roster.get_by_identity_mut(&entry.agent_identity) {
         roster_entry.effective_profile_override = seating.profile_override;
         roster_entry.effective_model_override = seating.model_override;
+    }
+    // The row's labels the build took, unless the roster entry's labels
+    // moved since the restore read them (a label update that landed while
+    // the member was being built set them from the row itself, which is
+    // newer than this build's read).
+    if let Some(labels) = &seating.row_labels
+        && commit
+            .roster
+            .get(&entry.agent_identity)
+            .is_some_and(|current| current.labels == entry.labels)
+    {
+        commit
+            .roster
+            .set_store_owned_seat_labels(&entry.agent_identity, labels);
     }
     let provision = match outcome {
         SeatedMemberRestoreOutcome::Refused(diagnostic) => {

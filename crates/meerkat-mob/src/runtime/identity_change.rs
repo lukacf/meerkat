@@ -3705,6 +3705,25 @@ impl super::MobHandle {
     }
 }
 
+/// The labels `identity`'s row holds in `store`, the mob's identity store:
+/// a store-owned identity's labels, as its record has them now. `None` for
+/// an identity the store holds no readable row of, and for a row that holds
+/// no spec.
+pub(super) async fn store_owned_row_labels(
+    store: &dyn crate::store::MobIdentityMemberStore,
+    mob_id: &MobId,
+    identity: &AgentIdentity,
+) -> Result<Option<BTreeMap<String, String>>, MobError> {
+    Ok(
+        match store.observe_created_identity(mob_id, identity).await? {
+            Some(crate::identity::CreatedIdentityObservation::Created(row)) => {
+                row.spec.map(|spec| spec.labels)
+            }
+            _ => None,
+        },
+    )
+}
+
 impl super::MobHandle {
     /// Update one store-owned identity's spec as one change (see
     /// [`StoreOwnedIdentityUpdate`]): a declared apply of the identity under

@@ -761,6 +761,14 @@ impl SessionError {
     /// `tool_grant_gate_refusal` member carries the typed refusal.
     pub const TOOL_GRANT_GATE_REFUSED_KIND: &'static str = "tool_grant_gate_refused";
 
+    /// Structured-data `kind` of a refused `reasoning_effort` level
+    /// ([`crate::error::AgentError::ReasoningEffortRefused`]) on the wire.
+    /// The `reasoning_effort_refusal` member carries the typed refusal; the
+    /// advisory `retryable` member beside it is `true` only for the
+    /// transient reason
+    /// ([`crate::ReasoningEffortRefusalReason::is_transient`]).
+    pub const REASONING_EFFORT_REFUSED_KIND: &'static str = "reasoning_effort_refused";
+
     /// Return a stable error code string for wire formats.
     pub fn code(&self) -> &'static str {
         match self {
@@ -836,6 +844,13 @@ impl SessionError {
                     "tool_grant_gate_refusal": refusal,
                 }))
             }
+            Self::Agent(crate::error::AgentError::ReasoningEffortRefused(refusal)) => {
+                Some(serde_json::json!({
+                    "kind": Self::REASONING_EFFORT_REFUSED_KIND,
+                    "retryable": refusal.reason.is_transient(),
+                    "reasoning_effort_refusal": refusal,
+                }))
+            }
             _ => None,
         }
     }
@@ -876,6 +891,22 @@ impl SessionError {
             return None;
         }
         serde_json::from_value(data.get("tool_grant_gate_refusal")?.clone()).ok()
+    }
+
+    /// Read a refused `reasoning_effort` level back off the wire: the typed
+    /// refusal of the [`Self::REASONING_EFFORT_REFUSED_KIND`] projection
+    /// [`Self::structured_data`] gives. The advisory `retryable` member is
+    /// not read: the refusal's reason states it. Other or malformed
+    /// structured data fails closed as `None`.
+    pub fn reasoning_effort_refusal_from_data(
+        data: &serde_json::Value,
+    ) -> Option<crate::ReasoningEffortRefusal> {
+        if data.get("kind").and_then(serde_json::Value::as_str)
+            != Some(Self::REASONING_EFFORT_REFUSED_KIND)
+        {
+            return None;
+        }
+        serde_json::from_value(data.get("reasoning_effort_refusal")?.clone()).ok()
     }
 
     /// Secret-free projection of a resume hold: the hold class, the session it

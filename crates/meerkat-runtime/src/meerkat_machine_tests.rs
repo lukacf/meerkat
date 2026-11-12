@@ -56217,6 +56217,9 @@ fn summarize_runtime_parity_driver_error(error: &RuntimeDriverError) -> String {
         RuntimeDriverError::ValidationFailed { reason } => {
             format!("validation_failed:{reason}")
         }
+        RuntimeDriverError::ReasoningEffortRefused(refusal) => {
+            format!("reasoning_effort_refused:{:?}", refusal.reason)
+        }
         RuntimeDriverError::InputIdempotencyConflict { existing_id } => {
             format!("input_idempotency_conflict:{existing_id}")
         }

@@ -1133,8 +1133,11 @@ impl InteractionTerminalPublicationError {
             | crate::RuntimeDriverError::DurableResumeHeld { .. }
             | crate::RuntimeDriverError::StaleAuthority { .. } => Self::StaleAuthority(detail),
             // A receipt-less terminal is a legitimate read verdict, but
-            // terminal publication expects the receipt its run staged.
+            // terminal publication expects the receipt its run staged. A
+            // refused reconfiguration is the request's own content, like a
+            // failed validation: never retryable here.
             crate::RuntimeDriverError::ValidationFailed { .. }
+            | crate::RuntimeDriverError::ReasoningEffortRefused(_)
             | crate::RuntimeDriverError::QueuedInputsRefused(_)
             | crate::RuntimeDriverError::ScopedContextGenerationNotAdvanced { .. }
             | crate::RuntimeDriverError::InputRefused { .. }

@@ -3192,16 +3192,19 @@ async fn a_held_change_is_carried_out_once_a_person_approved_it() {
     let asked = created.agent.provenance.expect("its record says who asked");
     assert_eq!(asked.requester_kind, RequesterKind::Host);
     assert_eq!(asked.requester, "ops");
-    let served = runtime
-        .identity_runtime()
-        .expect("the identity runtime")
-        .registered_spec(&AgentIdentity::parse("scout").unwrap())
-        .await
-        .is_ok();
-    assert!(
-        served,
-        "the identity runtime serves the agent from its record"
-    );
+    // The registration is the step after the commit: a read between the
+    // two sees the record before the runtime serves it, so the row waits
+    // for it within its bound.
+    let identities = runtime.identity_runtime().expect("the identity runtime");
+    let scout = AgentIdentity::parse("scout").unwrap();
+    let deadline = std::time::Instant::now() + TURN_BOUND;
+    while identities.registered_spec(&scout).await.is_err() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the identity runtime serves the agent from its record"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     match family
         .read(&mob, &host, IdentityRead::Operation(operation.clone()))
         .await

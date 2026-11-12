@@ -3916,6 +3916,10 @@ mod console_private_side_chat_tests;
 mod console_private_audience_tests;
 
 #[cfg(test)]
+#[path = "console_frame_witness_tests.rs"]
+mod console_frame_witness_tests;
+
+#[cfg(test)]
 #[path = "console_schedule_tests.rs"]
 mod console_schedule_tests;
 

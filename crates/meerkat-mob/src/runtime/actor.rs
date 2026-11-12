@@ -32268,6 +32268,27 @@ impl MobActor {
                     let _ = reply_tx.send(emitted);
                 }
                 #[cfg(test)]
+                MobCommand::ResolveRetirementEndpointForTest {
+                    agent_identity,
+                    retiring,
+                    reply_tx,
+                } => {
+                    let entry = self.roster.read().await.get(&agent_identity).cloned();
+                    let resolved = match entry {
+                        Some(entry) => self
+                            .resolve_wiring_endpoint_for_retirement(&entry, &retiring)
+                            .await
+                            .map(|endpoint| match endpoint {
+                                WiringEndpoint::Local { .. } => "local",
+                                WiringEndpoint::LocalDormant { .. } => "local_dormant",
+                                WiringEndpoint::PeerOnly { .. } => "peer_only",
+                                WiringEndpoint::Placed { .. } => "placed",
+                            }),
+                        None => Err(MobError::MemberNotFound(agent_identity)),
+                    };
+                    let _ = reply_tx.send(resolved);
+                }
+                #[cfg(test)]
                 MobCommand::ParkActorForObservationTest {
                     entered_tx,
                     release_rx,

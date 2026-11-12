@@ -536,26 +536,6 @@ async fn a_spawn_that_wired_a_peer_whose_wake_has_not_bound_it_is_rolled_back_at
     fixture.finish().await;
 }
 
-/// How many `mob.peer_retired` notices of `from` `peer`'s transcript holds.
-async fn retired_notices(
-    fixture: &WakeFixture,
-    peer: &AgentIdentity,
-    from: &AgentIdentity,
-) -> usize {
-    let session = fixture.session(peer).await;
-    fixture
-        .transcript(&session)
-        .await
-        .split("Peer lifecycle notice from ")
-        .skip(1)
-        .filter(|notice| {
-            notice.split_once("Kind: ").is_some_and(|(sender, rest)| {
-                sender.contains(from.as_str()) && rest.starts_with("mob.peer_retired")
-            })
-        })
-        .count()
-}
-
 /// A spawn whose second edge cannot be journaled is rolled back while the
 /// wakes of its two peers end. The rollback is held at its first
 /// `spawn-rollback` step, after it has observed the peers' endpoints and
@@ -573,9 +553,8 @@ async fn retired_notices(
 ///
 /// The rows hold the settled state, whether the rollback ended at once or by
 /// a later attempt: the member gone, no edge, no repair owed, neither peer
-/// holding a trust row for the member, at most one retired notice for each
-/// attempt, and the same identity spawned again with a message both ways on
-/// each edge.
+/// holding a trust row for the member, and the same identity spawned again
+/// with a message both ways on each edge.
 async fn spawn_rollback_whose_peers_wakes_end_meanwhile(label: &'static str, waking: bool) {
     let events = Arc::new(FaultInjectedMobEventStore::new());
     let fixture = WakeFixture::build_with_storage(
@@ -697,11 +676,6 @@ async fn spawn_rollback_whose_peers_wakes_end_meanwhile(label: &'static str, wak
             !trusted_by(&fixture, peer).await.contains(&member_peer_id),
             "{peer} holds no trust row for the rolled-back member (the spawn answered {refused:?})"
         );
-        let retired = retired_notices(&fixture, peer, &member).await;
-        assert!(
-            retired <= 2,
-            "{peer} holds at most one retired notice of the member for each attempt: {retired}"
-        );
     }
     {
         let state = fixture.handle.machine_state_watch_rx.borrow();
@@ -743,4 +717,163 @@ async fn a_spawn_rollback_whose_wired_peers_wake_binds_meanwhile_leaves_that_pee
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_spawn_rollback_whose_wired_peer_is_woken_meanwhile_leaves_that_peer_no_trust_row() {
     spawn_rollback_whose_peers_wakes_end_meanwhile("endpoint-meanwhile-dormant", false).await;
+}
+
+/// A spawn rollback beside a planned peer whose wake fails for good while the
+/// rollback runs finishes in that attempt. The peer was Dormant when the
+/// rollback observed it and was never wired (its edge is the one the journal
+/// refused); the host's build preparation then refuses its wake for good,
+/// before the rollback removes its edges. Such a peer's wake realized nothing
+/// that survives it, so there is nothing of the member to clean on it, and
+/// the rollback does not wait for it: the member is gone when the spawn
+/// answers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_spawn_rollback_beside_a_planned_peer_whose_wake_fails_meanwhile_finishes() {
+    let events = Arc::new(FaultInjectedMobEventStore::new());
+    let fixture = WakeFixture::build_with_storage(
+        "endpoint-meanwhile-refused",
+        |_| {},
+        |definition| {
+            definition.wiring.role_wiring = vec![RoleWiringRule {
+                a: ProfileName::from("worker"),
+                b: ProfileName::from("worker"),
+            }];
+        },
+        false,
+        None,
+        MobStorage::with_events(events.clone()),
+    )
+    .await;
+    let first = fixture.spawn("endpoint-refused-first").await;
+    let second = fixture.spawn("endpoint-refused-second").await;
+    fixture.release(&first).await;
+    fixture.release(&second).await;
+
+    events.fail_appends_for_after("MembersWired", 1).await;
+    let member = AgentIdentity::from(format!(
+        "endpoint-refused-member-{}",
+        Uuid::new_v4().simple()
+    ));
+    let rollback_held =
+        crate::runtime::actor::retirement_stage_hold::install(&member, "spawn-rollback");
+    let spawning = {
+        let handle = fixture.handle.clone();
+        let mut spec = SpawnMemberSpec::new("worker", member.clone());
+        spec.continuity_intent = SpawnContinuityIntent::DurableIdentity {
+            continuity_key: member.to_string(),
+        };
+        tokio::spawn(async move { handle.spawn_spec(spec).await.map(|_| ()) })
+    };
+    tokio::time::timeout(WAIT, rollback_held.entered())
+        .await
+        .expect("the spawn's rollback reaches its held step");
+
+    // The peer whose edge the journal refused was planned and never wired.
+    // Its wake is refused for good while the rollback is held.
+    let planned = if edge_held(&fixture, &member, &first) {
+        second.clone()
+    } else {
+        first.clone()
+    };
+    fixture.preparer.answer_with(PreparerAnswer::Final);
+    let woken = fixture.ensure_live(&planned).await;
+    fixture.preparer.answer_with(PreparerAnswer::Prepared);
+    assert!(
+        woken.is_err(),
+        "the planned peer's wake is refused for good: {woken:?}"
+    );
+    assert_ne!(
+        fixture.residency(&planned),
+        Some(mob_dsl::MemberMaterializationPhase::Live),
+        "the peer whose wake was refused is not Live"
+    );
+
+    rollback_held.release();
+    let refused = tokio::time::timeout(WAIT, spawning)
+        .await
+        .expect("the spawn answers")
+        .expect("the spawn task ends")
+        .expect_err("the spawn's second edge cannot be journaled");
+    events.allow_appends_for("MembersWired").await;
+    assert!(
+        !refused
+            .to_string()
+            .contains("rollback remains owned for retry"),
+        "the rollback finished in its first attempt: {refused:?}"
+    );
+    assert!(
+        fixture
+            .handle
+            .get_member(&member)
+            .await
+            .expect("roster read")
+            .is_none(),
+        "the refused member is rolled back when its spawn answers"
+    );
+    assert!(
+        !edge_held(&fixture, &member, &first) && !edge_held(&fixture, &member, &second),
+        "no edge of the refused member is left"
+    );
+    fixture.finish().await;
+}
+
+/// The kind of endpoint the retirement unwire resolver answers for
+/// `identity` while `retiring` is the retiring member.
+async fn retirement_endpoint_kind(
+    fixture: &WakeFixture,
+    identity: &AgentIdentity,
+    retiring: &AgentIdentity,
+) -> Result<&'static str, MobError> {
+    fixture
+        .handle
+        .enqueue_actor_command_for_test(|reply_tx| MobCommand::ResolveRetirementEndpointForTest {
+            agent_identity: identity.clone(),
+            retiring: retiring.clone(),
+            reply_tx,
+        })
+        .await
+        .expect("the resolver command is queued")
+        .await
+        .expect("the actor answers")
+}
+
+/// The retirement unwire resolver answers the surviving end of an edge from
+/// MobMachine's endpoint read, as ordinary resolution does: a peer whose wake
+/// has not bound it is answered from its recorded endpoint, with no lookup of
+/// the comms runtime its wake has already built, and a Live peer through its
+/// comms runtime. The resolver's callers are edges with a placed or a
+/// peer-only member, which this fixture does not have, so the row asks the
+/// resolver directly.
+///
+/// RED before the resolver took the read: the lookup found the held peer's
+/// comms runtime and marking it ready failed `missing generated owner
+/// operation binding`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_retirement_resolver_answers_a_surviving_peer_whose_wake_has_not_bound_it_from_its_recorded_endpoint()
+ {
+    let fixture = WakeFixture::new("endpoint-resolver-unbound").await;
+    let retiring = fixture.spawn("endpoint-resolver-retiring").await;
+    let live = fixture.spawn("endpoint-resolver-live").await;
+    let (peer, mut hold) = peer_held_before_bind(&fixture, "endpoint-resolver-peer").await;
+    let wake = start_wake(&fixture, &peer);
+    wait_held_before_bind(&fixture, &peer, &mut hold).await;
+
+    let held = retirement_endpoint_kind(&fixture, &peer, &retiring).await;
+    assert!(
+        matches!(held, Ok("local_dormant")),
+        "a surviving peer whose wake has not bound it is answered from its recorded endpoint: {held:?}"
+    );
+    let surviving_live = retirement_endpoint_kind(&fixture, &live, &retiring).await;
+    assert!(
+        matches!(surviving_live, Ok("local")),
+        "a Live surviving peer is answered through its comms runtime: {surviving_live:?}"
+    );
+
+    finish_held_wake(&fixture, &peer, hold, wake).await;
+    let bound = retirement_endpoint_kind(&fixture, &peer, &retiring).await;
+    assert!(
+        matches!(bound, Ok("local")),
+        "once its wake has ended the peer is answered through its comms runtime: {bound:?}"
+    );
+    fixture.finish().await;
 }

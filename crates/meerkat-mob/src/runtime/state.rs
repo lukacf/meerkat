@@ -1539,6 +1539,16 @@ pub(super) enum MobCommand {
         intent: &'static str,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
+    /// Test-only: the kind of endpoint the retirement unwire resolver answers
+    /// for `agent_identity` while `retiring` is the retiring member. The
+    /// resolver's callers are edges with a placed or a peer-only member,
+    /// which the wake rows' fixture does not have.
+    #[cfg(test)]
+    ResolveRetirementEndpointForTest {
+        agent_identity: AgentIdentity,
+        retiring: AgentIdentity,
+        reply_tx: oneshot::Sender<Result<&'static str, MobError>>,
+    },
     #[cfg(test)]
     ParkActorForObservationTest {
         entered_tx: oneshot::Sender<()>,
@@ -2512,6 +2522,8 @@ impl MobCommand {
             #[cfg(test)]
             Self::EmitKickoffNoticeForTest { .. } => ShutdownAnswerClass::CallerRequest,
             #[cfg(test)]
+            Self::ResolveRetirementEndpointForTest { .. } => ShutdownAnswerClass::CallerRequest,
+            #[cfg(test)]
             Self::InjectUnreadableNameAtLadderOpenForTest { .. } => {
                 ShutdownAnswerClass::CallerRequest
             }
@@ -2762,6 +2774,8 @@ impl MobCommand {
             Self::OwedMemberWakeRetryArmedForTest { .. } => "OwedMemberWakeRetryArmedForTest",
             #[cfg(test)]
             Self::EmitKickoffNoticeForTest { .. } => "EmitKickoffNoticeForTest",
+            #[cfg(test)]
+            Self::ResolveRetirementEndpointForTest { .. } => "ResolveRetirementEndpointForTest",
             #[cfg(test)]
             Self::InjectUnreadableNameAtLadderOpenForTest { .. } => {
                 "InjectUnreadableNameAtLadderOpenForTest"

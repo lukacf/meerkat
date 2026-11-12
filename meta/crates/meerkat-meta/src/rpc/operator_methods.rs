@@ -2780,6 +2780,12 @@ comms = true
         )
         .await
         .expect("bootstrap unified runtime");
+        // The host completes the runtime's bootstrap: an agent created at
+        // run time is built only after that.
+        runtime
+            .activate_without_identity_context()
+            .await
+            .expect("complete the runtime's bootstrap");
         let handle = runtime.mob_handle();
 
         // Identity-first member: the roster id is the mk--encoded generated

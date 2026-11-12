@@ -1998,17 +1998,42 @@ preparation (`preparations_open`), the held constructions
 last seat row predates their row's labels or profile (`seats_stale`: 0.9.8
 rebuilds such a member from its seat row; a respawn with the row's labels,
 `MemberRespawn::with_labels`, or a restamp brings the seat row up to date).
+From 0.9.15 a label update restamps its idle member
+itself, so only a seat an earlier release left behind, or one whose member
+was not restamped at its update (it held work, say), counts here. From
+that release on, an update that leaves its member's restamp owed records
+it in the identity's row (`label_restamps_owed` counts those rows): the
+mob's roster reads the row's labels from the update's commit and from each
+start on (a host's own respawn of the member with other labels in between
+keeps those on its roster entry until the next start or the restamp, while
+its builds carry the row's), the member's builds are compared with them,
+and a retry of the
+update, the identity's next update while the member is idle, or a respawn
+with the row's labels settles it. Such a seat needs no step before its
+host adopts `MemberBuildPreparer::prepare_store_owned_seat` or a spawn
+customizer that sets labels. A seat an earlier release left behind carries
+no such record: respawn it with its row's labels, or update the identity
+while its member is idle, before the host adopts either, since no start
+and no build moves its labels and a host that answers such a seat from its
+row is refused the member's build. Releases 0.9.9 through 0.9.14 read a row
+that records an owed restamp as unreadable, for that identity alone:
+settle the owed restamps before a rollback to one of them (the store-level
+row counts below report `label_restamps_owed` with no running mob).
+The count names the seat rows a downgrade would read: step 3 of the
+downgrade cycle brings them up to date.
 Change receipts are rows of the identity store's receipts table under keys
 0.9.8 never asks for.
 
 From 0.9.10 the rows are also counted with no running mob, by the same
 rule, read-only. `MobStorage::read_identity_record_rows` counts a store
 file's rows per mob (`IdentityRecordRows`: `created_rows`, `archived`,
-`tombstones`, `unreadable`), and `MobStorage::identity_record_rows` counts a
+`tombstones`, `unreadable`, and from 0.9.15 `label_restamps_owed`, the rows
+that record an owed label restamp), and `MobStorage::identity_record_rows` counts a
 storage's mob, a host store's included. `rkat storage doctor` reports them
 for each mob database that holds any, and Meta's storage doctor for a Meta
 state directory, as the Info finding `identity-store-rows` with the counts
-only.
+only. The doctors do not print the owed label restamp count; the row
+counts do (`label_restamps_owed`), so read that count before a rollback.
 
 0.9.8 reads WorkGraph items whose evidence withdraws earlier evidence, but it
 ignores `withdraws` and drops the field when it rewrites such an item (any

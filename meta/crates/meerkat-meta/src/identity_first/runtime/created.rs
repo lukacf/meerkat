@@ -523,20 +523,87 @@ impl IdentityRuntime {
     /// a row is its identity's one owner, also while the host's roster
     /// still lists its name, so a pass neither registers nor declares the
     /// roster's listing of it. No read of Core or of a row.
+    ///
+    /// The listing it leaves out is not silent. Each registration it is
+    /// left out for is marked
+    /// ([`IdentityEntry::roster_listing_superseded`], which the identity's
+    /// status carries), the mark of one `roster` no longer lists is
+    /// cleared, and each name is logged once per process
+    /// ([`Self::first_note_of_superseded_listing`]).
     pub(super) async fn roster_without_row_identities(
         &self,
         roster: &[DurableAgentSpec],
     ) -> Vec<DurableAgentSpec> {
-        let entries = self.entries.read().await;
-        roster
+        let listed = roster
             .iter()
-            .filter(|spec| {
-                !entries
-                    .get(&spec.identity)
-                    .is_some_and(|entry| entry.created)
-            })
-            .cloned()
-            .collect()
+            .map(|spec| &spec.identity)
+            .collect::<BTreeSet<_>>();
+        let (kept, superseded, marks_change) = {
+            let entries = self.entries.read().await;
+            let kept = roster
+                .iter()
+                .filter(|spec| {
+                    !entries
+                        .get(&spec.identity)
+                        .is_some_and(|entry| entry.created)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut superseded = Vec::new();
+            let mut marks_change = false;
+            for (identity, entry) in entries.iter().filter(|(_, entry)| entry.created) {
+                let is_listed = listed.contains(&identity);
+                if is_listed {
+                    superseded.push(identity.clone());
+                }
+                marks_change |= entry.roster_listing_superseded != is_listed;
+            }
+            (kept, superseded, marks_change)
+        };
+        if marks_change {
+            // Taken only when a mark changes: releasing the table's write
+            // lock wakes its waiters.
+            let mut entries = self.entries.write().await;
+            for (identity, entry) in entries.iter_mut().filter(|(_, entry)| entry.created) {
+                entry.roster_listing_superseded = listed.contains(&identity);
+            }
+        }
+        for identity in superseded {
+            if self.first_note_of_superseded_listing(&identity) {
+                tracing::warn!(
+                    %identity,
+                    "the host's roster lists a name whose agent is served from its record in \
+                     the mob's identity store: the roster's entry for it is not applied. Change \
+                     the agent through the identity methods, or remove the entry from the roster"
+                );
+            }
+        }
+        kept
+    }
+
+    /// Whether this is the first time this process says that the roster's
+    /// listing of `identity` is not applied: the name is recorded, so every
+    /// later ask answers `false` and the log names it once.
+    pub(super) fn first_note_of_superseded_listing(&self, identity: &AgentIdentity) -> bool {
+        self.roster_listings_noted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(identity.clone())
+    }
+
+    /// Whether the host's roster lists `identity`'s name while the identity
+    /// is served from its record in the mob's identity store, as the roster
+    /// was last read ([`IdentityEntry::roster_listing_superseded`]): what
+    /// its status carries as `roster_listing_superseded`. `false` for every
+    /// other identity, and for a name this runtime does not serve. No read
+    /// of Core or of a row. The identity family's reads answer it beside the
+    /// agent's record.
+    pub(crate) async fn roster_listing_superseded(&self, identity: &AgentIdentity) -> bool {
+        self.entries
+            .read()
+            .await
+            .get(identity)
+            .is_some_and(|entry| entry.created && entry.roster_listing_superseded)
     }
 
     /// [`Self::register_created_identities`], answering the identities a
@@ -894,7 +961,11 @@ impl IdentityRuntime {
 
     /// Record `spec`, a row's spec, as its identity's registration, while
     /// the caller holds its lifecycle lock. A wake refusal recorded for it
-    /// survives, as for any re-registration.
+    /// survives, as for any re-registration, and so does what the roster
+    /// said of its name: a registration the roster made lists the name, so
+    /// the row's registration that replaces it supersedes that listing from
+    /// now (an adoption between two roster passes), and a row's own
+    /// registration keeps the mark the last roster read gave it.
     pub(super) async fn register_created_locked(&self, spec: DurableAgentSpec) {
         self.append_changed_instructions_on_registration(&spec)
             .await;
@@ -902,12 +973,18 @@ impl IdentityRuntime {
         let bootstrap_generation = self.identity_bootstrap_status_with_generation().0;
         {
             let mut entries = self.entries.write().await;
-            let wake_refusal = entries
-                .get(&identity)
-                .and_then(|existing| existing.wake_refusal.clone());
+            let existing = entries.get(&identity);
+            let wake_refusal = existing.and_then(|existing| existing.wake_refusal.clone());
+            let roster_listing_superseded = existing
+                .is_some_and(|existing| !existing.created || existing.roster_listing_superseded);
             entries.insert(
                 identity.clone(),
-                Self::created_entry(spec, bootstrap_generation, wake_refusal),
+                Self::created_entry(
+                    spec,
+                    bootstrap_generation,
+                    wake_refusal,
+                    roster_listing_superseded,
+                ),
             );
             entries.note_registration(&identity);
         }
@@ -926,7 +1003,7 @@ impl IdentityRuntime {
             let mut entries = self.entries.write().await;
             entries
                 .entry(identity.clone())
-                .or_insert_with(|| Self::created_entry(spec, bootstrap_generation, None));
+                .or_insert_with(|| Self::created_entry(spec, bootstrap_generation, None, false));
             entries.note_registration(&identity);
         }
         self.ensure_registration_channels(identity).await;
@@ -937,6 +1014,7 @@ impl IdentityRuntime {
         spec: DurableAgentSpec,
         bootstrap_generation: u64,
         wake_refusal: Option<super::super::types::WakeRefusal>,
+        roster_listing_superseded: bool,
     ) -> IdentityEntry {
         IdentityEntry {
             spec,
@@ -946,6 +1024,7 @@ impl IdentityRuntime {
             last_reload: None,
             declaration_refused: false,
             created: true,
+            roster_listing_superseded,
         }
     }
 

@@ -50,21 +50,6 @@ impl IdentityRuntime {
         self.runtime_services.mob_handle()
     }
 
-    /// Whether the host's roster lists `identity` while the agent is served
-    /// from its record, so the roster's entry is not applied.
-    ///
-    /// STAND-IN, to be deleted when the roster pass is merged: the roster
-    /// pass owns this fact and brings a method of this name and signature,
-    /// which the family's reads then call unchanged. Until then no roster
-    /// pass says so, and the answer is `false` for every agent.
-    #[allow(
-        clippy::unused_async,
-        reason = "the signature of the roster pass's own method, which awaits"
-    )]
-    pub(crate) async fn roster_listing_superseded(&self, _identity: &AgentIdentity) -> bool {
-        false
-    }
-
     /// Whether the record of the agent `name` is its row in the mob's
     /// identity store: an agent created at run time, or adopted. `false`
     /// for an agent its host configures, for a name no agent holds, and for

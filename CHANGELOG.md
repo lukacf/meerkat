@@ -104,7 +104,10 @@ them.
   about the external peer's binding or about the edge; before, such a call
   could answer that other refusal (an open approval branch, a Broken
   member, an identity entry an agent may not wire, a binding the mob
-  refuses, an edge MobMachine does not admit) instead.
+  refuses, an edge MobMachine does not admit) instead. The same holds for
+  a call that gives one name as both members: a name the mob does not hold
+  answers member not found, where it answered that the call needs two
+  different members.
 
 ### Fixed
 

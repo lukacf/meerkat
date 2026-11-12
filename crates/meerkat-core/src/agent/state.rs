@@ -29661,11 +29661,14 @@ mod tests {
 
         let result = agent.run("prompt".to_string().into()).await.unwrap();
         assert_eq!(result.text, "done");
+        // Once `deferred_tool` is loaded, the only tool still behind the
+        // catalog is the one its closed gate hides. Nothing can be loaded,
+        // so the control tool leaves the request with it.
         assert_eq!(
             client.seen_tools(),
             vec![
                 vec!["tool_catalog_load".to_string()],
-                vec!["deferred_tool".to_string(), "tool_catalog_load".to_string()],
+                vec!["deferred_tool".to_string()],
             ]
         );
 

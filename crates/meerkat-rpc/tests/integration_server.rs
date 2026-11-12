@@ -1751,8 +1751,23 @@ mod tcp_callback_ownership {
                 .await;
             self.response(id).await
         }
+        /// Register a small tool: a session offers it in its requests.
         async fn register(&mut self, tool: &str) {
-            let result = self.request(2, "tools/register", json!({"tools":[{"name":tool,"description":"connection-owned synthetic callback","input_schema":{"type":"object","properties":{}}}]})).await;
+            self.register_described(tool, "connection-owned synthetic callback".to_owned())
+                .await;
+        }
+        /// Register a tool over the catalog's byte budget: a session defers
+        /// it, offers the catalog control tools, and the model loads the tool
+        /// before it calls it.
+        async fn register_deferred(&mut self, tool: &str) {
+            self.register_described(
+                tool,
+                super::over_catalog_budget("connection-owned synthetic callback"),
+            )
+            .await;
+        }
+        async fn register_described(&mut self, tool: &str, description: String) {
+            let result = self.request(2, "tools/register", json!({"tools":[{"name":tool,"description":description,"input_schema":{"type":"object","properties":{}}}]})).await;
             assert!(result["registered"].as_u64().unwrap() > 0);
         }
         async fn create(&mut self) -> String {
@@ -2135,8 +2150,8 @@ mod tcp_callback_ownership {
         let (_, mut b) = h.connect().await;
         // Register after both constructors so the baseline reaches actual misrouting,
         // independently of the previous test's registry-reset failure.
-        a.register("a_lookup").await;
-        b.register("b_lookup").await;
+        a.register_deferred("a_lookup").await;
+        b.register_deferred("b_lookup").await;
         let a_session = a.create().await;
         a.start(&a_session, "route-a").await;
         let a_initial = h.seen("route-a").await;
@@ -2504,11 +2519,12 @@ mod tcp_callback_ownership {
 
     /// The `durable` detached callback tool as a connection registers it:
     /// one runner and contract, and the description that tells two
-    /// declarations apart.
+    /// declarations apart. It is over the catalog's byte budget, so a session
+    /// defers it and the model loads it first.
     fn durable_tool(description: &str) -> Value {
         json!([{
             "name": "durable",
-            "description": description,
+            "description": super::over_catalog_budget(description),
             "input_schema": {"type": "object", "properties": {}},
             "execution": {
                 "mode": "detached",
@@ -2762,7 +2778,7 @@ mod tcp_callback_ownership {
         );
         let (_, mut a) = h.connect().await;
         if register_first {
-            a.register(tool).await;
+            a.register_deferred(tool).await;
         }
         let mob_id = a
             .request(
@@ -2781,7 +2797,7 @@ mod tcp_callback_ownership {
         )
         .await;
         if !register_first {
-            a.register(tool).await;
+            a.register_deferred(tool).await;
         }
         a.send(json!({"jsonrpc":"2.0","id":7,"method":"mob/turn_start","params":{"mob_id":mob_id,"agent_identity":"w1","prompt":prompt}}))
             .await;
@@ -2843,7 +2859,7 @@ mod tcp_callback_ownership {
         );
         let (_, mut a) = h.connect().await;
         let (_, mut b) = h.connect().await;
-        a.register(tool).await;
+        a.register_deferred(tool).await;
         let mob_id = a
             .request(
                 5,
@@ -2919,13 +2935,11 @@ mod tcp_callback_ownership {
         // The id `MobDefinition::implicit(session, ..)` gives.
         let mob = format!("implicit-{session}");
         if over_rpc {
+            // Both tools are small, so the member's requests carry the ones
+            // it has: the model calls B's tool without loading it.
             h.provider.plan(
                 prompt,
                 [
-                    Step::Load {
-                        tool: "b_lookup",
-                        call_id: "load-b-member",
-                    },
                     Step::Call {
                         tool: "b_lookup",
                         call_id: "call-b-member",
@@ -2976,11 +2990,22 @@ mod tcp_callback_ownership {
             b.response(9).await;
             return;
         }
-        let loaded = h.seen(prompt).await;
-        assert_catalog_load(&loaded, "load-b-member", "b_lookup");
+        // A tool of A's that reached the re-created mob would be in this
+        // request beside B's.
         assert!(
-            !loaded.tools.iter().any(|name| name == "a_lookup"),
-            "A's tool reached the re-created mob: {loaded:?}"
+            initial.tools.iter().any(|name| name == "b_lookup"),
+            "the re-created mob's member has B's tool: {initial:?}"
+        );
+        assert!(
+            !initial.tools.iter().any(|name| name == "a_lookup"),
+            "A's tool reached the re-created mob: {initial:?}"
+        );
+        assert!(
+            !initial
+                .tools
+                .iter()
+                .any(|name| name.starts_with("tool_catalog_")),
+            "a member whose registered tools are all in the request has no control tool: {initial:?}"
         );
         let (owner, callback) = tokio::select! {
             frame = a.next_significant() => ("A", frame),
@@ -3137,7 +3162,7 @@ mod tcp_callback_ownership {
             ],
         );
         let (a_index, mut a) = h.connect().await;
-        a.register("a_lookup").await;
+        a.register_deferred("a_lookup").await;
         let token = claim_token(
             &a.request(5, "mob/create", claim_mob_definition("handoff_mob"))
                 .await,
@@ -3162,7 +3187,7 @@ mod tcp_callback_ownership {
 
         // No connection holds the route: the member's call fails typed.
         let (_, mut b) = h.connect().await;
-        b.register("b_lookup").await;
+        b.register_deferred("b_lookup").await;
         b.send(member_turn(8, "handoff_mob", "handoff-unclaimed"))
             .await;
         h.seen("handoff-unclaimed").await;
@@ -3456,7 +3481,7 @@ mod tcp_callback_ownership {
             h.restart().await;
 
             let (_, mut b) = h.connect().await;
-            b.register("b_lookup").await;
+            b.register_deferred("b_lookup").await;
             b.send(json!({"jsonrpc":"2.0","id":17,"method":"mob/claim_callback_route","params":claim_params("restored_mob", &json!(format!("mct_{}", "A".repeat(43))))}))
                 .await;
             assert_claim_refused(
@@ -3504,11 +3529,12 @@ mod tcp_callback_ownership {
 
     /// The detached callback tool `name` a connection registers. Each case
     /// registers its own name and runner, so a job one case queues never
-    /// routes to another case's connection.
+    /// routes to another case's connection. It is over the catalog's byte
+    /// budget, so a session defers it and the model loads it first.
     fn detached_tool(name: &str) -> Value {
         json!([{
             "name": name,
-            "description": "connection-owned detached callback",
+            "description": super::over_catalog_budget("connection-owned detached callback"),
             "input_schema": {"type": "object", "properties": {}},
             "execution": {
                 "mode": "detached",

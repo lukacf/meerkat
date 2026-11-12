@@ -74,12 +74,28 @@ const SCAN_DEBOUNCE: Duration = Duration::from_millis(20);
 // Bodies
 // ---------------------------------------------------------------------------
 
-/// The bodies of the mob's Active records, by digest: content the journal
-/// keeps for replay and delivery. MobMachine holds every record's digest;
-/// this store holds no lifecycle fact.
+/// Where the Active body of one record is.
+#[derive(Debug, Clone)]
+enum RecordBody {
+    /// In memory: the body of a shared record (targeted at every member or
+    /// at a profile), which many members' snapshots carry.
+    Held(Arc<str>),
+    /// In the journal row at this cursor: the body of a member-targeted
+    /// record, read when the one member it names gets its snapshot. The mob
+    /// holds one such record per member that has one, so it keeps where
+    /// each body is, never the bodies.
+    Journaled(u64),
+}
+
+/// The bodies of the mob's Active records, by record slot: content the
+/// journal keeps for replay and delivery. A shared record's body is held; a
+/// member-targeted record's body stays in its journal row and is read for
+/// its member's snapshot. MobMachine holds every record's digest; this store
+/// holds no lifecycle fact, and a body is used only at the digest the
+/// machine holds for its slot.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct OperatorInstructionBodies {
-    by_digest: BTreeMap<String, Arc<str>>,
+    by_slot: BTreeMap<String, (String, RecordBody)>,
 }
 
 impl OperatorInstructionBodies {
@@ -92,30 +108,217 @@ impl OperatorInstructionBodies {
             .map_or(0, |position| position + 1);
         let mut bodies = Self::default();
         for event in &events[epoch_start..] {
-            if let MobEventKind::OperatorInstructionCommitted(committed) = &event.kind
-                && let (Some(digest), Some(body)) = (&committed.content_sha256, committed.body())
-            {
-                bodies.insert(digest, body);
+            if let MobEventKind::OperatorInstructionCommitted(committed) = &event.kind {
+                match (&committed.content_sha256, committed.body()) {
+                    (Some(digest), Some(body))
+                        if committed.effect == meerkat_core::InstructionEffect::Active =>
+                    {
+                        bodies.record_active(
+                            &committed.slot.machine_key(),
+                            digest,
+                            body,
+                            &committed.target,
+                            event.cursor,
+                        );
+                    }
+                    _ => bodies.record_revoked(&committed.slot.machine_key()),
+                }
             }
         }
         bodies
     }
 
-    pub(crate) fn insert(&mut self, digest: &InstructionContentDigest, body: &str) {
-        self.by_digest
-            .insert(digest.as_str().to_owned(), Arc::from(body));
+    /// Follow a committed Active record of `key`, journaled at `cursor`: a
+    /// shared record's body is held, a member-targeted record's located.
+    pub(crate) fn record_active(
+        &mut self,
+        key: &str,
+        digest: &InstructionContentDigest,
+        body: &str,
+        target: &OperatorInstructionTarget,
+        cursor: u64,
+    ) {
+        let body = match target {
+            OperatorInstructionTarget::Member { .. } => RecordBody::Journaled(cursor),
+            OperatorInstructionTarget::Mob | OperatorInstructionTarget::Profile { .. } => {
+                RecordBody::Held(Arc::from(body))
+            }
+        };
+        self.by_slot
+            .insert(key.to_owned(), (digest.as_str().to_owned(), body));
     }
 
-    pub(crate) fn get(&self, digest: &str) -> Option<&str> {
-        self.by_digest.get(digest).map(|body| &**body)
+    /// Follow a committed revoke of `key`: an Absent record keeps no body.
+    pub(crate) fn record_revoked(&mut self, key: &str) {
+        self.by_slot.remove(key);
     }
 
-    /// Keep only the bodies a record of `state` names.
-    pub(crate) fn retain_referenced(&mut self, state: &mob_dsl::MobMachineState) {
-        let referenced: BTreeSet<&String> = state.operator_instruction_digest.values().collect();
-        self.by_digest
-            .retain(|digest, _| referenced.contains(digest));
+    /// Drop what a slot `state` no longer records left behind (a reset
+    /// clears the records). It scans only when something is left over.
+    pub(crate) fn retain_recorded(&mut self, state: &mob_dsl::MobMachineState) {
+        if self.by_slot.len() > state.operator_instruction_revision.len() {
+            self.by_slot
+                .retain(|key, _| state.operator_instruction_revision.contains_key(key));
+        }
     }
+
+    /// The body of the record of `key` at `digest`: a held body, or a
+    /// located one read from `journal`, the mob's events in cursor order
+    /// (a restore at a start has them; a delivery resolves its member's
+    /// bodies first, see [`Self::member_journal_reads`]).
+    fn body<'a>(
+        &'a self,
+        key: &str,
+        digest: &str,
+        journal: Option<&'a [MobEvent]>,
+    ) -> Option<&'a str> {
+        let (recorded_digest, body) = self.by_slot.get(key)?;
+        if recorded_digest != digest {
+            return None;
+        }
+        match body {
+            RecordBody::Held(body) => Some(body.as_ref()),
+            RecordBody::Journaled(cursor) => {
+                let journal = journal?;
+                let event = journal
+                    .binary_search_by_key(cursor, |event| event.cursor)
+                    .ok()
+                    .and_then(|index| journal.get(index))
+                    .or_else(|| journal.iter().find(|event| event.cursor == *cursor))?;
+                journaled_body(event, key, digest)
+            }
+        }
+    }
+
+    /// The journal rows `agent_identity`'s snapshot needs read: for each
+    /// Active member-targeted record that names it and whose body this
+    /// store locates, the slot key, the digest and the row's cursor. A
+    /// member holds few records of its own, whatever the mob holds.
+    pub(crate) fn member_journal_reads(
+        &self,
+        state: &mob_dsl::MobMachineState,
+        agent_identity: &AgentIdentity,
+    ) -> Vec<(String, String, u64)> {
+        let mut reads = Vec::new();
+        for (key, member) in &state.operator_instruction_target_member {
+            if member.0.as_str() != agent_identity.as_str()
+                || state.operator_instruction_effect.get(key)
+                    != Some(&mob_dsl::InstructionEffect::Active)
+            {
+                continue;
+            }
+            if let (Some(digest), Some((recorded_digest, RecordBody::Journaled(cursor)))) = (
+                state.operator_instruction_digest.get(key),
+                self.by_slot.get(key),
+            ) && digest == recorded_digest
+            {
+                reads.push((key.clone(), digest.clone(), *cursor));
+            }
+        }
+        reads
+    }
+
+    /// The bodies one member's snapshot reads: the held bodies of the shared
+    /// records, and `read`, the member's own bodies as its journal rows
+    /// hold them (slot key, digest, body). What a snapshot built off the
+    /// mob's actor is handed, so it carries no other member's body.
+    pub(crate) fn for_member(&self, read: Vec<(String, String, Arc<str>)>) -> Self {
+        let mut by_slot: BTreeMap<String, (String, RecordBody)> = self
+            .by_slot
+            .iter()
+            .filter(|(_, (_, body))| matches!(body, RecordBody::Held(_)))
+            .map(|(key, entry)| (key.clone(), entry.clone()))
+            .collect();
+        for (key, digest, body) in read {
+            by_slot.insert(key, (digest, RecordBody::Held(body)));
+        }
+        Self { by_slot }
+    }
+
+    /// How many bytes of bodies this store holds in memory.
+    #[cfg(test)]
+    pub(crate) fn held_body_bytes(&self) -> usize {
+        self.by_slot
+            .values()
+            .map(|(_, body)| match body {
+                RecordBody::Held(body) => body.len(),
+                RecordBody::Journaled(_) => 0,
+            })
+            .sum()
+    }
+}
+
+/// The body `event` journals for the record of `key` at `digest`, when it is
+/// that record's committed row.
+fn journaled_body<'a>(event: &'a MobEvent, key: &str, digest: &str) -> Option<&'a str> {
+    match &event.kind {
+        MobEventKind::OperatorInstructionCommitted(committed)
+            if committed.slot.machine_key() == key
+                && committed
+                    .content_sha256
+                    .as_ref()
+                    .is_some_and(|recorded| recorded.as_str() == digest) =>
+        {
+            committed.body()
+        }
+        _ => None,
+    }
+}
+
+/// How many journal rows [`read_journaled_bodies`] has read, per slot key: a
+/// row's probe that a step read none. A row counts the reads of a slot key
+/// only it writes, so rows that share a process do not disturb each other.
+#[cfg(test)]
+static JOURNALED_BODY_ROW_READS: std::sync::Mutex<BTreeMap<String, usize>> =
+    std::sync::Mutex::new(BTreeMap::new());
+
+/// The journal rows read so far for the record of slot `key`.
+#[cfg(test)]
+pub(crate) fn journaled_body_row_reads(key: &str) -> usize {
+    JOURNALED_BODY_ROW_READS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(key)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Read from the mob's journal the member-targeted bodies a snapshot needs
+/// ([`OperatorInstructionBodies::member_journal_reads`]): one row per
+/// record, by its cursor. A row that is not the record's committed row at
+/// its digest fails the read, typed, so a snapshot never carries another
+/// body.
+pub(crate) async fn read_journaled_bodies(
+    events: &dyn crate::store::MobEventStore,
+    reads: Vec<(String, String, u64)>,
+) -> Result<Vec<(String, String, Arc<str>)>, MobError> {
+    let mut read = Vec::with_capacity(reads.len());
+    for (key, digest, cursor) in reads {
+        #[cfg(test)]
+        {
+            *JOURNALED_BODY_ROW_READS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .entry(key.clone())
+                .or_default() += 1;
+        }
+        let rows = events
+            .poll(cursor.saturating_sub(1), 1)
+            .await
+            .map_err(MobError::from)?;
+        let body = rows
+            .first()
+            .filter(|event| event.cursor == cursor)
+            .and_then(|event| journaled_body(event, &key, &digest))
+            .ok_or_else(|| {
+                MobError::Internal(format!(
+                    "the body of operator instruction {key} (digest {digest}) is not in the \
+                     mob's journal at row {cursor}"
+                ))
+            })?;
+        read.push((key, digest, Arc::from(body)));
+    }
+    Ok(read)
 }
 
 /// The actor's operator-instruction shell: the bodies, and the delivery
@@ -134,14 +337,45 @@ pub(crate) struct OperatorInstructionShell {
 /// nothing, so no delivery lands after a release.
 #[derive(Debug)]
 pub(crate) struct OperatorInstructionDeliveryShared {
-    last_failures: std::sync::Mutex<BTreeMap<AgentIdentity, String>>,
+    /// The mob this bookkeeping is of: a host serves several mobs, and a
+    /// member's name alone does not say which one a warning is about.
+    mob_id: MobId,
+    last_failures: std::sync::Mutex<BTreeMap<AgentIdentity, RetryFailure>>,
     member_locks: std::sync::Mutex<BTreeMap<AgentIdentity, Arc<tokio::sync::Mutex<u64>>>>,
     pub(crate) dormant_concurrency: usize,
 }
 
+/// A retryable failure of a member's record: its typed class (the closed
+/// refusal code, the session error's stable code, or this module's own
+/// class) and the text the status read shows as the member's last failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RetryFailure {
+    pub(crate) class: String,
+    pub(crate) text: String,
+}
+
+impl RetryFailure {
+    fn new(class: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            class: class.into(),
+            text: text.into(),
+        }
+    }
+}
+
+/// What the one warning for a member's failed record names: the mob, the
+/// member and the failure's typed class. Never the failure's text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MemberFailureWarning {
+    mob_id: MobId,
+    agent_identity: AgentIdentity,
+    class: String,
+}
+
 impl OperatorInstructionDeliveryShared {
-    pub(crate) fn new(dormant_concurrency: usize) -> Arc<Self> {
+    pub(crate) fn new(mob_id: MobId, dormant_concurrency: usize) -> Arc<Self> {
         Arc::new(Self {
+            mob_id,
             last_failures: std::sync::Mutex::new(BTreeMap::new()),
             member_locks: std::sync::Mutex::new(BTreeMap::new()),
             dormant_concurrency: dormant_concurrency.max(1),
@@ -160,18 +394,58 @@ impl OperatorInstructionDeliveryShared {
         Arc::clone(locks.entry(agent_identity.clone()).or_default())
     }
 
-    fn record_failure(&self, agent_identity: &AgentIdentity, failure: String) {
-        self.last_failures
+    /// Keep `failure` as the member's last failure, for the status read, and
+    /// log it by this module's one rule: a warning at a member's first
+    /// failure and again when the failure's class changes, never one per
+    /// retry (a failure that never clears is retried for the life of the
+    /// mob). The warning names the mob, the member and the class, never the
+    /// failure's text. Answers the warning it logged, if it logged one.
+    fn record_failure(
+        &self,
+        agent_identity: &AgentIdentity,
+        failure: RetryFailure,
+    ) -> Option<MemberFailureWarning> {
+        let class = failure.class.clone();
+        let previous = self
+            .last_failures
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(agent_identity.clone(), failure);
+        if previous.is_some_and(|previous| previous.class == class) {
+            return None;
+        }
+        let warning = MemberFailureWarning {
+            mob_id: self.mob_id.clone(),
+            agent_identity: agent_identity.clone(),
+            class,
+        };
+        tracing::warn!(
+            mob_id = %warning.mob_id,
+            agent_identity = %warning.agent_identity,
+            failure = %warning.class,
+            "a member's operator instruction record failed; the member stays owed and the mob \
+             goes on trying (logged again only when the failure's class changes)"
+        );
+        Some(warning)
     }
 
-    fn clear_failure(&self, agent_identity: &AgentIdentity) {
-        self.last_failures
+    /// Forget the member's last failure: its session answered the record.
+    /// A record that landed (`recorded`) after failing is logged once, so
+    /// the log shows the failure's end; the next failure warns again.
+    fn clear_failure(&self, agent_identity: &AgentIdentity, recorded: bool) {
+        let failed = self
+            .last_failures
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(agent_identity);
+        if let (Some(failed), true) = (failed, recorded) {
+            tracing::info!(
+                mob_id = %self.mob_id,
+                agent_identity = %agent_identity,
+                failure = %failed.class,
+                "a member's operator instruction record landed after failing"
+            );
+        }
     }
 
     fn last_failure(&self, agent_identity: &AgentIdentity) -> Option<String> {
@@ -179,7 +453,7 @@ impl OperatorInstructionDeliveryShared {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(agent_identity)
-            .cloned()
+            .map(|failure| failure.text.clone())
     }
 
     /// Drop the bookkeeping of members `state` no longer seats. It reads the
@@ -310,9 +584,15 @@ fn record_targets_another_member(
 /// member's snapshot, and its session revokes a slot its target no longer
 /// names. So a snapshot's size follows the shared records and the member's
 /// own, never the number of other members that hold a record.
+///
+/// `bodies` holds the shared records' bodies. The member's own bodies come
+/// from it too when the caller resolved them
+/// ([`OperatorInstructionBodies::for_member`]), or from `journal`, the mob's
+/// events in cursor order, at a start that has them in hand.
 pub(crate) fn member_instruction_record(
     state: &mob_dsl::MobMachineState,
     bodies: &OperatorInstructionBodies,
+    journal: Option<&[MobEvent]>,
     mob_id: &MobId,
     agent_identity: &AgentIdentity,
     member_profile: &str,
@@ -333,7 +613,7 @@ pub(crate) fn member_instruction_record(
                 .get(key)
                 .map(String::as_str)
                 .unwrap_or_default();
-            let body = bodies.get(digest).ok_or_else(|| {
+            let body = bodies.body(key, digest, journal).ok_or_else(|| {
                 MobError::Internal(format!(
                     "the body of operator instruction {slot} (digest {digest}) is not in the \
                      mob's journal"
@@ -369,8 +649,19 @@ pub(crate) fn member_profile(
         .unwrap_or_default()
 }
 
-/// How many current members the record of `key` selects.
+/// How many current members the record of `key` selects. A member-targeted
+/// record selects its one member when it is seated: it is looked up, not
+/// searched for among the seats.
 pub(crate) fn matched_members(state: &mob_dsl::MobMachineState, key: &str) -> u64 {
+    if state.operator_instruction_target_kind.get(key)
+        == Some(&mob_dsl::InstructionTargetKind::Member)
+    {
+        return state
+            .operator_instruction_target_member
+            .get(key)
+            .is_some_and(|member| state.identity_to_runtime.contains_key(member))
+            .into();
+    }
     state
         .identity_to_runtime
         .keys()
@@ -389,33 +680,55 @@ pub(crate) fn matched_members(state: &mob_dsl::MobMachineState, key: &str) -> u6
         .count() as u64
 }
 
+/// Whether a member's build carries its snapshot at birth: the mob has
+/// recorded a generation and the build mints its session. A build that
+/// continues an existing session carries nothing (that member receives its
+/// snapshot by delivery).
+pub(crate) fn birth_carries_member_instructions(
+    request: &meerkat_core::service::CreateSessionRequest,
+    state: &mob_dsl::MobMachineState,
+) -> bool {
+    state.operator_instruction_generation != 0
+        && request.build.as_ref().is_some_and(|build| {
+            build.session_build_intent() == meerkat_core::SessionBuildIntent::Mint
+                && build.resume_session.is_some()
+        })
+}
+
 /// Carry a member's snapshot in the session its build mints: the new session
 /// is born with its target, so its first run applies it, and the member's
 /// owed delivery then answers "already recorded" without a write. A build
 /// that continues an existing session carries nothing (that member receives
 /// its snapshot by delivery), nor does a mob that never recorded a
-/// generation.
+/// generation. `bodies` and `journal` are as
+/// [`member_instruction_record`] reads them.
 pub(crate) fn carry_member_instruction_birth(
     request: &mut meerkat_core::service::CreateSessionRequest,
     state: &mob_dsl::MobMachineState,
     bodies: &OperatorInstructionBodies,
+    journal: Option<&[MobEvent]>,
     mob_id: &MobId,
     agent_identity: &AgentIdentity,
     member_profile: &str,
 ) -> Result<(), MobError> {
-    if state.operator_instruction_generation == 0 {
+    if !birth_carries_member_instructions(request, state) {
         return Ok(());
     }
-    let Some(build) = request.build.as_mut() else {
+    let Some(carrier) = request
+        .build
+        .as_mut()
+        .and_then(|build| build.resume_session.as_mut())
+    else {
         return Ok(());
     };
-    if build.session_build_intent() != meerkat_core::SessionBuildIntent::Mint {
-        return Ok(());
-    }
-    let Some(carrier) = build.resume_session.as_mut() else {
-        return Ok(());
-    };
-    let record = member_instruction_record(state, bodies, mob_id, agent_identity, member_profile)?;
+    let record = member_instruction_record(
+        state,
+        bodies,
+        journal,
+        mob_id,
+        agent_identity,
+        member_profile,
+    )?;
     carrier
         .record_instruction_target(record)
         .map(|_| ())
@@ -468,9 +781,177 @@ pub(crate) enum MemberInstructionDeliveryOutcome {
 }
 
 /// How the delivery owner reads a session's answer.
-enum DeliveryResult {
+pub(crate) enum DeliveryResult {
     Settled(MemberInstructionDeliveryOutcome),
-    Retry(String),
+    Retry(RetryFailure),
+}
+
+/// How long one wait of a member's wake for its operator instruction record
+/// may take off the mob's actor: the wait for a delivery in flight for the
+/// member, and the session's answer to the write. Past it the wake goes on
+/// and the member stays owed. A write still under way ends on its own.
+pub(crate) const WAKE_INSTRUCTION_RECORD_BOUND: Duration = Duration::from_secs(5);
+
+/// What a member's wake did with the snapshot the member is owed.
+pub(crate) enum WakeInstructionRecord {
+    /// Nothing was written: the member's release moved on since the snapshot
+    /// was prepared.
+    NotWritten,
+    /// The session answered: the snapshot is recorded, or the session
+    /// refused it for a cause that blocks the member.
+    Settled(MemberInstructionDeliveryOutcome),
+    /// The session already holds a later generation under this mob's id.
+    SessionAhead { session_generation: u64 },
+    /// The write failed or did not answer within the bound: the member stays
+    /// owed. This module kept the failure and logged it by its rule.
+    Failed,
+}
+
+/// The typed class of a refusal: its closed code as hosts read it.
+fn refusal_class(code: InstructionSetErrorCode) -> String {
+    serde_json::to_value(code)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| format!("{code:?}"))
+}
+
+/// The typed class of a failed record: the closed refusal code, or the
+/// session error's stable code. Never an error's text.
+fn record_failure_class(error: &SessionInstructionError) -> String {
+    match error {
+        SessionInstructionError::Refused(refusal) => refusal_class(refusal.code()),
+        SessionInstructionError::DurabilityUnavailable => {
+            refusal_class(InstructionSetErrorCode::DurabilityUnavailable)
+        }
+        SessionInstructionError::Session(error) => error.code().to_string(),
+    }
+}
+
+/// A failure of a member's wake that leaves the member owed and that the
+/// mob's actor saw (the member's delivery still in flight past the wake's
+/// bound, its journal rows unread, its snapshot not prepared, its record
+/// not settled). The actor reports it here: this module keeps the member's
+/// last failure and logs it by its one rule, so a wake that fails the same
+/// way again does not warn again.
+pub(crate) fn report_wake_failure(
+    shared: &OperatorInstructionDeliveryShared,
+    agent_identity: &AgentIdentity,
+    class: &'static str,
+    text: &'static str,
+) {
+    shared.record_failure(agent_identity, RetryFailure::new(class, text));
+}
+
+/// A member's delivery lock and the release epoch read under it. A wake
+/// carries it from its epoch step to its write, so the write faces the very
+/// lock the epoch was read under: a lock the bookkeeping pruned and made
+/// anew in between (a retirement that released and completed) would start
+/// at the same number again.
+#[derive(Debug)]
+pub(crate) struct MemberRelease {
+    lock: Arc<tokio::sync::Mutex<u64>>,
+    epoch: u64,
+}
+
+/// `agent_identity`'s release epoch, read under the member's delivery lock,
+/// off the mob's actor: a delivery in flight for the member holds the lock
+/// while it writes the member's session, and is waited for here, at most
+/// `bound`. `None` past the bound.
+pub(crate) async fn member_release_epoch(
+    shared: &OperatorInstructionDeliveryShared,
+    agent_identity: &AgentIdentity,
+    bound: Duration,
+) -> Option<MemberRelease> {
+    let lock = shared.member_lock(agent_identity);
+    let epoch = tokio::time::timeout(bound, async { *lock.lock().await })
+        .await
+        .ok()?;
+    Some(MemberRelease { lock, epoch })
+}
+
+/// Record one member's prepared snapshot in its local session at the
+/// member's wake, off the mob's actor, as the delivery owner records it:
+/// under the member's delivery lock, and only while the member's release
+/// epoch is still `release`'s, the one read before the snapshot was prepared
+/// (a release that landed since moved it on, and nothing is written after
+/// it). The lock is the one that epoch was read under.
+///
+/// The write runs on a task of its own and is waited for at most `bound`:
+/// a session that is waiting for its turn boundary or its store does not
+/// hold the wake, and the write, still under the member's lock, ends on its
+/// own. The last failure the status read shows is kept here, by the module
+/// that made the write: set for a failure that leaves the member owed,
+/// cleared when the session answered.
+pub(crate) async fn record_owed_snapshot_at_wake(
+    shared: Arc<OperatorInstructionDeliveryShared>,
+    session_service: Arc<dyn super::session_service::MobSessionService>,
+    agent_identity: AgentIdentity,
+    delivery: MemberInstructionDelivery,
+    release: MemberRelease,
+    bound: Duration,
+) -> WakeInstructionRecord {
+    let session_id = delivery.session_id().clone();
+    let generation = delivery.generation();
+    let write = crate::tokio::spawn(async move {
+        let held = release.lock.lock().await;
+        if *held != release.epoch {
+            return None;
+        }
+        let answer = session_service
+            .record_member_instruction_target(delivery)
+            .await;
+        drop(held);
+        Some(answer)
+    });
+    let answer = match tokio::time::timeout(bound, write).await {
+        Ok(Ok(Some(answer))) => answer,
+        Ok(Ok(None)) => return WakeInstructionRecord::NotWritten,
+        Ok(Err(_)) => {
+            shared.record_failure(
+                &agent_identity,
+                RetryFailure::new(
+                    "record_task_ended",
+                    "the record's task ended without an answer",
+                ),
+            );
+            return WakeInstructionRecord::Failed;
+        }
+        Err(_) => {
+            shared.record_failure(
+                &agent_identity,
+                RetryFailure::new(
+                    "timed_out",
+                    format!(
+                        "the member's session did not answer the record within {} s",
+                        bound.as_secs()
+                    ),
+                ),
+            );
+            return WakeInstructionRecord::Failed;
+        }
+    };
+    match answer {
+        Ok(receipt) if receipt.target_generation > generation => {
+            WakeInstructionRecord::SessionAhead {
+                session_generation: receipt.target_generation,
+            }
+        }
+        answer => {
+            match classify_delivery_result(&agent_identity, &session_id, generation, answer) {
+                DeliveryResult::Settled(outcome) => {
+                    shared.clear_failure(
+                        &agent_identity,
+                        matches!(outcome, MemberInstructionDeliveryOutcome::Recorded { .. }),
+                    );
+                    WakeInstructionRecord::Settled(outcome)
+                }
+                DeliveryResult::Retry(failure) => {
+                    shared.record_failure(&agent_identity, failure);
+                    WakeInstructionRecord::Failed
+                }
+            }
+        }
+    }
 }
 
 fn classify_delivery_result(
@@ -487,6 +968,12 @@ fn classify_delivery_result(
             block,
         })
     };
+    let retry = |error: &SessionInstructionError| {
+        DeliveryResult::Retry(RetryFailure::new(
+            record_failure_class(error),
+            error.to_string(),
+        ))
+    };
     match result {
         // The session holds a later generation under this mob's id than the
         // mob ever minted: an earlier incarnation of the mob id recorded it
@@ -494,16 +981,27 @@ fn classify_delivery_result(
         // target was released). The snapshot it holds is not this mob's, so
         // the delivery is not current; it is retried, and the status read
         // shows why.
-        Ok(receipt) if receipt.target_generation > generation => DeliveryResult::Retry(format!(
-            "the member session holds operator instruction generation {} under this mob's id, \
-             above this mob's generation {generation}: an earlier mob with this id recorded it",
-            receipt.target_generation
-        )),
+        Ok(receipt) if receipt.target_generation > generation => {
+            DeliveryResult::Retry(RetryFailure::new(
+                "session_generation_above_mob",
+                format!(
+                    "the member session holds operator instruction generation {} under this \
+                     mob's id, above this mob's generation {generation}: an earlier mob with \
+                     this id recorded it",
+                    receipt.target_generation
+                ),
+            ))
+        }
         Ok(_) => DeliveryResult::Settled(MemberInstructionDeliveryOutcome::Recorded {
             agent_identity: agent_identity.clone(),
             session_id: session_id.clone(),
             generation,
         }),
+        // Only a service that keeps no durable session document answers
+        // this (the in-memory service, and the default of a wrapper that
+        // does not forward the record): a permanent condition, so the
+        // member is blocked. A durable service whose store fails answers a
+        // store error, which is retried below.
         Err(SessionInstructionError::DurabilityUnavailable) => {
             blocked(mob_dsl::MemberInstructionBlock::DurabilityUnavailable)
         }
@@ -516,7 +1014,8 @@ fn classify_delivery_result(
         Err(SessionInstructionError::Refused(InstructionWriteError::SlotManagedByActivation {
             ..
         })) => blocked(mob_dsl::MemberInstructionBlock::SlotManagedByActivation),
-        Err(other) => DeliveryResult::Retry(other.to_string()),
+        // Every other failure leaves the member owed and is tried again.
+        Err(other) => retry(&other),
     }
 }
 
@@ -576,15 +1075,18 @@ fn classify_placed_delivery_result(
             InstructionSetErrorCode::SlotManagedByActivation => {
                 blocked(mob_dsl::MemberInstructionBlock::SlotManagedByActivation)
             }
-            other => DeliveryResult::Retry(format!(
-                "the member's session on its member host refused the record: {other:?}"
+            other => DeliveryResult::Retry(RetryFailure::new(
+                refusal_class(other),
+                format!("the member's session on its member host refused the record: {other:?}"),
             )),
         },
-        Err(PlacedInstructionFailure::Stale) => DeliveryResult::Retry(
-            "the member host holds another incarnation of the member".to_string(),
-        ),
-        Err(PlacedInstructionFailure::Failed(error)) => DeliveryResult::Retry(format!(
-            "the record did not reach the member's host: {error}"
+        Err(PlacedInstructionFailure::Stale) => DeliveryResult::Retry(RetryFailure::new(
+            "member_host_stale",
+            "the member host holds another incarnation of the member",
+        )),
+        Err(PlacedInstructionFailure::Failed(error)) => DeliveryResult::Retry(RetryFailure::new(
+            "member_host_unreached",
+            format!("the record did not reach the member's host: {error}"),
         )),
     }
 }
@@ -602,6 +1104,36 @@ struct RetryState {
     owed_generation: u64,
     delay: Duration,
     next_attempt: Instant,
+    /// A scan saw the member not Live since this retry was armed. When the
+    /// member is Live again its retry starts over, so every wake of an owed
+    /// member is an attempt, by whichever path the member was materialized.
+    seen_not_live: bool,
+}
+
+/// Whether `identity` is materialized Live in `state`.
+fn member_is_live(state: &mob_dsl::MobMachineState, identity: &AgentIdentity) -> bool {
+    matches!(
+        state
+            .member_materialization
+            .get(&mob_dsl::AgentIdentity::from_domain(identity)),
+        Some(mob_dsl::MemberMaterializationPhase::Live)
+    )
+}
+
+/// Follow one member's materialization in its retry: answer whether the
+/// retry still stands. A retry stands for the obligation it was armed for
+/// (`owed_generation`: a later generation, or a member no longer owed, starts
+/// over) until the member wakes: one that a scan saw not Live and that is
+/// Live now starts over, and is tried at once.
+fn retry_stands(state: &mut RetryState, owed_generation: Option<u64>, live: bool) -> bool {
+    if owed_generation != Some(state.owed_generation) {
+        return false;
+    }
+    if !live {
+        state.seen_not_live = true;
+        return true;
+    }
+    !state.seen_not_live
 }
 
 /// The members a scan may deliver to now, from one published machine state:
@@ -795,17 +1327,21 @@ impl OperatorInstructionDeliveryReconciler {
             {
                 return super::RECONCILE_SAFETY_INTERVAL;
             }
-            deliverable_members(&state)
+            let candidates = deliverable_members(&state);
+            let owed = candidates
+                .iter()
+                .map(|(identity, generation, _)| (identity, *generation))
+                .collect::<BTreeMap<_, _>>();
+            // A retry is for one obligation, until the member wakes.
+            lanes.retry.retain(|identity, retry| {
+                retry_stands(
+                    retry,
+                    owed.get(identity).copied(),
+                    member_is_live(&state, identity),
+                )
+            });
+            candidates
         };
-        let owed = candidates
-            .iter()
-            .map(|(identity, generation, _)| (identity.clone(), *generation))
-            .collect::<BTreeMap<_, _>>();
-        // A retry is for one obligation: a later generation, or a member no
-        // longer owed, starts over.
-        lanes
-            .retry
-            .retain(|identity, state| owed.get(identity) == Some(&state.owed_generation));
         let now = Instant::now();
         for (identity, generation, lane) in candidates {
             if lanes.in_flight.contains(&identity) || lanes.feeding.contains(&identity) {
@@ -863,7 +1399,10 @@ impl OperatorInstructionDeliveryReconciler {
             Err(error) => {
                 return (
                     agent_identity,
-                    Some(DeliveryResult::Retry(error.to_string())),
+                    Some(DeliveryResult::Retry(RetryFailure::new(
+                        "snapshot_not_prepared",
+                        error.to_string(),
+                    ))),
                 );
             }
         };
@@ -927,16 +1466,22 @@ impl OperatorInstructionDeliveryReconciler {
                 None => back_off(&mut lanes.retry, &owed, &identity),
                 Some(DeliveryResult::Settled(outcome)) => {
                     lanes.retry.remove(&identity);
-                    self.shared.clear_failure(&identity);
+                    self.shared.clear_failure(
+                        &identity,
+                        matches!(outcome, MemberInstructionDeliveryOutcome::Recorded { .. }),
+                    );
                     lanes.feeding.insert(identity.clone());
                     members.push(identity);
                     outcomes.push(outcome);
                 }
+                // The failure is kept for the status read and logged by the
+                // shared bookkeeping's rule: a warning at the member's first
+                // failure and when its class changes, never one per retry.
                 Some(DeliveryResult::Retry(failure)) => {
                     tracing::debug!(
                         agent_identity = %identity,
-                        failure = %failure,
-                        "operator instruction delivery remains owed and will retry"
+                        failure = %failure.text,
+                        "operator instruction delivery failed"
                     );
                     self.shared.record_failure(&identity, failure);
                     back_off(&mut lanes.retry, &owed, &identity);
@@ -971,6 +1516,7 @@ fn back_off(
         owed_generation,
         delay: FIRST_RETRY_DELAY,
         next_attempt: now,
+        seen_not_live: false,
     });
     if state.owed_generation != owed_generation {
         state.owed_generation = owed_generation;
@@ -998,7 +1544,8 @@ impl MobHandle {
     ///
     /// [`OperatorInstructionError::Refused`] for a typed refusal (a body
     /// digest that is not the body's, a stale or conflicting revision, the
-    /// slot limit, the per-slot body limit, the mob's active budget),
+    /// per-slot body limit, the slot limit and the active budget of a
+    /// member's snapshot),
     /// [`OperatorInstructionError::MobTerminal`] for a completed or destroyed
     /// mob, and [`OperatorInstructionError::Mob`] when the mob cannot answer.
     pub async fn set_operator_instruction(
@@ -1635,6 +2182,237 @@ mod tests {
         }
     }
 
+    fn committed_row(
+        cursor: u64,
+        key: &str,
+        revision: u64,
+        body: Option<&str>,
+        target: OperatorInstructionTarget,
+        generation: u64,
+    ) -> MobEvent {
+        let slot = InstructionSlot {
+            namespace: InstructionNamespace::new("app.example").unwrap(),
+            key: InstructionKey::new(key).unwrap(),
+        };
+        MobEvent {
+            cursor,
+            timestamp: chrono::Utc::now(),
+            mob_id: MobId::from("mob"),
+            kind: MobEventKind::OperatorInstructionCommitted(
+                crate::operator_instruction::OperatorInstructionCommittedEvent {
+                    slot,
+                    revision: InstructionRevision::new(revision).unwrap(),
+                    effect: if body.is_some() {
+                        meerkat_core::InstructionEffect::Active
+                    } else {
+                        meerkat_core::InstructionEffect::Absent
+                    },
+                    content_sha256: body.map(InstructionContentDigest::for_body),
+                    body_bytes: body.map_or(0, |body| body.len() as u64),
+                    target,
+                    generation,
+                    body: body.map(str::to_owned),
+                },
+            ),
+        }
+    }
+
+    fn member(name: &str) -> OperatorInstructionTarget {
+        OperatorInstructionTarget::Member {
+            agent_identity: AgentIdentity::from(name),
+        }
+    }
+
+    fn slot_key(key: &str) -> String {
+        InstructionSlot {
+            namespace: InstructionNamespace::new("app.example").unwrap(),
+            key: InstructionKey::new(key).unwrap(),
+        }
+        .machine_key()
+    }
+
+    /// The stored form of a committed record and of a reset names what the
+    /// storage doctor's census of a mob's totals reads without this crate
+    /// (`meerkat_store::doctor::operator_instruction_mob_totals`): the
+    /// kind's type tag, the slot, the effect and the body bytes.
+    #[test]
+    fn the_stored_rows_name_what_the_storage_doctor_counts() {
+        let stored = |event: &MobEvent| -> serde_json::Value {
+            serde_json::from_slice(
+                &crate::event::encode_stored_mob_event(event).expect("the row encodes"),
+            )
+            .expect("the stored row is JSON")
+        };
+        let active = stored(&committed_row(
+            4,
+            "agent-a",
+            1,
+            Some("You are agent a."),
+            member("a"),
+            1,
+        ));
+        let kind = &active["event"]["kind"];
+        assert_eq!(kind["type"], "operator_instruction_committed");
+        assert_eq!(kind["slot"]["namespace"], "app.example");
+        assert_eq!(kind["slot"]["key"], "agent-a");
+        assert_eq!(kind["effect"], "active");
+        assert_eq!(kind["body_bytes"], 16);
+        let revoked = stored(&committed_row(5, "agent-a", 2, None, member("a"), 2));
+        assert_eq!(revoked["event"]["kind"]["effect"], "absent");
+        assert_eq!(revoked["event"]["kind"]["body_bytes"], 0);
+        let reset = stored(&MobEvent {
+            cursor: 6,
+            timestamp: chrono::Utc::now(),
+            mob_id: MobId::from("mob"),
+            kind: MobEventKind::MobReset,
+        });
+        assert_eq!(reset["event"]["kind"]["type"], "mob_reset");
+    }
+
+    /// The body store holds the shared records' bodies and only locates the
+    /// member-targeted ones: a member's body is read from its journal row
+    /// for that member's snapshot, a revoked or superseded body is gone, a
+    /// record that becomes shared is held, and a body is never served at
+    /// another digest than the one asked for.
+    #[test]
+    fn the_body_store_holds_shared_bodies_and_locates_member_bodies() {
+        let shared = "Answer formally.";
+        let own_a = "You are agent a. ".repeat(64);
+        let own_b_first = "You are agent b.";
+        let own_b = "You are agent b, revised.";
+        let journal = vec![
+            committed_row(
+                3,
+                "tone",
+                1,
+                Some(shared),
+                OperatorInstructionTarget::Mob,
+                1,
+            ),
+            committed_row(5, "agent-a", 1, Some(&own_a), member("a"), 2),
+            committed_row(6, "agent-b", 1, Some(own_b_first), member("b"), 3),
+            committed_row(9, "agent-b", 2, Some(own_b), member("b"), 4),
+            committed_row(11, "agent-c", 1, Some("You are agent c."), member("c"), 5),
+            committed_row(12, "agent-c", 2, None, member("c"), 6),
+        ];
+        let bodies = OperatorInstructionBodies::from_events(&journal);
+        assert_eq!(
+            bodies.held_body_bytes(),
+            shared.len(),
+            "only the shared record's body is in memory"
+        );
+        let digest = |body: &str| InstructionContentDigest::for_body(body).as_str().to_owned();
+        // The shared body is served without a journal.
+        assert_eq!(
+            bodies.body(&slot_key("tone"), &digest(shared), None),
+            Some(shared)
+        );
+        // A member's body needs its journal row, and is served at its
+        // current digest only.
+        assert_eq!(
+            bodies.body(&slot_key("agent-a"), &digest(&own_a), None),
+            None
+        );
+        assert_eq!(
+            bodies.body(&slot_key("agent-a"), &digest(&own_a), Some(&journal)),
+            Some(own_a.as_str())
+        );
+        assert_eq!(
+            bodies.body(&slot_key("agent-b"), &digest(own_b), Some(&journal)),
+            Some(own_b)
+        );
+        assert_eq!(
+            bodies.body(&slot_key("agent-b"), &digest(own_b_first), Some(&journal)),
+            None,
+            "a superseded body is not served"
+        );
+        assert_eq!(
+            bodies.body(
+                &slot_key("agent-c"),
+                &digest("You are agent c."),
+                Some(&journal)
+            ),
+            None,
+            "a revoked record keeps no body"
+        );
+
+        // The rows one member's snapshot reads are its own Active records'.
+        let mut state = mob_dsl::MobMachineState::default();
+        for (key, body, target) in [("agent-a", own_a.as_str(), "a"), ("agent-b", own_b, "b")] {
+            let key = slot_key(key);
+            state.operator_instruction_revision.insert(key.clone(), 1);
+            state
+                .operator_instruction_effect
+                .insert(key.clone(), mob_dsl::InstructionEffect::Active);
+            state
+                .operator_instruction_digest
+                .insert(key.clone(), digest(body));
+            state
+                .operator_instruction_target_kind
+                .insert(key.clone(), mob_dsl::InstructionTargetKind::Member);
+            state.operator_instruction_target_member.insert(
+                key,
+                mob_dsl::AgentIdentity::from_domain(&AgentIdentity::from(target)),
+            );
+        }
+        let reads = bodies.member_journal_reads(&state, &AgentIdentity::from("b"));
+        assert_eq!(
+            reads,
+            vec![(slot_key("agent-b"), digest(own_b), 9)],
+            "member b reads its own row, at the cursor of its current revision"
+        );
+        assert!(
+            bodies
+                .member_journal_reads(&state, &AgentIdentity::from("z"))
+                .is_empty(),
+            "a member without a record of its own reads no row"
+        );
+        let for_b = bodies.for_member(vec![(slot_key("agent-b"), digest(own_b), Arc::from(own_b))]);
+        assert_eq!(
+            for_b.body(&slot_key("agent-b"), &digest(own_b), None),
+            Some(own_b)
+        );
+        assert_eq!(
+            for_b.body(&slot_key("tone"), &digest(shared), None),
+            Some(shared)
+        );
+        assert_eq!(
+            for_b.body(&slot_key("agent-a"), &digest(&own_a), Some(&journal)),
+            None,
+            "member b's bodies carry no other member's"
+        );
+        assert_eq!(for_b.held_body_bytes(), shared.len() + own_b.len());
+
+        // A member's record that becomes a shared record is held; a reset
+        // epoch starts empty.
+        let mut retargeted = journal.clone();
+        retargeted.push(committed_row(
+            13,
+            "agent-a",
+            2,
+            Some(&own_a),
+            OperatorInstructionTarget::Mob,
+            7,
+        ));
+        assert_eq!(
+            OperatorInstructionBodies::from_events(&retargeted).held_body_bytes(),
+            shared.len() + own_a.len()
+        );
+        let mut reset = journal;
+        reset.push(MobEvent {
+            cursor: 20,
+            timestamp: chrono::Utc::now(),
+            mob_id: MobId::from("mob"),
+            kind: MobEventKind::MobReset,
+        });
+        let after_reset = OperatorInstructionBodies::from_events(&reset);
+        assert_eq!(after_reset.held_body_bytes(), 0);
+        assert_eq!(
+            after_reset.body(&slot_key("tone"), &digest(shared), Some(&reset)),
+            None
+        );
+    }
+
     /// A placed member's host answer reads like a local session's: a record
     /// settles it, and so does a refusal no retry changes; a member host that
     /// does not serve the record, a governed one (the record needs prepared
@@ -1684,6 +2462,10 @@ mod tests {
                 PlacedInstructionFailure::Refused(InstructionSetErrorCode::SlotManagedByActivation),
                 mob_dsl::MemberInstructionBlock::SlotManagedByActivation,
             ),
+            // A member host answers `durability_unavailable` only when its
+            // session service keeps no durable document: a permanent
+            // condition of that host, so the member is blocked, not
+            // retried.
             (
                 PlacedInstructionFailure::Refused(InstructionSetErrorCode::DurabilityUnavailable),
                 mob_dsl::MemberInstructionBlock::DurabilityUnavailable,
@@ -1712,6 +2494,153 @@ mod tests {
         }
     }
 
+    /// A local session's answer blocks the member for a cause no retry
+    /// changes: the three refusals an operator has to clear (the session,
+    /// another mob or an activation owns the target or a slot), and a
+    /// service that keeps no durable session document
+    /// (`durability_unavailable`, which only such a service answers). Every
+    /// other failure leaves the member owed and is retried: a store error of
+    /// a durable service among them.
+    #[test]
+    fn a_local_sessions_answer_blocks_on_the_owner_refusals_and_a_service_without_documents() {
+        use meerkat_core::service::{SessionError, SessionInstructionError};
+        let identity = AgentIdentity::from("member");
+        let session_id = SessionId::new();
+        let classify = |result| classify_delivery_result(&identity, &session_id, 3, result);
+        for (failure, expected) in [
+            (
+                SessionInstructionError::Refused(InstructionWriteError::OwnedBySession),
+                mob_dsl::MemberInstructionBlock::OwnedBySession,
+            ),
+            (
+                SessionInstructionError::Refused(InstructionWriteError::OwnedByOtherMob),
+                mob_dsl::MemberInstructionBlock::OwnedByOtherMob,
+            ),
+            (
+                SessionInstructionError::Refused(InstructionWriteError::SlotManagedByActivation {
+                    slot: tone(),
+                }),
+                mob_dsl::MemberInstructionBlock::SlotManagedByActivation,
+            ),
+            (
+                SessionInstructionError::DurabilityUnavailable,
+                mob_dsl::MemberInstructionBlock::DurabilityUnavailable,
+            ),
+        ] {
+            assert!(
+                matches!(
+                    classify(Err(failure)),
+                    DeliveryResult::Settled(MemberInstructionDeliveryOutcome::Blocked {
+                        generation: 3,
+                        block,
+                        ..
+                    }) if block == expected
+                ),
+                "{expected:?}"
+            );
+        }
+        for failure in [
+            SessionInstructionError::Session(SessionError::NotFound {
+                id: session_id.clone(),
+            }),
+            SessionInstructionError::Session(SessionError::Store(Box::new(std::io::Error::other(
+                "the session store is unavailable",
+            )))),
+            SessionInstructionError::Refused(InstructionWriteError::OwnedByMob),
+        ] {
+            let shown = failure.to_string();
+            assert!(
+                matches!(classify(Err(failure)), DeliveryResult::Retry(_)),
+                "{shown} leaves the member owed"
+            );
+        }
+    }
+
+    /// A member's retry stands for the obligation it was armed for until the
+    /// member wakes: one a scan saw not Live starts over when it is Live
+    /// again, so the mob tries its record at once. A member that stayed
+    /// Live keeps its back-off, and another obligation starts over.
+    #[test]
+    fn a_members_retry_starts_over_when_it_wakes() {
+        let armed = || RetryState {
+            owed_generation: 4,
+            delay: FIRST_RETRY_DELAY,
+            next_attempt: Instant::now(),
+            seen_not_live: false,
+        };
+        // Live all along: the back-off stands.
+        let mut retry = armed();
+        assert!(retry_stands(&mut retry, Some(4), true));
+        assert!(retry_stands(&mut retry, Some(4), true));
+        // Dormant or waking, then Live again: it starts over.
+        let mut retry = armed();
+        assert!(retry_stands(&mut retry, Some(4), false));
+        assert!(retry_stands(&mut retry, Some(4), false));
+        assert!(!retry_stands(&mut retry, Some(4), true));
+        // Another obligation, or none, starts over whatever the residency.
+        assert!(!retry_stands(&mut armed(), Some(5), true));
+        assert!(!retry_stands(&mut armed(), None, false));
+    }
+
+    /// A member's failure is warned once: at its first failure, and again
+    /// only when the failure's class changes or after a record landed. A
+    /// retry that fails the same way keeps the last failure for the status
+    /// read and does not warn, so a failure that never clears (a service
+    /// that keeps no durable document) is one warning, not one per retry.
+    /// The warning names the mob, the member and the class; the class is
+    /// the closed code as hosts read it.
+    #[test]
+    fn a_members_failure_warns_at_first_and_when_its_class_changes() {
+        let mob_id = MobId::from("a-mob");
+        let shared = OperatorInstructionDeliveryShared::new(mob_id.clone(), 1);
+        let member = AgentIdentity::from("member");
+        let other = AgentIdentity::from("other");
+        let store = record_failure_class(&SessionInstructionError::DurabilityUnavailable);
+        assert_eq!(store, "durability_unavailable");
+        assert_eq!(
+            refusal_class(InstructionSetErrorCode::OwnedByMob),
+            "owned_by_mob"
+        );
+        let warning = |agent_identity: &AgentIdentity, class: &str| {
+            Some(MemberFailureWarning {
+                mob_id: mob_id.clone(),
+                agent_identity: agent_identity.clone(),
+                class: class.to_string(),
+            })
+        };
+        assert_eq!(
+            shared.record_failure(&member, RetryFailure::new(store.clone(), "first")),
+            warning(&member, &store)
+        );
+        assert_eq!(
+            shared.record_failure(&member, RetryFailure::new(store.clone(), "second")),
+            None
+        );
+        assert_eq!(shared.last_failure(&member).as_deref(), Some("second"));
+        // Another member's first failure warns on its own.
+        assert_eq!(
+            shared.record_failure(&other, RetryFailure::new(store.clone(), "first")),
+            warning(&other, &store)
+        );
+        // Another class warns; the same class again does not.
+        assert_eq!(
+            shared.record_failure(&member, RetryFailure::new("timed_out", "third")),
+            warning(&member, "timed_out")
+        );
+        assert_eq!(
+            shared.record_failure(&member, RetryFailure::new("timed_out", "fourth")),
+            None
+        );
+        // A record that landed ends the failure: the next one warns again.
+        shared.clear_failure(&member, true);
+        assert_eq!(shared.last_failure(&member), None);
+        assert_eq!(
+            shared.record_failure(&member, RetryFailure::new("timed_out", "fifth")),
+            warning(&member, "timed_out")
+        );
+        assert_eq!(shared.last_failure(&other).as_deref(), Some("first"));
+    }
+
     /// A receipt whose target generation is above the delivery's is never
     /// current: an earlier mob with this id recorded it, so the delivery is
     /// retried with the reason. A receipt at the delivery's own generation
@@ -1727,7 +2656,10 @@ mod tests {
             })
         };
         match classify_delivery_result(&identity, &session_id, 2, receipt(5)) {
-            DeliveryResult::Retry(reason) => assert!(reason.contains("generation 5"), "{reason}"),
+            DeliveryResult::Retry(failure) => {
+                assert_eq!(failure.class, "session_generation_above_mob");
+                assert!(failure.text.contains("generation 5"), "{}", failure.text);
+            }
             DeliveryResult::Settled(_) => {
                 panic!("a later generation under this mob's id is not current")
             }

@@ -4811,11 +4811,14 @@ macro_rules! mob_catalog_machine_dsl {
 
         // The slot limit and the active budget of a write bound one member's
         // snapshot: the shared records (every member's, or a profile's) plus
-        // the member-targeted records that name the member. The write arms
-        // ask the snapshot natives for the widest snapshot the write leaves,
-        // over every member a record names, from the record maps with the
-        // written slot set (its kind, and its member: none for a write to
-        // every member or to a profile).
+        // the member-targeted records that name the member. Every snapshot
+        // is within both limits before a write (the two invariants), and a
+        // write grows only the snapshots that hold the written slot after
+        // it: one member's for a member-targeted write, every member's for
+        // a shared write. The write arms ask the write-snapshot natives for
+        // the widest of those with the write applied (the written member's
+        // snapshot, or the widest of all), so a member-targeted write is
+        // judged without counting any other member's records.
 
         disposition DefinitionEpochAdvanced => local seam SurfaceResultAlignment,
         disposition RequestRuntimeBinding => routed [MeerkatMachine] seam NoOwnerRealization,
@@ -35675,9 +35678,12 @@ macro_rules! mob_catalog_machine_dsl {
             guard "body_within_limit" { body_bytes <= 262144 }
             guard "slot_new" { self.operator_instruction_revision.contains_key(slot) == false }
             guard "slot_limit_reached" {
-                mob_machine_instruction_widest_snapshot_slots(
-                    session_document_instruction_slot_after_set(self.operator_instruction_target_kind, slot, target_kind),
-                    mob_machine_instruction_target_members_after_write(self.operator_instruction_target_member, slot, target_member)) > 64
+                mob_machine_instruction_write_snapshot_slots(
+                    self.operator_instruction_target_kind,
+                    self.operator_instruction_target_member,
+                    slot,
+                    target_kind,
+                    target_member) > 64
             }
             update {}
             to Running
@@ -35693,16 +35699,23 @@ macro_rules! mob_catalog_machine_dsl {
             guard "body_within_limit" { body_bytes <= 262144 }
             guard "slot_new" { self.operator_instruction_revision.contains_key(slot) == false }
             guard "slot_room" {
-                64 >= mob_machine_instruction_widest_snapshot_slots(
-                    session_document_instruction_slot_after_set(self.operator_instruction_target_kind, slot, target_kind),
-                    mob_machine_instruction_target_members_after_write(self.operator_instruction_target_member, slot, target_member))
+                64 >= mob_machine_instruction_write_snapshot_slots(
+                    self.operator_instruction_target_kind,
+                    self.operator_instruction_target_member,
+                    slot,
+                    target_kind,
+                    target_member)
             }
             guard "over_budget" {
-                mob_machine_instruction_widest_snapshot_active_bytes(
-                    session_document_instruction_slot_after_set(self.operator_instruction_effect, slot, InstructionEffect::Active),
-                    session_document_instruction_slot_after_set(self.operator_instruction_body_bytes, slot, body_bytes),
-                    session_document_instruction_slot_after_set(self.operator_instruction_target_kind, slot, target_kind),
-                    mob_machine_instruction_target_members_after_write(self.operator_instruction_target_member, slot, target_member))
+                mob_machine_instruction_write_snapshot_active_bytes(
+                    self.operator_instruction_effect,
+                    self.operator_instruction_body_bytes,
+                    self.operator_instruction_target_kind,
+                    self.operator_instruction_target_member,
+                    slot,
+                    body_bytes,
+                    target_kind,
+                    target_member)
                     > 1048576
             }
             update {}
@@ -35719,30 +35732,46 @@ macro_rules! mob_catalog_machine_dsl {
             guard "body_within_limit" { body_bytes <= 262144 }
             guard "slot_new" { self.operator_instruction_revision.contains_key(slot) == false }
             guard "slot_room" {
-                64 >= mob_machine_instruction_widest_snapshot_slots(
-                    session_document_instruction_slot_after_set(self.operator_instruction_target_kind, slot, target_kind),
-                    mob_machine_instruction_target_members_after_write(self.operator_instruction_target_member, slot, target_member))
+                64 >= mob_machine_instruction_write_snapshot_slots(
+                    self.operator_instruction_target_kind,
+                    self.operator_instruction_target_member,
+                    slot,
+                    target_kind,
+                    target_member)
             }
             guard "within_budget" {
                 1048576
-                    >= mob_machine_instruction_widest_snapshot_active_bytes(
-                        session_document_instruction_slot_after_set(self.operator_instruction_effect, slot, InstructionEffect::Active),
-                        session_document_instruction_slot_after_set(self.operator_instruction_body_bytes, slot, body_bytes),
-                        session_document_instruction_slot_after_set(self.operator_instruction_target_kind, slot, target_kind),
-                        mob_machine_instruction_target_members_after_write(self.operator_instruction_target_member, slot, target_member))
+                    >= mob_machine_instruction_write_snapshot_active_bytes(
+                        self.operator_instruction_effect,
+                        self.operator_instruction_body_bytes,
+                        self.operator_instruction_target_kind,
+                        self.operator_instruction_target_member,
+                        slot,
+                        body_bytes,
+                        target_kind,
+                        target_member)
             }
             update {
-                // Every seated member the new record selects is owed it.
-                for member_id in self.identity_to_runtime.keys() {
-                    if operator_instruction_target_applies(
-                            target_kind,
-                            target_profile,
-                            target_member,
-                            self.member_profile_names.get_cloned(member_id),
-                            member_id)
-                    {
-                        self.member_instruction_owed.insert(member_id, self.operator_instruction_generation + 1);
-                        self.member_instruction_blocked.remove(member_id);
+                // Every seated member the new record selects is owed it. A
+                // member-targeted record selects its one member, so that
+                // member is looked up, not searched for among the seats.
+                if target_kind == InstructionTargetKind::Member {
+                    if self.identity_to_runtime.contains_key(target_member.get("value")) == true {
+                        self.member_instruction_owed.insert(target_member.get("value"), self.operator_instruction_generation + 1);
+                        self.member_instruction_blocked.remove(target_member.get("value"));
+                    }
+                } else {
+                    for member_id in self.identity_to_runtime.keys() {
+                        if operator_instruction_target_applies(
+                                target_kind,
+                                target_profile,
+                                target_member,
+                                self.member_profile_names.get_cloned(member_id),
+                                member_id)
+                        {
+                            self.member_instruction_owed.insert(member_id, self.operator_instruction_generation + 1);
+                            self.member_instruction_blocked.remove(member_id);
+                        }
                     }
                 }
                 self.operator_instruction_revision.insert(slot, revision);
@@ -35844,9 +35873,12 @@ macro_rules! mob_catalog_machine_dsl {
                 revision != self.operator_instruction_revision.get_cloned(slot).get("value")
             }
             guard "slot_limit_reached" {
-                mob_machine_instruction_widest_snapshot_slots(
-                    session_document_instruction_slot_after_set(self.operator_instruction_target_kind, slot, target_kind),
-                    mob_machine_instruction_target_members_after_write(self.operator_instruction_target_member, slot, target_member)) > 64
+                mob_machine_instruction_write_snapshot_slots(
+                    self.operator_instruction_target_kind,
+                    self.operator_instruction_target_member,
+                    slot,
+                    target_kind,
+                    target_member) > 64
             }
             update {}
             to Running
@@ -35867,16 +35899,23 @@ macro_rules! mob_catalog_machine_dsl {
                 revision != self.operator_instruction_revision.get_cloned(slot).get("value")
             }
             guard "slot_room" {
-                64 >= mob_machine_instruction_widest_snapshot_slots(
-                    session_document_instruction_slot_after_set(self.operator_instruction_target_kind, slot, target_kind),
-                    mob_machine_instruction_target_members_after_write(self.operator_instruction_target_member, slot, target_member))
+                64 >= mob_machine_instruction_write_snapshot_slots(
+                    self.operator_instruction_target_kind,
+                    self.operator_instruction_target_member,
+                    slot,
+                    target_kind,
+                    target_member)
             }
             guard "over_budget" {
-                mob_machine_instruction_widest_snapshot_active_bytes(
-                    session_document_instruction_slot_after_set(self.operator_instruction_effect, slot, InstructionEffect::Active),
-                    session_document_instruction_slot_after_set(self.operator_instruction_body_bytes, slot, body_bytes),
-                    session_document_instruction_slot_after_set(self.operator_instruction_target_kind, slot, target_kind),
-                    mob_machine_instruction_target_members_after_write(self.operator_instruction_target_member, slot, target_member))
+                mob_machine_instruction_write_snapshot_active_bytes(
+                    self.operator_instruction_effect,
+                    self.operator_instruction_body_bytes,
+                    self.operator_instruction_target_kind,
+                    self.operator_instruction_target_member,
+                    slot,
+                    body_bytes,
+                    target_kind,
+                    target_member)
                     > 1048576
             }
             update {}
@@ -35898,38 +35937,60 @@ macro_rules! mob_catalog_machine_dsl {
                 revision != self.operator_instruction_revision.get_cloned(slot).get("value")
             }
             guard "slot_room" {
-                64 >= mob_machine_instruction_widest_snapshot_slots(
-                    session_document_instruction_slot_after_set(self.operator_instruction_target_kind, slot, target_kind),
-                    mob_machine_instruction_target_members_after_write(self.operator_instruction_target_member, slot, target_member))
+                64 >= mob_machine_instruction_write_snapshot_slots(
+                    self.operator_instruction_target_kind,
+                    self.operator_instruction_target_member,
+                    slot,
+                    target_kind,
+                    target_member)
             }
             guard "within_budget" {
                 1048576
-                    >= mob_machine_instruction_widest_snapshot_active_bytes(
-                        session_document_instruction_slot_after_set(self.operator_instruction_effect, slot, InstructionEffect::Active),
-                        session_document_instruction_slot_after_set(self.operator_instruction_body_bytes, slot, body_bytes),
-                        session_document_instruction_slot_after_set(self.operator_instruction_target_kind, slot, target_kind),
-                        mob_machine_instruction_target_members_after_write(self.operator_instruction_target_member, slot, target_member))
+                    >= mob_machine_instruction_write_snapshot_active_bytes(
+                        self.operator_instruction_effect,
+                        self.operator_instruction_body_bytes,
+                        self.operator_instruction_target_kind,
+                        self.operator_instruction_target_member,
+                        slot,
+                        body_bytes,
+                        target_kind,
+                        target_member)
             }
             update {
                 // Every seated member the old or the new target selects is
                 // owed the new record (a member that left the selector is
-                // owed the slot's revoke).
-                for member_id in self.identity_to_runtime.keys() {
-                    if operator_instruction_target_applies(
-                            self.operator_instruction_target_kind.get_cloned(slot).get("value"),
-                            self.operator_instruction_target_profile.get_cloned(slot).get("value"),
-                            self.operator_instruction_target_member.get_cloned(slot),
-                            self.member_profile_names.get_cloned(member_id),
-                            member_id)
-                        || operator_instruction_target_applies(
-                            target_kind,
-                            target_profile,
-                            target_member,
-                            self.member_profile_names.get_cloned(member_id),
-                            member_id)
-                    {
-                        self.member_instruction_owed.insert(member_id, self.operator_instruction_generation + 1);
-                        self.member_instruction_blocked.remove(member_id);
+                // owed the slot's revoke). A record that was and stays
+                // member-targeted selects its old member and its new one:
+                // they are looked up, not searched for among the seats.
+                if self.operator_instruction_target_kind.get_cloned(slot).get("value") == InstructionTargetKind::Member
+                    && target_kind == InstructionTargetKind::Member
+                {
+                    if self.identity_to_runtime.contains_key(self.operator_instruction_target_member.get_cloned(slot).get("value")) == true {
+                        self.member_instruction_owed.insert(self.operator_instruction_target_member.get_cloned(slot).get("value"), self.operator_instruction_generation + 1);
+                        self.member_instruction_blocked.remove(self.operator_instruction_target_member.get_cloned(slot).get("value"));
+                    }
+                    if self.identity_to_runtime.contains_key(target_member.get("value")) == true {
+                        self.member_instruction_owed.insert(target_member.get("value"), self.operator_instruction_generation + 1);
+                        self.member_instruction_blocked.remove(target_member.get("value"));
+                    }
+                } else {
+                    for member_id in self.identity_to_runtime.keys() {
+                        if operator_instruction_target_applies(
+                                self.operator_instruction_target_kind.get_cloned(slot).get("value"),
+                                self.operator_instruction_target_profile.get_cloned(slot).get("value"),
+                                self.operator_instruction_target_member.get_cloned(slot),
+                                self.member_profile_names.get_cloned(member_id),
+                                member_id)
+                            || operator_instruction_target_applies(
+                                target_kind,
+                                target_profile,
+                                target_member,
+                                self.member_profile_names.get_cloned(member_id),
+                                member_id)
+                        {
+                            self.member_instruction_owed.insert(member_id, self.operator_instruction_generation + 1);
+                            self.member_instruction_blocked.remove(member_id);
+                        }
                     }
                 }
                 self.operator_instruction_revision.insert(slot, revision);
@@ -36028,16 +36089,25 @@ macro_rules! mob_catalog_machine_dsl {
                 revision != self.operator_instruction_revision.get_cloned(slot).get("value")
             }
             update {
-                for member_id in self.identity_to_runtime.keys() {
-                    if operator_instruction_target_applies(
-                            self.operator_instruction_target_kind.get_cloned(slot).get("value"),
-                            self.operator_instruction_target_profile.get_cloned(slot).get("value"),
-                            self.operator_instruction_target_member.get_cloned(slot),
-                            self.member_profile_names.get_cloned(member_id),
-                            member_id)
-                    {
-                        self.member_instruction_owed.insert(member_id, self.operator_instruction_generation + 1);
-                        self.member_instruction_blocked.remove(member_id);
+                // The members the record selects are owed the revoke; a
+                // member-targeted record's one member is looked up.
+                if self.operator_instruction_target_kind.get_cloned(slot).get("value") == InstructionTargetKind::Member {
+                    if self.identity_to_runtime.contains_key(self.operator_instruction_target_member.get_cloned(slot).get("value")) == true {
+                        self.member_instruction_owed.insert(self.operator_instruction_target_member.get_cloned(slot).get("value"), self.operator_instruction_generation + 1);
+                        self.member_instruction_blocked.remove(self.operator_instruction_target_member.get_cloned(slot).get("value"));
+                    }
+                } else {
+                    for member_id in self.identity_to_runtime.keys() {
+                        if operator_instruction_target_applies(
+                                self.operator_instruction_target_kind.get_cloned(slot).get("value"),
+                                self.operator_instruction_target_profile.get_cloned(slot).get("value"),
+                                self.operator_instruction_target_member.get_cloned(slot),
+                                self.member_profile_names.get_cloned(member_id),
+                                member_id)
+                        {
+                            self.member_instruction_owed.insert(member_id, self.operator_instruction_generation + 1);
+                            self.member_instruction_blocked.remove(member_id);
+                        }
                     }
                 }
                 self.operator_instruction_revision.insert(slot, revision);
@@ -36066,23 +36136,44 @@ macro_rules! mob_catalog_machine_dsl {
             on signal RecoverOperatorInstruction { slot, revision, effect, digest, body_bytes, target_kind, target_profile, target_member, generation }
             guard "generation_advances" { self.operator_instruction_generation < generation }
             update {
-                for member_id in self.identity_to_runtime.keys() {
-                    if (self.operator_instruction_revision.contains_key(slot) == true
-                            && operator_instruction_target_applies(
-                                self.operator_instruction_target_kind.get_cloned(slot).get("value"),
-                                self.operator_instruction_target_profile.get_cloned(slot).get("value"),
-                                self.operator_instruction_target_member.get_cloned(slot),
+                // A replayed record that is member-targeted, over no record
+                // or over a member-targeted one, selects at most its old
+                // member and its new one: they are looked up, so the replay
+                // of a journal with a record per member does not search the
+                // seats once per record.
+                if (self.operator_instruction_revision.contains_key(slot) == false
+                        || self.operator_instruction_target_kind.get_cloned(slot).get("value") == InstructionTargetKind::Member)
+                    && target_kind == InstructionTargetKind::Member
+                {
+                    if self.operator_instruction_revision.contains_key(slot) == true {
+                        if self.identity_to_runtime.contains_key(self.operator_instruction_target_member.get_cloned(slot).get("value")) == true {
+                            self.member_instruction_owed.insert(self.operator_instruction_target_member.get_cloned(slot).get("value"), generation);
+                            self.member_instruction_blocked.remove(self.operator_instruction_target_member.get_cloned(slot).get("value"));
+                        }
+                    }
+                    if self.identity_to_runtime.contains_key(target_member.get("value")) == true {
+                        self.member_instruction_owed.insert(target_member.get("value"), generation);
+                        self.member_instruction_blocked.remove(target_member.get("value"));
+                    }
+                } else {
+                    for member_id in self.identity_to_runtime.keys() {
+                        if (self.operator_instruction_revision.contains_key(slot) == true
+                                && operator_instruction_target_applies(
+                                    self.operator_instruction_target_kind.get_cloned(slot).get("value"),
+                                    self.operator_instruction_target_profile.get_cloned(slot).get("value"),
+                                    self.operator_instruction_target_member.get_cloned(slot),
+                                    self.member_profile_names.get_cloned(member_id),
+                                    member_id))
+                            || operator_instruction_target_applies(
+                                target_kind,
+                                target_profile,
+                                target_member,
                                 self.member_profile_names.get_cloned(member_id),
-                                member_id))
-                        || operator_instruction_target_applies(
-                            target_kind,
-                            target_profile,
-                            target_member,
-                            self.member_profile_names.get_cloned(member_id),
-                            member_id)
-                    {
-                        self.member_instruction_owed.insert(member_id, generation);
-                        self.member_instruction_blocked.remove(member_id);
+                                member_id)
+                        {
+                            self.member_instruction_owed.insert(member_id, generation);
+                            self.member_instruction_blocked.remove(member_id);
+                        }
                     }
                 }
                 self.operator_instruction_revision.insert(slot, revision);
@@ -38550,50 +38641,114 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         impl MobMachineAuthority {
-        // Operator instructions reuse the session document's slot-set
-        // natives: one slot map with one slot set, and the body bytes of a
-        // slot set's Active slots. A slot the bytes map does not name counts
-        // nothing. The TLA model renders them for this machine too.
-        fn session_document_instruction_slot_after_set<V: Clone>(
-            current: &std::collections::BTreeMap<String, V>,
+        // Operator instructions: the records of the widest snapshot that
+        // holds the written slot once a write is applied (`slot` written
+        // with `kind` and `member`): the written member's snapshot for a
+        // member-targeted write, the widest of all for a shared one. A
+        // write grows no other snapshot, so with every snapshot within the
+        // limit before it, this is what the limit has to hold after it.
+        // It reads the record maps as they are and counts the written slot
+        // as written, without building the maps the write leaves.
+        fn mob_machine_instruction_write_snapshot_slots(
+            target_kind: &std::collections::BTreeMap<String, InstructionTargetKind>,
+            target_member: &std::collections::BTreeMap<String, AgentIdentity>,
             slot: &str,
-            value: &V,
-        ) -> std::collections::BTreeMap<String, V> {
-            let mut updated = current.clone();
-            updated.insert(slot.to_owned(), value.clone());
-            updated
-        }
-
-        fn session_document_instruction_active_bytes(
-            effect: &std::collections::BTreeMap<String, InstructionEffect>,
-            bytes: &std::collections::BTreeMap<String, u64>,
-        ) -> u64 {
-            effect
-                .iter()
-                .filter(|(_, slot_effect)| **slot_effect == InstructionEffect::Active)
-                .fold(0_u64, |total, (slot, _)| {
-                    total.saturating_add(bytes.get(slot).copied().unwrap_or(0))
-                })
-        }
-
-        // Operator instructions: the member targets of the records as a
-        // write leaves them. The written slot names the write's member, or
-        // no member when the write targets every member or a profile.
-        fn mob_machine_instruction_target_members_after_write(
-            current: &std::collections::BTreeMap<String, AgentIdentity>,
-            slot: &str,
+            kind: &InstructionTargetKind,
             member: &Option<AgentIdentity>,
-        ) -> std::collections::BTreeMap<String, AgentIdentity> {
-            let mut updated = current.clone();
-            match member {
-                Some(member) => {
-                    updated.insert(slot.to_owned(), member.clone());
+        ) -> u64 {
+            let written = member
+                .as_ref()
+                .filter(|_| *kind == InstructionTargetKind::Member);
+            let others = target_kind
+                .iter()
+                .filter(|(other, _)| other.as_str() != slot)
+                .map(|(other, other_kind)| {
+                    target_member
+                        .get(other)
+                        .filter(|_| *other_kind == InstructionTargetKind::Member)
+                });
+            match written {
+                Some(written) => {
+                    let mut records = 1_u64;
+                    for other_member in others {
+                        if other_member.is_none_or(|other_member| other_member == written) {
+                            records = records.saturating_add(1);
+                        }
+                    }
+                    records
                 }
                 None => {
-                    updated.remove(slot);
+                    let mut shared = 1_u64;
+                    let mut own = std::collections::BTreeMap::<&AgentIdentity, u64>::new();
+                    for other_member in others {
+                        match other_member {
+                            Some(other_member) => {
+                                let count = own.entry(other_member).or_insert(0);
+                                *count = count.saturating_add(1);
+                            }
+                            None => shared = shared.saturating_add(1),
+                        }
+                    }
+                    shared.saturating_add(own.values().copied().max().unwrap_or(0))
                 }
             }
-            updated
+        }
+
+        // The Active body bytes of the same snapshot, with the written slot
+        // Active at `body_bytes`. A slot the bytes map does not name counts
+        // nothing.
+        #[allow(clippy::too_many_arguments)]
+        fn mob_machine_instruction_write_snapshot_active_bytes(
+            effect: &std::collections::BTreeMap<String, InstructionEffect>,
+            bytes: &std::collections::BTreeMap<String, u64>,
+            target_kind: &std::collections::BTreeMap<String, InstructionTargetKind>,
+            target_member: &std::collections::BTreeMap<String, AgentIdentity>,
+            slot: &str,
+            body_bytes: &u64,
+            kind: &InstructionTargetKind,
+            member: &Option<AgentIdentity>,
+        ) -> u64 {
+            let written = member
+                .as_ref()
+                .filter(|_| *kind == InstructionTargetKind::Member);
+            let others = effect
+                .iter()
+                .filter(|(other, other_effect)| {
+                    other.as_str() != slot && **other_effect == InstructionEffect::Active
+                })
+                .map(|(other, _)| {
+                    (
+                        target_member.get(other).filter(|_| {
+                            target_kind.get(other) == Some(&InstructionTargetKind::Member)
+                        }),
+                        bytes.get(other).copied().unwrap_or(0),
+                    )
+                });
+            match written {
+                Some(written) => {
+                    let mut total = *body_bytes;
+                    for (other_member, other_bytes) in others {
+                        if other_member.is_none_or(|other_member| other_member == written) {
+                            total = total.saturating_add(other_bytes);
+                        }
+                    }
+                    total
+                }
+                None => {
+                    let mut shared = *body_bytes;
+                    let mut own = std::collections::BTreeMap::<&AgentIdentity, u64>::new();
+                    for (other_member, other_bytes) in others {
+                        match other_member {
+                            Some(other_member) => {
+                                let total = own.entry(other_member).or_insert(0);
+                                *total = total.saturating_add(other_bytes);
+                            }
+                            None => shared = shared.saturating_add(other_bytes),
+                        }
+                    }
+                    shared.saturating_add(own.values().copied().max().unwrap_or(0))
+                }
+            }
         }
 
         // Operator instructions: a member's snapshot holds the shared

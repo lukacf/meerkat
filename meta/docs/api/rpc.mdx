@@ -3642,7 +3642,10 @@ with Meerkat's closed code in `error.data.instruction_set_code`:
 `unknown_slot`, `slot_limit_exceeded`, `body_too_large`,
 `active_set_budget_exceeded`, `mob_terminal`, `malformed_instruction_history`
 or `prepared_authorization_required` (a governed runtime). Nothing was
-written. A mob that cannot answer keeps Meerkat's own error code and data.
+written. `slot_limit_exceeded` and `active_set_budget_exceeded` bound one
+member's snapshot, not the mob: at most 64 records and 1 MiB of Active
+bodies over the records targeted at every member or at a profile plus the
+member-targeted records that name the member. A mob that cannot answer keeps Meerkat's own error code and data.
 
 ### `meta/revoke_instruction`
 

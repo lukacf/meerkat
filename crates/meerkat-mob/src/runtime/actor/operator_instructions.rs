@@ -120,12 +120,19 @@ impl MobActor {
                     generation,
                     body: Some(write.body.clone()),
                 };
-                self.journal_operator_instruction_commit(prepared, event)
+                let cursor = self
+                    .journal_operator_instruction_commit(prepared, event)
                     .await?;
+                self.operator_instructions.bodies.record_active(
+                    &key,
+                    &digest,
+                    &write.body,
+                    &write.target,
+                    cursor,
+                );
                 self.operator_instructions
                     .bodies
-                    .insert(&digest, &write.body);
-                self.prune_operator_instruction_bodies();
+                    .retain_recorded(self.dsl_authority.state());
                 Ok(self.operator_instruction_receipt(
                     write.slot,
                     write.revision,
@@ -177,7 +184,10 @@ impl MobActor {
                 };
                 self.journal_operator_instruction_commit(prepared, event)
                     .await?;
-                self.prune_operator_instruction_bodies();
+                self.operator_instructions.bodies.record_revoked(&key);
+                self.operator_instructions
+                    .bodies
+                    .retain_recorded(self.dsl_authority.state());
                 Ok(self.operator_instruction_receipt(
                     slot,
                     revision,
@@ -206,11 +216,12 @@ impl MobActor {
     /// keeps the first row of a generation and drops a later one as stale);
     /// a row proven absent drops it; a journal that cannot be read stops
     /// the actor for a cold recovery, which replays whatever landed.
+    /// Answers the cursor of the row the journal holds.
     async fn journal_operator_instruction_commit(
         &mut self,
         prepared: PreparedDslTransition,
         event: OperatorInstructionCommittedEvent,
-    ) -> Result<(), OperatorInstructionError> {
+    ) -> Result<u64, OperatorInstructionError> {
         let desired = MobEventKind::OperatorInstructionCommitted(event);
         let cursor_floor = self
             .events
@@ -225,35 +236,39 @@ impl MobActor {
                 kind: desired.clone(),
             })
             .await;
-        if let Err(error) = append {
-            match super::reconcile_exact_mob_event_after_cursor(
-                self.events.as_ref(),
-                &self.definition.id,
-                cursor_floor,
-                &desired,
-            )
-            .await
-            {
-                Ok(Some(_)) => {
-                    tracing::warn!(
-                        error = %error,
-                        "an operator instruction row landed although its append answered an error; \
-                         committing it"
-                    );
-                }
-                Ok(None) => return Err(OperatorInstructionError::Mob(MobError::from(error))),
-                Err(reconcile_error) => {
-                    return Err(OperatorInstructionError::Mob(
-                        self.durable_uncertainty_fail_stop
-                            .record(MobError::Internal(format!(
-                                "an operator instruction append failed ({error}) and the journal \
-                                 could not tell whether it landed; the actor stops for a cold \
-                                 recovery: {reconcile_error}"
-                            ))),
-                    ));
+        let cursor = match append {
+            Ok(appended) => appended.cursor,
+            Err(error) => {
+                match super::reconcile_exact_mob_event_after_cursor(
+                    self.events.as_ref(),
+                    &self.definition.id,
+                    cursor_floor,
+                    &desired,
+                )
+                .await
+                {
+                    Ok(Some(landed)) => {
+                        tracing::warn!(
+                            error = %error,
+                            "an operator instruction row landed although its append answered an \
+                             error; committing it"
+                        );
+                        landed.cursor
+                    }
+                    Ok(None) => return Err(OperatorInstructionError::Mob(MobError::from(error))),
+                    Err(reconcile_error) => {
+                        return Err(OperatorInstructionError::Mob(
+                            self.durable_uncertainty_fail_stop
+                                .record(MobError::Internal(format!(
+                                    "an operator instruction append failed ({error}) and the \
+                                     journal could not tell whether it landed; the actor stops \
+                                     for a cold recovery: {reconcile_error}"
+                                ))),
+                        ));
+                    }
                 }
             }
-        }
+        };
         if let Err(error) = self.commit_prepared_dsl_transition(prepared) {
             return Err(OperatorInstructionError::Mob(
                 self.durable_uncertainty_fail_stop
@@ -263,7 +278,7 @@ impl MobActor {
                     ))),
             ));
         }
-        Ok(())
+        Ok(cursor)
     }
 
     fn operator_instruction_target_of(
@@ -288,9 +303,25 @@ impl MobActor {
             .map_err(OperatorInstructionError::Mob)
     }
 
-    fn prune_operator_instruction_bodies(&mut self) {
-        let state = self.dsl_authority.state().clone();
-        self.operator_instructions.bodies.retain_referenced(&state);
+    /// The bodies `agent_identity`'s snapshot reads: the shared records'
+    /// held bodies, and the member's own, read from their journal rows. A
+    /// member holds few records of its own, so this reads few rows whatever
+    /// the mob holds.
+    pub(super) async fn member_instruction_bodies(
+        &self,
+        agent_identity: &AgentIdentity,
+    ) -> Result<crate::runtime::operator_instruction_delivery::OperatorInstructionBodies, MobError>
+    {
+        let reads = self
+            .operator_instructions
+            .bodies
+            .member_journal_reads(self.dsl_authority.state(), agent_identity);
+        let read = crate::runtime::operator_instruction_delivery::read_journaled_bodies(
+            self.events.as_ref(),
+            reads,
+        )
+        .await?;
+        Ok(self.operator_instructions.bodies.for_member(read))
     }
 
     fn operator_instruction_receipt(
@@ -315,10 +346,29 @@ impl MobActor {
     /// (`PrepareMemberInstructionDelivery`): the sealed snapshot at the
     /// machine's generation for the member's bound session, when the machine
     /// delivers now. A placed member's delivery carries its route to its
-    /// member host, from the same machine state.
-    pub(super) fn prepare_member_instruction_delivery(
+    /// member host, from the same machine state. The member's own bodies
+    /// are read from their journal rows here; the actor serves no other
+    /// command meanwhile, so the snapshot is of one machine state.
+    pub(super) async fn prepare_member_instruction_delivery(
         &mut self,
         agent_identity: &AgentIdentity,
+    ) -> Result<MemberInstructionPreparation, MobError> {
+        self.prepare_member_instruction_delivery_with(agent_identity, None)
+            .await
+    }
+
+    /// [`Self::prepare_member_instruction_delivery`] over bodies the caller
+    /// already holds for the member (`own_bodies`: the shared records' and
+    /// the member's own, read from their journal rows off the actor), so
+    /// this step reads no journal row. A record of the member written since
+    /// those rows were read has no body there: the snapshot cannot be built,
+    /// the step answers the error, and the member stays owed.
+    pub(super) async fn prepare_member_instruction_delivery_with(
+        &mut self,
+        agent_identity: &AgentIdentity,
+        own_bodies: Option<
+            crate::runtime::operator_instruction_delivery::OperatorInstructionBodies,
+        >,
     ) -> Result<MemberInstructionPreparation, MobError> {
         let transition = self.apply_dsl_signal_collect_transition(
             mob_dsl::MobMachineSignal::PrepareMemberInstructionDelivery {
@@ -343,10 +393,15 @@ impl MobActor {
                  {agent_identity} on a session id that is not one: {error}"
             ))
         })?;
+        let bodies = match own_bodies {
+            Some(bodies) => bodies,
+            None => self.member_instruction_bodies(agent_identity).await?,
+        };
         let state = self.dsl_authority.state();
         let mut record = member_instruction_record(
             state,
-            &self.operator_instructions.bodies,
+            &bodies,
+            None,
             &self.definition.id,
             agent_identity,
             &member_profile(state, agent_identity),
@@ -448,16 +503,26 @@ impl MobActor {
 
     /// Carry the member's snapshot in the session its build mints
     /// (`operator_instruction_delivery::carry_member_instruction_birth`).
-    pub(super) fn carry_member_instruction_birth(
+    /// The member's own bodies are read from their journal rows only when
+    /// the build carries a snapshot.
+    pub(super) async fn carry_member_instruction_birth(
         &self,
         request: &mut meerkat_core::service::CreateSessionRequest,
         agent_identity: &AgentIdentity,
         profile_name: &str,
     ) -> Result<(), MobError> {
+        if !crate::runtime::operator_instruction_delivery::birth_carries_member_instructions(
+            request,
+            self.dsl_authority.state(),
+        ) {
+            return Ok(());
+        }
+        let bodies = self.member_instruction_bodies(agent_identity).await?;
         crate::runtime::operator_instruction_delivery::carry_member_instruction_birth(
             request,
             self.dsl_authority.state(),
-            &self.operator_instructions.bodies,
+            &bodies,
+            None,
             &self.definition.id,
             agent_identity,
             profile_name,
@@ -467,14 +532,16 @@ impl MobActor {
     /// The snapshot a placed member a `Fresh` spawn mints is born with, for
     /// its materialize (V7): its whole snapshot at the mob's generation,
     /// which its member host records in the session it mints.
-    pub(super) fn member_instruction_birth_target(
+    pub(super) async fn member_instruction_birth_target(
         &self,
         agent_identity: &AgentIdentity,
         profile_name: &str,
     ) -> Result<crate::runtime::bridge_protocol::BridgeInstructionTarget, MobError> {
+        let bodies = self.member_instruction_bodies(agent_identity).await?;
         crate::runtime::operator_instruction_delivery::member_instruction_record(
             self.dsl_authority.state(),
-            &self.operator_instructions.bodies,
+            &bodies,
+            None,
             &self.definition.id,
             agent_identity,
             profile_name,

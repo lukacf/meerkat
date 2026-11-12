@@ -21,11 +21,14 @@
 # - one run per reachability witness, with that witness's negation as an
 #   extra invariant (a state goal) or action property (a step goal),
 #   requiring TLC to report exactly that violation;
-# - with --mutants, six defects seeded into a copy of the generated model:
-#   four refused by the property each targets, checked as the run's only
+# - with --mutants, seven defects seeded into a copy of the generated model:
+#   five refused by the property each targets, checked as the run's only
 #   property:
 #     profile_check_dropped (the target predicate selects every member for a
 #       profile target) by AuditWriteOwesExactlyTheSelected;
+#     member_retarget_forgets_leaver (a member-targeted record that moves to
+#       another member owes only the member it moves to) by
+#       AuditWriteOwesExactlyTheSelected;
 #     unborn_seat_delivered (the prepared delivery's born-session guard
 #       dropped) by AuditDeliversOnlyToBoundBornMembers;
 #     seat_forgets_to_owe (a replayed seat owes nothing) by
@@ -414,6 +417,7 @@ check_space seat "${seat_covered_actions[@]}"
 for witness in \
   "write:Action property:ProfileWriteOwesOne" \
   "write:Action property:RetargetOwesLeaver" \
+  "write:Action property:MemberRetargetOwesBoth" \
   "write:Action property:RecordedReowed" \
   "write:Action property:BlockedThenUnblocked" \
   "write:Action property:RecordCloses" \
@@ -522,6 +526,45 @@ PY
   mutate write profile_check_dropped "Action property" AuditWriteOwesExactlyTheSelected \
     operator_instruction_target_applies 'member_profile = Some(profile)' \
     'operator_instruction_target_applies(kind, profile, member, member_profile, agent_identity) == ((kind = "Mob") \/ (kind = "Profile") \/ ((kind = "Member") /\ (member = Some(agent_identity))))'
+  # A member-targeted record that moves to another member owes only the
+  # member it moves to: the lookup of the member it leaves is dropped, so
+  # that member's session would keep the record. The arm looks its two
+  # members up instead of searching the seats; the edit replaces both
+  # places where it owes the record's earlier member (one per branch on
+  # whether the new member is seated).
+  seed_mutant_owed_lookup() {
+    local name="$1" arm="$2"
+    local dir="${work_dir}/mutant-${name}"
+    mkdir -p "${dir}"
+    cp "${spec_dir}/model.tla" "${spec_dir}/operator_instruction_delivery_audit.tla" "${dir}/"
+    MODEL="${dir}/model.tla" ARM="${arm}" python3 - <<'PY'
+import os, re
+path, arm = os.environ["MODEL"], os.environ["ARM"]
+text = open(path).read()
+start = text.index("\n" + arm + "(") + 1
+end = text.index("\n\n", start)
+body = text[start:end]
+earlier_member_owed = re.compile(
+    r'MapSet\(member_instruction_owed, \(IF "value" \\in DOMAIN \(IF \(slot \\in DOMAIN operator_instruction_target_member\)'
+    r'(?:(?!MapSet\().)*?\["value"\] ELSE None\), \(operator_instruction_generation \+ 1\)\)'
+)
+body, count = earlier_member_owed.subn("member_instruction_owed", body)
+assert count == 2, f"expected the earlier member owed in two places of {arm}, found {count}"
+open(path, "w").write(text[:start] + body + text[end:])
+PY
+  }
+  seed_mutant_owed_lookup member_retarget_forgets_leaver SetOperatorInstructionAdvanceRunning
+  mutant_cfg="${work_dir}/mutant-member_retarget_forgets_leaver.cfg"
+  write_target_cfg write "${mutant_cfg}" "Action property" AuditWriteOwesExactlyTheSelected
+  run_tlc mutant-member_retarget_forgets_leaver "${mutant_cfg}" \
+    "${work_dir}/mutant-member_retarget_forgets_leaver"
+  mutant_log="${work_dir}/mutant-member_retarget_forgets_leaver.log"
+  if ! grep -q "Error: Action property AuditWriteOwesExactlyTheSelected is violated" "${mutant_log}"; then
+    cat "${mutant_log}"
+    echo "error: mutant member_retarget_forgets_leaver was not refused by AuditWriteOwesExactlyTheSelected (tlc exit ${tlc_status})" >&2
+    exit 1
+  fi
+  echo "mutant member_retarget_forgets_leaver refused by AuditWriteOwesExactlyTheSelected in $(grep -cE '^State [0-9]+:' "${mutant_log}" || true) states"
   # A delivery is prepared for an unborn seat: the born-session guard dropped.
   mutate seat unborn_seat_delivered Invariant AuditDeliversOnlyToBoundBornMembers \
     PrepareMemberInstructionDeliveryDeliverRunning 'member_seat_session_unborn' \

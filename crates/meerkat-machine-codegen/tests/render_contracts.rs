@@ -1068,12 +1068,14 @@ fn mob_host_adoption_arms_follow_every_earlier_variant() {
         host_adoption_arms.to_vec(),
         "the host adoption's arms are the TransitionId variants directly before the build preparation retry's"
     );
-    // The refusals of external work to an identity entry (0.9.11) are the
-    // last TransitionId variants.
+    // The refusals of external work to an identity entry (0.9.11) directly
+    // follow the last arm of the identity's life marker. They are pinned by
+    // that neighbour, not by the end of the enum, which later arms extend.
+    let refusals = index("RecoverIdentityLifeResetsDestroyed") + 1;
     assert_eq!(
-        variants[variants.len() - MOB_IDENTITY_MEMBER_REFUSAL_ARMS.len()..].to_vec(),
+        variants[refusals..refusals + MOB_IDENTITY_MEMBER_REFUSAL_ARMS.len()].to_vec(),
         MOB_IDENTITY_MEMBER_REFUSAL_ARMS.to_vec(),
-        "the identity member refusals of external work are the last TransitionId variants"
+        "the identity member refusals of external work directly follow the identity life marker's arms"
     );
     assert!(
         index("AdoptLegacyIdentityEntryRetireUnadopted") > 1900,
@@ -1093,11 +1095,51 @@ const MOB_BUILD_PREPARATION_RETRY_ARMS: [&str; 4] = [
 ];
 
 /// MobMachine's refusals of external work to an identity entry and to a
-/// name reserved unreadable (0.9.11): the last `TransitionId` variants.
+/// name reserved unreadable (0.9.11): the last `TransitionId` variants
+/// 0.9.13 published.
 const MOB_IDENTITY_MEMBER_REFUSAL_ARMS: [&str; 2] = [
     "ResolveSubmitWorkRejectionIdentityMember",
     "ResolveSubmitWorkRejectionIdentityMemberUnreadableName",
 ];
+
+/// MobMachine's refusal of a higher revision that would move an operator
+/// instruction record into a full member snapshot (0.9.15), in the two
+/// phases that write records.
+const MOB_INSTRUCTION_SNAPSHOT_REFUSAL_ARMS: [&str; 2] = [
+    "SetOperatorInstructionAdvanceSlotLimitExceededRunning",
+    "SetOperatorInstructionAdvanceSlotLimitExceededStopped",
+];
+
+/// The refusal of an operator instruction move into a full member snapshot
+/// (0.9.15) is declared beside the other write arms in the catalog, where
+/// first-match dispatch needs it, and emitted on the machine's late tail:
+/// its two variants directly follow
+/// `ResolveSubmitWorkRejectionIdentityMemberUnreadableName`, the last
+/// variant 0.9.13 published, so no published variant's discriminant moves
+/// (`UnlistIdentityEntryMobNotRunningDestroyed` stays at index 1900 and the
+/// 0.9.13 enum, 2036 variants, is a prefix of this one).
+#[test]
+fn mob_instruction_snapshot_refusal_arms_follow_every_published_variant() {
+    let rendered = render_machine_kernel_module(&mob_machine());
+    let variants = transition_id_variants(&rendered);
+    let index = |name: &str| {
+        variants
+            .iter()
+            .position(|variant| variant == name)
+            .expect("the named variant is a rendered TransitionId variant")
+    };
+    assert_eq!(index("UnlistIdentityEntryMobNotRunningDestroyed"), 1900);
+    // The last TransitionId variant 0.9.13 published.
+    let published_last = index("ResolveSubmitWorkRejectionIdentityMemberUnreadableName");
+    assert_eq!(published_last, 2035);
+    assert_eq!(
+        variants
+            [published_last + 1..published_last + 1 + MOB_INSTRUCTION_SNAPSHOT_REFUSAL_ARMS.len()]
+            .to_vec(),
+        MOB_INSTRUCTION_SNAPSHOT_REFUSAL_ARMS.to_vec(),
+        "the snapshot refusal's arms directly follow the last variant 0.9.13 published"
+    );
+}
 
 /// The build preparation retry's arms are contiguous, after every variant
 /// 0.9.10 renders, and the seal's refusal (`SealDeclaredRosterRefused`,

@@ -31963,7 +31963,9 @@ impl MobActor {
                     agent_identity,
                     reply_tx,
                 } => {
-                    let result = self.prepare_member_instruction_delivery(&agent_identity);
+                    let result = self
+                        .prepare_member_instruction_delivery(&agent_identity)
+                        .await;
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::SettleMemberInstructionDeliveries { outcomes, reply_tx } => {
@@ -38353,11 +38355,13 @@ impl MobActor {
         // delivery.
         if matches!(provision_input.binding(), crate::RuntimeBinding::Session)
             && let SpawnProvisionInput::Ready(request) = &mut provision_input
-            && let Err(error) = self.carry_member_instruction_birth(
-                &mut request.create_session,
-                &agent_identity,
-                profile_name.as_str(),
-            )
+            && let Err(error) = self
+                .carry_member_instruction_birth(
+                    &mut request.create_session,
+                    &agent_identity,
+                    profile_name.as_str(),
+                )
+                .await
         {
             reject_spawn_before_custody!("operator_instruction_birth", error);
         }
@@ -39879,6 +39883,7 @@ impl MobActor {
             {
                 Ok(true) => match self
                     .member_instruction_birth_target(&agent_identity, profile_name.as_str())
+                    .await
                 {
                     Ok(target) => Some(target),
                     Err(error) => fail!(error),
@@ -41557,7 +41562,8 @@ impl MobActor {
                 &mut provision_request.create_session,
                 agent_identity,
                 profile_name.as_str(),
-            )?;
+            )
+            .await?;
         }
 
         if matches!(

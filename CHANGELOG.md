@@ -35,6 +35,17 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- `meerkat-machine-kernels`: the kernel `generated::mob::TransitionId` gains
+  `SetOperatorInstructionAdvanceSlotLimitExceededRunning` and
+  `SetOperatorInstructionAdvanceSlotLimitExceededStopped`, the refusal of a
+  higher revision that would move an operator instruction record into a full
+  member snapshot (see Changed). They are appended last, after
+  `ResolveSubmitWorkRejectionIdentityMemberUnreadableName`, so no existing
+  variant's implicit discriminant moves; an exhaustive match on the enum
+  needs the two arms.
+
 ### Added
 
 - `meerkat-mob`: `MobHandle::member_build_instructions(identity)` reads the
@@ -58,6 +69,72 @@ them.
   answers the same from the persisted session, which loads its transcript:
   a decorator over a durable session service forwards the method to keep
   the read transcript-free.
+
+- `rkat storage doctor` lists each mob database whose operator instruction
+  records are past what a release before this one holds in one mob: more
+  than 64 records, or more than 1 MiB of Active bodies in total
+  (`operator-instruction-mob-totals`, informational, with both totals). Such
+  a release cannot serve that mob (see Upgrade notes).
+  `meerkat_store::doctor::operator_instruction_mob_totals` is the census
+  behind it.
+
+### Changed
+
+- `meerkat-mob`, `meerkat-machine-schema`: a mob's operator instruction
+  limits bound one member's snapshot, not the mob. A member's snapshot is
+  the shared records (targeted at every member or at a profile) plus the
+  member-targeted records that name the member, and it holds at most 64
+  records and 1 MiB of Active bodies. Before, the mob as a whole held at
+  most 64 records and 1 MiB, revoked records included until a reset, so a
+  host that kept one member-targeted record per agent was refused
+  `slot_limit_exceeded` at its 65th agent for the life of the mob. A mob now
+  holds a member-targeted record for each of any number of members. Shared
+  records are in every snapshot and keep the bound they had; a mob that
+  holds 64 shared records has no room for a member's own. The limits count
+  a member-targeted record under the member it names, seated or not, so the
+  records of a retired or never-seated name keep taking room from new
+  shared records until they are written with another target or the mob is
+  reset; leaving such names out is not in this release. Every write the
+  earlier bound admitted is still admitted. The refusal codes
+  are unchanged (`slot_limit_exceeded`, `active_set_budget_exceeded`); a
+  higher revision that would move a record into a full snapshot (a member's
+  record retargeted to every member, or to a member whose snapshot is full)
+  is now refused `slot_limit_exceeded` as a new slot is. The journal row,
+  the session document and the wire types are unchanged. Behaviour change:
+  `MobHandle::set_operator_instruction`, `mob/set_instruction` and Meta's
+  `meta/set_instruction` keep their signatures.
+
+- `meerkat-mob`: a member's operator instruction snapshot no longer lists
+  other members' member-targeted records. Before, every member's session
+  recorded every record of its mob (bodiless where the record did not select
+  the member) and every member's row of `mob/instruction_status`
+  (`MobHandle::operator_instruction_status`) listed them all as
+  `not_targeted`. A member's recorded target and its status row now name
+  the shared records and its own; a record that moves to another member
+  leaves the first member's target, its session revokes the slot at its
+  next fresh run start, and the status row lists that record until then.
+  The page's `desired` list still names every record of the mob.
+
+- `meerkat-mob`, `meerkat-machine-schema`: the cost of a member-targeted
+  record no longer grows with the mob's seats. A write, a revoke or the
+  replay of a member-targeted record looks its one member up instead of
+  testing every seated member, the body of such a record stays in its
+  journal row and is read when its member's snapshot is built (the mob held
+  every Active body in memory), and a member's snapshot skips other
+  members' records without parsing them. The members a write owes are
+  the same as before. Limit: a record write still grows with the number of
+  records the mob holds (measured with one member-targeted record per
+  agent: 2.1 ms at 1,000 records, 39 ms at 10,000), because the mob shell
+  copies the whole machine state on each step; a member's run start does
+  not grow with other members' records, and a mob load pays a constant per
+  record.
+
+- `meerkat-mob`: the mob logs one warning for a member's failed operator
+  instruction record, at its first failure, and again only when the
+  failure's class changes or after a record landed, never one per retry;
+  the warning names the mob, the member and the class. A member's
+  `last_failure` in `mob/instruction_status` is diagnostic: it is kept in
+  the mob's process and not across a restart.
 
 ### Fixed
 
@@ -83,6 +160,58 @@ them.
   an explicit system prompt and names no sections still writes that prompt
   without the recorded sections (only the MCP server's `meerkat_resume`
   with `system_prompt` and direct `AgentFactory` embedders build that way).
+
+- `meerkat-mob`: a member that is owed the mob's operator instruction
+  snapshot when a delivery wakes it has it recorded during the wake, after
+  its conversation is loaded and before it is Live. A record owed to a
+  member seated dormant on a conversation it already has is therefore in
+  effect at the first run after the seat when the member's session takes the
+  write then. A write that fails stays owed: the mob tries again at every
+  wake of the member and on its own retry, at most 30 seconds apart, and the
+  entry reaches the first run that starts after a write succeeded. A write
+  the session refuses because its target or a slot belongs to another owner
+  (`owned_by_session`, `owned_by_other_mob`, `slot_managed_by_activation`)
+  is blocked: the status shows it with its kind, and it is not tried again
+  until a write selects the member again, the member is seated again, or
+  the mob restarts. Before, the record reached the session whenever the
+  mob's delivery next landed, and where the store-only record could not
+  reach the conversation until the member's wake had loaded it, the run that
+  woke the member started without the record and the agent got it one run
+  late (0.9.9 to 0.9.14). The wake never holds the mob for the record: the
+  mob answers other commands meanwhile, and a session that does not answer
+  the write within 5 seconds leaves the member Live and owed. Limits: only
+  the wake a delivery causes orders the record before the member's run. A
+  member seated eagerly on a conversation (a spawn with a Resume launch) and
+  a member the mob materializes itself at a start or a lift are recorded by
+  the mob's own delivery, tried at once when the member is Live and not
+  ordered before a run of it; a member that stays Live between runs is not
+  tried at each run start. A member the mob brings up itself at a start or
+  a lift with work already queued may start that run before the write is
+  tried; the entry then reaches the first run that starts after the write.
+
+### Upgrade notes
+
+- Rolling back to 0.9.14 or earlier: an earlier release cannot serve a mob
+  whose operator instruction records are past what it holds in one mob,
+  which only this release admits (as member-targeted records): more than 64
+  records, or more than 1 MiB of Active bodies over all the mob's records
+  together. An earlier release's build does not refuse such a mob at its
+  start: it replays the journal without an error, and then refuses every
+  step that checks the mob's recovered state, which is every spawn into the
+  mob and every flow run (an internal error that says the state could not
+  be recovered). With more than 64 records it also refuses every member's
+  operator instruction delivery in the member's session
+  (`slot_limit_exceeded`, retried without end; the status read shows the
+  member `owed` with that failure) and fails to build a member that needs a
+  new session. Before a rollback run `rkat storage doctor`, which lists
+  each such mob (`operator-instruction-mob-totals`, with both totals), and
+  for each: keep its processes on this release, or bring its Active bodies
+  back within 1 MiB where only the bytes are over, or reset the mob (which
+  clears the records) and write within both totals again, or destroy it. A
+  revoke lowers the bytes, not the count: a revoked record keeps its slot.
+  Mobs within both totals are unaffected in either direction. A journal an
+  earlier release wrote replays on this one without a refusal. See "Rolling
+  back to 0.9.14" in `docs/guides/upgrading.mdx`.
 
 ## [0.9.13] - 2026-11-11
 

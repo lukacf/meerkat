@@ -1032,6 +1032,247 @@ fn the_replay_restores_more_records_than_one_snapshot_holds() {
     assert_eq!(recovered.state(), &state);
 }
 
+/// A member-targeted record owes exactly its member, looked up among the
+/// seats: a write owes the member it names, a retarget to another member
+/// owes the member it leaves and the one it reaches, a revoke owes the
+/// member it named, and a record for a member that is not seated owes
+/// nobody. Every other seated member keeps what it had, blocked or not.
+#[test]
+fn a_member_targeted_record_owes_only_the_members_it_names() {
+    let mut authority = Authority::new();
+    for name in ["agent-a", "agent-b", "agent-c"] {
+        seat(&mut authority, name, "alpha");
+    }
+    // Member c is blocked before any member-targeted write.
+    signal(&mut authority, set(OTHER_SLOT, 1, DIGEST_A, 1, Target::Mob));
+    signal(
+        &mut authority,
+        refuse("agent-c", 1, MemberInstructionBlock::OwnedByOtherMob),
+    );
+    signal(&mut authority, record("agent-a", 1));
+    signal(&mut authority, record("agent-b", 1));
+    assert_eq!(
+        blocked(&authority, "agent-c"),
+        Some(MemberInstructionBlock::OwnedByOtherMob)
+    );
+
+    signal(
+        &mut authority,
+        set(SLOT, 1, DIGEST_A, 1, Target::Member("agent-a")),
+    );
+    assert_eq!(owed(&authority, "agent-a"), Some(2));
+    assert_eq!(owed(&authority, "agent-b"), None);
+    assert_eq!(
+        blocked(&authority, "agent-c"),
+        Some(MemberInstructionBlock::OwnedByOtherMob),
+        "a record for another member leaves a blocked member blocked"
+    );
+    signal(&mut authority, record("agent-a", 2));
+
+    // The record moves to member b: both are owed.
+    signal(
+        &mut authority,
+        set(SLOT, 2, DIGEST_A, 1, Target::Member("agent-b")),
+    );
+    assert_eq!(owed(&authority, "agent-a"), Some(3));
+    assert_eq!(owed(&authority, "agent-b"), Some(3));
+    assert_eq!(owed(&authority, "agent-c"), None);
+    signal(&mut authority, record("agent-a", 3));
+    signal(&mut authority, record("agent-b", 3));
+
+    // It moves to member c: member b and the blocked member c are owed,
+    // and member c is unblocked.
+    signal(
+        &mut authority,
+        set(SLOT, 3, DIGEST_A, 1, Target::Member("agent-c")),
+    );
+    assert_eq!(owed(&authority, "agent-a"), None);
+    assert_eq!(owed(&authority, "agent-b"), Some(4));
+    assert_eq!(owed(&authority, "agent-c"), Some(4));
+    assert_eq!(blocked(&authority, "agent-c"), None);
+    signal(&mut authority, record("agent-b", 4));
+    signal(&mut authority, record("agent-c", 4));
+
+    // A revoke owes the member the record names.
+    signal(&mut authority, revoke(SLOT, 4));
+    assert_eq!(owed(&authority, "agent-a"), None);
+    assert_eq!(owed(&authority, "agent-b"), None);
+    assert_eq!(owed(&authority, "agent-c"), Some(5));
+    signal(&mut authority, record("agent-c", 5));
+
+    // A record for a member that is not seated, and its move to another
+    // such member, owe nobody.
+    signal(
+        &mut authority,
+        set(
+            "[\"app.example\",\"absent\"]",
+            1,
+            DIGEST_A,
+            1,
+            Target::Member("agent-x"),
+        ),
+    );
+    signal(
+        &mut authority,
+        set(
+            "[\"app.example\",\"absent\"]",
+            2,
+            DIGEST_A,
+            1,
+            Target::Member("agent-y"),
+        ),
+    );
+    for name in ["agent-a", "agent-b", "agent-c"] {
+        assert_eq!(owed(&authority, name), None, "{name} is owed nothing");
+    }
+    assert_eq!(generation(&authority), 7);
+
+    // The replay of a member-targeted record over another member's owes
+    // both, at the replayed generation.
+    signal(
+        &mut authority,
+        Signal::RecoverOperatorInstruction {
+            slot: SLOT.to_string(),
+            revision: 5,
+            effect: InstructionEffect::Active,
+            digest: DIGEST_B.to_string(),
+            body_bytes: 1,
+            target_kind: InstructionTargetKind::Member,
+            target_profile: String::new(),
+            target_member: Some(identity("agent-a")),
+            generation: 9,
+        },
+    );
+    assert_eq!(owed(&authority, "agent-a"), Some(9));
+    assert_eq!(owed(&authority, "agent-b"), None);
+    assert_eq!(owed(&authority, "agent-c"), Some(9));
+}
+
+/// Measurement, not a check: what the machine pays for member-targeted
+/// records at 1,000 and 10,000 edited members, all seated. Run it in a
+/// release build (`--release -- --ignored --nocapture`): a debug build
+/// validates every invariant after every step. It prints, per size: the
+/// seats, the writes of one record per member (the last hundred, where the
+/// mob is full), one more member's write, a shared write, one member's
+/// delivery preparation and record, the replay of every record into a
+/// machine with the members seated, the whole-state invariant check, a
+/// fork of the state (what a prepared step of the mob's shell copies), and
+/// with the same records and no member seated, a fork and one seat.
+#[test]
+#[ignore = "measurement: prints machine costs at 1,000 and 10,000 member records"]
+fn measure_member_record_costs_in_the_machine() {
+    use std::time::Instant;
+    for members in [1_000_usize, 10_000] {
+        let names: Vec<&'static str> = (0..=members)
+            .map(|index| &*Box::leak(format!("agent-{index:05}").into_boxed_str()))
+            .collect();
+        let slots: Vec<String> = (0..=members)
+            .map(|index| format!("[\"agents\",\"m{index:05}\"]"))
+            .collect();
+        let mut authority = Authority::new();
+        let started = Instant::now();
+        for name in &names[..members] {
+            seat(&mut authority, name, "alpha");
+        }
+        let seats = started.elapsed();
+        let mut last_hundred = std::time::Duration::ZERO;
+        let started = Instant::now();
+        for (index, (slot, name)) in slots.iter().zip(&names).take(members).enumerate() {
+            let write_started = Instant::now();
+            assert!(commits(
+                &mut authority,
+                set(slot, 1, DIGEST_A, 4096, Target::Member(name)),
+            ));
+            if index + 100 >= members {
+                last_hundred += write_started.elapsed();
+            }
+        }
+        let writes = started.elapsed();
+        let started = Instant::now();
+        assert!(commits(
+            &mut authority,
+            set(
+                &slots[members],
+                1,
+                DIGEST_A,
+                4096,
+                Target::Member(names[members]),
+            ),
+        ));
+        let one_more_write = started.elapsed();
+        let started = Instant::now();
+        assert!(commits(
+            &mut authority,
+            set(SLOT, 1, DIGEST_A, 64, Target::Mob)
+        ));
+        let shared_write = started.elapsed();
+        let current_generation = generation(&authority);
+        let started = Instant::now();
+        signal(&mut authority, prepare(names[7]));
+        signal(&mut authority, record(names[7], current_generation));
+        let delivery = started.elapsed();
+        let started = Instant::now();
+        let fork = authority.fork();
+        let fork_time = started.elapsed();
+        let started = Instant::now();
+        Authority::recover_from_state(fork.state().clone())
+            .unwrap_or_else(|error| panic!("the reached state recovers: {error}"));
+        let recover = started.elapsed();
+
+        let mut replayed = Authority::new();
+        for name in &names[..members] {
+            seat(&mut replayed, name, "alpha");
+        }
+        let started = Instant::now();
+        for (index, (slot, name)) in slots.iter().zip(&names).take(members).enumerate() {
+            signal(
+                &mut replayed,
+                Signal::RecoverOperatorInstruction {
+                    slot: slot.clone(),
+                    revision: 1,
+                    effect: InstructionEffect::Active,
+                    digest: DIGEST_A.to_string(),
+                    body_bytes: 4096,
+                    target_kind: InstructionTargetKind::Member,
+                    target_profile: String::new(),
+                    target_member: Some(identity(name)),
+                    generation: index as u64 + 1,
+                },
+            );
+        }
+        let replay = started.elapsed();
+
+        // The same records with no member seated: what a step that has
+        // nothing to do with instructions (a seat) and a fork of the state
+        // cost because the machine holds a record per member.
+        let mut unseated = Authority::new();
+        for (slot, name) in slots.iter().zip(&names).take(members) {
+            assert!(commits(
+                &mut unseated,
+                set(slot, 1, DIGEST_A, 4096, Target::Member(name)),
+            ));
+        }
+        let started = Instant::now();
+        let unseated_fork = unseated.fork();
+        let records_only_fork = started.elapsed();
+        drop(unseated_fork);
+        let started = Instant::now();
+        seat(&mut unseated, "agent-unrelated", "alpha");
+        let seat_beside_records = started.elapsed();
+        println!(
+            "members={members} seats={seats:?} writes_total={writes:?} \
+             write_avg_last_100={:?} one_more_member_write={one_more_write:?} \
+             shared_write={shared_write:?} prepare_and_record={delivery:?} \
+             replay_total={replay:?} replay_avg={:?} fork={fork_time:?} \
+             clone_and_recover_from_state={recover:?} \
+             fork_records_only={records_only_fork:?} \
+             seat_beside_records={seat_beside_records:?}",
+            last_hundred / 100,
+            replay / members as u32,
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Seats, delivery and feedback
 // ---------------------------------------------------------------------------

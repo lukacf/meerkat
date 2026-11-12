@@ -1268,6 +1268,11 @@ const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
             // reserved unreadable (0.9.11).
             "ResolveSubmitWorkRejectionIdentityMember",
             "ResolveSubmitWorkRejectionIdentityMemberUnreadableName",
+            // The refusal of an operator instruction move into a full
+            // member snapshot (0.9.15), declared beside the other write
+            // arms in the catalog, where first-match dispatch needs it.
+            "SetOperatorInstructionAdvanceSlotLimitExceededRunning",
+            "SetOperatorInstructionAdvanceSlotLimitExceededStopped",
         ],
     ),
     // The end of a grant with its subject (0.9.11), after every arm 0.9.10

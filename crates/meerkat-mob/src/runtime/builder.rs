@@ -9714,6 +9714,7 @@ impl MobBuilder {
                 machine_state_watch_rx,
                 operator_instruction_delivery:
                     super::operator_instruction_delivery::OperatorInstructionDeliveryShared::new(
+                        definition.id.clone(),
                         wiring.member_residency.instruction_delivery_concurrency,
                     ),
                 reachability_observations,
@@ -10782,6 +10783,8 @@ impl MobBuilder {
             host_read_handle: &host_read_handle,
             unreadable_view_is_retryable: false,
             operator_instruction_bodies: &operator_instruction_bodies,
+            operator_instruction_journal: Some(epoch_events),
+            operator_instruction_member_rows: None,
         };
         restore_resumed_members(
             &restore_context,
@@ -11430,6 +11433,7 @@ impl MobBuilder {
             // member's release waits on the member's delivery lock).
             let operator_instruction_delivery =
                 super::operator_instruction_delivery::OperatorInstructionDeliveryShared::new(
+                    definition.id.clone(),
                     member_residency.instruction_delivery_concurrency,
                 );
             let handle = MobHandle {
@@ -12365,9 +12369,25 @@ pub(super) struct ResumeMemberRestoreContext<'a> {
     /// with the read failure as its diagnostic (the boot rule).
     pub(super) unreadable_view_is_retryable: bool,
     /// The bodies of the mob's Active operator-instruction records: a member
-    /// whose restore mints its session carries its snapshot in it.
+    /// whose restore mints its session carries its snapshot in it. A wake
+    /// hands the shared records' bodies and where the woken member's own
+    /// are (`operator_instruction_member_rows`); a start hands what its
+    /// journal holds in memory and where each member's own body is in
+    /// `operator_instruction_journal`.
     pub(super) operator_instruction_bodies:
         &'a super::operator_instruction_delivery::OperatorInstructionBodies,
+    /// The mob's events of the epoch a start replays, in cursor order: a
+    /// member-targeted record's body is read from its row there. None for a
+    /// wake.
+    pub(super) operator_instruction_journal: Option<&'a [crate::event::MobEvent]>,
+    /// A wake's own member-targeted records: the mob's journal and the rows
+    /// that hold their bodies (slot key, digest, cursor). They are read only
+    /// when the restore mints the member's session, off the mob's actor, so
+    /// a wake that continues a session reads no journal row for them.
+    pub(super) operator_instruction_member_rows: Option<(
+        &'a dyn crate::store::MobEventStore,
+        &'a [(String, String, u64)],
+    )>,
 }
 
 /// Everything a member's restore writes, applied in the member's turn.
@@ -14287,11 +14307,30 @@ async fn provision_fresh_member_session(
         super::actor::admit_bridge_session_for_spawn(&mut provision_request.create_session);
     // The session this restore mints is born with the member's operator
     // instruction snapshot (an unborn seat's first wake, a recreated
-    // session).
+    // session). A wake's own member-targeted bodies are read from their
+    // journal rows here, and only for a build that carries the snapshot.
+    let member_bodies = match ctx.operator_instruction_member_rows {
+        Some((events, rows))
+            if !rows.is_empty()
+                && super::operator_instruction_delivery::birth_carries_member_instructions(
+                    &provision_request.create_session,
+                    base.state(),
+                ) =>
+        {
+            let read =
+                super::operator_instruction_delivery::read_journaled_bodies(events, rows.to_vec())
+                    .await?;
+            Some(ctx.operator_instruction_bodies.for_member(read))
+        }
+        _ => None,
+    };
     super::operator_instruction_delivery::carry_member_instruction_birth(
         &mut provision_request.create_session,
         base.state(),
-        ctx.operator_instruction_bodies,
+        member_bodies
+            .as_ref()
+            .unwrap_or(ctx.operator_instruction_bodies),
+        ctx.operator_instruction_journal,
         &definition.id,
         &entry.agent_identity,
         entry.role.as_str(),

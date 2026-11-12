@@ -36,13 +36,14 @@ const NATIVE_MACHINE_HELPERS: &[&str] = &[
     "mob_machine_external_peer_edges_without_identity",
     "mob_machine_external_peer_key_matches_local",
     "mob_machine_identity_has_session_binding",
-    // MobMachine operator instructions: the member targets of the records
-    // with one slot written, and the widest member snapshot of the mob's
-    // records (the shared records plus one member's own), in records and
-    // in Active body bytes.
-    "mob_machine_instruction_target_members_after_write",
+    // MobMachine operator instructions: the widest member snapshot of the
+    // mob's records (the shared records plus one member's own), in records
+    // and in Active body bytes, and the same of the snapshot a write
+    // changes, with the write applied.
     "mob_machine_instruction_widest_snapshot_slots",
     "mob_machine_instruction_widest_snapshot_active_bytes",
+    "mob_machine_instruction_write_snapshot_slots",
+    "mob_machine_instruction_write_snapshot_active_bytes",
     "mob_machine_remote_turn_custody_admits",
     "mob_machine_placed_completion_obligation_well_formed",
     "mob_machine_placed_completion_custody_admits",

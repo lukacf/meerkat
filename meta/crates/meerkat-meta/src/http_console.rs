@@ -913,18 +913,26 @@ fn gating_audit_entry_origin(entry: &crate::runtime::GatingAuditEntry) -> Option
         .and_then(Value::as_str)
 }
 
+/// Whether a caller may see a gating entry recorded with the origin
+/// `identity`: only a caller that may view that agent, and, for a caller the
+/// console keeps apart from other people, only when the console knows the
+/// agent ([`AccessView::withholds_unknown_member`]): an origin it does not
+/// know may have been private to a person.
+fn gating_origin_visible(access_view: Option<&AccessView>, identity: &str) -> bool {
+    access_view.is_none_or(|view| {
+        view.can_view_agent(identity) && !view.withholds_unknown_member(identity)
+    })
+}
+
 /// Whether a caller may see an audit entry: entries recorded with an origin
-/// are visible only to callers that may view that origin's agent.
+/// are visible only to callers that may see that origin
+/// ([`gating_origin_visible`]).
 fn gating_audit_entry_visible(
     entry: &crate::runtime::GatingAuditEntry,
     access_view: Option<&AccessView>,
 ) -> bool {
-    entry
-        .detail
-        .get("origin")
-        .and_then(|origin| origin.get("identity"))
-        .and_then(Value::as_str)
-        .is_none_or(|identity| access_view.is_none_or(|view| view.can_view_agent(identity)))
+    gating_audit_entry_origin(entry)
+        .is_none_or(|identity| gating_origin_visible(access_view, identity))
 }
 
 /// An audit entry as the console serves it to a caller who may see it. The
@@ -15488,9 +15496,10 @@ async fn handle_console_runtime_rpc_with_visibility(
                 .list_gating_pending()
                 .into_iter()
                 .filter(|entry| {
-                    entry.origin.as_ref().is_none_or(|origin| {
-                        access_view.is_none_or(|view| view.can_view_agent(&origin.identity))
-                    })
+                    entry
+                        .origin
+                        .as_ref()
+                        .is_none_or(|origin| gating_origin_visible(access_view, &origin.identity))
                 })
                 .collect::<Vec<_>>();
             response_value(response_id, Some(json!({ "pending": pending })), None)

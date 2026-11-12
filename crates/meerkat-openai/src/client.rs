@@ -3253,6 +3253,14 @@ impl OpenAiClient {
             let mut streamed_web_search_ids: HashSet<String> = HashSet::new();
             let mut done_emitted = false;
             let mut saw_terminal_fallback_output = false;
+            // A `response.failed` that named no cause was read. The response
+            // failed, and what ends it is its cause (an `error` event, or a
+            // `response.failed` that carries one) or the end of the wait for
+            // one: the end of the stream, a frame that cannot be read, or
+            // `MAX_FRAMES_AWAITING_CAUSE` frames that are not the cause.
+            let mut failed_without_cause = false;
+            let mut frames_awaiting_cause = 0usize;
+            let mut cause_wait_over = false;
             // The output_index of every item the stream added: one ended by
             // `[DONE]` without a terminal response must have completed.
             let mut announced_items: std::collections::BTreeSet<u64> =
@@ -3278,10 +3286,24 @@ impl OpenAiClient {
                 let mut chunk_consumed_line = false;
                 while let Some(step) = events.next_step() {
                     chunk_consumed_line = true;
-                    let meerkat_llm_core::streaming::SseStep::Event(data) = step? else {
+                    let step = match step {
+                        // A line that cannot be read while waiting for a
+                        // cause is not the cause: the wait is over.
+                        Err(_) if failed_without_cause => {
+                            cause_wait_over = true;
+                            break;
+                        }
+                        step => step?,
+                    };
+                    let meerkat_llm_core::streaming::SseStep::Event(data) = step else {
                         continue;
                     };
                     if data == "[DONE]" {
+                        if failed_without_cause && !done_emitted {
+                            // The stream ended and no cause came.
+                            cause_wait_over = true;
+                            break;
+                        }
                         if !done_emitted && saw_terminal_fallback_output {
                             // Without a terminal response only what completed
                             // is committed: an item the stream announced and
@@ -3351,17 +3373,44 @@ impl OpenAiClient {
                     // is the event the end cut: the response is incomplete, as
                     // for a body cut anywhere else, not a malformed event. A
                     // complete event that does not parse stays a parse error.
-                    let parsed_event = Self::parse_responses_sse_data(&data).map_err(|error| {
-                        if body_ended {
-                            LlmError::IncompleteResponse {
-                                message: "OpenAI Responses stream ended mid-event".to_string(),
-                            }
-                        } else {
-                            error
+                    let parsed_event = match Self::parse_responses_sse_data(&data) {
+                        // Data that cannot be read while waiting for a cause
+                        // is not the cause: the wait is over.
+                        Err(_) if failed_without_cause => {
+                            cause_wait_over = true;
+                            break;
                         }
-                    })?;
+                        parsed => parsed.map_err(|error| {
+                            if body_ended {
+                                LlmError::IncompleteResponse {
+                                    message: "OpenAI Responses stream ended mid-event".to_string(),
+                                }
+                            } else {
+                                error
+                            }
+                        })?,
+                    };
 
                     if let Some(mut event) = parsed_event {
+                        // A failed response has no output. After a
+                        // `response.failed` that named no cause only its
+                        // cause is read: an `error` event, or a
+                        // `response.failed` that carries one. Every other
+                        // frame is counted and skipped, and after
+                        // `MAX_FRAMES_AWAITING_CAUSE` of them the wait is
+                        // over, however long the body stays open.
+                        if failed_without_cause
+                            && event.event_type != "error"
+                            && (event.event_type != "response.failed"
+                                || responses_stream_cause(&event).is_none())
+                        {
+                            frames_awaiting_cause += 1;
+                            if frames_awaiting_cause >= MAX_FRAMES_AWAITING_CAUSE {
+                                cause_wait_over = true;
+                                break;
+                            }
+                            continue;
+                        }
                         let terminal_event = event.event_type == "response.completed"
                             || event.event_type == "response.incomplete"
                             || event.event_type == "response.done";
@@ -3866,24 +3915,21 @@ impl OpenAiClient {
                             };
                         }
                         else if event.event_type == "response.failed" {
-                            let error_msg = event.response
-                                .as_ref()
-                                .and_then(responses_error_object)
-                                .and_then(|e| e.get("message"))
-                                .and_then(|m| m.as_str())
-                                .or_else(|| event.response
-                                    .as_ref()
-                                    .and_then(|r| r.get("status_details"))
-                                    .and_then(|d| d.get("error"))
-                                    .and_then(|e| e.get("message"))
-                                    .and_then(|m| m.as_str()))
-                                .unwrap_or("response failed");
-                            let error_code = event.response
-                                .as_ref()
-                                .and_then(responses_error_object)
-                                .and_then(|e| e.get("code"))
-                                .and_then(|c| c.as_str())
-                                .unwrap_or("server_error");
+                            let Some(cause) = responses_stream_cause(&event) else {
+                                // No error object: this event decides
+                                // nothing by itself. The cause, when the
+                                // stream carries one, is in an event after
+                                // it, so the stream is read on: under the
+                                // same stream timeouts as any other event,
+                                // and for a bounded number of frames.
+                                tracing::warn!(
+                                    "OpenAI response failed without an error object; reading on for its cause"
+                                );
+                                failed_without_cause = true;
+                                continue;
+                            };
+                            let error_msg = cause.message.unwrap_or("response failed");
+                            let error_code = cause.classifying_code().unwrap_or("server_error");
 
                             let logged_code = self.redacted(error_code);
                             let logged_message = self.redacted(error_msg);
@@ -3893,7 +3939,7 @@ impl OpenAiClient {
                                 "OpenAI response failed"
                             );
 
-                            let error = map_responses_stream_error(error_code, error_msg);
+                            let error = cause.error(error_code, error_msg);
 
                             done_emitted = true;
                             chunk_yielded.set(true);
@@ -3903,18 +3949,9 @@ impl OpenAiClient {
                         }
                         else if event.event_type == "error" {
                             // Streaming error event from OpenAI
-                            let error_msg = event.error
-                                .as_ref()
-                                .and_then(|e| e.get("message"))
-                                .and_then(|m| m.as_str())
-                                .or(event.message.as_deref())
-                                .unwrap_or("unknown streaming error");
-                            let error_code = event.error
-                                .as_ref()
-                                .and_then(|e| e.get("code"))
-                                .and_then(|c| c.as_str())
-                                .or(event.code.as_deref())
-                                .unwrap_or("unknown");
+                            let cause = responses_stream_cause(&event).unwrap_or_default();
+                            let error_msg = cause.message.unwrap_or("unknown streaming error");
+                            let error_code = cause.classifying_code().unwrap_or("unknown");
 
                             let logged_code = self.redacted(error_code);
                             let logged_message = self.redacted(error_msg);
@@ -3924,7 +3961,7 @@ impl OpenAiClient {
                                 "OpenAI streaming error"
                             );
 
-                            let error = map_responses_stream_error(error_code, error_msg);
+                            let error = cause.error(error_code, error_msg);
 
                             done_emitted = true;
                             chunk_yielded.set(true);
@@ -3934,11 +3971,26 @@ impl OpenAiClient {
                         }
                     }
                 }
+                // The wait for a cause is over and none came: the stream
+                // ended (`[DONE]`, or the end of the body), a frame could
+                // not be read, or too many frames that are not the cause
+                // followed the `response.failed`.
+                if failed_without_cause && !done_emitted && (body_ended || cause_wait_over) {
+                    done_emitted = true;
+                    chunk_yielded.set(true);
+                    yield LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Error {
+                            error: response_failed_without_cause(),
+                        },
+                    };
+                }
                 // A chunk whose lines produced no semantic event is still wire
                 // liveness (keepalive comments, lifecycle bookkeeping); surface
                 // it so the stream-inactivity watchdog re-arms. Bytes that never
-                // complete a line intentionally do not count.
-                if chunk_consumed_line && !chunk_yielded.get() {
+                // complete a line intentionally do not count, and nothing does
+                // while a failed response waits for its cause: the watchdog
+                // bounds that wait whatever the body keeps sending.
+                if chunk_consumed_line && !chunk_yielded.get() && !failed_without_cause {
                     yield LlmEvent::WireLiveness;
                 }
             }
@@ -4293,10 +4345,159 @@ fn map_responses_stream_error(error_code: &str, error_message: &str) -> LlmError
             max: 0,
             requested: 1,
         },
-        "invalid_request_error" => LlmError::from_http_status(400, error_message.to_string(), None),
+        // A refused request: over HTTP a 400, in a stream one of these codes
+        // (`invalid_request_error` is also the `type` of such an error
+        // object). The message is classified as the body of that 400 is, so
+        // a message that names another terminal class (a context overflow,
+        // an oversized request, exhausted quota) keeps it; otherwise the
+        // error is the invalid request, with the code in front of the
+        // service's message, and the turn fails once instead of being sent
+        // again. `invalid_request_body` is a general code, used for more
+        // than one request fault: the message says which fault.
+        "invalid_request_error"
+        | "invalid_request_body"
+        | "invalid_encrypted_content"
+        | "invalid_prompt"
+        | "invalid_value"
+        | "invalid_argument"
+        | "unsupported_value"
+        | "unsupported_parameter" => refused_request_error(error_code, error_message),
+        // One code, one class, whatever carries it: over HTTP this code is a
+        // 404 (`LlmError::from_http_status`), and the realtime adapter maps
+        // it the same way. Built here, not through the HTTP classifier: the
+        // message is text, never an error body to parse.
+        "model_not_found" => LlmError::ModelNotFound {
+            model: error_message.to_string(),
+        },
         _ => LlmError::Unknown {
             message: format!("{error_code}: {error_message}"),
         },
+    }
+}
+
+/// A refused request named by `error_code`, classified as the body of an
+/// HTTP 400 with `error_message` is: the invalid request with the code in
+/// front of the message, or the class the message itself names (a context
+/// overflow, an oversized request, exhausted quota). The message is text:
+/// one that is itself a JSON object naming a policy violation selects no
+/// policy stop, which only a structured code establishes.
+fn refused_request_error(error_code: &str, error_message: &str) -> LlmError {
+    match LlmError::from_http_status(400, error_message.to_string(), None) {
+        LlmError::InvalidRequest { .. } | LlmError::PolicyStop { .. } => LlmError::InvalidRequest {
+            message: format!("{error_code}: {error_message}"),
+        },
+        other => other,
+    }
+}
+
+/// How many frames that are not the cause the client reads after a
+/// `response.failed` without an error object before it stops waiting for
+/// one. A count, not a timer: it ends the wait on a body that keeps sending
+/// data frames without waiting for the stream-inactivity window, and where
+/// no window is configured. Comment lines are not frames and are not
+/// counted: a body that stays open and sends only those is ended by the
+/// stream-inactivity window (no liveness is reported while waiting), and
+/// where no window is configured this bound does not end it.
+const MAX_FRAMES_AWAITING_CAUSE: usize = 16;
+
+/// The cause a Responses stream event gives for a failed response.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ResponsesStreamCause<'a> {
+    code: Option<&'a str>,
+    /// The `type` of the error object.
+    error_type: Option<&'a str>,
+    message: Option<&'a str>,
+}
+
+impl<'a> ResponsesStreamCause<'a> {
+    /// The code that classifies this cause: its `code`, or, when it names
+    /// none, its `type` where the type names a class by itself (the
+    /// request-refusal type and the exhausted-quota codes). Any other type
+    /// decides nothing, and the event keeps its default class: a type alone
+    /// never establishes a policy stop, a rate limit or a server error.
+    fn classifying_code(&self) -> Option<&'a str> {
+        self.code.or_else(|| {
+            self.error_type.filter(|error_type| {
+                *error_type == "invalid_request_error"
+                    || LlmError::code_signals_quota_exhausted(error_type)
+            })
+        })
+    }
+
+    /// The typed error of this cause for `error_code` (its classifying
+    /// code, or the event's default) and `error_message`. A code this
+    /// client does not know, on an error object whose type is the
+    /// request-refusal type, is classified by that type, as the status
+    /// classifies the same refusal over HTTP 400; the message keeps the
+    /// code. With any other type an unknown code stays the unknown class.
+    fn error(&self, error_code: &str, error_message: &str) -> LlmError {
+        match map_responses_stream_error(error_code, error_message) {
+            LlmError::Unknown { .. }
+                if self.code.is_some() && self.error_type == Some("invalid_request_error") =>
+            {
+                refused_request_error(error_code, error_message)
+            }
+            error => error,
+        }
+    }
+}
+
+/// The cause `event` gives for a failed response, read from every place a
+/// stream event can carry it, into one shape: the error object of the
+/// event's response (`response.failed`; `error`, else
+/// `status_details.error`), the event's own `error` object (the nested form
+/// of an `error` event), or `code` and `message` at the top level of the
+/// event (the flat form). An error given as a plain string is the message.
+/// `None` when the event names no code, no type and no message: a
+/// `response.failed` whose `error` is null or an empty object.
+fn responses_stream_cause(event: &ResponsesStreamEvent) -> Option<ResponsesStreamCause<'_>> {
+    fn non_empty(value: &Value) -> Option<&str> {
+        value.as_str().filter(|text| !text.is_empty())
+    }
+    let response_error = event.response.as_ref().and_then(responses_error_object);
+    let object = response_error
+        .filter(|error| error.is_object())
+        .or_else(|| event.error.as_ref().filter(|error| error.is_object()));
+    let field = |name: &str| object.and_then(|error| error.get(name)).and_then(non_empty);
+    // The message a response states under `status_details` when its error
+    // object has none, and an error that is a plain string.
+    let details_message = event
+        .response
+        .as_ref()
+        .and_then(|response| response.get("status_details"))
+        .and_then(|details| details.get("error"))
+        .and_then(|error| error.get("message"))
+        .and_then(non_empty);
+    let string_error = response_error
+        .and_then(non_empty)
+        .or_else(|| event.error.as_ref().and_then(non_empty));
+    let flat_code = event.code.as_deref().filter(|code| !code.is_empty());
+    let flat_message = event
+        .message
+        .as_deref()
+        .filter(|message| !message.is_empty());
+    let cause = ResponsesStreamCause {
+        code: field("code").or(flat_code),
+        error_type: field("type"),
+        message: field("message")
+            .or(details_message)
+            .or(string_error)
+            .or(flat_message),
+    };
+    (cause != ResponsesStreamCause::default()).then_some(cause)
+}
+
+/// How a response ends whose `response.failed` named no cause and whose
+/// wait for one ended without it: the stream ended, a frame could not be
+/// read, or `MAX_FRAMES_AWAITING_CAUSE` other frames followed. Retryable,
+/// as a failure without a cause was before: nothing says the request itself
+/// was refused.
+fn response_failed_without_cause() -> LlmError {
+    LlmError::ServerError {
+        status: 500,
+        message: "response failed with no cause: `response.failed` carried no error and no \
+                  cause followed it"
+            .to_string(),
     }
 }
 

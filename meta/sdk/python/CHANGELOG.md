@@ -4,6 +4,10 @@ All notable changes to the Python SDK are documented here.
 
 ## Unreleased
 
+## 0.9.14
+
+No SDK API changes; released with Meta 0.9.14.
+
 ## 0.9.13
 
 No SDK API changes; released with Meta 0.9.13.

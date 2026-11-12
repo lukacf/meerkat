@@ -3473,6 +3473,16 @@ jobs:
         with:
           node-version: "22"
 
+      # The TypeScript SDK's development dependencies link @rkat/sdk and
+      # @rkat/meta-sdk from this checkout (file: dependencies), so its build
+      # and tests run against the SDKs of the same commit, built here first.
+      - name: Build the Core and Meta TypeScript SDKs of this commit
+        run: |
+          npm --prefix ../sdks/typescript install --ignore-scripts --no-audit --no-fund
+          npm --prefix ../sdks/typescript run build
+          npm --prefix ../meta/sdk/typescript ci --ignore-scripts --no-audit --no-fund
+          npm --prefix ../meta/sdk/typescript run build
+
       - name: Install locked SDK and panel test dependencies
         working-directory: connect/sdk/typescript
         run: npm ci --ignore-scripts --no-audit --no-fund

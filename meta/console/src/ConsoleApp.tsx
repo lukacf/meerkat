@@ -474,12 +474,20 @@ function normalizeConsoleInspectResult(
 ): IdentityInspectViewState | null {
   const view = normalizeConsoleInspectView(value);
   if (!view) return null;
-  // The status says so at its top level, and only with `true`: the host's
-  // roster lists this name while the agent is served from its record. The
-  // details pane says it as a note at the status.
+  // The status says so, and only with `true`: the host's roster lists this
+  // name while the agent is served from its record. It is read where the
+  // answer keeps the agent's reachability: at the top level of an answer
+  // that is the status itself, and in `identity` of the answer that keeps
+  // the agent's facts there. The details pane says it as a note at the
+  // status.
+  const record =
+    value !== null && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  const facts =
+    record.identity !== null && typeof record.identity === "object"
+      ? (record.identity as Record<string, unknown>)
+      : {};
   const superseded =
-    value !== null && typeof value === "object" &&
-    (value as Record<string, unknown>).roster_listing_superseded === true;
+    record.roster_listing_superseded === true || facts.roster_listing_superseded === true;
   return superseded
     ? ({ ...view, roster_listing_superseded: true } as IdentityInspectViewState)
     : view;

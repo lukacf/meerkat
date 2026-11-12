@@ -651,7 +651,10 @@ is classified from the body as received, then redacted, so an error keeps
 its class.
 
 Not removed: a named value in another form (base64 of it, a decoded `Basic`
-pair, a copy cut short or masked); a secret no route names outside the
+pair, a copy cut short or masked); what the second of two named values that
+overlap without one containing the other holds beyond the overlap, where a
+response runs them together (the two are replaced independently, longest
+first); a secret no route names outside the
 second step's positions (that step is a second line only: it also leaves an
 all-letter value under 32 bytes, a JSON web token directly followed by
 `.`, `/`, `+` or `=`, a quoted header dump without a `Bearer`/`Basic`

@@ -305,11 +305,17 @@ pub trait InprocPeerWaker: Send + Sync {
     fn member_is_waking(&self, member: &str) -> bool;
 }
 
-/// A seated member's wake route.
+/// A wake route: a seated member's own, or a host forwarder's.
 #[derive(Clone)]
 struct WakeRoute {
     member: String,
     waker: Weak<dyn InprocPeerWaker>,
+    /// Published by a host forwarder
+    /// ([`InprocRegistry::publish_forwarder_wake_route`]): the route stands
+    /// in its namespace for a member seated in another namespace. A lookup
+    /// in any namespace skips it, so the member's own owner stays the one
+    /// route such a lookup finds.
+    forwarder: bool,
 }
 
 /// A wake route whose owner is alive.
@@ -813,12 +819,12 @@ impl InprocRegistry {
 
     /// Publish a wake route under `pubkey` in `namespace`.
     ///
-    /// Two kinds of caller publish. A mob owner publishes the route of a
-    /// member seated in `namespace`, only from its machine effects (a
-    /// seating transition). A host forwarder publishes a route that stands
-    /// in `namespace` for a member of another namespace hosted by the same
-    /// process, for a durable link a member of `namespace` holds to it; a
-    /// forwarder never publishes over an owner's route.
+    /// A mob owner publishes the route of a member seated in `namespace`
+    /// with this, only from its machine effects (a seating transition). A
+    /// host forwarder, which stands in `namespace` for a member of another
+    /// namespace hosted by the same process, publishes with
+    /// [`Self::publish_forwarder_wake_route`] instead, and never over an
+    /// owner's route.
     /// The route occupies no name and never delivers: a live route under the
     /// same key always wins. Re-publishing replaces the key's route (the
     /// publisher's own projection rebuild); the registry does not check who
@@ -830,12 +836,52 @@ impl InprocRegistry {
         member: impl Into<String>,
         waker: Weak<dyn InprocPeerWaker>,
     ) -> bool {
+        self.insert_wake_route(namespace, pubkey, member.into(), waker, false)
+    }
+
+    /// Publish a host forwarder's wake route under `pubkey` in `namespace`.
+    ///
+    /// A forwarder's route stands in `namespace` for a member that is seated
+    /// in ANOTHER namespace hosted by the same process: asked to wake, its
+    /// owner hands the request to the member's own owner (see
+    /// [`Self::wake_route_owner_in_namespace`]). Only a host that composes
+    /// the two namespaces and holds a durable link between a member of
+    /// `namespace` and that member publishes one; a mob owner publishes its
+    /// members' routes with [`Self::publish_wake_route`], and a forwarder
+    /// never publishes over an owner's route.
+    ///
+    /// The route is marked as a forwarder's. A send scoped to `namespace`
+    /// finds it like any wake route. A lookup in ANY namespace (a sender
+    /// with no namespace) skips it, so the key keeps exactly one route for
+    /// such a sender, the member's own owner's, as if the forwarder's were
+    /// not there. Everything else is as for [`Self::publish_wake_route`]:
+    /// no name is occupied, a live route under the key wins, re-publishing
+    /// replaces the key's route in `namespace`, and a zero key is refused.
+    pub fn publish_forwarder_wake_route(
+        &self,
+        namespace: &str,
+        pubkey: PubKey,
+        member: impl Into<String>,
+        waker: Weak<dyn InprocPeerWaker>,
+    ) -> bool {
+        self.insert_wake_route(namespace, pubkey, member.into(), waker, true)
+    }
+
+    fn insert_wake_route(
+        &self,
+        namespace: &str,
+        pubkey: PubKey,
+        member: String,
+        waker: Weak<dyn InprocPeerWaker>,
+        forwarder: bool,
+    ) -> bool {
         if pubkey.is_zero() {
             return false;
         }
         let route = WakeRoute {
-            member: member.into(),
+            member,
             waker,
+            forwarder,
         };
         self.state
             .write()
@@ -919,7 +965,9 @@ impl InprocRegistry {
     /// `Err(())` when the key has a route whose owner is gone (its mob actor
     /// exited without retracting it): the member exists, but nothing in this
     /// process can wake it. In any namespace, a key routed in more than one
-    /// namespace fails closed as no route, exactly as live routes do.
+    /// namespace fails closed as no route, exactly as live routes do; a
+    /// forwarder's route is not counted and never answered there, so a key
+    /// with its owner's route and forwarders' routes resolves to the owner.
     fn wake_route(
         &self,
         scope: RouteScope<'_>,
@@ -938,7 +986,11 @@ impl InprocRegistry {
                 RouteScope::AnyNamespace => {
                     let mut found = None;
                     for namespace_state in state.namespaces.values() {
-                        if let Some(route) = namespace_state.wake_routes.get(pubkey) {
+                        let own_route = namespace_state
+                            .wake_routes
+                            .get(pubkey)
+                            .filter(|route| !route.forwarder);
+                        if let Some(route) = own_route {
                             if found.is_some() {
                                 return Ok(None);
                             }

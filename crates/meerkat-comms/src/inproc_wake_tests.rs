@@ -942,7 +942,7 @@ async fn a_host_forwarder_hands_the_same_request_to_the_members_own_owner() {
         alias: "mob-b/worker/worker-1".to_string(),
         forwarded: AtomicUsize::new(0),
     });
-    assert!(registry.publish_wake_route(
+    assert!(registry.publish_forwarder_wake_route(
         "realm-a",
         member.public_key(),
         "mob-b/worker/worker-1",
@@ -997,34 +997,67 @@ async fn a_host_forwarder_hands_the_same_request_to_the_members_own_owner() {
     assert_eq!(sender_owner.calls(), 0);
 }
 
-/// A sender with no namespace resolves a wake route in any namespace and
-/// fails closed when the key has one in more than one. A host forwarder's
-/// route beside the owner's is such a second route: a member that is not
-/// built is then no longer found by a sender with no namespace, while a
-/// send scoped to the member's own namespace still wakes it.
+/// A sender with no namespace resolves a wake route in any namespace. A host
+/// forwarder's route is marked and such a lookup skips it: a member that is
+/// not built keeps exactly one route for that sender, its own owner's, with
+/// forwarders' routes under the same key in other namespaces or without.
+/// The send scoped to the forwarder's namespace still finds the forwarder.
 #[tokio::test]
-async fn a_forwarder_route_hides_a_member_that_is_not_built_from_a_sender_with_no_namespace() {
+async fn a_sender_with_no_namespace_wakes_a_member_beside_a_forwarders_route() {
     let registry = Arc::new(InprocRegistry::new());
     let sender = make_keypair();
-    let materializing = |name: &str, pubkey: PubKey, sender: InboxSender| {
-        ScriptedOwner::new(OnWake::Materialize {
-            registry: Arc::clone(&registry),
-            namespace: "realm-b".to_string(),
-            name: name.to_string(),
-            pubkey,
-            sender: std::sync::Mutex::new(Some(sender)),
-        })
-    };
+    let member = make_keypair().public_key();
+    let (inbox, inbox_sender) = open_inbox();
+    let owner = ScriptedOwner::new(OnWake::Materialize {
+        registry: Arc::clone(&registry),
+        namespace: "realm-b".to_string(),
+        name: "worker-1".to_string(),
+        pubkey: member,
+        sender: std::sync::Mutex::new(Some(inbox_sender)),
+    });
+    let forwarder_a = ScriptedOwner::new(OnWake::NotAMember);
+    let forwarder_c = ScriptedOwner::new(OnWake::NotAMember);
+    assert!(registry.publish_wake_route("realm-b", member, "worker-1", owner.weak()));
+    assert!(registry.publish_forwarder_wake_route(
+        "realm-a",
+        member,
+        "mob-b/worker/worker-1",
+        forwarder_a.weak()
+    ));
+    assert!(registry.publish_forwarder_wake_route(
+        "realm-c",
+        member,
+        "mob-b/worker/worker-1",
+        forwarder_c.weak()
+    ));
 
-    // Only its owner's route: a sender with no namespace wakes the member.
-    let alone = make_keypair().public_key();
-    let (alone_inbox, alone_sender) = open_inbox();
-    let alone_owner = materializing("worker-1", alone, alone_sender);
-    assert!(registry.publish_wake_route("realm-b", alone, "worker-1", alone_owner.weak()));
+    // The send scoped to realm-a asks realm-a's forwarder, not the owner.
+    let scoped = registry
+        .send_to_pubkey_in_namespace_with_id_wait(
+            "realm-a",
+            &sender,
+            &member,
+            Uuid::new_v4(),
+            response(),
+            true,
+            BUDGET,
+            None,
+        )
+        .await
+        .expect_err("the forwarder of this row answers that the key is no member");
+    assert!(
+        matches!(scoped, InprocSendError::PeerNotFound(_)),
+        "{scoped:?}"
+    );
+    assert_eq!(forwarder_a.calls(), 1);
+    assert_eq!(owner.calls(), 0);
+
+    // The sender with no namespace finds the owner's route alone, wakes the
+    // member and hands the envelope off: no forwarder is asked.
     registry
         .send_to_pubkey_any_namespace_with_id_wait(
             &sender,
-            &alone,
+            &member,
             Uuid::new_v4(),
             response(),
             true,
@@ -1032,58 +1065,95 @@ async fn a_forwarder_route_hides_a_member_that_is_not_built_from_a_sender_with_n
             None,
         )
         .await
-        .expect("one route in any namespace is the route");
-    assert_eq!(alone_owner.calls(), 1);
-    assert_eq!(queued(&alone_inbox), 1);
+        .expect("the owner's route is the one route in any namespace");
+    assert_eq!(owner.calls(), 1);
+    assert_eq!(forwarder_a.calls(), 1);
+    assert_eq!(forwarder_c.calls(), 0);
+    assert_eq!(queued(&inbox), 1);
 
-    // Its owner's route in realm-b and a forwarder's in realm-a.
-    let linked = make_keypair().public_key();
-    let (linked_inbox, linked_sender) = open_inbox();
-    let linked_owner = materializing("worker-2", linked, linked_sender);
+    // The read of an owner answers a forwarder's route like any other, and
+    // a retract of it is owner-exact.
+    let (name, found) = registry
+        .wake_route_owner_in_namespace("realm-a", &member)
+        .expect("realm-a's route");
+    assert_eq!(name, "mob-b/worker/worker-1");
+    assert!(Weak::ptr_eq(&found, &forwarder_a.weak()));
+    assert!(!registry.retract_wake_route("realm-a", &member, &owner.weak()));
+    assert!(registry.retract_wake_route("realm-a", &member, &forwarder_a.weak()));
+}
+
+/// The mark is on the route, not on the key. A key with only forwarders'
+/// routes is no route for a sender with no namespace, and two routes that
+/// are both owners' (published with `publish_wake_route`) are still no
+/// route for it, as before. Publishing an owner's route over a forwarder's
+/// in one namespace makes it an owner's route.
+#[tokio::test]
+async fn only_a_forwarders_route_is_skipped_by_a_sender_with_no_namespace() {
+    let registry = Arc::new(InprocRegistry::new());
+    let sender = make_keypair();
+    let send = |key: PubKey| {
+        let registry = &registry;
+        let sender = &sender;
+        async move {
+            registry
+                .send_to_pubkey_any_namespace_with_id_wait(
+                    sender,
+                    &key,
+                    Uuid::new_v4(),
+                    response(),
+                    true,
+                    BUDGET,
+                    None,
+                )
+                .await
+        }
+    };
+
+    // Only a forwarder's route: nothing for a sender with no namespace.
+    let forwarded_only = make_keypair().public_key();
     let forwarder = ScriptedOwner::new(OnWake::ReadyWithoutRoute);
-    assert!(registry.publish_wake_route("realm-b", linked, "worker-2", linked_owner.weak()));
-    assert!(registry.publish_wake_route(
+    assert!(registry.publish_forwarder_wake_route(
         "realm-a",
-        linked,
-        "mob-b/worker/worker-2",
+        forwarded_only,
+        "mob-b/worker/gone",
         forwarder.weak()
     ));
-    let refused = registry
-        .send_to_pubkey_any_namespace_with_id_wait(
-            &sender,
-            &linked,
-            Uuid::new_v4(),
-            response(),
-            true,
-            BUDGET,
-            None,
-        )
-        .await
-        .expect_err("two routes in any namespace are no route");
+    let refused = send(forwarded_only).await.expect_err("no owner's route");
     assert!(
         matches!(refused, InprocSendError::PeerNotFound(_)),
         "{refused:?}"
     );
-    assert_eq!(linked_owner.calls(), 0);
     assert_eq!(forwarder.calls(), 0);
 
-    // A send scoped to the member's own namespace is not affected.
-    registry
-        .send_to_pubkey_in_namespace_with_id_wait(
-            "realm-b",
-            &sender,
-            &linked,
-            Uuid::new_v4(),
-            response(),
-            true,
-            BUDGET,
-            None,
-        )
-        .await
-        .expect("the member's own namespace wakes it");
-    assert_eq!(linked_owner.calls(), 1);
+    // Two owners' routes under one key in two namespaces: no route, as
+    // before.
+    let twice = make_keypair().public_key();
+    let first = ScriptedOwner::new(OnWake::ReadyWithoutRoute);
+    let second = ScriptedOwner::new(OnWake::ReadyWithoutRoute);
+    assert!(registry.publish_wake_route("realm-a", twice, "worker-a", first.weak()));
+    assert!(registry.publish_wake_route("realm-b", twice, "worker-b", second.weak()));
+    let refused = send(twice).await.expect_err("two owners' routes");
+    assert!(
+        matches!(refused, InprocSendError::PeerNotFound(_)),
+        "{refused:?}"
+    );
+    assert_eq!(first.calls() + second.calls(), 0);
+
+    // An owner's route published over the forwarder's in realm-a: the key
+    // now has one owner's route there, and the sender with no namespace
+    // asks that owner.
+    let owner = ScriptedOwner::new(OnWake::Refuse(PeerWakeRefusal::MemberRetiring));
+    assert!(registry.publish_wake_route("realm-a", forwarded_only, "worker", owner.weak()));
+    let refused = send(forwarded_only).await.expect_err("the owner refuses");
+    assert!(
+        matches!(
+            refused,
+            InprocSendError::WakeRefused(PeerWakeRefusal::MemberRetiring)
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(owner.calls(), 1);
     assert_eq!(forwarder.calls(), 0);
-    assert_eq!(queued(&linked_inbox), 1);
 }
 
 /// A wake route never claims a name: a live registration under the member's

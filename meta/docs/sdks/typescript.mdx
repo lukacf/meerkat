@@ -381,7 +381,10 @@ awaits none refuses `preparation_not_pending`.
 `IdentityStatus.rosterListingSuperseded` (`runtime.status(name)`) is `true`
 when the host's roster lists a name whose agent is served from its record,
 an adopted agent your roster still lists for one: the roster's entry is not
-applied. `IdentityStatus.archived` is `true` while the agent is archived,
+applied. `get`, `list`, the directory and the plan of a change of such an
+agent read the same member (`AgentSummary`, `AgentRecord`, `DirectoryPeer`,
+`IdentityChangePlan`). `IdentityStatus.archived` is `true` while the agent
+is archived,
 and `IdentityStatus.preparationPending` while it waits for its host's
 preparation; the gateway writes each only when it is so. An agent's spec
 digest, provenance and `openOperations` are read with `get` and `list`:

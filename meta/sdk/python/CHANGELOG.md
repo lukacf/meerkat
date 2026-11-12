@@ -40,6 +40,9 @@ All notable changes to the Python SDK are documented here.
   create answered `IdentityPendingPreparation`.
 - `IdentityStatus.roster_listing_superseded`: `True` when the host's
   roster lists a name whose agent is served from its record.
+- `AgentSummary`, `AgentRecord`, `DirectoryPeer` and `IdentityChangePlan`
+  read `roster_listing_superseded` too, on `get`, `list`, `directory` and
+  `plan`; the gateway writes it only when it is so.
 - `IdentityStatus.archived` and `IdentityStatus.preparation_pending`:
   `True` while the agent is archived, and while it waits for its host's
   preparation. The gateway writes each only when it is so.

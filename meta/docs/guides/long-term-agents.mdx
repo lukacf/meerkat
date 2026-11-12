@@ -172,7 +172,9 @@ Once the adoption committed, stop declaring the agent in your configuration.
 While your roster still lists it, the agent is served from its record and the
 roster's entry for that name is not applied: the identity's status
 (`runtime.status(name)`) reads `roster_listing_superseded` true
-(`rosterListingSuperseded` in TypeScript), and false for every other agent.
+(`rosterListingSuperseded` in TypeScript), and false for every other agent;
+`get`, `list`, the directory and the plan of a change of it read the same
+member.
 
 To adopt every agent, page through `list` and adopt each one:
 

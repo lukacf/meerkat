@@ -27,7 +27,7 @@ use std::collections::BTreeMap;
 
 use async_trait::async_trait;
 use meerkat_core::ContentInput;
-use meerkat_mob::{MobHandle, ProfileName};
+use meerkat_mob::{MobHandle, MobRuntimeMode, ProfileName};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -83,6 +83,14 @@ pub struct AgentSpec {
     /// agents of the same create. Nothing else is wired to it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub peers: Vec<String>,
+    /// Who reaches it: `addressable`, which an absent member means, or
+    /// `internal_only`. The member and the values of a roster row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub addressability: Option<AgentAddressability>,
+    /// How it runs: `autonomous_host` or `turn_driven`; absent, as its
+    /// profile says. The member and the values of a roster row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_mode_override: Option<MobRuntimeMode>,
 }
 
 impl AgentSpec {
@@ -97,6 +105,8 @@ impl AgentSpec {
             labels: BTreeMap::new(),
             first_message: None,
             peers: Vec::new(),
+            addressability: None,
+            runtime_mode_override: None,
         }
     }
 
@@ -118,13 +128,13 @@ impl AgentSpec {
         let mut spec = CreateIdentitySpec::new(DurableAgentSpec {
             identity,
             profile: ProfileName::from(self.profile.as_str()),
-            addressability: AgentAddressability::default(),
+            addressability: self.addressability.unwrap_or_default(),
             display_name,
             labels: self.labels.clone(),
             context: self.context.clone(),
             additional_instructions: self.instructions.clone(),
             initial_message: self.first_message.clone(),
-            runtime_mode_override: None,
+            runtime_mode_override: self.runtime_mode_override,
             backend: None,
             binding: None,
             placement: None,
@@ -216,6 +226,13 @@ pub struct AgentSet {
     /// The profile: the agent moves to it, on the same conversation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
+    /// Who reaches it: `addressable` or `internal_only`, as on a create.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub addressability: Option<AgentAddressability>,
+    /// How it runs: `autonomous_host` or `turn_driven`, as on a create. An
+    /// update sets it and cannot return the agent to its profile's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_mode_override: Option<MobRuntimeMode>,
 }
 
 /// An update of one agent, as every surface writes it.
@@ -284,6 +301,8 @@ impl UpdateAgent {
             labels,
             labels_remove,
             profile,
+            addressability,
+            runtime_mode_override,
         } = &self.set;
         let display_name = display_name
             .as_deref()
@@ -330,8 +349,8 @@ impl UpdateAgent {
             expected_spec_digest: self.expected_spec_digest.clone(),
             set: UpdateSetSpec {
                 profile: profile.as_deref().map(ProfileName::from),
-                addressability: None,
-                runtime_mode_override: None,
+                addressability: *addressability,
+                runtime_mode_override: *runtime_mode_override,
                 display_name,
                 additional_instructions: instructions.clone(),
                 context: context.clone(),

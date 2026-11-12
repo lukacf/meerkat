@@ -17,13 +17,14 @@ administrator only. See Security, Upgrade and Changed.
   is about is shown to an administrator only, whatever the access rules say
   and whoever holds the member's name now. In 0.9.11 through 0.9.14 such a
   frame was decided by its member's name. Records of a member that is
-  private to one person could therefore be shown to other signed-in people
-  when that name was, or later became, the name of a shared member, or
-  while the console did not know the ended member. The records stored
-  without attributes were a member's memory events, the initial message of
-  a spawn, a console send to a member with no session, lifecycle and
-  failure records, and live image records. The initial message, the send,
-  the failure record of a send and the image record carry content; the
+  private to one person could therefore be shown to other people who had
+  signed in and, on a console where sign-in is optional, to a caller who
+  sent no token, when that name was, or later became, the name of a shared
+  member, or while the console did not know the ended member. The records
+  stored without attributes were a member's memory events, the initial
+  message of a spawn, a console send to a member with no session, lifecycle
+  and failure records, and live image records. The initial message, the
+  send, the failure record of a send and the image record carry content; the
   others carry status and memory metadata. An administrator, here and
   below, is a person listed under `admins` in the access configuration; a
   subject that a rule grants the `access.admin` action is not one for this
@@ -58,7 +59,8 @@ administrator only. See Security, Upgrade and Changed.
   nobody the signal is read as a member's record with no attributes is, so
   an access deny that matches the anonymous caller also refuses it. Gating
   audit entries served by the Console no longer carry a memory conflict's
-  reason text for people who are not administrators.
+  reason text, nor the error text of a failed conflict lookup, for people
+  who are not administrators.
 - A deny rule naming an agent's memory now also withholds the realm's dream
   history when the console does not know that agent (for example after it
   was retired); before, such a rule was not consulted for signed-in people
@@ -130,6 +132,17 @@ administrator only. See Security, Upgrade and Changed.
   history is withheld while such memory exists; before, that agent was left
   out of the check. An allow rule with no agent selector, with agents `*`,
   or naming the agent keeps the history listed.
+- Until a console has read who its runtime's agents are private to (the
+  read runs in the background from the start), and for as long as that read
+  fails, it keeps every caller who is not an administrator apart, a console
+  that can identify nobody included: such a caller is shown no timeline
+  frame stored without member attributes and no memory scope of an agent
+  the console does not know, and attaches no session whose owner the
+  console does not know or that has none. A request made while the first
+  attempt of that read is running waits for it, at most five seconds. Once
+  the read has succeeded, a console that can identify nobody serves its one
+  operator as before, except for what belongs to an agent it now knows as
+  private to a person.
 
 ### Known limitations
 

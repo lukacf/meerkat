@@ -541,8 +541,11 @@ pub struct IdentityRecordCensus {
     /// the member is seated again, restamped or respawned with the row's
     /// labels (Apply now, [`super::MemberRespawn::with_labels`]), and its
     /// role until its restamp. A seat whose row records its owed label
-    /// restamp ([`Self::label_restamps_owed`]) reads the row's labels on the
-    /// mob's roster and at its builds meanwhile; any other stale seat keeps
+    /// restamp ([`Self::label_restamps_owed`]) carries the row's labels at
+    /// its builds meanwhile, and reads them on the mob's roster from the
+    /// update's commit and from each start on (a host's own respawn of the
+    /// member with other labels in between keeps those on its roster entry
+    /// until the next start or the restamp); any other stale seat keeps
     /// its seat's labels there. A downgrade rebuilds such a member from its
     /// seat row.
     pub seats_stale: usize,
@@ -551,7 +554,8 @@ pub struct IdentityRecordCensus {
     /// while the member's seat row carried other labels, and no seat row
     /// has carried the row's labels since. A retry of the update or the
     /// identity's next update while the member is idle, or a respawn with
-    /// the row's labels ([`super::MobHandle::respawn_member`]), settles
+    /// the row's labels ([`super::MobHandle::respawn`] or
+    /// [`super::MobHandle::respawn_member`]), settles
     /// it; a member no same-session successor can serve is settled by a
     /// rotation ([`super::MobHandle::rotate_member`]), and an archive or a
     /// removal drops the record. The row lets the record go when one of

@@ -1820,7 +1820,8 @@ that record an owed label restamp), and `MobStorage::identity_record_rows` count
 storage's mob, a host store's included. `rkat storage doctor` reports them
 for each mob database that holds any, and Meta's storage doctor for a Meta
 state directory, as the Info finding `identity-store-rows` with the counts
-only.
+only. The doctors do not print the owed label restamp count; the row
+counts do (`label_restamps_owed`), so read that count before a rollback.
 
 0.9.8 reads WorkGraph items whose evidence withdraws earlier evidence, but it
 ignores `withdraws` and drops the field when it rewrites such an item (any

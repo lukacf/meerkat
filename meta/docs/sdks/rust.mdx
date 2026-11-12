@@ -411,8 +411,10 @@ label keys, never a value; the refused send answers it and
 `meta/status_identity` shows it under `customizer_tools_pending`. Put the
 label in the agent's row, at its create or by an update: an agent that is
 owed its seat is seated by the update, and an agent Core already holds a
-member of takes its row's labels at a respawn or a reset. A customizer that
-sets no labels is unaffected.
+member of takes its row's labels at the update itself while its member is
+idle (a member that held work then takes them at a retry of the update, at
+its next update, or at a respawn or a reset). A customizer that sets no
+labels is unaffected.
 
 `after_create` is best-effort: the seat or build stands whatever it answers.
 The gateway calls it once Core's journal records the seat, with no lock of

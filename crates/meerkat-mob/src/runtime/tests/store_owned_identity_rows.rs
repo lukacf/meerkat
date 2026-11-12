@@ -10201,6 +10201,55 @@ async fn rb_cl2_4b_apply_now_writes_the_rows_labels_into_the_seat_row() {
     assert_eq!(seats_stale(&mob).await, 0, "no seat is stale");
 }
 
+/// Row (RED): a respawn of a store-owned member through the plain respawn
+/// (`MobHandle::respawn`) settles an owed label restamp, as a respawn that
+/// names its labels does. `owed`'s label update committed while its seat
+/// row carried other labels, so its row records the owed restamp and its
+/// roster entry reads the row's labels. The respawn seats the labels the
+/// entry reads, the row's, on the member's own session: a seat row now
+/// carries the row's labels, the row lets the owed restamp go, and the
+/// census counts none.
+///
+/// RED on the old tree: no settle follows this respawn, so the row keeps a
+/// record of a restamp nothing owes: the census counts it, and an earlier
+/// release reads the row as unreadable for no reason.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_plain_respawn_settles_an_owed_label_restamp() {
+    let mob = StoreOwnedMob::new("plain-respawn-settles").await;
+    committed(
+        mob.create(host_create("create-owed", &["owed"]), ALLOW)
+            .await,
+    );
+    let moved = moved_team("owed");
+    mob.commit_update_transaction(
+        "relabel-owed",
+        spec("owed", "worker").with_labels(moved.clone()),
+    )
+    .await;
+    assert!(label_restamp_owed(&mob, "owed").await);
+    let session = mob.session("owed").await;
+    tokio::time::timeout(STEP, mob.handle.respawn(id("owed"), None))
+        .await
+        .expect("the respawn answers")
+        .expect("the respawn commits");
+    assert_eq!(
+        mob.spawn_row("owed").await.labels,
+        moved,
+        "the respawn seats the labels the roster entry reads: the row's"
+    );
+    assert_eq!(mob.session("owed").await, session, "the same session");
+    assert!(
+        !label_restamp_owed(&mob, "owed").await,
+        "a seat row carries the row's labels: nothing is owed"
+    );
+    let census = mob
+        .handle
+        .identity_record_census()
+        .await
+        .expect("the census answers");
+    assert_eq!(census.label_restamps_owed, 0, "{census:?}");
+}
+
 /// Row: a respawn that names no labels keeps the member's own, the labels
 /// its roster entry reads. After an earlier release's label update (the
 /// row moved, the entry did not) the respawn keeps the labels the member

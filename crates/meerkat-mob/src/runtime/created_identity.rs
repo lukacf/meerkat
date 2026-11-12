@@ -106,13 +106,17 @@ fn last_bound_sessions(mob_id: &MobId, events: &[MobEvent]) -> BTreeMap<AgentIde
 /// What a start carries out from the store-owned rows it recovered: each
 /// present identity's spec (a seat whose session no build created takes its
 /// descriptive inputs from it), the identities whose row keeps a role
-/// migration its restamp has not committed, and the identities whose row
-/// is pending a `constructed` preparation (one whose construction a crash
-/// published before its row was settled is seated: its row is settled).
+/// migration its restamp has not committed, the identities whose row
+/// records its seat is owed a label restamp (their roster entry reads the
+/// row's labels; nothing is restamped, built or woken at a start), and the
+/// identities whose row is pending a `constructed` preparation (one whose
+/// construction a crash published before its row was settled is seated:
+/// its row is settled).
 #[derive(Debug, Default)]
 pub(super) struct RecoveredCreatedRows {
     pub(super) specs: BTreeMap<AgentIdentity, crate::identity::CreatedIdentitySpec>,
     pub(super) role_migrations_owed: std::collections::BTreeSet<AgentIdentity>,
+    pub(super) label_restamps_owed: std::collections::BTreeSet<AgentIdentity>,
     pub(super) pending_constructions: std::collections::BTreeSet<AgentIdentity>,
 }
 
@@ -160,6 +164,9 @@ pub(super) async fn recover_created_identity_entries(
                 recovered.specs.insert(identity.clone(), spec.clone());
                 if record.pending_role_migration.is_some() {
                     recovered.role_migrations_owed.insert(identity.clone());
+                }
+                if record.label_restamp_owed {
+                    recovered.label_restamps_owed.insert(identity.clone());
                 }
             }
             if let CreatedIdentityObservation::Created(record) = observation
@@ -314,8 +321,13 @@ fn reseat_spec(row: &MemberSpawnedEvent, session_id: SessionId) -> super::SpawnM
 /// the seat of such an identity's member at each of its builds
 /// ([`super::MemberBuildPreparer::prepare_store_owned_seat`]), since Core
 /// seats it from its row with no host step. A roster-owned identity's host
-/// composed its spec itself, and a worker is no identity entry.
-#[cfg(feature = "runtime-adapter")]
+/// composed its spec itself, and a worker is no identity entry. The plan of
+/// a same-session successor asks it too: the successor of such an
+/// identity's member is seated as a durable identity's
+/// ([`super::SpawnContinuityIntent::for_store_owned_successor`]), though it
+/// takes no custody. It reads MobMachine's state only, so it is there with
+/// or without the runtime adapter: the settle of a store-owned seat row
+/// asks it in every build.
 pub(super) fn host_composes_seat(
     state: &mob_dsl::MobMachineState,
     identity: &AgentIdentity,

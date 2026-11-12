@@ -1631,7 +1631,9 @@ impl IdentityRuntime {
         let lifecycle_lock = self.lifecycle_lock_for(identity).await;
         let _lifecycle_guard = lifecycle_lock.lock().await;
         self.event_channels.write().await.remove(identity);
-        self.entries.write().await.remove(identity);
+        let mut entries = self.entries.write().await;
+        entries.remove(identity);
+        entries.note_registration(identity);
     }
 
     /// The rows of the first-boot manifest still to carry out, by identity.

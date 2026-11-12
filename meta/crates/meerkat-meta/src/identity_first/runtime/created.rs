@@ -43,7 +43,7 @@
 //!
 //! [`SessionBridge::created_identity`]: super::super::bridge::SessionBridge::created_identity
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use tokio::sync::broadcast;
 
@@ -51,7 +51,8 @@ use super::super::bridge::{BridgeError, MemberRuntimeBinding};
 use super::super::first_boot_manifest::{FirstBootRow, FirstBootRowState};
 use super::super::types::{AgentIdentity, DurableAgentSpec};
 use super::{
-    IDENTITY_EVENT_CHANNEL_CAPACITY, IdentityEntry, IdentityRuntime, IdentityRuntimeError,
+    IDENTITY_EVENT_CHANNEL_CAPACITY, IdentityEntriesWriteGuard, IdentityEntry, IdentityRuntime,
+    IdentityRuntimeError,
 };
 
 /// Which record holds an identity's spec (see the module docs).
@@ -86,6 +87,31 @@ pub(super) enum SuccessorCause {
 /// ([`super::binding_spawned_for_identity`]).
 pub(super) fn binding_is_a_rows(binding: &meerkat_mob::MemberBinding) -> bool {
     binding.identity_management() == meerkat_mob::MemberIdentityManagement::CreatedEntry
+}
+
+impl IdentityEntriesWriteGuard<'_> {
+    /// This write made, replaced or dropped `identity`'s registration: the
+    /// row profiles follow what the table holds for it now.
+    pub(super) fn note_registration(&self, identity: &AgentIdentity) {
+        let profile = self
+            .guard
+            .get(identity)
+            .filter(|entry| entry.created)
+            .map(|entry| entry.spec.profile.clone());
+        let mut profiles = self
+            .entries
+            .row_profiles
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match profile {
+            Some(profile) => {
+                profiles.insert(identity.clone(), profile);
+            }
+            None => {
+                profiles.remove(identity);
+            }
+        }
+    }
 }
 
 impl IdentityRuntime {
@@ -438,24 +464,146 @@ impl IdentityRuntime {
             .collect()
     }
 
+    /// The agents this runtime serves from their rows, each with its row's
+    /// profile while it is a member of the mob: Core holds its name as a
+    /// created entry that is not archived, and the profile is one of the
+    /// mob definition's. `None` for an archived agent, for a name Core no
+    /// longer holds as such an entry (removed since, whatever this runtime
+    /// still has registered), for a profile the definition does not have,
+    /// and for an entry Core did not answer; every agent reads `None`
+    /// without a mob handle.
+    ///
+    /// For a caller that cannot wait (the memory steward's mob context): it
+    /// reads the profiles kept beside the registrations and the machine
+    /// state Core's actor last published. No row is read, no command is
+    /// sent, and no member is built, woken or loaded.
+    pub(crate) fn row_registered_members(
+        &self,
+    ) -> BTreeMap<AgentIdentity, Option<meerkat_mob::ProfileName>> {
+        let handle = self.family_mob_handle();
+        self.entries
+            .row_profiles()
+            .into_iter()
+            .map(|(identity, profile)| {
+                let member = handle.as_ref().is_some_and(|handle| {
+                    handle.definition().profiles.contains_key(&profile)
+                        && matches!(
+                            handle.identity_entry(
+                                &crate::member_comms_id::roster_member_id_for_identity(
+                                    identity.as_str(),
+                                ),
+                            ),
+                            Ok(meerkat_mob::IdentityEntryRead::Entry(entry))
+                                if entry.origin == meerkat_mob::IdentityEntryOrigin::Created
+                                    && entry.standing
+                                        != meerkat_mob::EntryStanding::Unseated(
+                                            meerkat_mob::UnseatedEntryCause::Archived,
+                                        )
+                        )
+                });
+                (identity, member.then_some(profile))
+            })
+            .collect()
+    }
+
+    /// Test only: whether the profiles kept beside the table are exactly
+    /// the profiles of the registrations made from rows.
+    #[cfg(test)]
+    pub(crate) async fn row_profiles_in_step(&self) -> bool {
+        let table = self.entries.read().await;
+        let profiles = self.entries.row_profiles();
+        table
+            .iter()
+            .filter(|(_, entry)| entry.created)
+            .map(|(identity, entry)| (identity, &entry.spec.profile))
+            .eq(profiles.iter())
+    }
+
     /// `roster` without the identities this runtime serves from their rows:
     /// a row is its identity's one owner, also while the host's roster
     /// still lists its name, so a pass neither registers nor declares the
     /// roster's listing of it. No read of Core or of a row.
+    ///
+    /// The listing it leaves out is not silent. Each registration it is
+    /// left out for is marked
+    /// ([`IdentityEntry::roster_listing_superseded`], which the identity's
+    /// status carries), the mark of one `roster` no longer lists is
+    /// cleared, and each name is logged once per process
+    /// ([`Self::first_note_of_superseded_listing`]).
     pub(super) async fn roster_without_row_identities(
         &self,
         roster: &[DurableAgentSpec],
     ) -> Vec<DurableAgentSpec> {
-        let entries = self.entries.read().await;
-        roster
+        let listed = roster
             .iter()
-            .filter(|spec| {
-                !entries
-                    .get(&spec.identity)
-                    .is_some_and(|entry| entry.created)
-            })
-            .cloned()
-            .collect()
+            .map(|spec| &spec.identity)
+            .collect::<BTreeSet<_>>();
+        let (kept, superseded, marks_change) = {
+            let entries = self.entries.read().await;
+            let kept = roster
+                .iter()
+                .filter(|spec| {
+                    !entries
+                        .get(&spec.identity)
+                        .is_some_and(|entry| entry.created)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut superseded = Vec::new();
+            let mut marks_change = false;
+            for (identity, entry) in entries.iter().filter(|(_, entry)| entry.created) {
+                let is_listed = listed.contains(&identity);
+                if is_listed {
+                    superseded.push(identity.clone());
+                }
+                marks_change |= entry.roster_listing_superseded != is_listed;
+            }
+            (kept, superseded, marks_change)
+        };
+        if marks_change {
+            // Taken only when a mark changes: releasing the table's write
+            // lock wakes its waiters.
+            let mut entries = self.entries.write().await;
+            for (identity, entry) in entries.iter_mut().filter(|(_, entry)| entry.created) {
+                entry.roster_listing_superseded = listed.contains(&identity);
+            }
+        }
+        for identity in superseded {
+            if self.first_note_of_superseded_listing(&identity) {
+                tracing::warn!(
+                    %identity,
+                    "the host's roster lists a name whose agent is served from its record in \
+                     the mob's identity store: the roster's entry for it is not applied. Change \
+                     the agent through the identity methods, or remove the entry from the roster"
+                );
+            }
+        }
+        kept
+    }
+
+    /// Whether this is the first time this process says that the roster's
+    /// listing of `identity` is not applied: the name is recorded, so every
+    /// later ask answers `false` and the log names it once.
+    pub(super) fn first_note_of_superseded_listing(&self, identity: &AgentIdentity) -> bool {
+        self.roster_listings_noted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(identity.clone())
+    }
+
+    /// Whether the host's roster lists `identity`'s name while the identity
+    /// is served from its record in the mob's identity store, as the roster
+    /// was last read ([`IdentityEntry::roster_listing_superseded`]): what
+    /// its status carries as `roster_listing_superseded`. `false` for every
+    /// other identity, and for a name this runtime does not serve. No read
+    /// of Core or of a row. The identity family's reads answer it beside the
+    /// agent's record.
+    pub(crate) async fn roster_listing_superseded(&self, identity: &AgentIdentity) -> bool {
+        self.entries
+            .read()
+            .await
+            .get(identity)
+            .is_some_and(|entry| entry.created && entry.roster_listing_superseded)
     }
 
     /// [`Self::register_created_identities`], answering the identities a
@@ -592,6 +740,11 @@ impl IdentityRuntime {
         &self,
         name: &AgentIdentity,
     ) -> Result<bool, IdentityRuntimeError> {
+        // An archive or a removal ended the identity's member, a step Core
+        // journaled: the projection of its side effects reads it now, not
+        // at its next sweep. Any other change journals none, and the wake
+        // costs one empty page read.
+        self.kick_lifecycle_projection();
         let registered_by_roster = self
             .entries
             .read()
@@ -798,19 +951,30 @@ impl IdentityRuntime {
 
     /// Record `spec`, a row's spec, as its identity's registration, while
     /// the caller holds its lifecycle lock. A wake refusal recorded for it
-    /// survives, as for any re-registration.
+    /// survives, as for any re-registration, and so does what the roster
+    /// said of its name: a registration the roster made lists the name, so
+    /// the row's registration that replaces it supersedes that listing from
+    /// now (an adoption between two roster passes), and a row's own
+    /// registration keeps the mark the last roster read gave it.
     pub(super) async fn register_created_locked(&self, spec: DurableAgentSpec) {
         let identity = spec.identity.clone();
         let bootstrap_generation = self.identity_bootstrap_status_with_generation().0;
         {
             let mut entries = self.entries.write().await;
-            let wake_refusal = entries
-                .get(&identity)
-                .and_then(|existing| existing.wake_refusal.clone());
+            let existing = entries.get(&identity);
+            let wake_refusal = existing.and_then(|existing| existing.wake_refusal.clone());
+            let roster_listing_superseded = existing
+                .is_some_and(|existing| !existing.created || existing.roster_listing_superseded);
             entries.insert(
                 identity.clone(),
-                Self::created_entry(spec, bootstrap_generation, wake_refusal),
+                Self::created_entry(
+                    spec,
+                    bootstrap_generation,
+                    wake_refusal,
+                    roster_listing_superseded,
+                ),
             );
+            entries.note_registration(&identity);
         }
         self.ensure_registration_channels(identity).await;
     }
@@ -823,11 +987,13 @@ impl IdentityRuntime {
     async fn register_created_if_absent(&self, spec: DurableAgentSpec) {
         let identity = spec.identity.clone();
         let bootstrap_generation = self.identity_bootstrap_status_with_generation().0;
-        self.entries
-            .write()
-            .await
-            .entry(identity.clone())
-            .or_insert_with(|| Self::created_entry(spec, bootstrap_generation, None));
+        {
+            let mut entries = self.entries.write().await;
+            entries
+                .entry(identity.clone())
+                .or_insert_with(|| Self::created_entry(spec, bootstrap_generation, None, false));
+            entries.note_registration(&identity);
+        }
         self.ensure_registration_channels(identity).await;
     }
 
@@ -836,6 +1002,7 @@ impl IdentityRuntime {
         spec: DurableAgentSpec,
         bootstrap_generation: u64,
         wake_refusal: Option<super::super::types::WakeRefusal>,
+        roster_listing_superseded: bool,
     ) -> IdentityEntry {
         IdentityEntry {
             spec,
@@ -845,6 +1012,7 @@ impl IdentityRuntime {
             last_reload: None,
             declaration_refused: false,
             created: true,
+            roster_listing_superseded,
         }
     }
 
@@ -898,7 +1066,30 @@ impl IdentityRuntime {
             }
         }
         self.event_channels.write().await.remove(identity);
-        self.entries.write().await.remove(identity);
+        let mut entries = self.entries.write().await;
+        entries.remove(identity);
+        entries.note_registration(identity);
+    }
+
+    /// The refusal of a new or changed schedule for `identity` while Core
+    /// holds it archived ([`IdentityRuntimeError::IdentityArchived`], the
+    /// refusal of a delivery to it), read from Core's entry of its name.
+    /// `Ok(None)` for an identity of any other standing, and for a name Core
+    /// holds no entry of; `Err` when Core could not serve the read, never
+    /// read as "not archived".
+    pub(crate) async fn archived_refusal(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<Option<IdentityRuntimeError>, IdentityRuntimeError> {
+        let archived = matches!(
+            self.core_entry_of_name(identity).await?,
+            Some(entry)
+                if entry.member.is_none()
+                    && entry.unseated == Some(meerkat_mob::UnseatedEntryCause::Archived)
+        );
+        Ok(archived.then(|| IdentityRuntimeError::IdentityArchived {
+            identity: identity.clone(),
+        }))
     }
 
     /// The refusal of a delivery, a wake or a grant to `identity` when Core

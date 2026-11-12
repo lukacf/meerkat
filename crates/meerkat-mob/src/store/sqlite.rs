@@ -14464,6 +14464,7 @@ mod tests {
             archived,
             tombstones,
             unreadable,
+            label_restamps_owed: 0,
         }
     }
 

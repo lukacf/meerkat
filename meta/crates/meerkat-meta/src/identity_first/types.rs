@@ -1817,7 +1817,10 @@ impl IdentityLifecycleState {
 pub enum RetiredIdentityCause {
     /// A roster pass retired the member because the roster no longer lists
     /// the identity (an identity this runtime registered, or a live member
-    /// Meta spawned for an identity it never registered).
+    /// Meta spawned for an identity it never registered). Also the end of
+    /// the member of an agent whose record is its row in the mob's identity
+    /// store, by its archive or its removal: it leaves the mob's agents as
+    /// an identity that leaves the roster does, and is owed the same.
     Unlisted,
     /// An explicit retire of the identity: the member is released.
     Retire,
@@ -2046,6 +2049,15 @@ pub struct IdentityStatus {
     /// and optional on the wire.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub customizer_tools_pending: Option<CustomizerToolsPending>,
+    /// Whether the host's roster lists this name while the agent is served
+    /// from its record in the mob's identity store (a host adopted it into
+    /// the store, or created an agent under a name its roster lists): the
+    /// record is the agent's one owner, so the roster's entry for the name
+    /// is not applied, and an edit of it changes nothing. Read from the
+    /// roster as the runtime last read it; `false` for every other agent.
+    /// Additive on the wire, and absent while `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub roster_listing_superseded: bool,
     /// What Core's entry of the identity's name says of an identity no
     /// member holds ([`IdentityRecordFacts`]): whether it is archived, and
     /// whether it awaits its host's preparation. Its members are members of

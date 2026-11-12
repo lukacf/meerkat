@@ -24,6 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (`IdentityRecordFacts`), so a struct literal of it needs the member
   (`record: Default::default()`). The status of a seated agent is written
   on the wire as before.
+- Rust API of `meerkat-meta`: `IdentityStatus` gains the member
+  `roster_listing_superseded` and `RestoreFlowResult` gains the member
+  `roster_listings_superseded`, so a struct literal of either needs its new
+  member (`roster_listing_superseded: false`,
+  `roster_listings_superseded: Default::default()`). The status as written
+  on the wire is unchanged while the member is `false`.
 - `runtime_options.identity_creation` (and the Rust form a native host
   returns): a policy that names the approval outcome `notify` or `review`, or
   the preparation mode `constructed`, is refused at init, with the policy
@@ -37,6 +43,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   late-bound reference to the session bridge, through which it asks whether
   Core holds a member as an identity entry, and a session bridge has
   neither trait. No Meerkat code relied on them.
+
+### Upgrade
+
+- A Rust host that composes its runtime through `UnifiedRuntime::bootstrap`
+  or the `bootstrap_with_*` family must complete the bootstrap before an
+  agent created at run time can be built: an identity bootstrap
+  (`install_and_bootstrap_identity_first_context`, or
+  `bootstrap_installed_identity_first_context` and its held variants) or
+  `activate_without_identity_context`. Until one of them returns, every
+  build of such an agent is refused for now with a reason that names both
+  calls, and one warning is logged per process. An agent that starts at
+  its creation (it was given a first message, or its profile runs as an
+  autonomous host, the default) and one the mob's start owes its seat stay
+  owed their seat, and the call that completes the bootstrap seats them. A
+  delivery to an agent seated dormant is refused retryable
+  (`host_preparation_pending`), nothing is delivered, and the sender sends
+  it again once the bootstrap is complete; work the agent already owes is
+  retried by the mob. Creating an agent that builds
+  nothing (no first message, a turn-driven profile) is unchanged. Through
+  0.9.14 such an agent was built from its record at once.
+  `UnifiedRuntimeBuilder` and both gateway binaries complete the bootstrap
+  themselves.
 
 ### Added
 
@@ -63,13 +91,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   agents' tools over them): an archive pauses the Active schedules that
   target the agent, an unarchive resumes exactly the ones that archive
   paused, and a removal ends every one. Before, such a schedule kept firing
-  and each fire ended as a delivery failure or a missing target. A schedule
+  and each fire ended as a delivery failure or a missing target. An archive
+  pauses the agent's Console schedules too, the schedules that name its
+  session, and the ones that name it by a name no member id spells as it
+  is. A schedule
   somebody paused by name stays paused through the unarchive, and a pause or
   a resume by name of a schedule the archive paused takes it over. The
-  agent's entry of the change's first answer says what was done
-  (`schedules: {effect, count, schedules, incomplete?}`, `effect` one of
-  `paused`, `resumed`, `ended`), and a plan of the change carries the same
-  member with what it would do. Whose pause a pause is, the schedule's own
+  agent's entry of the change's first answer says how the agent's schedules
+  stand after it (`schedules: {effect, count, schedules, incomplete?}`,
+  `effect` one of `paused`, `resumed`, `ended`: the schedules paused for the
+  agent, the agent's schedules that are active after an unarchive, the
+  ended ones), and a plan of the change carries the same member with what
+  the change would answer. Whose pause a pause is, the schedule's own
   lifecycle records (Core: `ScheduleService::pause_for_target`,
   `resume_for_target`). The stdio gateway gives the family its schedules; a
   Rust host does with `IdentityFamilyOptions::with_schedules`
@@ -77,6 +110,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   by `schedule_wiring::MobAgentSchedules`), and a launch that gives none
   changes no schedule. Rust: `identity_creation::AgentOutcome` and
   `ChangePlan` gain `schedules`.
+- No schedule is pointed at an archived agent through Meta: an agent's
+  `meerkat_schedule_create` or `meerkat_schedule_update` whose schedule
+  would target an archived agent (a member target or an identity target) is
+  refused as a policy denial with the code `identity_archived`, and the
+  Console's `meta/schedule/create` and `meta/schedule/update` answer
+  `-32603` `identity_archived`, as a send to the agent does. A pause, a
+  resume and a delete by name stay, and so does an update that moves a
+  schedule to another agent. A Console schedule whose create read the agent
+  just before its archive is paused for the agent once it is written. See
+  the known limitations under "Agent changes" in the RPC reference.
+- `meta/schedule/list` and every Console schedule write answer
+  `paused_for_target: true` on a schedule that is paused because its agent
+  is archived (absent otherwise), and the Console's schedule row and the
+  Schedules panel say so in words: "Paused because its agent is archived.
+  It resumes when the agent is unarchived."
 - `meta/identity/*`: host methods that change a mob's long-term agents while
   it runs, on the stdio gateway and on `POST /console/rpc`: `create` (1 to
   256 agents, all or nothing), `update`, `archive`, `unarchive`, `remove`,
@@ -608,6 +656,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- An agent created at run time that the mob's start seats before the
+  host's identity runtime is composed is not built from its row alone.
+  That is an agent created with a first message whose first spawn failed
+  or was refused, so it is owed its seat: the start embodies it before the
+  host's customizer can run. Meta's build preparer refuses that build for
+  now, as it does for a wake and a restore, and the composition asks Core
+  once to seat the agents owed their seat
+  (`MobHandle::seat_owed_store_owned_identities`, through the new
+  defaulted `SessionBridge::seat_created_identities_owed_their_seat`). The
+  host's build step then decides each as at any build: an agent whose row
+  lacks a label the customizer sets stays refused its seat and never runs,
+  and every other one is built from the host's inputs (its model, system
+  prompt, instructions, provider parameters, context and tools) as a
+  configured agent is, and its first message runs once. Until the runtime
+  is composed the agent stays owed its seat, and a send to it is refused.
+
+- The same holds on a runtime that learns only when its host completes the
+  bootstrap whether it composes an agent customizer
+  (`UnifiedRuntime::bootstrap` or the `bootstrap_with_*` family over a spec
+  that does not declare one). A mob a killed process left running starts
+  inside `bootstrap`, before the host can install anything, and embodied
+  the seats it owed there: an agent created at run time was built from its
+  row alone, with no comparison of the customizer's labels with its seat's,
+  and ran its first message; a delivery that reached a dormant one before
+  the identity bootstrap built it the same way. Until the host completes
+  the bootstrap the build preparer of such a runtime now refuses every
+  build of such an agent for now, as it does before the identity runtime
+  is composed: a seat stays owed, and a dormant agent stays dormant. An
+  identity bootstrap that finds a customizer has the runtime's first
+  composition seat the agents owed their seat, where the host's build step
+  and its label rule decide; an identity bootstrap that finds none, and
+  `activate_without_identity_context`, settle that the composition has no
+  customizer and ask Core once to seat them from their records (see
+  Upgrade).
+
+- A name an agent holds through its record in the mob's identity store
+  that the host's roster lists too (the host adopted the agent into the
+  store, or its configuration lists a name an agent was created under) is
+  served from the record, as before, and that is no longer silent. The
+  agent's status (`meta/status_identity` and the status lists) carries
+  `roster_listing_superseded: true`, absent for every other agent; the
+  roster pass's result names such agents
+  (`RestoreFlowResult::roster_listings_superseded`); and the gateway logs
+  one warning per name. The roster's entry for the name is still not
+  applied: change the agent through the identity methods, or remove the
+  entry from the roster, which drops the member at the next roster pass.
+
 - An agent created at run time (an identity whose record is its row) is
   built from the same host inputs as a configured agent on its profile: the
   model, the system prompt, the additional instructions, the provider
@@ -693,6 +788,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   boundary for agent memory, and a retirement's hooks name the member.
   They were skipped, because the member carried no mark of an
   identity-first spawn.
+- The memory steward's mob context lists an agent created at run time
+  while it is a member of the mob (not archived, not removed), by its name
+  and its profile only; it listed none. Nothing else of such an agent
+  enters a steward prompt (its labels, display name, context, instructions
+  and first message), and the mob's purpose is read from the host's roster
+  only, never from a created agent's `purpose` or `mob_purpose` label.
+
+- An archive or a removal of an agent whose record is its row in the mob's
+  identity store (one created at run time) owes that agent what leaving the
+  roster owes a configured agent: the harvest of the compactions its last
+  session holds, that session's distillation, an exit interview and the
+  host's retirement hook, which hears the cause `unlisted`. They run from
+  Core's member lifecycle journal, as every lifecycle side effect does:
+  right after the member's retirement ended, at least once, and at the next
+  start when the gateway stopped before they ran (over a durable metadata
+  store). Before, such an agent's last conversation was kept and never
+  harvested or distilled, no exit interview was queued and the hook never
+  heard of it. A removal of an archived agent retires no member and owes
+  nothing more. No order is promised between these side effects and the
+  answer of the change that owes them.
+
+- An agent whose record is its row in the mob's identity store (one created
+  at run time) is a durable identity to every check and copy the gateway
+  keeps for its long-term agents, on any profile. With this release's Core,
+  such an agent's seat is recorded durable whether or not its profile
+  declares `durable = true`, so, as for a configured agent: the start's
+  check of a state directory counts the agent once its conversation exists
+  and refuses a start whose `runtime.sqlite` no longer holds any session;
+  the storage census of the members' comms identities names it when it is
+  restored without its key pair; the continuity mirror
+  (`UnifiedRuntimeBuilder::continuity_mirror`) carries its record and its
+  session; `storage-migrate-native` lists it among a directory's
+  identities; and the launch's WorkGraph resume gate is asked before an
+  interrupted run of it resumes. Before, each of these covered such an
+  agent only on a `durable = true` profile. An agent seated by an earlier
+  build, or adopted into the store from a plain member, gets them from its
+  next seat: a reset, an unarchive, a seat a start owes, or a respawn
+  (`meta/respawn`), which keeps its conversation.
 
 ### Known limitations
 
@@ -711,6 +844,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   change how such an agent runs, set the other explicit value
   (`autonomous_host` or `turn_driven`); clearing an override is not offered
   in this release.
+- Schedules of an archived agent: Meta's own doors (the agents' schedule
+  tools, the Console) point no schedule at an archived agent. Meerkat's own
+  schedule methods (`schedule/create`, `schedule/update`, REST) do not judge
+  the target, and neither does a schedule tool call for a target that names
+  only a session: such a schedule for an archived agent is active and each
+  of its fires is refused at the delivery. An agent's schedule tool call
+  that reads its target just before the target's archive and writes just
+  after it can leave an active schedule the same way (the Console's create
+  closes that window). A change of a paused schedule's target through
+  Meerkat's own methods (its prompt, for one) makes its pause a pause by
+  name: the agent's unarchive does not resume it.
 
 ## [0.9.13] - 2026-11-11
 

@@ -27,11 +27,13 @@
 //!   instructions and the system prompt at the first build of the member's
 //!   session. The customizer runs once for the build: the preparation that
 //!   follows in the same build answers what the composition found. Before
-//!   the identity runtime is composed there is no host step to run: a fresh
-//!   spawn is left as Core lowered it (a refusal would leave the identity
-//!   owed its seat until the mob's next start, which asks in the same
-//!   state), and a wake or a restore is refused retryable, so the member
-//!   stays Dormant and is asked again;
+//!   the identity runtime is composed there is no host step to run, so the
+//!   build is refused retryable and nothing is built from the row alone: a
+//!   wake or a restore leaves the member Dormant and is asked again, and a
+//!   fresh spawn (a seat the mob's start owes the identity) leaves the
+//!   identity owed its seat, which the composition seats
+//!   (`IdentityRuntime::compose_member_builds` asks Core to seat the
+//!   identities owed their seat, once);
 //! - before the identity runtime is composed (its roster registered, its
 //!   customizer and runtime services installed), an identity's member is
 //!   answered `HoldUntilReleased`: Core builds it and holds its run starts,
@@ -53,10 +55,27 @@
 //! A runtime composed with `UnifiedRuntime::bootstrap` over a spec that
 //! declares its agent customizer (`MobBootstrapSpec::with_agent_customizer`)
 //! gets this preparer as the builder's runtime does. Without a declaration
-//! it learns whether it composes a customizer only at its identity
-//! bootstrap, so its mob is built with a deferred preparer: inert (Core
-//! builds as if the mob had none) until that bootstrap finds a customizer,
-//! and inert for good when it finds none.
+//! it learns whether it composes a customizer only when its host completes
+//! the bootstrap, so its mob is built with a deferred preparer, which is in
+//! one of three states:
+//!
+//! - undecided, until the host completes the bootstrap: inert (Core builds
+//!   as if the mob had no preparer), except for a build of the member of an
+//!   identity whose record is its row, which is refused retryable, as it is
+//!   before the identity runtime is composed. Whether a host build step and
+//!   its label rule apply to that build is not known yet, so nothing is
+//!   built from the row alone: a wake or a restore leaves the member
+//!   Dormant, and a fresh spawn (the kickoff spawn of its create, a seat
+//!   the mob's start owes it) leaves the identity owed its seat;
+//! - decided with a customizer, by an identity bootstrap that finds one
+//!   ([`IdentityBuildPreparer::bind_publishing`]): from then on it is the
+//!   preparer of a composition that composes one;
+//! - decided without one, by an identity bootstrap that finds none or by
+//!   the activation without an identity context
+//!   ([`IdentityBuildPreparer::decide_without_customizer`]): inert, and the
+//!   call that made the decision asks Core once to seat the identities owed
+//!   their seat. An identity bootstrap that finds a customizer later still
+//!   decides for it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Weak};
@@ -75,10 +94,23 @@ use super::types::AgentIdentity;
 pub(crate) const PUBLISHED_ONCE_COMPOSED: &str =
     "customizer tools are published once the identity runtime is composed";
 
-/// Why the seat of an identity whose record is its row is not composed for
-/// a wake or a restore while the identity runtime is not composed yet.
+/// Why the seat of an identity whose record is its row is not composed
+/// while the identity runtime is not composed yet.
 const SEAT_COMPOSED_ONCE_COMPOSED: &str = "the member's seat is composed from the host's build step once the identity runtime is \
      composed";
+
+/// Why the member of an identity whose record is its row is not built
+/// while a deferred preparer's composition has not decided: what its host
+/// does to have it built.
+const SEAT_COMPOSED_ONCE_BOOTSTRAP_COMPLETED: &str = "the member's seat is composed once its host completes the runtime's bootstrap: an \
+     identity bootstrap (UnifiedRuntime::install_and_bootstrap_identity_first_context) or \
+     the activation without an identity context \
+     (UnifiedRuntime::activate_without_identity_context)";
+
+/// Whether this process already logged that a seat was refused because its
+/// host has not completed the runtime's bootstrap: logged once.
+static UNDECIDED_SEAT_REFUSAL_LOGGED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// Meta's preparer of member builds: see the module documentation.
 ///
@@ -89,6 +121,11 @@ pub struct IdentityBuildPreparer {
     /// has an agent customizer. Unset while a deferred preparer's
     /// composition has not decided: the preparer is then inert.
     publishes_tools: std::sync::OnceLock<bool>,
+    /// A deferred preparer's composition decided that it composes no agent
+    /// customizer: set once, by the call that made the decision. The
+    /// preparer stays inert. An identity bootstrap that finds a customizer
+    /// later still sets `publishes_tools`.
+    decided_without_customizer: std::sync::OnceLock<()>,
     /// The identity runtime, once bound. Weak: the runtime owns this
     /// preparer through its composition, never the other way round.
     runtime: std::sync::OnceLock<Weak<IdentityRuntime>>,
@@ -133,10 +170,15 @@ impl IdentityBuildPreparer {
     }
 
     /// A preparer for a composition that learns whether it composes an
-    /// agent customizer only at its identity bootstrap
-    /// ([`Self::bind_publishing`]). Until then it is inert: Core builds as
-    /// if the mob had no preparer, and no build is held or recorded. A
-    /// composition that has no customizer leaves it inert.
+    /// agent customizer only when its host completes the bootstrap: at its
+    /// identity bootstrap ([`Self::bind_publishing`] when that finds one,
+    /// [`Self::decide_without_customizer`] when it finds none) or at the
+    /// activation without an identity context
+    /// ([`Self::decide_without_customizer`]). Until then it is undecided:
+    /// inert (Core builds as if the mob had no preparer, and no build is
+    /// held or recorded), except that a build of the member of an identity
+    /// whose record is its row is refused retryable. A composition that has
+    /// no customizer leaves it inert.
     pub(crate) fn deferred() -> Arc<Self> {
         Self::with_publishes_tools(std::sync::OnceLock::new())
     }
@@ -144,6 +186,7 @@ impl IdentityBuildPreparer {
     fn with_publishes_tools(publishes_tools: std::sync::OnceLock<bool>) -> Arc<Self> {
         Arc::new(Self {
             publishes_tools,
+            decided_without_customizer: std::sync::OnceLock::new(),
             runtime: std::sync::OnceLock::new(),
             session_service: std::sync::OnceLock::new(),
             state: std::sync::Mutex::new(PreparerState::default()),
@@ -160,14 +203,35 @@ impl IdentityBuildPreparer {
         self.publishes_tools.get().copied().unwrap_or(false)
     }
 
-    /// A deferred preparer whose composition has not decided yet.
+    /// A deferred preparer no identity bootstrap found a customizer for:
+    /// its composition has not decided yet, or decided that it composes
+    /// none.
     fn inert(&self) -> bool {
         self.publishes_tools.get().is_none()
     }
 
+    /// A deferred preparer whose composition has not decided yet whether it
+    /// composes an agent customizer: its host has not completed the
+    /// runtime's bootstrap.
+    fn undecided(&self) -> bool {
+        self.inert() && self.decided_without_customizer.get().is_none()
+    }
+
+    /// Decide a deferred preparer for a composition that composes no agent
+    /// customizer: its host completed the bootstrap and none was found. The
+    /// preparer stays inert, and the member of an identity whose record is
+    /// its row is built from its row from now on. Answers whether this
+    /// call made the decision, so its caller asks Core once to seat the
+    /// identities owed their seat: `false` for a preparer decided before,
+    /// either way, and for one created decided.
+    pub(crate) fn decide_without_customizer(&self) -> bool {
+        self.inert() && self.decided_without_customizer.set(()).is_ok()
+    }
+
     /// Decide a deferred preparer for a composition that composes an agent
     /// customizer, and bind it to `runtime` ([`Self::bind`]). A preparer
-    /// created decided keeps its decision.
+    /// created decided keeps its decision; one decided without a customizer
+    /// before is decided for this one from now on.
     pub(crate) async fn bind_publishing(
         self: &Arc<Self>,
         runtime: &Arc<IdentityRuntime>,
@@ -215,9 +279,10 @@ impl IdentityBuildPreparer {
 
     /// Mark the bound runtime composed: from now on a registered identity's
     /// build is prepared inline. A build held before is published by the
-    /// composition (Core names it) or by its report.
-    pub(crate) fn compose(&self) {
-        self.lock_state().composed = true;
+    /// composition (Core names it) or by its report. Answers whether this
+    /// call composed it: `false` for a runtime composed before.
+    pub(crate) fn compose(&self) -> bool {
+        !std::mem::replace(&mut self.lock_state().composed, true)
     }
 
     /// Read the live tools of `identity`'s member on `session_id` and write
@@ -401,14 +466,51 @@ impl IdentityBuildPreparer {
     /// draft is lowered onto the seat
     /// ([`IdentityRuntime::compose_store_owned_seat`]). The build's
     /// preparation, which Core asks next, then answers what the composition
-    /// found and does not run the customizer again.
+    /// found and does not run the customizer again. Before the runtime is
+    /// composed the build is refused, retryable: no member of such an
+    /// identity is built from its row alone.
+    ///
+    /// A deferred preparer whose composition has not decided refuses every
+    /// build the same way, since it cannot tell yet whether a host build
+    /// step applies to it.
     async fn compose_store_owned_seat(
         &self,
         seat: &mut SpawnMemberSpec,
     ) -> Result<(), MemberBuildPreparationRefusal> {
-        // An inert preparer, and a composition with no agent customizer,
-        // have no host build step: the seat stays as Core lowered it.
         if !self.publishes_tools() {
+            // The composition has not decided whether it composes an agent
+            // customizer: the build is refused for now, whatever it is, as
+            // it is before the identity runtime is composed, so no member
+            // is built from its row alone before a host build step and its
+            // label rule could be asked. A wake or a restore leaves the
+            // member Dormant: a delivery is refused retryable to its
+            // sender, and work the member owes is woken again by Core's
+            // retry. A fresh spawn (the kickoff spawn of the identity's
+            // create, a seat the mob's start owes it) leaves the identity
+            // owed its seat, and the call that completes the bootstrap
+            // seats it: the first composition of the identity runtime when
+            // it finds a customizer, the decision itself when it finds
+            // none.
+            if self.undecided() {
+                if !UNDECIDED_SEAT_REFUSAL_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    tracing::warn!(
+                        member = %seat.identity,
+                        "an agent created at run time is not built yet: its host has not \
+                         completed the runtime's bootstrap. It is built once the host \
+                         bootstraps an identity context \
+                         (UnifiedRuntime::install_and_bootstrap_identity_first_context) or \
+                         activates the runtime without one \
+                         (UnifiedRuntime::activate_without_identity_context). Logged once per \
+                         process."
+                    );
+                }
+                return Err(MemberBuildPreparationRefusal::Retryable {
+                    reason: SEAT_COMPOSED_ONCE_BOOTSTRAP_COMPLETED.to_string(),
+                });
+            }
+            // An inert preparer otherwise, and a composition with no agent
+            // customizer, have no host build step: the seat stays as Core
+            // lowered it.
             return Ok(());
         }
         // Nothing is kept of an earlier composition of this member's seat.
@@ -422,24 +524,15 @@ impl IdentityBuildPreparer {
                 });
             }
             // The identity runtime is not composed yet, so its customizer
-            // cannot run. A fresh spawn is left as Core lowered it: refused,
-            // the identity would stay owed its seat until the mob's next
-            // start, which asks in this same state. A wake or a restore is
-            // refused for now: the member stays Dormant, and Core asks
-            // again once the retry is due.
+            // cannot run: the build is refused for now, whatever it is, and
+            // no member is built before the host's build step and its label
+            // rule were asked. A wake or a restore leaves the member
+            // Dormant, and Core asks again once the retry is due. A fresh
+            // spawn (a seat the mob's start owes the identity, embodied for
+            // its kickoff) leaves the identity owed its seat, and the
+            // composition seats it
+            // ([`IdentityRuntime::compose_member_builds`]).
             Some(Ok(_)) | None => {
-                if matches!(
-                    seat.launch_mode,
-                    meerkat_mob::launch::MemberLaunchMode::Fresh
-                ) {
-                    tracing::warn!(
-                        member = %seat.identity,
-                        "the member is spawned before the identity runtime is composed: it is \
-                         built from its row alone, and its host's customizer is not asked \
-                         about its build inputs or its labels"
-                    );
-                    return Ok(());
-                }
                 return Err(MemberBuildPreparationRefusal::Retryable {
                     reason: SEAT_COMPOSED_ONCE_COMPOSED.to_string(),
                 });

@@ -1022,7 +1022,7 @@ manifest cannot be read.
 
 | Method | Params | Result |
 |--------|--------|--------|
-| `meta/status_identity` | `{identity}` | `IdentityStatus`: `identity`, `state`, `agent_runtime_id` (`null` when not live), `session_id` and `generation` (Core's last binding; `null` when it holds none), `member_id` (Core's mob member id of that binding, live or retired: the identity's roster member id, which is the identity itself when it is already a valid comms name and its `mk--...` encoding otherwise, as for an identity with a `:`; absent when Core holds no binding), `profile`, `runtime_mode` (the runtime mode Core runs the identity's member in; `null` while Core holds no member of it), `addressability`, `display_name`, `labels`, `intent_managed` (`true` when Core drives the identity itself, so Meta's lifecycle verbs refuse it: a host adopted it through an identity intent row, or Core holds an intent row for it that this build cannot read; `false` for every other identity, also for one whose record is its row in the mob's identity store, which read `true` through 0.9.13), `customizer_tools_pending` (`null` once the identity's customizer tools are published) and `delivery_scope` (see [Scope-bound dispatch](#scope-bound-dispatch)); `convergence` (host-adopted identities), `wake_refusal` and `replaced_session` only when set; `archived` (`true` for an archived agent: it has no member and a delivery to it is refused until its unarchive) and `preparation_pending` (`true` for an agent that waits for its host's preparation: it has no member yet), each written only when `true` and read from Core's entry of the agent's name, so the read builds and wakes nothing. An agent's spec digest and revision, who asked for it and the operations open for it are not on its status: [`meta/identity/get` and `meta/identity/list`](#metaidentitylist-and-metaidentityget) answer them, to each caller what it may read |
+| `meta/status_identity` | `{identity}` | `IdentityStatus`: `identity`, `state`, `agent_runtime_id` (`null` when not live), `session_id` and `generation` (Core's last binding; `null` when it holds none), `member_id` (Core's mob member id of that binding, live or retired: the identity's roster member id, which is the identity itself when it is already a valid comms name and its `mk--...` encoding otherwise, as for an identity with a `:`; absent when Core holds no binding), `profile`, `runtime_mode` (the runtime mode Core runs the identity's member in; `null` while Core holds no member of it), `addressability`, `display_name`, `labels`, `intent_managed` (`true` when Core drives the identity itself, so Meta's lifecycle verbs refuse it: a host adopted it through an identity intent row, or Core holds an intent row for it that this build cannot read; `false` for every other identity, also for one whose record is its row in the mob's identity store, which read `true` through 0.9.13), `customizer_tools_pending` (`null` once the identity's customizer tools are published) and `delivery_scope` (see [Scope-bound dispatch](#scope-bound-dispatch)); `convergence` (host-adopted identities), `wake_refusal`, `replaced_session` and `roster_listing_superseded` (`true` while the host's roster lists the name of an agent that is served from its record in the mob's identity store, so the roster's entry for it is not applied) only when set; `archived` (`true` for an archived agent: it has no member and a delivery to it is refused until its unarchive) and `preparation_pending` (`true` for an agent that waits for its host's preparation: it has no member yet), each written only when `true` and read from Core's entry of the agent's name, so the read builds and wakes nothing. An agent's spec digest and revision, who asked for it and the operations open for it are not on its status: [`meta/identity/get` and `meta/identity/list`](#metaidentitylist-and-metaidentityget) answer them, to each caller what it may read |
 | `meta/inspect_identity` | `{identity}` | The execution view: `identity`, `state`, `profile`, `addressability`, `display_name`, `labels`, `generation`, `agent_runtime_id`, `session_id`, `intent_managed`, `output_preview`, `preview_unavailable`, `is_final`, `peer_reachable_count`, `completion_cursor`, and the optional keys of the status |
 | `meta/retire` | `{identity}` | `{identity, cleanup_warning}`. Releases the member's live materialization: the identity stays a member of Core's mob, on the same session at the same generation, and still reads `active`; its next delivery materializes it again, and a delivery scope captured before stays valid. A member that is not materialized is left as it is. No `spawned_by` descendant of the member is retired (earlier releases retired them), and a completion wait on the identity goes on to its next completion. A member that is being woken or has work in flight is refused with `-32052`: nothing is interrupted (earlier releases interrupted its run), and the retire succeeds once it is quiescent. An identity Core holds no member for is refused as invalid state. A retire ends no incarnation: a reset or a delete ends it, with Core's rotation onto a fresh session, and so does a respawn, which wakes the member on its session at a new generation. A member that no identity of the gateway holds and no host adopted (a Console side chat, a member made on the worker plane) is retired instead, by Core's retire: it leaves the roster with its `spawned_by` descendants, work in flight is interrupted rather than refused with `-32052`, and the answer carries no `cleanup_warning`. A member a host adopted is refused (`-32053`) whether or not an identity of the gateway holds it |
 | `meta/respawn` | `{identity}` | `{identity, agent_runtime_id, session_id, generation, live_respawn_warning, cleanup_warning}`. Retires the live member and wakes it on the same session at a new generation, so a delivery scope captured before is refused as stale. Core's retirement ends the member's wiring, so Meta wires the identity's managed edges (the roster's and the topology controller's) again at once, bounded, as a reset does; a re-wire that fails is logged and the next reconcile retries it. The atoms are `null` for a peer-only member. A side chat is refused (`-32602`, `side_chat_restart_refused`; see `meta/fork_member` above) |
@@ -1472,13 +1472,21 @@ such member.
   its name, member, session and history; nothing restarts and nothing
   wakes. From then on it is changed at run time, and a configuration that
   still lists the name changes nothing. Its `spec_digest` does not move.
+  While the configuration still lists the name, the agent's
+  `meta/status_identity` carries `roster_listing_superseded: true`, the
+  roster pass's result names it, and the gateway logs one warning for it:
+  the agent is served from its record, and the configuration's entry for
+  it is not applied.
 
 An agent the host's configuration declares answers `owner_read_only` to an
 update, an archive, an unarchive and a removal: change it in the
 configuration, or adopt it first.
 
 The schedules that target the agent follow these three changes, so that no
-schedule keeps firing at an agent that takes no delivery:
+schedule keeps firing at an agent that takes no delivery. A schedule targets
+the agent when it names it (a member target, or an identity target by the
+agent's name), when it names the agent's session, and when it is a Console
+schedule for it (`meta/schedule/*`):
 
 - an **archive** pauses the Active schedules that target the agent, for
   their target;
@@ -1487,14 +1495,19 @@ schedule keeps firing at an agent that takes no delivery:
   paused;
 - a **removal** ends every schedule that targets the agent.
 
-The agent's entry of the answer says what was done, on the first answer of
-the change: `schedules: {effect, count, schedules, incomplete?}`, where
-`effect` is `paused`, `resumed` or `ended` and each schedule is
-`{schedule_id, name?}`. `incomplete: true` is written when a schedule could
-not be read or changed; the same request asked again follows the rest. A
-plan of the change (`meta/identity/plan`) carries the same member with the
-schedules the change would take with it, as they are when the plan is
-made; it is no part of the rendering.
+The agent's entry of the answer says how the agent's schedules stand after
+the change, on the first answer of the change: `schedules: {effect, count,
+schedules, incomplete?}`, where `effect` is `paused`, `resumed` or `ended`
+and each schedule is `{schedule_id, name?}`. After an archive the list is
+the agent's schedules that are paused for it; after an unarchive it is the
+agent's schedules that are active after the call, one a person resumed by
+name while the agent was archived included; after a removal it is the ended
+ones. A schedule somebody paused by name is on neither of the first two
+lists. `incomplete: true` is written when a schedule could not be read or
+changed; the same request asked again follows the rest. A plan of the
+change (`meta/identity/plan`) carries the same member with the list the
+change would answer, as the schedules are when the plan is made; it is no
+part of the rendering.
 
 A schedule a person resumes by name while its agent is archived is theirs
 from then on: it stays Active, its fires end as delivery failures while the
@@ -1505,7 +1518,29 @@ unarchive does not resume it. A change asked again under the same
 the change (an archive while it is archived, an unarchive while it is not,
 a removal), which is how a caller that got no answer makes the schedules
 converge; a schedule taken over by name in between follows the agent
-again. A schedule created for an agent while it is archived is not paused.
+again.
+
+No schedule is pointed at an archived agent through Meta. An agent's
+`meerkat_schedule_create` or `meerkat_schedule_update` is refused as a
+policy denial with the code `identity_archived` when the schedule would
+target an archived agent after the call (the target the call writes, else
+the one the schedule holds; a member target or an identity target), and the
+Console's `meta/schedule/create` and `meta/schedule/update` answer `-32603`
+`identity_archived`, as a send to the agent does. Nothing is written. A
+pause, a resume and a delete by name stay, and so does an update that moves
+a schedule to another agent. A Console schedule whose create read the agent
+just before its archive is paused for the agent once it is written.
+
+Known limitations: Meerkat's own schedule methods (`schedule/create`,
+`schedule/update`, REST) do not judge the target, and neither does a
+schedule tool call for a target that names only a session, so such a
+schedule for an archived agent is active and each of its fires is refused
+at the delivery. An agent's schedule tool call that reads its target just
+before the target's archive and writes just after it can leave an active
+schedule the same way. A schedule that names only the session of a removed
+agent is not ended by the removal. A change of a paused schedule's target
+through Meerkat's own methods makes its pause a pause by name: the
+unarchive does not resume it.
 A launch whose host gives the family no schedules (an embedded Rust host
 that attaches the policy without them) changes no schedule and answers no
 such member; the stdio gateway gives them.
@@ -4374,6 +4409,7 @@ place (below).
 | `content` | `string` | The message it sends |
 | `trigger` | `object` | When it sends |
 | `phase` | `string` | `active` or `paused` |
+| `paused_for_target` | `boolean` | `true` on a paused schedule whose pause is its agent's: the agent is archived, and its unarchive resumes the schedule. Absent on an active schedule and on one somebody paused by name |
 | `revision` | `integer` | Its revision; every write moves it on |
 | `sender` | `string \| null` | The principal it sends as; `null` for an anonymous caller, and when withheld |
 | `sender_hidden` | `boolean` | `true` when `sender` is withheld: the caller may view the agent but not send to it |
@@ -4460,6 +4496,7 @@ console send.
 | `-32002` | `not_addressable` | A create, update or resume names an agent that takes no console sends |
 | `-32004` | `governed_target` | The agent's input is governed: a governed send needs its Console human present, and a fire has none. A capability refusal, unlike the `-32003` a live send to a governed agent answers, since no human can be present at a fire |
 | `-32004` | `schedule_host_unavailable` | No schedule firing host sends the gateway's schedules, or the schedule store is unavailable |
+| `-32603` | `identity_archived` | A create or an update names an archived agent (with `identity` and `remedy: "unarchive_identity"`); nothing changed. A pause, a resume and a delete of its schedules stay |
 | `-32009` | `schedule_revision_conflict` | An update or resume named an `expected_revision` the schedule moved past, or raced another change of the schedule (with `expected_revision` and `actual_revision`); nothing changed |
 | `-32009` | `sender_takeover_required` | An update or resume by another caller than the schedule's sender without `take_over_sender: true` (with `sender`, who it sends as now); nothing changed |
 | `-32602` | `unsupported_param` | A pause, a delete or a create that names `expected_revision` or `take_over_sender` (with `param`, the one it named); nothing changed |

@@ -413,9 +413,12 @@ and resume it when the target takes them again
 resumed that way. A schedule paused by name (`schedule/pause`, the pause
 tool) stays paused, and a pause or a resume by name of a schedule paused
 for its target takes it over. The phase a read shows is `paused` either
-way. A revise that points a schedule paused for its target at another
-target ends that pause too: the schedule stays paused, as a pause by name,
-until somebody resumes it.
+way. A revise that changes the target of a schedule paused for its target
+(whom it names, or what it sends) ends that pause too: the schedule stays
+paused, as a pause by name, until somebody resumes it. One owner of a
+target's lifecycle sends the two calls for it: a schedule holds one mark
+for its target, so a second sender's resume would end the first one's
+pause.
 
 A pause for the target supersedes nothing, like a pause by name: a fire
 that was claimed and not yet dispatched is released, and a delivery already

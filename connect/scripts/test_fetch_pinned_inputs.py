@@ -1,7 +1,8 @@
 """The pinned public inputs of a library build: the fetch step and the committed pin file.
 
-No test here uses the network: the fetch runs against a transport the test supplies. The committed pin
-file is checked for its shape, for the rows its readers select, and against the root Cargo.lock.
+No test here uses the network or Cargo, except the one named for it: the fetch runs against a transport
+the test supplies, and the crate rows are derived from a fixture lock and a fixture closure listing. The
+committed pin file is checked for its shape and for the rows its readers select.
 """
 from __future__ import annotations
 
@@ -21,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY = ROOT.parent
 SCRIPT = ROOT / "scripts/fetch-pinned-inputs.py"
 PINS = ROOT / "release/library-pins-macos-arm64.json"
+RESOLVED_NAME = "library-pins-macos-arm64.resolved.json"
 
 
 def load(name, path):
@@ -34,8 +36,43 @@ FETCH = load("connect_fetch_pinned_inputs", SCRIPT)
 
 WHEEL = b"wheel bytes"
 TARBALL = b"npm tarball bytes"
-CRATE = b"crate bytes"
 ASSET = b"release asset bytes" * 40
+CRATES = {
+    ("io-lifetimes", "2.0.4"): b"io-lifetimes two",
+    ("io-lifetimes", "3.0.1"): b"io-lifetimes three",
+    ("itoa", "1.0.18"): b"itoa",
+    ("serde_derive", "1.0.229"): b"serde derive",
+}
+CRATES_IO = "registry+https://github.com/rust-lang/crates.io-index"
+
+
+def crate_url(name, version):
+    return f"https://static.crates.io/crates/{name}/{name}-{version}.crate"
+
+
+def lock_text(extra=""):
+    packages = ["version = 4\n"]
+    for (name, version), data in CRATES.items():
+        packages.append(f'[[package]]\nname = "{name}"\nversion = "{version}"\nsource = "{CRATES_IO}"\n'
+                        f'checksum = "{hashlib.sha256(data).hexdigest()}"\n')
+    packages.append('[[package]]\nname = "toolkit-package"\nversion = "0.9.15"\ndependencies = [\n "itoa",\n]\n')
+    packages.append('[[package]]\nname = "forked"\nversion = "0.1.0"\n'
+                    'source = "git+https://example.invalid/forked#0123"\n')
+    packages.append(f'[[package]]\nname = "unsummed"\nversion = "0.2.0"\nsource = "{CRATES_IO}"\n')
+    packages.append('[[package]]\nname = "elsewhere"\nversion = "0.3.0"\n'
+                    f'source = "registry+https://registry.example.invalid/index"\nchecksum = "{"5" * 64}"\n')
+    return "\n".join(packages) + extra
+
+
+LOCK = lock_text()
+CLOSURE = """\
+toolkit-package v0.9.15 (/checkout/connect/crates/toolkit-package)
+itoa v1.0.18
+io-lifetimes v3.0.1
+io-lifetimes v2.0.4
+serde_derive v1.0.229 (proc-macro)
+itoa v1.0.18 (*)
+"""
 
 
 def pin(kind, name, version, file, url, data, use):
@@ -48,29 +85,35 @@ def pin(kind, name, version, file, url, data, use):
     }
 
 
-def fixture_rows():
-    return [
-        pin("crate", "itoa", "1.0.18", "itoa-1.0.18.crate",
-            "https://static.crates.io/crates/itoa/itoa-1.0.18.crate", CRATE, ["tool build provenance"]),
-        pin("npm-tarball", "@scope/core", "2.3.0", "core-2.3.0.tgz",
-            "https://registry.npmjs.org/@scope/core/-/core-2.3.0.tgz", TARBALL, ["activepieces closure"]),
-        pin("pypi-wheel", "agno", "3.0.11", "agno-3.0.11-py3-none-any.whl",
-            "https://files.pythonhosted.org/packages/85/dc/agno-3.0.11-py3-none-any.whl", WHEEL,
-            ["agno closure"]),
-        pin("release-download", "cpython", "3.11.16+20260901", "cpython-3.11.16+20260901-full.tar.zst",
-            "https://github.com/example/standalone/releases/download/20260901/cpython-3.11.16%2B20260901-full.tar.zst",
-            ASSET, ["runtime python"]),
-    ]
+def crate_pin(name, version):
+    return {
+        "kind": "crate", "name": name, "version": version, "file": f"{name}-{version}.crate",
+        "url": crate_url(name, version), "sha256": hashlib.sha256(CRATES[(name, version)]).hexdigest(),
+        "sha512": None, "digest_source": "root Cargo.lock checksum (the crates.io index cksum)",
+        "use": ["tool build provenance"],
+    }
 
 
-BODIES = {
-    "https://static.crates.io/crates/itoa/itoa-1.0.18.crate": CRATE,
-    "https://registry.npmjs.org/@scope/core/-/core-2.3.0.tgz": TARBALL,
-    "https://files.pythonhosted.org/packages/85/dc/agno-3.0.11-py3-none-any.whl": WHEEL,
-}
+NPM, WHEEL_ROW, RELEASE = 0, 1, 2
+WHEEL_URL = "https://files.pythonhosted.org/packages/85/dc/agno-3.0.11-py3-none-any.whl"
+NPM_URL = "https://registry.npmjs.org/@scope/core/-/core-2.3.0.tgz"
 ASSET_URL = ("https://github.com/example/standalone/releases/download/20260901/"
              "cpython-3.11.16%2B20260901-full.tar.zst")
 ASSET_STORE = "https://release-assets.githubusercontent.com/github-production-release-asset/1/2?sig=3"
+
+
+def fixture_rows():
+    """The committed rows: every kind but crate."""
+    return [
+        pin("npm-tarball", "@scope/core", "2.3.0", "core-2.3.0.tgz", NPM_URL, TARBALL, ["activepieces closure"]),
+        pin("pypi-wheel", "agno", "3.0.11", "agno-3.0.11-py3-none-any.whl", WHEEL_URL, WHEEL, ["agno closure"]),
+        pin("release-download", "cpython", "3.11.16+20260901", "cpython-3.11.16+20260901-full.tar.zst",
+            ASSET_URL, ASSET, ["runtime python"]),
+    ]
+
+
+def resolved_rows():
+    return [crate_pin(name, version) for name, version in sorted(CRATES)] + fixture_rows()
 
 
 class Response:
@@ -97,9 +140,10 @@ class Transport:
     """Serves each URL from a list of answers (the last one stays); records every request."""
 
     def __init__(self, answers=None):
-        self.answers = {url: [lambda body=body: Response(200, body)] for url, body in BODIES.items()}
+        bodies = {crate_url(name, version): data for (name, version), data in CRATES.items()}
+        bodies.update({NPM_URL: TARBALL, WHEEL_URL: WHEEL, ASSET_STORE: ASSET})
+        self.answers = {url: [lambda body=body: Response(200, body)] for url, body in bodies.items()}
         self.answers[ASSET_URL] = [lambda: redirect(ASSET_STORE)]
-        self.answers[ASSET_STORE] = [lambda: Response(200, ASSET)]
         for url, sequence in (answers or {}).items():
             self.answers[url] = list(sequence)
         self.requests = []
@@ -115,7 +159,7 @@ class Transport:
 
 
 class Workspace:
-    def __init__(self, rows=None, document=None, text=None):
+    def __init__(self, rows=None, document=None, text=None, closure=CLOSURE, lock=LOCK):
         self._tmp = tempfile.TemporaryDirectory(prefix="connect-pinned-inputs-")
         self.root = Path(self._tmp.name)
         self.pins = self.root / "pins.json"
@@ -125,6 +169,10 @@ class Workspace:
                             "pins": fixture_rows() if rows is None else rows}
             text = json.dumps(document)
         self.pins.write_text(text, encoding="utf-8")
+        self.closure = self.root / "closure.txt"
+        self.closure.write_text(closure, encoding="utf-8")
+        self.lock = self.root / "Cargo.lock"
+        self.lock.write_text(lock, encoding="utf-8")
         self.destination = self.root / "out"
         self.sleeps = []
 
@@ -134,10 +182,13 @@ class Workspace:
     def __exit__(self, *exc):
         self._tmp.cleanup()
 
+    def arguments(self, *more):
+        return ["--pins", str(self.pins), "--closure", str(self.closure), "--lock", str(self.lock), *more]
+
     def fetch(self, transport=None, destination=None):
         transport = Transport() if transport is None else transport
-        return FETCH.fetch(self.pins, destination or self.destination, transport=transport,
-                           sleep=self.sleeps.append), transport
+        return FETCH.fetch(self.pins, self.closure, self.lock, destination or self.destination,
+                           transport=transport, sleep=self.sleeps.append), transport
 
     def refused(self, transport=None, destination=None):
         with unittest.TestCase().assertRaises(FETCH.Refusal) as caught:
@@ -145,39 +196,60 @@ class Workspace:
         return str(caught.exception)
 
 
+def main(argv, transport=None):
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        code = FETCH.main(argv, transport=Transport() if transport is None else transport,
+                          sleep=lambda seconds: None)
+    return code, out.getvalue(), err.getvalue()
+
+
 class FetchTests(unittest.TestCase):
-    def test_every_pin_is_fetched_checked_and_recorded(self):
+    def test_every_committed_and_derived_pin_is_fetched_checked_and_recorded(self):
         with Workspace() as work:
             record, transport = work.fetch()
             self.assertEqual(sorted(str(path.relative_to(work.destination))
                                     for path in work.destination.rglob("*") if path.is_file()),
-                             ["FETCHED.json", "crate/itoa-1.0.18.crate", "npm-tarball/core-2.3.0.tgz",
-                              "pypi-wheel/agno-3.0.11-py3-none-any.whl",
+                             ["FETCHED.json", "crate/io-lifetimes-2.0.4.crate", "crate/io-lifetimes-3.0.1.crate",
+                              "crate/itoa-1.0.18.crate", "crate/serde_derive-1.0.229.crate", RESOLVED_NAME,
+                              "npm-tarball/core-2.3.0.tgz", "pypi-wheel/agno-3.0.11-py3-none-any.whl",
                               "release-download/cpython-3.11.16+20260901-full.tar.zst"])
             self.assertEqual((work.destination / "release-download/cpython-3.11.16+20260901-full.tar.zst")
                              .read_bytes(), ASSET)
+            self.assertEqual((work.destination / "crate/itoa-1.0.18.crate").read_bytes(),
+                             CRATES[("itoa", "1.0.18")])
+            # The resolved pin file is what every reader is given as --pins: the committed rows plus
+            # the derived crate rows, in the committed file's own schema and rendering.
+            resolved_path = work.destination / RESOLVED_NAME
+            resolved = FETCH.load_pins(resolved_path, resolved=True)
+            self.assertEqual(resolved.rows, resolved_rows())
+            self.assertEqual(set(resolved.document), {"schema", "target", "pins"})
+            self.assertEqual(resolved_path.read_text(encoding="utf-8"), FETCH.render(resolved.document))
             fetched = json.loads((work.destination / "FETCHED.json").read_text())
             self.assertEqual(fetched, record)
+            self.assertEqual(set(fetched), {"schema", "pins_sha256", "lock_sha256", "resolved_pins", "files"})
             self.assertEqual(fetched["schema"], "connect-pinned-inputs/1")
             self.assertEqual(fetched["pins_sha256"], hashlib.sha256(work.pins.read_bytes()).hexdigest())
-            self.assertEqual(fetched["files"], [
-                {"kind": "crate", "file": "itoa-1.0.18.crate", "bytes": len(CRATE),
-                 "sha256": hashlib.sha256(CRATE).hexdigest()},
-                {"kind": "npm-tarball", "file": "core-2.3.0.tgz", "bytes": len(TARBALL),
-                 "sha256": hashlib.sha256(TARBALL).hexdigest()},
-                {"kind": "pypi-wheel", "file": "agno-3.0.11-py3-none-any.whl", "bytes": len(WHEEL),
-                 "sha256": hashlib.sha256(WHEEL).hexdigest()},
+            self.assertEqual(fetched["lock_sha256"], hashlib.sha256(work.lock.read_bytes()).hexdigest())
+            self.assertEqual(fetched["resolved_pins"], {
+                "file": RESOLVED_NAME, "rows": 7, "sha256": hashlib.sha256(resolved_path.read_bytes()).hexdigest()})
+            self.assertEqual(fetched["files"][:2] + fetched["files"][-1:], [
+                {"kind": "crate", "file": "io-lifetimes-2.0.4.crate", "bytes": len(CRATES[("io-lifetimes", "2.0.4")]),
+                 "sha256": hashlib.sha256(CRATES[("io-lifetimes", "2.0.4")]).hexdigest()},
+                {"kind": "crate", "file": "io-lifetimes-3.0.1.crate", "bytes": len(CRATES[("io-lifetimes", "3.0.1")]),
+                 "sha256": hashlib.sha256(CRATES[("io-lifetimes", "3.0.1")]).hexdigest()},
                 {"kind": "release-download", "file": "cpython-3.11.16+20260901-full.tar.zst",
                  "bytes": len(ASSET), "sha256": hashlib.sha256(ASSET).hexdigest()},
             ])
+            self.assertEqual([(entry["kind"], entry["file"]) for entry in fetched["files"]],
+                             [(row["kind"], row["file"]) for row in resolved_rows()])
             self.assertEqual(transport.requests[-2:], [ASSET_URL, ASSET_STORE])
             self.assertEqual(work.sleeps, [])
 
     def test_other_bytes_are_refused_and_never_moved_into_place(self):
-        for kind, url, file in (("pypi-wheel", "https://files.pythonhosted.org/packages/85/dc/"
-                                 "agno-3.0.11-py3-none-any.whl", "agno-3.0.11-py3-none-any.whl"),
-                                ("npm-tarball", "https://registry.npmjs.org/@scope/core/-/core-2.3.0.tgz",
-                                 "core-2.3.0.tgz")):
+        for kind, url, file in (("pypi-wheel", WHEEL_URL, "agno-3.0.11-py3-none-any.whl"),
+                                ("npm-tarball", NPM_URL, "core-2.3.0.tgz"),
+                                ("crate", crate_url("itoa", "1.0.18"), "itoa-1.0.18.crate")):
             with self.subTest(kind=kind), Workspace() as work:
                 transport = Transport({url: [lambda: Response(200, b"other bytes")]})
                 reason = work.refused(transport)
@@ -200,8 +272,7 @@ class FetchTests(unittest.TestCase):
                 self.assertIn("redirect", work.refused(transport))
                 self.assertEqual([url for url in transport.requests if "example.invalid" in url], [])
         with Workspace() as work:
-            wheel = "https://files.pythonhosted.org/packages/85/dc/agno-3.0.11-py3-none-any.whl"
-            transport = Transport({wheel: [lambda: redirect(ASSET_STORE)]})
+            transport = Transport({WHEEL_URL: [lambda: redirect(ASSET_STORE)]})
             self.assertIn("redirect", work.refused(transport))
             self.assertNotIn(ASSET_STORE, transport.requests)
         with Workspace() as work:
@@ -230,29 +301,27 @@ class FetchTests(unittest.TestCase):
                              and any((work.destination / "release-download").iterdir()))
 
     def test_a_transient_failure_is_retried_a_bounded_number_of_times(self):
-        wheel = "https://files.pythonhosted.org/packages/85/dc/agno-3.0.11-py3-none-any.whl"
         for name, failure in (("server error", lambda: Response(503)),
                               ("rate limit", lambda: Response(429)),
                               ("connection error", lambda: OSError("connection reset")),
                               ("short body", lambda: Response(200, WHEEL[:4], declared=len(WHEEL)))):
             with self.subTest(name=name), Workspace() as work:
-                transport = Transport({wheel: [failure, failure, lambda: Response(200, WHEEL)]})
+                transport = Transport({WHEEL_URL: [failure, failure, lambda: Response(200, WHEEL)]})
                 work.fetch(transport)
-                self.assertEqual(transport.requests.count(wheel), 3)
+                self.assertEqual(transport.requests.count(WHEEL_URL), 3)
                 self.assertEqual(len(work.sleeps), 2)
             with self.subTest(name=name, outcome="never recovers"), Workspace() as work:
-                transport = Transport({wheel: [failure]})
+                transport = Transport({WHEEL_URL: [failure]})
                 self.assertIn("agno-3.0.11-py3-none-any.whl", work.refused(transport))
-                self.assertEqual(transport.requests.count(wheel), FETCH.ATTEMPTS)
+                self.assertEqual(transport.requests.count(WHEEL_URL), FETCH.ATTEMPTS)
                 self.assertFalse((work.destination / "FETCHED.json").exists())
 
     def test_a_missing_file_is_refused_at_once(self):
-        wheel = "https://files.pythonhosted.org/packages/85/dc/agno-3.0.11-py3-none-any.whl"
         for status in (403, 404, 410):
             with self.subTest(status=status), Workspace() as work:
-                transport = Transport({wheel: [lambda status=status: Response(status)]})
+                transport = Transport({WHEEL_URL: [lambda status=status: Response(status)]})
                 self.assertIn(str(status), work.refused(transport))
-                self.assertEqual(transport.requests.count(wheel), 1)
+                self.assertEqual(transport.requests.count(WHEEL_URL), 1)
 
     def test_the_destination_must_be_a_new_absolute_directory_with_a_parent(self):
         with Workspace() as work:
@@ -266,6 +335,13 @@ class FetchTests(unittest.TestCase):
             (work.root / "real").mkdir()
             (work.root / "link").symlink_to(work.root / "real")
             self.assertIn("parent", work.refused(destination=work.root / "link" / "out"))
+
+    def test_a_closure_the_lock_does_not_explain_stops_the_fetch_before_any_download(self):
+        with Workspace(closure=CLOSURE + "unsummed v0.2.0\n") as work:
+            transport = Transport()
+            self.assertIn("unsummed", work.refused(transport))
+            self.assertEqual(transport.requests, [])
+            self.assertFalse(work.destination.exists())
 
 
 class PinFileShapeTests(unittest.TestCase):
@@ -283,7 +359,7 @@ class PinFileShapeTests(unittest.TestCase):
     def test_the_fixture_is_accepted(self):
         with Workspace() as work:
             pins = FETCH.load_pins(work.pins)
-            self.assertEqual(len(pins.rows), 4)
+            self.assertEqual(len(pins.rows), 3)
             self.assertEqual(pins.sha256, hashlib.sha256(work.pins.read_bytes()).hexdigest())
 
     def test_document_shape(self):
@@ -292,33 +368,67 @@ class PinFileShapeTests(unittest.TestCase):
         self.assertIn("target", self.refused(lambda doc, rows: doc.update(target="")))
         self.assertIn("pins", self.refused(lambda doc, rows: doc.update(pins={})))
         self.assertIn("pins", self.refused(lambda doc, rows: doc.update(pins=[])))
+        self.assertIn("note", self.refused(lambda doc, rows: doc.update(note=7)))
+        self.assertIn("note", self.refused(lambda doc, rows: doc.update(note="")))
         with Workspace(text='{"schema": "connect-library-pins/1", "schema": "connect-library-pins/1", '
                             '"target": "macos-arm64", "pins": []}') as work:
             self.assertIn("duplicate", work.refused())
         with Workspace(text="not json") as work:
             self.assertIn("JSON", work.refused())
 
+    def test_a_note_for_people_is_allowed_and_rendered(self):
+        document = {"schema": "connect-library-pins/1", "target": "macos-arm64",
+                    "note": "Crate rows are derived.", "pins": fixture_rows()}
+        with Workspace(text=FETCH.render(document)) as work:
+            pins = FETCH.load_pins(work.pins)
+            self.assertEqual(pins.document["note"], "Crate rows are derived.")
+            self.assertEqual(work.pins.read_text(encoding="utf-8").splitlines()[:4],
+                             ["{", '  "schema": "connect-library-pins/1",', '  "target": "macos-arm64",',
+                              '  "note": "Crate rows are derived.",'])
+            work.fetch()
+            # The note stays with the committed file; the resolved file has the readers' three keys.
+            self.assertNotIn("note", json.loads((work.destination / RESOLVED_NAME).read_text()))
+
+    def test_crate_rows_are_never_committed(self):
+        def add_crate(doc, rows):
+            rows.insert(0, crate_pin("itoa", "1.0.18"))
+        reason = self.refused(add_crate)
+        self.assertIn("crate", reason)
+        self.assertIn("Cargo.lock", reason)
+        # The same row is what a resolved file carries.
+        document = {"schema": "connect-library-pins/1", "target": "macos-arm64", "pins": resolved_rows()}
+        self.assertEqual(FETCH.validate_document(document, resolved=True), resolved_rows())
+        with self.assertRaises(FETCH.Refusal):
+            FETCH.validate_document(document)
+        with self.assertRaises(FETCH.Refusal):
+            FETCH.validate_document({**document, "note": "resolved files carry no note"}, resolved=True)
+
     def test_row_keys_and_kinds(self):
-        self.assertIn("key", self.refused(lambda doc, rows: rows[0].update(bytes=3)))
-        self.assertIn("key", self.refused(lambda doc, rows: rows[0].pop("digest_source")))
-        self.assertIn("kind", self.refused(lambda doc, rows: rows[0].update(kind="git")))
-        self.assertIn("name", self.refused(lambda doc, rows: rows[0].update(name="")))
-        self.assertIn("version", self.refused(lambda doc, rows: rows[0].update(version=7)))
+        self.assertIn("key", self.refused(lambda doc, rows: rows[WHEEL_ROW].update(bytes=3)))
+        self.assertIn("key", self.refused(lambda doc, rows: rows[WHEEL_ROW].pop("digest_source")))
+        self.assertIn("kind", self.refused(lambda doc, rows: rows[WHEEL_ROW].update(kind="git")))
+        self.assertIn("name", self.refused(lambda doc, rows: rows[WHEEL_ROW].update(name="")))
+        self.assertIn("version", self.refused(lambda doc, rows: rows[WHEEL_ROW].update(version=7)))
 
     def test_exactly_the_digest_the_index_publishes(self):
-        self.assertIn("sha256", self.refused(lambda doc, rows: rows[0].update(sha256=None)))
-        self.assertIn("sha256", self.refused(lambda doc, rows: rows[0].update(sha256=rows[0]["sha256"].upper())))
-        self.assertIn("sha256", self.refused(lambda doc, rows: rows[0].update(sha256=rows[0]["sha256"][:-1])))
-        self.assertIn("sha512", self.refused(lambda doc, rows: rows[0].update(sha512="0" * 128)))
-        self.assertIn("sha512", self.refused(lambda doc, rows: rows[1].update(sha512=None)))
-        self.assertIn("sha256", self.refused(lambda doc, rows: rows[1].update(sha256="0" * 64)))
+        def wheel(**change):
+            return lambda doc, rows: rows[WHEEL_ROW].update(change)
+        digest = fixture_rows()[WHEEL_ROW]["sha256"]
+        self.assertIn("sha256", self.refused(wheel(sha256=None)))
+        self.assertIn("sha256", self.refused(wheel(sha256=digest.upper())))
+        self.assertIn("sha256", self.refused(wheel(sha256=digest[:-1])))
+        self.assertIn("sha512", self.refused(wheel(sha512="0" * 128)))
+        self.assertIn("sha512", self.refused(lambda doc, rows: rows[NPM].update(sha512=None)))
+        self.assertIn("sha256", self.refused(lambda doc, rows: rows[NPM].update(sha256="0" * 64)))
 
     def test_labels_are_a_sorted_list_from_the_known_set(self):
-        self.assertIn("use", self.refused(lambda doc, rows: rows[0].update(use="tool build provenance")))
-        self.assertIn("use", self.refused(lambda doc, rows: rows[0].update(use=[])))
-        self.assertIn("use", self.refused(lambda doc, rows: rows[0].update(use=["tool history"])))
-        self.assertIn("use", self.refused(lambda doc, rows: rows[3].update(use=["runtime node", "acquisition node"])))
-        self.assertIn("use", self.refused(lambda doc, rows: rows[3].update(use=["runtime node", "runtime node"])))
+        def use(index, value):
+            return lambda doc, rows: rows[index].update(use=value)
+        self.assertIn("use", self.refused(use(WHEEL_ROW, "agno closure")))
+        self.assertIn("use", self.refused(use(WHEEL_ROW, [])))
+        self.assertIn("use", self.refused(use(WHEEL_ROW, ["tool history"])))
+        self.assertIn("use", self.refused(use(RELEASE, ["runtime node", "acquisition node"])))
+        self.assertIn("use", self.refused(use(RELEASE, ["runtime node", "runtime node"])))
         self.assertEqual(FETCH.LABELS, frozenset({
             "agno closure", "services closure", "activepieces closure", "component build tool",
             "component build backend", "tool build provenance", "runtime python", "runtime node",
@@ -328,34 +438,34 @@ class PinFileShapeTests(unittest.TestCase):
         self.assertIn("sorted", self.refused(lambda doc, rows: rows.reverse()))
 
         def duplicate(doc, rows):
-            copy = dict(rows[2], name="agno2")
-            rows.insert(3, copy)
+            rows.insert(WHEEL_ROW + 1, dict(rows[WHEEL_ROW], name="agno2"))
         self.assertIn("twice", self.refused(duplicate))
 
     def test_file_names_cannot_leave_their_directory(self):
-        for file in ("../itoa-1.0.18.crate", "sub/itoa-1.0.18.crate", ".hidden", "", "FETCHED.json", "a\\b",
-                     "a b.crate"):
+        for file in ("../agno.whl", "sub/agno.whl", ".hidden", "", "FETCHED.json", "a\\b", "a b.whl",
+                     RESOLVED_NAME):
             with self.subTest(file=file):
-                self.assertIn("file", self.refused(lambda doc, rows, file=file: rows[0].update(file=file)))
+                self.assertIn("file", self.refused(lambda doc, rows, file=file: rows[WHEEL_ROW].update(file=file)))
 
     def test_urls_are_https_on_the_hosts_of_their_kind(self):
         def url(index, value):
             return lambda doc, rows: rows[index].update(url=value)
+        wheel = "agno-3.0.11-py3-none-any.whl"
         cases = [
-            url(0, "http://static.crates.io/crates/itoa/itoa-1.0.18.crate"),
-            url(0, "https://github.com/example/x/releases/download/1/itoa-1.0.18.crate"),
-            url(0, "https://static.crates.io.example.invalid/crates/itoa/itoa-1.0.18.crate"),
-            url(0, "https://user@static.crates.io/crates/itoa/itoa-1.0.18.crate"),
-            url(0, "https://static.crates.io:8443/crates/itoa/itoa-1.0.18.crate"),
-            url(0, "https://static.crates.io/crates/itoa/itoa-1.0.18.crate?x=1"),
-            url(0, "https://static.crates.io/crates/itoa/itoa-1.0.18.crate#x"),
-            url(0, "https://static.crates.io/crates/itoa/other-1.0.18.crate"),
-            url(1, "https://files.pythonhosted.org/packages/core-2.3.0.tgz"),
-            url(2, "https://registry.npmjs.org/agno/-/agno-3.0.11-py3-none-any.whl"),
+            url(WHEEL_ROW, f"http://files.pythonhosted.org/packages/{wheel}"),
+            url(WHEEL_ROW, f"https://github.com/example/x/releases/download/1/{wheel}"),
+            url(WHEEL_ROW, f"https://files.pythonhosted.org.example.invalid/packages/{wheel}"),
+            url(WHEEL_ROW, f"https://user@files.pythonhosted.org/packages/{wheel}"),
+            url(WHEEL_ROW, f"https://files.pythonhosted.org:8443/packages/{wheel}"),
+            url(WHEEL_ROW, f"https://files.pythonhosted.org/packages/{wheel}?x=1"),
+            url(WHEEL_ROW, f"https://files.pythonhosted.org/packages/{wheel}#x"),
+            url(WHEEL_ROW, "https://files.pythonhosted.org/packages/other-3.0.11-py3-none-any.whl"),
+            url(WHEEL_ROW, f"https://static.crates.io/crates/agno/{wheel}"),
+            url(NPM, "https://files.pythonhosted.org/packages/core-2.3.0.tgz"),
             # github.com serves many things; only a release asset path is a pin.
-            url(3, "https://github.com/example/standalone/raw/main/cpython-3.11.16%2B20260901-full.tar.zst"),
-            url(3, "https://raw.githubusercontent.com/example/standalone/cpython-3.11.16%2B20260901-full.tar.zst"),
-            url(3, "https://release-assets.githubusercontent.com/cpython-3.11.16%2B20260901-full.tar.zst"),
+            url(RELEASE, "https://github.com/example/standalone/raw/main/cpython-3.11.16%2B20260901-full.tar.zst"),
+            url(RELEASE, "https://raw.githubusercontent.com/example/standalone/cpython-3.11.16%2B20260901-full.tar.zst"),
+            url(RELEASE, "https://release-assets.githubusercontent.com/cpython-3.11.16%2B20260901-full.tar.zst"),
         ]
         for case in cases:
             with self.subTest(case=cases.index(case)):
@@ -367,7 +477,7 @@ class PinFileShapeTests(unittest.TestCase):
                                 ("https://bootstrap.pypa.io/pip/zipapp/pip-26.2.1.pyz", "pip-26.2.1.pyz")):
             with self.subTest(file=file):
                 rows = fixture_rows()
-                rows[3] = pin("release-download", "tool", "1", file, url_value, ASSET, ["runtime node"])
+                rows[RELEASE] = pin("release-download", "tool", "1", file, url_value, ASSET, ["runtime node"])
                 with Workspace(rows=rows) as work:
                     transport = Transport({url_value: [lambda: Response(200, ASSET)]})
                     work.fetch(transport)
@@ -375,154 +485,115 @@ class PinFileShapeTests(unittest.TestCase):
 
 
 class CommandLineTests(unittest.TestCase):
-    def run_main(self, argv, transport):
-        out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = FETCH.main(argv, transport=transport, sleep=lambda seconds: None)
-        return code, out.getvalue(), err.getvalue()
-
     def test_success_prints_one_json_line(self):
         with Workspace() as work:
-            code, out, _ = self.run_main(["--pins", str(work.pins), "--destination", str(work.destination)],
-                                         Transport())
+            code, out, _ = main(work.arguments("--destination", str(work.destination)))
             self.assertEqual(code, 0)
             self.assertEqual(out.count("\n"), 1)
             summary = json.loads(out)
-            self.assertEqual((summary["files"], summary["destination"]), (4, str(work.destination)))
+            self.assertEqual((summary["files"], summary["destination"]), (7, str(work.destination)))
             self.assertEqual(summary["pins_sha256"], hashlib.sha256(work.pins.read_bytes()).hexdigest())
-            self.assertEqual(summary["bytes"], len(CRATE) + len(TARBALL) + len(WHEEL) + len(ASSET))
+            self.assertEqual(summary["resolved_pins"], str(work.destination / RESOLVED_NAME))
+            self.assertEqual(summary["resolved_pins_sha256"],
+                             hashlib.sha256((work.destination / RESOLVED_NAME).read_bytes()).hexdigest())
+            self.assertEqual(summary["bytes"],
+                             len(TARBALL) + len(WHEEL) + len(ASSET) + sum(len(data) for data in CRATES.values()))
 
     def test_a_refusal_is_one_line_on_stderr_and_exit_status_2(self):
         with Workspace() as work:
             work.destination.mkdir()
-            code, out, err = self.run_main(["--pins", str(work.pins), "--destination", str(work.destination)],
-                                           Transport())
+            code, out, err = main(work.arguments("--destination", str(work.destination)))
             self.assertEqual((code, out), (2, ""))
             self.assertEqual(err.count("\n"), 1)
             self.assertTrue(err.startswith("pinned input fetch refused: "), err)
 
+    def test_resolve_writes_only_the_resolved_pin_file(self):
+        with Workspace() as work:
+            output = work.root / "resolved.json"
+            transport = Transport()
+            code, out, _ = main(work.arguments("--resolve", str(output)), transport)
+            self.assertEqual(code, 0)
+            self.assertEqual(transport.requests, [])
+            self.assertFalse(work.destination.exists())
+            self.assertEqual(FETCH.load_pins(output, resolved=True).rows, resolved_rows())
+            self.assertEqual(json.loads(out), {
+                "resolved_pins": str(output), "rows": 7,
+                "resolved_pins_sha256": hashlib.sha256(output.read_bytes()).hexdigest()})
+            # A fetch writes the same bytes.
+            work.fetch()
+            self.assertEqual((work.destination / RESOLVED_NAME).read_bytes(), output.read_bytes())
+            # An existing output is never replaced.
+            code, _, err = main(work.arguments("--resolve", str(output)))
+            self.assertEqual(code, 2)
+            self.assertIn("exists", err)
 
-LOCK = """\
-version = 4
-
-[[package]]
-name = "itoa"
-version = "1.0.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "{itoa}"
-
-[[package]]
-name = "io-lifetimes"
-version = "2.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "{old}"
-
-[[package]]
-name = "io-lifetimes"
-version = "3.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "{new}"
-
-[[package]]
-name = "serde_derive"
-version = "1.0.229"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "{derive}"
-
-[[package]]
-name = "toolkit-package"
-version = "0.9.15"
-dependencies = [
- "itoa",
-]
-
-[[package]]
-name = "forked"
-version = "0.1.0"
-source = "git+https://example.invalid/forked#0123"
-""".format(itoa="1" * 64, old="2" * 64, new="3" * 64, derive="4" * 64)
-
-CLOSURE = """\
-toolkit-package v0.9.15 (/checkout/connect/crates/toolkit-package)
-itoa v1.0.18
-io-lifetimes v3.0.1
-io-lifetimes v2.0.4
-serde_derive v1.0.229 (proc-macro)
-itoa v1.0.18 (*)
-"""
+    def test_every_mode_needs_the_closure_and_the_lock(self):
+        with Workspace() as work:
+            pins, closure, lock = str(work.pins), str(work.closure), str(work.lock)
+            destination = ["--destination", str(work.destination)]
+            for argv in (["--pins", pins, *destination],
+                         ["--pins", pins, "--closure", closure, *destination],
+                         ["--pins", pins, "--lock", lock, *destination],
+                         ["--closure", closure, "--lock", lock, *destination],
+                         work.arguments(),
+                         work.arguments(*destination, "--resolve", str(work.root / "resolved.json"))):
+                with self.subTest(argv=argv):
+                    transport = Transport()
+                    code, out, err = main(argv, transport)
+                    self.assertEqual((code, out), (2, ""))
+                    self.assertTrue(err.startswith("pinned input fetch refused: "), err)
+                    self.assertEqual(transport.requests, [])
+                    self.assertFalse(work.destination.exists())
 
 
 class CrateRowTests(unittest.TestCase):
-    """The crate rows are generated: the tool closure Cargo prints, with the lock's checksums."""
+    """Crate rows are never committed: they are the tool closure Cargo prints, with the lock's checksums."""
 
     def test_rows_come_from_the_closure_listing_and_the_lock(self):
         rows = FETCH.crate_rows(CLOSURE, LOCK)
-        self.assertEqual([(row["name"], row["version"], row["sha256"]) for row in rows],
-                         [("io-lifetimes", "2.0.4", "2" * 64), ("io-lifetimes", "3.0.1", "3" * 64),
-                          ("itoa", "1.0.18", "1" * 64), ("serde_derive", "1.0.229", "4" * 64)])
+        self.assertEqual(rows, [crate_pin(name, version) for name, version in sorted(CRATES)])
         self.assertEqual(rows[2], {
             "kind": "crate", "name": "itoa", "version": "1.0.18", "file": "itoa-1.0.18.crate",
-            "url": "https://static.crates.io/crates/itoa/itoa-1.0.18.crate", "sha256": "1" * 64,
-            "sha512": None, "digest_source": "root Cargo.lock checksum (the crates.io index cksum)",
+            "url": "https://static.crates.io/crates/itoa/itoa-1.0.18.crate",
+            "sha256": hashlib.sha256(CRATES[("itoa", "1.0.18")]).hexdigest(), "sha512": None,
+            "digest_source": "root Cargo.lock checksum (the crates.io index cksum)",
             "use": ["tool build provenance"]})
+
+    def test_a_registry_crate_without_a_lock_checksum_is_an_error(self):
+        with self.assertRaises(FETCH.Refusal) as caught:
+            FETCH.crate_rows(CLOSURE + "unsummed v0.2.0\n", LOCK)
+        self.assertIn("unsummed 0.2.0", str(caught.exception))
+        self.assertIn("checksum", str(caught.exception))
+
+    def test_a_source_that_is_not_crates_io_is_an_error(self):
+        for name, line in (("a git source", "forked v0.1.0\n"),
+                           ("a git source as Cargo prints it", "forked v0.1.0 (https://example.invalid/forked#0123)\n"),
+                           ("another registry", "elsewhere v0.3.0\n"),
+                           ("another registry as Cargo prints it", "elsewhere v0.3.0 (registry `example`)\n")):
+            with self.subTest(name=name), self.assertRaises(FETCH.Refusal):
+                FETCH.crate_rows(CLOSURE + line, LOCK)
 
     def test_a_listing_the_lock_does_not_explain_is_refused(self):
         for name, closure in (("unknown shape", CLOSURE + "itoa 1.0.18\n"),
                               ("not in the lock", CLOSURE + "ryu v1.0.0\n"),
                               ("another version", CLOSURE + "itoa v1.0.19\n"),
-                              ("a git source", CLOSURE + "forked v0.1.0\n"),
-                              ("a workspace crate with a registry entry", CLOSURE + "itoa v1.0.18 (/checkout/itoa)\n"),
+                              ("a path crate with a registry entry", CLOSURE + "itoa v1.0.18 (/checkout/itoa)\n"),
                               ("a registry line for a workspace crate", CLOSURE + "toolkit-package v0.9.15\n"),
+                              ("only workspace crates", CLOSURE.splitlines(keepends=True)[0]),
                               ("empty", "")):
             with self.subTest(name=name), self.assertRaises(FETCH.Refusal):
                 FETCH.crate_rows(closure, LOCK)
+        with self.assertRaises(FETCH.Refusal):
+            FETCH.crate_rows(CLOSURE, "not a lock")
+        twice = lock_text(f'\n[[package]]\nname = "itoa"\nversion = "1.0.18"\nsource = "{CRATES_IO}"\n'
+                          f'checksum = "{"6" * 64}"\n')
+        with self.assertRaises(FETCH.Refusal):
+            FETCH.crate_rows(CLOSURE, twice)
 
-    def synced(self, rows):
-        document = {"schema": "connect-library-pins/1", "target": "macos-arm64", "pins": rows}
-        work = Workspace(text=FETCH.render(document))
-        (work.root / "Cargo.lock").write_text(LOCK, encoding="utf-8")
-        (work.root / "closure.txt").write_text(CLOSURE, encoding="utf-8")
-        return work
-
-    def crate_mode(self, work, mode):
-        out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = FETCH.main(["--pins", str(work.pins), mode, "--closure", str(work.root / "closure.txt"),
-                               "--lock", str(work.root / "Cargo.lock")], transport=Transport())
-        return code, out.getvalue(), err.getvalue()
-
-    def test_check_reports_stale_crate_rows_and_write_replaces_exactly_them(self):
-        stale = fixture_rows()
-        with self.synced(stale) as work:
-            before = work.pins.read_bytes()
-            code, _, err = self.crate_mode(work, "--check-crate-rows")
-            self.assertEqual(code, 1)
-            self.assertIn("io-lifetimes-2.0.4.crate", err)
-            self.assertIn("--write-crate-rows", err)
-            self.assertEqual(work.pins.read_bytes(), before)
-            code, _, _ = self.crate_mode(work, "--write-crate-rows")
-            self.assertEqual(code, 0)
-            written = FETCH.load_pins(work.pins)
-            self.assertEqual([row for row in written.rows if row["kind"] == "crate"],
-                             FETCH.crate_rows(CLOSURE, LOCK))
-            self.assertEqual([row for row in written.rows if row["kind"] != "crate"], stale[1:])
-            self.assertEqual(work.pins.read_text(), FETCH.render(written.document))
-            self.assertEqual(self.crate_mode(work, "--check-crate-rows")[0], 0)
-            self.assertFalse(work.destination.exists())
-
-    def test_the_crate_modes_need_both_inputs_and_no_destination(self):
-        with self.synced(fixture_rows()) as work:
-            for argv in (["--pins", str(work.pins), "--check-crate-rows"],
-                         ["--pins", str(work.pins), "--check-crate-rows", "--closure", str(work.root / "closure.txt")],
-                         ["--pins", str(work.pins), "--write-crate-rows", "--closure", str(work.root / "closure.txt"),
-                          "--lock", str(work.root / "Cargo.lock"), "--destination", str(work.destination)],
-                         ["--pins", str(work.pins)]):
-                with self.subTest(argv=argv[2:]):
-                    out, err = io.StringIO(), io.StringIO()
-                    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                        code = FETCH.main(argv, transport=Transport())
-                    self.assertEqual(code, 2)
-                    self.assertTrue(err.getvalue().startswith("pinned input fetch refused: "))
+    def test_the_closure_command_is_the_tool_closure_for_macos_arm64(self):
+        self.assertEqual(FETCH.TOOL_CLOSURE_ARGUMENTS, (
+            "-p", "toolkit-package", "--features", "local-recipes,local-artifacts",
+            "--target", "aarch64-apple-darwin", "-e", "normal,build", "--prefix", "none", "--format", "{p}"))
 
 
 def rows_with(rows, label):
@@ -536,11 +607,17 @@ class CommittedPinFileTests(unittest.TestCase):
     def setUpClass(cls):
         cls.pins = FETCH.load_pins(PINS)
         cls.rows = cls.pins.rows
-        cls.lock = (REPOSITORY / "Cargo.lock").read_text(encoding="utf-8")
 
     def test_the_file_is_the_canonical_rendering_for_macos_arm64(self):
         self.assertEqual(self.pins.document["target"], "macos-arm64")
         self.assertEqual(PINS.read_text(encoding="utf-8"), FETCH.render(self.pins.document))
+
+    def test_no_crate_row_is_committed_and_the_note_says_where_they_come_from(self):
+        self.assertEqual({row["kind"] for row in self.rows}, {"npm-tarball", "pypi-wheel", "release-download"})
+        self.assertEqual(rows_with(self.rows, "tool build provenance"), [])
+        note = self.pins.document["note"]
+        for words in ("Cargo.lock", "fetch-pinned-inputs.py", RESOLVED_NAME):
+            self.assertIn(words, note)
 
     def test_the_resource_rows_are_selected_by_kind_and_file(self):
         by_key = {(row["kind"], row["file"]): row for row in self.rows}
@@ -587,40 +664,21 @@ class CommittedPinFileTests(unittest.TestCase):
                 self.assertTrue(selected)
                 self.assertEqual({row["kind"] for row in selected}, {kind})
 
-    def test_crate_rows_and_only_they_are_tool_build_provenance(self):
-        crates = [row for row in self.rows if row["kind"] == "crate"]
-        self.assertTrue(crates)
-        self.assertEqual(crates, rows_with(self.rows, "tool build provenance"))
-        self.assertEqual({tuple(row["use"]) for row in crates}, {("tool build provenance",)})
-
-    def test_every_crate_row_is_a_package_of_the_root_lock_with_its_checksum(self):
-        # Runs everywhere (no Cargo): a lock change that moves a tool dependency to another version
-        # leaves a row the lock no longer has, and this fails until the rows are written again with
-        # `fetch-pinned-inputs.py --write-crate-rows` (the message of the check names the command).
-        import tomllib
-        packages = {}
-        for package in tomllib.loads(self.lock)["package"]:
-            packages.setdefault((package["name"], package["version"]), []).append(package)
-        for row in (row for row in self.rows if row["kind"] == "crate"):
-            with self.subTest(crate=row["file"]):
-                entries = packages.get((row["name"], row["version"]), [])
-                self.assertEqual(len(entries), 1, "not a package of the root Cargo.lock: stale crate rows")
-                self.assertEqual(entries[0].get("source"), "registry+https://github.com/rust-lang/crates.io-index")
-                self.assertEqual(entries[0].get("checksum"), row["sha256"])
-
     @unittest.skipUnless(os.environ.get("CONNECT_PINS_TOOL_CLOSURE") == "1",
                          "needs Cargo and the registry: set CONNECT_PINS_TOOL_CLOSURE=1 (the macOS stage run does)")
-    def test_the_crate_rows_equal_the_tool_closure_of_the_current_lock(self):
+    def test_the_tool_closure_cargo_prints_resolves_against_the_current_lock(self):
         result = subprocess.run(
             [str(ROOT / "scripts/repo-cargo"), "tree", "--locked", "--manifest-path",
              str(REPOSITORY / "Cargo.toml"), *FETCH.TOOL_CLOSURE_ARGUMENTS],
             cwd=REPOSITORY, capture_output=True, text=True, stdin=subprocess.DEVNULL)
         self.assertEqual(result.returncode, 0, result.stderr[-2000:])
-        expected = FETCH.crate_rows(result.stdout, self.lock)
-        committed = [row for row in self.rows if row["kind"] == "crate"]
-        self.assertEqual([row["file"] for row in committed], [row["file"] for row in expected],
-                         "stale crate rows: run fetch-pinned-inputs.py --write-crate-rows")
-        self.assertEqual(committed, expected)
+        lock = (REPOSITORY / "Cargo.lock").read_text(encoding="utf-8")
+        crates = FETCH.crate_rows(result.stdout, lock)
+        self.assertGreater(len(crates), 50)
+        document = FETCH.resolve(self.pins, crates)
+        self.assertEqual(FETCH.validate_document(document, resolved=True),
+                         crates + self.rows)
+        self.assertEqual(rows_with(document["pins"], "tool build provenance"), crates)
 
 
 if __name__ == "__main__":

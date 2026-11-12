@@ -963,7 +963,7 @@ fn a_constructed_preparation_needs_its_deadline_and_a_native_host() {
     // host or not. What is not served is said before what a host lacks.
     for native_host in [false, true] {
         let unserved = resolve(
-            native_host.then(|| Ok(None)),
+            native_host.then_some(Ok(None)),
             RuntimeOptionPolicy::Enabled(Box::new(policy.clone())),
             true,
         )

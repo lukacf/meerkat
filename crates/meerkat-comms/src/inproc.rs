@@ -325,9 +325,13 @@ struct NamespaceState {
     peers: HashMap<PubKey, InprocPeer>,
     /// Map from name to pubkey for name-based lookup.
     names: HashMap<String, PubKey>,
-    /// Wake routes of seated members, by key. A declared projection of their
-    /// owners' membership (published and retracted only from the owners'
-    /// machine effects); never an inbox and never a name claim.
+    /// Wake routes, by key; never an inbox and never a name claim. A mob
+    /// owner's routes are a declared projection of its membership (published
+    /// and retracted only from the owner's machine effects). A host
+    /// forwarder's routes stand in this namespace for members of another
+    /// namespace hosted by the same process that a member here is durably
+    /// linked to; a forwarder never publishes over an owner's route and
+    /// never retracts one.
     wake_routes: HashMap<PubKey, WakeRoute>,
     /// Live routes their runtime closed for peer ingress while it lives on
     /// (a stopped mob's live members). Never resolved for delivery and never a
@@ -807,12 +811,18 @@ impl InprocRegistry {
         self.state.write().namespaces.clear();
     }
 
-    /// Publish a seated member's wake route under `pubkey` in `namespace`.
+    /// Publish a wake route under `pubkey` in `namespace`.
     ///
-    /// Called only from the owner's machine effects (a seating transition).
+    /// Two kinds of caller publish. A mob owner publishes the route of a
+    /// member seated in `namespace`, only from its machine effects (a
+    /// seating transition). A host forwarder publishes a route that stands
+    /// in `namespace` for a member of another namespace hosted by the same
+    /// process, for a durable link a member of `namespace` holds to it; a
+    /// forwarder never publishes over an owner's route.
     /// The route occupies no name and never delivers: a live route under the
     /// same key always wins. Re-publishing replaces the key's route (the
-    /// owner's own projection rebuild). A zero key is refused.
+    /// publisher's own projection rebuild); the registry does not check who
+    /// published the route it replaces. A zero key is refused.
     pub fn publish_wake_route(
         &self,
         namespace: &str,
@@ -835,10 +845,12 @@ impl InprocRegistry {
         true
     }
 
-    /// Retract a wake route, only while it is still `waker`'s: an owner can
-    /// never retract a route another owner published for the same key.
-    /// Called only from the owner's machine effects (an unseating
-    /// transition or an endpoint migration).
+    /// Retract a wake route, only while it is still `waker`'s: a publisher
+    /// that passes its own owner can never retract a route another owner
+    /// published for the same key. Called by the route's publisher only: a
+    /// mob owner from its machine effects (an unseating transition or an
+    /// endpoint migration), a host forwarder when its durable link goes. A
+    /// forwarder never retracts an owner's route.
     pub fn retract_wake_route(
         &self,
         namespace: &str,
@@ -874,7 +886,15 @@ impl InprocRegistry {
     /// process and declared a link between them uses it to hand a wake to
     /// the member's own owner, which still answers from its machine. The
     /// read publishes and retracts nothing, wakes nobody and hands out no
-    /// inbox; `None` when the namespace has no wake route for the key.
+    /// inbox; `None` when the namespace has no wake route for the key (no
+    /// other namespace is consulted). A route whose owner is gone answers
+    /// `Some` with a `Weak` that does not upgrade: nothing in this process
+    /// can wake that member, as for the registry's own sends
+    /// (`mob_unavailable`).
+    ///
+    /// The answer is for forwarding a wake to the owner and for nothing
+    /// else: it is never passed to [`Self::retract_wake_route`] or
+    /// [`Self::publish_wake_route`].
     pub fn wake_route_owner_in_namespace(
         &self,
         namespace: &str,

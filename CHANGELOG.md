@@ -43,8 +43,10 @@ them.
   namespaces in one process and declared a link between them: the host hands
   a wake to the member's own owner, which still answers from its machine.
   The read publishes and retracts nothing, wakes nobody and hands out no
-  inbox, and the registry itself still never wakes a member from another
-  namespace.
+  inbox, and for a send scoped to a namespace the registry itself still
+  never wakes a member from another namespace. `publish_wake_route` and
+  `retract_wake_route` now document that second publisher: a host forwarder
+  never publishes over an owner's route and never retracts one.
 
 ## [0.9.14] - 2026-11-11
 

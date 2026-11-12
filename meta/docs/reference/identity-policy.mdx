@@ -232,6 +232,14 @@ only while the asker's record can be read and is shown to it: once an
 asker is removed, an agent reads no `provenance` on the agents that asker
 asked for. The host reads all of it.
 
+The list of an agent's schedules, which the answer of an archive, an
+unarchive and a removal and their plan carry (`schedules`), is the host's:
+the stdio gateway's caller is given it, and on the Console a caller with
+`runtime.admin`. A schedule that targets an agent may be anybody's, so
+every other caller (an agent that asks for the change, a Console caller
+without `runtime.admin`) is told what became of the schedules and how many
+they are (`effect`, `count`), with no `schedules` list.
+
 ## Peers a caller may name
 
 A change names as peers only agents its caller is shown, and an agent

@@ -1317,12 +1317,14 @@ A change answers one of three results, each with `outcome` and
 | `pending_preparation` | The change committed, and at least one of its `agents` is not usable yet |
 
 Each entry of `agents` is `{name, state, spec_digest?, spec_revision?,
-session_id?, seat?, instructions?}`. `state` is `committed`,
+session_id?, seat?, instructions?, schedules?}`. `state` is `committed`,
 `pending_preparation`, `archiving`, `archived`, `restored`, `retiring` or
 `removed`. `seat`, on a create, is `seated` or `owed` (see
 [`meta/identity/create`](#metaidentitycreate)). `instructions` is absent
 unless the launch has an instruction step for updates (see
-[`meta/identity/update`](#metaidentityupdate)).
+[`meta/identity/update`](#metaidentityupdate)). `schedules` is on the first
+answer of an archive, an unarchive and a removal, and says what became of
+the schedules that target the agent (see those methods below).
 
 ### Refusals
 
@@ -1496,6 +1498,13 @@ change (`meta/identity/plan`) carries the same member with the list the
 change would answer, as the schedules are when the plan is made; it is no
 part of the rendering.
 
+The list is the host's. `schedules` (the list) is written for the stdio
+gateway's caller and, on the Console, for a caller with `runtime.admin`. A
+schedule that targets an agent may be anybody's, so every other caller (an
+agent that asks for the change, a Console caller without `runtime.admin`)
+is answered `{effect, count, incomplete?}` with no `schedules` list, on the
+change's answer, on its plan and on `meta/identity/operation`.
+
 A schedule a person resumes by name while its agent is archived is theirs
 from then on: it stays Active, its fires end as delivery failures while the
 agent is archived, and the unarchive leaves it as it is. A person's pause
@@ -1522,10 +1531,14 @@ Known limitations: Meerkat's own schedule methods (`schedule/create`,
 `schedule/update`, REST) do not judge the target, and neither does a
 schedule tool call for a target that names only a session, so such a
 schedule for an archived agent is active and each of its fires is refused
-at the delivery. An agent's schedule tool call that reads its target just
-before the target's archive and writes just after it can leave an active
-schedule the same way. A schedule that names only the session of a removed
-agent is not ended by the removal. A change of a paused schedule's target
+at the delivery. A schedule that names only a session and is created while
+the session's agent is archived is active the same way; a later archive of
+the agent is followed. An agent's schedule tool call that reads its target
+just before the target's archive and writes just after it can leave an
+active schedule the same way. A schedule that names only the session of a
+removed agent is not ended by the removal: it stays active, each of its
+fires is refused as a missing target and no turn runs; end it by hand. A
+change of a paused schedule's target
 through Meerkat's own methods makes its pause a pause by name: the
 unarchive does not resume it.
 A launch whose host gives the family no schedules (an embedded Rust host
@@ -1593,9 +1606,11 @@ the stdio gateway, for any held change.
 While changes are held, every change of the family is refused the retryable
 `changes_held` and nothing of it is written. The hold is the host's: its
 operator's on the stdio gateway, or a signed-in person's with
-`runtime.admin` on the Console; an agent holds nothing. It is not durable:
-a host that holds changes across a deploy holds them again at its next
-start.
+`runtime.admin` on the Console; an agent holds nothing. A hold does not
+survive a restart of the host: after a restart, a deploy or a crash the
+changes are carried out again until the hold is set again, so a host that
+means to keep changes held sets the hold at its start, before it serves
+callers.
 
 ### `meta/identity/directory` and `meta/identity/plan`
 

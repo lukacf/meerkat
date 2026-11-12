@@ -69,6 +69,7 @@ pub mod mcp_apps_sandbox;
 pub mod member_comms_id;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod member_mcp_custody;
+pub(crate) mod member_socket_place;
 pub(crate) mod member_status_observation;
 pub mod member_tool_policy;
 pub mod memory;

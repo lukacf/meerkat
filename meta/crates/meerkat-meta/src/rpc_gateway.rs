@@ -19733,6 +19733,18 @@ external_addressable = true
     } else {
         None
     };
+    // One line at the start: with the member socket option the gateway
+    // serves one member, and this roster declares more.
+    if gateway_options.member_comms_address.is_some()
+        && let Some(roster) = boot_roster.as_deref()
+        && roster.len() > 1
+    {
+        tracing::warn!(
+            declared_members = roster.len(),
+            "{}",
+            crate::member_socket_place::SEVERAL_DECLARED_MEMBERS_WARNING
+        );
+    }
     // Each identity with a pending first-boot row waits for the roster
     // pass's declaration of it: the mob materializes none of them at start,
     // and refuses their wakes retryable until the declaration that carries

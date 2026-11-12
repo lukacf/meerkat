@@ -3196,9 +3196,9 @@ async fn a_held_change_is_carried_out_once_a_person_approved_it() {
     // two sees the record before the runtime serves it, so the row waits
     // for it within its bound.
     let identities = runtime.identity_runtime().expect("the identity runtime");
-    let scout = AgentIdentity::parse("scout").unwrap();
+    let registered_as = AgentIdentity::parse("scout").unwrap();
     let deadline = std::time::Instant::now() + TURN_BOUND;
-    while identities.registered_spec(&scout).await.is_err() {
+    while identities.registered_spec(&registered_as).await.is_err() {
         assert!(
             std::time::Instant::now() < deadline,
             "the identity runtime serves the agent from its record"

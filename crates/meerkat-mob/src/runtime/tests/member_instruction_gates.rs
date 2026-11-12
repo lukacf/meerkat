@@ -27,6 +27,8 @@ use meerkat_core::{
 };
 use meerkat_runtime::RuntimeStore;
 
+mod operator_instruction_reseat;
+
 const WAIT: Duration = Duration::from_secs(30);
 const BODY: &str = "Always state your uncertainty explicitly.";
 
@@ -183,6 +185,44 @@ impl Fixture {
         non_forwarding_decorator: bool,
         fork_instruction_policy: Option<meerkat_core::ForkInstructionPolicy>,
     ) -> Self {
+        let (fixture, session_id) = Self::unseated(
+            if non_forwarding_decorator {
+                ServiceDouble::NonForwarding
+            } else {
+                ServiceDouble::Real
+            },
+            fork_instruction_policy,
+        )
+        .await;
+        fixture
+            .handle
+            .spawn_spec(
+                SpawnMemberSpec::new(ProfileName::from("lead"), fixture.identity.clone())
+                    .with_launch_mode(crate::launch::MemberLaunchMode::Resume {
+                        bridge_session_id: session_id.clone(),
+                        resume_from_role: None,
+                    }),
+            )
+            .await
+            .expect("restore the member onto its durable session");
+        assert_eq!(
+            fixture
+                .handle
+                .resolve_bridge_session_id(&fixture.identity)
+                .await
+                .as_ref(),
+            Some(&session_id),
+            "the member runs on the restored session"
+        );
+        fixture
+    }
+
+    /// The mob and the durable session its member will be seated on, with
+    /// nobody seated yet: the session exists before the member.
+    async fn unseated(
+        double: ServiceDouble,
+        fork_instruction_policy: Option<meerkat_core::ForkInstructionPolicy>,
+    ) -> (Self, SessionId) {
         let root = tempfile::Builder::new()
             .prefix("meerkat-member-instruction-")
             .tempdir()
@@ -234,12 +274,16 @@ impl Fixture {
             ..ToolConfig::default()
         };
         let mob_id = definition.id.clone();
-        let mob_service: Arc<dyn MobSessionService> = if non_forwarding_decorator {
-            Arc::new(NonForwardingDecorator {
+        let mob_service: Arc<dyn MobSessionService> = match double {
+            ServiceDouble::Real => service.clone(),
+            ServiceDouble::NonForwarding => Arc::new(NonForwardingDecorator {
                 inner: service.clone(),
-            })
-        } else {
-            service.clone()
+                records_need_a_live_actor: false,
+            }),
+            ServiceDouble::RecordsNeedALiveActor => Arc::new(NonForwardingDecorator {
+                inner: service.clone(),
+                records_need_a_live_actor: true,
+            }),
         };
         let mut builder = MobBuilder::new(definition, MobStorage::in_memory())
             .with_session_service(Arc::clone(&mob_service))
@@ -282,30 +326,17 @@ impl Fixture {
         MobSessionService::discard_live_session(&*service, &created.session_id)
             .await
             .expect("discard the creating actor");
-        handle
-            .spawn_spec(
-                SpawnMemberSpec::new(ProfileName::from("lead"), identity.clone()).with_launch_mode(
-                    crate::launch::MemberLaunchMode::Resume {
-                        bridge_session_id: created.session_id.clone(),
-                        resume_from_role: None,
-                    },
-                ),
-            )
-            .await
-            .expect("restore the member onto its durable session");
-        assert_eq!(
-            handle.resolve_bridge_session_id(&identity).await.as_ref(),
-            Some(&created.session_id),
-            "the member runs on the restored session"
-        );
-        Self {
-            _root: root,
-            handle,
-            identity,
-            client,
-            service,
-            mob_service,
-        }
+        (
+            Self {
+                _root: root,
+                handle,
+                identity,
+                client,
+                service,
+                mob_service,
+            },
+            created.session_id,
+        )
     }
 
     async fn activate(
@@ -2945,8 +2976,26 @@ async fn a_fork_of_a_running_source_names_a_tool_the_child_cannot_call() {
 /// Forwards every session-service method to the real persistent service
 /// except `activate_instruction_under_runtime_turn_boundary`, which keeps the
 /// trait default. Generated mechanically from the trait signatures.
+///
+/// With `records_need_a_live_actor` it also forwards the mob's operator
+/// instruction seam, and answers a record for a session that has no live
+/// actor `session not found`: a service whose store-only record cannot
+/// reach a member's conversation until the member's wake has loaded it (a
+/// conversation the host keeps archived until then).
 struct NonForwardingDecorator {
     inner: Arc<Service>,
+    records_need_a_live_actor: bool,
+}
+
+/// Which session service a fixture's mob runs over.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ServiceDouble {
+    /// The real persistent service.
+    Real,
+    /// [`NonForwardingDecorator`] as it stands.
+    NonForwarding,
+    /// [`NonForwardingDecorator`] with `records_need_a_live_actor`.
+    RecordsNeedALiveActor,
 }
 
 #[async_trait]
@@ -3263,6 +3312,70 @@ impl MobSessionService for NonForwardingDecorator {
     // Required, so forwarded: the trait has no default to keep.
     fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
         MobSessionService::session_comms_identity_root(self.inner.as_ref())
+    }
+
+    async fn record_member_instruction_target(
+        self: Arc<Self>,
+        delivery: crate::operator_instruction::MemberInstructionDelivery,
+    ) -> Result<
+        meerkat_core::InstructionRecordReceipt,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        if !self.records_need_a_live_actor {
+            return Err(meerkat_core::service::SessionInstructionError::DurabilityUnavailable);
+        }
+        let session_id = delivery.session_id().clone();
+        let live =
+            <Service as MobSessionService>::live_session_actor_registered(&self.inner, &session_id)
+                .await?;
+        if !live {
+            return Err(SessionError::NotFound { id: session_id }.into());
+        }
+        <Service as MobSessionService>::record_member_instruction_target(
+            Arc::clone(&self.inner),
+            delivery,
+        )
+        .await
+    }
+
+    async fn read_member_instructions(
+        &self,
+        session_ids: &[SessionId],
+    ) -> Vec<
+        Result<
+            meerkat_core::service::SessionInstructionRead,
+            meerkat_core::service::SessionInstructionError,
+        >,
+    > {
+        if !self.records_need_a_live_actor {
+            return session_ids
+                .iter()
+                .map(|_| Err(meerkat_core::service::SessionInstructionError::DurabilityUnavailable))
+                .collect();
+        }
+        <Service as MobSessionService>::read_member_instructions(&self.inner, session_ids).await
+    }
+
+    async fn bind_seated_member_session(
+        &self,
+        session_id: &SessionId,
+        mob_id: &str,
+        member: &str,
+    ) -> Result<(), SessionError> {
+        if !self.records_need_a_live_actor {
+            return Err(SessionError::Unsupported(
+                "this session service binds no dormant seat's member session; a wrapper must \
+                 forward bind_seated_member_session"
+                    .to_string(),
+            ));
+        }
+        <Service as MobSessionService>::bind_seated_member_session(
+            &self.inner,
+            session_id,
+            mob_id,
+            member,
+        )
+        .await
     }
 
     async fn append_system_notice_under_runtime_turn_boundary(

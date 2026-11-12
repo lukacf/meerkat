@@ -341,7 +341,9 @@ pub enum InstructionNextSessionReason {
     /// The instructions text is larger than one instruction record holds.
     BodyTooLarge,
     /// The mob could not take the instruction record now: the change is
-    /// committed, and the record is written at the mob's next start.
+    /// committed, and the record is written by the agent's next update of
+    /// its instructions, or at its first delivery or change after the
+    /// mob's next start.
     RecordUnavailable,
 }
 

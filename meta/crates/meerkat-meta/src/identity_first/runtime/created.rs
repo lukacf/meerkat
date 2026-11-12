@@ -607,6 +607,12 @@ impl IdentityRuntime {
             // Core holds the name for no identity this runtime serves (the
             // change removed it): the registration is gone, as asked.
             Err(IdentityRuntimeError::UnknownIdentity(_)) => Ok(false),
+            Ok(true) => {
+                // A change of an agent is a use of it: one this process has
+                // not compared yet has its instructions compared now.
+                self.append_owed_instructions_before_delivery(name).await;
+                Ok(true)
+            }
             followed => followed,
         }
     }
@@ -663,15 +669,11 @@ impl IdentityRuntime {
         match created {
             Some(true) => self.refresh_created_registration(name).await,
             Some(false) => Ok(true),
-            None => {
-                let served = self.admit_unregistered_name(name).await?;
-                if served {
-                    // The agent's first registration in this process: its
-                    // instructions are compared with what the mob holds.
-                    self.append_changed_instructions_at_first_door(name).await;
-                }
-                Ok(served)
-            }
+            // Registered now, from its row. Its instructions are not
+            // compared here: this funnel also serves reads. A delivery or a
+            // change compares an agent this process has not compared yet
+            // (`append_owed_instructions_before_delivery`).
+            None => self.admit_unregistered_name(name).await,
         }
     }
 

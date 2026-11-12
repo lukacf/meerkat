@@ -1871,12 +1871,28 @@ async fn an_edit_of_an_archived_agent_reaches_it_after_its_unarchive() {
     rig.shutdown().await;
 }
 
+/// Send `marker` to `identity` through the send door and return once the
+/// send is admitted, without waiting for its run.
+async fn send_only(rig: &Rig, identity: &str, marker: &str) {
+    let sent = rig
+        .rpc(
+            "meta/send",
+            json!({"identity": identity, "content": marker}),
+        )
+        .await;
+    assert!(sent["error"].is_null(), "the send is admitted: {sent:#?}");
+}
+
 /// A change of an archived agent's row that nothing reported before the
-/// gateway stopped: the next start compares the agent against the
-/// conversation its archive kept, records the change, and the agent runs on
-/// it after its unarchive.
+/// gateway stopped. The next start records nothing for it: a start reads
+/// no conversation on behalf of an agent whose record is its row. Its
+/// unarchive through Core's handle is no delivery and records nothing
+/// either. The agent's first delivery after the start compares it against
+/// the conversation its archive kept and records the change before the
+/// delivery is submitted, and the run that delivery wakes carries the entry.
 #[tokio::test(flavor = "multi_thread")]
-async fn an_archived_agents_change_made_before_a_stop_is_recorded_at_start() {
+async fn an_archived_agents_change_made_before_a_stop_is_recorded_at_its_first_delivery_after_a_start()
+ {
     let temp = tempfile::tempdir().unwrap();
     let mob = fresh_mob_id();
     let mut rig = boot(temp.path(), &mob, vec![configured_spec(&[])]).await;
@@ -1910,13 +1926,10 @@ async fn an_archived_agents_change_made_before_a_stop_is_recorded_at_start() {
     rig.shutdown_for_reopen().await;
 
     let mut rig = boot(temp.path(), &mob, vec![configured_spec(&[])]).await;
-    let record = rig.record(CREATED).await;
     assert_eq!(
-        record
-            .as_ref()
-            .map(|record| (record["revision"].clone(), record["effect"].clone())),
-        Some((json!(1), json!("active"))),
-        "the start recorded the archived agent's change: {record:#?}"
+        rig.record(CREATED).await,
+        None,
+        "the start alone records nothing for the archived agent"
     );
     let unarchived = rig
         .mob()
@@ -1932,12 +1945,35 @@ async fn an_archived_agents_change_made_before_a_stop_is_recorded_at_start() {
         ),
         "{unarchived:?}"
     );
-    rig.turn(CREATED, "FIRST-AFTER-UNARCHIVE").await;
+    assert_eq!(
+        rig.record(CREATED).await,
+        None,
+        "an unarchive through Core's handle is no delivery: nothing is recorded"
+    );
+    assert!(
+        rig.dormant(CREATED),
+        "the agent is seated again without being woken"
+    );
+
+    send_only(&rig, CREATED, "FIRST-AFTER-UNARCHIVE").await;
+    let record = rig.record(CREATED).await;
+    assert_eq!(
+        record
+            .as_ref()
+            .map(|record| (record["revision"].clone(), record["effect"].clone())),
+        Some((json!(1), json!("active"))),
+        "the record exists when the agent's first delivery answers: {record:#?}"
+    );
+    assert!(
+        rig.asked("FIRST-AFTER-UNARCHIVE").await,
+        "the delivery's run is asked"
+    );
+    rig.settled(CREATED, "FIRST-AFTER-UNARCHIVE").await;
     let request = entries(&rig.request_messages("FIRST-AFTER-UNARCHIVE"));
     assert_eq!(
         request.len(),
         1,
-        "the run that woke the agent carries the entry: {request:#?}"
+        "the run that delivery woke carries the entry: {request:#?}"
     );
     assert!(
         carries(&request[0], &["Keep BETA records."]),
@@ -2010,15 +2046,12 @@ async fn an_update_that_leaves_the_sections_as_they_are_writes_nothing() {
     rig.shutdown().await;
 }
 
-/// A change of a store-owned agent's row that nothing reported before the
-/// gateway stopped: the next start compares the agent as it compares a
-/// configured one, records the change, wakes nothing, and the agent's next
-/// run carries the text.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_store_owned_agents_change_made_before_a_stop_is_recorded_at_start() {
-    let temp = tempfile::tempdir().unwrap();
+/// The store-owned agent built with one text, its row changed to another
+/// through Core's handle with nothing reporting the change, and the
+/// gateway stopped: the state a start finds. Answers the mob's id.
+async fn store_owned_agent_changed_before_a_stop(state: &Path) -> String {
     let mob = fresh_mob_id();
-    let mut rig = boot(temp.path(), &mob, vec![configured_spec(&[])]).await;
+    let mut rig = boot(state, &mob, vec![configured_spec(&[])]).await;
     rig.create(&["Keep ALPHA records."]).await;
     rig.turn(CREATED, "FIRST-TURN").await;
     rig.update(
@@ -2033,20 +2066,285 @@ async fn a_store_owned_agents_change_made_before_a_stop_is_recorded_at_start() {
         "nothing reported the change"
     );
     rig.shutdown_for_reopen().await;
+    mob
+}
+
+/// The revision of `name`'s instruction record, if the mob holds one.
+async fn record_revision(rig: &Rig, name: &str) -> Option<Value> {
+    rig.record(name)
+        .await
+        .map(|record| record["revision"].clone())
+}
+
+/// A change of a store-owned agent's row that nothing reported before the
+/// gateway stopped. The next start records nothing for it and wakes
+/// nothing: rows can be many, and a start reads no conversation on behalf
+/// of one. A read of the agent records nothing either. The agent's first
+/// delivery after the start records the change before the delivery is
+/// submitted, and the run that delivery wakes carries the text, as a
+/// configured agent's first run after a start does.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_store_owned_agents_change_made_before_a_stop_is_recorded_at_its_first_delivery_after_a_start()
+ {
+    let temp = tempfile::tempdir().unwrap();
+    let mob = store_owned_agent_changed_before_a_stop(temp.path()).await;
 
     let mut rig = boot(temp.path(), &mob, vec![configured_spec(&[])]).await;
-    let record = rig.record(CREATED).await;
     assert_eq!(
-        record.as_ref().map(|record| record["revision"].clone()),
-        Some(json!(1)),
-        "the start recorded the change: {record:#?}"
+        record_revision(&rig, CREATED).await,
+        None,
+        "the start alone records nothing"
     );
-    assert!(rig.dormant(CREATED), "the start woke nothing");
-    rig.recorded(CREATED).await;
+    let read = rig.rpc("meta/identity/get", json!({"name": CREATED})).await;
+    assert_eq!(
+        read["result"]["instructions"],
+        json!(["Keep BETA records."]),
+        "the agent reads with its current text: {read:#}"
+    );
+    assert_eq!(
+        record_revision(&rig, CREATED).await,
+        None,
+        "a read of the agent, and of its instruction status, records nothing"
+    );
+    assert!(rig.dormant(CREATED), "the start and the reads woke nothing");
+
+    send_only(&rig, CREATED, "SECOND-TURN").await;
+    assert_eq!(
+        record_revision(&rig, CREATED).await,
+        Some(json!(1)),
+        "the record exists when the agent's first delivery answers"
+    );
+    assert!(
+        rig.asked("SECOND-TURN").await,
+        "the delivery's run is asked"
+    );
+    rig.settled(CREATED, "SECOND-TURN").await;
+    let request = entries(&rig.request_messages("SECOND-TURN"));
+    assert_eq!(
+        request.len(),
+        1,
+        "the run that delivery woke carries the entry: {request:#?}"
+    );
+    assert!(carries(&request[0], &["Keep BETA records."]));
+    rig.shutdown().await;
+}
+
+/// The first change of the agent through the identity methods after a
+/// start is a use of it too: an update that names no instructions records
+/// the change nothing reported before the stop, says nothing of
+/// instructions in its answer and wakes nothing, and the agent's next run
+/// carries the text.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_store_owned_agents_change_made_before_a_stop_is_recorded_at_its_first_change_after_a_start()
+ {
+    let temp = tempfile::tempdir().unwrap();
+    let mob = store_owned_agent_changed_before_a_stop(temp.path()).await;
+
+    let mut rig = boot(temp.path(), &mob, vec![configured_spec(&[])]).await;
+    assert!(
+        rig.runtime
+            .attach_identity_policy(identity_policy(), IdentityFamilyOptions::new()),
+        "the runtime serves identities and takes the policy"
+    );
+    assert_eq!(
+        record_revision(&rig, CREATED).await,
+        None,
+        "the start alone records nothing"
+    );
+    let read = rig.rpc("meta/identity/get", json!({"name": CREATED})).await;
+    let digest = read["result"]["spec_digest"].clone();
+    assert!(digest.is_string(), "the agent reads: {read:#}");
+    let updated = rig
+        .rpc(
+            "meta/identity/update",
+            json!({"request_id": "rename-1", "name": CREATED, "expected_spec_digest": digest,
+                   "set": {"display_name": "Keeper"}}),
+        )
+        .await;
+    assert_eq!(updated["result"]["outcome"], json!("done"), "{updated:#}");
+    assert!(
+        updated["result"]["agents"][0].get("instructions").is_none(),
+        "an update that names no instructions says nothing of them: {updated:#}"
+    );
+    assert_eq!(
+        record_revision(&rig, CREATED).await,
+        Some(json!(1)),
+        "the record exists when the agent's first change answers"
+    );
+    assert!(rig.dormant(CREATED), "a change wakes nothing");
+
     rig.turn(CREATED, "SECOND-TURN").await;
     let request = entries(&rig.request_messages("SECOND-TURN"));
-    assert_eq!(request.len(), 1, "{request:#?}");
+    assert_eq!(
+        request.len(),
+        1,
+        "the agent's next run carries the entry: {request:#?}"
+    );
     assert!(carries(&request[0], &["Keep BETA records."]));
+    rig.shutdown().await;
+}
+
+/// The limit, pinned as it is: a run the mob starts itself, with no
+/// delivery through the gateway before it, runs on the instructions the
+/// agent's conversation holds and records nothing. The change nothing
+/// reported before the stop is recorded by the first delivery after it and
+/// reaches a run that starts after that.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_the_mob_starts_itself_before_any_delivery_records_nothing_and_the_next_delivery_does()
+ {
+    let temp = tempfile::tempdir().unwrap();
+    let mob = store_owned_agent_changed_before_a_stop(temp.path()).await;
+
+    let mut rig = boot(temp.path(), &mob, vec![configured_spec(&[])]).await;
+    assert_eq!(
+        record_revision(&rig, CREATED).await,
+        None,
+        "the start alone records nothing"
+    );
+    // The host's own work, admitted through Core's handle: no delivery door
+    // of the gateway is passed, and Core wakes the member itself.
+    let handle = rig.mob();
+    let member = handle
+        .get_member(&Rig::member(CREATED))
+        .await
+        .expect("Core's roster read")
+        .expect("Core holds the member");
+    tokio::time::timeout(
+        TURN_BOUND,
+        handle.submit_work_with_mode(
+            member.agent_runtime_id,
+            member.fence_token,
+            meerkat_mob::WorkRef::new(),
+            meerkat_mob::WorkSpec::new("MOB-STARTED-RUN", meerkat_mob::WorkOrigin::Internal),
+            meerkat_core::types::HandlingMode::Queue,
+        ),
+    )
+    .await
+    .expect("the submit is answered")
+    .expect("Core admits the work");
+    assert!(
+        rig.asked("MOB-STARTED-RUN").await,
+        "the mob's own run is asked"
+    );
+    rig.settled(CREATED, "MOB-STARTED-RUN").await;
+    let request = entries(&rig.request_messages("MOB-STARTED-RUN"));
+    assert!(
+        request.is_empty(),
+        "a run with no delivery before it runs on what its conversation holds: {request:#?}"
+    );
+    assert_eq!(
+        record_revision(&rig, CREATED).await,
+        None,
+        "and it records nothing"
+    );
+
+    send_only(&rig, CREATED, "FIRST-DELIVERY").await;
+    assert_eq!(
+        record_revision(&rig, CREATED).await,
+        Some(json!(1)),
+        "the record exists when the first delivery answers"
+    );
+    assert!(
+        rig.asked("FIRST-DELIVERY").await,
+        "the delivery's run is asked"
+    );
+    rig.settled(CREATED, "FIRST-DELIVERY").await;
+    rig.recorded(CREATED).await;
+    rig.turn(CREATED, "LATER-TURN").await;
+    let request = entries(&rig.request_messages("LATER-TURN"));
+    assert_eq!(
+        request.len(),
+        1,
+        "a run that starts after the record carries the entry: {request:#?}"
+    );
+    assert!(carries(&request[0], &["Keep BETA records."]));
+    rig.shutdown().await;
+}
+
+/// A start compares no agent whose record is its row. Three such agents,
+/// each with a conversation, a change nothing reported before the stop and
+/// no instruction record: after the start alone the mob holds no record of
+/// any of them. A comparison that ran would have written one, and the
+/// comparison is the only reader of a conversation's recorded sections (the
+/// source guard pins that). One delivery to one of them records that one
+/// and no other.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_start_compares_no_store_owned_agent_and_a_delivery_compares_its_own() {
+    const ROWS: [&str; 3] = ["row-a", "row-b", "row-c"];
+    let spec = |name: &str, instructions: &str| {
+        meerkat_mob::CreatedIdentitySpec::new(name, "worker")
+            .with_additional_instructions(vec![instructions.to_string()])
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let mob = fresh_mob_id();
+    let mut rig = boot(temp.path(), &mob, vec![configured_spec(&[])]).await;
+    let created = rig
+        .mob()
+        .create_store_owned_identities(
+            meerkat_mob::StoreOwnedIdentityCreate::new(
+                operation("create-rows"),
+                host(),
+                ROWS.iter()
+                    .map(|name| {
+                        meerkat_mob::CreatedIdentityRequest::new(spec(name, "Keep ALPHA records."))
+                    })
+                    .collect(),
+            ),
+            allow(),
+        )
+        .await
+        .map(|created| created.change);
+    assert!(
+        matches!(
+            created,
+            Ok(meerkat_mob::IdentityChangeOutcome::Committed { .. })
+        ),
+        "Core creates the agents: {created:?}"
+    );
+    for name in ROWS {
+        rig.turn(name, &format!("FIRST-TURN-OF-{name}")).await;
+        rig.update_spec(
+            &format!("update-{name}"),
+            spec(name, "Keep ALPHA records."),
+            spec(name, "Keep BETA records."),
+        )
+        .await;
+        assert_eq!(
+            record_revision(&rig, name).await,
+            None,
+            "nothing reported {name}'s change"
+        );
+    }
+    rig.shutdown_for_reopen().await;
+
+    let mut rig = boot(temp.path(), &mob, vec![configured_spec(&[])]).await;
+    for name in ROWS {
+        assert_eq!(
+            record_revision(&rig, name).await,
+            None,
+            "the start compared nothing for {name}"
+        );
+        assert!(rig.dormant(name), "the start woke nothing: {name}");
+    }
+
+    send_only(&rig, "row-b", "DELIVERY-TO-ROW-B").await;
+    assert_eq!(
+        record_revision(&rig, "row-b").await,
+        Some(json!(1)),
+        "the delivery recorded its own agent's change"
+    );
+    for name in ["row-a", "row-c"] {
+        assert_eq!(
+            record_revision(&rig, name).await,
+            None,
+            "a delivery to another agent compares nothing for {name}"
+        );
+    }
+    assert!(
+        rig.asked("DELIVERY-TO-ROW-B").await,
+        "the delivery's run is asked"
+    );
+    rig.settled("row-b", "DELIVERY-TO-ROW-B").await;
     rig.shutdown().await;
 }
 
@@ -2849,7 +3147,9 @@ fn one_function_owns_the_instruction_records() {
             }
         }
     }
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let root =
+        Path::new(&std::env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets the crate directory"))
+            .join("src");
     let mut sources = Vec::new();
     rust_sources(&root, &mut sources);
     assert!(sources.len() > 100, "the crate's sources are read");
@@ -2872,9 +3172,36 @@ fn one_function_owns_the_instruction_records() {
                 ("identity_first/runtime/created.rs", 1),
             ],
         ),
+        // An agent this process has not compared yet is compared before
+        // its first delivery is submitted and after its first change:
+        // the two sends, the governed send and the dispatch, and the
+        // registration that follows a change of a row. A start, a build
+        // and a read do not call it.
         (
-            ".append_changed_instructions_at_first_door(",
-            &[("identity_first/runtime/created.rs", 1)],
+            ".append_owed_instructions_before_delivery(",
+            &[
+                ("identity_first/runtime.rs", 4),
+                ("identity_first/runtime/created.rs", 1),
+            ],
+        ),
+        // The callers of the delivery funnel. A new one is a delivery,
+        // which calls `append_owed_instructions_before_delivery` right
+        // after it, or a read (as the status of a keyed send is), which
+        // does not: either way its count is raised here knowingly.
+        (
+            "self.ensure_current_registration(",
+            &[("identity_first/runtime.rs", 3)],
+        ),
+        (
+            "self.refuse_unless_addressable(",
+            &[("identity_first/runtime.rs", 3)],
+        ),
+        // The comparison is the one reader of the sections a
+        // conversation was built with; the two others are the session
+        // service decorators that forward the read.
+        (
+            ".recorded_build_instructions(",
+            &[("mob_handle_runtime.rs", 2)],
         ),
         (
             ".revoke_instruction_record_for_fresh_life(",
@@ -2919,6 +3246,8 @@ fn one_function_owns_the_instruction_records() {
     }
     assert!(
         violations.is_empty(),
-        "only {OWNER} keeps agents' instruction records: {violations:#?}"
+        "only {OWNER} keeps agents' instruction records and reads a conversation's \
+         recorded sections, and each delivery and each change of an agent compares an \
+         agent this process has not compared yet: {violations:#?}"
     );
 }

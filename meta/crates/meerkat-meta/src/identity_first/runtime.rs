@@ -10831,6 +10831,10 @@ impl IdentityRuntime {
         idempotency_key: &str,
     ) -> Result<meerkat_contracts::WireContinuationReceipt, IdentityRuntimeError> {
         self.refuse_unless_addressable(identity).await?;
+        // A delivery is a use of the agent: one this process has not
+        // compared yet has its instructions compared before it is submitted.
+        self.append_owed_instructions_before_delivery(identity)
+            .await;
         let member = crate::member_comms_id::roster_member_id_for_identity(identity.as_str());
         let refused = |refusal: meerkat_mob::MemberSendIdempotencyRefusal| {
             IdentityRuntimeError::KeyedSendRefused {
@@ -11259,6 +11263,10 @@ impl IdentityRuntime {
         // yet is registered from its row, and one it registered is read again
         // from its row, as at the other delivery doors.
         self.ensure_current_registration(identity).await?;
+        // A delivery is a use of the agent: one this process has not
+        // compared yet has its instructions compared before it is submitted.
+        self.append_owed_instructions_before_delivery(identity)
+            .await;
         // One deadline and one set of free rebinds for the whole send, armed
         // by its first wait and never re-armed (Core's owner-change churn),
         // taken at the send's first "not now".
@@ -12200,6 +12208,10 @@ impl IdentityRuntime {
             sender,
         } = request;
         self.refuse_unless_addressable(identity).await?;
+        // A delivery is a use of the agent: one this process has not
+        // compared yet has its instructions compared before it is submitted.
+        self.append_owed_instructions_before_delivery(identity)
+            .await;
         // A target Core does not hold yet (or whose first-boot row is still
         // to carry out) is seated first; Core's dispatch materializes it.
         self.seat_for_admission(identity, expected_alias, expected_spec_digest)
@@ -13470,6 +13482,10 @@ impl IdentityRuntime {
         // the door's typed refusal (a read Core could not serve, retryable),
         // or unknown here.
         self.ensure_current_registration(identity).await?;
+        // A delivery is a use of the agent: one this process has not
+        // compared yet has its instructions compared before it is submitted.
+        self.append_owed_instructions_before_delivery(identity)
+            .await;
         // A target Core does not hold yet (or whose first-boot row is still
         // to carry out) is seated first; Core's dispatch materializes it. A
         // maintenance dispatch bound to a captured incarnation seats nothing.

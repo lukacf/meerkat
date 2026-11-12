@@ -32,13 +32,19 @@
 //!   pass that reads an edited configuration, a door or a pass that reads a
 //!   changed row again, a spec the runtime's own update replaces
 //!   ([`IdentityRuntime::append_changed_instructions_on_registration`]);
-//! - when an agent is registered and no registration is replaced: its
-//!   first registration in this process, by whichever roster pass or
-//!   delivery door makes it, or its first since its host's configuration
-//!   listed it again
-//!   ([`IdentityRuntime::append_changed_instructions_at_first_door`] for a
-//!   door). A text that changed before a stop, or while the gateway was
-//!   down, without its record written is recorded then. One read of the
+//! - when an agent is registered and no registration is replaced. A
+//!   configured agent: at its first registration in this process, by
+//!   whichever roster pass makes it, or its first since its host's
+//!   configuration listed it again. An agent whose record is its row:
+//!   before its first delivery or after its first change in this process,
+//!   whichever registered it before (a roster pass, a door, Core's build
+//!   of its member)
+//!   ([`IdentityRuntime::append_owed_instructions_before_delivery`]). A
+//!   start reads the rows it serves in pages and compares none of them:
+//!   rows can be many, and a start reads no session on behalf of one. A
+//!   read compares nothing either. A
+//!   text that changed before a stop, or while the gateway was down,
+//!   without its record written is recorded then. One read of the
 //!   mob's records per process serves all of them
 //!   ([`InstructionRecordsAtStart`]): an agent whose record already holds
 //!   its text, or whose conversation was built with it, costs no
@@ -653,11 +659,50 @@ impl IdentityRuntime {
         })
     }
 
-    /// A delivery door registered `name` from its row, which nothing had
-    /// registered in this process, and holds no lifecycle lock: the agent
-    /// is compared as at any first registration, and the comparison takes
-    /// the identity's lifecycle lock itself.
-    pub(super) fn append_changed_instructions_at_first_door<'a>(
+    /// Whether this process has not compared `name` yet, so the comparison
+    /// at its first registration is still owed. An agent whose record is
+    /// its row is registered by a roster pass, a door or a build of its
+    /// member without being compared. Derived from the set the comparison
+    /// keeps of the agents it has served: nothing is stored for it, and it
+    /// reads nothing.
+    fn first_registration_comparison_owed(&self, name: &AgentIdentity) -> bool {
+        !self
+            .instruction_records_at_start
+            .compared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(name)
+    }
+
+    /// Before a delivery to `name` is submitted, and after a change of
+    /// `name` committed: an agent this process has not compared yet is
+    /// compared now, once ([`Self::first_registration_comparison_owed`]).
+    /// This is where an agent whose record is its row is first compared in
+    /// a process: a start registers such rows in pages and reads no session
+    /// for any of them, and a build of a member compares nothing. A
+    /// configured agent was compared when its roster pass registered it, so
+    /// this costs it one lookup. A read is not a use: no read calls this.
+    ///
+    /// The caller holds no lifecycle lock and is not inside a build of the
+    /// agent's member: the comparison takes the identity's lifecycle lock
+    /// itself.
+    pub(super) fn append_owed_instructions_before_delivery<'a>(
+        &'a self,
+        name: &'a AgentIdentity,
+    ) -> BoxedStep<'a, ()> {
+        Box::pin(async move {
+            if self.first_registration_comparison_owed(name) {
+                self.append_changed_instructions_at_first_registration(name)
+                    .await;
+            }
+        })
+    }
+
+    /// The comparison owed to `name` at its first registration in this
+    /// process ([`Self::append_owed_instructions_before_delivery`]): the
+    /// agent is compared as at any first registration, and the comparison
+    /// takes the identity's lifecycle lock itself. The caller holds none.
+    fn append_changed_instructions_at_first_registration<'a>(
         &'a self,
         name: &'a AgentIdentity,
     ) -> BoxedStep<'a, ()> {
@@ -798,6 +843,7 @@ impl IdentityRuntime {
                     }
                     if let OperatorInstructionTarget::Member {
                         agent_identity: member,
+                        ..
                     } = &record.target
                         && matches!(
                             mob.identity_entry(member),

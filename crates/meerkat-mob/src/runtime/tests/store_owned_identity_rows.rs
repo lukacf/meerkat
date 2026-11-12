@@ -3285,7 +3285,9 @@ const ORIGIN_READERS: &[(&str, &[&str], &str)] = &[
             "pub(super) fn host_composes_seat(",
         ],
         "the recovery source: the store-owned entries owed their seat; and the builds whose \
-         seat the host composes, a store-owned identity's, which Core seats from its row",
+         seat the host composes, a store-owned identity's, which Core seats from its row, \
+         with the same-session successor of such an identity's member, which is seated as \
+         a durable identity's",
     ),
     (
         "runtime/handle.rs",

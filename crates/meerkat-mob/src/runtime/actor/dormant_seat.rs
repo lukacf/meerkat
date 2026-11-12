@@ -1630,7 +1630,7 @@ impl MobActor {
         // The continuity the current incarnation was spawned with (its spawn
         // row's). An incarnation no spawn row records (a legacy reset) has
         // none to keep: refused, never defaulted.
-        spec.continuity_intent = self
+        let recorded = self
             .roster
             .read()
             .await
@@ -1641,6 +1641,19 @@ impl MobActor {
                     "no spawn row records the member's current continuity: a same-session successor cannot keep it",
                 )
             })?;
+        // A store-owned identity's seat is a durable identity's, whatever
+        // was recorded for it (an earlier release's seat, or the seat an
+        // adoption kept from a plain worker). Its successor takes no
+        // custody, so the plan asks here whose seat it is; any other
+        // member's successor keeps what was recorded.
+        spec.continuity_intent = if super::super::created_identity::host_composes_seat(
+            self.dsl_authority.state(),
+            agent_identity,
+        ) {
+            recorded.for_store_owned_successor(agent_identity)
+        } else {
+            recorded
+        };
         spec.initial_message = request.initial_message.clone();
         spec.launch_mode = crate::launch::MemberLaunchMode::Resume {
             bridge_session_id: session_id,

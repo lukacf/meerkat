@@ -72,7 +72,11 @@ them.
   objects of the host's process: the external tools, the compaction
   curator and the tool dispatch admission. No journal holds those and a
   process keeps them only for a member it built, so a build after a
-  restart has them only from this answer. The first build of the member's
+  restart has them only from this answer: a tool dispatch admission the
+  host sets here gates the member's tool calls after a restart too, and
+  its compaction curator still summarizes. In a process that already built
+  the member, the external tools overlay it kept for the member stands, as
+  for every member. The first build of the member's
   session also takes the context, the additional instructions, the system
   prompt override and the other inputs of a first build (the tool
   policies, the budget limits, the auth binding and the shell
@@ -119,11 +123,18 @@ them.
   `MemberBindingHistory::durable_identity_bindings`, so a host's checks
   over its durable identities cover it. Before, a store-owned identity on
   a profile without `durable = true` was seated ephemeral and was absent
-  from all of these. A plain worker's seat is unchanged, and so is the
-  refusal of a `durable = true` profile on a session service that keeps no
-  durable sessions (it still follows the profile alone). A seat recorded
-  before this release keeps its row until the identity's next seat (a
-  reset, a respawn, an unarchive).
+  from all of these. A plain worker's seat is unchanged. The local refusal
+  of a `durable = true` profile on a session service that keeps no durable
+  sessions still follows the profile alone: on such a service a
+  store-owned identity is seated and recorded durable as on any other, and
+  nothing is refused; its sessions end with the service, as before. A
+  placed store-owned identity requires durable sessions on its member
+  host, as every placed durable identity does (the materialize preflight
+  follows the recorded intent). A seat recorded ephemeral (by a release
+  from 0.9.9 on, or the seat an adoption kept from a plain worker) becomes
+  a durable identity's at the identity's next seat: a reset, an unarchive,
+  or a respawn of its member (`MobHandle::respawn_member`), which keeps
+  the conversation.
 
 ## [0.9.13] - 2026-11-11
 

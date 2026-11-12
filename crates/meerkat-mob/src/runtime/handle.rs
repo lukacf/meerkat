@@ -7133,8 +7133,27 @@ impl SpawnContinuityIntent {
         identity: &AgentIdentity,
         created_custody: bool,
     ) -> Self {
+        self.durable_when(identity, profile.durable || created_custody)
+    }
+
+    /// The intent the same-session successor of a store-owned identity's
+    /// member takes: the rule of [`Self::for_seat`] for a seat of such an
+    /// identity, which the successor is, though it takes no custody of its
+    /// own (it keeps its member's session). A seat an earlier release
+    /// recorded ephemeral, and the seat an adoption kept as its worker's,
+    /// become a durable identity's at this successor, with the
+    /// conversation kept. An explicit durable intent stays as it is.
+    #[must_use]
+    pub(crate) fn for_store_owned_successor(self, identity: &AgentIdentity) -> Self {
+        self.durable_when(identity, true)
+    }
+
+    /// The one rule: the default ephemeral intent becomes a durable
+    /// identity keyed by `identity` when `durable` holds; any other intent
+    /// stays as it is.
+    fn durable_when(self, identity: &AgentIdentity, durable: bool) -> Self {
         match self {
-            Self::Ephemeral if profile.durable || created_custody => Self::DurableIdentity {
+            Self::Ephemeral if durable => Self::DurableIdentity {
                 continuity_key: identity.as_str().to_string(),
             },
             other => other,

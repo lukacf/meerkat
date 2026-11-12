@@ -23,9 +23,15 @@
 //! build's preparation: before a fresh spawn under created custody is sent
 //! (the kickoff spawn of its create, and the spawn a start or a rotation
 //! owes it), and at every wake and boot restore of the member. Each build
-//! takes the profile and model overrides of the answer; the first build of
-//! the member's session also takes the build inputs that author it (the
-//! context, the instructions, the system prompt). No build relies on an
+//! takes the profile and model overrides of the answer and the overlays
+//! that are objects of the host's process (the external tools, the
+//! compaction curator and the tool dispatch admission), which no journal
+//! holds; in a process that already built the member, the external tools
+//! overlay it kept for the member stands, as for every member. The first
+//! build of the member's session also takes the build inputs that author
+//! it (the context, the instructions, the system prompt, and with them the
+//! tool policies, the budget limits, the auth binding and the shell
+//! environment). No build relies on an
 //! earlier answer: the host is the one source at each, so a restart
 //! changes nothing. The default composes nothing.
 //!
@@ -156,7 +162,9 @@ pub trait MemberBuildPreparer: Send + Sync {
     ///   process: the external tools, the compaction curator and the tool
     ///   dispatch admission. No journal holds them and a process keeps
     ///   them only for a member it built, so a build after a restart has
-    ///   them only from this answer;
+    ///   them only from this answer. In a process that already built the
+    ///   member, the external tools overlay it kept for the member stands,
+    ///   as for every member;
     /// - at the first build of the member's session only, the build inputs
     ///   that author it: the context, the additional instructions and the
     ///   system prompt override, and with them the tool access and

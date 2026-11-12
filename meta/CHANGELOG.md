@@ -218,7 +218,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   identities; and the launch's WorkGraph resume gate is asked before an
   interrupted run of it resumes. Before, each of these covered such an
   agent only on a `durable = true` profile. An agent seated by an earlier
-  build gets them from its next seat (a reset, a respawn, an unarchive).
+  build, or adopted into the store from a plain member, gets them from its
+  next seat: a reset, an unarchive, or a respawn (`meta/respawn`), which
+  keeps its conversation.
 
 ### Known limitations
 

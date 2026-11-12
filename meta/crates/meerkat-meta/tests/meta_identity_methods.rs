@@ -3986,6 +3986,123 @@ agents = ["gamma"]
     let _ = runtime.shutdown().await;
 }
 
+/// On the Console a change of one agent answers an agent the caller may
+/// not view exactly as a name no agent holds: the same error, whole, for
+/// an update, an archive, an unarchive, a removal and an adoption. Nothing
+/// is changed. An agent the caller may view and may not change is refused
+/// as access denied.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_console_answers_a_change_of_an_agent_its_caller_may_not_view_as_a_name_no_agent_holds()
+{
+    const ROOT: &str = "root@example.org";
+    const ANN: &str = "ann@example.org";
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, app) = console_under(
+        temp.path(),
+        r#"
+enabled = true
+admins = ["root@example.org"]
+
+[[rules]]
+id = "works"
+actions = ["agent.identity.create", "agent.view", "agent.identity.manage", "agent.identity.remove"]
+
+[[rules]]
+id = "not-beta"
+effect = "deny"
+actions = ["agent.view", "agent.identity.manage", "agent.identity.remove"]
+agents = ["beta"]
+
+[[rules]]
+id = "reads-gamma-only"
+effect = "deny"
+actions = ["agent.identity.manage", "agent.identity.remove"]
+agents = ["gamma"]
+"#,
+    )
+    .await;
+    let policy = IdentityCreationPolicy::parse(&json!({
+        "enabled": true,
+        "approval": {"rules": [{
+            "change": ["create", "descriptive", "archive", "remove", "adopt"],
+            "requester": {"kind": "human"},
+            "target": {"profile": ["worker"]},
+            "outcome": {"kind": "allow"},
+        }]},
+    }))
+    .expect("the policy parses")
+    .expect("the policy is enabled");
+    assert!(runtime.attach_identity_policy(Arc::new(policy), IdentityFamilyOptions::new()));
+    let made = console_rpc(
+        &app,
+        Some(ROOT),
+        "meta/identity/create",
+        json!({"request_id": "root-1", "agents": [
+            {"name": "beta", "profile": "worker"},
+            {"name": "gamma", "profile": "worker"},
+        ]}),
+    )
+    .await;
+    assert_eq!(console_ok(&made)["outcome"], json!("done"), "{made:#}");
+    let read = |name: &'static str| {
+        let app = app.clone();
+        async move {
+            let read =
+                console_rpc(&app, Some(ROOT), "meta/identity/get", json!({"name": name})).await;
+            console_ok(&read).clone()
+        }
+    };
+    let beta = read("beta").await;
+    let digest = beta["spec_digest"].clone();
+
+    let changes = [
+        (
+            "meta/identity/update",
+            json!({"set": {"display_name": "Other"}}),
+        ),
+        ("meta/identity/archive", json!({})),
+        ("meta/identity/unarchive", json!({})),
+        ("meta/identity/remove", json!({})),
+        ("meta/identity/adopt", json!({})),
+    ];
+    for (index, (method, more)) in changes.iter().enumerate() {
+        let ask = |name: &'static str| {
+            let app = app.clone();
+            let mut params = json!({"request_id": format!("ann-{index}-{name}"), "name": name,
+                                    "expected_spec_digest": digest.clone()});
+            for (member, value) in more.as_object().expect("an object") {
+                params[member.as_str()] = value.clone();
+            }
+            async move { console_rpc(&app, Some(ANN), method, params).await }
+        };
+        let nobody = ask("nobody").await;
+        assert_eq!(
+            nobody["error"]["data"]["kind"],
+            json!("identity_unknown"),
+            "{method} of a name no agent holds: {nobody:#}"
+        );
+        let unviewed = ask("beta").await;
+        assert!(unviewed["result"].is_null(), "{method}: {unviewed:#}");
+        assert_eq!(
+            unviewed["error"], nobody["error"],
+            "{method} of an agent the caller may not view answers as a name no agent holds"
+        );
+        // An agent the caller may view and may not change.
+        let denied = ask("gamma").await;
+        assert_eq!(
+            denied["error"]["data"]["kind"],
+            json!("access_denied"),
+            "{method}: {denied:#}"
+        );
+    }
+    assert_eq!(
+        read("beta").await,
+        beta,
+        "nothing of the unviewed agent changed"
+    );
+    let _ = runtime.shutdown().await;
+}
+
 /// A Console caller that is no verified person withdraws nothing and holds
 /// nothing: on a Console that signs nobody in, a held change stays held
 /// when such a caller asks to withdraw it, and the mob's changes are not
@@ -4208,6 +4325,58 @@ async fn a_create_and_an_update_set_addressability_and_runtime_mode_as_a_roster_
     assert_eq!(scout.addressability, AgentAddressability::Addressable);
     assert_eq!(scout.runtime_mode_override, None);
 
+    // What a caller sets, it reads back: a get and a list entry say both
+    // members, each only when it is not the default.
+    let shown = |name: &'static str| {
+        let family = rig.family();
+        let mob = rig.runtime.mob_handle();
+        let host = host.clone();
+        async move {
+            let got = match family
+                .read(&mob, &host, IdentityRead::Get(GetAgent::new(name)))
+                .await
+            {
+                Ok(IdentityReadAnswer::Get(record)) => {
+                    serde_json::to_value(*record).expect("a get as a surface writes it")
+                }
+                other => panic!("a get answers one agent: {other:?}"),
+            };
+            let list: ListAgents =
+                serde_json::from_value(json!({})).expect("a list as a surface writes it");
+            let listed = match family.read(&mob, &host, IdentityRead::List(list)).await {
+                Ok(IdentityReadAnswer::List(page)) => page
+                    .agents
+                    .into_iter()
+                    .find(|agent| agent.name == name)
+                    .map(|agent| serde_json::to_value(agent).expect("a list entry"))
+                    .unwrap_or_else(|| panic!("{name} is listed")),
+                other => panic!("a list answers a page: {other:?}"),
+            };
+            let members = |entry: &Value| {
+                (
+                    entry.get("addressability").cloned(),
+                    entry.get("runtime_mode_override").cloned(),
+                )
+            };
+            assert_eq!(members(&got), members(&listed), "{name}: a get and a list");
+            members(&got)
+        }
+    };
+    assert_eq!(
+        shown("clerk").await,
+        (Some(json!("internal_only")), Some(json!("turn_driven")))
+    );
+    assert_eq!(
+        shown("scout").await,
+        (None, None),
+        "the defaults are unsaid"
+    );
+    assert_eq!(
+        shown(HOST_A).await,
+        (None, None),
+        "a configured agent reads the same way"
+    );
+
     let before = rig.digest("scout").await;
     let update = |set: Value| -> UpdateAgent {
         serde_json::from_value(
@@ -4234,6 +4403,11 @@ async fn a_create_and_an_update_set_addressability_and_runtime_mode_as_a_roster_
         Some(MobRuntimeMode::TurnDriven)
     );
     assert_ne!(rig.digest("scout").await, before, "the spec changed");
+    assert_eq!(
+        shown("scout").await,
+        (Some(json!("internal_only")), Some(json!("turn_driven"))),
+        "the update reads back"
+    );
 
     // A value no roster row takes is no value of the member.
     for agent in [

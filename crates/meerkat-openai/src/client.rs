@@ -6679,6 +6679,59 @@ mod tests {
         );
     }
 
+    /// A rejection is redacted where it is read, before the stream carries
+    /// it: the error the request step returns holds no credential by itself,
+    /// whoever signed the request, and keeps its class. (The stream's last
+    /// wrapper redacts the same error again; this row pins the first step,
+    /// which a caller of the request step outside the stream relies on.)
+    #[tokio::test]
+    async fn a_rejection_is_redacted_where_it_is_read() {
+        let credential = format!("responses-{}", "madeupcredential".repeat(3));
+        for signer in [
+            CredentialSigner::ClientApiKey,
+            CredentialSigner::ClientAzureApiKey,
+            CredentialSigner::StaticBearerAuthorizer,
+        ] {
+            for echo in [
+                CredentialEcho::HeaderLine,
+                CredentialEcho::Bare,
+                CredentialEcho::Url,
+            ] {
+                let (base_url, server) = spawn_credential_echo_server(echo).await;
+                let client = credential_signed_client(signer, base_url, &credential);
+                let endpoint = client.responses_endpoint();
+                let error = client
+                    .responses_response_with_fallback(
+                        &endpoint,
+                        &serde_json::json!({"stream": true}),
+                        None,
+                        meerkat_core::HttpAuthorizationContent::default(),
+                        None,
+                        &mut Vec::new(),
+                    )
+                    .await
+                    .expect_err("the request is rejected");
+                server.abort();
+                let rendered = format!(
+                    "{error} {error:?} {}",
+                    serde_json::to_string(&error).expect("error JSON")
+                );
+                assert!(
+                    !rendered.contains(&credential),
+                    "{signer:?} {echo:?}: the rejection leaked the credential: {rendered}"
+                );
+                assert!(
+                    rendered.contains("upstream echo"),
+                    "{signer:?} {echo:?}: the server's answer reached the rejection: {rendered}"
+                );
+                assert!(
+                    matches!(error, LlmError::InvalidRequest { .. }),
+                    "{signer:?} {echo:?}: the rejection keeps its class: {error:?}"
+                );
+            }
+        }
+    }
+
     /// An image request the provider refuses with a body that repeats the
     /// request's credential reports the refusal without the credential.
     #[tokio::test]

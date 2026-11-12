@@ -4,7 +4,7 @@
 //! (topology reconciliation), REQ-20 (static wiring preserved), REQ-22 (topology
 //! not continuity truth), and REQ-33 (identity-keyed reconciliation).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 use futures::{StreamExt, stream};
@@ -190,6 +190,14 @@ pub struct RestoreFlowResult {
     /// declared that it does not list: retired, removed, or failed to retire
     /// (the next pass retires it again). Empty for a partial restore.
     pub unlisted: BTreeMap<AgentIdentity, UnlistedIdentityAnswer>,
+    /// The identities the host's roster lists that are served from their
+    /// records in the mob's identity store: a record is its identity's one
+    /// owner, so the pass neither registered nor declared the roster's
+    /// entry for any of them, and an edit of that entry changes nothing.
+    /// Each one's status says the same (`roster_listing_superseded`). Set
+    /// by a roster pass; empty for a partial restore and for one member's
+    /// add.
+    pub roster_listings_superseded: BTreeSet<AgentIdentity>,
 }
 
 // ---------------------------------------------------------------------------
@@ -521,6 +529,7 @@ pub(crate) async fn restore_roster(
         outcomes,
         managed_edges,
         unlisted: registered.unlisted,
+        roster_listings_superseded: BTreeSet::new(),
     })
 }
 
@@ -586,6 +595,7 @@ pub(crate) async fn lazy_register_roster(
         outcomes,
         managed_edges: registered.managed_edges,
         unlisted: registered.unlisted,
+        roster_listings_superseded: BTreeSet::new(),
     })
 }
 
@@ -760,5 +770,6 @@ pub(crate) async fn add_member_flow(
         outcomes: BTreeMap::from([(spec.identity.clone(), outcome)]),
         managed_edges: Vec::new(),
         unlisted: BTreeMap::new(),
+        roster_listings_superseded: BTreeSet::new(),
     })
 }

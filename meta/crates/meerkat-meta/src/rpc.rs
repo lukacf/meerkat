@@ -7679,9 +7679,10 @@ fn identity_status_wire(status: &crate::identity_first::IdentityStatus) -> Value
 
 /// The optional status fields: Core's mob member id of the identity's
 /// binding, Core's convergence of a host-adopted identity, the last refused
-/// wake, the session the last wake replaced, and why no member holds the
-/// identity (archived, or awaiting its host's preparation), each written
-/// only when it is so.
+/// wake, the session the last wake replaced, the mark of a roster listing
+/// the identity's record supersedes, and why no member holds the identity
+/// (archived, or awaiting its host's preparation), each written only when
+/// it is so.
 fn insert_identity_status_extras(
     result: &mut Value,
     status: &crate::identity_first::IdentityStatus,
@@ -7714,6 +7715,11 @@ fn insert_identity_status_extras(
         && let Ok(value) = serde_json::to_value(replaced_session)
     {
         fields.insert("replaced_session".to_string(), value);
+    }
+    // Present only when set: the host's roster lists the name of an agent
+    // that is served from its record, so the roster's entry is not applied.
+    if status.roster_listing_superseded {
+        fields.insert("roster_listing_superseded".to_string(), Value::Bool(true));
     }
 }
 

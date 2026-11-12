@@ -8623,8 +8623,9 @@ mod tests {
     /// about the member it names: a member it hides from the caller answers
     /// exactly as a name the mob does not hold, whatever the binding: a
     /// well-formed one, one whose address, key or name the mob refuses, and
-    /// one named as the member itself. A member the caller is shown is
-    /// answered the refusal of such a binding.
+    /// one named as the member itself. A member the caller is shown is wired
+    /// by the well-formed binding and answered the refusal of each other
+    /// one. `mob_unwire` of an external peer answers the same way.
     #[tokio::test]
     async fn mob_wire_to_an_external_binding_answers_a_member_hidden_from_the_caller_as_absent() {
         let state = MobMcpState::new_in_memory();
@@ -8733,14 +8734,65 @@ mod tests {
                     "{binding}: a member the caller is shown is answered as absent: {shown}"
                 ));
             }
-            if let Some(refusal) = refusal
-                && !(shown.starts_with("error:") && shown.contains(refusal))
-            {
-                told_apart.push(format!(
-                    "{binding}: a member the caller is shown is not answered the binding's \
-                     refusal: {shown}"
-                ));
+            match refusal {
+                Some(refusal) if !(shown.starts_with("error:") && shown.contains(refusal)) => {
+                    told_apart.push(format!(
+                        "{binding}: a member the caller is shown is not answered the binding's \
+                         refusal: {shown}"
+                    ));
+                }
+                None if !shown.starts_with("ok:") => {
+                    told_apart.push(format!(
+                        "{binding}: a member the caller is shown is not wired to the peer: {shown}"
+                    ));
+                }
+                _ => {}
             }
+        }
+        // An unwire of an external peer by its name: the same three members.
+        let unwire = |member: &str| {
+            json!({
+                "mob_id": "external-wire-audience",
+                "member_id": member,
+                "peer": { "external": { "name": "external-worker" } },
+            })
+        };
+        let absent = masked_mob_tool_answer(
+            &caller,
+            "mob_unwire",
+            unwire("external-gone"),
+            "external-gone",
+        )
+        .await;
+        let hidden = masked_mob_tool_answer(
+            &caller,
+            "mob_unwire",
+            unwire("external-kept"),
+            "external-kept",
+        )
+        .await;
+        let shown = masked_mob_tool_answer(
+            &caller,
+            "mob_unwire",
+            unwire("external-shown"),
+            "external-shown",
+        )
+        .await;
+        if !(absent.starts_with("error:") && absent.contains("mob member not found")) {
+            told_apart.push(format!(
+                "an unwire: a name the mob does not hold is not answered as one: {absent}"
+            ));
+        }
+        if hidden != absent {
+            told_apart.push(format!(
+                "an unwire: a member hidden from the caller answers {hidden}, a name the mob \
+                 does not hold {absent}"
+            ));
+        }
+        if !shown.starts_with("ok:") {
+            told_apart.push(format!(
+                "an unwire: a member the caller is shown is not unwired from the peer: {shown}"
+            ));
         }
         assert!(
             told_apart.is_empty(),
@@ -8812,8 +8864,9 @@ mod tests {
     /// `mob_wire` and `mob_unwire` ask the host's member tool audience about
     /// both members they name. A member it hides from the caller answers
     /// exactly as a name the mob does not hold, as the member and as the
-    /// peer, with manage scope, and no edge is made. A caller the member is
-    /// not hidden from wires and unwires it as before.
+    /// peer, with manage scope, and no edge is made, also beside an identity
+    /// entry of the host. A caller the member is not hidden from wires and
+    /// unwires it as before.
     #[tokio::test]
     async fn mob_wire_and_unwire_answer_a_member_hidden_from_the_caller_as_absent() {
         let state = MobMcpState::new_in_memory();
@@ -8833,6 +8886,18 @@ mod tests {
         let keeper = member_mob_tools(&state, &handle, "wire-keeper", scope()).await;
         let ends = |member: &str, peer: &str| json!({ "mob_id": "wire-audience", "member_id": member, "peer": { "local": peer } });
         let kept = AgentIdentity::from("wire-kept");
+        // An identity entry of the host: an agent's wire or unwire that
+        // names it is refused for the entry, after the other name is found.
+        let mut entry = SpawnMemberSpec::new(
+            ProfileName::from("worker"),
+            AgentIdentity::from("wire-entry"),
+        )
+        .with_entry_custody(true);
+        entry.runtime_mode = Some(meerkat_mob::MobRuntimeMode::TurnDriven);
+        handle
+            .spawn_spec(entry)
+            .await
+            .expect("the host seats its identity entry");
 
         for tool in ["mob_wire", "mob_unwire"] {
             // Each call naming the kept member, beside the same call naming
@@ -8853,6 +8918,16 @@ mod tests {
                     ends("wire-nobody", "wire-gone"),
                     "as the peer of a name the mob does not hold",
                 ),
+                (
+                    ends("wire-entry", "wire-kept"),
+                    ends("wire-entry", "wire-gone"),
+                    "as the peer of an identity entry",
+                ),
+                (
+                    ends("wire-kept", "wire-entry"),
+                    ends("wire-gone", "wire-entry"),
+                    "as the member beside an identity entry",
+                ),
             ] {
                 let hidden = masked_mob_tool_answer(&caller, tool, kept_call, "wire-kept").await;
                 let absent = masked_mob_tool_answer(&caller, tool, absent_call, "wire-gone").await;
@@ -8866,6 +8941,20 @@ mod tests {
                      name the mob does not hold"
                 );
             }
+            // Beside a member the caller is shown, the entry's refusal stays.
+            let shown = masked_mob_tool_answer(
+                &caller,
+                tool,
+                ends("wire-entry", "wire-plain"),
+                "wire-entry",
+            )
+            .await;
+            assert!(
+                shown.starts_with("error:")
+                    && shown.contains("member '<member>' is an identity entry"),
+                "{tool}: a call that names the entry beside a member the caller is shown still \
+                 answers the refusal of the entry: {shown}"
+            );
         }
         let wired_to_kept = || async {
             handle
@@ -8907,6 +8996,50 @@ mod tests {
         assert!(
             unwired.starts_with("ok:"),
             "a caller the member is not hidden from unwires it: {unwired}"
+        );
+
+        // The entry's own external peer, unwired by its name as if it were
+        // a member: no member holds that name, and the entry's refusal
+        // still answers, behind the lookup of the entry.
+        let entry = AgentIdentity::from("wire-entry");
+        let outside = AgentIdentity::from("wire-outside");
+        handle
+            .wire(
+                entry.clone(),
+                meerkat_mob::PeerTarget::ExternalBinding(
+                    meerkat_mob::ExternalPeerBindingSpec::new(
+                        "wire-outside",
+                        "inproc://wire-outside",
+                        meerkat_contracts::WireTrustedPeerIdentity::Ed25519PublicKey {
+                            public_key: ED25519_PUBLIC_KEY_7.to_string(),
+                        },
+                    ),
+                ),
+            )
+            .await
+            .expect("the host wires its entry to an external peer");
+        let by_name = masked_mob_tool_answer(
+            &caller,
+            "mob_unwire",
+            ends("wire-entry", "wire-outside"),
+            "wire-entry",
+        )
+        .await;
+        assert!(
+            by_name.starts_with("error:")
+                && by_name.contains("member '<member>' is an identity entry"),
+            "an agent's unwire of the entry's external peer by its name is refused for the \
+             entry: {by_name}"
+        );
+        assert!(
+            handle
+                .get_member(&entry)
+                .await
+                .expect("roster read")
+                .expect("the entry is seated")
+                .wired_to
+                .contains(&outside),
+            "the entry keeps its external peer"
         );
     }
 

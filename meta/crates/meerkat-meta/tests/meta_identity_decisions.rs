@@ -1244,7 +1244,7 @@ async fn eight_concurrent_drives_commit_an_approved_change_exactly_once() {
     let mut executed = 0;
     for _ in 0..3 {
         let passes =
-            futures::future::join_all(loops.iter_mut().map(|executors| executors.pass())).await;
+            futures::future::join_all(loops.iter_mut().map(DecisionExecutorLoop::pass)).await;
         executed += passes
             .iter()
             .flat_map(|pass| &pass.outcomes)

@@ -798,26 +798,6 @@ async fn member_can_address_peer(
     }))
 }
 
-async fn wire_member_with_authority(
-    handle: MobHandle,
-    identity_runtime: Option<&std::sync::Arc<crate::identity_first::IdentityRuntime>>,
-    member_id: &str,
-    mob_id: &str,
-    peer: PeerTarget,
-    wire: bool,
-) -> Result<(), CrossMobError> {
-    with_member_under_authority(
-        handle,
-        identity_runtime,
-        member_id,
-        mob_id,
-        move |handle, current_member_id| async move {
-            mutate_member_unchecked(handle, &current_member_id, peer, wire).await
-        },
-    )
-    .await
-}
-
 /// Run `operation` on the member `member_id` names now, under the identity
 /// authority that owns its alias when there is one: the operation gets the
 /// handle and the member's current alias.

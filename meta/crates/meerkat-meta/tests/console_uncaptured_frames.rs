@@ -245,6 +245,16 @@ async fn start_gateway(
     sign_in: bool,
     access: Option<AccessControlConfig>,
 ) -> Gateway {
+    start_gateway_under(state, mob_id, decisions(sign_in), access).await
+}
+
+/// [`start_gateway`] with the console's decision state given whole.
+async fn start_gateway_under(
+    state: &Path,
+    mob_id: &str,
+    decisions: meerkat_meta::RuntimeDecisionState,
+    access: Option<AccessControlConfig>,
+) -> Gateway {
     let layout = MetaStorageLayout::with_injected_roots(state.to_path_buf(), None);
     let (storage, provenance) =
         meerkat_meta::mob_composition_manifest::persistent_mob_storage(layout.event_log_db())
@@ -299,9 +309,7 @@ async fn start_gateway(
             .expect("activation");
     }
     let composition = composition.activate();
-    let app = composition
-        .runtime()
-        .build_reference_app_router(decisions(sign_in));
+    let app = composition.runtime().build_reference_app_router(decisions);
     composition
         .runtime()
         .reconcile_interrupted_console_sends()
@@ -1024,5 +1032,135 @@ async fn consoles_with_no_administrator_decide_a_frame_with_no_witness() {
         }
         drop(app);
         stop_gateway(gateway).await;
+    }
+}
+
+/// The access configurations that grant a caller who sends no token: every
+/// caller may do everything to every agent (an allow rule that names no
+/// subject and no group), and rules that are off. Root is the one
+/// administrator of both.
+fn configurations_that_grant_a_caller_with_no_token() -> [(&'static str, AccessControlConfig); 2] {
+    [
+        (
+            "an allow rule for every caller",
+            AccessControlConfig {
+                enabled: true,
+                admins: vec![ROOT.to_string()],
+                rules: vec![AccessRule {
+                    id: "every-caller-drives-every-agent".to_string(),
+                    actions: vec!["agent.*".to_string()],
+                    agents: vec!["*".to_string()],
+                    ..AccessRule::default()
+                }],
+                ..AccessControlConfig::default()
+            },
+        ),
+        (
+            "rules that are off",
+            AccessControlConfig {
+                enabled: false,
+                admins: vec![ROOT.to_string()],
+                ..AccessControlConfig::default()
+            },
+        ),
+    ]
+}
+
+/// A console where sign-in is optional and a token is verified can identify
+/// a person, so a member can be private to one there. A caller who sends no
+/// token is then one more caller who is not an administrator: the console
+/// shows a frame with no witness to its administrator only, under a name a
+/// shared member holds now and under a name no member ever held. The same
+/// console with no key to verify a token with can identify nobody: its one
+/// operator reads those frames as before. Read through the timeline window.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_console_that_can_identify_a_person_exempts_no_caller_with_no_token() {
+    for (rules, access) in configurations_that_grant_a_caller_with_no_token() {
+        for verifies_tokens in [true, false] {
+            let state = tempfile::tempdir().expect("state dir");
+            let nonce = format!(
+                "{:x}-{}-{verifies_tokens}",
+                std::process::id(),
+                access.enabled
+            );
+            let shared_canary = format!("shared-plume-{nonce}");
+            let unseated_canary = format!("unseated-plume-{nonce}");
+            let mut open = decisions(false);
+            if !verifies_tokens {
+                open.trusted_oidc.jwks_json = r#"{"keys":[]}"#.to_string();
+            }
+            let gateway = start_gateway_under(
+                state.path(),
+                &format!("open-{nonce}"),
+                open,
+                Some(access.clone()),
+            )
+            .await;
+            let app = gateway.app.clone();
+            let root = person_token(ROOT);
+            let bob = person_token(BOB);
+            // Both records are written while no member holds either name.
+            let sink = gateway.runtime().memory_event_sink();
+            sink.emit(harvest(SOURCE, &shared_canary));
+            sink.emit(harvest("ghost-y", &unseated_canary));
+            // The reader each console serves: its administrator where a
+            // token is verified, its one operator where none can be.
+            let served = verifies_tokens.then_some(root.as_str());
+            for (name, canary) in [(SOURCE, &shared_canary), ("ghost-y", &unseated_canary)] {
+                eventually("the frame with no witness is in the log", || async {
+                    window(&app, served, Some(name)).await.contains(canary)
+                })
+                .await;
+            }
+            // A shared member holds the first name from here on.
+            gateway
+                .runtime()
+                .spawn(SpawnMemberSpec::new("worker", AgentIdentity::from(SOURCE)))
+                .await
+                .expect("a shared member is seated");
+            if verifies_tokens {
+                send_as(&app, &root, SOURCE, "after", "TAG|after|").await;
+                eventually(
+                    "the caller with no token reads the shared member's own records",
+                    || async {
+                        window(&app, None, Some(SOURCE))
+                            .await
+                            .contains("reply-after")
+                    },
+                )
+                .await;
+            }
+            for (name, canary) in [(SOURCE, &shared_canary), ("ghost-y", &unseated_canary)] {
+                assert!(
+                    window(&app, served, Some(name)).await.contains(canary),
+                    "{rules}, verifies tokens {verifies_tokens}: the frame under {name} is \
+                     still served to the reader the console serves"
+                );
+                if !verifies_tokens {
+                    continue;
+                }
+                for (reader, who) in [
+                    (None, "the caller with no token"),
+                    (
+                        Some(bob.as_str()),
+                        "a signed-in person who is not an administrator",
+                    ),
+                ] {
+                    for page in [
+                        window(&app, reader, Some(name)).await,
+                        window(&app, reader, None).await,
+                    ] {
+                        assert!(
+                            !page.contains(canary.as_str()),
+                            "{rules}: {who} reads no frame with no witness under {name} on a \
+                             console that can identify a person"
+                        );
+                    }
+                }
+            }
+            drop(sink);
+            drop(app);
+            stop_gateway(gateway).await;
+        }
     }
 }

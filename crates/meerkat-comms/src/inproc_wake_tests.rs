@@ -1156,6 +1156,121 @@ async fn only_a_forwarders_route_is_skipped_by_a_sender_with_no_namespace() {
     assert_eq!(forwarder.calls(), 0);
 }
 
+/// A built member that a host forwarder made reachable from a second
+/// namespace has two live registrations under its key, both of the SAME
+/// inbox. For a sender with no namespace they are one route: the envelope is
+/// handed off once and the owner is not asked again. A registration of a
+/// DIFFERENT inbox under the key in another namespace is still ambiguous:
+/// nothing is handed off to either inbox.
+#[tokio::test]
+async fn a_sender_with_no_namespace_reaches_a_member_two_namespaces_route_to_one_inbox() {
+    let registry = Arc::new(InprocRegistry::new());
+    let sender = make_keypair();
+    let member = make_keypair().public_key();
+    let (inbox, inbox_sender) = open_inbox();
+    let owner = ScriptedOwner::new(OnWake::Materialize {
+        registry: Arc::clone(&registry),
+        namespace: "realm-b".to_string(),
+        name: "worker-1".to_string(),
+        pubkey: member,
+        sender: std::sync::Mutex::new(Some(inbox_sender)),
+    });
+    let forwarder = Arc::new(HostForwarder {
+        registry: Arc::clone(&registry),
+        local: "realm-a".to_string(),
+        remote: "realm-b".to_string(),
+        alias: "mob-b/worker/worker-1".to_string(),
+        forwarded: AtomicUsize::new(0),
+    });
+    assert!(registry.publish_wake_route("realm-b", member, "worker-1", owner.weak()));
+    assert!(registry.publish_forwarder_wake_route(
+        "realm-a",
+        member,
+        "mob-b/worker/worker-1",
+        forwarder_weak(&forwarder)
+    ));
+
+    // A send scoped to realm-a builds the member through the forwarder,
+    // which routes the member's inbox in realm-a too.
+    registry
+        .send_to_pubkey_in_namespace_with_id_wait(
+            "realm-a",
+            &sender,
+            &member,
+            Uuid::new_v4(),
+            response(),
+            true,
+            BUDGET,
+            None,
+        )
+        .await
+        .expect("the forwarded wake answered ready");
+    assert_eq!(owner.calls(), 1);
+    assert_eq!(queued(&inbox), 1);
+    let in_a = registry
+        .get_by_pubkey_in_namespace("realm-a", &member)
+        .expect("realm-a routes the member");
+    let in_b = registry
+        .get_by_pubkey_in_namespace("realm-b", &member)
+        .expect("realm-b routes the member");
+    assert!(in_a.same_inbox(&in_b), "fixture: one inbox, two namespaces");
+
+    // The sender with no namespace: one inbox is one route.
+    registry
+        .send_to_pubkey_any_namespace_with_id_wait(
+            &sender,
+            &member,
+            Uuid::new_v4(),
+            response(),
+            true,
+            BUDGET,
+            None,
+        )
+        .await
+        .expect("two registrations of one inbox are one route");
+    assert_eq!(
+        queued(&inbox),
+        2,
+        "the envelope was handed off exactly once"
+    );
+    assert_eq!(owner.calls(), 1, "a built member is not woken again");
+    assert_eq!(forwarder.forwarded.load(Ordering::SeqCst), 1);
+
+    // A different inbox under the same key in a third namespace: the key is
+    // ambiguous again for a sender with no namespace, and nothing is handed
+    // off to either inbox.
+    let (other_inbox, other_sender) = open_inbox();
+    let outcome = registry.register_with_meta_in_namespace(
+        "realm-c",
+        "somebody-else",
+        member,
+        other_sender,
+        PeerMeta::default(),
+    );
+    assert!(!outcome.is_rejected(), "{outcome:?}");
+    let refused = registry
+        .send_to_pubkey_any_namespace_with_id_wait(
+            &sender,
+            &member,
+            Uuid::new_v4(),
+            response(),
+            true,
+            BUDGET,
+            None,
+        )
+        .await
+        .expect_err("two different inboxes under one key");
+    assert!(
+        matches!(
+            refused,
+            InprocSendError::WakeRefused(PeerWakeRefusal::MaterializationLost)
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(queued(&inbox), 2);
+    assert_eq!(queued(&other_inbox), 0);
+}
+
 /// A wake route never claims a name: a live registration under the member's
 /// name still succeeds, and a lifecycle notice classifies as lifecycle.
 #[test]

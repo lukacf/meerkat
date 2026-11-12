@@ -950,3 +950,95 @@ async fn a_runtime_that_shut_down_takes_only_the_inbox_routes_links_name() {
     );
     registry.unregister_in_namespace(&pair.ns_a, &foreign);
 }
+
+#[tokio::test]
+async fn a_key_that_lost_its_last_link_loses_its_inbox_route() {
+    let pair = Pair::new("last-link");
+    let registry = InprocRegistry::global();
+    let asked = Arc::new(AtomicUsize::new(0));
+    let routes = part_of(&pair.ns_a);
+    // Alice and carol of mob A are both wired to bob, and bob to alice.
+    let carol_name = comms_name(&pair.mob_a, "carol");
+    pair.a_holds();
+    routes.set_member_links(
+        "carol",
+        vec![link("carol", &carol_name, &pair.bob_name, pair.bob)],
+    );
+    pair.b_holds();
+    let _bob_inbox = pair.build_bob();
+    assert_eq!(
+        pair.forward(never_asked(&asked)).await,
+        Ok(PeerWakeAnswer::Ready)
+    );
+    assert_eq!(pair.route_to_bob(), Some(pair.bob));
+
+    // Alice is unwired from bob. Carol's link still names the key: its wake
+    // route and its inbox route stay.
+    drop_member_link(&pair.mob_a, &AgentIdentity::from("alice"), &pair.bob_name);
+    assert!(registry.has_wake_route_in_namespace(&pair.ns_a, &pair.bob));
+    assert_eq!(pair.route_to_bob(), Some(pair.bob));
+
+    // Carol is unwired too: the key lost its last link, and the inbox route
+    // goes with the wake route.
+    drop_member_link(&pair.mob_a, &AgentIdentity::from("carol"), &pair.bob_name);
+    assert!(!registry.has_wake_route_in_namespace(&pair.ns_a, &pair.bob));
+    assert_eq!(
+        pair.route_to_bob(),
+        None,
+        "the inbox route outlived the last link to its key"
+    );
+
+    // Only the route under the link's own name goes. A route the namespace
+    // holds under the key with another name is somebody else's, and stays.
+    pair.a_holds();
+    let (_other_inbox, other_sender) = Inbox::new_transport_only();
+    assert!(
+        !registry
+            .register_with_meta_in_namespace(
+                &pair.ns_a,
+                "somebody-else",
+                pair.bob,
+                other_sender,
+                PeerMeta::default(),
+            )
+            .is_rejected()
+    );
+    drop_member_link(&pair.mob_a, &AgentIdentity::from("alice"), &pair.bob_name);
+    assert!(!registry.has_wake_route_in_namespace(&pair.ns_a, &pair.bob));
+    assert_eq!(
+        registry.get_name_by_pubkey_in_namespace(&pair.ns_a, &pair.bob),
+        Some("somebody-else".to_string())
+    );
+    registry.unregister_in_namespace(&pair.ns_a, &pair.bob);
+}
+
+#[tokio::test]
+async fn a_part_that_was_replaced_or_closed_takes_no_link() {
+    let pair = Pair::new("closed");
+    let registry = InprocRegistry::global();
+    let bob_names_alice = || vec![link("bob", &pair.bob_name, &pair.alice_name, pair.alice)];
+
+    // A runtime of mob B was dropped, and the runtime built after it started
+    // its own part. A write that still holds the earlier part adds nothing:
+    // no link, and no wake route under the earlier part's name.
+    let earlier = start_part(&pair.ns_b);
+    let later = start_part(&pair.ns_b);
+    earlier.set_member_links("bob", bob_names_alice());
+    let held_by_earlier = locked(&earlier.state).links.len();
+    let published_by_earlier =
+        registry.retract_wake_route(&pair.ns_b, &pair.alice, &earlier.waker());
+    assert_eq!(held_by_earlier, 0, "a replaced part took a link");
+    assert!(!published_by_earlier, "a replaced part published a route");
+
+    // The later runtime's part takes the link.
+    later.set_member_links("bob", bob_names_alice());
+    assert!(registry.has_wake_route_in_namespace(&pair.ns_b, &pair.alice));
+
+    // Its runtime closes it: the link and the route go, and a write that
+    // still holds the part adds nothing.
+    close_part(&later);
+    assert!(!registry.has_wake_route_in_namespace(&pair.ns_b, &pair.alice));
+    later.set_member_links("bob", bob_names_alice());
+    assert!(locked(&later.state).links.is_empty());
+    assert!(!registry.has_wake_route_in_namespace(&pair.ns_b, &pair.alice));
+}

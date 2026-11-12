@@ -2504,3 +2504,195 @@ async fn the_identical_wire_again_re_points_a_route_that_led_to_an_inbox_that_is
     left.stop().await;
     right.stop().await;
 }
+
+// ---------------------------------------------------------------------------
+// A route goes with its last link. The bilateral unwire removes the edge
+// from both mobs' rows, and the route a forwarded wake installed for that
+// edge goes with it: a later one-sided wire finds nothing to deliver
+// through, whether the other member is built or not.
+// ---------------------------------------------------------------------------
+
+/// The bilateral wire of alice and bob, one delivery each way (each mob's
+/// namespace then routes the other mob's member), and the bilateral unwire.
+async fn wired_delivered_and_unwired(left: &mut Mob, right: &mut Mob, tag: &str) {
+    let alice = left.peer_info().await;
+    let bob = right.peer_info().await;
+    know_each_other(left, right).await;
+    Box::pin(
+        left.runtime
+            .wire_cross_mob(&left.member, &right.member, &right.mob_id),
+    )
+    .await
+    .expect("the bilateral wire");
+    assert_delivers(left, right, &format!("{tag} before a-to-b")).await;
+    assert_delivers(right, left, &format!("{tag} before b-to-a")).await;
+    assert_eq!(left.route_to(&bob.comms_name), Some(bob.peer_id.clone()));
+    assert_eq!(right.route_to(&alice.comms_name), Some(alice.peer_id));
+    Box::pin(
+        left.runtime
+            .unwire_cross_mob(&left.member, &right.member, &right.mob_id),
+    )
+    .await
+    .expect("the bilateral unwire");
+    assert!(left.trusts().await.is_empty());
+    assert!(right.trusts().await.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bilateral_unwire_takes_the_routes_its_edge_delivered_through() {
+    let root = tempfile::tempdir().expect("root");
+    let mut left = Mob::start_persistent(root.path(), "wake-leftover-a", "alice", true).await;
+    let mut right = Mob::start_persistent(root.path(), "wake-leftover-b", "bob", true).await;
+    let alice = keyed(&left.peer_info().await);
+    let bob = keyed(&right.peer_info().await);
+    wired_delivered_and_unwired(&mut left, &mut right, "leftover").await;
+
+    // Neither mob routes the other mob's member any more, and neither
+    // holds a wake route for it.
+    assert_eq!(
+        left.route_to(&bob.comms_name),
+        None,
+        "alice's mob still routes bob after the unwire"
+    );
+    assert_eq!(
+        right.route_to(&alice.comms_name),
+        None,
+        "bob's mob still routes alice after the unwire"
+    );
+    assert!(!left.has_wake_route_for(&bob));
+    assert!(!right.has_wake_route_for(&alice));
+
+    // Bob's runtime is built again: bob exists and is not built. Alice's
+    // side alone is wired again, with bob's key: her send is refused as a
+    // peer that is not found, and nobody is built.
+    let mut right = right.built_again(root.path()).await;
+    left.wire_local(&bob).await.expect("alice's side alone");
+    assert_wakes_nobody(&mut left, &mut right, &bob, "leftover alone a-to-b").await;
+
+    left.stop().await;
+    right.stop().await;
+}
+
+/// After the bilateral unwire, a Console caller who is no access admin
+/// wires alice's side alone, with bob's key, while bob is still built. Her
+/// send is refused as a peer that is not found, as for a key nobody holds:
+/// it does not reach bob's inbox, so the caller cannot tell a built member
+/// from nobody.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn after_a_bilateral_unwire_a_keyed_wire_by_a_caller_who_is_no_admin_reaches_nobody() {
+    let root = tempfile::tempdir().expect("root");
+    let mut left = Mob::start_persistent(root.path(), "wake-unrouted-a", "alice", true).await;
+    let mut right = Mob::start_persistent(root.path(), "wake-unrouted-b", "bob", true).await;
+    let bob = keyed(&right.peer_info().await);
+    wired_delivered_and_unwired(&mut left, &mut right, "unrouted").await;
+
+    let console = console_for_everyone(&mut left);
+    console_rpc(
+        &console,
+        None,
+        "meta/cross_mob/wire_local",
+        left.wire_params(&bob),
+    )
+    .await
+    .expect("a keyed in-process wire is accepted");
+    let result = left.send(&bob.peer_id, "unrouted alone a-to-b").await;
+    assert!(
+        result.contains(NOT_ROUTABLE),
+        "bob's mob holds no edge to alice: the send must be refused as a peer that is not \
+         found, built or not: {result}"
+    );
+    assert!(
+        !right
+            .receives("unrouted alone a-to-b", NO_DELIVERY_WAIT)
+            .await
+    );
+    assert_eq!(
+        left.route_to(&bob.comms_name),
+        None,
+        "alice's mob routes bob"
+    );
+    assert_eq!(
+        right.routed_names(),
+        vec![bob.comms_name.clone()],
+        "bob's mob routes more than bob himself"
+    );
+
+    drop(console);
+    left.stop().await;
+    right.stop().await;
+}
+
+/// The owner of a wake route that is never asked: it stands for the owner of
+/// a member that is seated under a key.
+struct SeatedOwner;
+
+impl meerkat_comms::InprocPeerWaker for SeatedOwner {
+    fn wake(&self, _request: meerkat_comms::PeerWakeRequest) -> meerkat_comms::PeerWakeFuture {
+        Box::pin(std::future::ready(Err(
+            meerkat_comms::PeerWakeDenial::NotAMember,
+        )))
+    }
+
+    fn member_is_waking(&self, _member: &str) -> bool {
+        false
+    }
+}
+
+fn transport_key(peer: &PeerInfo) -> meerkat_comms::PubKey {
+    use base64::Engine;
+    let key: [u8; 32] = base64::engine::general_purpose::STANDARD
+        .decode(
+            peer.pubkey_b64
+                .as_deref()
+                .expect("peer_info reports the member's key"),
+        )
+        .expect("base64 key")
+        .try_into()
+        .expect("a 32-byte key");
+    meerkat_comms::PubKey::new(key)
+}
+
+/// The bilateral wire refuses a key a member of either wiring mob is seated
+/// under, as `wire_local` does, before anything is recorded: that key's wake
+/// route in the mob's namespace is its own member's and stays, so the edge
+/// could hold no link.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_bilateral_wire_refuses_a_key_a_member_of_a_wiring_mob_is_seated_under() {
+    let root = tempfile::tempdir().expect("root");
+    let mut left = Mob::start_persistent(root.path(), "wake-seated-a", "alice", true).await;
+    let mut right = Mob::start_persistent(root.path(), "wake-seated-b", "bob", true).await;
+    let alice = left.peer_info().await;
+    let bob = right.peer_info().await;
+    know_each_other(&mut left, &mut right).await;
+    let registry = InprocRegistry::global();
+    let seated_owner: Arc<dyn meerkat_comms::InprocPeerWaker> = Arc::new(SeatedOwner);
+    let seated = Arc::downgrade(&seated_owner);
+
+    // A member of the mob on one side is seated under the key of the member
+    // on the other side: refused in plain words, and neither row changed.
+    for (namespace, key) in [
+        (left.namespace(), transport_key(&bob)),
+        (right.namespace(), transport_key(&alice)),
+    ] {
+        assert!(registry.publish_wake_route(&namespace, key, "dave", seated.clone()));
+        let refusal = Box::pin(left.runtime.wire_cross_mob("alice", "bob", "wake-seated-b"))
+            .await
+            .expect_err("a member of a wiring mob is seated under that key");
+        assert!(
+            refusal.to_string().contains("already holds that key"),
+            "the refusal must say what is wrong: {refusal}"
+        );
+        assert!(left.trusts().await.is_empty(), "alice's row changed");
+        assert!(right.trusts().await.is_empty(), "bob's row changed");
+        assert!(registry.retract_wake_route(&namespace, &key, &seated));
+    }
+
+    // With no such member the same wire is accepted and delivers.
+    Box::pin(left.runtime.wire_cross_mob("alice", "bob", "wake-seated-b"))
+        .await
+        .expect("the bilateral wire");
+    assert_delivers(&mut left, &mut right, "seated after a-to-b").await;
+
+    left.stop().await;
+    right.stop().await;
+}

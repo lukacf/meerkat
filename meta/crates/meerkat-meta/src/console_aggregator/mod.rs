@@ -5248,10 +5248,14 @@ async fn delegate_member_sources(entry: &RuntimeEntry) -> Vec<ResolvedConsoleMem
         if mob_id.as_str() == primary_mob_id {
             continue;
         }
-        // Decided once per mob, from the council's own record.
+        // Decided once per mob, from the council's own record, which is
+        // read after the members are listed: a council's record is durable
+        // before its seating, so the seats of a council admitted over the
+        // mob meanwhile are never listed against the record's absence.
+        let members = handle.list_members_observation_snapshot().await;
         let council_participant =
             Box::pin(council::council_owns_mob(&state, mob_id.as_str(), &handle)).await;
-        for member in handle.list_members_observation_snapshot().await {
+        for member in members {
             resolved.push(ResolvedConsoleMember {
                 entry: entry.clone(),
                 handle: handle.clone(),

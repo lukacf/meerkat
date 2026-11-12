@@ -5643,21 +5643,153 @@ async fn write_comms_binding_out(
         tokio::fs::create_dir_all(parent).await?;
     }
     let bytes = serde_json::to_vec_pretty(&binding)?;
-    write_private_file(path, &bytes).await?;
+    write_private_file(path, &bytes).await.map_err(|error| {
+        anyhow::Error::new(error).context("--comms-binding-out could not write the binding file")
+    })?;
     eprintln!("Wrote comms external binding to {}", path.display());
     Ok(())
 }
 
+/// What stands at a path, when it is not something a new file may take the
+/// place of.
+#[cfg(feature = "comms")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathEntry {
+    Directory,
+    #[cfg(unix)]
+    NamedPipe,
+    #[cfg(unix)]
+    Socket,
+    #[cfg(unix)]
+    Device,
+    /// A symbolic link's target that does not exist.
+    Nothing,
+    /// Not a regular file, and none of the kinds above.
+    Other,
+}
+
+/// What [`write_private_file`] found at its path and will not replace.
+#[cfg(feature = "comms")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NotAFile {
+    entry: PathEntry,
+    /// The path is a symbolic link, and `entry` is what it leads to.
+    through_link: bool,
+}
+
+#[cfg(feature = "comms")]
+impl std::fmt::Display for NotAFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.through_link {
+            f.write_str("a symbolic link to ")?;
+        }
+        f.write_str(match self.entry {
+            PathEntry::Directory => "a directory",
+            #[cfg(unix)]
+            PathEntry::NamedPipe => "a named pipe",
+            #[cfg(unix)]
+            PathEntry::Socket => "a socket",
+            #[cfg(unix)]
+            PathEntry::Device => "a device",
+            PathEntry::Nothing => "nothing",
+            PathEntry::Other => "something that is not a regular file",
+        })
+    }
+}
+
+/// Why [`write_private_file`] wrote nothing.
+#[cfg(feature = "comms")]
+#[derive(Debug, thiserror::Error)]
+enum PrivateFileError {
+    /// The path holds something the file cannot take the place of. Nothing
+    /// was removed and nothing was written.
+    #[error(
+        "{} is {found}. The file is written as a new file in place of the one at its path, \
+         never into what is there: give a path that holds a regular file, or nothing yet",
+        .path.display()
+    )]
+    NotReplaceable { path: PathBuf, found: NotAFile },
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+}
+
+/// What stands at `path`, when a new file may not take its place: anything
+/// but nothing, a regular file, or a symbolic link to a regular file.
+#[cfg(feature = "comms")]
+async fn not_replaceable(path: &Path) -> std::io::Result<Option<NotAFile>> {
+    let absent = |error: &std::io::Error| error.kind() == std::io::ErrorKind::NotFound;
+    let entry = match tokio::fs::symlink_metadata(path).await {
+        Ok(entry) => entry,
+        Err(error) if absent(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let through_link = entry.file_type().is_symlink();
+    let target = if through_link {
+        match tokio::fs::metadata(path).await {
+            Ok(target) => target.file_type(),
+            Err(error) if absent(&error) => {
+                return Ok(Some(NotAFile {
+                    entry: PathEntry::Nothing,
+                    through_link,
+                }));
+            }
+            Err(error) => return Err(error),
+        }
+    } else {
+        entry.file_type()
+    };
+    if target.is_file() {
+        return Ok(None);
+    }
+    #[cfg(unix)]
+    let special = {
+        use std::os::unix::fs::FileTypeExt as _;
+        if target.is_fifo() {
+            Some(PathEntry::NamedPipe)
+        } else if target.is_socket() {
+            Some(PathEntry::Socket)
+        } else if target.is_char_device() || target.is_block_device() {
+            Some(PathEntry::Device)
+        } else {
+            None
+        }
+    };
+    #[cfg(not(unix))]
+    let special = None;
+    let entry = match special {
+        Some(entry) => entry,
+        None if target.is_dir() => PathEntry::Directory,
+        None => PathEntry::Other,
+    };
+    Ok(Some(NotAFile {
+        entry,
+        through_link,
+    }))
+}
+
 /// Write `bytes` to a new file at `path` that only its owner can read on
 /// Unix (0600, given when the file is created, which the umask can only
-/// narrow). A file already at `path` is removed first, so the bytes are
-/// never written into an older file with a wider mode.
+/// narrow). The new file takes the place of the one at `path`: a regular
+/// file there, or a symbolic link to one, is removed first (the link itself,
+/// never its target), so the bytes are never written into an older file
+/// with a wider mode or through a link.
+///
+/// Anything else at `path` is refused before it is touched
+/// ([`PrivateFileError::NotReplaceable`]): removing a named pipe a reader
+/// waits on, or a device such as `/dev/stdout`, would leave a regular file
+/// holding the bytes where none was asked for.
 #[cfg(feature = "comms")]
-async fn write_private_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+async fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), PrivateFileError> {
+    if let Some(found) = not_replaceable(path).await? {
+        return Err(PrivateFileError::NotReplaceable {
+            path: path.to_path_buf(),
+            found,
+        });
+    }
     match tokio::fs::remove_file(path).await {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
+        Err(error) => return Err(error.into()),
     }
     let mut options = tokio::fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -5665,7 +5797,8 @@ async fn write_private_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     options.mode(0o600);
     let mut file = options.open(path).await?;
     file.write_all(bytes).await?;
-    file.flush().await
+    file.flush().await?;
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -29806,6 +29939,11 @@ default_model = "gemma"
                 .expect("the entry at the path")
                 .file_type()
         };
+        // The refusal is typed: it names what stands at the path.
+        let found = |error: anyhow::Error| match error.downcast_ref::<PrivateFileError>() {
+            Some(PrivateFileError::NotReplaceable { found, .. }) => *found,
+            other => panic!("not the refusal of the path: {other:?} ({error:#})"),
+        };
 
         let pipe = temp.path().join("binding.pipe");
         #[allow(clippy::disallowed_methods)] // the test's own mkfifo
@@ -29814,25 +29952,50 @@ default_model = "gemma"
             .status()
             .expect("run mkfifo");
         assert!(made.success(), "mkfifo {}", pipe.display());
-        write_comms_binding_out(&pipe, &runtime)
+        let error = write_comms_binding_out(&pipe, &runtime)
             .await
             .expect_err("a named pipe at the path is refused");
+        assert!(
+            format!("{error:#}").contains("is a named pipe"),
+            "the message says what is at the path: {error:#}"
+        );
+        assert_eq!(
+            found(error),
+            NotAFile {
+                entry: PathEntry::NamedPipe,
+                through_link: false
+            }
+        );
         assert!(entry(&pipe).is_fifo(), "the named pipe is still there");
 
         let link_to_pipe = temp.path().join("pipe.link");
         std::os::unix::fs::symlink(&pipe, &link_to_pipe).expect("a link to the pipe");
-        write_comms_binding_out(&link_to_pipe, &runtime)
+        let error = write_comms_binding_out(&link_to_pipe, &runtime)
             .await
             .expect_err("a link to a named pipe is refused");
+        assert_eq!(
+            found(error),
+            NotAFile {
+                entry: PathEntry::NamedPipe,
+                through_link: true
+            }
+        );
         assert!(entry(&link_to_pipe).is_symlink(), "the link is still there");
         assert!(entry(&pipe).is_fifo(), "and so is the named pipe");
 
         let dangling = temp.path().join("dangling.link");
         std::os::unix::fs::symlink(temp.path().join("absent"), &dangling)
             .expect("a link to nothing");
-        write_comms_binding_out(&dangling, &runtime)
+        let error = write_comms_binding_out(&dangling, &runtime)
             .await
             .expect_err("a link whose target does not exist is refused");
+        assert_eq!(
+            found(error),
+            NotAFile {
+                entry: PathEntry::Nothing,
+                through_link: true
+            }
+        );
         assert!(entry(&dangling).is_symlink(), "the link is still there");
         assert!(
             !temp.path().join("absent").exists(),
@@ -29841,9 +30004,16 @@ default_model = "gemma"
 
         let directory = temp.path().join("binding.dir");
         std::fs::create_dir(&directory).expect("a directory at the path");
-        write_comms_binding_out(&directory, &runtime)
+        let error = write_comms_binding_out(&directory, &runtime)
             .await
             .expect_err("a directory at the path is refused");
+        assert_eq!(
+            found(error),
+            NotAFile {
+                entry: PathEntry::Directory,
+                through_link: false
+            }
+        );
         assert!(entry(&directory).is_dir(), "the directory is still there");
     }
 
@@ -29897,6 +30067,13 @@ default_model = "gemma"
             error.downcast_ref::<std::io::Error>().is_none(),
             "the refusal is the rule's, made before any unlink, not the operating system's \
              answer to one: {error:#}"
+        );
+        assert!(
+            matches!(
+                error.downcast_ref::<PrivateFileError>(),
+                Some(PrivateFileError::NotReplaceable { .. })
+            ),
+            "the typed refusal of the path: {error:#}"
         );
         assert_eq!(
             std::fs::symlink_metadata(stdout)

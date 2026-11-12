@@ -214,11 +214,16 @@ class Builder:
         return self.one_file(distribution, AP_ARCHIVE)
 
     def build(self, number: int, backends: dict) -> dict[str, bytes]:
-        prefix, work = "build-%d-" % number, self.scratch / ("build-%d" % number)
+        # Every build runs at the same path, so a tool that writes its working directory into its output
+        # cannot make two builds of one source differ. The directory is removed once its results are read;
+        # after a failure it stays for diagnosis.
+        prefix, work = "build-%d-" % number, self.scratch / "build"
         work.mkdir()
-        return {"agno": self.wheel(prefix, work, "agno", backends["agno"]),
-                "services": self.wheel(prefix, work, "services", backends["services"]),
-                "activepieces": self.archive(prefix, work)}
+        result = {"agno": self.wheel(prefix, work, "agno", backends["agno"]),
+                  "services": self.wheel(prefix, work, "services", backends["services"]),
+                  "activepieces": self.archive(prefix, work)}
+        shutil.rmtree(work)
+        return result
 
 
 def build(args: argparse.Namespace) -> dict:

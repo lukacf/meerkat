@@ -45,6 +45,9 @@ use meerkat_meta::identity_creation::{
     WithdrawRequest, Withdrawn, core_member_name, identity_tool_catalog, identity_tool_defs,
     is_identity_tool,
 };
+use meerkat_meta::identity_creation::{
+    AgentSchedules, ScheduleEffect, ScheduleRef, SchedulesFollowed,
+};
 use meerkat_meta::identity_first::contracts::RosterProvider;
 use meerkat_meta::identity_first::{
     AgentAddressability, AgentIdentity, DurableAgentSpec, MutableRosterProvider, RosterContext,
@@ -3024,5 +3027,112 @@ async fn identity_get_reads_one_agent_and_answers_unknown_for_a_name_it_is_not_s
         .await;
     assert!(!record.is_error, "{record:?}");
     assert_eq!(record.content["archived"], true, "{}", record.content);
+    rig.shutdown().await;
+}
+
+/// A launch's schedules as its host gives them to the family: two schedules
+/// target the agent, whoever wrote them, and each change of the agent takes
+/// both with it.
+struct TwoSchedules;
+
+impl TwoSchedules {
+    fn both(effect: ScheduleEffect) -> SchedulesFollowed {
+        SchedulesFollowed::new(
+            effect,
+            vec![
+                ScheduleRef::new("sched-nightly", Some("nightly digest".to_owned())),
+                ScheduleRef::new("sched-weekly", None),
+            ],
+            false,
+        )
+    }
+}
+
+#[async_trait]
+impl AgentSchedules for TwoSchedules {
+    async fn follow(
+        &self,
+        _mob_id: &str,
+        _agent: &str,
+        effect: ScheduleEffect,
+    ) -> SchedulesFollowed {
+        Self::both(effect)
+    }
+
+    async fn planned(
+        &self,
+        _mob_id: &str,
+        _agent: &str,
+        effect: ScheduleEffect,
+    ) -> SchedulesFollowed {
+        Self::both(effect)
+    }
+}
+
+/// An agent that archives, brings back or removes an agent is told what
+/// became of the schedules that target it and how many there are, and not
+/// which: a schedule that targets an agent may be anybody's, so the list of
+/// schedules is the host's to read. On the real family, with a launch whose
+/// schedules follow the agent: each answer's `agents[0].schedules` is the
+/// effect and the count, and no answer names a schedule.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "waits for the family to scope the schedules list by requester: until that change is on this branch the family answers every requester the per-schedule list"]
+async fn an_agent_is_told_what_became_of_an_agents_schedules_not_which() {
+    let state = tempfile::tempdir().unwrap();
+    let rig = boot(state.path(), &fresh_mob_id()).await;
+    assert!(
+        rig.runtime.attach_identity_policy(
+            policy(),
+            IdentityFamilyOptions::new().with_schedules(Arc::new(TwoSchedules)),
+        ),
+        "the launch attaches its identity policy and its schedules"
+    );
+    let created = rig
+        .tool(
+            LEAD,
+            "schedules-create",
+            IDENTITY_CREATE,
+            json!({"agents": [{"name": "scout", "profile": WORKER}]}),
+        )
+        .await;
+    assert_eq!(created.content["outcome"], "done", "{}", created.content);
+    let digest = created.content["agents"][0]["spec_digest"]
+        .as_str()
+        .expect("a spec digest")
+        .to_owned();
+    let one = json!({"name": "scout", "expected_spec_digest": digest});
+
+    for (tool, effect) in [
+        (IDENTITY_ARCHIVE, "paused"),
+        (IDENTITY_UNARCHIVE, "resumed"),
+        (IDENTITY_REMOVE, "ended"),
+    ] {
+        let answer = rig
+            .tool(LEAD, &format!("schedules-{tool}"), tool, one.clone())
+            .await;
+        assert_eq!(
+            answer.content["outcome"], "done",
+            "{tool}: {}",
+            answer.content
+        );
+        assert_eq!(
+            answer.content["agents"][0]["schedules"],
+            json!({"effect": effect, "count": 2}),
+            "{tool} tells an agent the effect and the count, and no list: {}",
+            answer.content
+        );
+        let said = answer.content.to_string();
+        for hidden in [
+            "sched-nightly",
+            "nightly digest",
+            "sched-weekly",
+            "schedule_id",
+        ] {
+            assert!(
+                !said.contains(hidden),
+                "{tool} names no schedule to an agent (`{hidden}`): {said}"
+            );
+        }
+    }
     rig.shutdown().await;
 }

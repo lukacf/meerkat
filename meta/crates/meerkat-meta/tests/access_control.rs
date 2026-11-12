@@ -1161,6 +1161,120 @@ async fn gating_audit_cursor_is_filtered_by_origin_audience() {
     assert_eq!(empty["error"]["code"], json!(-32602), "{empty:#}");
 }
 
+/// An action gating blocks on a memory conflict leaves an audit entry that
+/// carries the conflict. The conflict's reason text is written from the
+/// records that conflict, which a reader of the entry may not be allowed to
+/// read, so a console that can identify a person serves that text to an
+/// administrator only: every other caller who may see the entry reads the
+/// conflict's entity and topic and no reason. The stored entry keeps it. A
+/// console that can identify nobody serves its one operator the text as
+/// before.
+#[tokio::test]
+async fn a_memory_conflicts_reason_text_in_the_gating_audit_is_for_an_administrator_only() {
+    const REASON: &str = "words written from records the caller may not read";
+    for verifies_tokens in [true, false] {
+        let (_temp_dir, mut runtime) = build_access_runtime_fixture().await;
+        let controller = AccessController::new(gating_router_only_config()).expect("controller");
+        runtime.set_access_controller(controller.clone());
+        let mut decisions = decision_state(false);
+        if !verifies_tokens {
+            decisions.trusted_oidc.jwks_json = r#"{"keys":[]}"#.to_string();
+        }
+        let app = runtime.build_reference_app_router(decisions);
+        runtime
+            .memory_index(meerkat_meta::MemoryIndexRequest {
+                entity: "delivery".to_string(),
+                topic: "email_send".to_string(),
+                store: None,
+                fact: None,
+                metadata: None,
+                conflict: Some(true),
+                conflict_reason: Some(REASON.to_string()),
+            })
+            .await
+            .expect("the conflict is indexed");
+        let blocked = runtime
+            .evaluate_gating_action_with_origin(
+                serde_json::from_value::<meerkat_meta::GatingEvaluateRequest>(json!({
+                    "action": "send_email", "actor_id": "worker", "risk_tier": "r2",
+                    "entity": "delivery", "topic": "email_send",
+                }))
+                .expect("request"),
+                Some(meerkat_meta::GatingOrigin {
+                    identity: "router".to_string(),
+                    conversation_id: None,
+                    interaction_id: None,
+                }),
+            )
+            .await;
+        assert_eq!(
+            blocked.fallback_reason.as_deref(),
+            Some("memory_conflict"),
+            "{blocked:?}"
+        );
+
+        // The conflict of the one conflict block an answer serves.
+        let conflict_of = |answer: &Value| -> Value {
+            answer["result"]["entries"]
+                .as_array()
+                .expect("entries")
+                .iter()
+                .find(|entry| entry["event_type"] == json!("conflict_blocked"))
+                .unwrap_or_else(|| panic!("the conflict block is served: {answer:#}"))["detail"]
+                ["conflict"]
+                .clone()
+        };
+        if !verifies_tokens {
+            let operator = rpc(&app, "meta/gating/audit", json!({})).await;
+            assert_eq!(
+                conflict_of(&operator)["reason"],
+                json!(REASON),
+                "the one operator of a console that can identify nobody reads it as before"
+            );
+            continue;
+        }
+        let admin = rpc_as(
+            &app,
+            &person_token("root@example.test"),
+            "meta/gating/audit",
+            json!({}),
+        )
+        .await;
+        assert_eq!(conflict_of(&admin)["reason"], json!(REASON), "{admin:#}");
+        for (who, answer) in [
+            (
+                "a signed-in person who is not an administrator",
+                rpc_as(
+                    &app,
+                    &person_token("alice@example.test"),
+                    "meta/gating/audit",
+                    json!({}),
+                )
+                .await,
+            ),
+            (
+                "the caller with no token",
+                rpc(&app, "meta/gating/audit", json!({})).await,
+            ),
+        ] {
+            let conflict = conflict_of(&answer);
+            assert_eq!(
+                (&conflict["entity"], &conflict["topic"]),
+                (&json!("delivery"), &json!("email_send")),
+                "{who} still reads which entity and topic conflict: {answer:#}"
+            );
+            assert!(
+                conflict.get("reason").is_none() && !answer.to_string().contains(REASON),
+                "{who} reads no reason text: {answer:#}"
+            );
+        }
+        assert!(
+            format!("{:?}", runtime.gating_state_snapshot().await.audit).contains(REASON),
+            "the stored entry keeps the reason"
+        );
+    }
+}
+
 /// Withdrawal belongs to the requester side (the embedding host's RPC): the
 /// console has no route for it, so even a session allowed to decide cannot
 /// withdraw a request, and the request stays pending until the host does.

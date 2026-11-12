@@ -96,6 +96,9 @@ elif command[:2] == ["pack", "--ignore-scripts"] and command[2] == "--pack-desti
             members["dist/" + path.relative_to(root / "dist").as_posix()] = path.read_bytes()
     if %(unstable)r:
         members["dist/built-at.txt"] = str(time.time_ns()).encode()
+    if %(embeds_path)r:
+        # What a bundler that writes absolute paths into its output does.
+        members["dist/built-in.txt"] = str(root).encode()
     raw = io.BytesIO()
     with tarfile.open(fileobj=raw, mode="w") as archive:
         for member, data in members.items():
@@ -185,10 +188,11 @@ class ComponentBuildTests(unittest.TestCase):
         self.pins_path.write_text(json.dumps({"schema": "connect-library-pins/1", "target": "macos-arm64",
                                               "pins": self.rows}))
 
-    def fake_node(self, fail_build=False, unstable=False):
+    def fake_node(self, fail_build=False, unstable=False, embeds_path=False):
         directory = Path(tempfile.mkdtemp(prefix="node-", dir=self.work))
         node = directory / "node"
-        node.write_text(NODE % {"python": sys.executable, "fail_build": fail_build, "unstable": unstable})
+        node.write_text(NODE % {"python": sys.executable, "fail_build": fail_build, "unstable": unstable,
+                                "embeds_path": embeds_path})
         node.chmod(0o755)
         (directory / "npm-cli.js").write_text("// stand-in\n")
         return node
@@ -291,6 +295,16 @@ class ComponentBuildTests(unittest.TestCase):
             self.assertNotEqual(reproducible[family]["second_sha256"], record["components"][family]["sha256"])
         # The delivered files are the first build's.
         self.assertEqual(sha((self.output / SERVICES).read_bytes()), record["components"]["services"]["sha256"])
+
+    def test_both_builds_run_at_the_same_path(self):
+        # A tool that writes its working directory into its output must not make the comparison differ: the
+        # measure is of the build, not of two scratch directory names.
+        self.node = self.fake_node(embeds_path=True)
+        record = self.built("--verify-reproducible")
+        self.assertEqual(record["reproducible"]["activepieces"],
+                         {"equal": True, "second_sha256": record["components"]["activepieces"]["sha256"]})
+        with tarfile.open(self.output / ARCHIVE) as archive:
+            self.assertIn("package/dist/built-in.txt", archive.getnames())
 
     def test_the_same_epoch_gives_the_same_bytes_in_another_run(self):
         first = self.built()

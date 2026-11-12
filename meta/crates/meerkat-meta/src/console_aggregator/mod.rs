@@ -4544,16 +4544,21 @@ fn stale_durable_session_mismatch<'a>(
     })
 }
 
-/// Whether a live roster row is the bridge-authorized realization of a
-/// durable identity binding.
+/// Whether a live roster row is the realization of a durable identity
+/// binding.
 ///
-/// Session-backed identities use their generated `rt:<identity>:<generation>`
-/// alias directly. External peer bindings are intentionally different: the
-/// Meerkat bridge gives the peer a stable durable roster name and records the
-/// durable owner in the runtime-authoritative `agent_identity` label. Raw
-/// member creation cannot supply that label, so accepting this exact mapping
-/// preserves stale-generation fencing without mistaking the external member
-/// for an unrelated raw alias.
+/// The durable record names the generated binding
+/// (`rt:<identity>:<generation>`), and since the roster lowering the roster
+/// row of that binding is named by the bare identity. The row is the
+/// binding's when its roster id is Core's member id of the binding, which
+/// the durable record carries ([`ConsoleIdentityRecord::member_id`], from
+/// the identity runtime's status). No label is asked: a record has no mob to
+/// ask, a roster id names one member, and Core's own member id of the
+/// binding says which. So an identity whose record is its row in the mob's
+/// identity store, seated with no `agent_identity` label, is realized by its
+/// roster row as a labelled one is, and a row of another member is never
+/// the binding's, whatever label it carries: stale-generation fencing
+/// stands, and an unrelated raw alias is not mistaken for the member.
 fn live_record_realizes_durable_binding(
     durable: &ConsoleIdentityRecord,
     live: &ConsoleIdentityRecord,
@@ -4564,12 +4569,10 @@ fn live_record_realizes_durable_binding(
     if live.runtime_member_id == durable.runtime_member_id {
         return true;
     }
-    // The row named by the identity realizes the binding. This already intended
-    // that, but compared an ENCODED roster member id against a decoded label
-    // value, so it never matched once the roster row became the encoded durable
-    // identity. Decode before comparing.
-    crate::member_comms_id::durable_identity_label(&live.labels).is_some_and(|identity| {
-        crate::member_comms_id::live_member_is_identity(&live.runtime_member_id, identity)
+    // A live record carries the public alias of its roster id; Core's member
+    // id is the roster id itself.
+    durable.member_id.as_deref().is_some_and(|member_id| {
+        crate::member_comms_id::mob_member_id_str(&live.runtime_member_id) == member_id
     })
 }
 
@@ -4771,31 +4774,43 @@ fn explicit_identity_query_needs_session_history_backfill(frames: &[ConsoleFrame
 fn dedupe_identity_records(records: Vec<ConsoleIdentityRecord>) -> Vec<ConsoleIdentityRecord> {
     // Since the roster lowering a live roster row's member id is its bare
     // durable identity, while the identity's durable row names the generated
-    // binding `rt:{identity}:{generation}`. Decode before comparing, as
-    // `live_record_realizes_durable_binding` does: a roster row named by its
-    // identity realizes the one generated binding of that identity in the
-    // same runtime, source mob and session, and lists under that binding's
-    // public alias. Different generations never merge.
+    // binding `rt:{identity}:{generation}`. As
+    // `live_record_realizes_durable_binding` does, a roster row is joined to
+    // the binding by Core's member id of it, which the durable row carries:
+    // the roster row with that id realizes the one generated binding of its
+    // identity in the same runtime, source mob and session, and lists under
+    // that binding's public alias. No label is asked, so the roster row of
+    // an identity whose record is its row in the mob's identity store
+    // (seated with no `agent_identity` label) lists once too. Different
+    // generations never merge.
     let mut bindings: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for record in &records {
-        if let Some(identity) =
-            crate::member_comms_id::durable_identity_from_runtime_alias(&record.runtime_member_id)
+        if crate::member_comms_id::durable_identity_from_runtime_alias(&record.runtime_member_id)
+            .is_some()
+            && let Some(member_id) = record.member_id.as_deref()
         {
             bindings
-                .entry(identity_record_dedupe_key(record, &identity))
+                .entry(identity_record_dedupe_key(
+                    record,
+                    &crate::member_comms_id::runtime_alias_str(member_id),
+                ))
                 .or_default()
                 .insert(record.runtime_member_id.clone());
         }
     }
-    let mut by_identity: BTreeMap<String, ConsoleIdentityRecord> = BTreeMap::new();
+    // Each kept record, with whether it is a roster row that realizes its
+    // generated binding.
+    let mut by_identity: BTreeMap<String, (ConsoleIdentityRecord, bool)> = BTreeMap::new();
     for mut record in records {
-        let realized = crate::member_comms_id::durable_identity_label(&record.labels)
-            .filter(|identity| {
-                crate::member_comms_id::live_member_is_identity(&record.runtime_member_id, identity)
-            })
-            .and_then(|identity| bindings.get(&identity_record_dedupe_key(&record, identity)))
+        let realized = bindings
+            .get(&identity_record_dedupe_key(
+                &record,
+                &record.runtime_member_id,
+            ))
             .filter(|aliases| aliases.len() == 1)
-            .and_then(|aliases| aliases.first().cloned());
+            .and_then(|aliases| aliases.first().cloned())
+            .filter(|alias| *alias != record.runtime_member_id);
+        let realizes_binding = realized.is_some();
         if let Some(alias) = realized {
             record.runtime_member_id = alias;
         }
@@ -4804,13 +4819,19 @@ fn dedupe_identity_records(records: Vec<ConsoleIdentityRecord>) -> Vec<ConsoleId
                 &record,
                 &record.runtime_member_id,
             ))
-            .and_modify(|current| {
+            .and_modify(|(current, current_realizes_binding)| {
                 let member_id = current
                     .member_id
                     .clone()
                     .or_else(|| record.member_id.clone());
-                if identity_record_prefer(&record, current) {
+                if identity_record_prefer(
+                    &record,
+                    realizes_binding,
+                    current,
+                    *current_realizes_binding,
+                ) {
                     *current = record.clone();
+                    *current_realizes_binding = realizes_binding;
                 }
                 // Core's member id of the binding comes from the durable row;
                 // the live roster row of the same binding, which the list
@@ -4819,9 +4840,12 @@ fn dedupe_identity_records(records: Vec<ConsoleIdentityRecord>) -> Vec<ConsoleId
                     current.member_id = member_id;
                 }
             })
-            .or_insert(record);
+            .or_insert((record, realizes_binding));
     }
-    by_identity.into_values().collect()
+    by_identity
+        .into_values()
+        .map(|(record, _)| record)
+        .collect()
 }
 
 fn identity_record_dedupe_key(record: &ConsoleIdentityRecord, runtime_member_id: &str) -> String {
@@ -4839,20 +4863,32 @@ fn identity_record_dedupe_key(record: &ConsoleIdentityRecord, runtime_member_id:
     )
 }
 
+/// Whether `candidate` is listed in place of `current`, a record of the
+/// same identity, runtime, source mob, runtime member id and session. A
+/// live roster row wins over the durable row of its binding: a roster row
+/// that realizes its generated binding (`*_realizes_binding`, decided by
+/// Core's member id of the binding in [`dedupe_identity_records`]), labelled
+/// or not, or a row labelled as its identity's.
 fn identity_record_prefer(
     candidate: &ConsoleIdentityRecord,
+    candidate_realizes_binding: bool,
     current: &ConsoleIdentityRecord,
+    current_realizes_binding: bool,
 ) -> bool {
-    let candidate_is_live_label_projection =
-        crate::member_comms_id::durable_identity_label(&candidate.labels).is_some_and(|identity| {
-            identity == strip_namespace(&candidate.identity, "").unwrap_or_default()
-                || candidate.runtime_member_id != candidate.identity
-        });
-    let current_is_live_label_projection =
-        crate::member_comms_id::durable_identity_label(&current.labels).is_some_and(|identity| {
-            identity == strip_namespace(&current.identity, "").unwrap_or_default()
-                || current.runtime_member_id != current.identity
-        });
+    let candidate_is_live_label_projection = candidate_realizes_binding
+        || crate::member_comms_id::durable_identity_label(&candidate.labels).is_some_and(
+            |identity| {
+                identity == strip_namespace(&candidate.identity, "").unwrap_or_default()
+                    || candidate.runtime_member_id != candidate.identity
+            },
+        );
+    let current_is_live_label_projection = current_realizes_binding
+        || crate::member_comms_id::durable_identity_label(&current.labels).is_some_and(
+            |identity| {
+                identity == strip_namespace(&current.identity, "").unwrap_or_default()
+                    || current.runtime_member_id != current.identity
+            },
+        );
     if candidate_is_live_label_projection != current_is_live_label_projection {
         return candidate_is_live_label_projection;
     }
@@ -13071,9 +13107,15 @@ comms = true
     #[test]
     fn dedupe_identity_records_merges_a_live_roster_row_into_its_generated_binding() {
         // Since the roster lowering, a live roster row's member id is the bare
-        // durable identity, while the durable row names the generated binding.
+        // durable identity, while the durable row names the generated binding
+        // and carries Core's member id of it.
         let mut durable = identity_record_for_test("test/review:singleton");
         durable.runtime_member_id = "rt:review:singleton:0".to_string();
+        durable.member_id = Some(
+            crate::member_comms_id::roster_member_id_for_identity("review:singleton")
+                .as_str()
+                .to_string(),
+        );
         let mut live = identity_record_for_test("test/review:singleton");
         live.runtime_member_id = "review:singleton".to_string();
         live.labels
@@ -13088,6 +13130,39 @@ comms = true
         assert_eq!(
             records[0].runtime_member_id, "rt:review:singleton:0",
             "the merged row keeps the binding's public runtime alias"
+        );
+
+        // The roster row of an identity whose record is its row in the
+        // mob's identity store carries no label, and realizes the binding
+        // all the same: the list keeps the live roster row, under the
+        // binding's alias and with Core's member id of it.
+        let mut unlabelled = live.clone();
+        unlabelled.labels.clear();
+        unlabelled
+            .labels
+            .insert("role".to_string(), "worker".to_string());
+        for records in [
+            vec![durable.clone(), unlabelled.clone()],
+            vec![unlabelled.clone(), durable.clone()],
+        ] {
+            let records = dedupe_identity_records(records);
+            assert_eq!(records.len(), 1, "{records:#?}");
+            assert_eq!(records[0].runtime_member_id, "rt:review:singleton:0");
+            assert_eq!(records[0].member_id, durable.member_id);
+            assert_eq!(
+                records[0].labels.get("role").map(String::as_str),
+                Some("worker"),
+                "the list prefers the live roster row, labelled or not: {records:#?}"
+            );
+        }
+        // A roster row under another member id is no row of the binding,
+        // whatever label it carries.
+        let mut other_member = live.clone();
+        other_member.runtime_member_id = "review:impostor".to_string();
+        assert_eq!(
+            dedupe_identity_records(vec![durable.clone(), other_member]).len(),
+            2,
+            "a labelled row of another member never merges into the binding"
         );
 
         let mut other_session = live.clone();
@@ -13173,32 +13248,69 @@ comms = true
         );
     }
 
+    /// A durable row of `identity` that names its generated binding
+    /// (`rt:{identity}:0`) and carries Core's member id of it, as a status
+    /// of an identity Core holds a member of does.
+    fn durable_binding_record_for_test(identity: &str) -> ConsoleIdentityRecord {
+        let mut durable = identity_record_for_test(identity);
+        durable.runtime_member_id = format!("rt:{identity}:0");
+        durable.member_id = Some(
+            crate::member_comms_id::roster_member_id_for_identity(identity)
+                .as_str()
+                .to_string(),
+        );
+        durable
+    }
+
     #[test]
     fn stable_external_member_alias_realizes_generated_durable_binding() {
-        let mut durable = identity_record_for_test("target-smoke");
-        durable.runtime_member_id = "rt:target-smoke:0".to_string();
+        let durable = durable_binding_record_for_test("target-smoke");
 
-        let mut live = durable.clone();
-        live.runtime_member_id = "target-smoke".to_string();
+        let mut live = identity_record_for_test("target-smoke");
         live.labels
             .insert("agent_identity".to_string(), "target-smoke".to_string());
 
         assert!(live_record_realizes_durable_binding(&durable, &live));
         assert_eq!(
-            stale_durable_record_error("target-smoke", &durable, &[live]),
+            stale_durable_record_error("target-smoke", &durable, std::slice::from_ref(&live)),
             None,
             "the bridge-owned stable alias must not be classified as a stale generated binding"
         );
+
+        // The roster row is the binding's by Core's member id of it, not by
+        // a label: an unlabelled row realizes it too (an identity whose
+        // record is its row in the mob's identity store), and a labelled
+        // row of another member does not.
+        let mut unlabelled = live.clone();
+        unlabelled.labels.clear();
+        assert!(live_record_realizes_durable_binding(&durable, &unlabelled));
+        assert_eq!(
+            stale_durable_record_error("target-smoke", &durable, &[unlabelled]),
+            None
+        );
+        let mut other_member = live.clone();
+        other_member.runtime_member_id = "target-impostor".to_string();
+        assert!(!live_record_realizes_durable_binding(
+            &durable,
+            &other_member
+        ));
+        assert!(
+            stale_durable_record_error("target-smoke", &durable, &[other_member]).is_some(),
+            "a labelled row of another member is no row of the binding"
+        );
+        // A durable row that carries no member id of Core's names no roster
+        // row but its own.
+        let mut no_member_id = durable;
+        no_member_id.member_id = None;
+        assert!(!live_record_realizes_durable_binding(&no_member_id, &live));
     }
 
     #[test]
     fn stable_external_member_alias_still_fences_session_split_brain() {
-        let mut durable = identity_record_for_test("target-smoke");
-        durable.runtime_member_id = "rt:target-smoke:0".to_string();
+        let mut durable = durable_binding_record_for_test("target-smoke");
         durable.session_id = Some("session-durable".to_string());
 
-        let mut live = durable.clone();
-        live.runtime_member_id = "target-smoke".to_string();
+        let mut live = identity_record_for_test("target-smoke");
         live.session_id = Some("session-live".to_string());
         live.labels
             .insert("agent_identity".to_string(), "target-smoke".to_string());
@@ -14655,6 +14767,247 @@ comms = true
         );
 
         let _ = runtime.mob_handle().stop().await;
+    }
+
+    /// What the console answers for one identity whose member Core holds,
+    /// read by [`binding_answers`]: a store-owned agent and a configured
+    /// one must answer alike.
+    #[derive(Debug, PartialEq, Eq)]
+    struct BindingAnswers {
+        /// The durable record names the generated binding
+        /// (`rt:{identity}:{generation}`), so the live roster row, named by
+        /// the bare identity, differs from it by id.
+        durable_names_a_generated_binding: bool,
+        /// The live roster row realizes the durable binding.
+        live_row_realizes_the_binding: bool,
+        /// The stale-binding check's answer for the live roster row.
+        stale_error: Option<String>,
+        /// A row of another member whose label names the identity, listed
+        /// under the identity, is accepted as realizing the binding.
+        labelled_row_of_another_member_accepted: bool,
+        /// The same row, listed under another identity, is accepted.
+        labelled_row_of_another_identity_accepted: bool,
+        /// The rows the identity lists as.
+        listed_rows: usize,
+        /// The listed row is the live roster row: it carries the role.
+        listed_row_is_the_live_roster_row: bool,
+        /// The listed row names the generated binding and Core's member id
+        /// of it.
+        listed_row_names_the_binding: bool,
+        /// Whether the inspection answers the identity, or its refusal.
+        inspected: Result<bool, String>,
+    }
+
+    /// [`BindingAnswers`] of `identity`, an identity `identity_runtime`
+    /// registered and Core holds a member of.
+    async fn binding_answers(
+        aggregator: &MetaConsoleAggregator,
+        entry: &RuntimeEntry,
+        identity_runtime: &crate::identity_first::IdentityRuntime,
+        identity: &str,
+    ) -> BindingAnswers {
+        let status = identity_runtime
+            .status(&crate::identity_first::AgentIdentity::parse(identity).expect("an identity"))
+            .await
+            .expect("the identity's status reads");
+        let durable = identity_record_for_status(entry, &status);
+        let live = aggregator.live_records_for_identity(identity).await;
+        assert_eq!(
+            live.len(),
+            1,
+            "{identity} has one live roster row: {live:#?}"
+        );
+        let live = live[0].clone();
+        let mut other_member = live.clone();
+        other_member.runtime_member_id = format!("{identity}-impostor");
+        other_member
+            .labels
+            .insert("agent_identity".to_string(), identity.to_string());
+        let mut other_identity = other_member.clone();
+        other_identity.identity = format!("{identity}-impostor");
+        let listed = aggregator
+            .list_identities_fresh()
+            .await
+            .expect("the identities list");
+        let rows = listed
+            .iter()
+            .filter(|record| record.identity == identity)
+            .collect::<Vec<_>>();
+        BindingAnswers {
+            durable_names_a_generated_binding: durable.runtime_member_id.starts_with("rt:")
+                && durable.runtime_member_id != live.runtime_member_id,
+            live_row_realizes_the_binding: live_record_realizes_durable_binding(&durable, &live),
+            stale_error: stale_durable_record_error(
+                identity,
+                &durable,
+                std::slice::from_ref(&live),
+            ),
+            labelled_row_of_another_member_accepted: live_record_realizes_durable_binding(
+                &durable,
+                &other_member,
+            ),
+            labelled_row_of_another_identity_accepted: live_record_realizes_durable_binding(
+                &durable,
+                &other_identity,
+            ),
+            listed_rows: rows.len(),
+            listed_row_is_the_live_roster_row: rows.len() == 1
+                && rows[0].labels.get("role").map(String::as_str) == Some("worker"),
+            listed_row_names_the_binding: rows.len() == 1
+                && rows[0].runtime_member_id == durable.runtime_member_id
+                && durable.member_id.is_some()
+                && rows[0].member_id == durable.member_id,
+            inspected: aggregator
+                .inspect_identity(identity)
+                .await
+                .map(|inspection| inspection.is_some())
+                .map_err(|error| error.to_string()),
+        }
+    }
+
+    /// The live roster row of an agent created at run time realizes its
+    /// durable binding, as a configured agent's does, and a row of another
+    /// member that only carries a label naming the identity never does.
+    /// Core seats a store-owned identity's member with its row's labels,
+    /// which carry no `agent_identity` label, while its durable record names
+    /// the generated binding: the roster row is the binding's because Core
+    /// holds the binding under its member id, whatever its labels. So the
+    /// console lists the agent once, as its live roster row under the
+    /// binding's alias, inspects it, and reports no stale binding.
+    #[tokio::test]
+    async fn a_store_owned_agent_s_live_row_realizes_its_durable_binding_as_a_configured_agent_s_does()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let runtime = build_empty_runtime("store-owned-binding-realized").await;
+        let handle = runtime.mob_handle();
+        let identity_runtime = Arc::new(crate::identity_first::IdentityRuntime::new(
+            crate::identity_first::IdentityRuntimeConfig {
+                continuity_store: Arc::new(
+                    crate::identity_first::LocalContinuityStore::in_memory()?
+                ),
+                lease_provider: Arc::new(crate::identity_first::LocalLeaseProvider::new()),
+                runtime_instance_id: "store-owned-binding-realized".to_string(),
+                has_runtime_store: true,
+                durability_policy: crate::identity_first::DurabilityPolicy::SyncWriteThrough,
+                bridge: Some(Arc::new(crate::identity_first::MobSessionBridge::new(
+                    runtime.mob_handle(),
+                ))),
+                default_timeout: None,
+            },
+        ));
+
+        // The configured twin: registered from a roster spec and seated by
+        // the identity runtime, labelled.
+        let twin = crate::identity_first::AgentIdentity::parse("twin")?;
+        identity_runtime
+            .register(crate::identity_first::DurableAgentSpec {
+                identity: twin.clone(),
+                profile: meerkat_mob::ProfileName::from("worker"),
+                addressability: crate::identity_first::AgentAddressability::Addressable,
+                display_name: None,
+                labels: BTreeMap::new(),
+                context: None,
+                additional_instructions: Vec::new(),
+                initial_message: None,
+                runtime_mode_override: None,
+                backend: None,
+                binding: None,
+                placement: None,
+            })
+            .await
+            .expect("the twin registers");
+        identity_runtime
+            .materialize(&twin)
+            .await?
+            .ok_or("Core holds the twin live after the wake")?;
+
+        // The agent created at run time: Core seats it from its row, and the
+        // change path registers the row.
+        let created = handle
+            .create_store_owned_identities(
+                meerkat_mob::StoreOwnedIdentityCreate::new(
+                    meerkat_mob::IdentityOperation::new(
+                        "create-keeper",
+                        meerkat_core::approval::decision::Sha256Digest::of(b"create-keeper")
+                            .as_str(),
+                    ),
+                    meerkat_mob::IdentityChangeRequesterInput::host("console"),
+                    vec![meerkat_mob::CreatedIdentityRequest::new(
+                        meerkat_mob::CreatedIdentitySpec::new("keeper", "worker"),
+                    )],
+                ),
+                meerkat_mob::IdentityChangeConsentInput::Policy(
+                    meerkat_mob::IdentityPolicyOutcome::Allow,
+                ),
+            )
+            .await
+            .map(|created| created.change);
+        assert!(
+            matches!(
+                created,
+                Ok(meerkat_mob::IdentityChangeOutcome::Committed { .. })
+            ),
+            "{created:?}"
+        );
+        let keeper = crate::identity_first::AgentIdentity::parse("keeper")?;
+        assert!(
+            identity_runtime.register_from_row(&keeper).await?,
+            "the created row registers"
+        );
+        let labelled = |alias: &str, members: &[MobMemberListEntry]| {
+            members
+                .iter()
+                .find(|member| {
+                    member.agent_identity == crate::member_comms_id::mob_member_id(alias)
+                })
+                .map(|member| member.labels.contains_key("agent_identity"))
+        };
+        let members = handle.list_members_including_retiring().await;
+        assert_eq!(
+            (labelled("keeper", &members), labelled("twin", &members)),
+            (Some(false), Some(true)),
+            "the store-owned seat carries no identity label, the configured one does"
+        );
+
+        let aggregator = MetaConsoleAggregator::in_memory();
+        aggregator.register_runtime_handles_with_policy(
+            "identity-first",
+            "",
+            runtime.mob_runtime().clone(),
+            Some(identity_runtime.clone()),
+            runtime.console_events(),
+            Arc::new(AllowAllConsoleVisibilityPolicy),
+        );
+        let entry = aggregator
+            .inner
+            .runtimes
+            .read()
+            .expect("runtime registry")
+            .get("identity-first")
+            .cloned()
+            .ok_or("the runtime is registered")?;
+
+        let keeper_answers =
+            binding_answers(&aggregator, &entry, &identity_runtime, "keeper").await;
+        let twin_answers = binding_answers(&aggregator, &entry, &identity_runtime, "twin").await;
+        let expected = || BindingAnswers {
+            durable_names_a_generated_binding: true,
+            live_row_realizes_the_binding: true,
+            stale_error: None,
+            labelled_row_of_another_member_accepted: false,
+            labelled_row_of_another_identity_accepted: false,
+            listed_rows: 1,
+            listed_row_is_the_live_roster_row: true,
+            listed_row_names_the_binding: true,
+            inspected: Ok(true),
+        };
+        assert_eq!(
+            (keeper_answers, twin_answers),
+            (expected(), expected()),
+            "the store-owned agent (left) and the configured agent (right) answer alike"
+        );
+
+        let _ = runtime.mob_handle().stop().await;
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

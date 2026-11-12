@@ -224,8 +224,8 @@ impl MemberSocketPlace {
                 holder_mob_id = %holder.mob_id,
                 holder = %crate::member_comms_id::runtime_alias_str(&holder.member),
                 holder_session = ?holder.session,
-                "a member was refused before its build: the member socket option serves one \
-                 member per gateway and another member holds the place; this member's further \
+                "a member was refused before its build: members on socket comms are served \
+                 one per gateway and another member holds the place; this member's further \
                  refusals are not logged while that member holds it"
             );
         }
@@ -285,13 +285,14 @@ async fn session_exists(service: &dyn MobSessionService, session: &SessionId) ->
 /// What a refused member's caller reads. It names the refused member and
 /// nothing of the member that holds the place: that member may be one the
 /// caller cannot see (a member of another mob, a member private to another
-/// person).
+/// person). The sentence holds however the members came to run on socket
+/// comms: the gateway's option or the members' own `[comms]` table.
 pub(crate) fn refusal_text(member: &str) -> String {
     format!(
-        "member '{}' cannot be created: this gateway runs with the member socket option \
-         (member_comms_address), which serves one member per gateway, and another member of \
-         this gateway already holds its comms key. Retire that member first, or run the \
-         members without the option.",
+        "member '{}' cannot be created: this gateway's members run on socket comms \
+         (member_comms_address, or [comms] mode tcp or uds), which serve one member per \
+         gateway, and another member of this gateway already holds its comms key. Retire \
+         that member first, or run the members on in-process comms.",
         crate::member_comms_id::runtime_alias_str(member),
     )
 }
@@ -372,10 +373,10 @@ mod tests {
         let refused = place.refuse(&member("another-mob", "carol"), &holder);
         assert_eq!(
             refused.to_string(),
-            "member 'carol' cannot be created: this gateway runs with the member socket option \
-             (member_comms_address), which serves one member per gateway, and another member of \
-             this gateway already holds its comms key. Retire that member first, or run the \
-             members without the option."
+            "member 'carol' cannot be created: this gateway's members run on socket comms \
+             (member_comms_address, or [comms] mode tcp or uds), which serve one member per \
+             gateway, and another member of this gateway already holds its comms key. Retire \
+             that member first, or run the members on in-process comms."
         );
         let shown = format!("{refused:?}");
         for fact in ["holder-name", "holders-mob", "another-mob"] {

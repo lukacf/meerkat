@@ -264,17 +264,18 @@ are not limited.
 
 - The first member built holds the place until it is retired. When the
   roster declares several members, whichever is built first holds it, and
-  the gateway logs one warning at its start. At a restart the member whose
-  endpoint is recorded holds the place again.
+  a gateway with `member_comms_address` logs one warning at its start. At a
+  restart the member whose endpoint is recorded holds the place again.
 - Every other member is refused before anything is built:
   `meta/ensure_member`, `meta/spawn_helper`, `meta/fork_helper`, a durable
   fork, an agent's spawn tool or `delegate`, a member of a child mob, a
   declared roster member at its first build. The answer is a session error
   that names the refused member and nothing of the member that holds the
-  place: `member '<name>' cannot be created: this gateway runs with the
-  member socket option (member_comms_address), which serves one member per
-  gateway, and another member of this gateway already holds its comms key.
-  Retire that member first, or run the members without the option.` The
+  place: `member '<name>' cannot be created: this gateway's members run on
+  socket comms (member_comms_address, or [comms] mode tcp or uds), which
+  serve one member per gateway, and another member of this gateway already
+  holds its comms key. Retire that member first, or run the members on
+  in-process comms.` The
   refused member binds no socket and is not recorded, the member that holds
   the place keeps its endpoint, and nothing in this fails a gateway start.
 - Retiring the member that holds the place frees it. That is enough for an
@@ -285,7 +286,7 @@ are not limited.
   but no materializable body`); neither names the member that holds the
   place. It stays broken after the holder is retired and after a restart. To
   bring it back, free the place (retire the holder and withdraw its
-  declaration, or start the gateway without the option) and call
+  declaration, or run the members on in-process comms) and call
   `meta/delete_identity` for it: it never ran, so nothing is lost. To remove
   it instead, withdraw its declaration and call `meta/reconcile_identity`; a
   `meta/retire_member` alone is not enough, because the next roster pass

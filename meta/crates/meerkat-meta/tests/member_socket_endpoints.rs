@@ -74,10 +74,10 @@ const SEVERAL_MEMBERS_WARNING: &str =
 /// place. It names the refused member only.
 fn refusal_of(member: &str) -> String {
     format!(
-        "member '{member}' cannot be created: this gateway runs with the member socket option \
-         (member_comms_address), which serves one member per gateway, and another member of \
-         this gateway already holds its comms key. Retire that member first, or run the \
-         members without the option."
+        "member '{member}' cannot be created: this gateway's members run on socket comms \
+         (member_comms_address, or [comms] mode tcp or uds), which serve one member per \
+         gateway, and another member of this gateway already holds its comms key. Retire \
+         that member first, or run the members on in-process comms."
     )
 }
 

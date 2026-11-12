@@ -15,16 +15,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   helper or a fork helper, a durable fork, an agent's spawn tool or
   `delegate`, a member of a child mob, a declared roster member at its first
   build. The members of such a gateway load one comms key, and a mob admits a
-  comms key for one member. The refusal is a session error that names the
-  refused member only ("member '<name>' cannot be created: this gateway runs
-  with the member socket option (member_comms_address), which serves one
-  member per gateway, and another member of this gateway already holds its
-  comms key. Retire that member first, or run the members without the
-  option."). The refused member is not built, binds no socket and is not
-  recorded; the member that holds the place keeps its endpoint; nothing in
-  this fails a gateway start, and the gateway warns once at its start when
-  the roster declares more than one member. Retiring the holder frees the
-  place, and an ensured member, a helper or a fork is then built by asking
+  comms key for one member; the same holds when the members' own `[comms]`
+  table sets `mode = "tcp"` or `"uds"`. The refusal is a session error that
+  names the refused member only ("member '<name>' cannot be created: this
+  gateway's members run on socket comms (member_comms_address, or [comms]
+  mode tcp or uds), which serve one member per gateway, and another member of
+  this gateway already holds its comms key. Retire that member first, or run
+  the members on in-process comms."). The refused member is not built, binds
+  no socket and is not recorded; the member that holds the place keeps its
+  endpoint; nothing in this fails a gateway start, and the gateway warns once
+  at its start when the option is set and the roster declares more than one
+  member. Retiring the holder frees the place, and an ensured member, a
+  helper or a fork is then built by asking
   again. A declared roster member that was refused is listed broken with that
   text and stays so: once the place is free, `meta/delete_identity` starts it
   over (it never ran, so nothing is lost). A member built in an earlier start

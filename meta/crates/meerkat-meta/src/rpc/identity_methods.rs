@@ -325,29 +325,16 @@ fn named_operation(
     parse::<OperationRef>(params)?.resolve(&surface.requester.recorded())
 }
 
-/// The requester part of an operation id: `<kind>.<digest>`, before the
-/// request id.
-fn operation_namespace(operation_id: &str) -> &str {
-    let mut dots = operation_id.match_indices('.');
-    dots.next();
-    dots.next()
-        .map_or(operation_id, |(at, _)| &operation_id[..at])
-}
-
 impl IdentityFamilySurface<'_> {
     /// Whether the caller reads the operation `operation_id`: its own
     /// always, and another requester's on the stdio gateway or as a Console
     /// caller that administers the runtime. To every other caller another
     /// requester's operation reads as one nobody asked.
     fn reads_operation(&self, operation_id: &OperationId) -> bool {
-        let own = OperationId::for_request(&self.requester.recorded(), "own")
-            .ok()
-            .is_some_and(|probe| {
-                operation_namespace(probe.as_str()) == operation_namespace(operation_id.as_str())
-            });
-        own || self
-            .access
-            .is_none_or(|view| view.allows(crate::access::ACTION_RUNTIME_ADMIN))
+        operation_id.is_of(&self.requester.recorded())
+            || self
+                .access
+                .is_none_or(|view| view.allows(crate::access::ACTION_RUNTIME_ADMIN))
     }
 }
 

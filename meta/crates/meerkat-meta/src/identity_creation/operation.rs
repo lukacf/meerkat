@@ -117,6 +117,13 @@ impl OperationId {
         Self::namespaced(requester, &format!("call-{hex}"))
     }
 
+    /// Whether this operation is one `requester` asked: its id carries
+    /// the requester part every operation id of that requester has.
+    pub fn is_of(&self, requester: &Requester) -> bool {
+        self.0
+            .starts_with(Self::namespaced(requester, "").0.as_str())
+    }
+
     fn namespaced(requester: &Requester, request_id: &str) -> Self {
         let (kind, id) = match requester {
             Requester::Agent { identity } => ("agent", identity.as_str()),

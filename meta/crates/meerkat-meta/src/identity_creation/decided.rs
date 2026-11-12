@@ -269,7 +269,9 @@ impl IdentityDecisionNotice {
     }
 
     /// The notice as a requesting agent reads it: one sentence that says
-    /// what was decided, then the typed outcome.
+    /// what was decided, then the typed outcome. It names the decision and
+    /// no operation id: an operation id is the host's handle on a change,
+    /// and appears in nothing an agent reads.
     pub fn text(&self) -> String {
         let agents = self
             .agents
@@ -288,12 +290,14 @@ impl IdentityDecisionNotice {
             ),
             IdentityOutcome::PendingDecision { .. } => "is still held".to_owned(),
         };
+        let mut typed = self.to_json();
+        if let Some(members) = typed.as_object_mut() {
+            members.remove("operation_id");
+        }
         format!(
-            "The change you asked for ({} of {agents}, operation {}) {summary}\n\
-             Do not ask again for the same change unless this says it was not carried out.\n{}",
+            "The change you asked for ({} of {agents}) {summary}\n\
+             Do not ask again for the same change unless this says it was not carried out.\n{typed}",
             self.action,
-            self.operation_id,
-            self.to_json()
         )
     }
 }

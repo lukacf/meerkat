@@ -1844,6 +1844,14 @@ impl IdentityFamily for IdentityGate {
                 )))
             }
             IdentityRead::Operation(operation_id) => {
+                // An agent reads its own operations only: another
+                // requester's reads to it as one nobody asked. The host and
+                // a person read what their surface admits them to.
+                if matches!(requester, ChangeRequester::Agent { .. })
+                    && !operation_id.is_of(&requester.recorded())
+                {
+                    return Ok(IdentityReadAnswer::Operation(OperationState::Unknown));
+                }
                 let state = match committed_outcome(mob, &operation_id).await {
                     Ok(Some(outcome)) => OperationState::Outcome(outcome),
                     // No change committed under it: a decision may hold it.

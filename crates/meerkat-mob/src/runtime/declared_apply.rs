@@ -200,8 +200,10 @@ pub struct DeclaredEntry {
     /// externally bound identity is hosted on its first use), and its
     /// descriptive facets and build inputs (labels, context, instructions),
     /// which are no lifecycle fact: a change of them alone is no new life
-    /// and no restamp. The spec's launch mode is not read: the apply decides
-    /// the session.
+    /// and no restamp (a store-owned identity's label change excepted: its
+    /// update restamps its member with its row's labels, see
+    /// [`super::MobHandle::update_store_owned_identity`]). The spec's launch
+    /// mode is not read: the apply decides the session.
     pub spec: SpawnMemberSpec,
     /// Whether the host holds the identity's creation for its held protocol
     /// ([`super::MobHandle::spawn_held_until`]): an identity never created
@@ -445,10 +447,13 @@ pub enum DeclaredEntryOutcome {
     /// The identity's member keeps its seat: nothing was written. A change
     /// of descriptive facets alone answers this, and so does a change of
     /// placement alone (placement is read only for an identity no member
-    /// holds).
+    /// holds). A store-owned identity's label change is no such change: it
+    /// answers [`Self::Restamped`], and this only for a member a
+    /// same-session successor cannot serve.
     Kept,
-    /// The member was restamped with its declared runtime mode on its own
-    /// session, at `generation`.
+    /// The member was restamped on its own session, at `generation`: with
+    /// its declared runtime mode, or, a store-owned identity's member whose
+    /// row's labels moved, with its row's labels.
     Restamped { generation: Generation },
     /// The member was restamped under its declared new role on its own
     /// session, at `generation`.
@@ -2053,6 +2058,65 @@ impl super::MobHandle {
         super::identity_entry::machine_seats(&self.machine_state_watch_rx.borrow(), identity)
     }
 
+    /// Seat a kept store-owned identity's row labels when its seat carries
+    /// others: its member is restamped on its own session, as a
+    /// runtime-mode change restamps it, once it is idle. `None` when the
+    /// declaration is not a store-owned identity's composed spec, no member
+    /// holds the identity, or its seat carries the spec's labels already.
+    ///
+    /// A store-owned member's seat carries its row's labels and no others,
+    /// and every build of it is refused when the labels its host answers
+    /// are not its seat's
+    /// ([`super::MemberBuildPreparationRefusal::store_owned_seat_labels`]).
+    /// So a seat that kept the labels it was seated with after its row's
+    /// labels moved would be refused its next build for good. A member that
+    /// holds work is answered deferred and keeps its seat: the restamp is
+    /// owed until its update is retried. A member a same-session successor
+    /// cannot serve (a placed one, one wired to a placed member, one on a
+    /// service that keeps no durable sessions) keeps its seat and labels.
+    async fn restamp_store_owned_seat_labels(
+        &self,
+        entry: &DeclaredEntry,
+    ) -> Option<DeclaredEntryOutcome> {
+        if !entry.spec.created_custody || !entry.build.carries_member_build() {
+            return None;
+        }
+        let identity = &entry.spec.identity;
+        let labels = entry.spec.labels.clone().unwrap_or_default();
+        // The mob's own comparison of its seat with its row's labels, read
+        // under the mob's own authority: the caller's scopes are checked on
+        // the release and the respawn.
+        let seat = self
+            .non_owning()
+            .with_command_authority(crate::control_policy::CommandAuthority::principal(
+                crate::control_policy::MobControlPrincipal::Owner,
+            ))
+            .get_member(identity)
+            .await;
+        match seat {
+            Ok(Some(member)) if member.labels != labels => {}
+            Ok(_) => return None,
+            Err(error) => return Some(failure_outcome(error)),
+        }
+        // The release is the idle check (refused, retryable, while the
+        // member holds work): a label change never interrupts a turn.
+        let restamped = match self.release_member(identity).await {
+            Ok(()) => self
+                .respawn_member(
+                    identity.clone(),
+                    super::MemberRespawn::new().with_labels(labels),
+                )
+                .await
+                .map(|receipt| receipt.runtime_id().generation),
+            Err(error) => Err(error),
+        };
+        match restamped {
+            Ok(generation) => Some(DeclaredEntryOutcome::Restamped { generation }),
+            Err(MobError::UnsupportedForMode { .. }) => None,
+            Err(error) => Some(failure_outcome(error)),
+        }
+    }
+
     /// A seated member's first-boot `Fresh` request: its rotation onto a
     /// fresh session under the declared spec, once it is idle.
     async fn fresh_life_of_seated(&self, entry: &DeclaredEntry) -> DeclaredEntryOutcome {
@@ -2085,7 +2149,12 @@ impl super::MobHandle {
     ) -> DeclaredEntryOutcome {
         let identity = &entry.spec.identity;
         match verdict {
-            mob_dsl::IdentityEntryVerdict::Kept => DeclaredEntryOutcome::Kept,
+            // A kept store-owned identity whose seat's labels are not its
+            // row's is restamped with them on its own session.
+            mob_dsl::IdentityEntryVerdict::Kept => self
+                .restamp_store_owned_seat_labels(entry)
+                .await
+                .unwrap_or(DeclaredEntryOutcome::Kept),
             mob_dsl::IdentityEntryVerdict::HostedOnFirstUse => {
                 DeclaredEntryOutcome::HostedOnFirstUse
             }

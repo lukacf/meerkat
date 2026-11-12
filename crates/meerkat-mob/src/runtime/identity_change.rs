@@ -346,7 +346,10 @@ impl IdentityArchiveChange {
 /// identity's row takes the new spec at its next revision, in the change's
 /// store transaction, and its member is changed exactly as the declared
 /// apply changes a roster-owned identity's member for the same change of
-/// spec: a descriptive change keeps it, a runtime-mode change restamps it
+/// spec, a label change excepted: a descriptive change keeps it, a label
+/// change restamps it with the row's labels on its own session (a
+/// roster-owned member is kept: the declared apply stores no labels), a
+/// runtime-mode change restamps it
 /// on its own session, and a profile change moves it to the new profile on
 /// its own session (the store-owned identity's migration from its current
 /// profile is declared by the update itself, and kept in its row until the
@@ -3711,13 +3714,29 @@ impl super::MobHandle {
     /// revision and the change's receipt in one store transaction; the
     /// verdict is then realized as a roster-owned identity's change of the
     /// same spec is ([`IdentityUpdateOutcome::applied`]). A descriptive
-    /// change (display name, labels, context, instructions) keeps the member
+    /// change (display name, context, instructions) keeps the member
     /// and is in the row at once: a seat whose session no build created yet
     /// takes the new context and instructions at its first build; otherwise
     /// the seat keeps its recorded build inputs, as a roster-owned
-    /// identity's does, and its labels change when it is seated again or
-    /// respawned with them ([`super::MemberRespawn::with_labels`], counted
-    /// in `seats_stale` until then). A runtime-mode change is a restamp on
+    /// identity's does. A label change is in the row at once and restamps
+    /// the seated member with the row's labels on its own session
+    /// ([`super::DeclaredEntryOutcome::Restamped`]; the same-session respawn
+    /// with [`super::MemberRespawn::with_labels`]): every build of a
+    /// store-owned member must carry exactly its seat's labels
+    /// ([`super::MemberBuildPreparer::prepare_store_owned_seat`]), so a
+    /// seat that trailed its row would be refused its next build. The
+    /// member keeps its identity entry, session, conversation and edges;
+    /// nothing is built or woken, and no kickoff runs again. A member that
+    /// holds work is not interrupted: the update commits and answers
+    /// [`super::DeclaredEntryOutcome::Deferred`], and its restamp is owed
+    /// until the update is retried (the retry replays and carries it out);
+    /// until then the seat is counted in `seats_stale`
+    /// ([`Self::identity_record_census`]) and a cold build of the member is
+    /// refused naming the changed key. A member a same-session successor
+    /// cannot serve (a placed one, one wired to a placed member, one on a
+    /// session service that keeps no durable sessions) keeps its seat and
+    /// its labels ([`super::DeclaredEntryOutcome::Kept`]). A runtime-mode
+    /// change is a restamp on
     /// the member's own session; a profile change is the declared migration
     /// from the member's current role, kept in the row until the restamp
     /// commits (a crash before it is carried out by the next start); either

@@ -1962,6 +1962,189 @@ async fn a_label_updates_restamp_keeps_the_members_session_conversation_kickoff_
     assert_eq!(mob.wired_to("desk").await, wired, "its edge stands");
 }
 
+/// Row: a label update of a member that holds work commits and defers its
+/// restamp: nothing interrupts the member's turn, its seat keeps the labels
+/// it was seated with, and the record census counts the seat stale. A
+/// retry of the update while the member still holds work replays and
+/// leaves the seat as it is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_label_update_of_a_member_that_holds_work_defers_its_restamp() {
+    let mob = StoreOwnedMob::new("label-update-busy").await;
+    // A first message whose turn the rows' session service leaves running.
+    let before = spec("desk", "worker")
+        .with_runtime_mode_override(crate::MobRuntimeMode::AutonomousHost)
+        .with_initial_message(meerkat_core::types::ContentInput::from("Keep working."));
+    mob.create_outcome(
+        StoreOwnedIdentityCreate::new(
+            operation("create-desk"),
+            IdentityChangeRequesterInput::host("console"),
+            vec![CreatedIdentityRequest::new(before.clone())],
+        ),
+        ALLOW,
+    )
+    .await
+    .expect("the create commits");
+    let session = kicked_off(&mob, "desk", "Keep working.").await;
+    let generation = mob.generation("desk").await;
+    let seated_with = mob.spawn_row("desk").await.labels;
+    let moved = BTreeMap::from([("team".to_string(), "beta".to_string())]);
+    let after = before.clone().with_labels(moved.clone());
+    for attempt in ["first", "retried"] {
+        let updated = mob
+            .update("relabel-desk", after.clone(), &spec_digest(&before))
+            .await
+            .expect("the label update answers");
+        match attempt {
+            "first" => assert!(
+                matches!(
+                    updated.applied,
+                    Some(crate::runtime::DeclaredEntryOutcome::Deferred { .. })
+                ),
+                "a member that holds work keeps its seat, its restamp deferred: {updated:?}"
+            ),
+            _ => assert!(
+                matches!(updated.change, IdentityChangeOutcome::Replayed { .. }),
+                "{updated:?}"
+            ),
+        }
+        assert_eq!(
+            mob.row("desk").await.spec.map(|spec| spec.labels),
+            Some(moved.clone()),
+            "{attempt}: the row holds the new labels"
+        );
+        assert_eq!(
+            mob.generation("desk").await,
+            generation,
+            "{attempt}: no restamp"
+        );
+        assert_eq!(
+            mob.session("desk").await,
+            session,
+            "{attempt}: the same session"
+        );
+        assert_eq!(
+            mob.spawn_row("desk").await.labels,
+            seated_with,
+            "{attempt}: the seat keeps the labels it was seated with"
+        );
+        assert_eq!(
+            seats_stale(&mob).await,
+            1,
+            "{attempt}: the seat counts stale"
+        );
+    }
+}
+
+/// Row: a label restamp an update left owed (the update stopped after its
+/// commit, here; a member that held work at the update defers it the same
+/// way) is carried out by the update's retry: the retry replays, and the
+/// member is restamped with its row's labels on its own session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_owed_label_restamp_is_carried_out_by_the_updates_retry() {
+    let mob = StoreOwnedMob::new("label-restamp-owed").await;
+    committed(
+        mob.create(host_create("create-desk", &["desk"]), ALLOW)
+            .await,
+    );
+    let before = spec("desk", "worker");
+    let moved = BTreeMap::from([("team".to_string(), "beta".to_string())]);
+    let after = before.clone().with_labels(moved.clone());
+    let session = mob.session("desk").await;
+    let generation = mob.generation("desk").await.expect("desk is a member");
+    mob.commit_update_transaction("relabel-desk", after.clone())
+        .await;
+    assert_eq!(seats_stale(&mob).await, 1, "the restamp is owed");
+
+    let retried = mob
+        .update("relabel-desk", after, &spec_digest(&before))
+        .await
+        .expect("the retry answers");
+    assert!(
+        matches!(retried.change, IdentityChangeOutcome::Replayed { .. }),
+        "{retried:?}"
+    );
+    assert_eq!(
+        mob.spawn_row("desk").await.labels,
+        moved,
+        "the retry seats the row's labels"
+    );
+    assert_eq!(mob.generation("desk").await, generation.next());
+    assert_eq!(mob.session("desk").await, session, "the same session");
+    assert_eq!(seats_stale(&mob).await, 0, "no seat is stale");
+}
+
+/// Row: a member a same-session successor cannot serve keeps its seat at a
+/// label update, as before: on a session service that keeps no durable
+/// sessions the update answers kept, the member keeps its session, its
+/// generation and the labels it was seated with, and the record census
+/// counts the seat stale. A rotation onto a fresh session would cost the
+/// member its conversation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_label_update_keeps_a_member_a_same_session_successor_cannot_serve() {
+    let keys = tempfile::tempdir().expect("a comms identity root");
+    let service = Arc::new(MockSessionService::new());
+    service.keep_no_durable_sessions();
+    service.set_keep_alive_turns_complete_immediately(true);
+    let _adapter = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let handle = MobBuilder::new(
+        store_owned_definition("label-update-non-durable"),
+        storage.clone(),
+    )
+    .with_session_service(service.clone())
+    .with_member_comms_identity_root(keys.path())
+    .allow_ephemeral_sessions(true)
+    .create()
+    .await
+    .expect("create the mob");
+    let mob = StoreOwnedMob {
+        keys,
+        storage,
+        handle,
+        service,
+    };
+    let before = spec("desk", "worker")
+        .with_runtime_mode_override(crate::MobRuntimeMode::AutonomousHost)
+        .with_initial_message(meerkat_core::types::ContentInput::from("Begin."));
+    mob.create_outcome(
+        StoreOwnedIdentityCreate::new(
+            operation("create-desk"),
+            IdentityChangeRequesterInput::host("console"),
+            vec![CreatedIdentityRequest::new(before.clone())],
+        ),
+        ALLOW,
+    )
+    .await
+    .expect("the create commits");
+    let session = kicked_off(&mob, "desk", "Begin.").await;
+    let generation = mob.generation("desk").await;
+    let seated_with = mob.spawn_row("desk").await.labels;
+    let moved = BTreeMap::from([("team".to_string(), "beta".to_string())]);
+    let updated = mob
+        .update(
+            "relabel-desk",
+            before.clone().with_labels(moved),
+            &spec_digest(&before),
+        )
+        .await
+        .expect("the label update commits");
+    assert!(
+        matches!(
+            updated.applied,
+            Some(crate::runtime::DeclaredEntryOutcome::Kept)
+        ),
+        "a member no same-session successor can serve keeps its seat: {updated:?}"
+    );
+    assert_eq!(mob.generation("desk").await, generation, "no restamp");
+    assert_eq!(mob.session("desk").await, session, "the same session");
+    assert_eq!(
+        mob.spawn_row("desk").await.labels,
+        seated_with,
+        "the seat keeps the labels it was seated with"
+    );
+    assert_eq!(seats_stale(&mob).await, 1, "the seat counts stale");
+}
+
 /// A host's spawn customizer that sets one label on every build it is asked
 /// about, as a host that labels its members in its build step does.
 struct LabellingCustomizer;
@@ -5112,39 +5295,45 @@ fn answer_kind(outcome: &crate::runtime::DeclaredEntryOutcome) -> &'static str {
 
 /// Row (RED): a store-owned update and a roster-owned identity's change of
 /// the same spec answer the same, and each answers its own kind: a
-/// descriptive change, a label change and a placement change keep the
-/// member, a runtime-mode change restamps it, a profile change moves it to
-/// the new profile (the store-owned one's migration declared by the update,
-/// the roster-owned one's by its roster).
+/// descriptive change and a placement change keep the member, a
+/// runtime-mode change restamps it, a profile change moves it to the new
+/// profile (the store-owned one's migration declared by the update, the
+/// roster-owned one's by its roster). A label change is the one change the
+/// two answer differently: a roster-owned member is kept (the apply stores
+/// no labels, its host's build step labels it), and a store-owned member is
+/// restamped with its row's labels (its seat carries its row's labels and
+/// no others).
 ///
 /// RED on the old tree: no store-owned update exists.
 ///
-/// The kinds are pinned per change: two equal failures no longer
-/// pass.
+/// The kinds are pinned per change and per custody: two equal failures no
+/// longer pass.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn store_and_roster_updates_of_the_same_change_answer_the_same_verdict() {
     type Change = fn(CreatedIdentitySpec) -> CreatedIdentitySpec;
-    let changes: [(&str, &str, Change); 5] = [
-        ("descriptive", "kept", |spec| {
+    // Each change, what the roster-owned identity answers and what the
+    // store-owned one answers.
+    let changes: [(&str, &str, &str, Change); 5] = [
+        ("descriptive", "kept", "kept", |spec| {
             spec.with_display_name("Renamed")
         }),
-        ("labels", "kept", |spec| {
+        ("labels", "kept", "restamped", |spec| {
             let mut labels = spec.labels.clone();
             labels.insert("tier".to_string(), "gold".to_string());
             spec.with_labels(labels)
         }),
-        ("runtime_mode", "restamped", |spec| {
+        ("runtime_mode", "restamped", "restamped", |spec| {
             spec.with_runtime_mode_override(crate::MobRuntimeMode::AutonomousHost)
         }),
-        ("profile", "role_migrated", |mut spec| {
+        ("profile", "role_migrated", "role_migrated", |mut spec| {
             spec.profile = ProfileName::from("lead");
             spec
         }),
-        ("placement", "kept", |spec| {
+        ("placement", "kept", "kept", |spec| {
             spec.with_placement(meerkat_contracts::WireHostRef("host-peer-1".to_string()))
         }),
     ];
-    for (label, expected, change) in changes {
+    for (label, roster_expected, store_expected, change) in changes {
         let mob = StoreOwnedMob::new(&format!("update-parity-{label}")).await;
         let base = |name: &str| {
             CreatedIdentitySpec::new(name, "worker")
@@ -5201,8 +5390,15 @@ async fn store_and_roster_updates_of_the_same_change_answer_the_same_verdict() {
             .await
             .expect("update the store-owned identity");
         let store_kind = answer_kind(updated.applied.as_ref().expect("the update's answer"));
-        assert_eq!(roster_kind, expected, "{label}: the roster-owned change");
-        assert_eq!(store_kind, expected, "{label}: the store-owned update");
+        assert_eq!(
+            roster_kind, roster_expected,
+            "{label}: the roster-owned change"
+        );
+        assert_eq!(
+            store_kind, store_expected,
+            "{label}: the store-owned update (a label change restamps a store-owned member \
+             and keeps a roster-owned one; every other change answers the same for both)"
+        );
     }
 }
 
@@ -5345,13 +5541,41 @@ impl StoreOwnedMob {
     /// `spec` as the update's commit step writes it (the row at its next
     /// revision and the receipt), with nothing after it.
     async fn commit_update_transaction(&self, operation_id: &str, spec: CreatedIdentitySpec) {
-        let before = self.row(spec.identity.as_str()).await;
+        commit_update_transaction_of(&self.handle, operation_id, spec).await;
+    }
+}
+
+/// [`StoreOwnedMob::commit_update_transaction`] through `handle`'s own
+/// identity store: the update of a mob that stopped after the update's
+/// commit and before its member step (a label update's restamp, say), so
+/// the seat keeps the labels it was seated with.
+async fn commit_update_transaction_of(
+    handle: &MobHandle,
+    operation_id: &str,
+    spec: CreatedIdentitySpec,
+) {
+    let store = handle
+        .identity_member
+        .clone()
+        .expect("the built-in identity store");
+    let before = match crate::store::MobIdentityMemberStore::observe_created_identity(
+        store.as_ref(),
+        handle.mob_id(),
+        &spec.identity,
+    )
+    .await
+    .expect("the row reads")
+    {
+        Some(CreatedIdentityObservation::Created(row)) => row,
+        other => panic!("{} has no readable row: {other:?}", spec.identity),
+    };
+    {
         let after = before
             .clone()
             .updated(spec.clone(), None)
             .expect("the updated row");
         let receipt = crate::IdentityChangeReceipt::sealed(
-            self.mob_id(),
+            handle.mob_id().clone(),
             operation_id,
             digest(operation_id),
             IdentityChangeKind::Update,
@@ -5365,11 +5589,6 @@ impl StoreOwnedMob {
             1,
         )
         .expect("the update's receipt");
-        let store = self
-            .storage
-            .identity_member
-            .clone()
-            .expect("the built-in identity store");
         let written = crate::store::MobIdentityMemberStore::commit_identity_change(
             store.as_ref(),
             &crate::store::IdentityChangeWrite {
@@ -7337,8 +7556,9 @@ async fn the_tombstone_page_lists_removed_names_of_either_custody() {
 }
 
 /// Row (RED): the record census counts a seat whose labels its row moved
-/// past. A label change takes the row at once while the seated member's
-/// seat row keeps the old labels until its restamp, so the identity counts
+/// past. A label change takes the row at once, and until its restamp runs
+/// (here it did not: the update stopped after its commit) the seated
+/// member's seat row keeps the old labels, so the identity counts
 /// in `seats_stale`; the census also counts the mob's rows (present,
 /// pending, removed), its tombstones and its open preparations.
 ///
@@ -7367,14 +7587,14 @@ async fn the_census_counts_a_stale_seat_after_a_label_change() {
         .await
         .expect("the census answers");
     assert_eq!(before.seats_stale, 0, "{before:?}");
-    mob.update(
+    // A label update whose restamp did not run: the seat keeps the labels
+    // it was seated with.
+    mob.commit_update_transaction(
         "relabel-desk",
         spec("desk", "worker")
             .with_labels(BTreeMap::from([("team".to_string(), "beta".to_string())])),
-        &spec_digest(&spec("desk", "worker")),
     )
-    .await
-    .expect("the update commits");
+    .await;
     committed(mob.remove("remove-gone", "gone").await);
     mob.removed("gone").await;
     let census = mob
@@ -7724,9 +7944,11 @@ async fn rb_cl2_4a_store_owned_member_fixture() {
 }
 
 /// Rollback row RB-CL2-4b, first leg (without Apply now), in-process: a
-/// label change after the member's seat takes the row at once, while the
-/// seat row a predecessor replays keeps the labels it was seated with, and
-/// the record census counts the seat stale. The second leg (with Apply now)
+/// label change after the member's seat takes the row at once, and until
+/// its restamp runs (here it did not: the update stopped after its commit,
+/// as a member that holds work defers it) the seat row a predecessor
+/// replays keeps the labels it was seated with, and the record census
+/// counts the seat stale. The second leg (with Apply now)
 /// is `rb_cl2_4b_apply_now_writes_the_rows_labels_into_the_seat_row`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rb_cl2_4b_a_label_change_leaves_the_seat_row_a_predecessor_reads_stale() {
@@ -7737,13 +7959,8 @@ async fn rb_cl2_4b_a_label_change_leaves_the_seat_row_a_predecessor_reads_stale(
     );
     let seated_with = mob.spawn_row("desk").await.labels;
     let moved = BTreeMap::from([("team".to_string(), "beta".to_string())]);
-    mob.update(
-        "relabel-desk",
-        spec("desk", "worker").with_labels(moved),
-        &spec_digest(&spec("desk", "worker")),
-    )
-    .await
-    .expect("the update commits");
+    mob.commit_update_transaction("relabel-desk", spec("desk", "worker").with_labels(moved))
+        .await;
     let row = mob.row("desk").await;
     assert_eq!(
         row.spec
@@ -7772,7 +7989,11 @@ async fn rb_cl2_4b_a_label_change_leaves_the_seat_row_a_predecessor_reads_stale(
 /// published pair.
 ///
 /// This build writes the fixture: `desk`, a store-owned identity seated
-/// Dormant, whose labels an update moved after its seat. The lane serves it
+/// Dormant, whose labels an update moved after its seat and whose restamp
+/// did not run (the fixture writes the update's transaction and nothing
+/// after it: a label update restamps an idle member at once, so only an
+/// update that stopped after its commit, or a member that holds work,
+/// leaves such a seat). The lane serves it
 /// with the pair and checks: `desk` runs with the labels of its seat row;
 /// rolled forward, the seat keeps those labels, and the record census counts
 /// it in `seats_stale`, until it is seated again or respawned with its row's
@@ -7788,37 +8009,25 @@ async fn rb_cl2_4b_stale_seat_fixture() {
         |handle| async move {
             let seated = spec("desk", "worker")
                 .with_runtime_mode_override(crate::MobRuntimeMode::TurnDriven);
-            let expected = spec_digest(&seated);
             committed(
                 handle
                     .create_store_owned_identities(
                         StoreOwnedIdentityCreate::new(
                             operation("create-desk"),
                             IdentityChangeRequesterInput::host("console"),
-                            vec![CreatedIdentityRequest::new(seated)],
+                            vec![CreatedIdentityRequest::new(seated.clone())],
                         ),
                         ALLOW,
                     )
                     .await
                     .map(|created| created.change),
             );
-            handle
-                .update_store_owned_identity(
-                    crate::runtime::StoreOwnedIdentityUpdate::new(
-                        operation("relabel-desk"),
-                        IdentityChangeRequesterInput::host("console"),
-                        spec("desk", "worker")
-                            .with_runtime_mode_override(crate::MobRuntimeMode::TurnDriven)
-                            .with_labels(BTreeMap::from([(
-                                "team".to_string(),
-                                "beta".to_string(),
-                            )])),
-                        &expected,
-                    ),
-                    ALLOW,
-                )
-                .await
-                .expect("the update commits");
+            commit_update_transaction_of(
+                &handle,
+                "relabel-desk",
+                seated.with_labels(BTreeMap::from([("team".to_string(), "beta".to_string())])),
+            )
+            .await;
         },
     )
     .await;
@@ -7834,7 +8043,8 @@ async fn seats_stale(mob: &StoreOwnedMob) -> usize {
 }
 
 /// Rollback row RB-CL2-4b, second leg (with Apply now), in-process: after
-/// a label change left the seat stale, the host's Apply now respawns the
+/// a label change left the seat stale (its restamp did not run), the host's
+/// Apply now respawns the
 /// member with its row's labels on its own session: the new seat row (the
 /// last `MemberSpawned` row) carries the row's labels, the generation
 /// advances by one, and the record census counts no stale seat.
@@ -7847,14 +8057,12 @@ async fn rb_cl2_4b_apply_now_writes_the_rows_labels_into_the_seat_row() {
         mob.create(host_create("create-desk", &["desk"]), ALLOW)
             .await,
     );
-    mob.update(
+    mob.commit_update_transaction(
         "relabel-desk",
         spec("desk", "worker")
             .with_labels(BTreeMap::from([("team".to_string(), "beta".to_string())])),
-        &spec_digest(&spec("desk", "worker")),
     )
-    .await
-    .expect("the update commits");
+    .await;
     assert_eq!(seats_stale(&mob).await, 1);
     let session = mob.session("desk").await;
     let generation = mob.generation("desk").await.expect("desk is a member");
@@ -7902,17 +8110,12 @@ async fn a_respawn_without_labels_keeps_the_members_labels() {
     let seated_with = mob.spawn_row("desk").await.labels;
     let moved = BTreeMap::from([("team".to_string(), "beta".to_string())]);
     assert_ne!(moved, seated_with, "the update moves the labels");
-    mob.update(
-        "relabel-desk",
-        spec("desk", "worker").with_labels(moved),
-        &spec_digest(&spec("desk", "worker")),
-    )
-    .await
-    .expect("the update commits");
+    mob.commit_update_transaction("relabel-desk", spec("desk", "worker").with_labels(moved))
+        .await;
     assert_eq!(
         seats_stale(&mob).await,
         1,
-        "the label change left the seat stale"
+        "the label change whose restamp did not run left the seat stale"
     );
     tokio::time::timeout(
         STEP,
@@ -7969,7 +8172,8 @@ async fn a_store_owned_restamp_seats_the_rows_labels() {
 /// for each published pair.
 ///
 /// This build writes the fixture: `desk`, a store-owned identity whose
-/// labels an update moved after its seat, respawned by the host's Apply
+/// labels an update moved after its seat and whose restamp did not run (the
+/// update's transaction and nothing after it), respawned by the host's Apply
 /// now with its row's labels. The lane serves it with the pair and checks:
 /// `desk` runs with the row's labels (its last seat row's); rolled forward,
 /// the record census counts no stale seat.
@@ -7984,14 +8188,13 @@ async fn rb_cl2_4b_apply_now_fixture() {
         |handle| async move {
             let seated = spec("desk", "worker")
                 .with_runtime_mode_override(crate::MobRuntimeMode::TurnDriven);
-            let expected = spec_digest(&seated);
             committed(
                 handle
                     .create_store_owned_identities(
                         StoreOwnedIdentityCreate::new(
                             operation("create-desk"),
                             IdentityChangeRequesterInput::host("console"),
-                            vec![CreatedIdentityRequest::new(seated)],
+                            vec![CreatedIdentityRequest::new(seated.clone())],
                         ),
                         ALLOW,
                     )
@@ -7999,20 +8202,12 @@ async fn rb_cl2_4b_apply_now_fixture() {
                     .map(|created| created.change),
             );
             let labels = BTreeMap::from([("team".to_string(), "beta".to_string())]);
-            handle
-                .update_store_owned_identity(
-                    crate::runtime::StoreOwnedIdentityUpdate::new(
-                        operation("relabel-desk"),
-                        IdentityChangeRequesterInput::host("console"),
-                        spec("desk", "worker")
-                            .with_runtime_mode_override(crate::MobRuntimeMode::TurnDriven)
-                            .with_labels(labels.clone()),
-                        &expected,
-                    ),
-                    ALLOW,
-                )
-                .await
-                .expect("the update commits");
+            commit_update_transaction_of(
+                &handle,
+                "relabel-desk",
+                seated.with_labels(labels.clone()),
+            )
+            .await;
             handle
                 .respawn_member(
                     id("desk"),

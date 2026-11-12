@@ -35,6 +35,59 @@ them.
 
 ## [Unreleased]
 
+### Fixed
+
+- `meerkat-mob`: a kickoff notice to a wired peer that was being woken held
+  the whole mob for 30 seconds (0.9.7 through 0.9.14: since a send to a member
+  that is not live began to wake it). When a member's kickoff changed phase,
+  for example resolved, while a wired peer's wake was between its applied
+  plan and its readiness, the mob's actor sent the notice on its own step.
+  The send joined the peer's wake, the wake's next step needed the actor, and
+  the step ended only when the send's budget did (`wake_timed_out`). Until
+  then every other command of the mob waited: a spawn, a wire, an identity
+  change, a status read, a stop. The notice was not delivered, and the peer
+  was woken without it. The actor now prepares each kickoff notice and hands
+  its send to a task it owns on the peer delivery lane, for live recipients
+  and recipients that are not live alike, so the peer's wake is served while
+  the notice waits for it. The notices of one member to one peer are sent one
+  at a time, in the order the kickoff went through its phases; at most eight
+  may be pending for one member and one peer, and a notice beyond that is
+  refused and logged. A notice that cannot be delivered is logged as before
+  (`a kickoff notice to a peer that was not materialized was not delivered`,
+  or `failed to emit kickoff lifecycle notice` for a live recipient), now
+  with the recipient and the notice's kind. A failed send to one live peer no
+  longer skips the member's remaining peers. A notice behind one that cannot
+  be delivered is attempted when that one's 30 second budget has ended. A
+  stop, a complete, a reset, a destroy or a shutdown of the mob, an unwire of
+  the edge and a retirement of either member cancel a pending notice as they
+  cancel a pending peer message. A kickoff notice still wakes a peer that is
+  not live.
+
+## [0.9.14] - 2026-11-11
+
+### Highlights
+
+- A session whose history one OpenAI-family service produced no longer
+  fails its first turn on another (the OpenAI API, the ChatGPT backend, Azure
+  OpenAI, GitHub Copilot, a self-hosted server): encrypted reasoning and the
+  other opaque items of a response are replayed only to the service that
+  issued them (0.5.2 through 0.9.13). After a restart, earlier turns are
+  replayed without that material. See Breaking, Added, Fixed and Known
+  limitations.
+
+- A request that an OpenAI-family service refuses inside a response stream
+  fails once, with the service's cause, instead of being sent again until
+  the retry policy is used up (0.8.25 through 0.9.13). See Fixed.
+
+- GitHub Copilot routes send a current client identity, so the Copilot API
+  no longer marks every listed model `client_version_deprecated`. See
+  Changed.
+
+- A file write that the operating system refuses (a full disk, a quota, a
+  file size limit) no longer replaces a stored credential, a realm manifest,
+  a task file or an export with an empty file while the operation reports
+  success (0.3.0 through 0.9.13). See Fixed.
+
 ### Breaking
 
 - Behaviour-only (not measured by the gate): `meerkat-core`:
@@ -278,32 +331,6 @@ them.
   neither stays behind to be waited on. A file an earlier release already
   emptied is not restored.
 
-- `meerkat-mob`: a kickoff notice to a wired peer that was being woken held
-  the whole mob for 30 seconds (0.9.7 through 0.9.14: since a send to a member
-  that is not live began to wake it). When a member's kickoff changed phase,
-  for example resolved, while a wired peer's wake was between its applied
-  plan and its readiness, the mob's actor sent the notice on its own step.
-  The send joined the peer's wake, the wake's next step needed the actor, and
-  the step ended only when the send's budget did (`wake_timed_out`). Until
-  then every other command of the mob waited: a spawn, a wire, an identity
-  change, a status read, a stop. The notice was not delivered, and the peer
-  was woken without it. The actor now prepares each kickoff notice and hands
-  its send to a task it owns on the peer delivery lane, for live recipients
-  and recipients that are not live alike, so the peer's wake is served while
-  the notice waits for it. The notices of one member to one peer are sent one
-  at a time, in the order the kickoff went through its phases; at most eight
-  may be pending for one member and one peer, and a notice beyond that is
-  refused and logged. A notice that cannot be delivered is logged as before
-  (`a kickoff notice to a peer that was not materialized was not delivered`,
-  or `failed to emit kickoff lifecycle notice` for a live recipient), now
-  with the recipient and the notice's kind. A failed send to one live peer no
-  longer skips the member's remaining peers. A notice behind one that cannot
-  be delivered is attempted when that one's 30 second budget has ended. A
-  stop, a complete, a reset, a destroy or a shutdown of the mob, an unwire of
-  the edge and a retirement of either member cancel a pending notice as they
-  cancel a pending peer message. A kickoff notice still wakes a peer that is
-  not live.
-
 ### Known limitations
 
 - The issuer of OpenAI-family continuity material is the service (a kind of
@@ -312,6 +339,17 @@ them.
   same service at the same endpoint inside one process (two API keys of
   different organisations, two ChatGPT accounts, two Copilot accounts on one
   API host). Whether a service refuses that is not known; it was not tested.
+
+- `rustix` 1.1.5 in Cargo.lock is named by RUSTSEC-2026-0486, as in 0.9.12
+  and 0.9.13: the `getxattr` and `listxattr` functions of `rustix::fs` (with
+  their `l` and `f` forms) mark bytes they never wrote as initialized when
+  they are given a zero-length buffer. `meerkat-core` depends on `rustix`
+  directly, and it is also taken through `fs4`, `tempfile`, `which`, and
+  `xattr` through `tar`. No Meerkat crate calls those functions. Of the
+  crates Meerkat builds with only `xattr` does, and `tar`, the one crate
+  that uses `xattr`, calls it only to set attributes while unpacking, so
+  Meerkat's own use is not known to be affected. `rustix` 1.1.6 has the
+  fix; this release still builds with 1.1.5.
 
 ## [0.9.13] - 2026-11-11
 
@@ -48149,7 +48187,8 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.13...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.14...HEAD
+[0.9.14]: https://github.com/lukacf/meerkat/compare/v0.9.13...v0.9.14
 [0.9.13]: https://github.com/lukacf/meerkat/compare/v0.9.12...v0.9.13
 [0.9.12]: https://github.com/lukacf/meerkat/compare/v0.9.11...v0.9.12
 [0.9.11]: https://github.com/lukacf/meerkat/compare/v0.9.10...v0.9.11

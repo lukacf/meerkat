@@ -8621,14 +8621,21 @@ mod tests {
 
     /// `mob_wire` to an external binding asks the host's member tool audience
     /// about the member it names: a member it hides from the caller answers
-    /// exactly as a name the mob does not hold, for a well-formed binding.
+    /// exactly as a name the mob does not hold, whatever the binding: a
+    /// well-formed one, one whose address, key or name the mob refuses, and
+    /// one named as the member itself. A member the caller is shown is
+    /// answered the refusal of such a binding.
     #[tokio::test]
     async fn mob_wire_to_an_external_binding_answers_a_member_hidden_from_the_caller_as_absent() {
         let state = MobMcpState::new_in_memory();
         let handle = host_mob_with_kept_members(
             &state,
             "external-wire-audience",
-            &[("external-kept", Some("ann")), ("external-caller", None)],
+            &[
+                ("external-kept", Some("ann")),
+                ("external-shown", None),
+                ("external-caller", None),
+            ],
         )
         .await;
         let caller = member_mob_tools(
@@ -8638,35 +8645,108 @@ mod tests {
             scope_only_authority("external-wire-audience", handle.live_incarnation()),
         )
         .await;
-        let wire = |member: &str| {
-            json!({
-                "mob_id": "external-wire-audience",
-                "member_id": member,
-                "peer": {
-                    "external_binding": {
-                        "name": "external-worker",
-                        "address": "inproc://external-worker",
-                        "identity": {
-                            "kind": "ed25519_public_key",
-                            "public_key": ED25519_PUBLIC_KEY_7,
+        // Each binding with the refusal the mob answers a member the caller
+        // is shown, if it refuses the binding. A binding with no name of its
+        // own is named as the member the call names.
+        let mut told_apart = Vec::new();
+        for (binding, name, address, public_key, refusal) in [
+            (
+                "a well-formed binding",
+                Some("external-worker"),
+                "inproc://external-worker",
+                ED25519_PUBLIC_KEY_7,
+                None,
+            ),
+            (
+                "a binding whose address is no address",
+                Some("external-worker"),
+                "not an address",
+                ED25519_PUBLIC_KEY_7,
+                Some("invalid peer address"),
+            ),
+            (
+                "a binding whose key is no key",
+                Some("external-worker"),
+                "inproc://external-worker",
+                "not a key",
+                Some("public_key must start with"),
+            ),
+            (
+                "a binding whose name is no peer name",
+                Some(" "),
+                "inproc://external-worker",
+                ED25519_PUBLIC_KEY_7,
+                Some("invalid peer name"),
+            ),
+            (
+                "a binding named as the member",
+                None,
+                "inproc://external-worker",
+                ED25519_PUBLIC_KEY_7,
+                Some("wire requires distinct members"),
+            ),
+        ] {
+            let wire = |member: &str| {
+                json!({
+                    "mob_id": "external-wire-audience",
+                    "member_id": member,
+                    "peer": {
+                        "external_binding": {
+                            "name": name.unwrap_or(member),
+                            "address": address,
+                            "identity": {
+                                "kind": "ed25519_public_key",
+                                "public_key": public_key,
+                            },
                         },
                     },
-                },
-            })
-        };
-        let absent =
-            masked_mob_tool_answer(&caller, "mob_wire", wire("external-gone"), "external-gone")
-                .await;
-        let hidden =
-            masked_mob_tool_answer(&caller, "mob_wire", wire("external-kept"), "external-kept")
-                .await;
+                })
+            };
+            let absent =
+                masked_mob_tool_answer(&caller, "mob_wire", wire("external-gone"), "external-gone")
+                    .await;
+            let hidden =
+                masked_mob_tool_answer(&caller, "mob_wire", wire("external-kept"), "external-kept")
+                    .await;
+            let shown = masked_mob_tool_answer(
+                &caller,
+                "mob_wire",
+                wire("external-shown"),
+                "external-shown",
+            )
+            .await;
+            // Every binding is asked before any is judged, so one run shows
+            // each binding that tells the two names apart.
+            if !(absent.starts_with("error:") && absent.contains("mob member not found")) {
+                told_apart.push(format!(
+                    "{binding}: a name the mob does not hold is not answered as one: {absent}"
+                ));
+            }
+            if hidden != absent {
+                told_apart.push(format!(
+                    "{binding}: a member hidden from the caller answers {hidden}, a name the \
+                     mob does not hold {absent}"
+                ));
+            }
+            if shown.contains("mob member not found") {
+                told_apart.push(format!(
+                    "{binding}: a member the caller is shown is answered as absent: {shown}"
+                ));
+            }
+            if let Some(refusal) = refusal
+                && !(shown.starts_with("error:") && shown.contains(refusal))
+            {
+                told_apart.push(format!(
+                    "{binding}: a member the caller is shown is not answered the binding's \
+                     refusal: {shown}"
+                ));
+            }
+        }
         assert!(
-            absent.starts_with("error:"),
-            "a name the mob does not hold is refused: {absent}"
-        );
-        assert_eq!(
-            hidden, absent,
-            "a member hidden from the caller answers as a name the mob does not hold"
+            told_apart.is_empty(),
+            "a member hidden from the caller answers as a name the mob does not hold, and a \
+             member the caller is shown as the mob answers its binding:\n{}",
+            told_apart.join("\n")
         );
     }
 

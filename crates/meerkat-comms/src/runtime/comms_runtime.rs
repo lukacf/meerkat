@@ -1935,6 +1935,8 @@ impl PreparedCommsRuntime {
     ///
     /// Namespace and participant name must match. Any stale-current or
     /// replacement-key conflict is reported before registry mutation.
+    /// A route another namespace held to `current`'s inbox goes with the
+    /// replacement: a route never outlives its inbox.
     pub fn publish_replacing(
         self,
         current: &CommsRuntime,
@@ -4062,6 +4064,12 @@ impl CommsRuntime {
     /// runtime published, never a successor that has since rebound the same key,
     /// and `Drop` stays correct because it removes the same generation
     /// idempotently. Returns whether this call removed the route.
+    ///
+    /// A route never outlives its inbox: every registration of this
+    /// runtime's inbox in another namespace (a route a host that links two
+    /// namespaces installed to it) is removed with it, here and at `Drop`,
+    /// so a send there meets the member's wake route instead of an inbox
+    /// nobody drains.
     pub fn retire_inproc_route(&self) -> bool {
         let Some(sender) = self.inproc_sender.as_ref() else {
             return false;

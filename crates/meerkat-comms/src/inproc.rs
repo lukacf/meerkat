@@ -32,6 +32,21 @@
 //! and hands it off once, through the ordinary receipt path, after the owner
 //! answered that the member is ready. A key with neither route is not a
 //! member: the send fails `PeerNotFound` exactly as before.
+//!
+//! # A route never outlives its inbox
+//!
+//! A runtime registers its inbox in its own namespace. A host that links two
+//! namespaces may register the same inbox in a second one, so that senders
+//! there reach the member. When the inbox leaves the registry by its own
+//! runtime's doing (the runtime releases its route, is dropped, or is
+//! replaced by a successor that names it), every registration of that inbox
+//! in another namespace leaves with it, in the same write. A send there then
+//! finds no live route: it takes the member's wake route, or fails
+//! `PeerNotFound`, instead of handing envelopes to an inbox nobody drains.
+//! Removing a route by its key alone
+//! ([`InprocRegistry::unregister_in_namespace`]) is a host taking back its
+//! own registration while the inbox lives: it removes that one registration
+//! and nothing else.
 
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
@@ -376,6 +391,36 @@ impl RegistryState {
     fn namespace_is_empty(&self, namespace: &str) -> bool {
         self.namespace_len(namespace) == 0
     }
+
+    /// Drop every live registration of `inbox` outside `home`, and free the
+    /// name each one held: a route never outlives its inbox.
+    ///
+    /// Called under the write lock in which `inbox` leaves `home`, and only
+    /// by the two paths the inbox's own runtime takes (its exact-generation
+    /// release and its exact-generation replacement). A registration of the
+    /// inbox in another namespace is a route a host that links two
+    /// namespaces installed to it. Left behind, it would keep answering for
+    /// a member that is gone, and a send there would never reach the
+    /// member's wake route. Inbox identity decides alone: a registration of
+    /// any other inbox stays, whatever key and name it is under, and so
+    /// does every wake route.
+    fn forget_inbox_outside(&mut self, home: &str, inbox: &InboxSender) {
+        for (namespace, namespace_state) in &mut self.namespaces {
+            if namespace == home {
+                continue;
+            }
+            let NamespaceState { peers, names, .. } = namespace_state;
+            peers.retain(|pubkey, peer| {
+                if !peer.sender.same_inbox(inbox) {
+                    return true;
+                }
+                if names.get(&peer.name) == Some(pubkey) {
+                    names.remove(&peer.name);
+                }
+                false
+            });
+        }
+    }
 }
 
 /// Process-global registry for in-process peer communication.
@@ -531,6 +576,8 @@ impl InprocRegistry {
     ///
     /// All checks happen under the registry write lock. A stale predecessor or
     /// occupied replacement key therefore leaves the live route unchanged.
+    /// The replaced inbox leaves the registry: its registrations in other
+    /// namespaces go in the same write (see the module text).
     pub(crate) fn replace_sender_in_namespace(
         &self,
         namespace: &str,
@@ -578,6 +625,7 @@ impl InprocRegistry {
         namespace_state
             .names
             .insert(name.to_string(), replacement_pubkey);
+        state.forget_inbox_outside(namespace, current_sender);
         Ok(())
     }
 
@@ -589,6 +637,10 @@ impl InprocRegistry {
     }
 
     /// Unregister an agent by pubkey from an explicit namespace.
+    ///
+    /// This removes the one registration under `pubkey` in `namespace`,
+    /// whichever inbox it holds, and nothing in any other namespace: a host
+    /// takes back a route it registered while the inbox lives on.
     pub fn unregister_in_namespace(&self, namespace: &str, pubkey: &PubKey) -> bool {
         let mut state = self.state.write();
         if let Some(namespace_state) = state.namespaces.get_mut(namespace)
@@ -602,6 +654,12 @@ impl InprocRegistry {
 
     /// Remove a route only when its exact inbox generation is still current.
     /// A closed route of the same generation is forgotten too.
+    ///
+    /// Called by the inbox's own runtime when the inbox leaves (its release
+    /// or its drop), so every registration of the inbox in another namespace
+    /// goes in the same write (see the module text), whether or not
+    /// `namespace` still held it. Returns whether this call removed the
+    /// live route in `namespace`.
     pub(crate) fn unregister_sender_in_namespace(
         &self,
         namespace: &str,
@@ -609,6 +667,7 @@ impl InprocRegistry {
         sender: &InboxSender,
     ) -> bool {
         let mut state = self.state.write();
+        state.forget_inbox_outside(namespace, sender);
         let Some(namespace_state) = state.namespaces.get_mut(namespace) else {
             return false;
         };

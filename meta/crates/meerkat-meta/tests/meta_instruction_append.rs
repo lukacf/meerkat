@@ -3365,6 +3365,150 @@ async fn a_removal_through_the_identity_methods_revokes_the_record() {
     rig.shutdown().await;
 }
 
+/// The identity policy of the row below: [`identity_policy`], and the host
+/// prepares every agent of the profile `worker` before its first use.
+fn prepared_identity_policy() -> Arc<IdentityCreationPolicy> {
+    Arc::new(
+        IdentityCreationPolicy::parse(&json!({
+            "enabled": true,
+            "peers": {"default": "allow"},
+            "preparation": {"worker": {"mode": "required"}},
+            "approval": {"rules": [{
+                "change": ["create", "descriptive", "capability", "peers", "profile",
+                           "archive", "remove", "adopt"],
+                "requester": {"kind": "host"},
+                "target": {"profile": ["worker"]},
+                "outcome": {"kind": "allow"},
+            }]},
+        }))
+        .expect("the policy parses")
+        .expect("the policy is enabled"),
+    )
+}
+
+/// An agent that awaits its host's preparation has no member and no
+/// conversation, so no record is owed to it: its first build takes the
+/// current text. After a start, a delivery to it is refused, and the
+/// comparison that door owes an agent this process has not compared writes
+/// nothing; an update of its instructions while it waits answers
+/// `applies_at_next_run` and writes nothing; its host's settle writes
+/// nothing and runs nothing. Its first run is built from the updated text
+/// and carries no entry.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_that_awaits_its_preparation_gets_no_record_and_its_first_run_takes_the_current_text()
+ {
+    let temp = tempfile::tempdir().unwrap();
+    let mob = fresh_mob_id();
+    let rig = boot(temp.path(), &mob, vec![configured_spec(&[])]).await;
+    assert!(
+        rig.runtime
+            .attach_identity_policy(prepared_identity_policy(), IdentityFamilyOptions::new()),
+        "the runtime serves identities and takes the policy"
+    );
+    let created = rig
+        .rpc(
+            "meta/identity/create",
+            json!({"request_id": "create-1", "agents": [
+                {"name": CREATED, "profile": "worker", "instructions": ["Keep ALPHA records."]},
+            ]}),
+        )
+        .await;
+    assert_eq!(
+        created["result"]["outcome"],
+        json!("pending_preparation"),
+        "the agent is committed and awaits its host's preparation: {created:#}"
+    );
+    rig.shutdown_for_reopen().await;
+
+    // The next process has not compared the agent. A delivery is a use of
+    // it, and is refused while it waits.
+    let mut rig = boot(temp.path(), &mob, vec![configured_spec(&[])]).await;
+    assert!(
+        rig.runtime
+            .attach_identity_policy(prepared_identity_policy(), IdentityFamilyOptions::new()),
+        "the runtime serves identities and takes the policy"
+    );
+    let sent = rig
+        .rpc(
+            "meta/send",
+            json!({"identity": CREATED, "content": "BEFORE-THE-SETTLE"}),
+        )
+        .await;
+    assert!(
+        sent["error"].to_string().contains("preparation"),
+        "a delivery to an agent that awaits its preparation is refused, naming it: {sent:#}"
+    );
+    assert_eq!(
+        record_revision(&rig, CREATED).await,
+        None,
+        "the refused delivery recorded nothing"
+    );
+
+    // Its instructions are changed while it waits.
+    let read = rig.rpc("meta/identity/get", json!({"name": CREATED})).await;
+    let digest = read["result"]["spec_digest"].clone();
+    assert!(digest.is_string(), "the agent reads: {read:#}");
+    let updated = rig
+        .rpc(
+            "meta/identity/update",
+            json!({"request_id": "update-1", "name": CREATED, "expected_spec_digest": digest,
+                   "set": {"instructions": ["Keep BETA records."]}}),
+        )
+        .await;
+    assert_eq!(updated["result"]["outcome"], json!("done"), "{updated:#}");
+    assert_eq!(
+        updated["result"]["agents"][0]["instructions"],
+        json!({"kind": "applies_at_next_run"}),
+        "the change reaches the agent with its first run: {updated:#}"
+    );
+    assert_eq!(
+        record_revision(&rig, CREATED).await,
+        None,
+        "an agent with no conversation needs no record"
+    );
+
+    // Its host settles it: it is seated, and nothing is recorded or run.
+    let settled = rig
+        .rpc(
+            "meta/identity/settle_preparation",
+            json!({"request_id": "settle-1", "name": CREATED}),
+        )
+        .await;
+    assert_eq!(
+        settled["result"]["agents"][0]["seat"],
+        json!("seated"),
+        "the host's settle seats the agent: {settled:#}"
+    );
+    assert_eq!(
+        record_revision(&rig, CREATED).await,
+        None,
+        "the settle recorded nothing"
+    );
+    assert!(
+        rig.requests.lock().unwrap().is_empty(),
+        "nothing ran before the agent's first delivery"
+    );
+
+    // Its first run is built from the current text and carries no entry.
+    rig.turn(CREATED, "FIRST-TURN").await;
+    let request = rig.request_messages("FIRST-TURN");
+    assert!(
+        entries(&request).is_empty(),
+        "the first run carries no entry: {request:#?}"
+    );
+    let whole = Value::Array(request).to_string();
+    assert!(
+        whole.contains("Keep BETA records.") && !whole.contains("Keep ALPHA records."),
+        "the first prompt is built from the current text alone: {whole}"
+    );
+    assert_eq!(
+        record_revision(&rig, CREATED).await,
+        None,
+        "and nothing was recorded for it"
+    );
+    rig.shutdown().await;
+}
+
 /// One function owns the comparison and the records: nothing else in Meta's
 /// source names the reserved namespace, calls the comparison, or writes or
 /// revokes an operator instruction, besides the host's own verbs (which

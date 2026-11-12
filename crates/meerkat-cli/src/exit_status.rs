@@ -828,6 +828,176 @@ mod tests {
         assert!(plain["error"].get("details").is_none(), "{plain}");
     }
 
+    /// A refused or not-ready input's document carries the admission detail
+    /// the shared projection gives the other surfaces for it, and nothing
+    /// else: a caller can tell a changed policy from an unusable credential
+    /// without reading text. The route hint stays in the message.
+    #[test]
+    fn a_refused_or_not_ready_input_document_carries_its_admission_detail() {
+        use meerkat_core::OperationRefusalKind as Refusal;
+        use meerkat_core::authorization::ControllerReadinessFailure as Readiness;
+        let refused = |kind| RuntimeDriverError::InputRefused {
+            refusal: meerkat_core::OperationRefused::new(kind),
+        };
+        let not_ready = |reason| RuntimeDriverError::ControllerReadinessUnavailable { reason };
+        let policy_changed = serde_json::json!({
+            "type": "not_ready",
+            "reason": { "kind": "policy_changed" },
+        });
+        let cases = [
+            (
+                refused(Refusal::Denied),
+                "INPUT_REFUSED",
+                serde_json::json!({ "type": "refused", "kind": "denied" }),
+            ),
+            (
+                refused(Refusal::MalformedFacts),
+                "INPUT_REFUSED",
+                serde_json::json!({ "type": "refused", "kind": "malformed_facts" }),
+            ),
+            (
+                refused(Refusal::ReprepareRequired),
+                "INPUT_NOT_READY",
+                policy_changed.clone(),
+            ),
+            (
+                not_ready(Readiness::PolicyChanged),
+                "INPUT_NOT_READY",
+                policy_changed,
+            ),
+            (
+                not_ready(Readiness::CredentialUnusable {
+                    disposition: meerkat_core::handles::CredentialUseDisposition::ReauthRequired,
+                }),
+                "INPUT_NOT_READY",
+                serde_json::json!({
+                    "type": "not_ready",
+                    "reason": {
+                        "kind": "credential_unusable",
+                        "disposition": "reauth_required",
+                    },
+                }),
+            ),
+        ];
+        for (error, code, details) in cases {
+            let shared = meerkat::surface::native_admission_error_detail(&error)
+                .expect("a native admission error")
+                .to_wire_error()
+                .expect("the detail serializes")
+                .details
+                .expect("the shared envelope has details");
+            let failure =
+                crate::runtime_accept_failure(error, &Some("grant the route".to_string()));
+            let document = serde_json::to_value(failure_document(&failure)).unwrap();
+            assert_eq!(document["error"]["code"], code, "{failure}");
+            assert_eq!(document["error"]["details"], details, "{failure}");
+            assert_eq!(document["error"]["details"], shared, "{failure}");
+            assert_eq!(
+                document["error"]["message"],
+                failure.to_string(),
+                "{failure}"
+            );
+        }
+    }
+
+    /// A session another runtime owner hosts, a hosting claim that is
+    /// unavailable and a teardown still in progress give the document the
+    /// data of the session error their code is read from, as JSON-RPC and
+    /// REST report them.
+    #[test]
+    fn a_hosting_or_teardown_refusal_document_carries_its_session_data() {
+        let id = SessionId::new();
+        let runtime_id = || meerkat_runtime::identifiers::LogicalRuntimeId::new("runtime-1");
+        let teardown = |name: &str| {
+            serde_json::json!({
+                "kind": "runtime_teardown_in_progress",
+                "code": "SESSION_BUSY",
+                "teardown": name,
+                "runtime_id": "runtime-1",
+                "retryable": true,
+                "authority_retained": true,
+            })
+        };
+        let cases = [
+            (
+                RuntimeDriverError::ServedElsewhere {
+                    session_id: id.clone(),
+                },
+                "SESSION_BUSY",
+                serde_json::json!({
+                    "kind": "session_served_elsewhere",
+                    "session_id": id.to_string(),
+                }),
+            ),
+            (
+                RuntimeDriverError::HostingUnavailable {
+                    session_id: id.clone(),
+                },
+                "SESSION_RUNTIME_UNAVAILABLE",
+                serde_json::json!({
+                    "kind": "session_hosting_unavailable",
+                    "session_id": id.to_string(),
+                }),
+            ),
+            (
+                RuntimeDriverError::UnregisterInProgress {
+                    runtime_id: runtime_id(),
+                },
+                "SESSION_BUSY",
+                teardown("unregister"),
+            ),
+            (
+                RuntimeDriverError::RuntimeStopInProgress {
+                    runtime_id: runtime_id(),
+                },
+                "SESSION_BUSY",
+                teardown("stop"),
+            ),
+        ];
+        for (error, code, details) in cases {
+            let session_error = error
+                .teardown_in_progress_session_error()
+                .or_else(|| error.hosting_session_error())
+                .expect("a hosting or teardown error");
+            let shared = session_error_details(&session_error).expect("typed session data");
+            let failure = typed_failure(error, |error| {
+                format!("runtime executor registration failed: {error}")
+            });
+            let document = serde_json::to_value(failure_document(&failure)).unwrap();
+            assert_eq!(document["error"]["code"], code, "{failure}");
+            assert_eq!(document["error"]["details"], details, "{failure}");
+            assert_eq!(document["error"]["details"], shared, "{failure}");
+            assert_eq!(
+                failure_exit_status(&failure),
+                code_exit_status(failure_error_code(&failure).expect("a public code")),
+                "{failure}"
+            );
+        }
+    }
+
+    /// A refused help-session resume gives the document the refusal's own
+    /// data, as the other surfaces report it.
+    #[test]
+    fn a_refused_help_session_resume_document_carries_its_data() {
+        let id = SessionId::new();
+        let refusal = meerkat::help::HelpSessionNotResumable {
+            session_id: id.clone(),
+        };
+        let error = anyhow::Error::new(refusal.clone());
+        let document = serde_json::to_value(failure_document(&error)).unwrap();
+        assert_eq!(document["error"]["code"], "SESSION_NOT_RUNNING");
+        assert_eq!(
+            document["error"]["details"],
+            serde_json::json!({
+                "kind": "help_session_not_resumable",
+                "session_id": id.to_string(),
+            })
+        );
+        assert_eq!(document["error"]["details"], refusal.data());
+        assert_eq!(document["error"]["message"], error.to_string());
+        assert_eq!(failure_exit_status(&error), 12);
+    }
+
     /// A failure with no typed owner, and a typed owner without a public
     /// code, print `INTERNAL_ERROR` with no details and exit 1.
     #[test]

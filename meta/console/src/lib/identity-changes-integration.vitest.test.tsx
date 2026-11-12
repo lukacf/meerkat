@@ -28,8 +28,12 @@ interface Harness extends MetaConsoleTransport {
 /** A console transport over the scripted family: the experience read
  * carries its agents, its section and their affordances, and each command
  * of the family is answered as the console RPC answers it. With
- * `serveFamily` false the gateway serves no method of the family. */
-function transport(family: Family, { serveFamily = true, readOnly = false }: { serveFamily?: boolean; readOnly?: boolean } = {}): Harness {
+ * `serveFamily` false the gateway serves no method of the family. `inspect`
+ * is what the gateway answers the details read of an agent. */
+function transport(
+  family: Family,
+  { serveFamily = true, readOnly = false, inspect }: { serveFamily?: boolean; readOnly?: boolean; inspect?: () => Record<string, unknown> } = {},
+): Harness {
   const harness: Harness = {
     commands: [],
     loadExperience: async () => ({
@@ -60,6 +64,10 @@ function transport(family: Family, { serveFamily = true, readOnly = false }: { s
       // The requester's own held changes, as the decisions read lists them.
       if (method === CONSOLE_RPC_METHODS.decisionsList) {
         return { command: input.command, accepted: true, result: { decisions: [], statuses: family.decisionStatuses(), unreadable: [] } } as never;
+      }
+      // The details of an agent: its status, as the gateway answers it.
+      if (method === CONSOLE_RPC_METHODS.inspectIdentity && inspect) {
+        return { command: input.command, accepted: true, result: inspect() } as never;
       }
       const answer = family.handle(method, params);
       if (!answer) return { command: input.command, accepted: true, result: {} } as never;
@@ -1385,5 +1393,248 @@ describe("long-term agents in the console", () => {
     expect(removed[1]).toEqual(removed[0]);
     expect(calls(family, "meta/identity/get").filter((params) => params.name === "sentry").length).toBe(readsBefore + 1);
     view.unmount();
+  }, 60_000);
+
+  it("who_reaches_an_agent_and_how_it_runs_are_shown_and_set_where_the_forms_list_its_settings", async () => {
+    const family = createScriptedIdentityFamily();
+    const { view } = await openRoster(family);
+    const picked = (scope: HTMLElement, field: string): string[] =>
+      Array.from(scope.querySelectorAll<HTMLInputElement>(`[data-field='${field}'] input[type='radio']`))
+        .filter((input) => input.checked)
+        .map((input) => input.value);
+    const words = (scope: HTMLElement, field: string): string => scope.querySelector(`[data-field='${field}']`)?.textContent || "";
+
+    // New agent lists both, each choice in words, with the default picked:
+    // an agent that can be messaged and that runs as its profile says. A
+    // create that leaves them alone writes neither.
+    let form = await openNewAgent(view);
+    expect(picked(form, "addressability")).toEqual(["addressable"]);
+    expect(picked(form, "runtime_mode")).toEqual([""]);
+    expect(words(form, "addressability")).toContain("Can receive messages");
+    expect(words(form, "addressability")).toContain("Internal only");
+    for (const choice of ["As its profile says", "On its own", "Turn by turn"]) expect(words(form, "runtime_mode")).toContain(choice);
+    expect(`${words(form, "addressability")} ${words(form, "runtime_mode")}`).not.toMatch(/_|addressab|autonomous/i);
+    fireEvent.click(within(form).getByTestId("identity-profile:worker"));
+    setField(form, "identity-field:name", "scout");
+    fireEvent.submit(form);
+    await find(view, "identity-notice");
+    expect(calls(family, "meta/identity/create")[0].agents).toEqual([{ name: "scout", profile: "worker" }]);
+    fireEvent.click(view.getByTestId("identity-cancel"));
+    await gone(view, "identity-new-agent");
+
+    // An agent that is internal only and runs turn by turn says both.
+    form = await openNewAgent(view);
+    fireEvent.click(within(form).getByTestId("identity-profile:worker"));
+    setField(form, "identity-field:name", "clerk");
+    fireEvent.click(within(form).getByTestId("identity-addressability:internal_only"));
+    fireEvent.click(within(form).getByTestId("identity-runtime-mode:turn_driven"));
+    fireEvent.submit(form);
+    await waitFor(() => expect(calls(family, "meta/identity/create")).toHaveLength(2), { timeout: 5_000 });
+    expect(calls(family, "meta/identity/create")[1].agents)
+      .toEqual([{ name: "clerk", profile: "worker", addressability: "internal_only", runtime_mode_override: "turn_driven" }]);
+    await find(view, "roster-row:clerk");
+    fireEvent.click(view.getByTestId("identity-cancel"));
+    await gone(view, "identity-new-agent");
+
+    // Edit opens on what the record says and sends only what changed.
+    const openEdit = async (): Promise<HTMLElement> => {
+      await selectAgent(view, "clerk");
+      fireEvent.click(view.getByTestId("roster-action:clerk:edit"));
+      const edit = await find(view, "identity-edit:clerk");
+      await within(edit).findByTestId("identity-field:display_name", undefined, { timeout: 5_000 });
+      return edit;
+    };
+    let edit = await openEdit();
+    expect(picked(edit, "addressability")).toEqual(["internal_only"]);
+    expect(picked(edit, "runtime_mode")).toEqual(["turn_driven"]);
+    // An update cannot hand the way an agent runs back to its profile, so
+    // that choice is not offered for an agent whose record names a way.
+    expect(within(edit).queryByTestId("identity-runtime-mode:profile") === null).toBe(true);
+    fireEvent.click(within(edit).getByTestId("identity-runtime-mode:autonomous_host"));
+    fireEvent.submit(edit);
+    expect(noticeWords(await find(view, "identity-notice"))).toContain("is updated");
+    expect(calls(family, "meta/identity/update")).toEqual([{
+      request_id: expect.stringMatching(/\S/),
+      name: "clerk",
+      expected_spec_digest: expect.stringMatching(/^sha256:/),
+      set: { runtime_mode_override: "autonomous_host" },
+    }]);
+    fireEvent.click(view.getByTestId("identity-cancel"));
+    await gone(view, "identity-edit:clerk");
+
+    // A refusal that names one of the two shows at its field.
+    edit = await openEdit();
+    expect(picked(edit, "runtime_mode")).toEqual(["autonomous_host"]);
+    fireEvent.click(within(edit).getByTestId("identity-addressability:addressable"));
+    family.scriptNext("meta/identity/update", { refuse: { kind: "change_denied", field: "set.addressability" } });
+    fireEvent.submit(edit);
+    const error = await find(view, "identity-field-error:addressability");
+    expect(error.textContent).toBe("The host's rules do not allow you this change. It was not made, and asking again changes nothing.");
+    expect(error.closest("[data-field]")?.getAttribute("data-field")).toBe("addressability");
+    expect(family.agents.get("clerk").addressability).toBe("internal_only");
+    // An agent whose record names no way offers the profile's own as the
+    // choice it has.
+    fireEvent.click(view.getByTestId("identity-cancel"));
+    await gone(view, "identity-edit:clerk");
+    await selectAgent(view, "scout");
+    fireEvent.click(view.getByTestId("roster-action:scout:edit"));
+    const plain = await find(view, "identity-edit:scout");
+    await within(plain).findByTestId("identity-field:display_name", undefined, { timeout: 5_000 });
+    expect(picked(plain, "addressability")).toEqual(["addressable"]);
+    expect(picked(plain, "runtime_mode")).toEqual([""]);
+    expect(within(plain).queryByTestId("identity-runtime-mode:profile") === null).toBe(false);
+    view.unmount();
+    cleanup();
+
+    // The details pane's Record says how the agent runs, in words.
+    const record = async (name: string): Promise<string> => {
+      window.localStorage.clear();
+      seedDock({ id: `inspect:${name}`, kind: "identity-inspect", title: `${name} details`, identity: name, memberId: name });
+      const details = render(<ConsoleApp baseUrl="" transport={transport(family)} />);
+      const section = await details.findByTestId(`inspect-record:${name}`, undefined, { timeout: 5_000 });
+      const facts = section.querySelector(".cc-kv")?.textContent || "";
+      details.unmount();
+      cleanup();
+      return facts;
+    };
+    const clerk = await record("clerk");
+    expect(clerk).toContain("How it runs");
+    expect(clerk).toContain("On its own");
+    expect(clerk).not.toMatch(/autonomous|_/);
+    expect(await record("warden")).toContain("As its profile says");
+  }, 60_000);
+
+  it("an_archive_an_unarchive_and_a_removal_say_what_became_of_the_agents_schedules", async () => {
+    const family = createScriptedIdentityFamily();
+    family.seed({ name: "scout", display_name: "Scout", profile: "worker" });
+    family.setSchedules("scout", [
+      { schedule_id: "sched-0001", name: "Morning report" },
+      { schedule_id: "sched-0002", name: "Weekly digest" },
+      { schedule_id: "sched-0003" },
+    ]);
+    const harvest = "Its last conversation is harvested, as for any agent that leaves the team.";
+    const { view } = await openRoster(family);
+    const states = () => family.schedulesOf("scout").map((schedule: { state: string }) => schedule.state);
+
+    // Archive: the question says that the last conversation is harvested,
+    // and the answer says which schedules were paused, by name.
+    await selectAgent(view, "scout");
+    fireEvent.click(view.getByTestId("roster-action:scout:archive"));
+    let confirm = await find(view, "identity-confirm:scout:archive");
+    expect(confirm.textContent).toContain(harvest);
+    fireEvent.click(within(confirm).getByTestId("identity-confirm-yes"));
+    let notice = await find(view, "identity-notice");
+    expect(noticeWords(notice)).toContain("Scout is archived");
+    expect(noticeWords(notice)).toContain("Its 3 schedules are paused until it is unarchived: Morning report, Weekly digest and 1 without a name.");
+    // A schedule's id is no primary text: it is among the technical details.
+    expect(noticeWords(notice)).not.toContain("sched-000");
+    const idNodes = Array.from(notice.querySelectorAll("*")).filter((node) =>
+      Array.from(node.childNodes).some((child) => child.nodeType === 3 && (child.textContent || "").includes("sched-0003")));
+    expect(idNodes.length).toBeGreaterThan(0);
+    expect(idNodes.every((node) => node.closest(".cc-tech") !== null)).toBe(true);
+    // Every schedule was followed, so nothing is offered to try again.
+    expect(within(notice).queryByTestId("identity-retry") === null).toBe(true);
+    fireEvent.click(view.getByTestId("identity-confirm-cancel"));
+
+    // Unarchive: the schedules its archive paused run again.
+    await openArchived(view);
+    fireEvent.click(await find(view, "roster-archived-action:scout:unarchive"));
+    confirm = await find(view, "identity-confirm:scout:unarchive");
+    expect(confirm.textContent).not.toMatch(/harvest/i);
+    fireEvent.click(within(confirm).getByTestId("identity-confirm-yes"));
+    notice = await find(view, "identity-notice");
+    expect(noticeWords(notice)).toContain("Scout is back");
+    expect(noticeWords(notice)).toContain("Its 3 schedules run again: Morning report, Weekly digest and 1 without a name.");
+    await find(view, "roster-row:scout");
+    fireEvent.click(view.getByTestId("identity-confirm-cancel"));
+
+    // An archive whose answer is lost: trying again is answered with the
+    // agent's state and nothing of its schedules, which only a first answer
+    // states. The console says what it was told and no more.
+    await selectAgent(view, "scout");
+    fireEvent.click(view.getByTestId("roster-action:scout:archive"));
+    confirm = await find(view, "identity-confirm:scout:archive");
+    family.scriptNext("meta/identity/archive", { fail: "after" });
+    fireEvent.click(within(confirm).getByTestId("identity-confirm-yes"));
+    notice = await find(view, "identity-notice");
+    expect(notice.querySelector("[data-outcome='failed']") === null).toBe(false);
+    fireEvent.click(within(notice).getByTestId("identity-retry"));
+    await waitFor(() => expect(noticeWords(view.getByTestId("identity-notice"))).toContain("Scout is archived"), { timeout: 5_000 });
+    expect(noticeWords(view.getByTestId("identity-notice"))).not.toMatch(/schedule/i);
+    expect(states()).toEqual(["paused_for_target", "paused_for_target", "paused_for_target"]);
+    fireEvent.click(view.getByTestId("identity-confirm-cancel"));
+
+    // A removal during which one schedule cannot be read: the answer says
+    // which were ended and that not every one was, and offers to try again.
+    await openArchived(view);
+    fireEvent.click(await find(view, "roster-archived-action:scout:remove"));
+    confirm = await find(view, "identity-confirm:scout:remove");
+    expect(confirm.textContent).toContain(harvest);
+    family.failSchedulesAfter("scout", 2);
+    fireEvent.click(within(confirm).getByTestId("identity-confirm-yes"));
+    notice = await find(view, "identity-notice");
+    expect(noticeWords(notice)).toContain("Scout is removed");
+    expect(noticeWords(notice)).toContain("Its 2 schedules are ended: Morning report, Weekly digest.");
+    expect(noticeWords(notice)).toContain("Not every schedule could be changed. Try again to follow the rest.");
+    expect(states()).toHaveLength(1);
+    // Trying again sends the same request. Its answer states nothing of the
+    // schedules: what the first answer said stays, and the console says
+    // that the team was asked again.
+    fireEvent.click(within(notice).getByTestId("identity-retry"));
+    await waitFor(() => expect(noticeWords(view.getByTestId("identity-notice"))).toContain("The team was asked again to follow the rest."), { timeout: 5_000 });
+    notice = view.getByTestId("identity-notice");
+    expect(noticeWords(notice)).toContain("Scout is removed");
+    expect(noticeWords(notice)).toContain("Its 2 schedules are ended: Morning report, Weekly digest.");
+    expect(noticeWords(notice)).not.toContain("Try again to follow the rest");
+    expect(within(notice).queryByTestId("identity-retry") === null).toBe(true);
+    const removed = calls(family, "meta/identity/remove");
+    expect(removed).toHaveLength(2);
+    expect(removed[1]).toEqual(removed[0]);
+    expect(states()).toEqual([]);
+    view.unmount();
+  }, 60_000);
+
+  it("an_agent_its_hosts_configuration_also_lists_says_so_at_its_status", async () => {
+    const family = createScriptedIdentityFamily();
+    const status = (extra: Record<string, unknown> = {}) => ({
+      identity: "warden",
+      state: "active",
+      role: "worker",
+      addressability: "addressable",
+      display_name: "The warden",
+      labels: {},
+      continuity: {},
+      topology_peers: [],
+      ...extra,
+    });
+    const open = async (answer: Record<string, unknown>): Promise<View> => {
+      window.localStorage.clear();
+      seedDock({ id: "inspect:warden", kind: "identity-inspect", title: "The warden details", identity: "warden", memberId: "warden" });
+      const details = render(<ConsoleApp baseUrl="" transport={transport(family, { inspect: () => answer })} />);
+      await find(details, "inspect-state:warden");
+      return details;
+    };
+
+    // The status says that the host's roster lists the name while the
+    // agent is served from its record: a note in plain words, at the status.
+    let view = await open(status({ roster_listing_superseded: true }));
+    const note = await find(view, "inspect-roster-superseded:warden");
+    expect(note.textContent).toBe(
+      "The host's configuration lists an agent of this name too. That entry is not applied: this agent runs from its own record, and a change made here changes that record.",
+    );
+    expect(note.textContent || "").not.toMatch(/_|superseded|roster.listing/i);
+    expect(note.parentElement?.querySelector("[data-testid='inspect-state:warden']") === null).toBe(false);
+    view.unmount();
+    cleanup();
+
+    // A status that does not say so, or says it in another way than `true`,
+    // shows no note.
+    for (const answer of [status(), status({ roster_listing_superseded: false }), status({ roster_listing_superseded: "true" })]) {
+      view = await open(answer);
+      await settle(50);
+      expect(present(view, "inspect-roster-superseded:warden")).toBe(false);
+      view.unmount();
+      cleanup();
+    }
   }, 60_000);
 });

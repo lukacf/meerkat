@@ -79,6 +79,19 @@ function createScriptedIdentityFamily(options = {}) {
   // says of naming one agent as a peer. Absent means allowed.
   const profileChanges = new Map();
   const peerVerdicts = new Map();
+  // What the host's rules give a change of who reaches an agent or of how
+  // it runs: `allow` or `require_approval`.
+  let capabilityChange = "allow";
+  // The team's schedules, by the agent each targets: `{schedule_id, name?,
+  // state}` with state `active`, `paused_by_name` (somebody paused it) or
+  // `paused_for_target` (its agent's archive paused it). A family that is
+  // given no schedules says nothing of them in any answer.
+  const schedules = new Map();
+  let givesSchedules = options.schedules === true;
+  // Per agent: how many schedules the next pass can change before one
+  // cannot be read. That pass answers `incomplete`; the pass after it
+  // follows the rest.
+  const scheduleFaults = new Map();
   // The team's members that are no long-term agent of their own.
   const members = [];
   const tombstones = new Set();
@@ -92,6 +105,7 @@ function createScriptedIdentityFamily(options = {}) {
     return sha256(stable({
       name: agent.name, profile: agent.profile, display_name: agent.display_name ?? null,
       instructions: agent.instructions, context: agent.context ?? null, labels: agent.labels, peers: agent.peers,
+      addressability: agent.addressability, runtime_mode_override: agent.runtime_mode_override ?? null,
     }));
   }
 
@@ -109,6 +123,10 @@ function createScriptedIdentityFamily(options = {}) {
       context: agent.context,
       labels: agent.labels || {},
       peers: agent.peers || [],
+      // Who reaches it (`addressable` or `internal_only`) and how it runs
+      // (`autonomous_host`, `turn_driven`, or nothing: as its profile says).
+      addressability: agent.addressability || "addressable",
+      runtime_mode_override: agent.runtime_mode_override,
       // Scripted only, never written: a change of this agent is refused
       // `owner_read_only`.
       configured: agent.configured === true,
@@ -144,6 +162,52 @@ function createScriptedIdentityFamily(options = {}) {
       readiness: agent.readiness,
       ...(agent.provenance ? { provenance: agent.provenance } : {}),
       ...(agent.open_operations.length ? { open_operations: agent.open_operations } : {}),
+      // Each is written only when it is not the default: an addressable
+      // agent, and one that runs as its profile says, say nothing.
+      ...(agent.addressability === "internal_only" ? { addressability: "internal_only" } : {}),
+      ...(agent.runtime_mode_override ? { runtime_mode_override: agent.runtime_mode_override } : {}),
+    };
+  }
+
+  const ADDRESSABILITY = ["addressable", "internal_only"];
+  const RUNTIME_MODES = ["autonomous_host", "turn_driven"];
+
+  // A refusal of a value the wire does not know for one of the two members,
+  // at the path `prefix` gives them; null when both are fine.
+  function capabilityRefusal(spec, prefix) {
+    if (spec.addressability !== undefined && !ADDRESSABILITY.includes(spec.addressability)) {
+      return refusal("invalid_request", `${prefix}addressability`, { problem: "malformed" }, "addressability is addressable or internal_only.");
+    }
+    if (spec.runtime_mode_override !== undefined && !RUNTIME_MODES.includes(spec.runtime_mode_override)) {
+      return refusal("invalid_request", `${prefix}runtime_mode_override`, { problem: "malformed" }, "runtime_mode_override is autonomous_host or turn_driven.");
+    }
+    return null;
+  }
+
+  // Have the schedules that target `name` follow a change of it, as the
+  // launch's schedule owner does after the change committed, and answer
+  // the ones it was done to: an archive pauses the active ones for their
+  // target, an unarchive resumes exactly those, a removal ends every one.
+  // Asked again it changes nothing where nothing is left to do.
+  function followSchedules(name, effect) {
+    const all = schedules.get(name) || [];
+    const due = all.filter(schedule =>
+      effect === "paused" ? schedule.state === "active"
+        : effect === "resumed" ? schedule.state === "paused_for_target"
+          : true);
+    const limit = scheduleFaults.get(name);
+    scheduleFaults.delete(name);
+    const done = limit === undefined ? due : due.slice(0, limit);
+    for (const schedule of done) {
+      if (effect === "paused") schedule.state = "paused_for_target";
+      else if (effect === "resumed") schedule.state = "active";
+    }
+    if (effect === "ended") schedules.set(name, all.filter(schedule => !done.includes(schedule)));
+    return {
+      effect,
+      count: done.length,
+      schedules: done.map(schedule => ({ schedule_id: schedule.schedule_id, ...(schedule.name ? { name: schedule.name } : {}) })),
+      ...(done.length < due.length ? { incomplete: true } : {}),
     };
   }
 
@@ -203,6 +267,8 @@ function createScriptedIdentityFamily(options = {}) {
       const profile = profiles.find(entry => entry.profile === spec.profile);
       if (!profile) return { refused: refusal("profile_unknown", `agents[${index}].profile`, { profile: spec.profile }) };
       if (profile.verdict === "not_allowed") return { refused: refusal("change_denied", `agents[${index}].profile`, { change: "create" }) };
+      const capability = capabilityRefusal(spec, `agents[${index}].`);
+      if (capability) return { refused: capability };
       for (const [peerIndex, peer] of (spec.peers || []).entries()) {
         if (!agents.has(peer) && !specs.some(other => other.name === peer)) {
           return { refused: refusal("peer_unknown", `agents[${index}].peers[${peerIndex}]`) };
@@ -214,6 +280,7 @@ function createScriptedIdentityFamily(options = {}) {
         name: spec.name, display_name: spec.display_name, profile: spec.profile,
         instructions: spec.instructions || [], context: spec.context, labels: spec.labels || {},
         peers: spec.peers || [], provenance: provenance(),
+        addressability: spec.addressability, runtime_mode_override: spec.runtime_mode_override,
         readiness: preparation ? "preparation_pending" : "dormant",
       });
       // A first message that did not start leaves the seat owed; the script
@@ -242,6 +309,11 @@ function createScriptedIdentityFamily(options = {}) {
     }
     const rule = set.profile !== undefined ? profileChanges.get(set.profile) || "allow" : "allow";
     if (rule === "deny") return { refused: refusal("change_denied", "set.profile", { change: "profile" }) };
+    const capability = capabilityRefusal(set, "set.");
+    if (capability) return { refused: capability };
+    // Who reaches an agent and how it runs are a change class of their
+    // own, under the script's rule for it.
+    const capabilityRule = set.addressability !== undefined || set.runtime_mode_override !== undefined ? capabilityChange : "allow";
     for (const [index, peer] of (params.peers_add || []).entries()) {
       if (!agents.has(peer)) return { refused: refusal("peer_unknown", `peers_add[${index}]`) };
     }
@@ -250,7 +322,7 @@ function createScriptedIdentityFamily(options = {}) {
         return { refused: refusal("invalid_request", "set.labels_remove", { problem: "conflicting" }, "A label is both set and removed.") };
       }
     }
-    return { agent: found.agent, rule };
+    return { agent: found.agent, rule: rule === "require_approval" || capabilityRule === "require_approval" ? "require_approval" : rule };
   }
 
   function update(params) {
@@ -266,6 +338,8 @@ function createScriptedIdentityFamily(options = {}) {
       if (set.labels !== undefined) agent.labels = { ...agent.labels, ...set.labels };
       for (const key of set.labels_remove || []) delete agent.labels[key];
       if (set.profile !== undefined) agent.profile = set.profile;
+      if (set.addressability !== undefined) agent.addressability = set.addressability;
+      if (set.runtime_mode_override !== undefined) agent.runtime_mode_override = set.runtime_mode_override;
       agent.peers = [...agent.peers.filter(peer => !(params.peers_remove || []).includes(peer)), ...(params.peers_add || []).filter(peer => !agent.peers.includes(peer))];
       agent.spec_revision += 1;
       // What became of an instructions change: the script's answer for this
@@ -299,7 +373,9 @@ function createScriptedIdentityFamily(options = {}) {
     return {
       result: {
         outcome: judged.rule,
-        change: body.set && body.set.profile !== undefined ? "profile" : "descriptive",
+        change: body.set && body.set.profile !== undefined ? "profile"
+          : body.set && (body.set.addressability !== undefined || body.set.runtime_mode_override !== undefined) ? "capability"
+            : "descriptive",
         ...(judged.rule === "require_approval" ? { approver_id: "owner" } : {}),
         timeout_ms: 3_600_000,
         request_digest: sha256(stable(body)),
@@ -309,25 +385,38 @@ function createScriptedIdentityFamily(options = {}) {
     };
   }
 
+  // What a change of a whole agent does to the schedules that target it.
+  const SCHEDULE_EFFECTS = { archive: "paused", unarchive: "resumed", remove: "ended" };
+
   function whole(params, change) {
     const found = target(params);
     if (found.refused) return found;
     const agent = found.agent;
+    // The first answer of the change says what became of the agent's
+    // schedules, on a family that is given them.
+    const followed = () => (givesSchedules ? { schedules: followSchedules(agent.name, SCHEDULE_EFFECTS[change]) } : {});
     if (change === "archive") {
       agent.archived = true;
       agent.readiness = "unseated";
-      return { agents: [outcomeOf(agent, "archived")] };
+      return { agents: [outcomeOf(agent, "archived", followed())] };
     }
     if (change === "unarchive") {
       if (!agent.archived) return { refused: refusal("not_archived", "name") };
       agent.archived = false;
       agent.readiness = "dormant";
-      return { agents: [outcomeOf(agent, "restored")] };
+      return { agents: [outcomeOf(agent, "restored", followed())] };
     }
     agents.delete(agent.name);
     tombstones.add(agent.name);
     for (const other of agents.values()) other.peers = other.peers.filter(peer => peer !== agent.name);
-    return { agents: [outcomeOf(agent, "removed")] };
+    return { agents: [outcomeOf(agent, "removed", followed())] };
+  }
+
+  // An outcome as a replay answers it: without what became of the
+  // schedules, which only the first answer of a change states.
+  function replayOf(outcome) {
+    if (!Array.isArray(outcome.agents)) return outcome;
+    return { ...outcome, agents: outcome.agents.map(({ schedules: _schedules, ...agent }) => agent) };
   }
 
   function change(method, params) {
@@ -342,7 +431,11 @@ function createScriptedIdentityFamily(options = {}) {
     if (known) {
       if (known.fingerprint !== fingerprint) return { error: refusal("operation_reused", "request_id") };
       // The same request under the same id answers the same state again and
-      // writes nothing.
+      // writes nothing. A change of a whole agent has its schedules follow
+      // it again (so a caller that got no answer makes them converge), and
+      // the replay states nothing of them.
+      const effect = SCHEDULE_EFFECTS[method.slice("meta/identity/".length)];
+      if (givesSchedules && effect && typeof body.name === "string") followSchedules(body.name, effect);
       return { result: known.outcome, replayed: true };
     }
     const done = method === "meta/identity/create" ? create(body)
@@ -361,7 +454,7 @@ function createScriptedIdentityFamily(options = {}) {
     } else {
       outcome = { outcome: "done", operation_id: id, agents: done.agents };
     }
-    operations.set(id, { fingerprint, outcome });
+    operations.set(id, { fingerprint, outcome: replayOf(outcome) });
     return { result: outcome };
   }
 
@@ -474,6 +567,25 @@ function createScriptedIdentityFamily(options = {}) {
     /** What the directory says of naming `name` as a peer: `{verdict,
      * reason?, lines?}`. */
     setPeerVerdict(name, verdict) { peerVerdicts.set(name, verdict); },
+    /** What the host's rules give a change of who reaches an agent or of
+     * how it runs: `allow` or `require_approval`. */
+    setCapabilityChange(rule) { capabilityChange = rule; },
+    /**
+     * The schedules that target `name`: `[{schedule_id, name?, state?}]`,
+     * state `active` (the default), `paused_by_name` or
+     * `paused_for_target`. Giving any makes this a family that is given
+     * its launch's schedules: the first answer of an archive, an unarchive
+     * and a removal then says what became of them.
+     */
+    setSchedules(name, list) {
+      givesSchedules = true;
+      schedules.set(name, list.map(schedule => ({ state: "active", ...schedule })));
+    },
+    /** The schedules that target `name`, as they stand. */
+    schedulesOf(name) { return (schedules.get(name) || []).map(schedule => ({ ...schedule })); },
+    /** The next pass over the schedules of `name` changes `count` of them
+     * and then cannot read one: it answers `incomplete`. */
+    failSchedulesAfter(name, count) { scheduleFaults.set(name, count); },
     /** What became of the next instructions change of `name`. */
     setInstructionOutcome(name, outcome) { agents.get(name).instruction_outcome = outcome; },
     /**

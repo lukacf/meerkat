@@ -15,7 +15,9 @@ import { agentDisplayTitle } from "./agents";
 import { familiesFor } from "../panels/access-model";
 import {
   IDENTITY_REFUSED_CODE,
+  REACH_CHOICES,
   REFUSAL_KINDS_WITH_A_SENTENCE,
+  RUN_MODE_CHOICES,
   UNKNOWN_REFUSAL_SENTENCE,
   refusalDetail,
   agentChangeConfirmWords,
@@ -29,6 +31,7 @@ import {
   identityChangeFlags,
   identityRefusalOf,
   instructionOutcomeWords,
+  keepFirstSchedules,
   outcomeWords,
   parseAgentPage,
   parseAgentRecord,
@@ -36,11 +39,14 @@ import {
   parseIdentityDirectory,
   parseIdentityOutcome,
   planWords,
+  reachWords,
   readAllPages,
   refusalFormField,
   refusalSentence,
   requestIdFor,
   requesterWords,
+  runModeWords,
+  schedulesWords,
   seatWords,
   updateAgentRequest,
   verdictWords,
@@ -514,5 +520,224 @@ describe("an outcome in words", () => {
     expect(remove.consequence).toContain("Archive is the reversible choice");
     expect(agentChangeConfirmWords("archive", "Scout").consequence).toContain("keeps its name");
     expect(agentChangeConfirmWords("unarchive", "Scout").confirm).toBe("Unarchive");
+  });
+
+  it("says before an archive and a removal that the agent's last conversation is harvested", () => {
+    // An agent that is archived or removed leaves as any agent leaves: its
+    // last conversation is harvested. An unarchive harvests nothing.
+    const harvest = "Its last conversation is harvested, as for any agent that leaves the team.";
+    expect(agentChangeConfirmWords("archive", "Scout").consequence).toContain(harvest);
+    expect(agentChangeConfirmWords("remove", "Scout").consequence).toContain(harvest);
+    expect(agentChangeConfirmWords("unarchive", "Scout").consequence).not.toContain("harvest");
+  });
+});
+
+describe("who reaches an agent and how it runs", () => {
+  it("reads both from a record only where the record says so", () => {
+    const family = createScriptedIdentityFamily();
+    family.seed({ name: "clerk", profile: "worker", addressability: "internal_only", runtime_mode_override: "turn_driven" });
+    const clerk = parseAgentRecord(family.handle("meta/identity/get", { name: "clerk" }).result);
+    expect(clerk).toMatchObject({ addressability: "internal_only", runtimeMode: "turn_driven" });
+    // An agent that can be messaged and runs as its profile says: its
+    // record writes neither, and the console reads neither.
+    const warden = parseAgentRecord(family.handle("meta/identity/get", { name: "warden" }).result);
+    expect(warden !== null && "addressability" in warden).toBe(false);
+    expect(warden !== null && "runtimeMode" in warden).toBe(false);
+    // A page of the list carries both the same way.
+    const page = parseAgentPage(family.handle("meta/identity/list", {}).result);
+    expect(page.agents.find((agent) => agent.name === "clerk")).toMatchObject({ addressability: "internal_only", runtimeMode: "turn_driven" });
+    // The form opens on what the record says.
+    expect(editDraftOf(clerk!)).toMatchObject({ addressability: "internal_only", runtimeMode: "turn_driven" });
+    expect(editDraftOf(warden!)).toMatchObject({ addressability: "addressable", runtimeMode: "" });
+  });
+
+  it("writes both on a create only when they are not the default, and on an update only when they changed", () => {
+    const draft = { profile: "worker", name: "clerk", displayName: "", instructions: "", firstMessage: "", peers: [], addressability: "addressable", runtimeMode: "" };
+    expect(createAgentsRequest(draft)).toEqual({ agents: [{ name: "clerk", profile: "worker" }] });
+    expect(createAgentsRequest({ ...draft, addressability: "internal_only", runtimeMode: "autonomous_host" }))
+      .toEqual({ agents: [{ name: "clerk", profile: "worker", addressability: "internal_only", runtime_mode_override: "autonomous_host" }] });
+
+    const open = record();
+    const same = updateAgentRequest(open, editDraftOf(open));
+    expect(same).toMatchObject({ changed: false, request: { set: {} } });
+    const changed = updateAgentRequest(open, { ...editDraftOf(open), addressability: "internal_only", runtimeMode: "turn_driven" });
+    expect(changed).toMatchObject({
+      changed: true,
+      request: { name: "keeper", expected_spec_digest: DIGEST, set: { addressability: "internal_only", runtime_mode_override: "turn_driven" } },
+    });
+    // Back to an agent that can be messaged: the wire's own word for it.
+    const internal = record({ addressability: "internal_only", runtimeMode: "turn_driven" });
+    expect(updateAgentRequest(internal, { ...editDraftOf(internal), addressability: "addressable" }))
+      .toMatchObject({ changed: true, request: { set: { addressability: "addressable" } } });
+    expect(updateAgentRequest(internal, { ...editDraftOf(internal), runtimeMode: "autonomous_host" }))
+      .toMatchObject({ changed: true, request: { set: { runtime_mode_override: "autonomous_host" } } });
+    // An update cannot hand the way an agent runs back to its profile: a
+    // form that names none sets none.
+    const handedBack = updateAgentRequest(internal, { ...editDraftOf(internal), runtimeMode: "" });
+    expect(handedBack).toMatchObject({ changed: false, request: { set: {} } });
+  });
+
+  it("says both in words, offers the choices a form lists, and names the form field of a refusal", () => {
+    expect(reachWords(undefined)).toBe("Can receive messages");
+    expect(reachWords("addressable")).toBe("Can receive messages");
+    expect(reachWords("internal_only")).toBe("Internal only");
+    expect(runModeWords(undefined)).toBe("As its profile says");
+    expect(runModeWords("autonomous_host")).toBe("On its own");
+    expect(runModeWords("turn_driven")).toBe("Turn by turn");
+    // A value a later gateway writes reads in words, never as a token.
+    expect(runModeWords("later_mode")).toBe("Later mode");
+    expect(REACH_CHOICES.map((choice) => [choice.value, choice.label]))
+      .toEqual([["addressable", "Can receive messages"], ["internal_only", "Internal only"]]);
+    expect(RUN_MODE_CHOICES.map((choice) => [choice.value, choice.label]))
+      .toEqual([["", "As its profile says"], ["autonomous_host", "On its own"], ["turn_driven", "Turn by turn"]]);
+    for (const choice of [...REACH_CHOICES, ...RUN_MODE_CHOICES]) {
+      expect(choice.hint).toMatch(/^[A-Z].*\.$/);
+      expect(`${choice.label} ${choice.hint}`).not.toMatch(/_|addressab|autonomous|turn.driven|\bhost\b/i);
+    }
+    expect(refusalFormField("create", "agents[0].addressability")).toBe("addressability");
+    expect(refusalFormField("create", "agents[0].runtime_mode_override")).toBe("runtime_mode");
+    expect(refusalFormField("update", "set.addressability")).toBe("addressability");
+    expect(refusalFormField("update", "set.runtime_mode_override")).toBe("runtime_mode");
+  });
+});
+
+describe("what a change did to an agent's schedules", () => {
+  const followed = (effect: string, schedules: Array<{ schedule_id: string; name?: string }>, extra: Record<string, unknown> = {}) => {
+    const outcome = parseIdentityOutcome({
+      outcome: "done",
+      operation_id: "human.x.r",
+      agents: [{ name: "scout", state: "archived", schedules: { effect, count: schedules.length, schedules, ...extra } }],
+    });
+    return outcome && outcome.outcome === "done" ? outcome.agents[0]!.schedules : undefined;
+  };
+  const morning = { schedule_id: "sched-01", name: "Morning report" };
+  const weekly = { schedule_id: "sched-02", name: "Weekly digest" };
+  const unnamed = { schedule_id: "sched-03" };
+
+  it("reads the member of a first answer and says it with the schedules' names", () => {
+    expect(followed("paused", [morning, weekly])).toEqual({
+      effect: "paused",
+      count: 2,
+      schedules: [{ scheduleId: "sched-01", name: "Morning report" }, { scheduleId: "sched-02", name: "Weekly digest" }],
+      incomplete: false,
+    });
+    expect(schedulesWords(followed("paused", [morning]))).toEqual(["Its schedule Morning report is paused until it is unarchived."]);
+    expect(schedulesWords(followed("paused", [morning, weekly])))
+      .toEqual(["Its 2 schedules are paused until it is unarchived: Morning report, Weekly digest."]);
+    expect(schedulesWords(followed("resumed", [morning]))).toEqual(["Its schedule Morning report runs again."]);
+    expect(schedulesWords(followed("resumed", [morning, weekly]))).toEqual(["Its 2 schedules run again: Morning report, Weekly digest."]);
+    expect(schedulesWords(followed("ended", [morning]))).toEqual(["Its schedule Morning report is ended."]);
+    expect(schedulesWords(followed("ended", [morning, weekly]))).toEqual(["Its 2 schedules are ended: Morning report, Weekly digest."]);
+    // A schedule without a name is counted, never shown by its id.
+    expect(schedulesWords(followed("ended", [morning, unnamed, weekly])))
+      .toEqual(["Its 3 schedules are ended: Morning report, Weekly digest and 1 without a name."]);
+    expect(schedulesWords(followed("paused", [unnamed]))).toEqual(["Its schedule is paused until it is unarchived."]);
+    expect(schedulesWords(followed("paused", [unnamed, { schedule_id: "sched-04" }]))).toEqual(["Its 2 schedules are paused until it is unarchived."]);
+    for (const effect of ["paused", "resumed", "ended"]) {
+      expect(schedulesWords(followed(effect, [morning, unnamed])).join(" ")).not.toMatch(/sched-0\d|_/);
+    }
+    // A change that had no schedule to follow, an answer without the
+    // member (a replay, a launch without schedules) and an effect this
+    // console does not know say nothing.
+    expect(schedulesWords(followed("paused", []))).toEqual([]);
+    expect(schedulesWords(undefined)).toEqual([]);
+    expect(schedulesWords(followed("rescheduled", [morning]))).toEqual([]);
+    const plain = parseIdentityOutcome({ outcome: "done", operation_id: "x", agents: [{ name: "scout", state: "archived" }] });
+    expect(plain && plain.outcome === "done" ? "schedules" in plain.agents[0]! : true).toBe(false);
+  });
+
+  it("says when not every schedule could be followed", () => {
+    expect(schedulesWords(followed("paused", [morning], { incomplete: true }))).toEqual([
+      "Its schedule Morning report is paused until it is unarchived.",
+      "Not every schedule could be changed. Try again to follow the rest.",
+    ]);
+    expect(schedulesWords(followed("ended", [], { incomplete: true }))).toEqual(["Its schedules could not be changed. Try again to follow them."]);
+    expect(followed("paused", [morning], { incomplete: true })?.incomplete).toBe(true);
+    // Only `true` says so.
+    expect(followed("paused", [morning], { incomplete: "yes" })?.incomplete).toBe(false);
+  });
+
+  it("says a change's outcome with what became of the schedules, the ids apart", () => {
+    const outcome = parseIdentityOutcome({
+      outcome: "done",
+      operation_id: "human.x.r",
+      agents: [{ name: "scout", state: "archived", schedules: { effect: "paused", count: 2, schedules: [morning, unnamed] } }],
+    })!;
+    const words = outcomeWords("archive", outcome, "Scout");
+    expect(words.title).toBe("Scout is archived");
+    expect(words.lines).toContain("Its 2 schedules are paused until it is unarchived: Morning report and 1 without a name.");
+    expect(words.lines.join(" ")).not.toContain("sched-0");
+  });
+
+  it("keeps what the first answer said when the same request is answered again without it", () => {
+    const first = parseIdentityOutcome({
+      outcome: "done",
+      operation_id: "human.x.r",
+      agents: [{ name: "scout", state: "archived", schedules: { effect: "paused", count: 1, schedules: [morning], incomplete: true } }],
+    })!;
+    // A replay states the agent's state and nothing of its schedules.
+    const replay = parseIdentityOutcome({ outcome: "done", operation_id: "human.x.r", agents: [{ name: "scout", state: "archived" }] })!;
+    const kept = keepFirstSchedules(first, replay);
+    expect(kept).toMatchObject({
+      outcome: "done",
+      agents: [{ name: "scout", state: "archived", schedules: { effect: "paused", count: 1, incomplete: true, askedAgain: true } }],
+    });
+    expect(schedulesWords(kept.outcome === "done" ? kept.agents[0]!.schedules : undefined)).toEqual([
+      "Its schedule Morning report is paused until it is unarchived.",
+      "Not every schedule could be changed at first. The team was asked again to follow the rest.",
+    ]);
+    // An answer that says what became of the schedules itself is kept as it is.
+    const second = parseIdentityOutcome({
+      outcome: "done",
+      operation_id: "human.x.r",
+      agents: [{ name: "scout", state: "archived", schedules: { effect: "paused", count: 2, schedules: [morning, weekly] } }],
+    })!;
+    expect(keepFirstSchedules(first, second)).toEqual(second);
+    // Another agent's schedules are nobody else's, and an outcome that is
+    // no change's (a decision that waits) is kept as it is.
+    const other = parseIdentityOutcome({ outcome: "done", operation_id: "human.x.r", agents: [{ name: "ranger", state: "archived" }] })!;
+    expect(keepFirstSchedules(first, other)).toEqual(other);
+    const waiting = parseIdentityOutcome({ outcome: "pending_decision", operation_id: "x", decision_id: "d", deadline_ms: 9 })!;
+    expect(keepFirstSchedules(first, waiting)).toEqual(waiting);
+    expect(keepFirstSchedules(waiting, replay)).toEqual(replay);
+  });
+
+  it("follows the scripted family: the first answer says it, a replay does not", () => {
+    const family = createScriptedIdentityFamily();
+    family.seed({ name: "scout", profile: "worker" });
+    family.setSchedules("scout", [
+      { schedule_id: "sched-01", name: "Morning report" },
+      { schedule_id: "sched-02", name: "Weekly digest", state: "paused_by_name" },
+      { schedule_id: "sched-03" },
+    ]);
+    const digest = () => family.handle("meta/identity/get", { name: "scout" }).result.spec_digest;
+    const archive = { request_id: "a-1", name: "scout", expected_spec_digest: digest() };
+    const first = family.handle("meta/identity/archive", archive).result;
+    // An archive pauses the schedules that run; one somebody paused by name
+    // is left as it is.
+    expect(first.agents[0].schedules).toEqual({
+      effect: "paused", count: 2, schedules: [{ schedule_id: "sched-01", name: "Morning report" }, { schedule_id: "sched-03" }],
+    });
+    const again = family.handle("meta/identity/archive", archive).result;
+    expect("schedules" in again.agents[0]).toBe(false);
+    expect(again.agents[0].state).toBe(first.agents[0].state);
+    // An unarchive resumes exactly the schedules the archive paused.
+    const back = family.handle("meta/identity/unarchive", { request_id: "u-1", name: "scout", expected_spec_digest: digest() }).result;
+    expect(back.agents[0].schedules.effect).toBe("resumed");
+    expect(back.agents[0].schedules.schedules.map((schedule: { schedule_id: string }) => schedule.schedule_id)).toEqual(["sched-01", "sched-03"]);
+    expect(family.schedulesOf("scout").map((schedule: { state: string }) => schedule.state)).toEqual(["active", "paused_by_name", "active"]);
+    // A removal ends every one. A pass that cannot read one says so, and
+    // the same request asked again follows the rest.
+    family.failSchedulesAfter("scout", 1);
+    const remove = { request_id: "r-1", name: "scout", expected_spec_digest: digest() };
+    const removed = family.handle("meta/identity/remove", remove).result;
+    expect(removed.agents[0].schedules).toMatchObject({ effect: "ended", count: 1, incomplete: true });
+    expect(family.schedulesOf("scout")).toHaveLength(2);
+    expect("schedules" in family.handle("meta/identity/remove", remove).result.agents[0]).toBe(false);
+    expect(family.schedulesOf("scout")).toHaveLength(0);
+    // A family that is given no schedules says nothing of them.
+    const plain = createScriptedIdentityFamily();
+    const warden = plain.handle("meta/identity/get", { name: "warden" }).result.spec_digest;
+    expect("schedules" in plain.handle("meta/identity/archive", { request_id: "a-2", name: "warden", expected_spec_digest: warden }).result.agents[0]).toBe(false);
   });
 });

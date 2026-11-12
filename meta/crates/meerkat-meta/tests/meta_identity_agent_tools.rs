@@ -1985,7 +1985,16 @@ fn the_descriptions_say_what_a_model_must_know() {
         "If you are a long-term agent yourself, a notice reaches you when it is decided; in \
          every case the identical call with the same `request_id` returns the current state.",
         "A name that was removed is never available again",
-        "`pending_preparation`",
+        // An agent the host prepares, in plain words: what it is until the
+        // host settles it, that no tool settles it, and where it is read
+        // (`an_agent_reads_that_an_agent_waits_for_its_hosts_preparation`).
+        "- `pending_preparation`: created, and at least one agent (its `state` is \
+         `pending_preparation`) waits for the host to prepare it.",
+        "Until the host settles that, the agent has no member, takes no message and runs \
+         nothing; its first message runs once when it is settled.",
+        "No tool settles it, and nothing you send speeds it up: identity_list and identity_get \
+         read it as `readiness: \"preparation_pending\"`, and the identical call with the same \
+         `request_id` returns where it stands.",
         "`refused`",
     ] {
         assert!(
@@ -1995,6 +2004,13 @@ fn the_descriptions_say_what_a_model_must_know() {
     }
     let update = text(IDENTITY_UPDATE);
     for sentence in [
+        // A move into a profile the host prepares, and an update of an agent
+        // that waits: the same row.
+        "A move into a profile whose agents the host prepares is refused `unsupported` at \
+         `set.profile`: create the agent in that profile instead.",
+        "An update of an agent that waits for its host's preparation changes its record only: \
+         the agent still waits.",
+        "The result's `outcome` is `done`, `pending_decision` or `refused`,",
         "It reaches the agent at its next run; a run that starts within moments of the change \
          may still use the earlier instructions; earlier instructions are never rewritten.",
         "`applies_at_next_run`",
@@ -2023,6 +2039,36 @@ fn the_descriptions_say_what_a_model_must_know() {
             .contains("An agent of a profile you may not create agents of is listed too")
     );
     assert!(!text(IDENTITY_LIST).contains("your grant covers"));
+    // An agent that waits for its host's preparation is read in plain words
+    // by the two reads, and an update never answers a preparation.
+    assert!(
+        text(IDENTITY_LIST).contains(
+            "`preparation_pending` (it waits for its host to prepare it: no member, no message \
+             taken, nothing runs until the host settles that; no tool of yours does)"
+        ),
+        "identity_list says what `preparation_pending` is"
+    );
+    assert!(
+        text(IDENTITY_GET).contains(
+            "An agent that waits for its host's preparation reads `readiness: \
+             \"preparation_pending\"`: it takes no message until the host settles that."
+        ),
+        "identity_get says how an agent that waits reads"
+    );
+    assert!(
+        !update.contains("`pending_preparation`"),
+        "an update answers no preparation: its description names no such outcome"
+    );
+    // The settle of a preparation is the host's: there is no tool for it,
+    // and no description names the host's method as something to call.
+    assert_eq!(IDENTITY_TOOLS.len(), 8);
+    assert!(!IDENTITY_TOOLS.iter().any(|tool| tool.contains("settle")));
+    for tool in IDENTITY_TOOLS {
+        assert!(
+            !text(tool).contains("settle_preparation"),
+            "{tool} names no settle method"
+        );
+    }
     // The two members a host sets are read back by the two reads and set by
     // no tool: the create and the update do not name them.
     for tool in [IDENTITY_LIST, IDENTITY_GET] {
@@ -3134,5 +3180,298 @@ async fn an_agent_is_told_what_became_of_an_agents_schedules_not_which() {
             );
         }
     }
+    rig.shutdown().await;
+}
+
+/// The identity policy of the preparation row: the host prepares every
+/// agent of the worker profile before its first use, and agents of the
+/// profile with mob tools may create agents of both profiles, change them
+/// and move them to another profile.
+fn prepared_policy() -> Arc<IdentityCreationPolicy> {
+    Arc::new(
+        IdentityCreationPolicy::parse(&json!({
+            "enabled": true,
+            "peers": {"default": "allow"},
+            "preparation": {WORKER: {"mode": "required"}},
+            "approval": {"rules": [{
+                "change": ["create", "descriptive", "profile"],
+                "requester": {"kind": "agent", "profile": [MAKER]},
+                "target": {"profile": [WORKER, MAKER]},
+                "outcome": {"kind": "allow"},
+            }]},
+        }))
+        .expect("the policy parses")
+        .expect("the policy is enabled"),
+    )
+}
+
+/// The first message of the agent the preparation row creates. An agent's
+/// tool call writes it as JSON, where its quotes are escaped, so this text
+/// as it stands is in a model request only when the new agent itself is
+/// asked it.
+const KICKOFF: &str = r#"Chart the "tides" first."#;
+
+/// What an agent reads of an agent its host prepares, on the real family
+/// under a policy that names a preparation for the worker profile. Its
+/// create answers `pending_preparation` and is no error result; until the
+/// host settles it the agent has no member, takes no message, and its first
+/// message is asked of no model; `identity_list` and `identity_get` read it
+/// `preparation_pending`; the same create again answers the same; an update
+/// changes its record and leaves it waiting; and the agent that asked is
+/// offered no tool that settles it. A move of another agent into the
+/// prepared profile is refused `unsupported` at `set.profile`. Once the
+/// host settles it, its first message runs once, the same create answers
+/// `done`, and the list reads it as any agent.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_reads_that_an_agent_waits_for_its_hosts_preparation() {
+    use meerkat_mob::{EntryStanding, IdentityEntryRead, UnseatedEntryCause};
+
+    let state = tempfile::tempdir().unwrap();
+    let rig = boot(state.path(), &fresh_mob_id()).await;
+    assert!(
+        rig.runtime
+            .attach_identity_policy(prepared_policy(), IdentityFamilyOptions::new()),
+        "the launch attaches its identity policy"
+    );
+    let member = core_member_name("scout").expect("an agent name");
+    let waits = || {
+        matches!(
+            rig.runtime.mob_handle().identity_entry(&member),
+            Ok(IdentityEntryRead::Entry(entry))
+                if entry.standing
+                    == EntryStanding::Unseated(UnseatedEntryCause::PreparationPending)
+        )
+    };
+    let entry_of = |listed: &ToolAnswer, name: &str| {
+        listed.content["agents"]
+            .as_array()
+            .expect("the agents")
+            .iter()
+            .find(|entry| entry["name"] == name)
+            .unwrap_or_else(|| panic!("{name} is listed: {}", listed.content))
+            .clone()
+    };
+
+    // The create: committed, and the agent waits for its host.
+    let create = json!({
+        "request_id": "scout-1",
+        "agents": [{"name": "scout", "profile": WORKER, "first_message": KICKOFF}],
+    });
+    let created = rig
+        .tool(LEAD, "prep-create", IDENTITY_CREATE, create.clone())
+        .await;
+    assert_eq!(
+        created.content["outcome"], "pending_preparation",
+        "{}",
+        created.content
+    );
+    assert_eq!(
+        created.content["agents"][0]["state"], "pending_preparation",
+        "{}",
+        created.content
+    );
+    assert!(
+        !created.is_error,
+        "an agent that waits for its host is no error result"
+    );
+    let digest = created.content["agents"][0]["spec_digest"]
+        .as_str()
+        .expect("a spec digest")
+        .to_owned();
+
+    // Until the host settles it: no member, no message taken, nothing run.
+    assert!(waits(), "Core holds the agent for its preparation");
+    assert!(
+        !rig.runtime
+            .mob_handle()
+            .list_members_including_retiring()
+            .await
+            .iter()
+            .any(|entry| entry.agent_identity == member),
+        "an agent that waits has no member"
+    );
+    let sent = rig
+        .rpc(
+            "meta/send",
+            json!({"identity": "scout", "content": "are you there"}),
+        )
+        .await;
+    assert!(
+        !sent["error"].is_null(),
+        "an agent that waits takes no message: {sent:#}"
+    );
+
+    // The two reads say so, and show the agent that asked no operation.
+    let listed = rig.tool(LEAD, "prep-list", IDENTITY_LIST, json!({})).await;
+    assert_eq!(
+        entry_of(&listed, "scout")["readiness"],
+        "preparation_pending",
+        "{}",
+        listed.content
+    );
+    let read = rig
+        .tool(LEAD, "prep-get", IDENTITY_GET, json!({"name": "scout"}))
+        .await;
+    assert_eq!(
+        read.content["readiness"], "preparation_pending",
+        "{}",
+        read.content
+    );
+    for answer in [&listed, &read] {
+        let said = answer.content.to_string();
+        assert!(
+            !answer.is_error && !said.contains("open_operations") && !said.contains("operation_id"),
+            "a read of an agent that waits names no operation: {said}"
+        );
+    }
+
+    // The same create again reads where the agent stands.
+    let again = rig
+        .tool(LEAD, "prep-create-again", IDENTITY_CREATE, create.clone())
+        .await;
+    assert_eq!(
+        again.content, created.content,
+        "the same create answers the same while the agent waits"
+    );
+
+    // An update changes the record and settles nothing.
+    let updated = rig
+        .tool(
+            LEAD,
+            "prep-update",
+            IDENTITY_UPDATE,
+            json!({
+                "name": "scout",
+                "expected_spec_digest": digest,
+                "set": {"display_name": "Scout"},
+            }),
+        )
+        .await;
+    assert_eq!(updated.content["outcome"], "done", "{}", updated.content);
+    assert!(!updated.is_error);
+    let read = rig
+        .tool(
+            LEAD,
+            "prep-get-updated",
+            IDENTITY_GET,
+            json!({"name": "scout"}),
+        )
+        .await;
+    assert_eq!(
+        (
+            read.content["display_name"].as_str(),
+            read.content["readiness"].as_str()
+        ),
+        (Some("Scout"), Some("preparation_pending")),
+        "an update changes the record of an agent that waits, and it still waits: {}",
+        read.content
+    );
+
+    // A move of an agent into the prepared profile is refused.
+    let walker = rig
+        .tool(
+            LEAD,
+            "prep-walker",
+            IDENTITY_CREATE,
+            json!({"agents": [{"name": "walker", "profile": MAKER}]}),
+        )
+        .await;
+    assert_eq!(walker.content["outcome"], "done", "{}", walker.content);
+    let moved = rig
+        .tool(
+            LEAD,
+            "prep-move",
+            IDENTITY_UPDATE,
+            json!({
+                "name": "walker",
+                "expected_spec_digest": walker.content["agents"][0]["spec_digest"],
+                "set": {"profile": WORKER},
+            }),
+        )
+        .await;
+    assert_eq!(
+        (
+            moved.content["outcome"].as_str(),
+            moved.content["kind"].as_str(),
+            moved.content["field"].as_str()
+        ),
+        (Some("refused"), Some("unsupported"), Some("set.profile")),
+        "a move into a profile the host prepares is refused: {}",
+        moved.content
+    );
+    assert!(moved.is_error);
+    assert_eq!(
+        entry_of(
+            &rig.tool(LEAD, "prep-list-walker", IDENTITY_LIST, json!({}))
+                .await,
+            "walker"
+        )["profile"],
+        MAKER,
+        "the agent stays on its profile"
+    );
+
+    // Nothing the agent that asked did settled it: it is offered no tool
+    // for that, the agent still waits, and its first message was asked of
+    // no model.
+    {
+        let asked = rig.model.asked.lock().unwrap();
+        assert!(
+            asked
+                .iter()
+                .all(|asked| asked.tools.iter().all(|tool| !tool.contains("settle"))),
+            "no agent is offered a tool that settles a preparation"
+        );
+        assert!(
+            asked.iter().all(|asked| !asked.text.contains(KICKOFF)),
+            "the first message of an agent that waits is asked of no model"
+        );
+    }
+    assert!(waits(), "the agent still waits for its host");
+
+    // The host settles it: the agent is seated and its first message runs.
+    let settled = rig
+        .rpc(
+            "meta/identity/settle_preparation",
+            json!({"request_id": "settle-scout", "name": "scout"}),
+        )
+        .await;
+    assert!(
+        settled["error"].is_null() && settled["result"]["outcome"] == "done",
+        "the host settles the preparation: {settled:#}"
+    );
+    rig.turn(KICKOFF).await;
+    let after = rig
+        .tool(LEAD, "prep-create-after", IDENTITY_CREATE, create)
+        .await;
+    assert_eq!(
+        (
+            after.content["outcome"].as_str(),
+            after.content["agents"][0]["state"].as_str(),
+            after.content["agents"][0]["seat"].as_str()
+        ),
+        (Some("done"), Some("committed"), Some("seated")),
+        "the same create answers done once the agent is settled: {}",
+        after.content
+    );
+    let listed = rig
+        .tool(LEAD, "prep-list-after", IDENTITY_LIST, json!({}))
+        .await;
+    let readiness = entry_of(&listed, "scout")["readiness"].clone();
+    assert!(
+        readiness == "live" || readiness == "dormant",
+        "a settled agent reads as any agent: {}",
+        listed.content
+    );
+    assert_eq!(
+        rig.model
+            .asked
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|asked| asked.text.contains(KICKOFF) && asked.ended)
+            .count(),
+        1,
+        "the first message ran once"
+    );
     rig.shutdown().await;
 }

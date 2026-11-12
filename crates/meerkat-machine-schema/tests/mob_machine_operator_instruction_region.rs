@@ -1181,7 +1181,7 @@ fn measure_member_record_costs_in_the_machine() {
             let write_started = Instant::now();
             assert!(commits(
                 &mut authority,
-                set(slot, 1, DIGEST_A, 4096, Target::Member(*name)),
+                set(slot, 1, DIGEST_A, 4096, Target::Member(name)),
             ));
             if index + 100 >= members {
                 last_hundred += write_started.elapsed();
@@ -1249,7 +1249,7 @@ fn measure_member_record_costs_in_the_machine() {
         for (slot, name) in slots.iter().zip(&names).take(members) {
             assert!(commits(
                 &mut unseated,
-                set(slot, 1, DIGEST_A, 4096, Target::Member(*name)),
+                set(slot, 1, DIGEST_A, 4096, Target::Member(name)),
             ));
         }
         let started = Instant::now();

@@ -166,6 +166,14 @@ impl AgentLlmClient for ModelFallbackClient {
             .controller_model_selection()
     }
 
+    /// The route of the candidate this client is serving: a fallback moves
+    /// the answer to the target's route with it.
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        self.candidates[self.active_index()]
+            .client
+            .reasoning_route()
+    }
+
     fn pin_controller(self: Arc<Self>) -> Option<meerkat_core::ControllerModelClient> {
         // Read the existing selector exactly once and retain the selected
         // child. Later fallback changes cannot retarget the admitted pin.
@@ -599,6 +607,36 @@ mod tests {
         pressure_available: bool,
     }
 
+    /// The route a scripted candidate of `provider` reports: its family's
+    /// direct backend, and none for a provider without one.
+    fn scripted_route(provider: Provider) -> Option<meerkat_core::ReasoningRouteObservation> {
+        use meerkat_core::provider_matrix::{
+            AnthropicBackendKind, GoogleBackendKind, OpenAiBackendKind,
+        };
+        use meerkat_core::{ModelApi, ReasoningBackend};
+        let (backend, api) = match provider {
+            Provider::OpenAI => (
+                ReasoningBackend::OpenAi(OpenAiBackendKind::OpenAiApi),
+                ModelApi::Responses,
+            ),
+            Provider::Anthropic => (
+                ReasoningBackend::Anthropic(AnthropicBackendKind::AnthropicApi),
+                ModelApi::Messages,
+            ),
+            Provider::Gemini => (
+                ReasoningBackend::Google(GoogleBackendKind::GoogleGenAi),
+                ModelApi::GenerateContent,
+            ),
+            _ => return None,
+        };
+        Some(meerkat_core::ReasoningRouteObservation {
+            backend,
+            api,
+            account: meerkat_core::AccountLevelStatement::NotApplicable,
+            operator_levels: None,
+        })
+    }
+
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl AgentLlmClient for ScriptedClient {
@@ -628,6 +666,10 @@ mod tests {
                 self.controller_model_selection()?,
                 self,
             ))
+        }
+
+        fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+            scripted_route(self.provider)
         }
 
         fn request_pressure(
@@ -804,6 +846,39 @@ mod tests {
             .unwrap();
         assert_eq!(primary_seen.lock().await.len(), 1);
         assert!(target_seen.lock().await.is_empty());
+    }
+
+    /// R2.1: the fallback client reports the route of its active candidate,
+    /// before and after a fallback moves it to another target. It answers
+    /// with the candidate's own observation and adds nothing to it.
+    #[test]
+    fn every_adapter_reports_its_route() {
+        let primary = candidate(
+            Provider::OpenAI,
+            "primary",
+            Some(1_000_000),
+            Some(8192),
+            Arc::default(),
+        );
+        let target = candidate(
+            Provider::Anthropic,
+            "target",
+            Some(1_000_000),
+            Some(8192),
+            Arc::default(),
+        );
+        let previous = primary.identity.clone();
+        let next = target.identity.clone();
+        let client =
+            ModelFallbackClient::new(vec![primary, target], Default::default(), Vec::new(), None)
+                .unwrap();
+
+        let primary_route = scripted_route(Provider::OpenAI);
+        let target_route = scripted_route(Provider::Anthropic);
+        assert!(primary_route.is_some() && primary_route != target_route);
+        assert_eq!(client.reasoning_route(), primary_route);
+        client.commit_model_fallback(&previous, &next).unwrap();
+        assert_eq!(client.reasoning_route(), target_route);
     }
 
     #[test]

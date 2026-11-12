@@ -471,6 +471,14 @@ impl LlmClient for GeminiCopilotChatClient {
         self.inner.prepare_controller_credential().await
     }
 
+    /// Reports no route. This client serves a Gemini model on Chat
+    /// Completions on the Copilot backend; the Chat Completions client it
+    /// wraps is built for another family and does not know that route, so
+    /// its answer is never passed on as this client's.
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        None
+    }
+
     fn stream_prepared<'a>(
         &'a self,
         request: &'a meerkat_llm_core::PreparedLlmRequest,

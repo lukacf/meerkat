@@ -1344,6 +1344,16 @@ impl meerkat_llm_core::LlmClient for CopilotRoutedClient {
         self.sync_client().prompt_token_limit(output_budget)
     }
 
+    /// Reports no route. The route of a Copilot request is this client's
+    /// own to state: the endpoint the account's model list gives the model,
+    /// with what that entry says about effort levels. The adapter it wraps
+    /// knows the backend and the API but not the account's list, so its
+    /// answer is never passed on as this client's; until this client states
+    /// the whole route it reports none.
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        None
+    }
+
     async fn prepare_controller_credential(&self) -> Result<(), AuthError> {
         self.connection
             .resolved_authorizer()
@@ -1676,6 +1686,11 @@ fn account_prompt_limit(limits: &crate::CopilotModelLimits, output_budget: u32) 
 impl meerkat_llm_core::LlmClient for CopilotCapabilityGatedClient {
     async fn prepare_controller_credential(&self) -> Result<(), AuthError> {
         self.inner.prepare_controller_credential().await
+    }
+
+    /// The route of the adapter this gate stands in front of.
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        self.inner.reasoning_route()
     }
 
     /// The account model's own output limit, the one the gate enforces.
@@ -7174,6 +7189,62 @@ mod tests {
                 Err(meerkat_llm_core::LlmError::ContextLengthExceeded { max: 96_000, .. })
             ),
             "{refused:?}"
+        );
+    }
+
+    /// The account capability gate stands in front of a route's adapter and
+    /// does not hide the route the adapter reports for the provider-neutral
+    /// `reasoning_effort` option; in front of an adapter that reports none
+    /// it reports none.
+    #[test]
+    fn the_capability_gate_forwards_its_clients_route() {
+        use meerkat_core::provider_matrix::OpenAiBackendKind;
+        use meerkat_core::{
+            AccountLevelStatement, ModelApi, ReasoningBackend, ReasoningRouteObservation,
+        };
+
+        struct ReportingClient(ReasoningRouteObservation);
+
+        #[async_trait]
+        impl meerkat_llm_core::LlmClient for ReportingClient {
+            fn reasoning_route(&self) -> Option<ReasoningRouteObservation> {
+                Some(self.0.clone())
+            }
+
+            fn stream<'a>(
+                &'a self,
+                _request: &'a meerkat_llm_core::LlmRequest,
+            ) -> meerkat_llm_core::LlmStream<'a> {
+                Box::pin(futures::stream::empty())
+            }
+
+            fn provider(&self) -> Provider {
+                Provider::OpenAI
+            }
+
+            async fn health_check(&self) -> Result<(), meerkat_llm_core::LlmError> {
+                Ok(())
+            }
+        }
+
+        let reported = ReasoningRouteObservation {
+            backend: ReasoningBackend::OpenAi(OpenAiBackendKind::Copilot),
+            api: ModelApi::Responses,
+            account: AccountLevelStatement::NotApplicable,
+            operator_levels: None,
+        };
+        let gated = capability_gated_client(
+            Arc::new(ReportingClient(reported.clone())),
+            Some(crate::CopilotModelCapabilities::default()),
+        );
+        assert_eq!(gated.reasoning_route(), Some(reported));
+        assert_eq!(
+            capability_gated_client(
+                Arc::new(NoopLlmClient),
+                Some(crate::CopilotModelCapabilities::default()),
+            )
+            .reasoning_route(),
+            None
         );
     }
 

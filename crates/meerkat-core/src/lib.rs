@@ -159,6 +159,7 @@ pub mod realm_admission;
 pub mod realtime_transcript;
 pub mod realtime_transcript_revision;
 pub mod realtime_transcript_sidecar;
+pub mod reasoning_effort;
 pub mod redact;
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
@@ -538,6 +539,12 @@ pub use realtime_transcript_sidecar::{
     REALTIME_TRANSCRIPT_SIDECAR_EVENT_SCHEMA_V3, REALTIME_TRANSCRIPT_SIDECAR_EVENT_SCHEMA_V4,
     RealtimeTranscriptSidecarError, RealtimeTranscriptSidecarRecord,
     RealtimeTranscriptSnapshotReasonV1,
+};
+pub use reasoning_effort::{
+    AccountLevelStatement, ModelApi, ReasoningBackend, ReasoningEffortDecidedBy,
+    ReasoningEffortRefusal, ReasoningEffortRefusalReason, ReasoningEffortReport,
+    ReasoningEffortResolution, ReasoningEffortSent, ReasoningFactsSource, ReasoningRoute,
+    ReasoningRouteObservation,
 };
 pub use retry::{
     DEFAULT_STREAM_INACTIVITY_TIMEOUT, LlmRetryFailure, LlmRetryFailureKind, LlmRetryPlan,

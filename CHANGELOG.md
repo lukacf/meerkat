@@ -35,6 +35,41 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- `meerkat-core`: `OpenAiProviderTag` gains the public field
+  `reasoning_effort_resolved: bool`, a request-local marker for the
+  provider-neutral `reasoning_effort` option (see Added). Code that builds
+  the tag with a struct literal sets the new field: `false`, or
+  `..Default::default()`. The field is never serialized, so no wire or
+  stored form changes, and a serialized tag that names it is refused as an
+  unknown field.
+
+### Added
+
+- `meerkat-core`, `meerkat-llm-core`: the vocabulary of a provider-neutral
+  `reasoning_effort` option, as types only. Nothing reads them yet: no
+  request, wire form or schema changes. `meerkat_core::reasoning_effort`
+  (re-exported at the crate root) adds the route a request is served on
+  (`ModelApi`, `ReasoningBackend`, and the reported form `ReasoningRoute`,
+  `{"backend": "<provider-matrix string>", "api": "<snake_case API>"}`),
+  what a client observes about its route (`ReasoningRouteObservation`,
+  `AccountLevelStatement`), the typed refusal (`ReasoningEffortRefusal` with
+  `ReasoningEffortRefusalReason` and `ReasoningFactsSource`) and the reports
+  of the level a request was sent with (`ReasoningEffortResolution`,
+  `ReasoningEffortDecidedBy`, `ReasoningEffortSent`,
+  `ReasoningEffortReport`). `ReasoningEffortRefusalReason` is a closed set
+  of eight reasons; adding one is a breaking change. A `ReasoningRoute`
+  read from JSON whose backend is not a provider-matrix backend string is
+  a deserialization error, also inside a refusal or a report. A wrapper
+  that sends its client's requests on unchanged reports that client's
+  route: the selected-target wrapper on every registry-built client,
+  `ModelFallbackClient` (its active candidate) and the Copilot account
+  capability gate.
+  `AgentLlmClient::reasoning_route()` and `LlmClient::reasoning_route()`
+  are a request-free accessor with a `None` default, so existing clients
+  compile unchanged; `LlmClientAdapter` forwards its client's answer.
+
 ## [0.9.14] - 2026-11-11
 
 ### Highlights

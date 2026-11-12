@@ -146,11 +146,14 @@ pub const MIN_REDACTED_CREDENTIAL_BYTES: usize = 8;
 /// URL also ends at a quoting byte (`"`, `'`, `\`, `<`, `>`) that closes a
 /// bare host when a second such byte stands before the `@` that follows.
 ///
-/// Three limits. A named value is found in the spellings above and in no
+/// Four limits. A named value is found in the spellings above and in no
 /// other form: not as base64 of it, not as the decoded pair of a `Basic`
-/// value, not cut short or masked. The shape rules are a second line
-/// only: a secret no caller names is replaced only in the positions they
-/// read, and one made of letters only and shorter than 32 bytes is not.
+/// value, not cut short or masked. Two named values that overlap without
+/// one containing the other are replaced independently, longest first, so
+/// where a response runs them together, what the second holds beyond the
+/// overlap stays. The shape rules are a second line only: a secret no
+/// caller names is replaced only in the positions they read, and one made
+/// of letters only and shorter than 32 bytes is not.
 /// And URL userinfo whose text before its first quoting byte reads as a
 /// bare host (not empty, and no `:` or a `:` followed by one or more
 /// digits and nothing else) and that holds a second quoting byte before

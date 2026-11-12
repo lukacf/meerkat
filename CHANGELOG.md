@@ -238,6 +238,10 @@ them.
   - A value the response repeats in another form: base64 of it, the
     decoded user and password of a `Basic` pair, a copy cut short or
     masked, an HTML entity, a doubly escaped copy.
+  - Two named values that overlap without one containing the other (the
+    end of one is the start of the other) are replaced independently,
+    longest first: where a response runs them together, what the second
+    holds beyond the overlap stays.
   - The second step is a second line only. It leaves a secret no route
     names when the secret stands outside the positions listed under
     Changed, is made of letters only and shorter than 32 bytes, is a JSON

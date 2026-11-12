@@ -1,0 +1,634 @@
+#![allow(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::too_many_lines
+)]
+//! Ordinary peer sends between members of two isolated mobs composed in one
+//! process and wired with the local-side RPC calls, in the order the Python
+//! SDK helper `MobHandle.wire_cross_mob` makes them: `meta/cross_mob/peer_info`
+//! on both sides, then `meta/cross_mob/wire_local` on each side, and
+//! `meta/cross_mob/unwire_local` on the first side when the second refuses.
+//!
+//! Every request goes through `handle_unified_rpc_json`, the stdio gateway's
+//! dispatcher. No test here writes the in-process registry: the routes a send
+//! needs are the ones the wire calls themselves leave behind.
+//!
+//! The sending member is driven by a scripted model that calls the agent
+//! `send_message` tool with the other member's canonical peer id. A delivery
+//! is what the receiving mob's model is handed on the receiver's next turn.
+
+use std::collections::HashSet;
+use std::future::Future;
+use std::path::Path;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use futures::stream;
+use meerkat::{AgentFactory, Config, build_ephemeral_service};
+use meerkat_client::{LlmClient, LlmError, LlmEvent, LlmRequest};
+use meerkat_comms::InprocRegistry;
+use meerkat_core::types::HandlingMode;
+use meerkat_core::{Message, Provider, StopReason};
+use meerkat_meta::{
+    DiscoverySpec, MetaConfig, MobBootstrapOptions, MobBootstrapSpec, TopologyBootstrapConfig,
+    TopologyControlPolicy, UnifiedRuntime, handle_unified_rpc_json,
+};
+use meerkat_mob::{
+    MobDefinition, MobRuntimeMode, MobStorage, SpawnMemberSpec, ids::AgentIdentity as MeerkatId,
+};
+use serde_json::{Value, json};
+
+#[path = "support/llm_usage.rs"]
+mod llm_usage;
+
+const SEND_TRIGGER: &str = "SCRIPTED-SEND peer_id=";
+const NOT_ROUTABLE: &str = "peer_not_found_or_not_trusted";
+
+/// What a mob's model double was handed for one model call.
+struct Observation {
+    /// The call follows a tool call of this turn (the `send_message` result).
+    after_tool: bool,
+    replay: String,
+    last: String,
+}
+
+/// One model double per mob. A user message `SCRIPTED-SEND peer_id=<id>
+/// body=<text>` makes it call `send_message` once; every other call is
+/// recorded and answered with plain text.
+struct PeerScriptClient {
+    sent: Mutex<HashSet<String>>,
+    observations: tokio::sync::mpsc::UnboundedSender<Observation>,
+}
+
+fn scripted_send(request: &LlmRequest) -> Option<(String, String)> {
+    request.messages.iter().rev().find_map(|message| {
+        let Message::User(user) = message else {
+            return None;
+        };
+        let text = user.text_content();
+        let rest = text.split_once(SEND_TRIGGER)?.1;
+        let (peer_id, rest) = rest.split_once(" body=")?;
+        let body = rest.lines().next().unwrap_or_default();
+        Some((peer_id.to_string(), body.to_string()))
+    })
+}
+
+impl LlmClient for PeerScriptClient {
+    fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
+        Ok(messages.to_vec())
+    }
+
+    fn stream<'a>(
+        &'a self,
+        request: &'a LlmRequest,
+    ) -> Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
+        let provider = LlmClient::provider(self);
+        if matches!(
+            request.messages.last(),
+            Some(Message::User(user)) if user.text_content().contains("You have been spawned as")
+        ) {
+            let [usage, done] = llm_usage::usage_then_done(request, provider, StopReason::EndTurn);
+            return Box::pin(stream::iter(vec![Ok(usage), Ok(done)]));
+        }
+        if let Some((peer_id, body)) = scripted_send(request)
+            && self.sent.lock().expect("sent bodies").insert(body.clone())
+        {
+            let [usage, done] = llm_usage::usage_then_done(request, provider, StopReason::ToolUse);
+            return Box::pin(stream::iter(vec![
+                Ok(LlmEvent::ToolCallComplete {
+                    id: format!("scripted-send-{}", body.replace(' ', "-")),
+                    name: "send_message".to_string(),
+                    args: json!({
+                        "peer_id": peer_id,
+                        "body": body,
+                        "handling_mode": "queue",
+                    }),
+                    meta: None,
+                }),
+                Ok(usage),
+                Ok(done),
+            ]));
+        }
+        let _ = self.observations.send(Observation {
+            after_tool: matches!(request.messages.last(), Some(Message::ToolResults { .. })),
+            replay: serde_json::to_string(&request.messages).unwrap_or_default(),
+            last: request
+                .messages
+                .last()
+                .map(|message| serde_json::to_string(message).unwrap_or_default())
+                .unwrap_or_default(),
+        });
+        let [usage, done] = llm_usage::usage_then_done(request, provider, StopReason::EndTurn);
+        Box::pin(stream::iter(vec![
+            Ok(LlmEvent::TextDelta {
+                delta: "observed".to_string(),
+                meta: None,
+            }),
+            Ok(usage),
+            Ok(done),
+        ]))
+    }
+
+    fn provider(&self) -> Provider {
+        Provider::Other
+    }
+
+    fn health_check<'life0, 'async_trait>(
+        &'life0 self,
+    ) -> Pin<Box<dyn Future<Output = Result<(), LlmError>> + Send + 'async_trait>>
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// One mob with one member, and what its model double was handed.
+struct Mob {
+    runtime: UnifiedRuntime,
+    mob_id: String,
+    member: String,
+    received: tokio::sync::mpsc::UnboundedReceiver<Observation>,
+    unmatched: Vec<Observation>,
+}
+
+/// A member's `meta/cross_mob/peer_info` answer.
+#[derive(Clone)]
+struct PeerInfo {
+    comms_name: String,
+    peer_id: String,
+    address: String,
+}
+
+impl Mob {
+    async fn start(root: &Path, mob_id: &str, member: &str) -> Self {
+        let session_path = root.join(format!("{mob_id}-sessions"));
+        std::fs::create_dir_all(&session_path).expect("session path");
+        let factory = AgentFactory::new(&session_path).comms(true);
+        let session_service = Arc::new(build_ephemeral_service(factory, Config::default(), 8));
+        let definition = MobDefinition::from_toml(&format!(
+            r#"
+[mob]
+id = "{mob_id}"
+
+[profiles.worker]
+model = "gpt-5.5"
+external_addressable = true
+
+[profiles.worker.tools]
+comms = true
+"#
+        ))
+        .expect("definition");
+        let (observations, received) = tokio::sync::mpsc::unbounded_channel();
+        let client: Arc<dyn LlmClient> = Arc::new(PeerScriptClient {
+            sent: Mutex::new(HashSet::new()),
+            observations,
+        });
+        let mob_spec = MobBootstrapSpec::new(definition, MobStorage::in_memory(), session_service)
+            .with_options(MobBootstrapOptions {
+                allow_ephemeral_sessions: true,
+                notify_orchestrator_on_resume: true,
+                default_llm_client: Some(client),
+            });
+        let runtime = UnifiedRuntime::bootstrap_with_topology(
+            mob_spec,
+            MetaConfig {
+                modules: vec![],
+                discovery: DiscoverySpec {
+                    namespace: format!("wire-local-{mob_id}"),
+                    modules: vec![],
+                },
+                pre_spawn: vec![],
+            },
+            Duration::from_secs(2),
+            TopologyBootstrapConfig {
+                policy: TopologyControlPolicy::default(),
+                state_path: Some(root.join(format!("{mob_id}-topology.json"))),
+            },
+        )
+        .await
+        .expect("bootstrap runtime");
+        runtime
+            .spawn(
+                SpawnMemberSpec::from_wire(
+                    "worker".to_string(),
+                    MeerkatId::from(member).to_string(),
+                    None,
+                    Some(MobRuntimeMode::TurnDriven),
+                    None,
+                )
+                .with_additional_instructions(vec![format!("You are {member}.")]),
+            )
+            .await
+            .expect("spawn member");
+        Self {
+            runtime,
+            mob_id: mob_id.to_string(),
+            member: member.to_string(),
+            received,
+            unmatched: Vec::new(),
+        }
+    }
+
+    /// One JSON-RPC request through the stdio gateway's dispatcher: the
+    /// result, or the error message.
+    async fn rpc(&self, method: &str, params: Value) -> Result<Value, String> {
+        let request = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params});
+        let response = handle_unified_rpc_json(
+            &self.runtime,
+            &request.to_string(),
+            Duration::from_secs(10),
+            None,
+            None,
+        )
+        .await;
+        let response: Value = serde_json::from_str(&response).expect("JSON-RPC response");
+        match response.get("error") {
+            Some(error) if !error.is_null() => Err(error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()),
+            _ => Ok(response.get("result").cloned().unwrap_or(Value::Null)),
+        }
+    }
+
+    async fn peer_info(&self) -> PeerInfo {
+        let info = self
+            .rpc(
+                "meta/cross_mob/peer_info",
+                json!({"member_id": self.member}),
+            )
+            .await
+            .expect("peer_info");
+        let field = |name: &str| {
+            info.get(name)
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| panic!("peer_info has no {name}: {info}"))
+                .to_string()
+        };
+        PeerInfo {
+            comms_name: field("comms_name"),
+            peer_id: field("peer_id"),
+            address: field("address"),
+        }
+    }
+
+    fn wire_params(&self, remote: &PeerInfo) -> Value {
+        json!({
+            "local_member_id": self.member,
+            "remote_comms_name": remote.comms_name,
+            "remote_peer_id": remote.peer_id,
+            "remote_address": remote.address,
+        })
+    }
+
+    async fn wire_local(&self, remote: &PeerInfo) -> Result<Value, String> {
+        self.rpc("meta/cross_mob/wire_local", self.wire_params(remote))
+            .await
+    }
+
+    async fn unwire_local(&self, remote: &PeerInfo) -> Result<Value, String> {
+        self.rpc("meta/cross_mob/unwire_local", self.wire_params(remote))
+            .await
+    }
+
+    fn namespace(&self) -> String {
+        meerkat_core::mob_realm_id(&self.mob_id)
+            .expect("mob namespace")
+            .as_str()
+            .to_string()
+    }
+
+    /// The member's key as this process registers it.
+    fn registered_key(&self, name: &str) -> [u8; 32] {
+        *InprocRegistry::global()
+            .peers_in_namespace(&self.namespace())
+            .into_iter()
+            .find(|peer| peer.name == name)
+            .unwrap_or_else(|| panic!("{name} is not registered in its own namespace"))
+            .pubkey
+            .as_bytes()
+    }
+
+    /// The peer id this mob's namespace routes `name` to, if it routes it.
+    fn route_to(&self, name: &str) -> Option<String> {
+        InprocRegistry::global()
+            .peers_in_namespace(&self.namespace())
+            .into_iter()
+            .find(|peer| peer.name == name)
+            .map(|peer| peer.pubkey.to_peer_id().to_string())
+    }
+
+    /// The comms names the member trusts.
+    async fn trusts(&self) -> Vec<String> {
+        self.runtime
+            .mob_handle()
+            .get_member(&MeerkatId::from(self.member.as_str()))
+            .await
+            .expect("member lookup")
+            .expect("member")
+            .wired_to
+            .iter()
+            .map(|peer| peer.as_str().to_string())
+            .collect()
+    }
+
+    async fn observation(
+        &mut self,
+        wait: Duration,
+        matches: impl Fn(&Observation) -> bool,
+    ) -> Option<Observation> {
+        if let Some(index) = self.unmatched.iter().position(&matches) {
+            return Some(self.unmatched.remove(index));
+        }
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            match tokio::time::timeout_at(deadline, self.received.recv()).await {
+                Ok(Some(observation)) if matches(&observation) => return Some(observation),
+                Ok(Some(observation)) => self.unmatched.push(observation),
+                Ok(None) => panic!("{}: observation channel closed", self.mob_id),
+                Err(_) => return None,
+            }
+        }
+    }
+
+    /// The member calls `send_message` to `peer_id`; the tool result the
+    /// member's model was handed.
+    async fn send(&mut self, peer_id: &str, body: &str) -> String {
+        self.runtime
+            .mob_handle()
+            .member(&MeerkatId::from(self.member.as_str()))
+            .await
+            .expect("member handle")
+            .send(
+                format!("{SEND_TRIGGER}{peer_id} body={body}"),
+                HandlingMode::Queue,
+            )
+            .await
+            .expect("trigger the sending turn");
+        self.observation(Duration::from_secs(20), |observation| {
+            observation.after_tool
+        })
+        .await
+        .unwrap_or_else(|| panic!("{}: no send_message result for {body:?}", self.mob_id))
+        .last
+    }
+
+    /// Whether the member's model is handed a peer message carrying `body`.
+    async fn receives(&mut self, body: &str, wait: Duration) -> bool {
+        self.observation(wait, |observation| {
+            !observation.after_tool && observation.replay.contains(body)
+        })
+        .await
+        .is_some()
+    }
+
+    async fn stop(self) {
+        let report = self.runtime.shutdown().await;
+        assert!(
+            report.mob_stop.is_ok(),
+            "{} stop: {:?}",
+            self.mob_id,
+            report.mob_stop
+        );
+    }
+}
+
+/// The Python SDK helper `MobHandle.wire_cross_mob`, call for call, from the
+/// two `peer_info` answers on.
+async fn sdk_wire_with(
+    local: &Mob,
+    local_info: &PeerInfo,
+    remote: &Mob,
+    remote_info: &PeerInfo,
+) -> Result<(), String> {
+    local.wire_local(remote_info).await?;
+    if let Err(error) = remote.wire_local(local_info).await {
+        let _ = local.unwire_local(remote_info).await;
+        return Err(error);
+    }
+    Ok(())
+}
+
+async fn sdk_wire_cross_mob(local: &Mob, remote: &Mob) -> Result<(), String> {
+    let local_info = local.peer_info().await;
+    let remote_info = remote.peer_info().await;
+    sdk_wire_with(local, &local_info, remote, &remote_info).await
+}
+
+const DELIVERY_WAIT: Duration = Duration::from_secs(20);
+const NO_DELIVERY_WAIT: Duration = Duration::from_millis(1500);
+
+async fn assert_delivers(sender: &mut Mob, recipient: &mut Mob, body: &str) {
+    let recipient_peer_id = recipient.peer_info().await.peer_id;
+    let result = sender.send(&recipient_peer_id, body).await;
+    assert!(
+        !result.contains(NOT_ROUTABLE),
+        "{} -> {}: send_message was refused: {result}",
+        sender.mob_id,
+        recipient.mob_id
+    );
+    assert!(
+        recipient.receives(body, DELIVERY_WAIT).await,
+        "{} -> {}: the recipient was never handed {body:?}; send_message answered {result}",
+        sender.mob_id,
+        recipient.mob_id
+    );
+}
+
+async fn assert_refused(sender: &mut Mob, recipient: &mut Mob, body: &str) {
+    let recipient_peer_id = recipient.peer_info().await.peer_id;
+    let result = sender.send(&recipient_peer_id, body).await;
+    assert!(
+        result.contains(NOT_ROUTABLE),
+        "{} -> {}: an unwired member's send_message must be refused: {result}",
+        sender.mob_id,
+        recipient.mob_id
+    );
+    assert!(
+        !recipient.receives(body, NO_DELIVERY_WAIT).await,
+        "{} -> {}: an unwired member's message was delivered",
+        sender.mob_id,
+        recipient.mob_id
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sdk_wire_sequence_delivers_peer_sends_both_ways() {
+    let root = tempfile::tempdir().expect("root");
+    let mut left = Mob::start(root.path(), "wire-both-a", "alice").await;
+    let mut right = Mob::start(root.path(), "wire-both-b", "bob").await;
+
+    sdk_wire_cross_mob(&left, &right)
+        .await
+        .expect("the helper's call sequence");
+
+    assert_delivers(&mut left, &mut right, "both-ways a-to-b").await;
+    assert_delivers(&mut right, &mut left, "both-ways b-to-a").await;
+
+    left.stop().await;
+    right.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wire_local_with_the_members_key_supplied_delivers_both_ways() {
+    let root = tempfile::tempdir().expect("root");
+    let mut left = Mob::start(root.path(), "wire-keyed-a", "alice").await;
+    let mut right = Mob::start(root.path(), "wire-keyed-b", "bob").await;
+    let alice = left.peer_info().await;
+    let bob = right.peer_info().await;
+
+    // The library call under the RPC, with each member's own key supplied.
+    left.runtime
+        .wire_local(
+            "alice",
+            &bob.comms_name,
+            &bob.peer_id,
+            &bob.address,
+            Some(right.registered_key(&bob.comms_name)),
+        )
+        .await
+        .expect("wire alice to bob");
+    right
+        .runtime
+        .wire_local(
+            "bob",
+            &alice.comms_name,
+            &alice.peer_id,
+            &alice.address,
+            Some(left.registered_key(&alice.comms_name)),
+        )
+        .await
+        .expect("wire bob to alice");
+
+    assert_delivers(&mut left, &mut right, "keyed a-to-b").await;
+    assert_delivers(&mut right, &mut left, "keyed b-to-a").await;
+
+    left.stop().await;
+    right.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sdk_wire_sequence_keeps_an_unwired_third_mob_out() {
+    let root = tempfile::tempdir().expect("root");
+    let mut left = Mob::start(root.path(), "wire-third-a", "alice").await;
+    let mut right = Mob::start(root.path(), "wire-third-b", "bob").await;
+    let mut third = Mob::start(root.path(), "wire-third-c", "carol").await;
+
+    sdk_wire_cross_mob(&left, &right)
+        .await
+        .expect("the helper's call sequence");
+    // The wired pair delivers, so the refusals below are not a dead edge.
+    assert_delivers(&mut left, &mut right, "third a-to-b").await;
+
+    let alice = left.peer_info().await;
+    let bob = right.peer_info().await;
+    let carol = third.peer_info().await;
+    assert_refused(&mut third, &mut right, "third c-to-b").await;
+    assert_refused(&mut third, &mut left, "third c-to-a").await;
+    assert_refused(&mut left, &mut third, "third a-to-c").await;
+    assert_refused(&mut right, &mut third, "third b-to-c").await;
+    for name in [&alice.comms_name, &bob.comms_name] {
+        assert_eq!(
+            third.route_to(name),
+            None,
+            "the unwired mob's namespace gained a route to {name}"
+        );
+    }
+    assert_eq!(left.route_to(&carol.comms_name), None);
+    assert_eq!(right.route_to(&carol.comms_name), None);
+    assert!(third.trusts().await.is_empty());
+
+    left.stop().await;
+    right.stop().await;
+    third.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wire_local_refuses_a_peer_id_the_named_live_member_does_not_have() {
+    let root = tempfile::tempdir().expect("root");
+    let mut left = Mob::start(root.path(), "wire-bound-a", "alice").await;
+    let mut right = Mob::start(root.path(), "wire-bound-b", "bob").await;
+    sdk_wire_cross_mob(&left, &right)
+        .await
+        .expect("the helper's call sequence");
+    let bob = right.peer_info().await;
+
+    // Same comms name, another peer id: the name is a live member of this
+    // process, and it is not that peer.
+    let impostor = PeerInfo {
+        peer_id: "00000000-0000-4000-8000-0000000000aa".to_string(),
+        ..bob.clone()
+    };
+    let refusal = left
+        .wire_local(&impostor)
+        .await
+        .expect_err("a peer id the named live member does not have must be refused");
+    assert!(
+        refusal.contains("cross_mob/wire_local failed"),
+        "unexpected refusal: {refusal}"
+    );
+
+    // Nothing was displaced: the route and the trust are the first wiring's.
+    assert_eq!(left.route_to(&bob.comms_name), Some(bob.peer_id.clone()));
+    assert_eq!(left.trusts().await, vec![bob.comms_name.clone()]);
+    assert_delivers(&mut left, &mut right, "bound a-to-b").await;
+    assert_delivers(&mut right, &mut left, "bound b-to-a").await;
+
+    left.stop().await;
+    right.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sdk_wire_rollback_leaves_no_trust_and_no_route() {
+    let root = tempfile::tempdir().expect("root");
+    let mut left = Mob::start(root.path(), "wire-undo-a", "alice").await;
+    let mut right = Mob::start(root.path(), "wire-undo-b", "bob").await;
+    let alice = left.peer_info().await;
+    let bob = right.peer_info().await;
+
+    // The first side alone: trust and route arrive together.
+    left.wire_local(&bob).await.expect("first side");
+    assert_eq!(left.trusts().await, vec![bob.comms_name.clone()]);
+    assert_eq!(
+        left.route_to(&bob.comms_name),
+        Some(bob.peer_id.clone()),
+        "wire_local left trust without a route"
+    );
+    left.unwire_local(&bob).await.expect("undo the first side");
+    assert!(left.trusts().await.is_empty());
+    assert_eq!(left.route_to(&bob.comms_name), None);
+
+    // The helper's sequence with a second side that refuses: the first
+    // member's peer id is no longer the one its `peer_info` answered.
+    let stale_alice = PeerInfo {
+        peer_id: "00000000-0000-4000-8000-0000000000bb".to_string(),
+        ..alice.clone()
+    };
+    sdk_wire_with(&left, &stale_alice, &right, &bob)
+        .await
+        .expect_err("the second side must refuse");
+    assert!(left.trusts().await.is_empty(), "trust without route");
+    assert!(right.trusts().await.is_empty(), "trust without route");
+    assert_eq!(left.route_to(&bob.comms_name), None, "route without trust");
+    assert_eq!(
+        right.route_to(&alice.comms_name),
+        None,
+        "route without trust"
+    );
+
+    // Nothing is left in the way of a clean wiring.
+    sdk_wire_cross_mob(&left, &right)
+        .await
+        .expect("the helper's call sequence after a rollback");
+    assert_delivers(&mut left, &mut right, "undo a-to-b").await;
+    assert_delivers(&mut right, &mut left, "undo b-to-a").await;
+
+    left.stop().await;
+    right.stop().await;
+}

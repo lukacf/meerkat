@@ -222,6 +222,97 @@ class InstallBoundaryTests(unittest.TestCase):
                 child.wait()
 
 
+class OfficialReleaseAssetNoticeTests(unittest.TestCase):
+    """The GitHub component's notices: a locally built executable or an upstream release asset."""
+
+    def setUp(self):
+        self.scratch = tempfile.TemporaryDirectory(prefix="toolkit-official-notices-")
+        self.addCleanup(self.scratch.cleanup)
+        self.bundle = Path(self.scratch.name).resolve() / "official"
+        # A Mach-O arm64 header and inert bytes: the installer inspects, it never launches.
+        self.binary = bytes.fromhex("cffaedfe0c0000010000000002000000") + b"\0" * 64
+        self.component = {
+            "artifact": "github/github-mcp-server", "artifact_sha256": MODULE.sha(self.binary),
+            "catalog_id": "github", "configuration_template": "github/mcp.template.json",
+            "notices": "github/notices", "profile": "selected-reads",
+            "required_secret_environment": ["GITHUB_PERSONAL_ACCESS_TOKEN"],
+            "selected_operations": ["get_me", "list_commits", "get_file_contents"],
+            "source_revision": "b98d115bbb080e9555466a96656ec4df605aea21", "target": "macos-arm64"}
+        self.archive = {"bytes": 8983965, "sha256": "5" * 64}
+
+    def notices(self, count, upstream=True):
+        names = ["upstream-LICENSE"] if upstream else []
+        names += ["module-%02d-LICENSE" % index for index in range(count - len(names))]
+        return {"github/notices/" + name: b"licence text\n" for name in names}
+
+    def read(self, component, notices):
+        files = {"github/github-mcp-server": self.binary,
+                 "github/mcp.template.json": MODULE.encoded(MODULE.official_template("selected-reads")),
+                 "github/UPSTREAM-PROFILE.md": b"# profile\n", **notices,
+                 "delivery.json": MODULE.encoded({"format": "meerkat-toolkit.official-consumers.v1",
+                                                  "role": "service_connector", "catalog_ids": ["github"],
+                                                  "components": [component]})}
+        if self.bundle.exists():
+            for path in sorted(self.bundle.rglob("*"), reverse=True):
+                path.unlink() if path.is_file() else path.rmdir()
+        for name, data in files.items():
+            target = self.bundle / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+        contents = MODULE.encoded({"format": 1, "files": {
+            name: {"sha256": MODULE.sha(data), "bytes": len(data)} for name, data in files.items()}})
+        (self.bundle / "CONTENTS.json").write_bytes(contents)
+        return MODULE.official_inputs(self.bundle, MODULE.sha(contents), "github")
+
+    def test_release_asset_component_carries_exactly_the_upstream_licence(self):
+        component = {**self.component, "source_archive": self.archive}
+        files, selected = self.read(component, self.notices(1))
+        self.assertEqual(selected, component)
+        self.assertEqual(sorted(files), ["delivery.json", "github/UPSTREAM-PROFILE.md", "github/github-mcp-server",
+                                         "github/mcp.template.json", "github/notices/upstream-LICENSE"])
+
+    def test_release_asset_component_with_other_notices_is_refused(self):
+        component = {**self.component, "source_archive": self.archive}
+        for label, notices in (("the 78 of a local build", self.notices(78)), ("two", self.notices(2)),
+                               ("none", {}), ("one under another name", self.notices(1, upstream=False))):
+            with self.subTest(label), self.assertRaises(ValueError):
+                self.read(component, notices)
+
+    def test_release_asset_record_must_be_exactly_size_and_digest(self):
+        for label, archive in (("extra key", {**self.archive, "url": "https://example.invalid/asset"}),
+                               ("missing digest", {"bytes": 8983965}), ("boolean size", {**self.archive, "bytes": True}),
+                               ("zero size", {**self.archive, "bytes": 0}), ("text size", {**self.archive, "bytes": "8983965"}),
+                               ("short digest", {**self.archive, "sha256": "5" * 63}),
+                               ("uppercase digest", {**self.archive, "sha256": "A" * 64}),
+                               ("null", None), ("list", [8983965, "5" * 64])):
+            with self.subTest(label), self.assertRaises(ValueError):
+                self.read({**self.component, "source_archive": archive}, self.notices(1))
+
+    def test_component_without_a_release_asset_keeps_the_78_notice_rule(self):
+        files, selected = self.read(self.component, self.notices(78))
+        self.assertEqual(selected, self.component)
+        self.assertEqual(len([name for name in files if name.startswith("github/notices/")]), 78)
+        for label, notices in (("one", self.notices(1)), ("77", self.notices(77)), ("79", self.notices(79)),
+                               ("78 without the upstream licence", self.notices(78, upstream=False))):
+            with self.subTest(label), self.assertRaises(ValueError):
+                self.read(self.component, notices)
+
+    def test_release_asset_form_is_the_macos_contract_only(self):
+        # A Linux selected-reads record is judged as before: the release asset field changes nothing for it.
+        elf = bytearray(64 + 56)
+        elf[:16] = bytes.fromhex("7f454c46020101000000000000000000")
+        import struct
+        struct.pack_into("<HHIQQQIHHHHHH", elf, 16, 2, 62, 1, 0x400000, 64, 0, 0, 64, 56, 1, 0, 0, 0)
+        struct.pack_into("<IIQQQQQQ", elf, 64, 1, 5, 0, 0x400000, 0x400000, len(elf), len(elf), 0x1000)
+        self.binary = bytes(elf)
+        component = {**self.component, "target": "linux-x86_64", "artifact_sha256": MODULE.sha(self.binary),
+                     "source_archive": self.archive}
+        with self.assertRaises(ValueError):
+            self.read(component, self.notices(1))
+        files, _ = self.read(component, self.notices(78))
+        self.assertEqual(len([name for name in files if name.startswith("github/notices/")]), 78)
+
+
 class NpmClosureTests(unittest.TestCase):
     def setUp(self):
         component = "@rkat/toolkit-activepieces"

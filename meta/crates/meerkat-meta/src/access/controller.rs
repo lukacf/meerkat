@@ -2703,7 +2703,9 @@ mod tests {
     /// console that can identify a person, except an admin, whatever the
     /// rules say, with an access configuration or without one, signed in or
     /// not. The one operator of a console that identifies nobody keeps the
-    /// identity decision.
+    /// identity decision, and only a console that says so is one: a view
+    /// taken for no subject is kept apart until then, however it was taken,
+    /// and a view taken for a person is never of such a console.
     #[test]
     fn a_record_with_no_captured_attributes_is_read_by_an_admin_only() {
         let controller = secret_label_deny_controller();
@@ -2730,12 +2732,40 @@ mod tests {
                 .can_view_uncaptured_member("anyone"),
             "nor does a console with sign-in and no access configuration"
         );
+        // A view taken for no subject says nothing of its console, so its
+        // caller is kept apart, however the view was taken.
+        for (taken, view) in [
+            ("view_for_subject", unconfigured.view_for_subject(None)),
+            ("view_for_caller", unconfigured.view_for_caller(None, None)),
+            ("view_and_revision", unconfigured.view_and_revision(None).0),
+            (
+                "a console with no access configuration",
+                AccessController::audience_only().view_for_caller(None, None),
+            ),
+            ("enforced rules", allow_only.view_for_subject(None)),
+        ] {
+            assert!(
+                view.kept_apart_from_other_people(),
+                "{taken}: a view taken for no subject is kept apart until a console says it \
+                 identifies nobody"
+            );
+            assert!(!view.can_view_uncaptured_member("anyone"), "{taken}");
+            assert!(view.withholds_unknown_member("anyone"), "{taken}");
+            assert!(
+                view.refreshed().kept_apart_from_other_people(),
+                "{taken}: and stays kept apart when the view is taken again"
+            );
+        }
+        // The one operator of a console that says it identifies nobody reads
+        // the record as before, and stays that operator when the view is
+        // taken again.
+        let operator = unconfigured.view_for_subject(None).on_console(false);
         assert!(
-            unconfigured
-                .view_for_subject(None)
-                .can_view_uncaptured_member("anyone"),
+            operator.can_view_uncaptured_member("anyone"),
             "the one operator of a console that identifies nobody reads it as before"
         );
+        assert!(!operator.withholds_unknown_member("anyone"));
+        assert!(operator.refreshed().can_view_uncaptured_member("anyone"));
         // The decision reads the console, never whether the caller signed
         // in: a caller a console that can identify a person did not identify
         // is refused, and stays refused when the view is taken again.
@@ -2747,15 +2777,23 @@ mod tests {
                 .refreshed()
                 .can_view_uncaptured_member("anyone")
         );
+        // A console that identified a person is not one that identifies
+        // nobody: a view taken for a person cannot be stated as its
+        // operator's.
+        let person = allow_only
+            .view_for_subject(Some("bob@example.test"))
+            .on_console(false);
         assert!(
-            !unconfigured
-                .view_for_subject(None)
-                .withholds_unknown_member("anyone")
+            person.kept_apart_from_other_people(),
+            "a view taken for a person is kept apart whatever is said of its console"
         );
+        assert!(!person.can_view_uncaptured_member("anyone"));
         assert!(
-            !allow_only
-                .view_for_subject(Some("bob@example.test"))
-                .can_view_uncaptured_member("anyone")
+            allow_only
+                .view_for_subject(Some("root@example.test"))
+                .on_console(false)
+                .can_view_uncaptured_member("anyone"),
+            "an admin reads it on every console"
         );
     }
 

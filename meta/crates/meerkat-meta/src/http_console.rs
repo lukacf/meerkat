@@ -3943,6 +3943,10 @@ mod console_private_audience_tests;
 mod console_frame_witness_tests;
 
 #[cfg(test)]
+#[path = "console_kept_apart_tests.rs"]
+mod console_kept_apart_tests;
+
+#[cfg(test)]
 #[path = "console_schedule_tests.rs"]
 mod console_schedule_tests;
 
@@ -32891,11 +32895,11 @@ mod console_viewer_resolver_tests {
 
     // HS256 fixtures are accepted only for a development issuer.
     const ISSUER: &str = "https://trusted.meta.localhost";
-    const BOB: &str = "bob@example.test";
-    const CAROL: &str = "carol@example.test";
+    pub(super) const BOB: &str = "bob@example.test";
+    pub(super) const CAROL: &str = "carol@example.test";
     const ROBOT: &str = "svc:robot";
 
-    fn decisions(require_app_auth: bool) -> RuntimeDecisionState {
+    pub(super) fn decisions(require_app_auth: bool) -> RuntimeDecisionState {
         crate::build_runtime_decision_state(crate::RuntimeDecisionInputs {
             bigquery: crate::BigQueryNaming {
                 dataset: "viewer_dataset".to_string(),
@@ -32947,7 +32951,7 @@ mod console_viewer_resolver_tests {
         .expect("signed fixture JWT")
     }
 
-    fn bearer(subject: &str) -> HeaderMap {
+    pub(super) fn bearer(subject: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
         headers.insert(
             header::AUTHORIZATION,
@@ -33461,14 +33465,14 @@ mod console_viewer_resolver_tests {
 
     /// `decisions` with a trusted key set that holds no key: no token
     /// verifies against it.
-    fn with_no_key(mut decisions: RuntimeDecisionState) -> RuntimeDecisionState {
+    pub(super) fn with_no_key(mut decisions: RuntimeDecisionState) -> RuntimeDecisionState {
         decisions.trusted_oidc.jwks_json = r#"{"keys":[]}"#.to_string();
         decisions
     }
 
     /// Rules that are off, with Carol the one administrator: every caller
     /// may reach every agent.
-    fn rules_off() -> AccessControlConfig {
+    pub(super) fn rules_off() -> AccessControlConfig {
         AccessControlConfig {
             enabled: false,
             admins: vec![CAROL.to_string()],

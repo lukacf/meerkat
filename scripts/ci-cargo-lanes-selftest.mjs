@@ -3935,6 +3935,12 @@ for (const path of [
     assert.deepEqual(plan.products.lanes, product.name === "connect" ? ["connect_checks"] : [], `${product.name} docs lanes`);
     assert.deepEqual(plan.products.floor_checks, [], `${product.name} docs: no floor check`);
   }
+  // Connect's TypeScript SDK links the Core and Meta TypeScript SDKs of the
+  // same commit, so a change to either selects Connect's checks.
+  for (const path of ["sdks/typescript/src/selftest-only.ts", "meta/sdk/typescript/src/selftest-only.ts"]) {
+    const plan = planFor([path], ["--event", "pull_request"]);
+    assert.deepEqual(plan.products.lanes, ["connect_checks"], `${path} selects Connect's checks`);
+  }
   // A Core change outside meerkat-mob's build that reaches a product gives
   // it one downstream type-check row (every target); one that invalidates
   // meerkat-mob's build leaves it to the push; neither runs a floor check.

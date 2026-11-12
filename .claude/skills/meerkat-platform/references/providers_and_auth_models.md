@@ -439,9 +439,13 @@ rkat run -p self-hosted "Say hello"   # uses [self_hosted] default_model
   `phase` (`commentary` or `final_answer`), and reasoning items keep their
   `encrypted_content` (requested with `include:
   ["reasoning.encrypted_content"]` when reasoning is on). These replay in
-  order with the tool calls and outputs and survive session save and
-  resume. A provider switch or Chat Completions mode never receives this
-  OpenAI-private state.
+  order with the tool calls and outputs, to the service the running process
+  received them from. A step the process did not receive from that service
+  (a session that moved from the public OpenAI API to a Copilot route or a
+  self-hosted server, and every earlier turn after a restart or a resume
+  from the store) is replayed as plain text and paired tool calls, without
+  reasoning items, hosted-tool items, item ids or phases. A provider switch
+  or Chat Completions mode never receives this OpenAI-private state.
 - With `store = true` in an `open_ai` tag, the client continues from
   `previous_response_id` and falls back to a full replay when the server
   rejects that id.

@@ -1706,3 +1706,268 @@ async fn console_wire_local_tells_a_caller_who_is_no_admin_nothing_about_another
     left.stop().await;
     right.stop().await;
 }
+
+// ---------------------------------------------------------------------------
+// A peer message wakes a member of the other mob that is not built: after a
+// runtime was stopped and built again, with no second wire and no host
+// message to the recipient. A wake is forwarded only for a link both mobs
+// hold.
+// ---------------------------------------------------------------------------
+
+impl Mob {
+    /// Stop the runtime and build it again over its state. Nobody is built.
+    async fn built_again(self, root: &Path) -> Self {
+        let (mob_id, member) = (self.mob_id.clone(), self.member.clone());
+        self.stop().await;
+        Self::start_persistent(root, &mob_id, &member, false).await
+    }
+
+    /// The names this mob's namespace routes, its own members included.
+    fn routed_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = InprocRegistry::global()
+            .peers_in_namespace(&self.namespace())
+            .into_iter()
+            .map(|peer| peer.name)
+            .collect();
+        names.sort();
+        names
+    }
+}
+
+/// The member by its in-process address and its key: the descriptor of a
+/// member that may not be built.
+fn keyed(info: &PeerInfo) -> PeerInfo {
+    PeerInfo {
+        key: Some(
+            info.pubkey_b64
+                .clone()
+                .expect("peer_info reports the member's key"),
+        ),
+        ..info.clone()
+    }
+}
+
+/// The sender's `send_message` is refused as a peer that is not found, the
+/// recipient's model is handed nothing, and the recipient is not built.
+async fn assert_wakes_nobody(sender: &mut Mob, recipient: &mut Mob, to: &PeerInfo, body: &str) {
+    let result = sender.send(&to.peer_id, body).await;
+    assert!(
+        result.contains(NOT_ROUTABLE),
+        "{} -> {}: the send must be refused as a peer that is not found: {result}",
+        sender.mob_id,
+        recipient.mob_id
+    );
+    assert!(
+        !recipient.receives(body, NO_DELIVERY_WAIT).await,
+        "{} -> {}: the message was delivered",
+        sender.mob_id,
+        recipient.mob_id
+    );
+    assert_eq!(
+        recipient.route_to(&to.comms_name),
+        None,
+        "{}: the member was built by a send that must wake nobody",
+        recipient.mob_id
+    );
+    assert_eq!(
+        sender.route_to(&to.comms_name),
+        None,
+        "{}: a refused send left a route to the member",
+        sender.mob_id
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn both_mobs_built_again_deliver_each_way_with_no_second_wire_and_no_host_wake() {
+    let root = tempfile::tempdir().expect("root");
+    let mut left = Mob::start_persistent(root.path(), "wake-both-a", "alice", true).await;
+    let mut right = Mob::start_persistent(root.path(), "wake-both-b", "bob", true).await;
+    let alice = left.peer_info().await;
+    let bob = right.peer_info().await;
+    sdk_wire_cross_mob(&left, &right)
+        .await
+        .expect("the helper's call sequence");
+    assert_delivers(&mut left, &mut right, "wake-both before a-to-b").await;
+    assert_delivers(&mut right, &mut left, "wake-both before b-to-a").await;
+
+    // Both runtimes are stopped and built again over their state. A stopped
+    // runtime leaves no route behind: none of its own, none to its members.
+    let left = left.built_again(root.path()).await;
+    let right = right.built_again(root.path()).await;
+    let (mut left, mut right) = (left, right);
+    assert_eq!(left.routed_names(), Vec::<String>::new());
+    assert_eq!(right.routed_names(), Vec::<String>::new());
+
+    // Nobody wires again. Alice's turn is started by the host (a member
+    // sends from a turn); bob gets no host message: alice's peer message
+    // builds him, and he is handed it.
+    assert_delivers(&mut left, &mut right, "wake-both after a-to-b").await;
+    assert_eq!(
+        right.route_to(&bob.comms_name),
+        Some(bob.peer_id.clone()),
+        "the peer message built bob"
+    );
+    assert_delivers(&mut right, &mut left, "wake-both after b-to-a").await;
+    assert_eq!(left.route_to(&alice.comms_name), Some(alice.peer_id));
+
+    left.stop().await;
+    right.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_mob_built_again_is_reached_by_its_peer_with_no_second_wire_and_no_host_wake() {
+    let root = tempfile::tempdir().expect("root");
+    let mut left = Mob::start_persistent(root.path(), "wake-one-a", "alice", true).await;
+    let right = Mob::start_persistent(root.path(), "wake-one-b", "bob", true).await;
+    let bob = right.peer_info().await;
+    sdk_wire_cross_mob(&left, &right)
+        .await
+        .expect("the helper's call sequence");
+
+    // Bob's runtime alone is stopped and built again. Alice's mob keeps
+    // running, and its route to the bob that is gone went with his runtime.
+    let mut right = right.built_again(root.path()).await;
+    assert_eq!(left.route_to(&bob.comms_name), None);
+    assert_eq!(right.routed_names(), Vec::<String>::new());
+
+    // Alice's peer message builds bob; his answer reaches alice.
+    assert_delivers(&mut left, &mut right, "wake-one after a-to-b").await;
+    assert_eq!(right.route_to(&bob.comms_name), Some(bob.peer_id.clone()));
+    assert_delivers(&mut right, &mut left, "wake-one after b-to-a").await;
+
+    left.stop().await;
+    right.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_link_only_one_mob_holds_wakes_nobody() {
+    let root = tempfile::tempdir().expect("root");
+    let mut left = Mob::start_persistent(root.path(), "wake-half-a", "alice", true).await;
+    let right = Mob::start_persistent(root.path(), "wake-half-b", "bob", true).await;
+    let bob = right.peer_info().await;
+
+    // Only alice's side is wired: her mob holds the link, bob's does not.
+    left.wire_local(&bob).await.expect("alice's side alone");
+    assert!(right.trusts().await.is_empty());
+
+    // Bob's runtime is built again: bob is not built.
+    let mut right = right.built_again(root.path()).await;
+    assert_wakes_nobody(&mut left, &mut right, &bob, "wake-half a-to-b").await;
+
+    left.stop().await;
+    right.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn after_an_unwire_on_one_side_nothing_is_forwarded() {
+    let root = tempfile::tempdir().expect("root");
+    let mut left = Mob::start_persistent(root.path(), "wake-unwired-a", "alice", true).await;
+    let mut right = Mob::start_persistent(root.path(), "wake-unwired-b", "bob", true).await;
+    let alice = left.peer_info().await;
+    let bob = right.peer_info().await;
+    sdk_wire_cross_mob(&left, &right)
+        .await
+        .expect("the helper's call sequence");
+    assert_delivers(&mut left, &mut right, "wake-unwired before a-to-b").await;
+
+    let left = left.built_again(root.path()).await;
+    let right = right.built_again(root.path()).await;
+    let (mut left, mut right) = (left, right);
+
+    // Bob's side is unwired while bob is not built; the unwire builds
+    // nobody. Alice's mob still holds its half of the link.
+    right
+        .unwire_local(&keyed(&alice))
+        .await
+        .expect("unwire bob from alice");
+    assert_eq!(right.routed_names(), Vec::<String>::new());
+    assert_wakes_nobody(&mut left, &mut right, &bob, "wake-unwired a-to-b").await;
+
+    // Wired again on bob's side, the link is whole and a peer message
+    // builds bob.
+    right
+        .wire_local(&keyed(&alice))
+        .await
+        .expect("wire bob to alice again");
+    assert_delivers(&mut left, &mut right, "wake-unwired again a-to-b").await;
+
+    left.stop().await;
+    right.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_wire_to_a_member_that_is_not_built_with_its_key_delivers() {
+    let root = tempfile::tempdir().expect("root");
+    let left = Mob::start_persistent(root.path(), "wake-keyed-a", "alice", true).await;
+    let right = Mob::start_persistent(root.path(), "wake-keyed-b", "bob", true).await;
+    let alice = left.peer_info().await;
+    let bob = right.peer_info().await;
+
+    // Both runtimes are built again before anything is wired: neither
+    // member is built.
+    let left = left.built_again(root.path()).await;
+    let right = right.built_again(root.path()).await;
+    let (mut left, mut right) = (left, right);
+
+    // The in-process form with the member's key wires a member that is not
+    // built. The wire builds nobody and installs no route.
+    left.wire_local(&keyed(&bob))
+        .await
+        .expect("wire alice to a bob that is not built");
+    right
+        .wire_local(&keyed(&alice))
+        .await
+        .expect("wire bob to an alice that is not built");
+    assert_eq!(left.routed_names(), Vec::<String>::new());
+    assert_eq!(right.routed_names(), Vec::<String>::new());
+    assert_eq!(left.trusts().await, vec![bob.comms_name.clone()]);
+    assert_eq!(right.trusts().await, vec![alice.comms_name.clone()]);
+
+    assert_delivers(&mut left, &mut right, "wake-keyed a-to-b").await;
+    assert_delivers(&mut right, &mut left, "wake-keyed b-to-a").await;
+
+    left.stop().await;
+    right.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stopped_mob_refuses_the_wake_and_builds_nobody() {
+    let root = tempfile::tempdir().expect("root");
+    let mut left = Mob::start_persistent(root.path(), "wake-stopped-a", "alice", true).await;
+    let mut right = Mob::start_persistent(root.path(), "wake-stopped-b", "bob", true).await;
+    let bob = right.peer_info().await;
+    sdk_wire_cross_mob(&left, &right)
+        .await
+        .expect("the helper's call sequence");
+    assert_delivers(&mut left, &mut right, "wake-stopped before a-to-b").await;
+
+    let left = left.built_again(root.path()).await;
+    let right = right.built_again(root.path()).await;
+    let (mut left, mut right) = (left, right);
+
+    // Bob's mob is stopped while its runtime lives on. The wake is asked of
+    // bob's own mob, which refuses it: alice's send is refused with that
+    // typed answer, and bob is not built.
+    right
+        .runtime
+        .mob_handle()
+        .stop()
+        .await
+        .expect("stop bob's mob");
+    let result = left.send(&bob.peer_id, "wake-stopped a-to-b").await;
+    assert!(
+        result.contains("peer_wake_refused"),
+        "a stopped mob refuses the wake with its own typed answer: {result}"
+    );
+    assert!(
+        !right
+            .receives("wake-stopped a-to-b", NO_DELIVERY_WAIT)
+            .await,
+        "a member of a stopped mob was handed a peer message"
+    );
+    assert_eq!(right.route_to(&bob.comms_name), None, "bob was built");
+    assert_eq!(left.route_to(&bob.comms_name), None);
+
+    left.stop().await;
+    right.stop().await;
+}

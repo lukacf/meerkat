@@ -927,6 +927,29 @@ fn gating_audit_entry_visible(
         .is_none_or(|identity| access_view.is_none_or(|view| view.can_view_agent(identity)))
 }
 
+/// An audit entry as the console serves it to a caller who may see it. The
+/// entry for an action blocked on a memory conflict carries the conflict,
+/// and the conflict's reason is text written from the records that
+/// conflict, which the caller may not be allowed to read: a console that can
+/// identify a person serves that text to an admin only
+/// ([`AccessView::kept_apart_from_other_people`]) and leaves the conflict's
+/// entity and topic to every caller who may see the entry. The stored entry
+/// is unchanged.
+fn gating_audit_entry_served(
+    mut entry: crate::runtime::GatingAuditEntry,
+    access_view: Option<&AccessView>,
+) -> crate::runtime::GatingAuditEntry {
+    if access_view.is_some_and(AccessView::kept_apart_from_other_people)
+        && let Some(conflict) = entry
+            .detail
+            .get_mut("conflict")
+            .and_then(Value::as_object_mut)
+    {
+        conflict.remove("reason");
+    }
+    entry
+}
+
 /// Live gating change notifications for the console. A connection starts with
 /// `gating.resync_required` (`initial_sync`). Afterwards `gating.changed`
 /// means an audit entry the caller may see was recorded; the caller pulls it
@@ -15488,6 +15511,7 @@ async fn handle_console_runtime_rpc_with_visibility(
                 .into_iter()
                 .filter(|entry| gating_audit_entry_visible(entry, access_view))
                 .take(limit)
+                .map(|entry| gating_audit_entry_served(entry, access_view))
                 .collect::<Vec<_>>();
             // Hidden entries never move the cursor, so a stretch of them is
             // re-read next time, and a gap may be reported if the last

@@ -8811,6 +8811,66 @@ mod tests {
         );
     }
 
+    /// `mob_list_members` leaves out a member the host's member tool audience
+    /// hides from the caller, with manage scope over the mob: the row is
+    /// absent, and every other member is listed. A caller the member is not
+    /// hidden from is listed it.
+    #[tokio::test]
+    async fn mob_list_members_leaves_out_a_member_hidden_from_the_caller() {
+        let state = MobMcpState::new_in_memory();
+        let handle = host_mob_with_kept_members(
+            &state,
+            "list-audience",
+            &[
+                ("list-kept", Some("ann")),
+                ("list-keeper", Some("ann")),
+                ("list-other-keeper", Some("bob")),
+                ("list-plain", None),
+            ],
+        )
+        .await;
+        let listed = |member: &'static str| {
+            let state = Arc::clone(&state);
+            let handle = handle.clone();
+            async move {
+                let tools = member_mob_tools(
+                    &state,
+                    &handle,
+                    member,
+                    scope_only_authority("list-audience", handle.live_incarnation()),
+                )
+                .await;
+                let mut names: Vec<String> = listed_member_rows(&tools, "list-audience")
+                    .await
+                    .iter()
+                    .map(|row| row["agent_identity"].as_str().expect("a name").to_owned())
+                    .collect();
+                names.sort_unstable();
+                names
+            }
+        };
+
+        assert_eq!(
+            listed("list-plain").await,
+            vec!["list-plain".to_owned()],
+            "a caller whose row carries no such label is listed no kept member"
+        );
+        assert_eq!(
+            listed("list-other-keeper").await,
+            vec!["list-other-keeper".to_owned(), "list-plain".to_owned()],
+            "a caller whose row carries another value is listed its own kind only"
+        );
+        assert_eq!(
+            listed("list-keeper").await,
+            vec![
+                "list-keeper".to_owned(),
+                "list-kept".to_owned(),
+                "list-plain".to_owned(),
+            ],
+            "a caller whose row carries the same value is listed the kept members"
+        );
+    }
+
     /// The classification behind `wired`: only a committed edge between the
     /// caller and the new member reports it wired, whatever was requested.
     #[test]

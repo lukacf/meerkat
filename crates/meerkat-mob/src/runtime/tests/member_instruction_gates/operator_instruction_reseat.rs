@@ -522,24 +522,34 @@ async fn a_wake_closed_while_its_record_is_in_flight_settles_nothing() {
         .await;
 
     fixture.records.open();
-    tokio::time::timeout(WAIT, retiring)
+    let retired = tokio::time::timeout(WAIT, retiring)
         .await
         .expect("the retirement answers")
-        .expect("the retirement's task")
-        .expect("the member retires");
-    let _ = tokio::time::timeout(WAIT, turn).await;
-    assert_eq!(
-        fixture.delivery_of(&fixture.identity).await,
-        None,
-        "the retired member has no delivery left"
+        .expect("the retirement's task");
+    // The retirement lands, or answers that it is still in progress once
+    // its caller's budget is spent: the mob finishes it on its own.
+    assert!(
+        retired
+            .as_ref()
+            .map_or_else(MobError::is_retirement_in_progress, |()| true),
+        "the retirement lands or goes on: {retired:?}"
     );
+    let _ = tokio::time::timeout(WAIT, turn).await;
+    tokio::time::timeout(WAIT, async {
+        while fixture.delivery_of(&fixture.identity).await.is_some() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the retired member has no delivery left");
     fixture.finish().await;
 }
 
-/// A member whose record failed is owed, and the mob's retry has backed
-/// off. The mob is stopped and lifted again, which materializes the member
-/// outside a delivery's wake: the mob tries the record at once when the
-/// member is Live again, not when its back-off is due.
+/// A member whose record failed is owed and dormant again, and the mob's
+/// retry has backed off. The mob is stopped and lifted again, which
+/// materializes the dormant member itself, outside a delivery's wake: the
+/// mob tries the record at once when the member is Live again, not when its
+/// back-off is due.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_lift_of_the_mob_tries_an_owed_members_record_at_once() {
     let (fixture, session_id) = Fixture::unseated_with(
@@ -548,17 +558,31 @@ async fn a_lift_of_the_mob_tries_an_owed_members_record_at_once() {
         Some(crate::runtime::MemberRestorePolicy::Eager),
     )
     .await;
+    let seated = tokio::time::Instant::now();
     fixture.seat_dormant_under_the_record(&session_id).await;
     fixture.records.set_live(LiveRecord::SessionGone);
     let request = fixture
         .first_request_of_a_turn("the first task after the seat")
         .await;
     assert_eq!(entries_with(&request, STANDING), 0);
+    tokio::time::timeout(WAIT, async {
+        while fixture
+            .handle
+            .release_member(&fixture.identity)
+            .await
+            .is_err()
+        {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the idle member is released");
 
     // The mob's retry fails and backs off (200 ms, doubling): its attempts
-    // start about 0, 0.2, 0.6, 1.4, 3.0, 6.2 and 12.6 s after the member
-    // went Live, so after this time the next one is about 12 s away.
-    tokio::time::sleep(Duration::from_secs(13)).await;
+    // start about 0, 0.2, 0.6, 1.4, 3.0, 6.2 and 12.6 s after it was armed
+    // (at the seat, or about half a second later), so 14 s after the seat
+    // the next one is more than 11 s away.
+    tokio::time::sleep_until(seated + Duration::from_secs(14)).await;
     let backed_off = fixture.delivery_of(&fixture.identity).await;
     assert!(
         matches!(

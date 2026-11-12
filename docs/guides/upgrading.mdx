@@ -1597,7 +1597,7 @@ compiles, but the default disables what they carry:
   `list_public_events` pages through `list_events`.
 - an `HttpAuthorizer` wrapper: `redact_response_diagnostic`. Its default
   changes nothing, so a credential a provider echoes back reaches the errors
-  and logs of the requests signed through the wrapper. (From 0.9.14 the
+  and logs of the requests signed through the wrapper. (From 0.9.15 the
   default removes the values `visit_signed_credentials` names and
   credential shapes; a wrapper still forwards `redact_response_diagnostic`,
   or the values the wrapped authorizer signed with are not removed by exact

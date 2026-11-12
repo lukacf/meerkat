@@ -685,9 +685,9 @@ enum SeatScript {
     Keep,
     /// Set the host's build inputs on it.
     Compose(HostBuild),
-    /// Set the inputs that are objects of the host's process on it: a
-    /// compaction curator, a tool dispatch admission and a shell
-    /// environment.
+    /// Set the inputs that are objects of the host's process on it: its
+    /// external tools, a compaction curator, a tool dispatch admission
+    /// and a shell environment.
     ProcessInputs,
     /// Refuse to compose it.
     Refuse(crate::runtime::MemberBuildPreparationRefusal),
@@ -856,6 +856,7 @@ impl crate::runtime::MemberBuildPreparer for ScriptedPreparer {
             SeatScript::Keep => {}
             SeatScript::Compose(build) => build.apply(seat),
             SeatScript::ProcessInputs => {
+                seat.external_tools = Some(Arc::new(EchoBundleDispatcher));
                 seat.compaction_curator_override = Some(Arc::new(TestCompactionCurator));
                 seat.tool_dispatch_admission = Some(Arc::new(AdmitEveryDispatch));
                 seat.shell_env = Some(process_shell_env());
@@ -1605,8 +1606,11 @@ async fn a_batch_above_256_is_refused_and_writes_nothing() {
 /// Row (RED): a store-owned identity is seated exactly as a roster-owned
 /// identity of the same spec: their `MemberSpawned` rows are equal field by
 /// field, but for what names the identity itself (its name, runtime id,
-/// fence, session and endpoint, its creation token) and the origin token.
-/// Both are host roots.
+/// fence, session and endpoint, its creation token, the key of its durable
+/// identity mark) and the origin token. Both are host roots. The
+/// roster-owned seat carries the durable identity mark its host stamps on
+/// every identity it declares; Core gives the store-owned seat that mark
+/// itself.
 ///
 /// RED on the old tree: no store-owned create exists.
 #[tokio::test]
@@ -1621,6 +1625,12 @@ async fn a_store_owned_seat_equals_the_roster_owned_seat_of_the_same_spec() {
     roster_spec.labels = Some(declared.labels.clone());
     roster_spec.context = declared.context.clone();
     roster_spec.additional_instructions = Some(declared.additional_instructions.clone());
+    // A host stamps every identity it declares as a durable identity,
+    // keyed by the identity; Core gives a store-owned seat the same mark
+    // itself.
+    roster_spec.continuity_intent = crate::runtime::SpawnContinuityIntent::DurableIdentity {
+        continuity_key: "beta".to_string(),
+    };
     tokio::time::timeout(
         STEP,
         mob.handle
@@ -1647,6 +1657,14 @@ async fn a_store_owned_seat_equals_the_roster_owned_seat_of_the_same_spec() {
     normalized.seat_session = roster_owned.seat_session.clone();
     normalized.creation.creation_id = roster_owned.creation.creation_id;
     normalized.identity_entry = roster_owned.identity_entry;
+    assert_eq!(
+        normalized.continuity_intent,
+        crate::runtime::SpawnContinuityIntent::DurableIdentity {
+            continuity_key: "alpha".to_string(),
+        },
+        "the store-owned seat is a durable identity's, keyed by its identity"
+    );
+    normalized.continuity_intent = roster_owned.continuity_intent.clone();
     normalized
         .labels
         .insert("desk".to_string(), "beta".to_string());
@@ -7694,12 +7712,13 @@ fn process_shell_env() -> HashMap<String, String> {
 }
 
 /// What the last build of `session` took of its host's process: whether it
-/// carries a compaction curator, whether it carries a tool dispatch
-/// admission, and its shell environment.
+/// offers the host's external tool, whether it carries a compaction
+/// curator, whether it carries a tool dispatch admission, and its shell
+/// environment.
 async fn process_inputs_of_last_build(
     mob: &StoreOwnedMob,
     session: &SessionId,
-) -> (bool, bool, Option<HashMap<String, String>>) {
+) -> (bool, bool, bool, Option<HashMap<String, String>>) {
     let builds = mob.service.recorded_create_requests().await;
     let curators = mob.service.recorded_compaction_curators().await;
     assert_eq!(
@@ -7712,6 +7731,10 @@ async fn process_inputs_of_last_build(
         .rposition(|build| &build.session_id == session)
         .expect("a build of the session");
     (
+        builds[last]
+            .external_tool_names
+            .iter()
+            .any(|name| name == "bundle_echo"),
         curators[last].is_some(),
         builds[last].tool_dispatch_admission,
         builds[last].shell_env.clone(),
@@ -7719,9 +7742,9 @@ async fn process_inputs_of_last_build(
 }
 
 /// Every build of a store-owned identity's member takes the overlays that
-/// are objects of its host's process from the host again: the compaction
-/// curator and the tool dispatch admission (and the external tools, which
-/// ride the same rule). A process keeps none of them for a member it did
+/// are objects of its host's process from the host again: the external
+/// tools, the compaction curator and the tool dispatch admission. A
+/// process keeps none of them for a member it did
 /// not build, so a build after a restart has them only if the host is
 /// asked and its answer is taken, as a member a host declares at each start
 /// gets them from that declaration. The shell environment is launch
@@ -7754,7 +7777,7 @@ async fn a_later_build_takes_the_hosts_process_inputs_again() {
         .expect("the first wake builds the member");
     assert_eq!(
         process_inputs_of_last_build(&mob, &session).await,
-        (true, true, Some(process_shell_env())),
+        (true, true, true, Some(process_shell_env())),
         "the first build takes the host's process inputs"
     );
 
@@ -7774,8 +7797,89 @@ async fn a_later_build_takes_the_hosts_process_inputs_again() {
     );
     assert_eq!(
         process_inputs_of_last_build(&mob, &session).await,
-        (true, true, None),
-        "the build after the restart takes the host's curator and dispatch admission again, \
-         and no shell environment: no member's rebuild on its durable session takes one"
+        (true, true, true, None),
+        "the build after the restart takes the host's external tools, curator and dispatch \
+         admission again, and no shell environment: no member's rebuild on its durable \
+         session takes one"
+    );
+}
+
+/// The kickoff spawn of a store-owned identity's create (a first message)
+/// is recorded as a durable identity's too, on a profile that is not
+/// durable: the local spawn hands the rule its request's created custody,
+/// as the Dormant seat plan does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_kickoff_spawn_of_a_store_owned_identity_is_a_durable_identitys() {
+    let mob = StoreOwnedMob::new("durable-kickoff").await;
+    mob.service.set_keep_alive_turns_complete_immediately(true);
+    let created = mob
+        .create_outcome(kickoff_create("greeter", "Begin."), ALLOW)
+        .await
+        .expect("the create commits");
+    assert!(matches!(
+        created.change,
+        IdentityChangeOutcome::Committed { .. }
+    ));
+    kicked_off(&mob, "greeter", "Begin.").await;
+    assert_eq!(
+        mob.spawn_row("greeter").await.continuity_intent,
+        crate::runtime::SpawnContinuityIntent::DurableIdentity {
+            continuity_key: "greeter".to_string(),
+        },
+        "the kickoff spawn's row records a durable identity"
+    );
+}
+
+/// Row (source guard): every seat and spawn Core plans hands the rule that
+/// makes a seat durable its own request's created custody. The one literal
+/// is the policy auto-spawn's `false`: it is a worker's and takes no
+/// custody. A `false` at the local spawn, the placed spawn or the Dormant
+/// seat plan would seat a store-owned identity ephemeral again; the placed
+/// spawn has no row here that runs it, so the call sites are pinned as
+/// written.
+#[test]
+fn every_seat_and_spawn_hands_the_durable_rule_its_requests_custody() {
+    use super::fail_stop_cause::shipped_sources;
+    const CALL: &str = ".for_seat(";
+    let mut calls: Vec<(String, String)> = Vec::new();
+    for (path, code) in shipped_sources() {
+        let mut rest = code.as_str();
+        while let Some(at) = rest.find(CALL) {
+            let arguments = &rest[at + CALL.len()..];
+            let end = arguments.find(')').expect("a closed call");
+            calls.push((
+                path.clone(),
+                arguments[..end]
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .trim_end_matches(',')
+                    .to_string(),
+            ));
+            rest = &arguments[end..];
+        }
+    }
+    calls.sort();
+    let expected: Vec<(String, String)> = [
+        (
+            "runtime/actor.rs",
+            "&profile, &agent_identity, created_custody",
+        ),
+        (
+            "runtime/actor.rs",
+            "&profile, &agent_identity, created_custody",
+        ),
+        ("runtime/actor.rs", "&profile, agent_identity, false"),
+        (
+            "runtime/actor/dormant_seat.rs",
+            "&profile, &agent_identity, spec.created_custody",
+        ),
+    ]
+    .into_iter()
+    .map(|(path, arguments)| (path.to_string(), arguments.to_string()))
+    .collect();
+    assert_eq!(
+        calls, expected,
+        "the call sites of the durable seat rule, with what each hands it"
     );
 }

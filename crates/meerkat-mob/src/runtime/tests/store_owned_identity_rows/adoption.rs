@@ -602,3 +602,112 @@ fn not_adoptable_while_its_host_settles_the_identity_is_retryable() {
         assert_eq!(data["retryable"], retryable, "{reason:?}: {data}");
     }
 }
+
+/// A store-owned identity whose seat was recorded ephemeral becomes a
+/// durable identity at its member's same-session successor, with its
+/// conversation kept: an adopted worker here (the adoption keeps the
+/// worker's seat as it was recorded), and likewise an identity an earlier
+/// release seated on a profile that is not durable. The successor's seat is
+/// recorded durable, keyed by the identity, its member is built with the
+/// host's resume gate bound on its registration, and Core lists it among
+/// its durable identities. Beside it a plain worker's successor stays
+/// ephemeral with no gate, and the successor of a member a host spawned as
+/// a durable identity keeps the key its host gave it.
+///
+/// RED before a successor took the rule: the successor copied the recorded
+/// intent, so the adopted identity stayed ephemeral through every respawn,
+/// with no gate and absent from the list.
+#[tokio::test]
+async fn a_respawn_seats_a_store_owned_identity_recorded_ephemeral_as_a_durable_identity() {
+    let gate: Arc<dyn crate::DurableResumeGate> = Arc::new(ContinueResumeGate);
+    let mob = StoreOwnedMob::build(
+        store_owned_definition("respawn-durable"),
+        MobStorage::in_memory(),
+        |builder| builder.with_durable_resume_gate(Arc::clone(&gate)),
+    )
+    .await;
+    let machine = mob.service.enable_runtime_adapter();
+    let session = mob.spawn_worker("helper", None, &[]).await;
+    mob.spawn_worker("plain", None, &[]).await;
+    let mut marked = SpawnMemberSpec::new("worker", id("marked"));
+    marked.continuity_intent = crate::runtime::SpawnContinuityIntent::DurableIdentity {
+        continuity_key: "desk-7".to_string(),
+    };
+    tokio::time::timeout(STEP, mob.handle.spawn_spec(marked))
+        .await
+        .expect("the spawn answers")
+        .expect("spawn the host's durable identity");
+    let generation = mob.member("helper").await.generation;
+    committed(
+        mob.adopt("adopt-helper", "helper", AdoptionSource::worker(generation))
+            .await,
+    );
+    assert!(mob.store_owned("helper"));
+    assert_eq!(
+        mob.spawn_row("helper").await.continuity_intent,
+        crate::runtime::SpawnContinuityIntent::Ephemeral,
+        "the adoption keeps the worker's seat as it was recorded"
+    );
+
+    for name in ["helper", "plain", "marked"] {
+        tokio::time::timeout(
+            STEP,
+            mob.handle
+                .respawn_member(id(name), crate::runtime::MemberRespawn::new()),
+        )
+        .await
+        .expect("the respawn answers")
+        .expect("the respawn commits");
+        tokio::time::timeout(STEP, mob.handle.ensure_member_live(&id(name)))
+            .await
+            .expect("the wake answers")
+            .expect("the successor wakes");
+    }
+
+    assert_eq!(mob.session("helper").await, session, "the same session");
+    assert_eq!(
+        mob.spawn_row("helper").await.continuity_intent,
+        crate::runtime::SpawnContinuityIntent::DurableIdentity {
+            continuity_key: "helper".to_string(),
+        },
+        "the store-owned identity's successor is recorded durable"
+    );
+    assert_eq!(
+        mob.spawn_row("plain").await.continuity_intent,
+        crate::runtime::SpawnContinuityIntent::Ephemeral,
+        "a plain worker's successor stays ephemeral"
+    );
+    assert_eq!(
+        mob.spawn_row("marked").await.continuity_intent,
+        crate::runtime::SpawnContinuityIntent::DurableIdentity {
+            continuity_key: "desk-7".to_string(),
+        },
+        "a host's durable identity keeps the key its host gave it"
+    );
+    assert!(
+        member_registration_holds_resume_admission(&mob.handle, &machine, &id("helper")).await,
+        "the store-owned identity's successor holds the gate"
+    );
+    assert!(
+        !member_registration_holds_resume_admission(&mob.handle, &machine, &id("plain")).await,
+        "a plain worker's successor holds none"
+    );
+    assert!(
+        member_registration_holds_resume_admission(&mob.handle, &machine, &id("marked")).await,
+        "the host's durable identity holds the gate as before"
+    );
+    let durable: Vec<AgentIdentity> = mob
+        .handle
+        .durable_identity_members()
+        .await
+        .expect("Core's durable identity members")
+        .into_iter()
+        .map(|binding| binding.identity().clone())
+        .collect();
+    assert!(
+        durable.contains(&id("helper"))
+            && durable.contains(&id("marked"))
+            && !durable.contains(&id("plain")),
+        "Core lists the store-owned identity among its durable identities: {durable:?}"
+    );
+}

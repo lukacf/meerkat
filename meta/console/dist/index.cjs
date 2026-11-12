@@ -25903,7 +25903,8 @@ var CONSOLE_RPC_METHODS = {
   identityDirectory: "meta/identity/directory",
   identityAdopt: "meta/identity/adopt",
   identityChangesHold: "meta/identity/changes_hold",
-  identityPlan: "meta/identity/plan"
+  identityPlan: "meta/identity/plan",
+  identitySettlePreparation: "meta/identity/settle_preparation"
 };
 
 // ../packages/console-core/src/sse-reader.ts
@@ -55000,7 +55001,8 @@ var CONSOLE_RPC_METHODS2 = {
   identityDirectory: "meta/identity/directory",
   identityAdopt: "meta/identity/adopt",
   identityChangesHold: "meta/identity/changes_hold",
-  identityPlan: "meta/identity/plan"
+  identityPlan: "meta/identity/plan",
+  identitySettlePreparation: "meta/identity/settle_preparation"
 };
 var CONSOLE_BLOB_PATH_PREFIX2 = "/blobs/";
 var CONSOLE_TIMELINE_REPLAY_UNAVAILABLE_CODE2 = -32013;

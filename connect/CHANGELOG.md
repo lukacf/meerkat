@@ -10,13 +10,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - `rustix` is updated from 1.1.5 to 1.1.6 for RUSTSEC-2026-0486.
   `meerkat-connect` and `toolkit-package` depend on `rustix` directly and
   now require exactly 1.1.6; it is also taken through `cap-std`, `tempfile`,
-  Meerkat Core and Meerkat Meta, and `xattr` through `tar`. The advisory is
-  about the `getxattr` and `listxattr` functions of `rustix::fs` (with
-  their `l` and `f` forms), which mark bytes they never wrote as
-  initialized when they are given a zero-length buffer. No Connect crate
-  calls them. Of the crates Connect builds with only `xattr` does, and
-  `tar`, the one crate that uses `xattr`, calls it only to set attributes
-  while unpacking, so Connect's own use is not known to be affected.
+  Meerkat Core and Meerkat Meta, and `xattr` through `tar`. Meerkat Core
+  and Meerkat Meta, which Connect builds on, now require rustix 1.1.6 or
+  later. The advisory is about the `getxattr` and `listxattr` functions of
+  `rustix::fs` (with their `l` and `f` forms), which mark bytes they never
+  wrote as initialized when they are given a zero-length buffer. No Connect
+  crate calls them. Of the crates Connect builds with only `xattr` does,
+  and `tar`, the one crate that uses `xattr`, calls it only to set
+  attributes while unpacking, so Connect's own use is not known to be
+  affected.
 
 ## [0.9.13] - 2026-11-11
 

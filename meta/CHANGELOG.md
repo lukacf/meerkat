@@ -10,14 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Security
 
 - `rustix` is updated from 1.1.5 to 1.1.6 for RUSTSEC-2026-0486.
-  `meerkat-meta` depends on `rustix` directly, and it is also taken through
-  Meerkat Core, `tempfile`, and `xattr` through `tar`. The advisory is about
-  the `getxattr` and `listxattr` functions of `rustix::fs` (with their `l`
-  and `f` forms), which mark bytes they never wrote as initialized when
-  they are given a zero-length buffer. No Meta crate calls them. Of the
-  crates Meta builds with only `xattr` does, and `tar`, the one crate that
-  uses `xattr`, calls it only to set attributes while unpacking, so Meta's
-  own use is not known to be affected.
+  `meerkat-meta` depends on `rustix` directly and now requires rustix 1.1.6
+  or later (it accepted 1.1.4 and later), so a build that resolves it with
+  a lock of its own moves too. `rustix` is also taken through Meerkat Core,
+  `tempfile`, and `xattr` through `tar`. The advisory is about the
+  `getxattr` and `listxattr` functions of `rustix::fs` (with their `l` and
+  `f` forms), which mark bytes they never wrote as initialized when they
+  are given a zero-length buffer. No Meta crate calls them. Of the crates
+  Meta builds with only `xattr` does, and `tar`, the one crate that uses
+  `xattr`, calls it only to set attributes while unpacking, so Meta's own
+  use is not known to be affected.
 
 ## [0.9.13] - 2026-11-11
 

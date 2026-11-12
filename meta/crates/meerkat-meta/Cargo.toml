@@ -205,7 +205,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 # Safe nonblocking pipe readiness and non-reaping child-exit observation.
-rustix = { version = "1.1.4", features = ["fs", "event", "process"] }
+rustix = { version = "1.1.6", features = ["fs", "event", "process"] }
 
 [features]
 extension-state = ["dep:meta-extension-state"]

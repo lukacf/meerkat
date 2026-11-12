@@ -1594,3 +1594,95 @@ async fn a_deny_by_role_holds_for_the_list_record_of_an_agent_with_no_live_membe
     }
     rig.shutdown().await;
 }
+
+/// The preview of the access rules on a Console that serves a runtime
+/// beside others decides an agent with no member on the agent's record, as
+/// the call it previews does, and needs no earlier call to have read the
+/// runtime's agents: the first call the Console is asked. An archived agent
+/// private to a person is previewed as refused to another person, an
+/// archived agent of a role a deny names as refused to the person the deny
+/// names and as allowed to a person the rules allow, and an archived agent
+/// no rule names as allowed.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_access_preview_decides_an_agent_with_no_member_on_its_record() {
+    let temp = tempfile::tempdir().unwrap();
+    let owner = meerkat_meta::private_owner_key(ISSUER, ANN);
+    let archived = ["confidant", "rev-archived", "plain-archived"];
+    let rig = boot(
+        temp.path(),
+        vec![
+            roster_spec(
+                "confidant",
+                "worker",
+                &[("console.private_to", owner.as_str())],
+            ),
+            roster_spec("rev-archived", "reviewer", &[]),
+            roster_spec("plain-archived", "worker", &[]),
+        ],
+        Some(SCOPED_DENIES),
+    )
+    .await;
+    let host = ChangeRequester::host_operator("rpc");
+    let mob = rig.runtime.mob_handle();
+    for name in archived {
+        let digest = rig.agent(name).await.agent.spec_digest;
+        let adopted = rig
+            .change(
+                &host,
+                &format!("adopt-{name}"),
+                IdentityChangeSpec::Adopt(agent_ref(name, &digest)),
+            )
+            .await;
+        assert_eq!(adopted.token(), "done", "{adopted:?}");
+        let digest = rig.agent(name).await.agent.spec_digest;
+        let archive = rig
+            .change(
+                &host,
+                &format!("archive-{name}"),
+                IdentityChangeSpec::Archive(agent_ref(name, &digest)),
+            )
+            .await;
+        assert_eq!(archive.token(), "done", "{archive:?}");
+        let member = meerkat_mob::AgentIdentity::from(
+            meerkat_meta::member_comms_id::roster_member_id_for_identity(name).as_str(),
+        );
+        tokio::time::timeout(CALL_BOUND, async {
+            while mob
+                .get_member(&member)
+                .await
+                .expect("a roster read")
+                .is_some()
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("the member of {name} leaves the roster"));
+    }
+
+    // The first call this Console is asked.
+    let serving = serving_console(&rig, SCOPED_DENIES);
+    let preview = |subject: &'static str, name: &'static str| {
+        let serving = serving.clone();
+        async move {
+            let answer = console_rpc(
+                &serving,
+                ROOT,
+                "meta/access/preview",
+                json!({"subject": subject, "action": "agent.view",
+                       "identity": format!("served/{name}")}),
+            )
+            .await;
+            console_ok(&answer)["allowed"].clone()
+        }
+    };
+    assert_eq!(
+        preview(BOB, "confidant").await,
+        json!(false),
+        "the agent private to another person"
+    );
+    assert_eq!(preview(BOB, "rev-archived").await, json!(false));
+    assert_eq!(preview(ANN, "rev-archived").await, json!(true));
+    assert_eq!(preview(BOB, "plain-archived").await, json!(true));
+    rig.shutdown().await;
+}

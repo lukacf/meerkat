@@ -552,3 +552,144 @@ async fn a_gateway_shutdown_ends_a_replay_between_pages() {
         "the replay ended before it completed"
     );
 }
+
+/// The Console of `runtime` over the stored frames of `store`, with the
+/// access controller `access` when one is installed.
+fn console_over(
+    runtime: &MobRuntime,
+    store: Arc<ReplayStore>,
+    access: Option<AccessController>,
+) -> axum::Router {
+    console_json_router_with_state(ConsoleJsonState {
+        decisions: open_console(),
+        session_fences: crate::auth::session_fence::ConsoleSessionFences::detached(),
+        runtime: Some(runtime.clone()),
+        module_runtime: None,
+        contact_directory: None,
+        event_log: None,
+        gateway_peer_keys: None,
+        identity_runtime: None,
+        console_events: None,
+        console_aggregator: Some(MetaConsoleAggregator::new(store)),
+        mob_events: None,
+        metadata_table: None,
+        visibility_policy: Arc::new(HideImplicitDelegateMembersConsoleVisibilityPolicy),
+        snapshot_read_model: ConsoleSnapshotReadModel::default(),
+        access,
+        memory_panel: None,
+        identity_roster: None,
+        workgraph: None,
+        topology: None,
+        job_health_projection: None,
+        governed_ingress: Default::default(),
+        mob_announcements: Default::default(),
+        durable_decisions: Default::default(),
+        console_audit: None,
+        console_attention: None,
+    })
+}
+
+/// A stream that was opened before an agent became private to a person
+/// decides the agent's frames on what the runtime knows of the agent now,
+/// once its last read of that is as old as the bound: the frames it reads
+/// after the bound are not sent to a caller the agent is now hidden from,
+/// and the frames of an agent nothing changed for still are. The stream
+/// knows both agents from its open, and nothing but the stream reads the
+/// runtime: RED without the stream's own bound, where it keeps deciding on
+/// what it read at its open.
+async fn a_stream_opened_before_an_agent_became_private_stops_sending_its_frames(
+    tag: &str,
+    access: Option<AccessController>,
+) {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let mob_id = format!(
+        "timeline-replay-bound-{tag}-{}",
+        NEXT.fetch_add(1, Ordering::SeqCst)
+    );
+    let (_temp, runtime) = super::tests::build_empty_console_test_runtime(&mob_id)
+        .await
+        .expect("runtime");
+    // Two agents with no member, both known to the runtime and private to
+    // nobody.
+    for agent in ["agent-plain", "agent-x"] {
+        runtime.private_owners().record(&mob_id, agent, None);
+    }
+    let release = Arc::new(tokio::sync::Notify::new());
+    let of = |seq: u64| {
+        if seq % 2 == 0 {
+            "agent-plain".to_string()
+        } else {
+            "agent-x".to_string()
+        }
+    };
+    let store = ReplayStore::with_frames(Some(SecondPage::Held(Arc::clone(&release))), of).await;
+    let app = console_over(&runtime, store, access);
+
+    let mut sse = open_stream(&app, "console:0")
+        .await
+        .expect("the stream answers on its first page");
+    // The first page: the frames of both agents.
+    let mut first = Vec::new();
+    while first.len() < PAGE as usize {
+        match sse.next(DEADLINE).await {
+            Read::Event(event) if event.name == "console_frame" => first.push(cursor_seq(&event)),
+            Read::Event(_) => {}
+            Read::Ended | Read::Quiet => panic!("the first page stopped at {}", first.len()),
+        }
+    }
+    assert_eq!(first, (1..=PAGE).collect::<Vec<_>>());
+
+    // The agent becomes private to a person the caller is not, and the
+    // stream's read of the runtime grows as old as the bound.
+    runtime.private_owners().record(
+        &mob_id,
+        "agent-x",
+        Some(&BTreeMap::from([(
+            crate::access::PRIVATE_TO_LABEL.to_string(),
+            "another-person".to_string(),
+        )])),
+    );
+    // The bound a kept record has, and a stream's read with it: 20 s.
+    tokio::time::sleep(Duration::from_secs(20) + Duration::from_millis(200)).await;
+    release.notify_one();
+
+    let (rest, _) = sse.frames_until(is_named("snapshot_complete")).await;
+    assert_eq!(
+        rest,
+        (PAGE + 1..=FRAMES)
+            .filter(|seq| seq % 2 == 0)
+            .collect::<Vec<_>>(),
+        "after the bound only the frames of the agent nothing changed for are sent"
+    );
+    runtime.handle().stop().await.expect("stop");
+}
+
+/// On a Console without an access controller, where each stream decides on
+/// attributes of its own.
+#[tokio::test]
+async fn a_stream_decides_on_an_agent_as_it_is_now_after_the_bound_without_an_access_controller() {
+    a_stream_opened_before_an_agent_became_private_stops_sending_its_frames("own", None).await;
+}
+
+/// On a Console with an access controller, where every request and stream
+/// decide on the same attributes and no other request reads the runtime.
+#[tokio::test]
+async fn a_stream_decides_on_an_agent_as_it_is_now_after_the_bound_with_an_access_controller() {
+    let controller = AccessController::new(crate::access::AccessControlConfig {
+        enabled: true,
+        admins: vec!["root@example.com".to_string()],
+        rules: vec![crate::access::AccessRule {
+            id: "everyone-views".to_string(),
+            actions: vec!["agent.view".to_string()],
+            agents: vec!["*".to_string()],
+            ..crate::access::AccessRule::default()
+        }],
+        ..crate::access::AccessControlConfig::default()
+    })
+    .expect("controller");
+    a_stream_opened_before_an_agent_became_private_stops_sending_its_frames(
+        "shared",
+        Some(controller),
+    )
+    .await;
+}

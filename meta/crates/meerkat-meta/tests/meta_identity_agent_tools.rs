@@ -46,7 +46,8 @@ use meerkat_meta::identity_creation::{
     is_identity_tool,
 };
 use meerkat_meta::identity_creation::{
-    AgentSchedules, ScheduleEffect, ScheduleRef, SchedulesFollowed,
+    AgentSchedules, KeyedSendNotices, OperationState, ScheduleEffect, ScheduleRef,
+    SchedulesFollowed,
 };
 use meerkat_meta::identity_first::contracts::RosterProvider;
 use meerkat_meta::identity_first::{
@@ -3473,5 +3474,373 @@ async fn an_agent_reads_that_an_agent_waits_for_its_hosts_preparation() {
         1,
         "the first message ran once"
     );
+    rig.shutdown().await;
+}
+
+/// An operation id is the host's handle on a change. No identity tool takes
+/// one and no description tells an agent to quote one, so a change's answer
+/// names none to the agent that asked: a `done`, a held decision and an
+/// agent that waits for its host's preparation each answer their outcome
+/// without it, as the model reads the tool result and as a direct call
+/// answers. A held change still names its decision and its deadline, and
+/// the description says in words that a person decides. The family is
+/// handed the operation as before, and the host reads it with its id.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agents_change_answer_names_no_operation_id() {
+    let state = tempfile::tempdir().unwrap();
+    let rig = boot_with_family(state.path(), &fresh_mob_id()).await;
+    let asker = Requester::Agent {
+        identity: LEAD.to_owned(),
+    };
+    let operation = OperationId::for_request(&asker, "r-1").unwrap();
+    let create = json!({"request_id": "r-1", "agents": [{"name": "scout", "profile": WORKER}]});
+    for (token, scripted) in [
+        // The scripted family's own answer: `done` for the agent named.
+        ("done", None),
+        (
+            "pending_decision",
+            Some(IdentityOutcome::PendingDecision {
+                operation_id: operation.clone(),
+                decision_id: "decision-7".to_owned(),
+                deadline_ms: 1_800_000_000_000,
+            }),
+        ),
+        (
+            "pending_preparation",
+            Some(IdentityOutcome::PendingPreparation {
+                operation_id: operation.clone(),
+                agents: vec![AgentOutcome::new(
+                    "scout",
+                    AgentChangeState::PendingPreparation,
+                )],
+            }),
+        ),
+    ] {
+        if let Some(outcome) = scripted {
+            rig.family.answer(outcome);
+        }
+        rig.family.forget();
+        // In a real turn, which is what the model reads; then directly.
+        let read = rig
+            .tool(
+                LEAD,
+                &format!("no-id-{token}"),
+                IDENTITY_CREATE,
+                create.clone(),
+            )
+            .await;
+        let direct = call(&rig, IDENTITY_CREATE, create.clone()).await;
+        assert_eq!(
+            rig.family.operations(),
+            vec![operation.as_str().to_owned(); 2],
+            "{token}: the family is handed the operation"
+        );
+        assert!(
+            !read.is_error && !direct.refused,
+            "{token} is no error result"
+        );
+        assert_eq!(
+            read.content, direct.content,
+            "{token}: one answer however it is called"
+        );
+        assert_eq!(read.content["outcome"], token, "{}", read.content);
+        let said = read.content.to_string();
+        assert!(
+            !said.contains("operation_id") && !said.contains(operation.as_str()),
+            "{token}: the answer names no operation id: {said}"
+        );
+        if token == "pending_decision" {
+            assert_eq!(
+                read.content,
+                json!({
+                    "outcome": "pending_decision",
+                    "decision_id": "decision-7",
+                    "deadline_ms": 1_800_000_000_000_u64,
+                }),
+                "a held change names its decision and its deadline"
+            );
+        }
+    }
+    // What a held change is, the description says in words; and no tool's
+    // text or arguments name an operation id.
+    for def in identity_tool_defs().iter() {
+        let all = format!("{} {}", def.description, def.input_schema).to_lowercase();
+        assert!(
+            !all.contains("operation_id") && !all.contains("operation id"),
+            "{} names no operation id",
+            def.name
+        );
+        if def.name == IDENTITY_CREATE {
+            assert!(
+                def.description.contains(
+                    "a person must decide (`decision_id`, `deadline_ms`). Nothing is created yet."
+                ),
+                "identity_create says what a held change is"
+            );
+        }
+    }
+    rig.shutdown().await;
+
+    // On the real family under a host's policy: the same, for the first
+    // answer and for the same request asked again.
+    let state = tempfile::tempdir().unwrap();
+    let rig = boot(state.path(), &fresh_mob_id()).await;
+    assert!(
+        rig.runtime
+            .attach_identity_policy(policy(), IdentityFamilyOptions::new()),
+        "the launch attaches its identity policy"
+    );
+    let operation = OperationId::for_request(&asker, "real-1").unwrap();
+    for mark in ["no-id-real", "no-id-real-again"] {
+        let answer = rig
+            .tool(
+                LEAD,
+                mark,
+                IDENTITY_CREATE,
+                json!({"request_id": "real-1", "agents": [{"name": "scout", "profile": WORKER}]}),
+            )
+            .await;
+        assert_eq!(answer.content["outcome"], "done", "{}", answer.content);
+        let said = answer.content.to_string();
+        assert!(
+            !said.contains("operation_id") && !said.contains(operation.as_str()),
+            "{mark}: the answer names no operation id: {said}"
+        );
+    }
+    rig.host_reads_operation(&operation, "done").await;
+    rig.shutdown().await;
+}
+
+/// The approver id the notice row's policy names.
+const APPROVERS: &str = "team:owners";
+/// The chat person the launch's approver map lets decide for [`APPROVERS`].
+const OWNER: &str = "U123";
+
+fn now_ms() -> u64 {
+    u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_millis(),
+    )
+    .expect("ms")
+}
+
+/// [`boot`], on a launch whose approver map lets the chat person [`OWNER`]
+/// decide for [`APPROVERS`] through a declared ingress.
+async fn boot_with_approvers(state: &Path, mob_id: &str) -> Rig {
+    let model = ScriptedModel::default();
+    let access: meerkat_meta::AccessControlConfig = toml::from_str(
+        r#"
+enabled = false
+
+[approvers."team:owners"]
+subjects = ["owner@example.org"]
+ingress_subjects = [{ ingress = "chat", subject = "U123" }]
+"#,
+    )
+    .expect("the approver map");
+    let ingresses: meerkat_meta::DecisionIngressDeclarations =
+        serde_json::from_value(json!({"ingresses": [
+            {"ingress": "chat", "attests": "person", "max_clock_skew_ms": 5000},
+        ]}))
+        .expect("ingress declarations");
+    let runtime = Box::pin(
+        UnifiedRuntimeBuilder::default()
+            .definition(definition(mob_id))
+            .persistent_state(state)
+            .continuity_from_state_dir(state)
+            .await
+            .expect("open the state-dir identity substrate")
+            .roster_provider(Arc::new(DeclaredRoster))
+            .identity_runtime_instance_id("meta-identity-agent-tools")
+            .default_llm_client(Arc::new(model.clone()))
+            .decision_ingresses(ingresses)
+            .access_controller(meerkat_meta::AccessController::new(access).expect("controller"))
+            .build(),
+    )
+    .await
+    .expect("build the gateway-shaped UnifiedRuntime");
+    Rig {
+        runtime,
+        model,
+        family: Arc::new(ScriptedFamily::default()),
+    }
+}
+
+impl Rig {
+    /// Approve the held decision `decision_id` as the person the approver
+    /// map names: a host channel shows it to its approvers first.
+    async fn approve(&self, decision_id: &str) {
+        use meerkat_core::approval::decision::{
+            ApproverId, DecisionId, DecisionReference, PresentationAudience, PresentationRecord,
+        };
+        struct NoNotices;
+        #[async_trait]
+        impl meerkat_meta::DecisionNoticeSink for NoNotices {
+            async fn deliver(&self, _line: String) -> bool {
+                true
+            }
+        }
+        let runtime = &self.runtime;
+        let owner = runtime.durable_decisions().owner().clone();
+        let row = owner
+            .get(&DecisionId::new(decision_id).expect("a decision id"))
+            .expect("the decision is read");
+        owner
+            .present(
+                &row.decision_id,
+                &PresentationRecord::complete(
+                    PresentationAudience::Approver {
+                        approver_id: ApproverId::new(APPROVERS).expect("approver"),
+                    },
+                    &row.descriptor.rendering,
+                    None,
+                    DecisionReference::new("chat:owners").expect("channel"),
+                    DecisionReference::new(format!("message-{}", now_ms())).expect("message"),
+                    now_ms(),
+                ),
+            )
+            .expect("present");
+        let connection = meerkat_meta::StdioDecisionConnection::new(
+            runtime.durable_decisions().realm(),
+            Arc::new(NoNotices) as Arc<dyn meerkat_meta::DecisionNoticeSink>,
+        );
+        let line = json!({"jsonrpc": "2.0", "id": "decide", "method": "meta/decisions/decide",
+        "params": {
+            "decision_id": decision_id,
+            "approve": true,
+            "presented_digest": row.descriptor.subject_digest.to_string(),
+            "attestation": {
+                "ingress": "chat",
+                "subject": OWNER,
+                "scope": "chat-session-1",
+                "event_ref": format!("chat:event:{decision_id}"),
+                "observed_at_ms": now_ms(),
+            },
+        }})
+        .to_string();
+        let answer: Value = serde_json::from_str(
+            &connection
+                .handle_line(runtime, &line)
+                .await
+                .expect("a decision method answers"),
+        )
+        .expect("answer JSON");
+        assert!(answer["error"].is_null(), "{answer:#}");
+    }
+
+    /// The host's read of the operation `operation` on the real family: its
+    /// outcome is `outcome`, and it carries the operation's id, which is the
+    /// host's handle on the change.
+    async fn host_reads_operation(&self, operation: &OperationId, outcome: &str) {
+        let family = self.runtime.identity_family().expect("the family");
+        let read = family
+            .read(
+                &self.runtime.mob_handle(),
+                &ChangeRequester::host("rpc"),
+                IdentityRead::Operation(operation.clone()),
+            )
+            .await;
+        let Ok(IdentityReadAnswer::Operation(OperationState::Outcome(read))) = read else {
+            panic!("the host reads the operation {operation:?}");
+        };
+        assert_eq!(read.token(), outcome, "{read:?}");
+        assert_eq!(
+            read.to_json()["operation_id"],
+            operation.as_str(),
+            "the host's read of an operation keeps its id"
+        );
+    }
+}
+
+/// A person decided a change an agent asked for, and it was carried out:
+/// the notice the agent reads says so with the typed outcome and names the
+/// decision, and it names no operation id, neither the notice's own nor the
+/// one inside the outcome it carries. On the real family, with the launch's
+/// notices sent as the gateway sends them (a keyed send to the agent's own
+/// name): for a create that ends `done`, and for one whose agent then waits
+/// for its host's preparation. The host's read of the same operation keeps
+/// the id.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_notice_of_a_carried_out_change_names_no_operation_id_to_the_agent_that_asked() {
+    let state = tempfile::tempdir().unwrap();
+    let rig = boot_with_approvers(state.path(), &fresh_mob_id()).await;
+    let policy = IdentityCreationPolicy::parse(&json!({
+        "enabled": true,
+        "peers": {"default": "allow"},
+        "preparation": {WORKER: {"mode": "required"}},
+        "approval": {"rules": [{
+            "change": ["create"],
+            "requester": {"kind": "agent", "profile": [MAKER]},
+            "target": {"profile": [WORKER, MAKER]},
+            "outcome": {"kind": "require_approval", "approver": {"id": APPROVERS}},
+        }]},
+    }))
+    .expect("the policy parses")
+    .expect("the policy is enabled");
+    // The route the gateway gives a launch's notices: the identity runtime,
+    // asked when a notice is delivered. The row takes it back before the
+    // runtime stops.
+    let route = Arc::new(Mutex::new(rig.runtime.identity_runtime()));
+    let asked_route = Arc::clone(&route);
+    assert!(
+        rig.runtime.attach_identity_policy(
+            Arc::new(policy),
+            IdentityFamilyOptions::new().with_decision_notices(Arc::new(KeyedSendNotices::new(
+                move || asked_route.lock().unwrap().clone()
+            ))),
+        ),
+        "the launch attaches its identity policy and its notices"
+    );
+    let asker = Requester::Agent {
+        identity: LEAD.to_owned(),
+    };
+    for (name, profile, outcome) in [
+        ("walker", MAKER, "done"),
+        ("scout", WORKER, "pending_preparation"),
+    ] {
+        let request_id = format!("held-{name}");
+        let operation = OperationId::for_request(&asker, &request_id).unwrap();
+        let held = rig
+            .tool(
+                LEAD,
+                &format!("notice-ask-{name}"),
+                IDENTITY_CREATE,
+                json!({"request_id": request_id, "agents": [{"name": name, "profile": profile}]}),
+            )
+            .await;
+        assert_eq!(
+            held.content["outcome"], "pending_decision",
+            "{}",
+            held.content
+        );
+        let decision_id = held.content["decision_id"]
+            .as_str()
+            .expect("a decision id")
+            .to_owned();
+        rig.approve(&decision_id).await;
+
+        // The notice starts a turn of the agent that asked: its text is
+        // what that agent's model reads.
+        let told = rig
+            .turn(&format!("The change you asked for (create of \"{name}\")"))
+            .await;
+        let text = told.last().expect("the notice's turn").text.clone();
+        assert!(
+            text.contains("was approved and carried out") && text.contains(&decision_id),
+            "the notice says what was decided and names the decision: {text}"
+        );
+        assert!(
+            text.contains(&format!("\"outcome\":\"{outcome}\"")),
+            "the notice carries the typed outcome `{outcome}`: {text}"
+        );
+        assert!(
+            !text.contains("operation_id") && !text.contains(operation.as_str()),
+            "the notice an agent reads names no operation id: {text}"
+        );
+        rig.host_reads_operation(&operation, outcome).await;
+    }
+    route.lock().unwrap().take();
     rig.shutdown().await;
 }

@@ -36,10 +36,11 @@
 //! One rule for a notice that is not delivered: it is recorded at WARN with
 //! the member, the peer, the notice's kind and a class
 //! ([`KickoffNoticeLoss`]), nothing is retried, and the member's other peers
-//! and later notices are still served. That holds for a failed send, a
-//! notice dropped at the bound and a cancelled one alike. No fact about a
-//! kickoff lives here: a notice is presentation, and a notice that is not
-//! delivered changes no machine state.
+//! and later notices are still served. That holds for a failed preparation
+//! on the actor, a failed send, a notice dropped at the bound and a
+//! cancelled one alike. No fact about a kickoff lives here: a notice is
+//! presentation, and a notice that is not delivered changes no machine
+//! state.
 //!
 //! The deliveries are peer deliveries: a stop, a complete, a reset, a
 //! destroy and a shutdown of the mob, an unwire of the edge and a retirement
@@ -75,6 +76,9 @@ pub(super) struct KickoffNoticeDelivery {
 /// Why a kickoff notice was not delivered: the `class` of its record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum KickoffNoticeLoss {
+    /// Its preparation on the actor failed (MobMachine's verdict, the
+    /// recipient's endpoint, the command): it never reached the lane.
+    PreparationFailed,
     /// Its send failed, or the send's budget ended.
     SendFailed,
     /// It was the oldest queued notice of its member and peer when another
@@ -87,6 +91,7 @@ pub(super) enum KickoffNoticeLoss {
 impl KickoffNoticeLoss {
     pub(super) const fn as_str(self) -> &'static str {
         match self {
+            Self::PreparationFailed => "preparation_failed",
             Self::SendFailed => "send_failed",
             Self::PendingBound => "pending_bound",
             Self::Cancelled => "cancelled",
@@ -346,6 +351,26 @@ fn record_undelivered_kickoff_notice(
             "a kickoff notice to a live peer was not delivered"
         );
     }
+}
+
+/// Record a kickoff notice of `from` for `to` whose preparation on the actor
+/// failed: it was never handed to the lane.
+pub(super) fn record_unprepared_kickoff_notice(
+    mob_id: &MobId,
+    from: &AgentIdentity,
+    to: &AgentIdentity,
+    intent: &'static str,
+    error: &MobError,
+) {
+    tracing::warn!(
+        %mob_id,
+        %from,
+        %to,
+        intent,
+        class = KickoffNoticeLoss::PreparationFailed.as_str(),
+        error = %error,
+        "a kickoff notice could not be prepared for a peer and was not delivered"
+    );
 }
 
 /// Test override of the pending bound, per mob.

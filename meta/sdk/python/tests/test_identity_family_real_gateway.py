@@ -153,6 +153,27 @@ _THE_HOST_PREPARES_WRITERS = dict(
     _HOST_MAY_CHANGE_AGENTS, preparation={"writer": {"mode": "required"}}
 )
 
+# A person decides every descriptive change (a display name, for one) the
+# host asks for; the host may make the other changes by itself.
+_A_PERSON_DECIDES_A_DESCRIPTIVE_CHANGE = {
+    "enabled": True,
+    "approval": {
+        "rules": [
+            {
+                "change": ["descriptive"],
+                "requester": {"kind": "host", "surface": "rpc"},
+                "outcome": {"kind": "require_approval", "approver": {"id": "owner"}},
+            },
+            {
+                "change": ["create", "capability", "peers", "profile", "archive", "remove", "adopt"],
+                "requester": {"kind": "host", "surface": "rpc"},
+                "outcome": {"kind": "allow"},
+            },
+        ]
+    },
+    "peers": {"default": "allow"},
+}
+
 _AHEAD_ROWS = {
     name for name in os.environ.get("META_IDENTITY_AHEAD_ROWS", "").split(",") if name
 }
@@ -684,6 +705,72 @@ async def test_a_status_says_when_the_roster_lists_an_agent_served_from_its_reco
         # An agent the roster does not list says nothing.
         await _created(identities)
         assert (await runtime.status("editor")).roster_listing_superseded is False
+
+
+@_ahead("preparation_reads")
+async def test_an_agent_that_waits_for_its_host_says_so_and_names_its_create(tmp_path):
+    async with gateway(tmp_path, policy=_THE_HOST_PREPARES_WRITERS) as identities:
+        runtime = identities._runtime
+        waiting = await identities.create(
+            [AgentSpec(name="editor", profile="writer")], request_id="create-editor"
+        )
+        assert isinstance(waiting, IdentityPendingPreparation), waiting
+        # Its create is open until the host settles it.
+        assert (await identities.get("editor")).open_operations == (waiting.operation_id,)
+        listed = {agent.name: agent for agent in (await identities.list()).agents}
+        assert listed["editor"].open_operations == (waiting.operation_id,)
+        assert listed["scout"].open_operations == ()
+        status = await runtime.status("editor")
+        assert (status.preparation_pending, status.archived) == (True, False)
+
+        settled = await identities.settle_preparation("editor", request_id="settle-editor")
+        assert isinstance(settled, IdentityDone), settled
+        assert (await identities.get("editor")).open_operations == ()
+        status = await runtime.status("editor")
+        assert (status.preparation_pending, status.archived) == (False, False)
+
+
+@_ahead("preparation_reads")
+async def test_an_archived_agent_says_so_on_its_status(tmp_path):
+    async with gateway(tmp_path) as identities:
+        runtime = identities._runtime
+        digest = await _created(identities)
+        assert (await runtime.status("editor")).archived is False
+        archived = await identities.archive(
+            "editor", expected_spec_digest=digest, request_id="archive-editor"
+        )
+        assert isinstance(archived, IdentityDone), archived
+        status = await runtime.status("editor")
+        assert (status.archived, status.preparation_pending) == (True, False)
+        restored = await identities.unarchive(
+            "editor", expected_spec_digest=digest, request_id="unarchive-editor"
+        )
+        assert isinstance(restored, IdentityDone), restored
+        assert (await runtime.status("editor")).archived is False
+        assert (await runtime.status("scout")).archived is False
+
+
+@_ahead("preparation_reads")
+async def test_a_held_change_of_an_agent_is_one_of_its_open_operations(tmp_path):
+    async with gateway(tmp_path, policy=_A_PERSON_DECIDES_A_DESCRIPTIVE_CHANGE) as identities:
+        digest = await _created(identities)
+        assert (await identities.get("editor")).open_operations == ()
+
+        held = await identities.update(
+            "editor",
+            expected_spec_digest=digest,
+            request_id="rename-editor",
+            set=AgentSet(display_name="Editor II"),
+        )
+        assert isinstance(held, IdentityPendingDecision), held
+        assert (await identities.get("editor")).open_operations == (held.operation_id,)
+        listed = {agent.name: agent for agent in (await identities.list()).agents}
+        assert listed["editor"].open_operations == (held.operation_id,)
+        assert listed["scout"].open_operations == ()
+
+        await identities.withdraw(request_id="rename-editor")
+        assert (await identities.get("editor")).open_operations == ()
+        assert (await identities.get("editor")).display_name is None
 
 
 async def test_directory_lists_what_a_change_may_name(tmp_path):

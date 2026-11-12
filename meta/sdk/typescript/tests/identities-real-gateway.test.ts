@@ -98,6 +98,27 @@ const THE_HOST_PREPARES_WRITERS = {
   preparation: { writer: { mode: "required" } },
 };
 
+// A person decides every descriptive change (a display name, for one) the
+// host asks for; the host may make the other changes by itself.
+const A_PERSON_DECIDES_A_DESCRIPTIVE_CHANGE = {
+  enabled: true,
+  approval: {
+    rules: [
+      {
+        change: ["descriptive"],
+        requester: { kind: "host", surface: "rpc" },
+        outcome: { kind: "require_approval", approver: { id: "owner" } },
+      },
+      {
+        change: ["create", "capability", "peers", "profile", "archive", "remove", "adopt"],
+        requester: { kind: "host", surface: "rpc" },
+        outcome: { kind: "allow" },
+      },
+    ],
+  },
+  peers: { default: "allow" },
+};
+
 const aheadRows = new Set(
   (process.env.META_IDENTITY_AHEAD_ROWS ?? "").split(",").filter((name) => name !== ""),
 );
@@ -656,6 +677,93 @@ describe("identity family on a real gateway", () => {
           none.kind,
         );
       }, THE_HOST_PREPARES_WRITERS);
+    },
+  );
+
+  it(
+    "an agent that waits for its host says so and names its create",
+    { skip: ahead("preparation_reads") },
+    async () => {
+      await withGateway(async (identities, rpc) => {
+        const status = async (identity: string) =>
+          parseIdentityStatus(await rpc("meta/status_identity", { identity }));
+        const waiting = await identities.create([{ name: "editor", profile: "writer" }], {
+          requestId: "create-editor",
+        });
+        assert.ok(waiting.outcome === "pending_preparation", JSON.stringify(waiting));
+        // Its create is open until the host settles it.
+        assert.deepEqual((await identities.get("editor")).openOperations, [waiting.operationId]);
+        const listed = new Map(
+          (await identities.list()).agents.map((agent) => [agent.name, agent]),
+        );
+        assert.deepEqual(listed.get("editor")?.openOperations, [waiting.operationId]);
+        assert.deepEqual(listed.get("scout")?.openOperations, []);
+        let read = await status("editor");
+        assert.deepEqual([read.preparationPending, read.archived], [true, false]);
+
+        const settled = await identities.settlePreparation("editor", {
+          requestId: "settle-editor",
+        });
+        assert.equal(settled.outcome, "done");
+        assert.deepEqual((await identities.get("editor")).openOperations, []);
+        read = await status("editor");
+        assert.deepEqual([read.preparationPending, read.archived], [false, false]);
+      }, THE_HOST_PREPARES_WRITERS);
+    },
+  );
+
+  it(
+    "an archived agent says so on its status",
+    { skip: ahead("preparation_reads") },
+    async () => {
+      await withGateway(async (identities, rpc) => {
+        const status = async (identity: string) =>
+          parseIdentityStatus(await rpc("meta/status_identity", { identity }));
+        const digest = await created(identities);
+        assert.equal((await status("editor")).archived, false);
+        const archived = await identities.archive("editor", {
+          expectedSpecDigest: digest,
+          requestId: "archive-editor",
+        });
+        assert.equal(archived.outcome, "done");
+        const read = await status("editor");
+        assert.deepEqual([read.archived, read.preparationPending], [true, false]);
+        const restored = await identities.unarchive("editor", {
+          expectedSpecDigest: digest,
+          requestId: "unarchive-editor",
+        });
+        assert.equal(restored.outcome, "done");
+        assert.equal((await status("editor")).archived, false);
+        assert.equal((await status("scout")).archived, false);
+      });
+    },
+  );
+
+  it(
+    "a held change of an agent is one of its open operations",
+    { skip: ahead("preparation_reads") },
+    async () => {
+      await withGateway(async (identities) => {
+        const digest = await created(identities);
+        assert.deepEqual((await identities.get("editor")).openOperations, []);
+
+        const held = await identities.update("editor", {
+          expectedSpecDigest: digest,
+          requestId: "rename-editor",
+          set: { displayName: "Editor II" },
+        });
+        assert.ok(held.outcome === "pending_decision", JSON.stringify(held));
+        assert.deepEqual((await identities.get("editor")).openOperations, [held.operationId]);
+        const listed = new Map(
+          (await identities.list()).agents.map((agent) => [agent.name, agent]),
+        );
+        assert.deepEqual(listed.get("editor")?.openOperations, [held.operationId]);
+        assert.deepEqual(listed.get("scout")?.openOperations, []);
+
+        await identities.withdraw({ requestId: "rename-editor" });
+        assert.deepEqual((await identities.get("editor")).openOperations, []);
+        assert.equal((await identities.get("editor")).displayName, null);
+      }, A_PERSON_DECIDES_A_DESCRIPTIVE_CHANGE);
     },
   );
 

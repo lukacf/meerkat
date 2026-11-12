@@ -181,7 +181,7 @@ impl CoreApplyFailureCause {
                 }),
             AgentError::ReasoningEffortRefused(refusal) => Self::runtime_turn(error.to_string())
                 .with_reason(crate::event::AgentErrorReason::ReasoningEffortRefused {
-                    refusal: (**refusal).clone(),
+                    refusal: refusal.clone(),
                 }),
             _ => Self::runtime_turn(error.to_string()),
         }

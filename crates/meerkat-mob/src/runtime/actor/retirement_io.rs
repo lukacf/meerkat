@@ -6132,8 +6132,10 @@ impl MobActor {
 
 impl MobActor {
     /// A cleanup peer of `rollback` that it observed from the recorded
-    /// endpoint alone and that MobMachine no longer answers from the recorded
-    /// endpoint: its wake has bound it, or it is Live. A placed or a
+    /// endpoint alone and whose wake has bound it since: MobMachine holds it
+    /// Waking and Bound, or Live. A peer whose wake failed meanwhile has no
+    /// residency phase and is not one: its wake realized nothing that
+    /// survives it. A placed or a
     /// peer-only peer is never one (it is not observed so), and neither is a
     /// peer whose edge the placed cleanup already removed.
     fn spawn_rollback_peer_bound_since_observed(
@@ -6150,8 +6152,7 @@ impl MobActor {
                     .endpoints
                     .get(*peer)
                     .is_some_and(|endpoint| endpoint.recorded_only)
-                    && crate::runtime::boot_plan::domain_member_endpoint_source(state, peer)
-                        != crate::runtime::boot_plan::MemberEndpointSource::Recorded
+                    && crate::runtime::boot_plan::domain_member_bound_since_recorded(state, peer)
             })
             .cloned()
     }
@@ -6959,6 +6960,13 @@ impl MobActor {
                 description,
             } => {
                 rollback.peer_description = description;
+                if rollback.reobserving {
+                    // A second observation replaces the first one whole: an
+                    // entry it does not write again (a planned peer whose
+                    // observation now fails is passed over below) must not
+                    // keep its mark from the first.
+                    rollback.endpoints.clear();
+                }
                 let mut error = None;
                 for (identity, endpoint) in observed.endpoints {
                     match endpoint {

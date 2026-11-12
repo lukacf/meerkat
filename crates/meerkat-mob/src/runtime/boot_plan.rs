@@ -360,6 +360,25 @@ pub(crate) enum MemberEndpointSource {
     Runtime,
 }
 
+/// Whether `identity`, which a caller read from its recorded endpoint
+/// earlier, has been bound by its wake since: MobMachine holds it Waking and
+/// no longer reads it from its recorded endpoint, or Live. A member with no
+/// residency phase is not (its wake failed, and nothing that wake realized
+/// survives it), and neither is one still read from its recorded endpoint.
+pub(crate) fn domain_member_bound_since_recorded(
+    state: &mob_dsl::MobMachineState,
+    identity: &AgentIdentity,
+) -> bool {
+    match domain_member_endpoint_source(state, identity) {
+        MemberEndpointSource::Recorded => false,
+        MemberEndpointSource::RuntimeThenRecorded => true,
+        MemberEndpointSource::Runtime => matches!(
+            member_materialization_phase(state, &mob_dsl::AgentIdentity::from_domain(identity)),
+            Some(mob_dsl::MemberMaterializationPhase::Live)
+        ),
+    }
+}
+
 /// [`MemberEndpointSource`] of `identity`, read from MobMachine's residency
 /// phase, its Bound mark and its recorded endpoint.
 pub(crate) fn domain_member_endpoint_source(

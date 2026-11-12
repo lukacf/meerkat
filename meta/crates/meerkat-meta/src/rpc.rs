@@ -7658,7 +7658,7 @@ fn identity_lifecycle_state_json(
 /// (why no member holds the identity). Every field comes from the one
 /// status read. The session repair hold is answered by
 /// `meta/member_health`, not here.
-fn identity_status_wire(status: &crate::identity_first::IdentityStatus) -> Value {
+pub(crate) fn identity_status_wire(status: &crate::identity_first::IdentityStatus) -> Value {
     let mut result = serde_json::json!({
         "state": identity_lifecycle_state_json(status.state),
         "identity": status.identity.as_str(),

@@ -1755,4 +1755,52 @@ describe("long-term agents in the console", () => {
       cleanup();
     }
   }, 60_000);
+
+  it("what_a_hosts_preparation_refuses_reads_in_the_consoles_own_words", async () => {
+    const family = createScriptedIdentityFamily();
+    // A profile whose agents the host prepares takes no agent that was not
+    // prepared for it. The gateway refuses the move when it is asked, so
+    // the form says so at the profile before anything is sent: in words of
+    // the move, never as a matter of versions.
+    family.setProfileChange("reviewer", "prepared");
+    const { view } = await openRoster(family);
+    await selectAgent(view, "warden");
+    fireEvent.click(view.getByTestId("roster-action:warden:edit"));
+    const edit = await find(view, "identity-edit:warden");
+    await within(edit).findByTestId("identity-field:profile", undefined, { timeout: 5_000 });
+    fireEvent.click(within(edit).getByTestId("identity-profile:reviewer"));
+    const refused = await find(view, "identity-field-error:profile");
+    expect(refused.textContent).toBe("An agent cannot be moved into this profile: its host prepares the agents of this profile before their first use. Create a new agent in this profile instead.");
+    expect(detailsOf(edit.querySelector("[data-field='profile']"))).toContain("An agent is not moved into a profile its host prepares");
+    expect(present(view, "identity-profile-plan")).toBe(false);
+    expect(calls(family, "meta/identity/update")).toEqual([]);
+    expect(family.agents.get("warden").profile).toBe("worker");
+    fireEvent.click(view.getByTestId("identity-cancel"));
+
+    // A read of the team's agents says what is open for each. Where the
+    // team's held changes cannot be read the gateway refuses the read, and
+    // the list says that it could not be read and to try again: nothing
+    // about a decision, and never as if nobody waited.
+    family.seed({ name: "porter", display_name: "The porter", profile: "worker", readiness: "preparation_pending" });
+    family.scriptNext("meta/identity/list", {
+      refuse: {
+        kind: "approval_unavailable",
+        detail: "The mob's held changes could not be read now, so what is open for its agents is not known: read again later.",
+      },
+    });
+    await openArchived(view);
+    const unread = await find(view, "roster-archived-error");
+    expect(unread.textContent).toContain("The archived and waiting agents could not be read.");
+    expect(unread.textContent).toContain("The team's open requests could not be read just now, so the console cannot say what waits for its agents. Try again shortly.");
+    expect(unread.textContent).not.toMatch(/person's decision|nobody who can be asked|Nothing was made/);
+    expect(detailsOf(unread)).toContain("read again later");
+    expect(present(view, "roster-waiting:porter")).toBe(false);
+    // Opened again, the list is read again and shows who waits.
+    fireEvent.click(view.getByTestId("roster-archived-open"));
+    await gone(view, "roster-archived");
+    fireEvent.click(view.getByTestId("roster-archived-open"));
+    expect((await find(view, "roster-waiting:porter")).textContent).toContain("Waiting for its host");
+    expect(present(view, "roster-archived-error")).toBe(false);
+    view.unmount();
+  }, 60_000);
 });

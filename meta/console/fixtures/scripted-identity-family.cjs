@@ -309,6 +309,15 @@ function createScriptedIdentityFamily(options = {}) {
     }
     const rule = set.profile !== undefined ? profileChanges.get(set.profile) || "allow" : "allow";
     if (rule === "deny") return { refused: refusal("change_denied", "set.profile", { change: "profile" }) };
+    // A profile whose agents the host prepares before their first use
+    // takes no agent that was not prepared for it: the move is refused
+    // when it is asked, and its plan answers the same.
+    if (rule === "prepared") {
+      return {
+        refused: refusal("unsupported", "set.profile", { feature: "move_into_prepared_profile" },
+          "An agent is not moved into a profile its host prepares: the host prepares an agent of that profile before its first use, and this agent was not. Create the agent in that profile instead. Nothing was changed."),
+      };
+    }
     const capability = capabilityRefusal(set, "set.");
     if (capability) return { refused: capability };
     // Who reaches an agent and how it runs are a change class of their
@@ -562,7 +571,8 @@ function createScriptedIdentityFamily(options = {}) {
     /** Set one agent's two affordances as the experience read carries them. */
     setAffordances(name, value) { affordances.set(name, value); },
     /** What the host's rules give a change of an agent's profile to
-     * `profile`: `allow`, `require_approval` or `deny`. */
+     * `profile`: `allow`, `require_approval` or `deny`; `prepared` for a
+     * profile whose agents the host prepares, which takes no move. */
     setProfileChange(profile, rule) { profileChanges.set(profile, rule); },
     /** What the directory says of naming `name` as a peer: `{verdict,
      * reason?, lines?}`. */

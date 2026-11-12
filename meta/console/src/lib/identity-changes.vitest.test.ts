@@ -41,6 +41,7 @@ import {
   planWords,
   reachWords,
   readAllPages,
+  readRefusalSentence,
   refusalFormField,
   refusalSentence,
   requestIdFor,
@@ -739,5 +740,55 @@ describe("what a change did to an agent's schedules", () => {
     const plain = createScriptedIdentityFamily();
     const warden = plain.handle("meta/identity/get", { name: "warden" }).result.spec_digest;
     expect("schedules" in plain.handle("meta/identity/archive", { request_id: "a-2", name: "warden", expected_spec_digest: warden }).result.agents[0]).toBe(false);
+  });
+});
+
+describe("what a host's preparation of its agents refuses", () => {
+  const refusal = (kind: string, data: Record<string, unknown> = {}, detail = "") => ({ kind, retryable: false, detail, data });
+
+  it("says a move into a profile whose agents the host prepares in words of its own", () => {
+    // The move is refused `unsupported` with a feature of its own. It is no
+    // matter of versions: the profile's agents are prepared before their
+    // first use, and this one was not.
+    const moved = refusalSentence(refusal("unsupported", { feature: "move_into_prepared_profile" }));
+    expect(moved).toBe("An agent cannot be moved into this profile: its host prepares the agents of this profile before their first use. Create a new agent in this profile instead.");
+    expect(moved).not.toMatch(/version|_/);
+    // Any other feature, and none, keep the kind's sentence.
+    const plain = "This change needs something this version does not support. Leave it out.";
+    expect(refusalSentence(refusal("unsupported", { feature: "another feature" }))).toBe(plain);
+    expect(refusalSentence(refusal("unsupported"))).toBe(plain);
+    // The feature alone says nothing: another kind that carries it keeps its own sentence.
+    expect(refusalSentence(refusal("change_denied", { feature: "move_into_prepared_profile" })))
+      .toBe("The host's rules do not allow you this change. It was not made, and asking again changes nothing.");
+    // The scripted family answers the move, and its plan, in the wire's shape.
+    const family = createScriptedIdentityFamily();
+    family.setProfileChange("reviewer", "prepared");
+    const digest = family.handle("meta/identity/get", { name: "warden" }).result.spec_digest;
+    const body = { name: "warden", expected_spec_digest: digest, set: { profile: "reviewer" } };
+    for (const answer of [
+      family.handle("meta/identity/plan", { change: "update", request_id: "p-1", ...body }),
+      family.handle("meta/identity/update", { request_id: "u-1", ...body }),
+    ]) {
+      expect(answer.error.data).toMatchObject({ kind: "unsupported", field: "set.profile", feature: "move_into_prepared_profile", retryable: false });
+      expect(refusalFormField("update", answer.error.data.field)).toBe("profile");
+    }
+    expect(family.agents.get("warden").profile).toBe("worker");
+  });
+
+  it("says a read that could not see the team's open requests as a read to repeat", () => {
+    // A get and a list name what is open for each agent. Where the team's
+    // held changes cannot be read, the read is refused with the kind a
+    // change that cannot be held is refused with: for a read it means
+    // "read again", and nothing about a decision or a change.
+    const unread = refusal("approval_unavailable", {}, "The mob's held changes could not be read now, so what is open for its agents is not known: read again later.");
+    const said = readRefusalSentence(unread);
+    expect(said).toBe("The team's open requests could not be read just now, so the console cannot say what waits for its agents. Try again shortly.");
+    expect(said).not.toMatch(/decision|nobody|Nothing was made|\bmob\b|_/);
+    // A change refused with that kind keeps the change's sentence.
+    expect(refusalSentence(unread)).toBe("This change needs a person's decision, and this team has nobody who can be asked. Nothing was made.");
+    // Every other refusal of a read reads as it does anywhere.
+    for (const kind of ["identity_unknown", "access_denied", "mob_not_running", "a_kind_of_a_later_gateway"]) {
+      expect(readRefusalSentence(refusal(kind))).toBe(refusalSentence(refusal(kind)));
+    }
   });
 });

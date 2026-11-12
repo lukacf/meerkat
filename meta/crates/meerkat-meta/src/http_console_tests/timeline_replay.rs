@@ -616,7 +616,7 @@ async fn a_stream_opened_before_an_agent_became_private_stops_sending_its_frames
     }
     let release = Arc::new(tokio::sync::Notify::new());
     let of = |seq: u64| {
-        if seq % 2 == 0 {
+        if seq.is_multiple_of(2) {
             "agent-plain".to_string()
         } else {
             "agent-x".to_string()

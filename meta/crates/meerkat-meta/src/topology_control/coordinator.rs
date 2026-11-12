@@ -1668,7 +1668,7 @@ impl AuthorityView {
 
 fn access_view(runtime: &UnifiedRuntime, principal: Option<&str>) -> Option<AuthorityView> {
     runtime.access_controller().map(|controller| AuthorityView {
-        authority: runtime.mob_id().to_string(),
+        authority: runtime.mob_id(),
         view: controller.view_for_subject(principal),
     })
 }

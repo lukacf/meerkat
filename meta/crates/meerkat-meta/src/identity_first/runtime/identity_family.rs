@@ -421,7 +421,7 @@ match_labels = { tier = "sealed" }
         // The record gets a label a deny names, past this process.
         let now = record("worker", &[("tier", "sealed")]);
 
-        let inside = start + UNSEATED_RECORD_MAX_AGE - Duration::from_millis(1);
+        let inside = start + UNSEATED_RECORD_MAX_AGE.saturating_sub(Duration::from_millis(1));
         let asked = records.ask(["scout"], inside);
         assert!(asked.missing.is_empty(), "no read inside the bound");
         assert_eq!(asked.held.get("scout"), Some(&record("worker", &[])));
@@ -434,7 +434,7 @@ match_labels = { tier = "sealed" }
             "the record is read again at the bound"
         );
         assert!(asked.held.is_empty());
-        records.keep(&asked, [("scout".to_owned(), now.clone())], at_the_bound);
+        records.keep(&asked, [("scout".to_owned(), now)], at_the_bound);
         let asked = records.ask(["scout"], at_the_bound);
         let decided_on = asked.held.get("scout").expect("the record read again");
         assert!(denied_person_views(&record("worker", &[])));

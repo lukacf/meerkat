@@ -1343,14 +1343,15 @@ mod tests {
     fn a_stream_reads_the_attributes_again_once_its_last_read_is_as_old_as_the_bound() {
         let bound = crate::identity_first::runtime::UNSEATED_RECORD_MAX_AGE;
         assert_eq!(bound, Duration::from_secs(20));
+        let below = bound.saturating_sub(Duration::from_millis(1));
         let opened = std::time::Instant::now();
         let mut age = StreamPrimeAge::primed(opened);
         assert!(!age.due(opened));
-        assert!(!age.due(opened + bound - Duration::from_millis(1)));
+        assert!(!age.due(opened + below));
         assert!(age.due(opened + bound), "the read is as old as the bound");
         // The read at the bound counts: the next one is a bound later.
         assert!(!age.due(opened + bound + Duration::from_millis(1)));
-        assert!(!age.due(opened + bound + bound - Duration::from_millis(1)));
+        assert!(!age.due(opened + bound + below));
         assert!(age.due(opened + bound + bound));
         // An instant before the last read reads nothing.
         assert!(!age.due(opened));

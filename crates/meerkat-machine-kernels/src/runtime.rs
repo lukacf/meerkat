@@ -1868,7 +1868,7 @@ impl GeneratedMachineKernel {
                 .map_err(|error| self.eval_error(transition_name, error.to_string()))?,
         };
         effects.insert(slot.clone(), active);
-        slot_bytes.insert(slot.clone(), body_bytes);
+        slot_bytes.insert(slot, body_bytes);
         self.eval_mob_machine_instruction_widest_snapshot_active_bytes(
             vec![
                 KernelValue::Map(effects),

@@ -28199,7 +28199,7 @@ RecordMemberInstructionLineageRunning(agent_identity, root_identity) ==
     /\ model_step_count' = model_step_count + 1
     /\ member_instruction_owed' = IF (operator_instruction_generation # 0) THEN MapSet(member_instruction_owed, agent_identity, operator_instruction_generation) ELSE member_instruction_owed
     /\ member_instruction_blocked' = IF (operator_instruction_generation # 0) THEN MapRemove(member_instruction_blocked, agent_identity) ELSE member_instruction_blocked
-    /\ member_instruction_lineage' = IF ((root_identity \in DOMAIN member_instruction_lineage) = TRUE) THEN IF ((IF (root_identity \in DOMAIN member_instruction_lineage) THEN Some((IF root_identity \in DOMAIN member_instruction_lineage THEN member_instruction_lineage[root_identity] ELSE "None")) ELSE None) # Some(agent_identity)) THEN MapSet(member_instruction_lineage, agent_identity, (IF "value" \in DOMAIN (IF (root_identity \in DOMAIN member_instruction_lineage) THEN Some((IF root_identity \in DOMAIN member_instruction_lineage THEN member_instruction_lineage[root_identity] ELSE "None")) ELSE None) THEN (IF (root_identity \in DOMAIN member_instruction_lineage) THEN Some((IF root_identity \in DOMAIN member_instruction_lineage THEN member_instruction_lineage[root_identity] ELSE "None")) ELSE None)["value"] ELSE None)) ELSE member_instruction_lineage ELSE MapSet(member_instruction_lineage, agent_identity, root_identity)
+    /\ member_instruction_lineage' = MapSet(member_instruction_lineage, agent_identity, root_identity)
     /\ UnchangedFrame_bba34de88771e078
 
 
@@ -28212,7 +28212,7 @@ RecordMemberInstructionLineageStopped(agent_identity, root_identity) ==
     /\ model_step_count' = model_step_count + 1
     /\ member_instruction_owed' = IF (operator_instruction_generation # 0) THEN MapSet(member_instruction_owed, agent_identity, operator_instruction_generation) ELSE member_instruction_owed
     /\ member_instruction_blocked' = IF (operator_instruction_generation # 0) THEN MapRemove(member_instruction_blocked, agent_identity) ELSE member_instruction_blocked
-    /\ member_instruction_lineage' = IF ((root_identity \in DOMAIN member_instruction_lineage) = TRUE) THEN IF ((IF (root_identity \in DOMAIN member_instruction_lineage) THEN Some((IF root_identity \in DOMAIN member_instruction_lineage THEN member_instruction_lineage[root_identity] ELSE "None")) ELSE None) # Some(agent_identity)) THEN MapSet(member_instruction_lineage, agent_identity, (IF "value" \in DOMAIN (IF (root_identity \in DOMAIN member_instruction_lineage) THEN Some((IF root_identity \in DOMAIN member_instruction_lineage THEN member_instruction_lineage[root_identity] ELSE "None")) ELSE None) THEN (IF (root_identity \in DOMAIN member_instruction_lineage) THEN Some((IF root_identity \in DOMAIN member_instruction_lineage THEN member_instruction_lineage[root_identity] ELSE "None")) ELSE None)["value"] ELSE None)) ELSE member_instruction_lineage ELSE MapSet(member_instruction_lineage, agent_identity, root_identity)
+    /\ member_instruction_lineage' = MapSet(member_instruction_lineage, agent_identity, root_identity)
     /\ UnchangedFrame_bba34de88771e078
 
 

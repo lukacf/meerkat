@@ -8549,6 +8549,107 @@ mod tests {
         );
     }
 
+    /// `mob_wire` and `mob_unwire` ask the host's member tool audience about
+    /// both members they name. A member it hides from the caller answers
+    /// exactly as a name the mob does not hold, as the member and as the
+    /// peer, with manage scope, and no edge is made. A caller the member is
+    /// not hidden from wires and unwires it as before.
+    #[tokio::test]
+    async fn mob_wire_and_unwire_answer_a_member_hidden_from_the_caller_as_absent() {
+        let state = MobMcpState::new_in_memory();
+        let handle = host_mob_with_kept_members(
+            &state,
+            "wire-audience",
+            &[
+                ("wire-kept", Some("ann")),
+                ("wire-keeper", Some("ann")),
+                ("wire-plain", None),
+                ("wire-caller", None),
+            ],
+        )
+        .await;
+        let scope = || scope_only_authority("wire-audience", handle.live_incarnation());
+        let caller = member_mob_tools(&state, &handle, "wire-caller", scope()).await;
+        let keeper = member_mob_tools(&state, &handle, "wire-keeper", scope()).await;
+        let ends = |member: &str, peer: &str| json!({ "mob_id": "wire-audience", "member_id": member, "peer": { "local": peer } });
+        let kept = AgentIdentity::from("wire-kept");
+
+        for tool in ["mob_wire", "mob_unwire"] {
+            // Each call naming the kept member, beside the same call naming
+            // a name the mob does not hold in its place.
+            for (kept_call, absent_call, position) in [
+                (
+                    ends("wire-plain", "wire-kept"),
+                    ends("wire-plain", "wire-gone"),
+                    "as the peer",
+                ),
+                (
+                    ends("wire-kept", "wire-plain"),
+                    ends("wire-gone", "wire-plain"),
+                    "as the member",
+                ),
+                (
+                    ends("wire-nobody", "wire-kept"),
+                    ends("wire-nobody", "wire-gone"),
+                    "as the peer of a name the mob does not hold",
+                ),
+            ] {
+                let hidden = masked_mob_tool_answer(&caller, tool, kept_call, "wire-kept").await;
+                let absent = masked_mob_tool_answer(&caller, tool, absent_call, "wire-gone").await;
+                assert!(
+                    absent.starts_with("error:"),
+                    "{tool}: a name the mob does not hold is refused: {absent}"
+                );
+                assert_eq!(
+                    hidden, absent,
+                    "{tool}: a member hidden from the caller, named {position}, answers as a \
+                     name the mob does not hold"
+                );
+            }
+        }
+        let wired_to_kept = || async {
+            handle
+                .get_member(&kept)
+                .await
+                .expect("roster read")
+                .expect("the kept member is seated")
+                .wired_to
+        };
+        assert!(
+            wired_to_kept().await.is_empty(),
+            "no edge reaches the hidden member"
+        );
+
+        let wired = masked_mob_tool_answer(
+            &keeper,
+            "mob_wire",
+            ends("wire-keeper", "wire-kept"),
+            "wire-kept",
+        )
+        .await;
+        assert!(
+            wired.starts_with("ok:"),
+            "a caller the member is not hidden from wires it: {wired}"
+        );
+        assert!(
+            wired_to_kept()
+                .await
+                .contains(&AgentIdentity::from("wire-keeper")),
+            "the keeper's wire is made"
+        );
+        let unwired = masked_mob_tool_answer(
+            &keeper,
+            "mob_unwire",
+            ends("wire-keeper", "wire-kept"),
+            "wire-kept",
+        )
+        .await;
+        assert!(
+            unwired.starts_with("ok:"),
+            "a caller the member is not hidden from unwires it: {unwired}"
+        );
+    }
+
     /// The classification behind `wired`: only a committed edge between the
     /// caller and the new member reports it wired, whatever was requested.
     #[test]

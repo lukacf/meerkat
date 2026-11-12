@@ -30543,6 +30543,162 @@ async fn owned_member_tools_answer_a_member_hidden_from_the_caller_as_absent() {
         .expect("a member not hidden from the caller is admitted as before");
 }
 
+/// A mob whose host hides the members kept for a keeper
+/// ([`HideKeptMembers`]), with `members` seated: each with the keeper its
+/// row's `kept_for` label names, if any.
+async fn mob_with_kept_members(members: &[(&str, Option<&str>)]) -> MobHandle {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    service.set_return_exact_run_result(true);
+    let handle = MobBuilder::new(sample_definition_with_mob_tools(), MobStorage::in_memory())
+        .with_session_service(service)
+        .with_member_tool_audience(Arc::new(HideKeptMembers))
+        .create()
+        .await
+        .expect("create mob");
+    for (member, keeper) in members {
+        let mut spec = crate::runtime::handle::SpawnMemberSpec::new(
+            ProfileName::from("worker"),
+            AgentIdentity::from(*member),
+        )
+        .with_initial_message(ContentInput::Text("source context".to_string()));
+        if let Some(keeper) = keeper {
+            spec = spec.with_labels(BTreeMap::from([(
+                "kept_for".to_string(),
+                (*keeper).to_string(),
+            )]));
+        }
+        handle.spawn_spec(spec).await.expect("spawn the member");
+    }
+    handle
+}
+
+/// The operator tools of member `caller` of the mob, with manage scope.
+async fn manage_scope_tools(handle: &MobHandle, caller: &str) -> Arc<dyn AgentToolDispatcher> {
+    owned_member_tool_dispatcher(
+        handle,
+        &AgentIdentity::from(caller),
+        generated_mob_operator_authority_with_scope(
+            handle.definition().id.as_str(),
+            handle.live_incarnation(),
+        ),
+    )
+    .await
+}
+
+/// One operator tool call with `args` through `dispatcher`.
+async fn dispatch_operator_tool(
+    dispatcher: &Arc<dyn AgentToolDispatcher>,
+    tool: &'static str,
+    args: serde_json::Value,
+) -> Result<ToolDispatchOutcome, ToolError> {
+    let raw = serde_json::value::RawValue::from_string(args.to_string()).unwrap();
+    dispatcher
+        .dispatch(ToolCallView {
+            id: "operator-tool-call",
+            name: tool,
+            args: &raw,
+        })
+        .await
+}
+
+/// A tool's answer with the member name `name` masked: the answers for two
+/// names compare equal when they differ in nothing but the name.
+fn masked_tool_answer(answer: &Result<ToolDispatchOutcome, ToolError>, name: &str) -> String {
+    match answer {
+        Ok(outcome) => format!("ok: {}", outcome.result.text_content()),
+        Err(error) => format!("error: {error:?}"),
+    }
+    .replace(name, "<member>")
+}
+
+/// `wire_members` and `unwire_members` ask the host's member tool audience
+/// about both members they name. A member it hides from the caller answers
+/// exactly as a name the mob does not hold, as the member and as the peer,
+/// with manage scope, and no edge is made. A caller the member is not
+/// hidden from wires and unwires it as before.
+#[tokio::test]
+async fn wire_members_answer_a_member_hidden_from_the_caller_as_absent() {
+    let handle = mob_with_kept_members(&[
+        ("wire-kept", Some("ann")),
+        ("wire-keeper", Some("ann")),
+        ("wire-plain", None),
+        ("wire-caller", None),
+    ])
+    .await;
+    let caller = manage_scope_tools(&handle, "wire-caller").await;
+    let keeper = manage_scope_tools(&handle, "wire-keeper").await;
+    let ends = |member: &str, peer: &str| serde_json::json!({ "member_id": member, "peer_member_id": peer });
+    let kept = AgentIdentity::from("wire-kept");
+
+    for tool in ["wire_members", "unwire_members"] {
+        // Each call naming the kept member, beside the same call naming a
+        // name the mob does not hold in its place.
+        for (kept_call, absent_call, position) in [
+            (
+                ends("wire-plain", "wire-kept"),
+                ends("wire-plain", "wire-gone"),
+                "as the peer",
+            ),
+            (
+                ends("wire-kept", "wire-plain"),
+                ends("wire-gone", "wire-plain"),
+                "as the member",
+            ),
+            (
+                ends("wire-nobody", "wire-kept"),
+                ends("wire-nobody", "wire-gone"),
+                "as the peer of a name the mob does not hold",
+            ),
+        ] {
+            let hidden = masked_tool_answer(
+                &dispatch_operator_tool(&caller, tool, kept_call).await,
+                "wire-kept",
+            );
+            let absent = masked_tool_answer(
+                &dispatch_operator_tool(&caller, tool, absent_call).await,
+                "wire-gone",
+            );
+            assert!(
+                absent.starts_with("error:"),
+                "{tool}: a name the mob does not hold is refused: {absent}"
+            );
+            assert_eq!(
+                hidden, absent,
+                "{tool}: a member hidden from the caller, named {position}, answers as a name \
+                 the mob does not hold"
+            );
+        }
+    }
+    assert!(
+        handle
+            .get_member(&kept)
+            .await
+            .unwrap()
+            .expect("the kept member is seated")
+            .wired_to
+            .is_empty(),
+        "no edge reaches the hidden member"
+    );
+
+    dispatch_operator_tool(&keeper, "wire_members", ends("wire-keeper", "wire-kept"))
+        .await
+        .expect("a caller the member is not hidden from wires it");
+    assert!(
+        handle
+            .get_member(&kept)
+            .await
+            .unwrap()
+            .expect("the kept member is seated")
+            .wired_to
+            .contains(&AgentIdentity::from("wire-keeper")),
+        "the keeper's wire is made"
+    );
+    dispatch_operator_tool(&keeper, "unwire_members", ends("wire-keeper", "wire-kept"))
+        .await
+        .expect("a caller the member is not hidden from unwires it");
+}
+
 /// A force cancel reaches a fork child's run one of two typed ways. A run
 /// already current receives an exact boundary cancel (`boundary_cancelled`);
 /// a run still queued is abandoned at the cancel point, so its supervised run

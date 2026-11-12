@@ -473,13 +473,17 @@ impl IdentityFamily for ScriptedFamily {
 /// One agent as the scripted family's host read shows it: another agent
 /// asked for it, so it carries its provenance and an operation that agent
 /// holds open for it, whose id tells who asked; and the host's roster
-/// lists its name as well, which the host's read says.
+/// lists its name as well, which the host's read says. The host made it
+/// internal only and gave it a runtime mode of its own, which every read
+/// says.
 fn hosts_view_of_scout() -> AgentSummary {
     let mut agent = AgentSummary::new("scout", WORKER, sha("scout"), AgentReadiness::Unseated);
     agent.display_name = Some("Scout".to_owned());
     agent.spec_revision = Some(3);
     agent.archived = true;
     agent.roster_listing_superseded = true;
+    agent.addressability = Some(AgentAddressability::InternalOnly);
+    agent.runtime_mode_override = Some(meerkat_mob::MobRuntimeMode::TurnDriven);
     agent.provenance = Some(AgentProvenance::new(
         AgentEntered::Created,
         RequesterKind::Agent,
@@ -1092,7 +1096,8 @@ async fn each_identity_tool_reaches_the_family_with_its_wire_request() {
         );
         let expected_answer = if tool == IDENTITY_LIST {
             // The family's page, without the agent's provenance and without
-            // the operation another requester holds open for it.
+            // the operation another requester holds open for it; the two
+            // members the host set are read back.
             json!({
                 "agents": [{
                     "name": "scout",
@@ -1102,6 +1107,8 @@ async fn each_identity_tool_reaches_the_family_with_its_wire_request() {
                     "spec_revision": 3,
                     "archived": true,
                     "readiness": "unseated",
+                    "addressability": "internal_only",
+                    "runtime_mode_override": "turn_driven",
                 }],
                 "next": "next-agent",
             })
@@ -1267,6 +1274,31 @@ async fn the_requester_is_the_calling_session_and_an_argument_naming_one_is_refu
                 json!("turn_driven"),
             ),
             "set.runtime_mode_override",
+        ),
+        (
+            IDENTITY_UPDATE,
+            with(&update, &["set"], "addressability", json!("internal_only")),
+            "set.addressability",
+        ),
+        (
+            IDENTITY_CREATE,
+            with(
+                &create,
+                &["agents", "0"],
+                "addressability",
+                json!("internal_only"),
+            ),
+            "agents[0].addressability",
+        ),
+        (
+            IDENTITY_CREATE,
+            with(
+                &create,
+                &["agents", "0"],
+                "runtime_mode_override",
+                json!("turn_driven"),
+            ),
+            "agents[0].runtime_mode_override",
         ),
         (
             IDENTITY_UPDATE,
@@ -1785,12 +1817,18 @@ fn member_names(value: &impl serde::Serialize) -> BTreeSet<String> {
 }
 
 /// Every schema is the family's wire request, member for member, without
-/// the two members only the host plane writes, and closed at every depth:
-/// a member added to a wire type fails this row until the tool names it or
-/// is told to leave it out.
+/// the two members only the host plane writes and without the two only a
+/// host sets (an agent reads them back and does not set them), and closed
+/// at every depth: a member added to a wire type fails this row until the
+/// tool names it or is told to leave it out.
 #[test]
 fn every_schema_names_the_wire_request_without_the_host_plane() {
     let host_plane: BTreeSet<String> = ["proposer", "source_evidence"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    // What a host's create and update set and an agent's do not.
+    let host_sets: BTreeSet<String> = ["addressability", "runtime_mode_override"]
         .into_iter()
         .map(str::to_owned)
         .collect();
@@ -1804,6 +1842,8 @@ fn every_schema_names_the_wire_request_without_the_host_plane() {
     agent.labels = BTreeMap::from([("k".to_owned(), "v".to_owned())]);
     agent.first_message = Some(ContentInput::Text("go".to_owned()));
     agent.peers = vec![LEAD.to_owned()];
+    agent.addressability = Some(AgentAddressability::InternalOnly);
+    agent.runtime_mode_override = Some(meerkat_mob::MobRuntimeMode::TurnDriven);
     let mut create = CreateAgents::new(vec![agent.clone()]);
     create.request_id = Some("r".to_owned());
     create.proposer = Some("p".to_owned());
@@ -1815,9 +1855,13 @@ fn every_schema_names_the_wire_request_without_the_host_plane() {
         "identity_create"
     );
     assert_eq!(
-        property_names(&schema["properties"]["agents"]["items"]),
+        &property_names(&schema["properties"]["agents"]["items"]) | &host_sets,
         member_names(&agent),
         "an agent of identity_create"
+    );
+    assert!(
+        property_names(&schema["properties"]["agents"]["items"]).is_disjoint(&host_sets),
+        "an agent of identity_create takes neither member a host sets"
     );
 
     let mut set = AgentSet::default();
@@ -1827,6 +1871,8 @@ fn every_schema_names_the_wire_request_without_the_host_plane() {
     set.labels = Some(BTreeMap::from([("k".to_owned(), "v".to_owned())]));
     set.labels_remove = vec!["k".to_owned()];
     set.profile = Some(WORKER.to_owned());
+    set.addressability = Some(AgentAddressability::InternalOnly);
+    set.runtime_mode_override = Some(meerkat_mob::MobRuntimeMode::TurnDriven);
     let mut update = UpdateAgent::new("scout", digest.clone());
     update.request_id = Some("r".to_owned());
     update.set = set.clone();
@@ -1841,9 +1887,13 @@ fn every_schema_names_the_wire_request_without_the_host_plane() {
         "identity_update"
     );
     assert_eq!(
-        property_names(&schema["properties"]["set"]),
+        &property_names(&schema["properties"]["set"]) | &host_sets,
         member_names(&set),
         "the set of identity_update"
+    );
+    assert!(
+        property_names(&schema["properties"]["set"]).is_disjoint(&host_sets),
+        "the set of identity_update takes neither member a host sets"
     );
 
     let mut one = AgentRef::new("scout", digest);
@@ -1970,6 +2020,23 @@ fn the_descriptions_say_what_a_model_must_know() {
             .contains("An agent of a profile you may not create agents of is listed too")
     );
     assert!(!text(IDENTITY_LIST).contains("your grant covers"));
+    // The two members a host sets are read back by the two reads and set by
+    // no tool: the create and the update do not name them.
+    for tool in [IDENTITY_LIST, IDENTITY_GET] {
+        assert!(
+            text(tool).contains(
+                "`addressability` and `runtime_mode_override` are read back only: the host \
+                 sets them, and identity_create and identity_update do not take them."
+            ),
+            "{tool} says the two members are read back and not set here"
+        );
+    }
+    for tool in [IDENTITY_CREATE, IDENTITY_UPDATE] {
+        let all = format!("{} {}", text(tool), schema_of(tool));
+        for absent in ["addressability", "runtime_mode"] {
+            assert!(!all.contains(absent), "{tool} names no `{absent}`");
+        }
+    }
     // A name the caller is shown no agent under: one answer, whatever the
     // reason (`identity_list_shows_an_agent_of_a_profile_the_caller_may_not_create`).
     for tool in [
@@ -2758,6 +2825,8 @@ async fn identity_get_hands_the_family_its_read_and_shows_an_agent_no_provenance
             "spec_revision": 3,
             "archived": true,
             "readiness": "unseated",
+            "addressability": "internal_only",
+            "runtime_mode_override": "turn_driven",
             "instructions": ["Find the open questions."],
             "context": {"desk": "north"},
             "labels": {"team": "research"},

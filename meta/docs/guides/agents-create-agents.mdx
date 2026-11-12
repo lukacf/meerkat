@@ -129,9 +129,11 @@ as itself, and a change attributed to another agent than the calling session's
 member is refused `invalid_request`.
 
 What the tools do not take in this release: grants, schedules, a fork source,
-another mob, placement, binding, backend or runtime mode. Grants and schedules
-for a new agent are separate calls. There is no reset tool; a host resets an
-agent with its own methods.
+another mob, placement, binding, backend, addressability or runtime mode.
+Grants and schedules for a new agent are separate calls. An agent's
+addressability and runtime mode are set by the host (`meta/identity/create`,
+`meta/identity/update`); `identity_list` and `identity_get` read them back.
+There is no reset tool; a host resets an agent with its own methods.
 
 ### What a model is told
 
@@ -222,7 +224,9 @@ profile the caller may create no agent of is listed too, and
 `identity_directory` is the read that says what the caller may create and
 name. Each entry carries
 `name`, `display_name`, `profile`, `spec_digest`, `spec_revision`, `archived`
-and `readiness`. An agent is not shown who asked for another agent, when, or
+and `readiness`, and, read back only, `addressability` when the agent is
+`internal_only` and `runtime_mode_override` when the agent's record names
+one. An agent is not shown who asked for another agent, when, or
 under which consent, nor another requester's open operations, nor whether the
 host's roster lists the agent's name as well; the host's
 `meta/identity/list` shows those. A list is in one stable order, and `after`

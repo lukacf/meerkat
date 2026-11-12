@@ -164,6 +164,9 @@ const UNKNOWN_NAME: &str = "A `name` that no agent holds, and an agent you are n
 const CONFIGURED_AGENT: &str = "An agent that the host's configuration declares is changed \
     there, not here (`owner_read_only`).";
 
+const READ_BACK_ONLY: &str = "`addressability` and `runtime_mode_override` are read back only: \
+    the host sets them, and identity_create and identity_update do not take them.";
+
 /// The description of the identity tool `name`, as a model reads it.
 fn description(name: &str) -> String {
     match name {
@@ -266,7 +269,8 @@ fn description(name: &str) -> String {
              member stops, then `removed`), `pending_decision` or `refused`, \
              {AS_FOR_CREATE}"
         ),
-        IDENTITY_LIST => "List the long-term agents of your mob: every agent that is not \
+        IDENTITY_LIST => format!(
+            "List the long-term agents of your mob: every agent that is not \
              private to a person, of any profile, whoever asked for it and however it came \
              to exist. An agent of a profile you may not create agents of is listed too: \
              `identity_directory` says what you may create and name. Read only: it never \
@@ -275,19 +279,23 @@ fn description(name: &str) -> String {
              (what a change sends as `expected_spec_digest`), `spec_revision`, `archived` \
              and `readiness`. `readiness` is `dormant` (nothing is loaded; its next delivery \
              wakes it), `live`, `broken`, `preparation_pending`, `retiring` or `unseated` \
-             (archived, or its seat is owed).\n\n\
+             (archived, or its seat is owed). An entry also has `addressability` when the \
+             agent is `internal_only` (who reaches it; an addressable agent says nothing) \
+             and `runtime_mode_override` (`autonomous_host` or `turn_driven`) when the \
+             agent's record names how it runs instead of its profile. {READ_BACK_ONLY}\n\n\
              `profile` narrows the list to one profile; `include_archived` adds archived \
              agents; when the result has `next`, pass it as `after` to read on."
-            .to_owned(),
+        ),
         IDENTITY_GET => format!(
             "Read one long-term agent of your mob by name: what identity_list says of it \
              (`name`, `display_name`, `profile`, `spec_digest`, `spec_revision`, `archived`, \
-             `readiness`) and the rest of what a create or an update sets: its \
+             `readiness`, and `addressability` and `runtime_mode_override` when the agent \
+             has them) and the rest of what a create or an update sets: its \
              `instructions`, `context`, `labels` and `peers` (the peers its changes listed, \
              among the agents you are shown). An archived agent is read too, and so is your \
              own record. Read only: it never wakes an agent and loads nothing.\n\n\
              You are not shown who asked for the agent, when, or under which consent. \
-             {UNKNOWN_NAME}\n\n\
+             {UNKNOWN_NAME} {READ_BACK_ONLY}\n\n\
              A change of the agent sends its `spec_digest` as `expected_spec_digest`."
         ),
         IDENTITY_DIRECTORY => "See what you may name before you create or change a long-term \

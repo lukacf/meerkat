@@ -326,7 +326,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     private to a person, of any profile: also an agent of a profile the
     calling agent may create no agent of. It shows an agent no provenance:
     who asked for another agent, when and under which consent stay with the
-    host's read, and so do another requester's open operations. A change
+    host's read, and so do another requester's open operations and whether
+    the host's roster lists the agent's name as well. A change
     that names a member private to a person answers `identity_unknown`, as
     for a name no agent holds.
   - `identity_get` reads one agent's record by name: the list entry's
@@ -335,6 +336,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     without another requester's open operations. A name the calling agent
     is shown no agent under answers `identity_unknown`, whether no agent
     holds it or its member is private to a person.
+  - `identity_list` and `identity_get` read an agent's `addressability`
+    (written as `internal_only`) and `runtime_mode_override` back when it
+    has them. An agent does not set them: `identity_create` and
+    `identity_update` do not take them, and the host does
+    (`meta/identity/create`, `meta/identity/update`).
   - The eight tools may wait behind the deferred tool catalog: in a session
     whose catalog is exact, their definitions are loaded on demand.
   - Rust API: `identity_creation::{IdentityAgentTools, IdentityToolCaller,

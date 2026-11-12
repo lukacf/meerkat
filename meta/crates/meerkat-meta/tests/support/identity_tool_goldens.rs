@@ -280,7 +280,7 @@ The result's `outcome` is `done` (the agent's `state` is `retiring` while its me
         "identity_list",
         r"List the long-term agents of your mob: every agent that is not private to a person, of any profile, whoever asked for it and however it came to exist. An agent of a profile you may not create agents of is listed too: `identity_directory` says what you may create and name. Read only: it never wakes an agent and loads nothing.
 
-Each entry of `agents` has `name`, `display_name`, `profile`, `spec_digest` (what a change sends as `expected_spec_digest`), `spec_revision`, `archived` and `readiness`. `readiness` is `dormant` (nothing is loaded; its next delivery wakes it), `live`, `broken`, `preparation_pending`, `retiring` or `unseated` (archived, or its seat is owed).
+Each entry of `agents` has `name`, `display_name`, `profile`, `spec_digest` (what a change sends as `expected_spec_digest`), `spec_revision`, `archived` and `readiness`. `readiness` is `dormant` (nothing is loaded; its next delivery wakes it), `live`, `broken`, `preparation_pending`, `retiring` or `unseated` (archived, or its seat is owed). An entry also has `addressability` when the agent is `internal_only` (who reaches it; an addressable agent says nothing) and `runtime_mode_override` (`autonomous_host` or `turn_driven`) when the agent's record names how it runs instead of its profile. `addressability` and `runtime_mode_override` are read back only: the host sets them, and identity_create and identity_update do not take them.
 
 `profile` narrows the list to one profile; `include_archived` adds archived agents; when the result has `next`, pass it as `after` to read on.",
         r#"{
@@ -304,9 +304,9 @@ Each entry of `agents` has `name`, `display_name`, `profile`, `spec_digest` (wha
     ),
     (
         "identity_get",
-        r"Read one long-term agent of your mob by name: what identity_list says of it (`name`, `display_name`, `profile`, `spec_digest`, `spec_revision`, `archived`, `readiness`) and the rest of what a create or an update sets: its `instructions`, `context`, `labels` and `peers` (the peers its changes listed, among the agents you are shown). An archived agent is read too, and so is your own record. Read only: it never wakes an agent and loads nothing.
+        r"Read one long-term agent of your mob by name: what identity_list says of it (`name`, `display_name`, `profile`, `spec_digest`, `spec_revision`, `archived`, `readiness`, and `addressability` and `runtime_mode_override` when the agent has them) and the rest of what a create or an update sets: its `instructions`, `context`, `labels` and `peers` (the peers its changes listed, among the agents you are shown). An archived agent is read too, and so is your own record. Read only: it never wakes an agent and loads nothing.
 
-You are not shown who asked for the agent, when, or under which consent. A `name` that no agent holds, and an agent you are not shown (one private to a person), both answer `identity_unknown`.
+You are not shown who asked for the agent, when, or under which consent. A `name` that no agent holds, and an agent you are not shown (one private to a person), both answer `identity_unknown`. `addressability` and `runtime_mode_override` are read back only: the host sets them, and identity_create and identity_update do not take them.
 
 A change of the agent sends its `spec_digest` as `expected_spec_digest`.",
         r#"{

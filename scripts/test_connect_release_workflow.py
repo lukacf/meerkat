@@ -47,7 +47,8 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/connect-release.yml"
 PUBLISHER = ROOT / "scripts/connect_release_macos_assets.py"
 JOBS = ("resolve", "require_ci_green", "floor_check", "create_release", "build_macos", "publish_macos",
-        "recover_macos", "stage_macos_build", "stage_macos_check", "build", "attest", "accept", "publish")
+        "recover_macos", "stage_macos_build", "stage_macos_check", "assemble_macos", "build", "attest", "accept",
+        "publish")
 
 
 def job_block(name: str) -> str:
@@ -1118,7 +1119,8 @@ class ConnectMacosStageTests(unittest.TestCase):
 
     def test_the_stage_is_a_dispatch_mode_with_an_optional_core_release(self):
         text = WORKFLOW.read_text()
-        self.assertIn("        options: [candidate, accept, publish, macos-build, macos-assets, macos-stage]\n", text)
+        self.assertIn("        options: [candidate, accept, publish, macos-build, macos-assets, macos-stage, "
+                      "macos-assemble]\n", text)
         inputs = text[text.index("    inputs:\n"):text.index("\npermissions:\n")]
         block = inputs[inputs.index("      rkat_release_tag:\n"):]
         self.assertIn('        required: false\n        default: ""\n        type: string\n', block[:400])
@@ -1470,6 +1472,196 @@ class ConnectMacosStageTests(unittest.TestCase):
                      "path: ${{ runner.temp }}/stage-provenance/connect-macos-arm64-stage-provenance.jsonl",
                      "if-no-files-found: error", "overwrite: false", "retention-days: 90"):
             self.assertIn(f"          {line}\n", provenance)
+
+
+STAGE_DIRECTORY = "/private/tmp/cs"
+ASSEMBLY_DIRECTORY = "/private/tmp/ca"
+ASSEMBLE_STEPS = (
+    "Checkout the dispatched source",
+    "Check the runner layout",
+    "Select Python",
+    "Read the stage run and the stated review digest",
+    "Download the stage record and its provenance",
+    "Verify the stage record's attestation and commit",
+    "Accept the reviewed shutdown record",
+    "Assemble both products",
+    "Upload the assembly",
+)
+GH_RECORDER = (
+    f"#!{sys.executable}\n"
+    "import json, os, sys\n"
+    "with open(os.environ['GH_LOG'], 'a') as log:\n"
+    "    log.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+    "sys.exit(int(os.environ.get('GH_STATUS', '0')))\n"
+)
+
+
+class ConnectMacosAssembleTests(unittest.TestCase):
+    """Stage two, hosted: a dispatch downloads one stage record of the dispatched commit, checks its
+    attestation, reproduces the accepted shutdown review the reader stated by digest, assembles both
+    products at the stage's own paths and uploads them as a workflow artifact. Nothing is published."""
+
+    JOB = "assemble_macos"
+
+    def test_the_assembly_is_a_dispatch_mode_that_reuses_two_inputs(self):
+        text = WORKFLOW.read_text()
+        inputs = text[text.index("    inputs:\n"):text.index("\npermissions:\n")]
+        names = re.findall(r"(?m)^      ([a-z_0-9]+):$", inputs)
+        # A dispatch takes few inputs: the stage run and the stated digest travel in two existing ones.
+        self.assertLessEqual(len(names), 10)
+        for name in ("candidate_run_id", "acceptance_sha256"):
+            block = inputs[inputs.index(f"      {name}:\n"):]
+            self.assertIn("macos-assemble", block.splitlines()[1])
+        step = step_block("Read the stage run and the stated review digest", self.JOB)
+        self.assertIn("          STAGE_RUN: ${{ inputs.candidate_run_id }}\n", step)
+        self.assertIn("          REVIEW_SHA256: ${{ inputs.acceptance_sha256 }}\n", step)
+
+    def test_only_the_assembly_dispatch_runs_the_job(self):
+        outcome = results("workflow_dispatch", "macos-assemble")
+        self.assertEqual({job for job, result in outcome.items() if result == "success"}, {"resolve", self.JOB})
+        for event, mode in (("push", "tag"), ("workflow_dispatch", "candidate"), ("workflow_dispatch", "accept"),
+                            ("workflow_dispatch", "publish"), ("workflow_dispatch", "macos-build"),
+                            ("workflow_dispatch", "macos-assets"), ("workflow_dispatch", "macos-stage")):
+            with self.subTest(mode=mode):
+                self.assertEqual(results(event, mode)[self.JOB], "skipped")
+        self.assertEqual(job_needs(self.JOB), ["resolve"])
+        sha = "4" * 40
+        result, _, _, output = run_step("Resolve", job="resolve", env={
+            "EVENT": "workflow_dispatch", "REF": "", "MODE": "macos-assemble", "RELEASE_TAG": "", "GITHUB_SHA": sha})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"source_ref={sha}\n", output)
+
+    def test_the_job_reads_artifacts_and_can_write_nothing_but_its_own(self):
+        block = job_block(self.JOB)
+        self.assertIn("    runs-on: macos-15\n", block)
+        self.assertLessEqual(int(re.search(r"(?m)^    timeout-minutes: ([0-9]+)$", block).group(1)), 360)
+        self.assertEqual(job_mapping(self.JOB, "permissions"), {"actions": "read", "contents": "read"})
+        for word in ("secrets.", "gh release", "gh api", "gh workflow", "git push", "git tag", "contents: write",
+                     "id-token", "attestations: write", "--clobber", "API_KEY", "notarytool", "Developer ID",
+                     "codesign", "repo-cargo", "cargo "):
+            with self.subTest(word=word):
+                self.assertNotIn(word, block)
+        # The run's own token is used for two reads: another run's artifacts and the attestation check.
+        self.assertEqual(sorted(set(re.findall(r"(?m)^\s+gh ([a-z]+ [a-z]+) ", block))),
+                         ["attestation verify", "run download"])
+        uses = re.findall(r"(?m)^        uses: ([^@\s]+)@", block)
+        self.assertEqual(uses, ["actions/checkout", "actions/setup-python", "actions/upload-artifact"])
+
+    def test_the_assembly_runs_at_the_stages_own_paths(self):
+        self.assertEqual(job_mapping(self.JOB, "env"), {
+            "CONNECT_CHECKOUT": CHECKOUT_ROOT, "CONNECT_WORK": WORK_ROOT, "CONNECT_STAGE": STAGE_DIRECTORY,
+            "CONNECT_ASSEMBLY": ASSEMBLY_DIRECTORY, "PYTHONDONTWRITEBYTECODE": "1"})
+        for step in ("Checkout the dispatched source", "Check the runner layout", "Select Python"):
+            with self.subTest(step=step):
+                self.assertEqual(step_block(step, self.JOB).rstrip(), step_block(step, "stage_macos_check").rstrip())
+        self.assertEqual(tuple(re.findall(r"(?m)^      - name: (.+)$", job_block(self.JOB))), ASSEMBLE_STEPS)
+
+    def request(self, stage_run, review):
+        with TempDir() as scratch:
+            output = scratch / "github-output"
+            result = run_stage_step("Read the stage run and the stated review digest", self.JOB, scratch, {
+                "STAGE_RUN": stage_run, "REVIEW_SHA256": review, "GITHUB_OUTPUT": str(output)})
+            return result, output.read_text() if output.exists() else ""
+
+    def test_the_request_names_one_stage_run_attempt_and_one_digest(self):
+        digest = "a1" * 32
+        for stage_run, expected in (("987654", ("987654", "1")), ("987654-3", ("987654", "3"))):
+            with self.subTest(stage_run=stage_run):
+                result, output = self.request(stage_run, digest)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(output, f"run_id={expected[0]}\nattempt={expected[1]}\nreview_sha256={digest}\n")
+        for stage_run in ("", "0", "12a", "987654-0", "987654-2-3", "987654 ", "-2", "987654;id", "main"):
+            with self.subTest(stage_run=stage_run):
+                result, output = self.request(stage_run, digest)
+                self.assertEqual((result.returncode, output), (1, ""))
+        for review in ("", digest.upper(), digest[:-1], digest + "0", "sha256:" + digest):
+            with self.subTest(review=review):
+                result, output = self.request("987654", review)
+                self.assertEqual((result.returncode, output), (1, ""))
+
+    def gh_step(self, step, *, stage=None, env=None, status="0"):
+        with TempDir() as scratch:
+            scratch = scratch.resolve()
+            (scratch / "bin").mkdir()
+            (scratch / "bin/gh").write_text(GH_RECORDER)
+            (scratch / "bin/gh").chmod(0o755)
+            (scratch / "stage").mkdir()
+            if stage is not None:
+                (scratch / "stage/STAGE.json").write_text(json.dumps(stage))
+            log = scratch / "gh-log"
+            result = run_stage_step(step, self.JOB, scratch, {
+                "GH_LOG": str(log), "GH_STATUS": status, "GITHUB_REPOSITORY": "lukacf/meerkat",
+                "CONNECT_STAGE": str(scratch / "stage"), "RUNNER_TEMP": str(scratch / "temp"),
+                "PATH": f"{scratch / 'bin'}:{os.environ['PATH']}", **(env or {})})
+            calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+            return result, calls, scratch
+
+    def test_the_stage_record_and_its_provenance_come_from_the_named_run_attempt(self):
+        result, calls, scratch = self.gh_step("Download the stage record and its provenance",
+                                              env={"RUN_ID": "987654", "ATTEMPT": "3"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls, [
+            ["run", "download", "987654", "--repo", "lukacf/meerkat", "--name",
+             "connect-macos-arm64-stage-987654-3", "--dir", str(scratch / "stage")],
+            ["run", "download", "987654", "--repo", "lukacf/meerkat", "--name",
+             "connect-macos-arm64-stage-provenance-987654-3", "--dir", str(scratch / "temp" / "stage-provenance")],
+        ])
+        step = step_block("Download the stage record and its provenance", self.JOB)
+        self.assertIn("          GH_TOKEN: ${{ github.token }}\n", step)
+        self.assertIn("          RUN_ID: ${{ steps.request.outputs.run_id }}\n", step)
+        self.assertIn("          ATTEMPT: ${{ steps.request.outputs.attempt }}\n", step)
+
+    def test_a_stage_of_another_commit_or_without_this_workflows_attestation_is_refused(self):
+        sha = "5" * 40
+        step = "Verify the stage record's attestation and commit"
+        result, calls, scratch = self.gh_step(step, stage={"revision": sha}, env={"GITHUB_SHA": sha})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls, [[
+            "attestation", "verify", str(scratch / "stage" / "STAGE.json"), "--repo", "lukacf/meerkat",
+            "--bundle", str(scratch / "temp" / "stage-provenance" / "connect-macos-arm64-stage-provenance.jsonl"),
+            "--signer-workflow", "lukacf/meerkat/.github/workflows/connect-release.yml",
+            "--source-digest", sha]])
+        result, calls, _ = self.gh_step(step, stage={"revision": "6" * 40}, env={"GITHUB_SHA": sha})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("not the dispatched commit", result.stderr)
+        result, calls, _ = self.gh_step(step, stage={"revision": sha}, env={"GITHUB_SHA": sha}, status="1")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(len(calls), 1)
+        for stage in ({}, {"revision": 7}, None):
+            with self.subTest(stage=stage):
+                result, _, _ = self.gh_step(step, stage=stage, env={"GITHUB_SHA": sha})
+                self.assertNotEqual(result.returncode, 0)
+
+    def test_the_stated_review_is_reproduced_and_both_products_are_assembled(self):
+        review = '"${RUNNER_TEMP}/native-shutdown-review.accepted.json"'
+        self.assertEqual(
+            one_line("Accept the reviewed shutdown record", self.JOB),
+            f'set -euo pipefail {PRODUCER} accept-review --stage "${{CONNECT_STAGE}}" --output {review} '
+            '--review-sha256 "${REVIEW_SHA256}"')
+        self.assertEqual(
+            one_line("Assemble both products", self.JOB),
+            f'set -euo pipefail {PRODUCER} assemble --work "${{CONNECT_WORK}}" --stage "${{CONNECT_STAGE}}" '
+            f'--review {review} --review-sha256 "${{REVIEW_SHA256}}" --output "${{CONNECT_ASSEMBLY}}"')
+        for step in ("Accept the reviewed shutdown record", "Assemble both products"):
+            self.assertIn("          REVIEW_SHA256: ${{ steps.request.outputs.review_sha256 }}\n",
+                          step_block(step, self.JOB))
+        called = re.findall(r"connect-candidate\.py macos ([a-z-]+)", job_block(self.JOB))
+        self.assertEqual(called, ["accept-review", "assemble"])
+
+    def test_one_artifact_holds_both_archives_their_checksums_and_the_assembly_record(self):
+        upload = step_block("Upload the assembly", self.JOB) + "\n"
+        self.assertIn("        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4\n", upload)
+        for line in ("name: connect-macos-arm64-assembly-${{ github.run_id }}-${{ github.run_attempt }}",
+                     "if-no-files-found: error", "overwrite: false", "retention-days: 90"):
+            self.assertIn(f"          {line}\n", upload)
+        paths = re.findall(r"(?m)^            (/\S+)$", upload)
+        self.assertEqual(paths, [
+            f"{ASSEMBLY_DIRECTORY}/ASSEMBLY.json",
+            f"{ASSEMBLY_DIRECTORY}/cli/meerkat-connect-*-macos-arm64.tar.gz",
+            f"{ASSEMBLY_DIRECTORY}/cli/meerkat-connect-*-macos-arm64.tar.gz.sha256",
+            f"{ASSEMBLY_DIRECTORY}/gateway/meerkat-connect-gateway-*-macos-arm64.tar.gz",
+            f"{ASSEMBLY_DIRECTORY}/gateway/meerkat-connect-gateway-*-macos-arm64.tar.gz.sha256",
+        ])
 
 
 if __name__ == "__main__":

@@ -652,11 +652,15 @@ export class MetaBuilder {
   }
 
   /**
-   * Give locally hosted mob members signed TCP comms endpoints.
+   * Give the gateway's member a signed TCP comms endpoint.
    *
    * External members run in another process and cannot reply to the default
-   * in-process endpoints. Each local member binds an ephemeral TCP port. Pass
-   * a concrete externally reachable interface address for cross-host peers.
+   * in-process endpoints. A gateway with this option serves one member: the
+   * first member built holds the place until it is retired, and every other
+   * member is refused before it is built (see `member_comms_address` in the
+   * configuration reference). The default address binds a kernel-picked
+   * loopback port. Pass a concrete externally reachable interface address
+   * for cross-host peers.
    */
   memberCommsTcp(address = "127.0.0.1:0"): this {
     if (!address.trim()) {

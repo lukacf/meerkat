@@ -18,6 +18,13 @@
 //! the refused member's own session error. That error names the refused
 //! member only: who holds the place is written to the log, once per refused
 //! member, never to a caller.
+//!
+//! A restore is a create too. A member that was built in an earlier start
+//! and is refused at its restore keeps its session: the refusal builds
+//! nothing and archives nothing, so the member runs again at the next start
+//! where it can. A declared member that is refused at its first build has no
+//! session to come back to; its mob lists it broken until it is started
+//! over.
 
 use std::sync::{Arc, Mutex, PoisonError};
 

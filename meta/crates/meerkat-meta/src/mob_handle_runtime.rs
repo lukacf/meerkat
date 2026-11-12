@@ -14782,9 +14782,10 @@ mod tests {
 
     /// With socket comms the composition serves one member. While the first
     /// member's session exists, another member's create is refused before
-    /// the inner service sees it, with the text that names the holder; the
-    /// holder's own rebuild and a plain session pass; once the holder's
-    /// session is gone (a retired member) the next member takes the place.
+    /// the inner service sees it, with the text that names the refused member
+    /// only; the holder's own rebuild and a plain session pass; once the
+    /// holder's session is gone (a retired member) the next member takes the
+    /// place.
     #[tokio::test]
     async fn a_second_socket_member_is_refused_before_its_build_while_the_first_holds_the_place() {
         let probe = Arc::new(ForwardingProbe::default());

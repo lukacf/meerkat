@@ -1329,6 +1329,81 @@ async fn a_process_cut_between_the_commit_and_the_settlement_settles_executed_af
     rig.shutdown().await;
 }
 
+/// A receipt of ANOTHER request under the operation id is not the held
+/// change's commit. A held create is approved and its permit issued, and
+/// the process ends before the change commits; the requester's other,
+/// allowed create under the same request id commits under the operation.
+/// After a restart the driver does not record the decision executed on
+/// the strength of that receipt: it asks the seam, Core answers that the
+/// operation was used for another request, and the decision ends not
+/// carried out. The held agent does not exist.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_receipt_of_another_request_under_the_operation_is_not_the_decisions_commit() {
+    let temp = tempfile::tempdir().unwrap();
+    let mob_id = fresh_mob_id();
+    // A seam that commits nothing: the permit is issued and the process
+    // is cut before anything is written.
+    let rig = boot_with(
+        temp.path(),
+        &mob_id,
+        Boot {
+            seam: ObservedSeam::scripted(),
+            ..Boot::default()
+        },
+    )
+    .await;
+    let facts = host_facts();
+    let (decision_id, _) = pending(&rig.ask_create(&facts, "race-1", &["scout"]).await);
+    rig.approve(&decision_id).await;
+    rig.seam.cut_after_commit.store(true, Ordering::SeqCst);
+    let mut executors = rig.executor_loop();
+    tokio::select! {
+        pass = executors.pass() => panic!("the pass is cut before it settles: {pass:?}"),
+        () = rig.seam.cut_reached.notified() => {}
+        () = tokio::time::sleep(BOUND) => panic!("the driver did not ask the seam"),
+    }
+    drop(executors);
+    assert!(!rig.exists("scout"), "nothing committed the held change");
+    assert!(
+        rig.row(&decision_id).state.permit_issued,
+        "the permit is outstanding"
+    );
+
+    // The same requester's other request under the same request id.
+    let other = normalized_create(&allow_policy(), &facts, &[spec("scribe")]);
+    let operation_id = operation(&facts, "race-1");
+    let mob = rig.mob();
+    let committed = CoreChangeExecutor::new()
+        .commit(ChangeCommit::new(
+            &mob,
+            &operation_id,
+            &ChangeRequester::host(SURFACE),
+            consent_of_plan(&other.plan).expect("the rule allows the create"),
+            &other.request,
+        ))
+        .await
+        .expect("the seam answers");
+    assert_eq!(committed.outcome.token(), "done", "{committed:?}");
+    drop(mob);
+    rig.shutdown_for_reopen().await;
+
+    let rig = boot(temp.path(), &mob_id).await;
+    assert!(rig.exists("scribe"));
+    let mut executors = rig.executor_loop();
+    let did = drive(&mut executors).await;
+    assert!(
+        !did.contains(&DecisionPassOutcome::SettledExecuted),
+        "another request's receipt is not this decision's commit: {did:?}"
+    );
+    assert_ne!(
+        rig.row(&decision_id).state.phase,
+        DecisionPhase::Executed,
+        "the held change was not carried out"
+    );
+    assert!(!rig.exists("scout"), "the held agent was never created");
+    rig.shutdown().await;
+}
+
 /// Declare `definition` as the stored definition's successor through the
 /// spec-update ceremony, the sanctioned path for an edited definition: a
 /// persistent mob pins its definition, and a start that carries an

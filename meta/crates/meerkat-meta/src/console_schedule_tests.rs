@@ -4412,9 +4412,9 @@ async fn due_after(
     }
     let mut woken = Vec::new();
     for wake in &wakes {
-        woken.extend(fired.ended(wake, 1, Duration::from_secs(60)).await);
+        woken.extend(fired.ended(wake, 1, Duration::from_mins(1)).await);
     }
-    let first_turns = tokio::time::Instant::now() + Duration::from_secs(60);
+    let first_turns = tokio::time::Instant::now() + Duration::from_mins(1);
     while fired.model_calls.load(SeqCst) < 2 && tokio::time::Instant::now() < first_turns {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -4494,7 +4494,7 @@ async fn due_after(
     let control_calls = fired.model_calls.load(SeqCst);
     let ledger_after = fired.reading("ledger", &ledger).await;
 
-    let ended = fired.ended(&scouts, 2, Duration::from_secs(60)).await;
+    let ended = fired.ended(&scouts, 2, Duration::from_mins(1)).await;
     // Whatever a fire started has shown by now.
     tokio::time::sleep(Duration::from_secs(2)).await;
     let calls = fired.model_calls.load(SeqCst);

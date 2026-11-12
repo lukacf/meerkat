@@ -336,6 +336,10 @@ struct ConsoleSnapshotReadModelState {
 #[derive(Clone, Debug, Default)]
 struct IdentityBindingCut {
     bindings: BTreeMap<String, IdentityBinding>,
+    /// The display name of each identity whose registration carries one.
+    /// No part of a binding: a rename moves no session and no walked fact,
+    /// so it makes no row pending.
+    display_names: BTreeMap<String, String>,
     /// Positions of the read's start and completion on
     /// [`IDENTITY_BINDING_CUT_SEQUENCE`]. The empty cut of an unprimed read
     /// model holds 0 for both, before every read.
@@ -366,6 +370,7 @@ impl IdentityBindingCut {
     async fn read(identity_runtime: Option<&crate::identity_first::IdentityRuntime>) -> Self {
         let read_started = next_identity_binding_cut_position();
         let mut bindings = BTreeMap::new();
+        let mut display_names = BTreeMap::new();
         if let Some(identity_runtime) = identity_runtime {
             // A read that fails records no binding, so the walk's rows are
             // left as walked until a later cut answers.
@@ -377,6 +382,12 @@ impl IdentityBindingCut {
                 })
                 .unwrap_or_default();
             for status in statuses {
+                if let Some(display_name) = status.display_name.as_ref() {
+                    display_names.insert(
+                        status.identity.as_str().to_string(),
+                        display_name.as_str().to_string(),
+                    );
+                }
                 bindings.insert(
                     status.identity.as_str().to_string(),
                     IdentityBinding {
@@ -388,6 +399,7 @@ impl IdentityBindingCut {
         }
         Self {
             bindings,
+            display_names,
             read_started,
             read_completed: next_identity_binding_cut_position(),
         }
@@ -18328,6 +18340,12 @@ async fn build_live_snapshot(
 /// time) until the walk lands. Its other facts stay as walked: visibility
 /// and access decide on them, and the experience renders every record of a
 /// pending row in its withheld shape.
+///
+/// An identity-first row is also labelled by its registration: its
+/// `display_name` label is the display name `cut` read for the identity,
+/// when the registration has one. The roster, the sidebar and the topology
+/// node all read that label, so they show one name, and a change of it shows
+/// at the next read with no new walk.
 async fn join_identity_bindings(
     members: &mut [ConsoleMember],
     walked_cut: &IdentityBindingCut,
@@ -18347,6 +18365,18 @@ async fn join_identity_bindings(
         };
         if !crate::member_comms_id::live_member_is_identity(&member.agent_identity, &identity) {
             continue;
+        }
+        // The label the roster, the sidebar and the topology node read
+        // (`labels.display_name`, else the row's id) is the display name of
+        // the identity's registration, when it has one. A seat carries only
+        // the labels it was seated with: an identity whose record is its row
+        // in the mob's identity store is seated with its row's labels, which
+        // hold no display name, and a change of the row's display name
+        // reaches the registration, never the seat.
+        if let Some(display_name) = cut.display_names.get(&identity) {
+            member
+                .labels
+                .insert("display_name".to_string(), display_name.clone());
         }
         let current = cut.bindings.get(&identity);
         let session_id = current.and_then(|binding| binding.session_id.clone());

@@ -129,6 +129,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   encodes. A member with the label resolves exactly as before, and a plain
   worker still resolves to no identity.
 
+- The console experience read labels an agent by its registration's
+  display name when it has one, else by its name: the roster, the sidebar
+  and the topology node read the same answer the identities listing gives.
+  An agent whose record is its row was labelled by its name even after its
+  row got a display name, because the label was read from its seat's
+  labels, which do not carry one. The label now follows an update of the
+  row as soon as the registration follows it, with no restart. A configured
+  agent's label is unchanged where its seat label and its registration
+  agree; where they differ, the registration's display name is shown.
+
 - A member of an identity whose record is its row acts as that identity
   for the extension state (the `extension-state` feature): its session
   resolves the agent principal of its name, as a configured identity's

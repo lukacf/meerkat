@@ -1878,11 +1878,13 @@ mod tests {
 
     use meerkat_core::model_profile::capabilities::EffortLevel;
 
-    /// A fallback target whose client reports a scripted route and records
-    /// the params its pressure probe is handed.
+    /// A fallback target whose client reports a scripted route and a
+    /// scripted default tag, and records the params its pressure probe is
+    /// handed.
     struct RouteClient {
         model: String,
         route: Option<meerkat_core::ReasoningRouteObservation>,
+        default_tag: Option<meerkat_core::lifecycle::run_primitive::ProviderTag>,
         probed: Arc<std::sync::Mutex<Vec<Option<ProviderParamsOverride>>>>,
     }
 
@@ -1891,6 +1893,12 @@ mod tests {
     impl AgentLlmClient for RouteClient {
         fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
             self.route.clone()
+        }
+
+        fn default_provider_tag(
+            &self,
+        ) -> Option<meerkat_core::lifecycle::run_primitive::ProviderTag> {
+            self.default_tag.clone()
         }
 
         fn request_pressure(
@@ -1966,6 +1974,17 @@ mod tests {
         level: EffortLevel,
         route: Option<meerkat_core::ReasoningRouteObservation>,
     ) -> (ModelFallbackCandidate, Probed) {
+        leveled_target_with_default_tag(model, level, route, None)
+    }
+
+    /// [`leveled_target`] whose client applies `default_tag` to a request
+    /// that carries no tag of its own.
+    fn leveled_target_with_default_tag(
+        model: &str,
+        level: EffortLevel,
+        route: Option<meerkat_core::ReasoningRouteObservation>,
+        default_tag: Option<meerkat_core::lifecycle::run_primitive::OpenAiProviderTag>,
+    ) -> (ModelFallbackCandidate, Probed) {
         let probed = Probed::default();
         let mut target = candidate(
             Provider::OpenAI,
@@ -1979,6 +1998,8 @@ mod tests {
         target.client = Arc::new(RouteClient {
             model: model.to_string(),
             route,
+            default_tag: default_tag
+                .map(meerkat_core::lifecycle::run_primitive::ProviderTag::OpenAi),
             probed: Arc::clone(&probed),
         });
         (target, probed)
@@ -2174,6 +2195,7 @@ mod tests {
         target.client = Arc::new(RouteClient {
             model: "target".to_string(),
             route: None,
+            default_tag: None,
             probed: Arc::clone(&probed),
         });
         let expected_identity = target.identity.clone();
@@ -2205,6 +2227,113 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
             vec![Some(ProviderParamsOverride::default())],
             "the probe carries the target's own params, with no effort field"
+        );
+    }
+
+    /// A target is judged on what its client sends: a client that applies a
+    /// default tag to a request without one is judged with that tag. A
+    /// default tag that sets another provider-specific effort than the
+    /// session's level is a conflict on that target, so it is skipped with
+    /// the typed reason and never probed; the next target, whose client has
+    /// no such default, is taken.
+    #[test]
+    fn a_target_whose_default_tag_conflicts_with_the_level_is_skipped() {
+        use meerkat_core::lifecycle::run_primitive::{OpenAiProviderTag, ReasoningEffort};
+
+        let route = || Some(account_route(&[EffortLevel::Low, EffortLevel::High]));
+        let (conflicting, conflicting_probed) = leveled_target_with_default_tag(
+            "conflicting",
+            EffortLevel::High,
+            route(),
+            Some(OpenAiProviderTag {
+                reasoning_effort: Some(ReasoningEffort::Low),
+                ..Default::default()
+            }),
+        );
+        let (accepting, _) = leveled_target("accepting", EffortLevel::High, route());
+        let client = ModelFallbackClient::new(
+            vec![leveled_primary(EffortLevel::High), conflicting, accepting],
+            Default::default(),
+            Vec::new(),
+            None,
+        )
+        .unwrap();
+        let switch = client
+            .prepare_model_fallback(&retryable_error(Provider::OpenAI), &request(&[]))
+            .expect("the target without a conflicting default is taken");
+        assert_eq!(switch.new_identity.model, "accepting");
+        let skipped = switch
+            .skipped_targets
+            .iter()
+            .map(|target| (target.identity.model.as_str(), reason_name(target.reason)))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            skipped,
+            vec![("conflicting", "reasoning_effort_unsupported".to_string())],
+            "a default tag that sets another effort is a conflict on that target"
+        );
+        assert!(
+            conflicting_probed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "a target skipped for the level is not probed"
+        );
+    }
+
+    /// A default tag that does not touch the effort travels with the probe:
+    /// the probe copy carries the client's own field beside the level, as a
+    /// request on the target would. The switch still carries the neutral
+    /// level and nothing of the default tag, which stays the client's.
+    #[test]
+    fn the_probe_carries_the_targets_default_tag_beside_the_level() {
+        use meerkat_core::lifecycle::run_primitive::{OpenAiProviderTag, ProviderTag};
+        use meerkat_core::model_profile::capabilities::OpenAiTextVerbosity;
+
+        let (target, probed) = leveled_target_with_default_tag(
+            "target",
+            EffortLevel::High,
+            Some(account_route(&[EffortLevel::Low, EffortLevel::High])),
+            Some(OpenAiProviderTag {
+                text_verbosity: Some(OpenAiTextVerbosity::Low),
+                ..Default::default()
+            }),
+        );
+        let client = ModelFallbackClient::new(
+            vec![leveled_primary(EffortLevel::High), target],
+            Default::default(),
+            Vec::new(),
+            None,
+        )
+        .unwrap();
+        let switch = client
+            .prepare_model_fallback(&retryable_error(Provider::OpenAI), &request(&[]))
+            .expect("an orthogonal default tag is no conflict");
+        assert_eq!(
+            switch.request_policy.provider_params,
+            Some(level_only(EffortLevel::High)),
+            "the sticky policy carries the neutral level alone"
+        );
+
+        let probed = probed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(probed.len(), 1, "one probe of the accepted target");
+        let probe = probed[0].as_ref().expect("the probe carries params");
+        assert_eq!(probe.reasoning_effort, None);
+        let Some(ProviderTag::OpenAi(tag)) = probe.provider_tag.as_ref() else {
+            panic!("the probe carries an OpenAI tag: {probe:?}");
+        };
+        assert_eq!(
+            tag.text_verbosity,
+            Some(OpenAiTextVerbosity::Low),
+            "the probe carries the client's default field"
+        );
+        assert_eq!(
+            serde_json::to_value(tag.reasoning_effort).ok(),
+            Some(serde_json::json!("high")),
+            "beside the level as the route's own field"
         );
     }
 

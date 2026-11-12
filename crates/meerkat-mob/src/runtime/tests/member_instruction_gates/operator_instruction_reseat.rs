@@ -722,7 +722,7 @@ async fn a_release_between_the_preparation_and_the_write_writes_nothing() {
         "with the epoch that stands the record reaches the session"
     );
     assert!(
-        matches!(record, WakeInstructionRecord::Failed { .. }),
+        matches!(record, WakeInstructionRecord::Failed),
         "the session has no live actor: the record fails and the member stays owed"
     );
     fixture.finish().await;

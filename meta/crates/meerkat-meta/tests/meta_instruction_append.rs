@@ -2786,7 +2786,7 @@ async fn more_than_64_agents_each_get_their_own_appended_instruction() {
         .await;
         assert_eq!(
             identities
-                .after_update(&rig.mob(), &changed(&name, vec![previous], vec![current]),)
+                .after_update(&rig.mob(), &changed(name, vec![previous], vec![current]),)
                 .await,
             InstructionOutcome::AppliesAtNextRun,
             "{name}'s change is recorded"

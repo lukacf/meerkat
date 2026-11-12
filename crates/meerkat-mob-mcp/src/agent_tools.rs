@@ -8742,6 +8742,75 @@ mod tests {
         );
     }
 
+    /// `mob_check_member` and `mob_retire_member` ask the host's member tool
+    /// audience themselves: a member it hides from the caller answers
+    /// exactly as a name the mob does not hold, with manage scope, and stays
+    /// seated. A caller the member is not hidden from checks it as before.
+    #[tokio::test]
+    async fn mob_check_and_retire_member_answer_a_member_hidden_from_the_caller_as_absent() {
+        let state = MobMcpState::new_in_memory();
+        let handle = host_mob_with_kept_members(
+            &state,
+            "check-audience",
+            &[
+                ("check-kept", Some("ann")),
+                ("check-keeper", Some("ann")),
+                ("check-caller", None),
+            ],
+        )
+        .await;
+        let scope = || scope_only_authority("check-audience", handle.live_incarnation());
+        let caller = member_mob_tools(&state, &handle, "check-caller", scope()).await;
+        let keeper = member_mob_tools(&state, &handle, "check-keeper", scope()).await;
+        // A caller without manage scope over the mob: the audience is asked
+        // before the caller's ownership of the target is.
+        let unscoped = member_mob_tools(
+            &state,
+            &handle,
+            "check-caller",
+            spawn_profile_authority("check-audience", handle.live_incarnation(), "worker"),
+        )
+        .await;
+        let member = |member: &str| json!({ "mob_id": "check-audience", "member_id": member });
+
+        for (tools, scope) in [(&caller, "with manage scope"), (&unscoped, "without it")] {
+            for tool in ["mob_check_member", "mob_retire_member"] {
+                let absent =
+                    masked_mob_tool_answer(tools, tool, member("check-gone"), "check-gone").await;
+                assert!(
+                    absent.contains("member_not_found"),
+                    "{tool} {scope}: a name the mob does not hold is typed not found: {absent}"
+                );
+                let hidden =
+                    masked_mob_tool_answer(tools, tool, member("check-kept"), "check-kept").await;
+                assert_eq!(
+                    hidden, absent,
+                    "{tool} {scope}: a member hidden from the caller answers as a name the mob \
+                     does not hold"
+                );
+            }
+        }
+        assert!(
+            handle
+                .get_member(&AgentIdentity::from("check-kept"))
+                .await
+                .expect("roster read")
+                .is_some(),
+            "the hidden member stays seated"
+        );
+        let own = masked_mob_tool_answer(
+            &keeper,
+            "mob_check_member",
+            member("check-kept"),
+            "check-kept",
+        )
+        .await;
+        assert!(
+            own.starts_with("ok:"),
+            "a caller the member is not hidden from checks it: {own}"
+        );
+    }
+
     /// The classification behind `wired`: only a committed edge between the
     /// caller and the new member reports it wired, whatever was requested.
     #[test]

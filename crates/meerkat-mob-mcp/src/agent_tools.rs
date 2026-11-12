@@ -1927,6 +1927,20 @@ impl AgentMobToolSurface {
                 .ensure_mob_scope_authority(call.name, &source_mob_id)
                 .await?;
             let source_identity = AgentIdentity::from(participant.member_id);
+            // A member the source mob's host hides from the convener's
+            // member tools answers as a name that mob does not hold, before
+            // anything is read from it: nothing is forked.
+            let convener = self.caller_identity_in(&source).await;
+            if !source
+                .members_hidden_from(convener.as_ref(), std::slice::from_ref(&source_identity))
+                .await
+                .is_empty()
+            {
+                return Err(Self::map_mob_error(
+                    call,
+                    MobError::MemberNotFound(source_identity),
+                ));
+            }
             let source_profile = source
                 .effective_member_profile(&source_identity)
                 .await

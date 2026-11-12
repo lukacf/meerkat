@@ -8871,6 +8871,102 @@ mod tests {
         );
     }
 
+    /// Manage scope over a mob an agent created with `mob_create` belongs to
+    /// the session that created it: another member's session, holding the
+    /// capability to create mobs and manage scope over its own mob, is
+    /// refused by every tool that needs scope over the created mob, and its
+    /// `mob_list` does not name it. The creating session manages it.
+    #[tokio::test]
+    async fn a_session_holds_no_manage_scope_over_a_mob_another_session_created() {
+        let state = MobMcpState::new_in_memory();
+        let home = host_mob_with_kept_members(
+            &state,
+            "scope-home",
+            &[("scope-creator", None), ("scope-other", None)],
+        )
+        .await;
+        let creator =
+            member_mob_tools(&state, &home, "scope-creator", create_only_authority()).await;
+        let other = member_mob_tools(
+            &state,
+            &home,
+            "scope-other",
+            create_and_manage_authority(&home),
+        )
+        .await;
+        let created = masked_mob_tool_answer(
+            &creator,
+            "mob_create",
+            json!({
+                "definition": {
+                    "id": "scope-created",
+                    "profiles": {
+                        "worker": {
+                            "model": "claude-sonnet-4-5",
+                            "tools": { "comms": true },
+                            "peer_description": "worker",
+                            "runtime_mode": "turn_driven"
+                        }
+                    }
+                }
+            }),
+            "scope-helper",
+        )
+        .await;
+        assert!(created.starts_with("ok:"), "the creator's mob: {created}");
+        let created_id = MobId::from("scope-created");
+        for member in ["scope-helper", "scope-second"] {
+            state
+                .mob_spawn_spec(
+                    &created_id,
+                    SpawnMemberSpec::new(ProfileName::from("worker"), AgentIdentity::from(member)),
+                )
+                .await
+                .expect("seat a member of the created mob");
+        }
+
+        let own = listed_member_rows(&creator, "scope-created").await;
+        assert_eq!(own.len(), 2, "the creating session lists its mob: {own:?}");
+        for (tool, args) in [
+            ("mob_list_members", json!({ "mob_id": "scope-created" })),
+            (
+                "mob_wire",
+                json!({
+                    "mob_id": "scope-created",
+                    "member_id": "scope-helper",
+                    "peer": { "local": "scope-second" },
+                }),
+            ),
+            (
+                "mob_spawn_member",
+                json!({ "mob_id": "scope-created", "profile": "worker", "member_id": "scope-third" }),
+            ),
+            (
+                "council",
+                json!({
+                    "topic": "What were you asked so far?",
+                    "participants": [{
+                        "mob_id": "scope-created",
+                        "member_id": "scope-helper",
+                        "role": "witness",
+                    }],
+                    "max_rounds": 1,
+                }),
+            ),
+        ] {
+            let answer = masked_mob_tool_answer(&other, tool, args, "scope-helper").await;
+            assert!(
+                answer.starts_with("error: AccessDenied"),
+                "{tool}: another session holds no scope over the created mob: {answer}"
+            );
+        }
+        let mobs = masked_mob_tool_answer(&other, "mob_list", json!({}), "scope-helper").await;
+        assert!(
+            mobs.contains("scope-home") && !mobs.contains("scope-created"),
+            "another session's mob_list names its own mob only: {mobs}"
+        );
+    }
+
     /// The classification behind `wired`: only a committed edge between the
     /// caller and the new member reports it wired, whatever was requested.
     #[test]

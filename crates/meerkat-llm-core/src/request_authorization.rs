@@ -145,6 +145,11 @@ impl LlmClient for SelectedTargetClient {
         Some(self.target.controller_model_selection())
     }
 
+    /// The route of the client this wrapper selects a target for.
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        self.inner.reasoning_route()
+    }
+
     fn plain_model_route(
         &self,
         logical_model: &str,

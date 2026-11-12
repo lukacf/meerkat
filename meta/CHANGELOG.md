@@ -22,15 +22,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   unchanged; `Identity` sorts first, where `Declared` did.
 - Rust API of `meerkat-meta`: `IdentityStatus` gains the member `record`
   (`IdentityRecordFacts`), so a struct literal of it needs the member
-  (`record: Default::default()`). The status as written on the wire is
-  unchanged while the record's members are unset.
+  (`record: Default::default()`). The status of a seated agent is written
+  on the wire as before.
 - `runtime_options.identity_creation` (and the Rust form a native host
   returns): a policy that names the approval outcome `notify` or `review`, or
-  a `preparation` other than `none`, is refused at init, with the policy path
-  and what to write instead. Before, such a policy was accepted and nothing
-  acted on it. No notice reaches an approver for `notify` yet, no reviewer
-  decides for `review` yet, and no method settles a preparation yet: write
-  `allow` or `require_approval`, and leave `preparation` out.
+  the preparation mode `constructed`, is refused at init, with the policy
+  path and what to write instead. Before, such a policy was accepted and
+  nothing acted on it. No notice reaches an approver for `notify` yet, no
+  reviewer decides for `review` yet, and no method holds or activates a
+  construction yet: write `allow` or `require_approval`, and the preparation
+  mode `required`.
 - Rust, source only: `CustomizerToolsSpawnCustomizer` no longer implements
   the auto traits `UnwindSafe` and `RefUnwindSafe`. It now holds a
   late-bound reference to the session bridge, through which it asks whether
@@ -82,10 +83,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `adopt` (release a configured agent from configuration: it keeps its
   member, session and history, and is changed at run time from then on),
   `withdraw` and `changes_hold`, and the reads `list`, `get`, `operation`,
-  `directory` and `plan`. An agent created this way is the same kind of
+  `directory` and `plan`; on the stdio gateway also `settle_preparation`,
+  the host operator's (below). An agent created this way is the same kind of
   agent as a configured one; who asked for it is recorded and grants or
-  limits nothing. A create seats its agents dormant and wakes nothing, and a
-  read never wakes an agent. See "Agent changes" in the RPC reference.
+  limits nothing. A create seats its agents dormant and wakes nothing (an
+  agent of a profile its host prepares waits for its host first, below), and
+  a read never wakes an agent. See "Agent changes" in the RPC reference.
 - Every launch whose mob has long-term agents serves the methods and lists
   them in `meta/capabilities`. Their changes need the launch's identity
   policy (`runtime_options.identity_creation`, which until now was checked
@@ -146,6 +149,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   whose runtime is governed refuses a create that gives a first message
   (`unsupported`, `first_message_in_governed_realm`) before anything is
   written.
+- A host prepares an agent created at run time before its first use. A
+  launch's identity policy names `preparation.<profile>.mode: "required"`;
+  a create of an agent of that profile, at once or after a person approved
+  it, commits it pending its preparation (`pending_preparation`): it reads
+  `readiness: "preparation_pending"`, has no member, takes no message, and
+  nothing is built, run or woken for it, its first message included. The
+  host's operator settles it with the new method
+  `meta/identity/settle_preparation` (`{name, request_id}`), which answers a
+  change's outcome with the agent `committed` and its `seat`: the agent is
+  seated dormant and its first message runs once. A restart keeps a waiting
+  agent waiting. The operation of the agent's create reads where the agent
+  stands: `done` with the agent `committed` once it is settled, and `done`
+  with the agent `removed` once the agent has been removed with
+  `meta/identity/remove`, whether a host that gave up on it removed it
+  while it waited or it was settled first and removed later (the name is
+  then retired like any removed name). An update asks no
+  preparation, and an update that would move an agent into a prepared
+  profile is refused `unsupported` (`move_into_prepared_profile`, at
+  `set.profile`): create the agent in that profile. The move is refused
+  when it is asked, so a rule that has a person decide a profile change
+  holds nothing and asks nobody for it, and a plan of it answers the
+  refusal. A reset of an agent
+  that waits is refused retryable before the host composes a build for it.
+  The method is the 14th of the family, for the host's operator only: the
+  Console does not list it and refuses it for every caller. Rust:
+  `IdentityFamily::settle_preparation` (with a refusing default),
+  `IdentityChangeExecutor::settle_preparation` (with a refusing default)
+  and `identity_creation::{SettlePreparation, SettlePreparationCall,
+  PreparationSettle, MOVE_INTO_PREPARED_PROFILE}`.
 - Console access actions `agent.identity.create`, `agent.identity.manage`
   (update, archive, unarchive and adopt, on the named agent) and
   `agent.identity.remove` (on the named agent). `GET /console/experience`
@@ -292,10 +324,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     (which is `non_exhaustive`) are declared after every earlier one, so no
     earlier variant's implicit discriminant moves. A refusal carries a
     detail sentence (`IdentityRefusal::detail`, `to_refused`).
-- Rust API of `meerkat-meta`: `IdentityRecordFacts`, the record facts of an
-  identity's status (spec digest and revision, archived, preparation
-  pending, provenance, open operations), each absent on the wire while
-  unset. Nothing sets them yet.
+- `meta/status_identity` on the stdio gateway (Rust: `IdentityStatus`, as
+  `IdentityRuntime::status` and `statuses` answer it)
+  says when no member holds an agent and why: `archived: true` for an
+  archived agent and `preparation_pending: true` for an agent that waits
+  for its host's preparation. Each is written only when `true`, so the
+  status of a seated agent is unchanged, and each is read from Core's entry
+  of the agent's name on the read the status already makes: nothing is
+  built, loaded or woken. Rust API of `meerkat-meta`: `IdentityRecordFacts`
+  with the members `archived` and `preparation_pending`, and
+  `CoreIdentityEntry::is_archived` and `awaits_host_preparation`. An
+  agent's spec digest and revision, who asked for it and its open
+  operations are not on its status: `meta/identity/get` and
+  `meta/identity/list` answer them. The Console's own status answer is
+  unchanged.
+- `meta/identity/get` and `meta/identity/list` name the operations open
+  for an agent in `open_operations`: the create of an agent that waits for
+  its host's preparation, until the host settles it, and each change of
+  the agent that is held for a person's decision or approved and not yet
+  carried out. The member is absent when nothing is open. An operation id
+  is answered as `meta/identity/operation` answers the operation: the stdio
+  host reads every one, a Console caller its own and, with
+  `runtime.admin`, every one, and an agent none. A read that cannot read
+  the mob's held changes is refused `approval_unavailable` with a detail
+  that says to read again. Rust API: `IdentityDecisions::open_operations`.
 
 ### Changed
 

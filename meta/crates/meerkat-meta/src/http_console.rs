@@ -6021,6 +6021,13 @@ fn console_rpc_access_requirements(
             one(crate::access::ACTION_AGENT_IDENTITY_REMOVE, target)
         }
         crate::rpc::identity_methods::IDENTITY_CHANGES_HOLD => one(ACTION_RUNTIME_ADMIN, None),
+        // The settle of an agent's preparation is the host's operator's,
+        // which no Console caller is: the family refuses it here whoever
+        // asks. It is gated like the runtime's administration all the same,
+        // so a caller without that reads a plain access refusal.
+        crate::rpc::identity_methods::IDENTITY_SETTLE_PREPARATION => {
+            one(ACTION_RUNTIME_ADMIN, None)
+        }
         // The reads: one agent is judged on that agent; a list and the
         // directory leave out the agents the caller may not view.
         crate::rpc::identity_methods::IDENTITY_GET => one(ACTION_AGENT_VIEW, target),
@@ -6476,7 +6483,8 @@ pub(crate) fn console_method_member_fields(method: &str) -> Option<&'static [Con
         | crate::rpc::identity_methods::IDENTITY_REMOVE
         | crate::rpc::identity_methods::IDENTITY_ADOPT
         | crate::rpc::identity_methods::IDENTITY_GET
-        | crate::rpc::identity_methods::IDENTITY_PLAN => NAMED_AGENT,
+        | crate::rpc::identity_methods::IDENTITY_PLAN
+        | crate::rpc::identity_methods::IDENTITY_SETTLE_PREPARATION => NAMED_AGENT,
         crate::rpc::identity_methods::IDENTITY_LIST
         | crate::rpc::identity_methods::IDENTITY_DIRECTORY
         | crate::rpc::identity_methods::IDENTITY_OPERATION
@@ -13308,6 +13316,8 @@ async fn handle_console_runtime_rpc_with_visibility(
             );
             // The identity family, derived from its registry and split by
             // its own classifier: advertised by the runtime that serves it.
+            // A method that is the host's operator's alone is advertised to
+            // no Console caller: none of them is the operator.
             if identity_runtime
                 .as_ref()
                 .is_some_and(|identity_runtime| identity_runtime.identity_family().is_some())
@@ -13316,6 +13326,11 @@ async fn handle_console_runtime_rpc_with_visibility(
                     crate::rpc::identity_methods::IDENTITY_FAMILY_METHODS
                         .iter()
                         .copied()
+                        .filter(|method| {
+                            !crate::rpc::identity_methods::is_identity_family_operator_method(
+                                method,
+                            )
+                        })
                         .filter(|method| {
                             can_mutate
                                 || !crate::rpc::identity_methods::is_identity_family_mutating_method(
@@ -36745,6 +36760,20 @@ mod identity_family_console_access_tests {
         assert_eq!(
             console_rpc_access_requirements("meta/identity/changes_hold", &json!({ "held": true })),
             Some(vec![(ACTION_RUNTIME_ADMIN, None)])
+        );
+        assert_eq!(
+            console_rpc_access_requirements(
+                "meta/identity/settle_preparation",
+                &json!({ "request_id": "r-1", "name": "scout" })
+            ),
+            Some(vec![(ACTION_RUNTIME_ADMIN, None)])
+        );
+        assert_eq!(
+            console_method_members(
+                "meta/identity/settle_preparation",
+                &json!({ "request_id": "r-1", "name": "scout" })
+            ),
+            ["scout"]
         );
         assert_eq!(
             console_rpc_access_requirements("meta/identity/get", &json!({ "name": "scout" })),

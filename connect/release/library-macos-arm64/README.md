@@ -288,7 +288,10 @@ Each further capability is a separate explicit option of host preparation:
   [recipe owner](selected/contracts/LOCAL-RECIPES.md).
 - Container integrations use the Compose planner with an explicitly selected
   container backend; image acquisition and graph execution are enabled separately.
-  See [the Compose contract](selected/contracts/COMPOSE.md).
+  See [the Compose contract](selected/contracts/COMPOSE.md). The request example
+  beside the canonical contract, `selected/contracts/COMPOSE-request.example.json`,
+  holds example digests: they illustrate the format and are not digests of anything
+  in this archive.
 
 `setup_guide` returns the bundled contract for each enabled capability, with its byte
 count and SHA-256, so the agent needs no file tool to read them. Only host-enabled

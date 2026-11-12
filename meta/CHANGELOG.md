@@ -364,6 +364,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- An agent's `mob_check_member` and `mob_retire_member` naming a member
+  private to a person the agent does not act for, and the refusal of a
+  private member's `council`, read whom the member is private to from the
+  member's own roster row (its `console.private_to` label). They asked
+  only the running host's record of the members it had started, so
+  through 0.9.13 a private member the host had not started since its
+  launch (seated and never run, or any private member in the moments
+  after a restart) was checked and retired by another agent, and convened
+  a council. The host's record still adds what a roster row cannot say (a
+  member that left the roster).
 - The first build of an identity created at run time carries the host
   customizer's tools: the member Core starts at the create to run the
   identity's first message, and the member Core wakes before a roster pass

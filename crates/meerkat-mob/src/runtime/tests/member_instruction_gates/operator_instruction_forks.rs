@@ -1123,3 +1123,240 @@ async fn a_fork_of_a_fork_is_recorded_with_the_first_member_by_every_route() {
     }
     fixture.finish().await;
 }
+
+impl Fixture {
+    /// [`Self::restored_member`] in a mob that keeps its journal in a SQLite
+    /// database: its rows are stored encoded, and a resume reads them back.
+    async fn restored_member_on_a_sqlite_journal() -> Self {
+        let (fixture, session_id) =
+            Self::unseated_on_journal(ServiceDouble::Real, None, None, true).await;
+        fixture
+            .handle
+            .spawn_spec(
+                SpawnMemberSpec::new(ProfileName::from("lead"), fixture.identity.clone())
+                    .with_launch_mode(crate::launch::MemberLaunchMode::Resume {
+                        bridge_session_id: session_id,
+                        resume_from_role: None,
+                    }),
+            )
+            .await
+            .expect("restore the member onto its durable session");
+        fixture
+    }
+
+    /// The targets of the mob's records, as its status read lists them.
+    async fn desired_targets(&self) -> Vec<OperatorInstructionTarget> {
+        self.handle
+            .operator_instruction_status(OperatorInstructionStatusQuery::default())
+            .await
+            .expect("the status read answers")
+            .desired
+            .into_iter()
+            .map(|record| record.target)
+            .collect()
+    }
+}
+
+/// A fork's family and a record written for a member and its forks are
+/// stored facts: a mob that keeps its journal in SQLite is stopped and
+/// resumed from the stored rows, and the record still carries its scope,
+/// the fork's status row still lists it, the fork's first run has it once,
+/// and a revision written after the resume selects and reaches the fork.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_forks_family_and_a_scoped_record_survive_a_resume_from_a_sqlite_journal() {
+    let fixture = Fixture::restored_member_on_a_sqlite_journal().await;
+    let family = member_and_forks(&fixture.identity);
+    fixture
+        .set(write("call-sign", 1, CALL_SIGN, family.clone()))
+        .await;
+    fixture.instructions_current(&fixture.identity).await;
+    fixture.run_turn("source turn under the record").await;
+    let child = fixture.host_driven_fork("fork-child").await;
+
+    let fixture = fixture.crash_and_resume().await;
+    assert_eq!(
+        fixture.desired_targets().await,
+        vec![family.clone()],
+        "the stored record reads back as a record for the member and its forks"
+    );
+    assert_eq!(
+        fixture.listed_slots(&child).await,
+        vec!["call-sign".to_string()],
+        "the resumed mob still counts the child in its source's fork family"
+    );
+    let first = fixture.turn_request(&child, "the child's first task").await;
+    assert_eq!(
+        entries_with(&first, CALL_SIGN),
+        1,
+        "after the resume the child's first request has the record's body in effect, once"
+    );
+
+    let receipt = fixture
+        .handle
+        .set_operator_instruction(write("call-sign", 2, CALL_SIGN_REVISED, family))
+        .await
+        .expect("the revision commits");
+    assert_eq!(
+        receipt.matched_members, 2,
+        "the revision selects the member and its fork"
+    );
+    fixture.instructions_current(&child).await;
+    let second = fixture
+        .turn_request(&child, "the child's second task")
+        .await;
+    assert_eq!(
+        entries_with(&second, CALL_SIGN_REVISED),
+        1,
+        "a revision written after the resume reaches the child"
+    );
+    assert_appended(
+        &first,
+        &second,
+        "the revision reached the child as an appended entry",
+    );
+    fixture.finish().await;
+}
+
+/// A fork's family follows its identity through a respawn: the respawned
+/// fork runs on a new session, its first run there has its source's record
+/// once, its status row lists the record, and after a restart of the mob's
+/// host a revision still selects and reaches it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_respawned_fork_keeps_its_family() {
+    let fixture =
+        Fixture::source_with_record(member_and_forks(&AgentIdentity::from("restored-member")))
+            .await;
+    let child = fixture.host_driven_fork("fork-child").await;
+    fixture.turn_request(&child, "the child's first task").await;
+    let before = fixture
+        .member_session(&child)
+        .await
+        .expect("the child has a session");
+
+    tokio::time::timeout(WAIT, fixture.handle.respawn(child.clone(), None))
+        .await
+        .expect("the respawn answers")
+        .expect("the fork is respawned");
+    let after = fixture
+        .member_session(&child)
+        .await
+        .expect("the respawned child has a session");
+    assert_ne!(before, after, "the respawned fork runs on a new session");
+    assert_eq!(
+        fixture.listed_slots(&child).await,
+        vec!["call-sign".to_string()],
+        "the respawned fork's status row still lists its source's record"
+    );
+    let request = fixture
+        .turn_request(&child, "the respawned child's first task")
+        .await;
+    assert_eq!(
+        entries_with(&request, CALL_SIGN),
+        1,
+        "the respawned fork's first run has its source's record in effect, once"
+    );
+
+    let fixture = fixture.crash_and_resume().await;
+    let receipt = fixture
+        .handle
+        .set_operator_instruction(write(
+            "call-sign",
+            2,
+            CALL_SIGN_REVISED,
+            member_and_forks(&fixture.identity),
+        ))
+        .await
+        .expect("the revision commits");
+    assert_eq!(
+        receipt.matched_members, 2,
+        "after the restart the revision selects the member and its respawned fork"
+    );
+    fixture.instructions_current(&child).await;
+    let request = fixture
+        .turn_request(&child, "the respawned child's next task")
+        .await;
+    assert_eq!(
+        entries_with(&request, CALL_SIGN_REVISED),
+        1,
+        "the revision reaches the respawned fork"
+    );
+    fixture.finish().await;
+}
+
+/// A durable fork's child takes its operator instruction snapshot before it
+/// is seated, and a child that cannot take it is not seated. Over a session
+/// service that refuses a record for a session with no live actor, a fork
+/// taken while the mob holds no record seats its child (nothing is
+/// written), and a fork taken after the mob's first record fails with the
+/// provision failure that names the snapshot, and seats nobody.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fork_whose_child_cannot_take_its_snapshot_fails_and_seats_nobody() {
+    let (fixture, session_id) = Fixture::unseated(ServiceDouble::RecordsNeedALiveActor, None).await;
+    fixture
+        .handle
+        .spawn_spec(
+            SpawnMemberSpec::new(ProfileName::from("lead"), fixture.identity.clone())
+                .with_launch_mode(crate::launch::MemberLaunchMode::Resume {
+                    bridge_session_id: session_id,
+                    resume_from_role: None,
+                }),
+        )
+        .await
+        .expect("restore the member onto its durable session");
+    fixture.run_turn("source turn before any record").await;
+
+    let fork = |child: &str| {
+        let handle = fixture.handle.clone();
+        let source = fixture.identity.clone();
+        let child = AgentIdentity::from(child);
+        async move {
+            tokio::time::timeout(
+                WAIT,
+                handle.fork_member(
+                    &source,
+                    SpawnMemberSpec::new(ProfileName::from("lead"), child),
+                    None,
+                ),
+            )
+            .await
+            .expect("the fork answers")
+            .map(|_| ())
+        }
+    };
+    fork("fork-before")
+        .await
+        .expect("a mob with no record writes nothing: the child is seated");
+
+    fixture
+        .set(write(
+            "call-sign",
+            1,
+            CALL_SIGN,
+            member_and_forks(&fixture.identity),
+        ))
+        .await;
+    let refused = fork("fork-after").await;
+    let after = AgentIdentity::from("fork-after");
+    match refused {
+        Err(MobError::ForkMemberProvisionFailed {
+            member_id, reason, ..
+        }) => {
+            assert_eq!(member_id, after);
+            assert!(
+                reason.contains("operator instruction snapshot could not be recorded"),
+                "the failure names the snapshot: {reason}"
+            );
+        }
+        other => panic!("the fork fails with its provision failure: {other:?}"),
+    }
+    assert!(
+        fixture
+            .handle
+            .get_member(&after)
+            .await
+            .expect("roster read")
+            .is_none(),
+        "the child that could not take its snapshot is not seated"
+    );
+    fixture.finish().await;
+}

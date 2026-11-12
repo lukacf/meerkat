@@ -171,6 +171,9 @@ struct Fixture {
     /// the mob and resume it from them ([`Self::crash_and_resume`]).
     events: Arc<dyn MobEventStore>,
     runtime_metadata: Arc<dyn MobRuntimeMetadataStore>,
+    /// The file of the mob's SQLite journal, for a mob that keeps one
+    /// ([`Self::unseated_on_journal`]); `None` for the in-memory journal.
+    mob_db: Option<std::path::PathBuf>,
 }
 
 impl Fixture {
@@ -240,6 +243,25 @@ impl Fixture {
         double: ServiceDouble,
         fork_instruction_policy: Option<meerkat_core::ForkInstructionPolicy>,
         member_restore_policy: Option<crate::runtime::MemberRestorePolicy>,
+    ) -> (Self, SessionId) {
+        Self::unseated_on_journal(
+            double,
+            fork_instruction_policy,
+            member_restore_policy,
+            false,
+        )
+        .await
+    }
+
+    /// [`Self::unseated_with`], with the mob's journal in memory or, for
+    /// `sqlite_journal`, in a SQLite database under the fixture's root: its
+    /// rows are then stored encoded and decoded again at a resume
+    /// ([`Self::crash_and_resume`] opens the database again).
+    async fn unseated_on_journal(
+        double: ServiceDouble,
+        fork_instruction_policy: Option<meerkat_core::ForkInstructionPolicy>,
+        member_restore_policy: Option<crate::runtime::MemberRestorePolicy>,
+        sqlite_journal: bool,
     ) -> (Self, SessionId) {
         let root = tempfile::Builder::new()
             .prefix("meerkat-member-instruction-")
@@ -314,7 +336,11 @@ impl Fixture {
                 records: Arc::clone(&records),
             }),
         };
-        let storage = MobStorage::in_memory();
+        let mob_db = sqlite_journal.then(|| root_path.join("mob.db"));
+        let storage = match &mob_db {
+            Some(path) => MobStorage::persistent(path).expect("the mob's SQLite journal"),
+            None => MobStorage::in_memory(),
+        };
         let events = storage.events.clone();
         let runtime_metadata = storage.runtime_metadata.clone();
         let mut builder = MobBuilder::new(definition, storage)
@@ -372,6 +398,7 @@ impl Fixture {
                 records,
                 events,
                 runtime_metadata,
+                mob_db,
             },
             created.session_id,
         )
@@ -379,8 +406,9 @@ impl Fixture {
 
     /// Crash the mob (its volatile tasks stop, nothing is terminalized) and
     /// resume it from its journal over the same session service and model
-    /// client, as a restarted host does. The resumed mob runs under the
-    /// default fork instruction and member restore policies.
+    /// client, as a restarted host does. A SQLite journal is opened again
+    /// from its file, so the resume reads the stored rows. The resumed mob
+    /// runs under the default fork instruction and member restore policies.
     async fn crash_and_resume(self) -> Self {
         let Self {
             _root,
@@ -392,15 +420,22 @@ impl Fixture {
             records,
             events,
             runtime_metadata,
+            mob_db,
         } = self;
         crash_stop_and_release_routes(handle).await;
-        let builder = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
-            events.clone(),
-            runtime_metadata.clone(),
-        ))
-        .with_session_service(Arc::clone(&mob_service))
-        .with_default_llm_client(Arc::new(client.clone()))
-        .notify_orchestrator_on_resume(false);
+        let storage = match &mob_db {
+            Some(path) => {
+                drop((events, runtime_metadata));
+                MobStorage::persistent(path).expect("open the mob's SQLite journal again")
+            }
+            None => MobStorage::with_events_and_runtime_metadata(events, runtime_metadata),
+        };
+        let events = storage.events.clone();
+        let runtime_metadata = storage.runtime_metadata.clone();
+        let builder = MobBuilder::for_resume(storage)
+            .with_session_service(Arc::clone(&mob_service))
+            .with_default_llm_client(Arc::new(client.clone()))
+            .notify_orchestrator_on_resume(false);
         let handle = tokio::time::timeout(WAIT, Box::pin(builder.resume()))
             .await
             .expect("the resume answers")
@@ -415,6 +450,7 @@ impl Fixture {
             records,
             events,
             runtime_metadata,
+            mob_db,
         }
     }
 

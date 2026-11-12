@@ -136,7 +136,7 @@ const page = await mob.instructionStatus({ agentIdentity: "worker-1" });
 
 A member target (`{ kind: "member", agent_identity: "worker-1" }`) may carry
 `include_forks: true` since 0.9.15: the record then also selects the forks of
-the member's fork family, and a status read shows the member on such a
+the member's fork family, and a status read shows the field on such a
 record (see [operator instructions](/guides/mobs#operator-instructions)).
 
 The results keep the wire shape (snake_case fields) and are checked on read:

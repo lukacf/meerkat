@@ -21,8 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   it writes for the member alone and refuses a target that carries
   `include_forks`. `meta/instruction_status` shows the scope of a record
   written elsewhere. A Rust host that embeds Meta sets the scope through
-  the mob handle's `set_operator_instruction`; the gateway method follows
-  in a later release.
+  the mob handle's `set_operator_instruction`.
 
 ## [0.9.13] - 2026-11-11
 

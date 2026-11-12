@@ -1742,7 +1742,11 @@ before it is seated, so its first run applies the record, and a helper fork
 (a spawn with a fork launch mode) is born with it. A seated fork then
 follows the record like any member it selects: a higher revision and the
 revoke reach it as entries appended at its next fresh run start, and nothing
-already in the fork's conversation is rewritten. A durable fork copies its
+already in the fork's conversation is rewritten. A fork taken after the
+record was revoked gets the record's slot with no body: nothing of it is in
+effect in that fork. A higher revision that writes the record without
+`include_forks` (or for another member) takes it from the seated forks: each
+drops it at its next fresh run start. A durable fork copies its
 source's conversation up to the fork point, so its model also reads the
 source's earlier entry
 rows, each as a header without a body

@@ -126,8 +126,8 @@ them.
   that carries it and refuse a value that is not a boolean). Limits: the
   participants of a
   temporary council are seated in the council's own mob and are not
-  covered; a governed runtime still refuses every write (see Known
-  limitations).
+  covered (see Known limitations); a governed runtime still refuses every
+  write (`prepared_authorization_required`).
 
 - `rkat storage doctor` lists each mob database whose operator instruction
   records are past what a release before this one holds in one mob: more

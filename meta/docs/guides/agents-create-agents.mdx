@@ -113,9 +113,9 @@ first message. A call that reaches the tools anyway is refused
 | --- | --- | --- |
 | `identity_create` | `agents: [{name, profile, display_name?, instructions?, context?, labels?, first_message?, peers?}]`, `request_id?` | Creates 1 to 256 agents, all together or not at all. They may name each other as peers. |
 | `identity_update` | `name`, `expected_spec_digest`, `set {display_name?, instructions?, context?, labels?, labels_remove?, profile?}`, `peers_add?`, `peers_remove?`, `request_id?` | Changes one agent. A member left out of `set` stays as it is. |
-| `identity_archive` | `name`, `expected_spec_digest`, `request_id?` | Stops an agent and keeps it: name, record, conversation and memory stay, and messages to it are refused. |
+| `identity_archive` | `name`, `expected_spec_digest`, `request_id?` | Stops an agent and keeps it: name, record, conversation and memory stay, its last conversation is harvested as for any agent that leaves, and messages to it are refused. |
 | `identity_unarchive` | `name`, `expected_spec_digest`, `request_id?` | Brings an archived agent back on the conversation it had. |
-| `identity_remove` | `name`, `expected_spec_digest`, `request_id?` | Removes an agent for good. Its name is never available again. |
+| `identity_remove` | `name`, `expected_spec_digest`, `request_id?` | Removes an agent for good. Its name is never available again; its last conversation is harvested as for any agent that leaves. |
 | `identity_list` | `profile?`, `include_archived?`, `after?` | Lists the mob's long-term agents that are not private to a person, of any profile. Read only. |
 | `identity_get` | `name` | Reads one agent's record: what the list says of it, and its instructions, context, labels and peers. Read only. |
 | `identity_directory` | `query?`, `after?` | Lists the profiles the caller may create agents of and the agents it may name as peers, each `allowed`, `needs_decision` or `not_allowed`. Read only. |
@@ -240,6 +240,14 @@ interchangeable:
   conversation and memory are kept, and nothing can reach them.
 - **`meta/delete_identity`** gives an agent a fresh life and keeps it: a new
   conversation under the same name. It removes nothing from the mob.
+
+An archive and a removal owe the agent what leaving the roster owes any
+agent: its last conversation is harvested and distilled, an exit interview is
+queued and the host's retirement hook is told (see
+[Lifecycle side effects across a restart](/guides/deployment#lifecycle-side-effects-across-a-restart)).
+They run right after the agent's member has stopped; no order is promised
+between them and the change's answer. A removal of an archived agent owes
+nothing more.
 
 ## Listing and looking up
 

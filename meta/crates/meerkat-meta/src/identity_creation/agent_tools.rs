@@ -245,7 +245,8 @@ fn description(name: &str) -> String {
         ),
         IDENTITY_ARCHIVE => format!(
             "Stop a long-term agent and keep it. Its name, record, conversation and memory \
-             stay; it has no running member, messages to it are refused, and \
+             stay, and the agent's last conversation is harvested as for any agent that leaves; \
+             it has no running member, messages to it are refused, and \
              identity_unarchive brings it back on the same conversation. Use this when the \
              agent may be needed later; identity_remove is for good.\n\n\
              Send the agent's `name` and `expected_spec_digest` (its `spec_digest` from \
@@ -269,7 +270,8 @@ fn description(name: &str) -> String {
         IDENTITY_REMOVE => format!(
             "Remove a long-term agent for good. Its member stops, its peer links end, and \
              its name can never be used again, by anyone. Its conversation and memory are \
-             kept, and nothing can reach them. This cannot be undone: use identity_archive \
+             kept, and nothing can reach them; the agent's last conversation is harvested as \
+             for any agent that leaves. This cannot be undone: use identity_archive \
              when the agent may be needed later.\n\n\
              Send the agent's `name` and `expected_spec_digest` (its `spec_digest` from \
              identity_list; a changed agent answers `stale_spec` with `current_digest`). \

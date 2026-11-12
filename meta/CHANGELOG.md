@@ -425,6 +425,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     `set.profile` and that an update of an agent that waits changes its
     record only. There is no tool for the settle: it stays the host's
     (`meta/identity/settle_preparation`).
+  - `identity_archive` and `identity_remove` say that the agent's last
+    conversation is harvested as for any agent that leaves: an archive and
+    a removal owe an agent created at run time the retirement side effects
+    a configured agent is owed.
   - The eight tools may wait behind the deferred tool catalog: in a session
     whose catalog is exact, their definitions are loaded on demand.
   - Rust API: `identity_creation::{IdentityAgentTools, IdentityToolCaller,

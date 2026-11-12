@@ -2058,6 +2058,16 @@ fn the_descriptions_say_what_a_model_must_know() {
     assert!(text(IDENTITY_UNARCHIVE).contains("You cannot unarchive yourself"));
     assert!(text(IDENTITY_REMOVE).contains("its name can never be used again"));
     assert!(text(IDENTITY_REMOVE).contains("use identity_archive when the agent may be needed"));
+    // An archive and a removal owe an agent created at run time what
+    // leaving the roster owes a configured one: both texts say so.
+    for tool in [IDENTITY_ARCHIVE, IDENTITY_REMOVE] {
+        assert!(
+            text(tool).contains(
+                "the agent's last conversation is harvested as for any agent that leaves"
+            ),
+            "{tool} says the agent's last conversation is harvested"
+        );
+    }
     assert!(text(IDENTITY_LIST).contains("it never wakes an agent"));
     // What the list shows is what the family lists, not what the caller may
     // create: `identity_list_shows_an_agent_of_a_profile_the_caller_may_not_create`.

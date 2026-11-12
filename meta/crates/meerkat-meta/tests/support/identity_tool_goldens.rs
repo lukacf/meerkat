@@ -188,7 +188,7 @@ The result's `outcome` is `done`, `pending_decision` or `refused`, and `request_
     ),
     (
         "identity_archive",
-        r"Stop a long-term agent and keep it. Its name, record, conversation and memory stay; it has no running member, messages to it are refused, and identity_unarchive brings it back on the same conversation. Use this when the agent may be needed later; identity_remove is for good.
+        r"Stop a long-term agent and keep it. Its name, record, conversation and memory stay, and the agent's last conversation is harvested as for any agent that leaves; it has no running member, messages to it are refused, and identity_unarchive brings it back on the same conversation. Use this when the agent may be needed later; identity_remove is for good.
 
 Send the agent's `name` and `expected_spec_digest` (its `spec_digest` from identity_list; a changed agent answers `stale_spec` with `current_digest`). A `name` that no agent holds, and an agent you are not shown (one private to a person), both answer `identity_unknown`. You cannot archive yourself (`self_change_refused`). An agent that the host's configuration declares is changed there, not here (`owner_read_only`).
 
@@ -248,7 +248,7 @@ The result's `outcome` is `done` (the agent's `state` is `restored`), `pending_d
     ),
     (
         "identity_remove",
-        r"Remove a long-term agent for good. Its member stops, its peer links end, and its name can never be used again, by anyone. Its conversation and memory are kept, and nothing can reach them. This cannot be undone: use identity_archive when the agent may be needed later.
+        r"Remove a long-term agent for good. Its member stops, its peer links end, and its name can never be used again, by anyone. Its conversation and memory are kept, and nothing can reach them; the agent's last conversation is harvested as for any agent that leaves. This cannot be undone: use identity_archive when the agent may be needed later.
 
 Send the agent's `name` and `expected_spec_digest` (its `spec_digest` from identity_list; a changed agent answers `stale_spec` with `current_digest`). A `name` that no agent holds, and an agent you are not shown (one private to a person), both answer `identity_unknown`. You cannot remove yourself (`self_change_refused`). An agent that the host's configuration declares is changed there, not here (`owner_read_only`).
 

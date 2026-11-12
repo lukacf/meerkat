@@ -3898,3 +3898,429 @@ async fn a_start_builds_no_owed_seat_before_the_runtime_is_composed_and_the_labe
     );
     rig.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------
+// A runtime that learns only when its host completes the bootstrap whether
+// it composes an agent customizer
+// ---------------------------------------------------------------------------
+
+/// A mob over `state` composed the way a host composes one with
+/// `UnifiedRuntime::bootstrap` over a persistent spec that declares no agent
+/// customizer: bootstrapped, and its bootstrap not completed yet (no
+/// identity context is installed, and it is not activated without one).
+/// Such a runtime learns only when its host completes the bootstrap whether
+/// it composes an agent customizer. Its members' model reports no selection
+/// of its own, so each request names the model its member was built with.
+async fn bootstrap_undeclared(state: &Path, definition: MobDefinition) -> Rig {
+    std::fs::create_dir_all(state).expect("state root");
+    let (asked_tx, asked) = mpsc::unbounded_channel();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let mob_id = definition.id.to_string();
+    let (storage, provenance) =
+        meerkat_meta::mob_composition_manifest::persistent_mob_storage(state.join("mob.sqlite3"))
+            .expect("open persistent mob storage");
+    let spec = meerkat_meta::MobBootstrapSpec::persistent(
+        definition,
+        storage,
+        provenance,
+        state.to_path_buf(),
+        16,
+    )
+    .await
+    .expect("compose persistent Meta stores")
+    .with_child_mob_storage(meerkat_meta::ChildMobStorage::ProcessBound)
+    .with_options(meerkat_meta::MobBootstrapOptions {
+        allow_ephemeral_sessions: true,
+        notify_orchestrator_on_resume: true,
+        default_llm_client: Some(Arc::new(RecordingClient {
+            asked: asked_tx,
+            requests: Arc::clone(&requests),
+            pinned: false,
+        })),
+    });
+    let runtime = Box::pin(meerkat_meta::UnifiedRuntime::bootstrap(
+        spec,
+        meerkat_meta::MetaConfig {
+            modules: Vec::new(),
+            discovery: meerkat_meta::DiscoverySpec {
+                namespace: mob_id,
+                modules: Vec::new(),
+            },
+            pre_spawn: Vec::new(),
+        },
+        Duration::from_secs(10),
+    ))
+    .await
+    .expect("bootstrap the UnifiedRuntime");
+    Rig {
+        runtime,
+        asked,
+        requests,
+        declared: declared_spec(),
+    }
+}
+
+/// Set in the child process of a row whose first process is killed: the
+/// state directory that first process runs in.
+const FIRST_PROCESS_STATE: &str = "META_CREATED_IDENTITIES_FIRST_PROCESS_STATE";
+
+/// The state directory of a row's first process, when this process is the
+/// child that runs it.
+fn first_process_state() -> Option<std::path::PathBuf> {
+    std::env::var_os(FIRST_PROCESS_STATE).map(Into::into)
+}
+
+/// Run the first process of the row `row` over `state` in a child process
+/// that exits without shutting its runtime down. No Stop is recorded, so the
+/// mob's log stays running, as a killed process leaves it, and the next
+/// process's mob starts inside `UnifiedRuntime::bootstrap`. (A clean
+/// shutdown records a Stop: the next start then lifts the mob only once its
+/// host completes the bootstrap.)
+fn run_first_process_killed(row: &str, state: &Path) {
+    let child = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args(["--exact", row, "--nocapture", "--test-threads=1"])
+        .env(FIRST_PROCESS_STATE, state)
+        .status()
+        .expect("run the first process in a child process");
+    assert!(child.success(), "the row's first process failed: {child}");
+}
+
+impl Rig {
+    /// Install the identity context a [`bootstrap_undeclared`] runtime's
+    /// host composes, and bootstrap nothing yet: the state directory's
+    /// continuity substrate, the identity bridge every composition builds,
+    /// a roster that declares [`DECLARED`], and `customizer` installed on
+    /// the identity runtime when the host composes one. Neither the spec
+    /// nor the context carries it. The runtime's doors answer from now on;
+    /// its bootstrap is not complete.
+    async fn install_identities(
+        &mut self,
+        state: &Path,
+        customizer: Option<Arc<dyn AgentCustomizer>>,
+    ) {
+        let substrate = meerkat_meta::gateway_wiring::open_identity_substrate(
+            &state.join("continuity.sqlite3"),
+        )
+        .await
+        .expect("open the identity substrate");
+        let handle = meerkat_meta::gateway_wiring::identity_mob_handle(&self.runtime);
+        let bridge = meerkat_meta::gateway_wiring::identity_session_bridge(
+            self.runtime.mob_runtime(),
+            handle.clone(),
+        );
+        let identity_runtime = meerkat_meta::identity_first::IdentityRuntime::new(
+            meerkat_meta::identity_first::IdentityRuntimeConfig {
+                continuity_store: substrate.continuity_store,
+                lease_provider: substrate.lease_provider,
+                runtime_instance_id: "meta-created-identities".to_string(),
+                has_runtime_store: true,
+                durability_policy: meerkat_meta::identity_first::DurabilityPolicy::SyncWriteThrough,
+                bridge: Some(Arc::new(bridge)),
+                default_timeout: None,
+            },
+        )
+        .with_runtime_services(meerkat_meta::identity_first::AgentRuntimeServices::new(
+            handle,
+        ));
+        identity_runtime.set_agent_customizer(customizer).await;
+        let context = Arc::new(
+            meerkat_meta::identity_first::IdentityFirstRuntimeContext::new(
+                Arc::new(identity_runtime),
+                Arc::new(DeclaredRoster(self.declared.clone())),
+                None,
+                None,
+                Some(self.runtime.mob_handle().definition().clone()),
+            ),
+        );
+        self.runtime.install_identity_first_context(context);
+    }
+
+    /// Complete the bootstrap with the identity bootstrap of the context
+    /// [`Self::install_identities`] installed.
+    async fn bootstrap_installed_identities(&mut self) {
+        let declared = self.declared.clone();
+        Box::pin(
+            self.runtime
+                .bootstrap_installed_identity_first_context(&[declared]),
+        )
+        .await
+        .expect("bootstrap the installed identity context");
+    }
+
+    /// [`Self::install_identities`], then [`Self::bootstrap_installed_identities`].
+    async fn bootstrap_identities(
+        &mut self,
+        state: &Path,
+        customizer: Option<Arc<dyn AgentCustomizer>>,
+    ) {
+        self.install_identities(state, customizer).await;
+        self.bootstrap_installed_identities().await;
+    }
+
+    /// Whether Core holds `name` as an identity owed its seat: it holds no
+    /// member of it.
+    fn owed_its_seat(&self, name: &str) -> bool {
+        matches!(
+            self.runtime
+                .mob_handle()
+                .identity_entry(&meerkat_mob::AgentIdentity::from(name)),
+            Ok(IdentityEntryRead::Entry(entry))
+                if entry.standing
+                    == EntryStanding::Unseated(meerkat_mob::UnseatedEntryCause::SeatOwed)
+        )
+    }
+
+    /// How many model requests carried `marker`.
+    fn requests_with(&self, marker: &str) -> usize {
+        self.requests()
+            .iter()
+            .filter(|request| request.contains(marker))
+            .count()
+    }
+}
+
+/// A runtime composed with `UnifiedRuntime::bootstrap` over a spec that
+/// declares no agent customizer learns of the customizer its host installs
+/// on the identity runtime only at its identity bootstrap. The mob of a
+/// killed process starts inside `bootstrap`, before the host can install
+/// anything, and embodies the seats it owes: none of them is built then.
+/// Two agents are owed their seat, as in the row above: one whose row lacks
+/// the label the host's customizer sets, and a twin whose row carries it.
+/// The first process is killed. When `bootstrap` returns in the second,
+/// both are still owed their seat and neither ran. The identity bootstrap
+/// then finds the customizer, and the host's build step decides each seat:
+/// the agent whose row lacks the label stays refused (no member, no
+/// session, no first message, and its status shows the label rule's
+/// reason), and the twin is built from the host's inputs as the configured
+/// agent is, on a seat that carries the label, and runs its first message
+/// once.
+///
+/// RED before such a runtime refused the build while it had not learned of
+/// its customizer: the start built both agents from their rows alone inside
+/// `bootstrap`, with no comparison of the customizer's labels, and the
+/// refused agent ran its first message.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_start_builds_no_owed_seat_before_a_bootstrap_composition_learns_of_its_customizer() {
+    const MOB_ID: &str = "meta-created-identities-undeclared-start";
+    const REFUSED: &str = "keeper-refused";
+    const TWIN: &str = "keeper-twin";
+    if let Some(state) = first_process_state() {
+        // The first process. The label rule refuses the first spawn of the
+        // agent whose row lacks the host's label, and the host refuses the
+        // twin's build: both creates commit, and both agents are owed their
+        // seat. The process then exits without a shutdown.
+        let mut rig = bootstrap_undeclared(&state, build_rows_definition(MOB_ID)).await;
+        rig.bootstrap_identities(
+            &state,
+            Some(Arc::new(RefusingBuildsOf {
+                name: TWIN,
+                composing: ComposingCustomizer::default(),
+            }) as Arc<dyn AgentCustomizer>),
+        )
+        .await;
+        rig.create_request(
+            meerkat_mob::CreatedIdentityRequest::new(created_spec(REFUSED).with_initial_message(
+                meerkat_core::ContentInput::Text("REFUSED-KICKOFF".to_string()),
+            )),
+            REFUSED,
+        )
+        .await;
+        rig.create_request(
+            meerkat_mob::CreatedIdentityRequest::new(
+                host_labelled_spec(TWIN, "worker").with_initial_message(
+                    meerkat_core::ContentInput::Text("TWIN-KICKOFF".to_string()),
+                ),
+            ),
+            TWIN,
+        )
+        .await;
+        assert!(
+            rig.owed_its_seat(REFUSED) && rig.owed_its_seat(TWIN),
+            "both agents are owed their seat"
+        );
+        assert!(
+            rig.request_with("REFUSED-KICKOFF").is_none()
+                && rig.request_with("TWIN-KICKOFF").is_none(),
+            "nothing was built"
+        );
+        std::process::exit(0);
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let state = temp.path().join("state");
+    run_first_process_killed(
+        "a_start_builds_no_owed_seat_before_a_bootstrap_composition_learns_of_its_customizer",
+        &state,
+    );
+
+    // The second process. The mob was left running, so its start ran inside
+    // `bootstrap` and embodied both owed seats before the host could
+    // install its customizer.
+    let mut rig = bootstrap_undeclared(&state, build_rows_definition(MOB_ID)).await;
+    assert!(
+        rig.owed_its_seat(REFUSED) && rig.owed_its_seat(TWIN),
+        "the start built neither agent before the runtime learned of its host's customizer: \
+         both stay owed their seat"
+    );
+    let customizer = Arc::new(ComposingCustomizer::default());
+    rig.bootstrap_identities(
+        &state,
+        Some(Arc::clone(&customizer) as Arc<dyn AgentCustomizer>),
+    )
+    .await;
+    assert!(
+        rig.asked("TWIN-KICKOFF").await,
+        "the twin's first message runs once the runtime is composed"
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // The agent the label rule refuses: never built, never run.
+    assert!(
+        rig.request_with("REFUSED-KICKOFF").is_none(),
+        "the refused agent's first message never runs"
+    );
+    assert!(
+        rig.owed_its_seat(REFUSED) && !rig.session_built(REFUSED).await,
+        "Core holds no member of the refused agent, and nothing was built for it"
+    );
+    assert!(
+        customizer.builds_of(REFUSED) >= 1,
+        "the host's build step was asked about the refused agent once the runtime was composed"
+    );
+    let refused = rig.seat_status(REFUSED).await;
+    assert!(
+        refused.shows_the_label_refusal() && refused.state == "dormant",
+        "the label rule decided: the status shows its reason: {refused:?}"
+    );
+
+    // The twin: built from the host's inputs, on a seat that carries the
+    // label, as the configured agent is.
+    let twin = rig.build_inputs(TWIN, "TWIN-KICKOFF").await;
+    assert_host_inputs(TWIN, &twin);
+    assert_eq!(
+        rig.member(TWIN).await.labels,
+        host_labelled_row(),
+        "the twin's seat carries its row's labels, the host's among them"
+    );
+    assert!(
+        rig.turn(DECLARED, "BUILD-CONFIGURED").await,
+        "the configured agent runs a turn"
+    );
+    let configured = rig.build_inputs(DECLARED, "BUILD-CONFIGURED").await;
+    assert_host_inputs(DECLARED, &configured);
+    assert_eq!(
+        twin, configured,
+        "the twin is built from the host's inputs as the configured agent is"
+    );
+    assert_eq!(
+        rig.requests_with("TWIN-KICKOFF"),
+        1,
+        "the twin's first message runs once"
+    );
+    assert_eq!(
+        customizer.builds_of(TWIN),
+        1,
+        "the host's customizer composes the twin's build once"
+    );
+    rig.shutdown().await;
+}
+
+/// The same runtime, and a delivery that reaches a dormant agent before the
+/// host completed the bootstrap. Two agents are created with no first
+/// message on a turn-driven profile, so each is seated and nothing is
+/// built: one whose row lacks the label the host's customizer sets, and a
+/// twin whose row carries it. The host installs its identity context (its
+/// doors answer from then on) and has not bootstrapped it yet. A send to
+/// each agent then builds neither: it is refused for now within its bound,
+/// nothing is delivered, and the model is not asked. The identity bootstrap
+/// finds the customizer. The twin's delivery, sent again, builds it from
+/// the host's inputs and runs once; the delivery to the agent whose row
+/// lacks the label is refused with the label rule's reason, and that agent
+/// is never built.
+///
+/// RED before such a runtime refused the build while it had not learned of
+/// its customizer: the first send built each agent from its row alone, with
+/// no comparison of the customizer's labels, and both ran.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delivery_builds_no_created_agent_before_a_bootstrap_composition_learns_of_its_customizer()
+ {
+    const REFUSED: &str = "keeper-unlabelled";
+    const TWIN: &str = "keeper-labelled";
+    let temp = tempfile::tempdir().unwrap();
+    let mob_id = fresh_mob_id();
+    let mut rig = bootstrap_undeclared(temp.path(), build_rows_definition(&mob_id)).await;
+    rig.create(REFUSED).await;
+    rig.create_request(
+        meerkat_mob::CreatedIdentityRequest::new(host_labelled_spec(TWIN, "worker")),
+        TWIN,
+    )
+    .await;
+    assert!(
+        rig.seated(REFUSED) && rig.seated(TWIN),
+        "both agents are seated, and nothing is built"
+    );
+    let customizer = Arc::new(ComposingCustomizer::default());
+    rig.install_identities(
+        temp.path(),
+        Some(Arc::clone(&customizer) as Arc<dyn AgentCustomizer>),
+    )
+    .await;
+
+    // Before the host completed the bootstrap: neither send builds its
+    // agent, and each answers.
+    for (name, work) in [(REFUSED, "REFUSED-WORK"), (TWIN, "TWIN-WORK")] {
+        let sent = tokio::time::timeout(TURN_BOUND, rig.send(name, work))
+            .await
+            .unwrap_or_else(|_| panic!("the send to {name} answers within its bound"));
+        assert!(
+            sent["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("retry")),
+            "{name}: a send before the runtime learned of its host's customizer is refused for \
+             now, and builds nothing: {sent}"
+        );
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        rig.request_with("REFUSED-WORK").is_none() && rig.request_with("TWIN-WORK").is_none(),
+        "neither agent ran"
+    );
+    assert!(
+        !rig.session_built(REFUSED).await && !rig.session_built(TWIN).await,
+        "nothing was built for either agent"
+    );
+
+    rig.bootstrap_installed_identities().await;
+
+    // The twin's delivery, sent again: built from the host's inputs, once.
+    assert!(
+        rig.turn(TWIN, "TWIN-WORK").await,
+        "the twin's delivery, sent again, runs"
+    );
+    let twin = rig.build_inputs(TWIN, "TWIN-WORK").await;
+    assert_host_inputs(TWIN, &twin);
+    assert_eq!(
+        rig.requests_with("TWIN-WORK"),
+        1,
+        "the twin's delivery runs once"
+    );
+
+    // The agent the label rule refuses: its delivery is refused with the
+    // rule's reason, and it is never built.
+    let sent = rig.send(REFUSED, "REFUSED-WORK").await;
+    assert!(
+        !sent["error"].is_null() && names_the_label_key(&sent["error"].to_string()),
+        "the delivery to the agent whose row lacks the host's label is refused, naming the \
+         label key and the remedy: {sent}"
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        rig.request_with("REFUSED-WORK").is_none() && !rig.session_built(REFUSED).await,
+        "the refused agent never runs, and nothing is built for it"
+    );
+    assert!(
+        customizer.builds_of(REFUSED) >= 1,
+        "the host's build step was asked about the refused agent"
+    );
+    rig.shutdown().await;
+}

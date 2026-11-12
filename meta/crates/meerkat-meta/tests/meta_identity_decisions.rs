@@ -73,7 +73,7 @@ const APPROVERS: &str = "team:owners";
 const OWNER: &str = "U123";
 const SECOND_OWNER: &str = "U456";
 /// Bounds a failure only; a passing row never waits for it.
-const BOUND: Duration = Duration::from_secs(60);
+const BOUND: Duration = Duration::from_mins(1);
 
 static NEXT_MOB: AtomicU64 = AtomicU64::new(0);
 

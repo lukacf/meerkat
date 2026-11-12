@@ -60,6 +60,8 @@ mod supervisor;
 
 pub use bootstrap::{start_meta_runtime, start_meta_runtime_with_options};
 #[cfg(test)]
+pub(crate) use console_ingress::console_rest_route_view;
+#[cfg(test)]
 pub(crate) use console_ingress::handle_console_rest_json_route_with_pending_rows;
 /// Applies no session fence; use the routers a [`crate::UnifiedRuntime`] builds,
 /// or the `_under_session_fences` variant
@@ -80,7 +82,7 @@ pub use console_ingress::{
 pub(crate) use console_ingress::{
     ConsoleCallerVerification, ConsoleLoginKind, ConsoleSignOutError, ConsoleSignedOut,
     ResolvedConsoleCaller, authorize_console_rest_json_route, console_human_principal,
-    console_member_access_attributes, fold_console_member_attributes,
+    console_identifies_people, console_member_access_attributes, fold_console_member_attributes,
     render_console_rest_json_route, resolve_authorized_console_caller_from_token,
     session_fence_first_accepted_iat,
 };

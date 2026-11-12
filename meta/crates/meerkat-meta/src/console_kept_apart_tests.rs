@@ -194,6 +194,105 @@ fn every_route_tells_the_caller_it_did_not_identify_by_its_console() {
     }
 }
 
+/// A route that takes no audience from the Console (an embedder's own REST
+/// route for the experience) tells the caller it did not identify by the
+/// same answer as the Console's routes, and identifies the person a
+/// volunteered token names only on a console that can identify a person.
+/// The console the stock console gateway serves when it is launched with no
+/// auth configuration trusts no key, so it identifies nobody, with an
+/// access controller too; one that requires sign-in identifies its people.
+#[test]
+fn a_route_with_no_console_audience_asks_the_same_console() {
+    let fences = ConsoleSessionFences::detached();
+    let experience = |query: &str| crate::runtime::ConsoleRestJsonRequest {
+        method: "GET".to_string(),
+        path: format!("/console/experience{query}"),
+        auth: None,
+    };
+    for console in open_consoles() {
+        let name = console.name;
+        let view = crate::runtime::console_rest_route_view(
+            &console.decisions,
+            &fences,
+            &experience(""),
+            None,
+            console.access.as_ref(),
+        );
+        assert!(view.subject().is_none(), "{name}");
+        assert_eq!(
+            kept_apart_rules(&view),
+            if console.identifies_people {
+                (true, false, true)
+            } else {
+                (false, true, false)
+            },
+            "{name}: the caller with no token on a route with no console audience"
+        );
+        // The same request with a person's token in its query.
+        let token = bearer(BOB)
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .expect("a bearer token")
+            .to_string();
+        let volunteered = crate::runtime::console_rest_route_view(
+            &console.decisions,
+            &fences,
+            &experience(&format!("?auth_token={token}")),
+            None,
+            console.access.as_ref(),
+        );
+        if console.identifies_people {
+            assert_eq!(volunteered.subject(), Some(BOB), "{name}");
+            assert_eq!(
+                kept_apart_rules(&volunteered),
+                (true, false, true),
+                "{name}"
+            );
+        } else {
+            assert!(
+                volunteered.subject().is_none(),
+                "{name}: a console that identifies nobody resolves no token"
+            );
+            assert_eq!(
+                kept_apart_rules(&volunteered),
+                (false, true, false),
+                "{name}"
+            );
+        }
+    }
+
+    // The stock console gateway's console with no auth configuration.
+    let local = RuntimeDecisionState::local_console(
+        crate::ConsolePolicy {
+            require_app_auth: false,
+            ..crate::ConsolePolicy::default()
+        },
+        None,
+    );
+    let controller = AccessController::new(rules_off()).expect("access controller");
+    for access in [None, Some(&controller)] {
+        assert!(
+            !crate::runtime::console_identifies_people(&local, access),
+            "a local console identifies nobody (controller: {})",
+            access.is_some()
+        );
+        let operator = console_request_auth_context_for(
+            &local,
+            &fences,
+            access,
+            &HeaderMap::new(),
+            &Uri::from_static("/console/timeline"),
+        )
+        .expect("the console admits its operator")
+        .audience;
+        assert_eq!(kept_apart_rules(&operator), (false, true, false));
+    }
+    let mut signed_in = local;
+    signed_in.console.require_app_auth = true;
+    assert!(crate::runtime::console_identifies_people(&signed_in, None));
+}
+
 /// An access configuration that grants every caller every agent action and
 /// `gating.view`, with a deny on agents labelled `tier = restricted` when
 /// `with_deny`.

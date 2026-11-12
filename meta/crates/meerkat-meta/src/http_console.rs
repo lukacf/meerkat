@@ -1002,8 +1002,6 @@ async fn console_gating_stream_handler(
         )
             .into_response();
     };
-    let subject = audience.subject().map(ToString::to_string);
-    let private_owner_key = audience.private_owner_key().map(ToString::to_string);
     // The caller's audience controller: an installed access controller, kept
     // even while it is disabled (enabling a policy later must reach this
     // stream), else the stream's own. Either is primed: the private-owner
@@ -1058,7 +1056,7 @@ async fn console_gating_stream_handler(
             }
             let page = owner.lock().await.gating_audit_after(cursor.as_deref());
             if let Some(runtime) = &runtime {
-                let probe = access.view_for_caller(subject.as_deref(), private_owner_key.as_deref());
+                let probe = audience.refreshed();
                 if page
                     .entries
                     .iter()
@@ -1072,8 +1070,9 @@ async fn console_gating_stream_handler(
                 break;
             }
             // The view is derived after the last await, from the live
-            // configuration and attribute cache.
-            let view = access.view_for_caller(subject.as_deref(), private_owner_key.as_deref());
+            // configuration and attribute cache: the same caller's view of
+            // the same console, under the configuration committed now.
+            let view = audience.refreshed();
             if view.enforced() && !view.allows(ACTION_GATING_VIEW) {
                 yield Ok(axum::response::sse::Event::default()
                     .event("gating.access_revoked")
@@ -7935,8 +7934,8 @@ mod memory_panel_records_paging_tests {
         Ok(())
     }
 
-    /// An anonymous caller who may view router and read its memory, and
-    /// neither for delivery.
+    /// The anonymous caller of a console that identifies nobody, who may
+    /// view router and read its memory, and neither for delivery.
     fn router_reader() -> TestResult<AccessView> {
         let controller = AccessController::new(crate::access::AccessControlConfig {
             enabled: true,
@@ -7952,7 +7951,7 @@ mod memory_panel_records_paging_tests {
             }],
             ..crate::access::AccessControlConfig::default()
         })?;
-        Ok(controller.view_for_subject(None))
+        Ok(controller.view_for_subject(None).on_console(false))
     }
 
     /// One page of `meta/memory/panel/records`: its rows as
@@ -10067,26 +10066,13 @@ fn console_request_auth_context(
     )
 }
 
-/// Whether this console can identify a person: it requires sign-in, or it
-/// has an access controller, for which it resolves the token a caller
-/// volunteers, and a trusted OIDC snapshot a token can verify against
-/// ([`crate::runtime::validate_trusted_oidc_runtime_config`]). Only on such
-/// a console can a member be private to a person. A console that can
-/// identify nobody has one anonymous operator and nobody to keep apart.
-/// Computed here and nowhere else, from the console's own configuration.
-fn console_identifies_people(
-    decisions: &RuntimeDecisionState,
-    access: Option<&AccessController>,
-) -> bool {
-    decisions.console.require_app_auth
-        || (access.is_some()
-            && crate::runtime::validate_trusted_oidc_runtime_config(&decisions.trusted_oidc)
-                .is_ok())
-}
-
 /// The Console's request authentication, shared by the Console's own routes
 /// and [`ConsoleViewerResolver`]. A token is checked against the Console's
-/// session fence record `fences` as it is now.
+/// session fence record `fences` as it is now. Whether the console can
+/// identify a person is read from its own configuration, in one place
+/// ([`crate::runtime::console_identifies_people`]), and stated on the
+/// audience of the caller it did not identify: that is the only place a
+/// caller becomes the one operator of a console that identifies nobody.
 pub(crate) fn console_request_auth_context_for(
     decisions: &RuntimeDecisionState,
     fences: &crate::auth::session_fence::ConsoleSessionFences,
@@ -10101,7 +10087,7 @@ pub(crate) fn console_request_auth_context_for(
         // and there the caller it did not identify is told apart from its
         // people all the same: the audience states the console's fact, not
         // the caller's.
-        let identifies_people = console_identifies_people(decisions, access);
+        let identifies_people = crate::runtime::console_identifies_people(decisions, access);
         let caller = identifies_people
             .then(|| {
                 let token = console_request_token(headers, uri)?;

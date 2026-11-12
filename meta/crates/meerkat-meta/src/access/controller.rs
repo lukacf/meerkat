@@ -632,10 +632,12 @@ impl AccessController {
     /// member: an agent private to a person ([`super::PRIVATE_TO_LABEL`]) is
     /// hidden from it unless the subject is an admin.
     ///
-    /// A view taken for no subject states that its console identifies
-    /// nobody. The console's request authentication does not take one that
-    /// way for a caller it did not identify on a console that can identify
-    /// a person: it states that fact on the view itself.
+    /// A view taken for no subject says nothing of the console it is taken
+    /// for, so its caller is kept apart from other people like every caller
+    /// who is not an admin: shown nothing the console cannot attribute.
+    /// Only the console's own request authentication, which knows whether
+    /// its console can identify a person, takes the view of the one operator
+    /// of a console that identifies nobody.
     pub fn view_for_subject(&self, subject: Option<&str>) -> AccessView {
         self.view_and_revision(subject).0
     }
@@ -643,8 +645,8 @@ impl AccessController {
     /// [`Self::view_for_subject`] for a caller who owns the agents private
     /// to `private_owner_key` ([`super::PRIVATE_TO_LABEL`]): a signed-in
     /// person's console caller scope, `None` for every other caller. As
-    /// there, a view taken for no subject states that its console
-    /// identifies nobody, unless the console that takes it states otherwise.
+    /// there, a view taken for no subject is kept apart from other people
+    /// unless the console that takes it states that it identifies nobody.
     pub fn view_for_caller(
         &self,
         subject: Option<&str>,
@@ -679,11 +681,12 @@ impl AccessController {
         AccessView {
             inner: Arc::clone(&self.inner),
             config,
-            // Whatever took a view for a subject identified a person. A view
-            // taken for no subject is of a console that identifies nobody,
-            // until the console that takes it states otherwise
-            // ([`AccessView::on_console`]).
-            console_identifies_people: principal.subject.is_some(),
+            // Nothing here knows which console takes the view, so the view
+            // is of one that can identify a person: its caller is kept
+            // apart from other people unless it is an admin. Only the
+            // console's request authentication states that its console
+            // identifies nobody ([`AccessView::on_console`]).
+            console_identifies_people: true,
             principal,
             is_admin,
             private_owner_key: private_owner_key
@@ -978,7 +981,7 @@ pub struct AccessView {
     is_admin: bool,
     /// Whether the console this view was taken for can identify a person
     /// ([`Self::on_console`]): a fact about the console, the same for every
-    /// caller of it.
+    /// caller of it. True until a console states that it identifies nobody.
     console_identifies_people: bool,
     /// The private-owner key this caller owns private agents under
     /// ([`super::PRIVATE_TO_LABEL`]); `None` for a caller who owns none.
@@ -993,9 +996,13 @@ impl AccessView {
     /// identify is kept apart from them like every caller who is not an
     /// admin ([`Self::kept_apart_from_other_people`]). The console's request
     /// authentication states it, from its own configuration, for the caller
-    /// it did not identify.
+    /// it did not identify, and nothing else states that a console
+    /// identifies nobody: a view nobody stated it for is kept apart. A view
+    /// taken for a person stays one of a console that can identify a person
+    /// whatever is stated: a console that identified a person is not one
+    /// that identifies nobody.
     pub(crate) fn on_console(mut self, identifies_people: bool) -> Self {
-        self.console_identifies_people = identifies_people;
+        self.console_identifies_people = identifies_people || self.principal.subject.is_some();
         self
     }
 

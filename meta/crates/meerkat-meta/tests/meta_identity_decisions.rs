@@ -1156,6 +1156,13 @@ async fn a_held_change_is_withdrawn_by_its_requester_or_the_host_and_by_nobody_e
     let notices = rig.notices.all();
     assert_eq!(notices.len(), 1, "{notices:?}");
     assert_eq!(notices[0].outcome.to_json()["state"], json!("withdrawn"));
+    // What the requesting agent reads of it names no operation id.
+    let text = notices[0].text();
+    assert!(
+        !text.contains(notices[0].operation_id.as_str()) && !text.contains("operation_id"),
+        "the notice an agent reads names no operation id: {text}"
+    );
+    assert!(text.contains(decision_id.as_str()), "{text}");
     let twice = rig
         .decisions
         .withdraw(&mob, &asker_as, &WithdrawRequest::new(first))

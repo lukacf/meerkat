@@ -4896,6 +4896,70 @@ async fn a_withdrawal_is_admitted_as_a_change_is() {
     rig.shutdown().await;
 }
 
+/// An agent reads its own operations only: the family answers another
+/// requester's operation to it as one nobody asked, whatever surface the
+/// call came through. The host reads every operation.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_reads_its_own_operations_only() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), false, None).await;
+    let family = rig.family();
+    let mob = rig.runtime.mob_handle();
+    let host = ChangeRequester::host("ops");
+    let planner = ChangeRequester::agent_recorded(PLANNER);
+    let other = ChangeRequester::agent_recorded(HOST_A);
+    let by_host = rig
+        .change(
+            &host,
+            "c-1",
+            create_of(json!([{"name": "scout", "profile": "worker"}])),
+        )
+        .await;
+    assert_eq!(by_host.token(), "done", "{by_host:?}");
+    let by_planner = rig
+        .change(
+            &planner,
+            "c-1",
+            create_of(json!([{"name": "gamma", "profile": "worker"}])),
+        )
+        .await;
+    assert_eq!(by_planner.token(), "done", "{by_planner:?}");
+    let of_host = OperationId::for_request(&host.recorded(), "c-1").expect("a request id");
+    let of_planner = OperationId::for_request(&planner.recorded(), "c-1").expect("a request id");
+    let read = |requester: &ChangeRequester, operation: &OperationId| {
+        let family = Arc::clone(&family);
+        let mob = mob.clone();
+        let requester = requester.clone();
+        let operation = operation.clone();
+        async move {
+            match family
+                .read(&mob, &requester, IdentityRead::Operation(operation))
+                .await
+            {
+                Ok(IdentityReadAnswer::Operation(OperationState::Outcome(outcome))) => {
+                    outcome.token().to_owned()
+                }
+                Ok(IdentityReadAnswer::Operation(OperationState::Unknown)) => "unknown".to_owned(),
+                other => panic!("an operation read answers a state: {other:?}"),
+            }
+        }
+    };
+    assert_eq!(read(&planner, &of_planner).await, "done", "its own");
+    assert_eq!(read(&planner, &of_host).await, "unknown", "the host's");
+    assert_eq!(
+        read(&other, &of_planner).await,
+        "unknown",
+        "another agent's"
+    );
+    assert_eq!(read(&host, &of_planner).await, "done", "the host reads any");
+    assert_eq!(
+        read(&host, &of_host).await,
+        "done",
+        "the host reads its own"
+    );
+    rig.shutdown().await;
+}
+
 /// The label by which a host says an agent is private to a person.
 const PRIVATE_TO: &str = "console.private_to";
 

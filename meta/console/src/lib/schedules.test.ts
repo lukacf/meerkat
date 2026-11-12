@@ -185,6 +185,7 @@ test("a list answer is read fail-closed: no schedules array lists none, and unre
     content: "Post the standup summary",
     trigger: { type: "interval", start_at_utc: "2030-01-01T09:00:00Z", every_seconds: 7200 },
     phase: "active",
+    pausedForTarget: false,
     revision: 3,
     sender: "console:shared",
     senderHidden: false,

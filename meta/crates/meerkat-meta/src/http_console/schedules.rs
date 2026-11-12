@@ -598,7 +598,7 @@ async fn schedule_item(
     } else {
         Vec::new()
     };
-    json!({
+    let mut item = json!({
         "schedule_id": schedule.schedule_id.to_string(),
         "identity": send.identity,
         "name": schedule.config.name,
@@ -613,7 +613,17 @@ async fn schedule_item(
         "created_at_utc": schedule.config.created_at_utc,
         "updated_at_utc": schedule.config.updated_at_utc,
         "next_due_at_utc": next_due_at_utc,
-    })
+    });
+    // Whose pause it is, as the schedule's own lifecycle records it: said
+    // only of a schedule paused because its agent takes no deliveries (its
+    // agent is archived), never of an active schedule or of a pause
+    // somebody asked for by name.
+    if schedule.paused_for_target()
+        && let Some(members) = item.as_object_mut()
+    {
+        members.insert("paused_for_target".to_string(), Value::Bool(true));
+    }
+    item
 }
 
 /// An instant held in whole seconds since the epoch, as UTC.

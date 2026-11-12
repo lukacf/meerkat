@@ -7,6 +7,7 @@ import {
   CONSOLE_SCHEDULE_COMMANDS,
   consoleScheduleEditing,
   describeFormerSender,
+  describeSchedulePause,
   describeSchedulePhase,
   describeScheduleSender,
   describeScheduleTrigger,
@@ -783,6 +784,7 @@ export function SchedulesPanel({
     const isPaused = schedule.phase !== "active";
     const working = busy !== null;
     const sender = schedule.senderHidden ? null : describeScheduleSender(schedule.sender, (raw) => directory.lookup(raw)?.label);
+    const pauseReason = describeSchedulePause(schedule);
     const actions = editing.canChange ? (
       <span className="schedules__actions">
         {confirmingDelete === id ? (
@@ -844,6 +846,7 @@ export function SchedulesPanel({
           <>
             <span>{describeScheduleTrigger(schedule.trigger, formatTime)}</span>
             {sender ? <span title={schedule.sender || undefined}>{` · Sends as ${sender}`}</span> : null}
+            {pauseReason ? <span data-testid={`schedules-pause-reason:${id}`}>{` · ${pauseReason}`}</span> : null}
           </>
         }
         status={
@@ -983,6 +986,7 @@ export function SchedulesPanel({
         >
           <DrawerSection label="When">
             <p className="schedules__detail-text">{describeScheduleTrigger(schedule.trigger, formatTime)}</p>
+            {describeSchedulePause(schedule) ? <Notice tone="warn">{describeSchedulePause(schedule)}</Notice> : null}
             {plan.invalidZone ? <Notice tone="warn">This console cannot read the schedule's time zone, so its runs are not drawn.</Notice> : null}
           </DrawerSection>
           <DrawerSection label="Next runs" count={upcoming.length || null}>

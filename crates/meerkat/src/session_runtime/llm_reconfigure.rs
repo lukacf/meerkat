@@ -1360,10 +1360,10 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
         session_id: &SessionId,
         target_identity: &SessionLlmIdentity,
     ) -> Result<(), RuntimeDriverError> {
-        if !target_identity
+        if target_identity
             .provider_params
             .as_ref()
-            .is_some_and(|params| params.reasoning_effort.is_some())
+            .is_none_or(|params| params.reasoning_effort.is_none())
         {
             return Ok(());
         }

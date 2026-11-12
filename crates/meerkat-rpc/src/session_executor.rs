@@ -833,6 +833,7 @@ mod typed_context_append_tests {
     /// turn's error carries it. A refusal that names no route crosses
     /// unchanged. The grant gate's data gives no effort reason.
     #[test]
+    #[allow(clippy::expect_used)]
     fn a_refused_reasoning_effort_crosses_the_rpc_bridge_with_its_typed_reason() {
         for document in [
             serde_json::json!({

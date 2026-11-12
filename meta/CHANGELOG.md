@@ -136,7 +136,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - An agent's change is refused `invalid_request` when the identity its
   surface attributed to the call is not the member of the session the call
   ran in (`ChangeRequester::agent_session`): the policy judges the first and
-  Core reads the grant of the second, so the two are one agent.
+  Core reads the grant of the second, so the two are one agent. It is
+  refused when the change is asked for, before anything is held, so a
+  person is never asked to decide such a call; a plan of it is refused the
+  same.
 
 - Changes of agents that a person decides. A change whose outcome under the
   host's identity policy is `require_approval` is held as one durable

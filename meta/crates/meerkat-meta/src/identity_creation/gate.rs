@@ -1319,6 +1319,12 @@ impl IdentityGate {
         if self.is_private(mob, requester) {
             return Err(IdentityRefusal::new(IdentityRefusalKind::PrivateRequester));
         }
+        // A call attributed to another agent than its session's member is
+        // refused here, before a receipt is read and before anything is
+        // held: nobody is asked to decide it.
+        if let Some(refusal) = requester.refused_by_its_session(mob).await {
+            return Err(refusal);
+        }
         self.drive_owed_seats(mob);
         if let Some(receipt) = Self::receipt(mob, &call.operation_id).await? {
             return self.replayed(mob, policy, requester, call, &receipt).await;
@@ -1586,6 +1592,9 @@ impl IdentityGate {
         };
         if self.is_private(mob, requester) {
             return Err(IdentityRefusal::new(IdentityRefusalKind::PrivateRequester));
+        }
+        if let Some(refusal) = requester.refused_by_its_session(mob).await {
+            return Err(refusal);
         }
         let judged = self.judge(mob, policy, requester, &call.change).await?;
         let request = &judged.normalized.request;

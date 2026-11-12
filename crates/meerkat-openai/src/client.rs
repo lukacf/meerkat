@@ -6242,6 +6242,73 @@ mod tests {
         );
     }
 
+    /// An authorizer that redacts response text by itself is the only
+    /// redaction of its route's errors: the client asks it and adds no step
+    /// of its own. Text the authorizer leaves, credential-shaped or not,
+    /// reaches the error as the provider sent it. (The made-up value is
+    /// assembled here so no scanner reads the source as a secret.)
+    #[tokio::test]
+    async fn an_authorizer_that_redacts_by_itself_is_the_only_redaction_of_a_stream_error() {
+        let unsigned = format!("{}7", "notsignedbythisroute".repeat(2));
+        let sent = format!(
+            "upstream echo: authorization: Bearer {AUTHORIZATION_CANARY}; another route sent api_key={unsigned}"
+        );
+        let event = serde_json::json!({"type": "error", "code": "server_error", "message": sent});
+        let body = format!("data: {event}\n\n");
+        let app = Router::new().fallback(move || {
+            let body = body.clone();
+            async move { ([("content-type", "text/event-stream")], body).into_response() }
+        });
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind echoing server");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve echoing server");
+        });
+        let client =
+            OpenAiClient::new_with_base_url("unused".to_string(), format!("http://{addr}"))
+                .with_authorizer(Arc::new(CanaryBearerAuthorizer));
+        let request = LlmRequest::new("gpt-5.4", vec![Message::User(UserMessage::text("hello"))]);
+        let events = client.stream(&request).collect::<Vec<_>>().await;
+        server.abort();
+        let error = events
+            .into_iter()
+            .find_map(|event| match event {
+                Err(error)
+                | Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Error { error },
+                }) => Some(error),
+                Ok(_) => None,
+            })
+            .expect("the stream ends in an error");
+        let LlmError::ServerError {
+            status: 500,
+            message,
+        } = &error
+        else {
+            panic!("the stream error keeps its class: {error:?}");
+        };
+        assert_eq!(
+            message,
+            &format!(
+                "upstream echo: authorization: Bearer <redacted>; another route sent api_key={unsigned}"
+            ),
+            "the authorizer's replacement and nothing else"
+        );
+        // The step a client without such an authorizer applies would have
+        // replaced the value: without that, this row could not notice a
+        // second step.
+        let mut stepped = message.clone();
+        meerkat_core::redact::redact_credentials(&mut stepped, |_| {});
+        assert!(
+            !stepped.contains(&unsigned),
+            "the credential-shape step replaces the value: {stepped}"
+        );
+    }
+
     /// How the upstream repeats the credential that signed the request.
     #[derive(Debug, Clone, Copy)]
     enum CredentialEcho {

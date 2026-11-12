@@ -178,6 +178,8 @@ pub enum AccountLevelStatement {
     /// The route has an account list and it is not loaded.
     ListUnavailable,
     /// The account's list is loaded and the model's entry states no levels.
+    /// Also what an entry gets whose statement holds only words this binary
+    /// does not know as levels: such a statement cannot be read.
     NotStated,
     /// The levels the model's entry states.
     Stated(Vec<EffortLevel>),

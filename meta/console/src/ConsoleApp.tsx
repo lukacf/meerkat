@@ -1462,6 +1462,10 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   // lists the archived agents, whether or not any change is offered.
   const [agentRecordOffered, setAgentRecordOffered] = React.useState(false);
   const [agentListOffered, setAgentListOffered] = React.useState(false);
+  // The agents whose record, as the details pane last read it, says that
+  // the host's configuration lists their name too: the pane says it at the
+  // agent's status.
+  const [rosterListingSuperseded, setRosterListingSuperseded] = React.useState<Readonly<Record<string, true>>>({});
   const [transportState, setTransportState] = React.useState<ConsoleTransportState>({
     phase: "connecting", stale: true, freshness: "unknown",
   });
@@ -3234,11 +3238,28 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     void refreshPendingIdentityRequests?.();
   }, [experience, refreshPendingIdentityRequests]);
   async function loadAgentRecord(name: string) {
-    const record = parseAgentRecord(await executeHeadlessCommand(
-      CONSOLE_COMMAND_NAMES.getAgentRecord,
-      identityWorkbenchTarget(name, "inspect"),
-      { name },
-    ));
+    // What the record says of the host's configuration is kept with the
+    // read: a record that no longer says it, or cannot be read, says
+    // nothing.
+    const noteSuperseded = (said: boolean) => setRosterListingSuperseded((current) => {
+      if ((current[name] === true) === said) return current;
+      const next: Record<string, true> = { ...current };
+      if (said) next[name] = true;
+      else delete next[name];
+      return next;
+    });
+    let record: ReturnType<typeof parseAgentRecord>;
+    try {
+      record = parseAgentRecord(await executeHeadlessCommand(
+        CONSOLE_COMMAND_NAMES.getAgentRecord,
+        identityWorkbenchTarget(name, "inspect"),
+        { name },
+      ));
+    } catch (error) {
+      noteSuperseded(false);
+      throw error;
+    }
+    noteSuperseded(record?.rosterListingSuperseded === true);
     if (!record) throw new Error("The gateway's answer was not an agent's record.");
     return record;
   }
@@ -6490,6 +6511,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         identityChanges={identityChanges
           ? { api: identityChanges, controls: agentIdentityControls(identityChanges.flags, agent?.affordances) }
           : null}
+        rosterListingSuperseded={agentRecordOffered && rosterListingSuperseded[target.identity] === true}
       >
         {agentRecordOffered ? (
           <AgentRecordFacts

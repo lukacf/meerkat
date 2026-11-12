@@ -180,6 +180,10 @@ export interface AgentSummary {
   /** How the agent runs, where its record says so (`autonomous_host`,
    * `turn_driven`). An agent that runs as its profile says says nothing. */
   runtimeMode?: string;
+  /** The record says that the host's configuration lists this name while
+   * the agent is served from its own record: that entry is not applied.
+   * Only `true` is carried. */
+  rosterListingSuperseded?: true;
 }
 
 export interface AgentRecord extends AgentSummary {
@@ -223,6 +227,7 @@ function summaryOf(raw: Raw): AgentSummary | null {
     openOperations: textsOf(raw.open_operations),
     ...(addressability ? { addressability } : {}),
     ...(runtimeMode ? { runtimeMode } : {}),
+    ...(raw.roster_listing_superseded === true ? { rosterListingSuperseded: true as const } : {}),
   };
 }
 
@@ -894,13 +899,25 @@ export function schedulesWords(followed: SchedulesFollowed | undefined): string[
   const lines: string[] = [];
   if (count > 0) {
     const named = followed.schedules.flatMap((schedule) => (schedule.name ? [schedule.name] : []));
-    const unnamed = count - named.length;
+    // A listed schedule without a name is counted as such. A schedule the
+    // answer counts and does not list is only counted: nothing is said of
+    // its name.
+    const unnamed = followed.schedules.length - named.length;
+    const unlisted = count - followed.schedules.length;
     if (one) {
       lines.push(`Its schedule${named.length ? ` ${named[0]}` : ""} ${done}.`);
     } else if (named.length === 0) {
       lines.push(`Its ${scheduleCount(count)} ${done}.`);
     } else {
-      const list = unnamed > 0 ? `${named.join(", ")} and ${unnamed} without a name` : named.join(", ");
+      const rest = [
+        ...(unnamed > 0 ? [`${unnamed} without a name`] : []),
+        ...(unlisted > 0 ? [`${unlisted} more`] : []),
+      ];
+      const list = rest.length === 0
+        ? named.join(", ")
+        : rest.length === 1
+          ? `${named.join(", ")} and ${rest[0]}`
+          : `${named.join(", ")}, ${rest[0]} and ${rest[1]}`;
       lines.push(`Its ${scheduleCount(count)} ${done}: ${list}.`);
     }
   }
@@ -924,8 +941,9 @@ export function schedulesOweRetry(outcome: IdentityOutcome): boolean {
 }
 
 /** What the host's roster and an agent's record say of one name, as a
- * note at the agent's status: the status says so with
- * `roster_listing_superseded`. */
+ * note at the agent's status: the agent's record says so with
+ * `roster_listing_superseded` (`meta/identity/get`), and so may the
+ * details answer. */
 export const ROSTER_LISTING_SUPERSEDED_NOTE =
   "The host's configuration lists an agent of this name too. That entry is not applied: this agent runs from its own record, and a change made here changes that record.";
 
@@ -974,6 +992,9 @@ export function outcomeWords(change: IdentityChangeKind, outcome: IdentityOutcom
     case "archived":
       title = `${name} is archived`;
       lines.push("It keeps its name, its record, its conversation and its memory. Messages to it are refused until it is unarchived.");
+      // What it keeps is never said alone: it leaves the team as any agent
+      // leaves it.
+      lines.push(HARVEST_WORDS);
       break;
     case "restored":
       title = `${name} is back`;
@@ -1188,8 +1209,10 @@ export function requesterWords(provenance: AgentProvenance, personName: (key: st
 }
 
 /** What an archive and a removal owe an agent beside the change itself: it
- * leaves the team as any agent leaves it. */
-const HARVEST_WORDS = "Its last conversation is harvested, as for any agent that leaves the team.";
+ * leaves the team as any agent leaves it, so its last conversation is
+ * harvested and distilled. Every text that says what an archived agent
+ * keeps says this with it. */
+const HARVEST_WORDS = "Its last conversation is harvested and distilled, as for any agent that leaves the team.";
 
 /** What the confirmation of a change of one agent as a whole says.
  * `state.waiting` is an agent that still waits for its host's preparation:

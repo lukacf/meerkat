@@ -199,6 +199,7 @@ export function AgentDetailsPanel({
   spawnedBy,
   now,
   identityChanges,
+  rosterListingSuperseded,
   children,
 }: {
   identity: string;
@@ -223,6 +224,10 @@ export function AgentDetailsPanel({
   /** The changes of this agent's record (Edit, Archive, Remove) the
    * gateway offers this viewer. */
   identityChanges?: { api: IdentityChangesApi; controls: AgentIdentityControls } | null;
+  /** The agent's record says that the host's configuration lists this name
+   * too (`roster_listing_superseded` of `meta/identity/get`). The note at
+   * the status says it, as it does when the details answer says so. */
+  rosterListingSuperseded?: boolean;
   /** The record and schedules sections, when offered. */
   children?: React.ReactNode;
 }): React.JSX.Element {
@@ -456,7 +461,7 @@ export function AgentDetailsPanel({
                   spawnedBy ? { label: "Started by", value: <AgentName id={spawnedBy} link /> } : null,
                 ]}
               />
-              {view.roster_listing_superseded === true ? (
+              {view.roster_listing_superseded === true || rosterListingSuperseded === true ? (
                 <Notice tone="neutral" className="agent-details__status-note" testId={`inspect-roster-superseded:${identity}`}>
                   {ROSTER_LISTING_SUPERSEDED_NOTE}
                 </Notice>

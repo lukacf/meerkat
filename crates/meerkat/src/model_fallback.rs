@@ -125,9 +125,12 @@ fn preserves_request_requirements(
 /// `params`, a fallback target's effective params, as the target's client
 /// is handed them for a request: the session's reasoning effort level they
 /// carry, resolved strictly for the route that client observes now and the
-/// model's catalog row. `Ok(None)` when the params carry no level (nothing
-/// is judged); `Err` when the route refuses the level (unsupported, unknown,
-/// unavailable, or in conflict with the target's own params).
+/// model's catalog row. A copy that carries no provider tag takes the tag
+/// the target's client applies by default first, so the level is judged,
+/// and the probe built, on what that client sends. `Ok(None)` when the
+/// params carry no level (nothing is judged); `Err` when the route refuses
+/// the level (unsupported, unknown, unavailable, or in conflict with the
+/// target's own params or its client's default tag).
 fn resolved_for_target(
     target: &ModelFallbackCandidate,
     params: &ProviderParamsOverride,
@@ -137,6 +140,9 @@ fn resolved_for_target(
     };
     let mut resolved = params.clone();
     resolved.reasoning_effort = None;
+    if resolved.provider_tag.is_none() {
+        resolved.provider_tag = target.client.default_provider_tag();
+    }
     let mut resolved = Some(resolved);
     let observation = target.client.reasoning_route();
     meerkat_core::resolve_reasoning_effort(

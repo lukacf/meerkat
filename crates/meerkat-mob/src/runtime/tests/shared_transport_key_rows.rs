@@ -16,8 +16,14 @@ use super::*;
 use crate::machines::mob_machine as dsl;
 use crate::runtime::MemberRestorePolicy;
 use crate::runtime::handle::MobMemberStatus;
+use crate::runtime::state::MobCommand;
 
 const STEP: Duration = Duration::from_mins(1);
+
+/// How long, in milliseconds, a read of a member's comms runtime is held
+/// while spawns are brought to one point (see
+/// [`KeyMob::hold_comms_runtime_reads`]).
+const OBSERVATION_HOLD_MS: u64 = 500;
 
 /// The seed of the one key both members' sessions load.
 const SHARED_KEY: &str = "one-realm-transport-key";
@@ -122,6 +128,52 @@ impl KeyMob {
             .cloned()
     }
 
+    /// The phase of `identity`'s spawn ladder in MobMachine.
+    fn spawn_phase(&self, identity: &AgentIdentity) -> Option<dsl::SpawnExecPhase> {
+        self.handle
+            .machine_state_watch_rx
+            .borrow()
+            .spawn_exec_phase
+            .get(&dsl::AgentIdentity::from_domain(identity))
+            .cloned()
+    }
+
+    /// Hold every read of a member's comms runtime for
+    /// [`OBSERVATION_HOLD_MS`]: a spawn's endpoint observation (off the
+    /// actor) starts with one.
+    fn hold_comms_runtime_reads(&self) {
+        self.service
+            .set_comms_runtime_delay_for_next_calls(u64::MAX, OBSERVATION_HOLD_MS);
+    }
+
+    /// Hold no further read, and wait until the reads held now have ended
+    /// and the observations they belong to have finished.
+    async fn release_comms_runtime_reads_and_wait(&self) {
+        self.service.set_comms_runtime_delay_for_next_calls(0, 0);
+        tokio::time::sleep(Duration::from_millis(OBSERVATION_HOLD_MS * 4)).await;
+    }
+
+    /// Park the actor: it takes no command and commits no off-actor result
+    /// until the park is released.
+    async fn park_actor(&self) -> ActorPark {
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let ended = self
+            .handle
+            .enqueue_actor_command_for_test(|reply_tx| MobCommand::ParkActorForObservationTest {
+                entered_tx,
+                release_rx,
+                reply_tx,
+            })
+            .await
+            .expect("queue the park");
+        tokio::time::timeout(STEP, entered_rx)
+            .await
+            .expect("the actor reaches the park")
+            .expect("the actor parks");
+        ActorPark { release_tx, ended }
+    }
+
     /// Whether MobMachine holds anything of `identity`: a member, a session
     /// binding, an open spawn or a staged one.
     fn machine_holds(&self, identity: &AgentIdentity) -> bool {
@@ -201,6 +253,24 @@ impl KeyMob {
             })
             .await
             .expect("append the row");
+    }
+}
+
+/// A parked actor (see [`KeyMob::park_actor`]).
+struct ActorPark {
+    release_tx: tokio::sync::oneshot::Sender<()>,
+    ended: tokio::sync::oneshot::Receiver<Result<(), MobError>>,
+}
+
+impl ActorPark {
+    /// Let the actor go on, and wait until it left the park.
+    async fn release(self) {
+        self.release_tx.send(()).expect("the actor is still parked");
+        tokio::time::timeout(STEP, self.ended)
+            .await
+            .expect("the park answers")
+            .expect("the actor answers the park")
+            .expect("the park ends");
     }
 }
 
@@ -336,6 +406,121 @@ async fn a_member_whose_transport_key_a_dormant_member_holds_is_refused_before_i
         mob.handle.member_materialization_for_test(&alice),
         Some(dsl::MemberMaterializationPhase::Dormant),
         "the refusal wakes nobody"
+    );
+}
+
+/// Two members whose comms runtimes load one key, admitted back to back (the
+/// parallel shape of `spawn_many`): MobMachine holds the first one's endpoint
+/// from the step that commits its membership, so the one admitted second is
+/// refused before its `MemberSpawned` row as a member spawned later is. One
+/// member is admitted, the other is refused as a wiring error with nothing of
+/// it left behind, and a second start of the mob is clean.
+///
+/// The two admissions are brought back to back, in either order: both
+/// endpoint observations run off the actor while the actor is parked, so both
+/// members are admitted before the first one's activation takes another actor
+/// turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_members_of_one_key_admitted_back_to_back_admit_one_and_refuse_the_other_before_its_row()
+ {
+    let mut mob = KeyMob::new("shared-key-in-flight").await;
+    let members = [
+        (id("alice"), SessionId::new()),
+        (id("carol"), SessionId::new()),
+    ];
+    for (_, session) in &members {
+        mob.service
+            .set_comms_identity_seed(session, SHARED_KEY)
+            .await;
+    }
+    mob.hold_comms_runtime_reads();
+    let spawns = members
+        .iter()
+        .map(|(identity, session)| {
+            let handle = mob.handle.clone();
+            let spec = spec_on(identity, session);
+            tokio::spawn(async move { handle.spawn_spec(spec).await.map(|_| ()) })
+        })
+        .collect::<Vec<_>>();
+    let both_ladders_open = |mob: &KeyMob| {
+        members
+            .iter()
+            .all(|(identity, _)| mob.spawn_phase(identity) == Some(dsl::SpawnExecPhase::Opened))
+    };
+    tokio::time::timeout(STEP, async {
+        while !both_ladders_open(&mob) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("both spawns open their ladders while their endpoints are observed");
+    let park = mob.park_actor().await;
+    assert!(
+        both_ladders_open(&mob),
+        "the actor is parked before either member is admitted"
+    );
+    mob.release_comms_runtime_reads_and_wait().await;
+    park.release().await;
+
+    let mut admitted = Vec::new();
+    let mut refused = Vec::new();
+    for ((identity, session), spawn) in members.iter().zip(spawns) {
+        match tokio::time::timeout(STEP, spawn)
+            .await
+            .expect("the spawn answers")
+            .expect("the spawn task ends")
+        {
+            Ok(()) => admitted.push(identity.clone()),
+            Err(error) => refused.push((identity.clone(), session.clone(), error)),
+        }
+    }
+    let rows = mob.spawned_rows().await;
+    assert!(
+        admitted.len() == 1 && refused.len() == 1,
+        "one member of the key is admitted and the other refused: admitted={admitted:?} refused={refused:?} rows={rows:?}"
+    );
+    let winner = &admitted[0];
+    let (loser, loser_session, refusal) = &refused[0];
+    assert!(
+        matches!(refusal, MobError::WiringError(_)) && rows == vec![winner.to_string()],
+        "the member admitted second is refused before its row, as a wiring error: rows={rows:?} refusal={refusal:?}"
+    );
+    let refusal_text = refusal.to_string();
+    for word in MACHINE_WORDS {
+        assert!(
+            !refusal_text.contains(word),
+            "the refusal is plain text, not the machine's rejection ({word}): {refusal_text}"
+        );
+    }
+    assert!(
+        !mob.machine_holds(loser),
+        "MobMachine holds nothing of the refused member"
+    );
+    assert!(
+        mob.recorded_endpoint(winner).is_some() && mob.recorded_endpoint(loser).is_none(),
+        "the admitted member alone holds the key's endpoint"
+    );
+    assert_eq!(
+        mob.listed()
+            .await
+            .into_iter()
+            .map(|(member, status, _)| (member, status))
+            .collect::<Vec<_>>(),
+        vec![(winner.to_string(), MobMemberStatus::Active)],
+        "only the admitted member is listed, active"
+    );
+    assert!(
+        mob.service.test_is_session_archived(loser_session).await,
+        "the refused member's session is rolled back"
+    );
+
+    // A second start is clean: one member, not broken.
+    mob.reconstruct(None).await.expect("the mob starts again");
+    mob.handle.status().await.expect("the mob answers");
+    assert_eq!(
+        mob.listed().await,
+        vec![(winner.to_string(), MobMemberStatus::Active, None)],
+        "the second start lists the admitted member alone, with no error"
     );
 }
 

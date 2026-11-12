@@ -6826,6 +6826,7 @@ async fn completion_waiter_fails_closed_when_runtime_finalization_fails() {
                         .map_err(|err| CoreExecutorError::Internal(err.to_string()))?,
                 ),
                 meerkat_core::RunResult {
+                    reasoning_effort: None,
                     text: "{\"gate\":\"green\"}".to_string(),
                     session_id: self.session_id.clone(),
                     usage: Default::default(),
@@ -7206,6 +7207,7 @@ async fn runtime_loop_checkpoints_session_snapshot_after_machine_commit() {
                 receipt,
                 None,
                 meerkat_core::RunResult {
+                    reasoning_effort: None,
                     text: "done".to_string(),
                     session_id: self.session_id.clone(),
                     usage: Default::default(),
@@ -8294,6 +8296,7 @@ async fn idle_explicit_steer_peer_request_runs_through_runtime_loop() {
                 },
                 None,
                 meerkat_core::RunResult {
+                    reasoning_effort: None,
                     text: "peer request executed".to_string(),
                     session_id: self.session_id.clone(),
                     usage: Default::default(),
@@ -8425,6 +8428,7 @@ async fn runtime_loop_checkpoint_failure_is_completion_finalization_failure() {
                 receipt,
                 None,
                 meerkat_core::RunResult {
+                    reasoning_effort: None,
                     text: "checkpoint-fails-after-output".to_string(),
                     session_id: self.session_id.clone(),
                     usage: Default::default(),
@@ -39395,6 +39399,7 @@ impl CoreExecutor for RuntimeRecoveryExecutor {
             },
             None,
             meerkat_core::RunResult {
+                reasoning_effort: None,
                 text: self.result_text.clone(),
                 session_id: self.session.id().clone(),
                 usage: Default::default(),

@@ -15957,6 +15957,7 @@ mod tests {
         let input_id = InputId::new();
         let handle = registry.register(input_id.clone());
         let run_result = meerkat_core::types::RunResult {
+            reasoning_effort: None,
             text: "terminal authority".to_string(),
             session_id: SessionId::new(),
             usage: meerkat_core::types::Usage::default(),

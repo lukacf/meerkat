@@ -950,6 +950,7 @@ pub(crate) async fn create_session_with_params_on_route_and_configured_mcp(
         }
 
         meerkat_core::RunResult {
+            reasoning_effort: None,
             text: String::new(),
             session_id: session_id.clone(),
             usage: Default::default(),
@@ -1208,6 +1209,7 @@ mod tests {
     #[test]
     fn create_session_result_preserves_skill_diagnostics() {
         let run = meerkat_core::RunResult {
+            reasoning_effort: None,
             text: "ok".to_string(),
             session_id: meerkat_core::SessionId::new(),
             usage: Default::default(),

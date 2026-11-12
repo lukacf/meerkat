@@ -76,6 +76,32 @@ enum LlmCallWait {
     },
 }
 
+/// One prepared provider request, with the resolution of the session's
+/// provider-neutral `reasoning_effort` level it was prepared with (`None`
+/// for a request that carries no level). The resolution is reported once
+/// the request was handed to the provider.
+struct PreparedModelAttempt {
+    attempt: Arc<dyn crate::AgentLlmRequestAttempt>,
+    reasoning_effort: Option<Box<crate::ReasoningEffortResolution>>,
+}
+
+/// Whether a model call that settled as `outcome` was handed to the
+/// provider. A call refused before dispatch (an authorization refusal, or a
+/// route that changed after the request was prepared) was not: the request
+/// is prepared again and that preparation is the one that is sent.
+fn llm_call_was_dispatched(outcome: &LlmCallWait) -> bool {
+    match outcome {
+        LlmCallWait::Completed(Ok(_))
+        | LlmCallWait::HardTimeout { .. }
+        | LlmCallWait::Stalled { .. } => true,
+        LlmCallWait::Completed(Err(error)) => {
+            !(error.operation_refusal().is_some()
+                || error.operation_authorization_unavailable()
+                || agent_error_is_authorization_route_changed(error))
+        }
+    }
+}
+
 struct LlmRetryRequest<'a> {
     run_id: &'a RunId,
     turn_count: u32,
@@ -100,7 +126,7 @@ struct LlmRetryRequest<'a> {
     max_tokens: u32,
     temperature: Option<f32>,
     provider_params: Option<&'a ProviderParamsOverride>,
-    prepared_attempt: Arc<dyn crate::AgentLlmRequestAttempt>,
+    prepared_attempt: PreparedModelAttempt,
     authorization: Option<crate::LlmRequestAuthorization>,
     /// Once feedback selects the retained controller, later turns and retries
     /// must not revive the refused route or its hosted capability defaults.
@@ -249,6 +275,9 @@ struct LlmRetryLoopState<'a> {
     max_tokens: &'a mut u32,
     provider_params: &'a mut Option<ProviderParamsOverride>,
     attempt: &'a mut u32,
+    /// Set once a model fallback was applied in this call: the failed
+    /// attempt the fallback's requests replace.
+    fallback_attempt: &'a mut Option<u32>,
     durable_visibility_parent: &'a mut Option<crate::SessionToolVisibilityState>,
 }
 
@@ -1208,7 +1237,7 @@ where
         temperature: Option<f32>,
         provider_params: Option<ProviderParamsOverride>,
         authorization: Option<crate::LlmRequestAuthorization>,
-    ) -> Result<Arc<dyn crate::AgentLlmRequestAttempt>, AgentError> {
+    ) -> Result<PreparedModelAttempt, AgentError> {
         // Interim reasoning-effort guard: nothing resolves the
         // provider-neutral level for a route yet, so a request whose params
         // carry it reaches no client, the provider adapter's or any other.
@@ -1223,6 +1252,8 @@ where
             ));
         }
         let provider_params = self.provider_params_under_native_tool_policy(provider_params);
+        // Nothing is resolved while the guard above stands.
+        let reasoning_effort = None;
         if authorization.as_ref().is_some_and(|authorization| {
             authorization.usage()
                 == crate::authorization::ModelAuthorizationUse::ControllerInference
@@ -1238,23 +1269,61 @@ where
                 })?;
             // Use the admitted immutable provider client. A mutable fallback
             // wrapper cannot silently move the controller to another route.
-            return Arc::clone(controller.client()).prepare_request_attempt_authorized(
+            return Arc::clone(controller.client())
+                .prepare_request_attempt_authorized(
+                    messages,
+                    tools,
+                    max_tokens,
+                    temperature,
+                    provider_params,
+                    authorization,
+                )
+                .map(|attempt| PreparedModelAttempt {
+                    attempt,
+                    reasoning_effort,
+                });
+        }
+        Arc::clone(&self.client)
+            .prepare_request_attempt_authorized(
                 messages,
                 tools,
                 max_tokens,
                 temperature,
                 provider_params,
                 authorization,
-            );
-        }
-        Arc::clone(&self.client).prepare_request_attempt_authorized(
-            messages,
-            tools,
-            max_tokens,
-            temperature,
-            provider_params,
-            authorization,
+            )
+            .map(|attempt| PreparedModelAttempt {
+                attempt,
+                reasoning_effort,
+            })
+    }
+
+    /// Report one provider request that was sent with a resolved
+    /// `reasoning_effort` level: count it into the run's report and publish
+    /// the per-request event. Out of line and boxed by its caller, so the
+    /// retry loop's own frame carries no event.
+    #[inline(never)]
+    async fn report_sent_reasoning_effort(
+        &mut self,
+        resolution: crate::ReasoningEffortResolution,
+        turn_number: Option<u32>,
+        fallback_attempt: Option<u32>,
+        event_tx: &Option<mpsc::Sender<AgentEvent>>,
+    ) {
+        crate::agent::request_reasoning_effort::record_sent_reasoning_effort(
+            &mut self.run_reasoning_effort,
+            &resolution,
+        );
+        let _ = crate::event_tap::tap_emit(
+            &self.event_tap,
+            event_tx.as_ref(),
+            AgentEvent::RequestReasoningEffortResolved {
+                turn_number,
+                fallback_attempt,
+                resolution,
+            },
         )
+        .await;
     }
 
     /// Return to the actual client retained by admitted work, never a fresh
@@ -3439,6 +3508,8 @@ where
         let mut current_max_tokens = max_tokens;
         let mut current_provider_params = provider_params.cloned();
         let mut attempt = 0u32;
+        // Set once a model fallback was applied in this call.
+        let mut fallback_attempt: Option<u32> = None;
         let mut retry_request_pressure_recheck = false;
         // Once per call: after a model fallback, the open run's oversized
         // tool results give way against the fallback's cap and input budget
@@ -3558,7 +3629,7 @@ where
             if std::mem::take(&mut retry_request_pressure_recheck) {
                 let mut route_stabilization_attempt = 0_u8;
                 let request_pressure_result = loop {
-                    match request_attempt.request_pressure() {
+                    match request_attempt.attempt.request_pressure() {
                         Ok(pressure) => break Ok(pressure),
                         Err(error)
                             if agent_error_is_authorization_route_changed(&error)
@@ -3743,7 +3814,9 @@ where
             // test clock cannot leave the loop re-arming forever).
             let model_call_started = crate::time_compat::Instant::now();
             let wait_outcome = 'wait: {
-                let call_fut = request_attempt.stream_response(assistant_message_id);
+                let call_fut = request_attempt
+                    .attempt
+                    .stream_response(assistant_message_id);
                 let mut call_fut = std::pin::pin!(call_fut);
                 let call_started = crate::time_compat::DeadlineInstant::now();
                 // The call runs once before any deadline is checked, and its
@@ -3815,6 +3888,19 @@ where
                 },
                 "model call settled"
             );
+            // A request that was handed to the provider reports the level
+            // it was sent with; one refused before dispatch reports nothing.
+            if let Some(resolution) = request_attempt.reasoning_effort.take()
+                && llm_call_was_dispatched(&wait_outcome)
+            {
+                Box::pin(self.report_sent_reasoning_effort(
+                    *resolution,
+                    Some(turn_count),
+                    fallback_attempt,
+                    event_tx,
+                ))
+                .await;
+            }
             let call_result = match wait_outcome {
                 LlmCallWait::Completed(result) => result,
                 LlmCallWait::HardTimeout { limit, source } => {
@@ -3916,6 +4002,7 @@ where
                                     max_tokens: &mut current_max_tokens,
                                     provider_params: &mut current_provider_params,
                                     attempt: &mut attempt,
+                                    fallback_attempt: &mut fallback_attempt,
                                     durable_visibility_parent: &mut *durable_visibility_parent,
                                 },
                             )
@@ -4010,6 +4097,7 @@ where
                                 max_tokens: &mut current_max_tokens,
                                 provider_params: &mut current_provider_params,
                                 attempt: &mut attempt,
+                                fallback_attempt: &mut fallback_attempt,
                                 durable_visibility_parent: &mut *durable_visibility_parent,
                             },
                         )
@@ -4226,6 +4314,7 @@ where
                 )) => {
                     *state.tools = next_tools;
                     *state.provider_params = next_params;
+                    *state.fallback_attempt = Some(retry_schedule.plan.attempt);
                     *state.max_tokens = next_max_tokens;
                     let messages = Arc::make_mut(state.messages);
                     self.reproject_output_schema_instructions_after_fallback(
@@ -6687,6 +6776,7 @@ where
             usage: self.reported_session_usage(),
             run_usage: self.run_usage_delta(),
             request_usage: self.run_request_usage.clone(),
+            reasoning_effort: self.run_reasoning_effort.clone(),
             turns: turn_count + 1,
             tool_calls: tool_call_count,
             terminal_cause_kind: None,
@@ -6839,6 +6929,10 @@ where
             None => self.budget.begin_turn(),
         }
         self.extraction_state.reset();
+        // The run's reasoning-effort report starts empty; a run that
+        // continues a callback suspension takes that run's report below. A
+        // run resumed from its cursor reports what it sends from here on.
+        self.run_reasoning_effort = None;
         match carried.as_ref() {
             // A resumed run continues its own usage account. A suspension
             // this agent recorded belongs to another run and is discarded.
@@ -6868,6 +6962,7 @@ where
                 Some(resumed) => {
                     self.run_usage_baseline = resumed.baseline;
                     self.run_request_usage = resumed.rows;
+                    self.run_reasoning_effort = resumed.reasoning_effort;
                 }
                 None => {
                     self.run_usage_baseline = self.reported_session_usage();
@@ -8790,7 +8885,7 @@ where
                         .await;
                 }
             };
-            match attempt.request_pressure() {
+            match attempt.attempt.request_pressure() {
                 Ok(pressure) => {
                     let profile = self.request_model_profile(*ctx.controller_feedback);
                     let budget = self.context_budget_fact_for_profile(
@@ -10942,6 +11037,7 @@ where
                 run_id: ctx.run_id.clone(),
                 baseline: self.run_usage_baseline.clone(),
                 rows: self.run_request_usage.clone(),
+                reasoning_effort: self.run_reasoning_effort.clone(),
                 callback_results_applied: false,
             });
             if callback_pending.len() == 1 {
@@ -11136,6 +11232,7 @@ where
                     usage: self.reported_session_usage(),
                     run_usage: self.run_usage_delta(),
                     request_usage: self.run_request_usage.clone(),
+                    reasoning_effort: self.run_reasoning_effort.clone(),
                     turns: ctx.turn_count + 1,
                     tool_calls: ctx.tool_call_count,
                     terminal_cause_kind: None,
@@ -11189,6 +11286,7 @@ where
             usage: self.reported_session_usage(),
             run_usage: self.run_usage_delta(),
             request_usage: self.run_request_usage.clone(),
+            reasoning_effort: self.run_reasoning_effort.clone(),
             turns: ctx.turn_count + 1,
             tool_calls: ctx.tool_call_count,
             terminal_cause_kind: None,
@@ -11308,6 +11406,7 @@ where
                 usage: self.reported_session_usage(),
                 run_usage: self.run_usage_delta(),
                 request_usage: self.run_request_usage.clone(),
+                reasoning_effort: self.run_reasoning_effort.clone(),
                 turns: ctx.turn_count + 1,
                 tool_calls: ctx.tool_call_count,
                 terminal_cause_kind: None,
@@ -11409,6 +11508,7 @@ where
             usage: self.reported_session_usage(),
             run_usage: self.run_usage_delta(),
             request_usage: self.run_request_usage.clone(),
+            reasoning_effort: self.run_reasoning_effort.clone(),
             turns: ctx.turn_count + 1,
             tool_calls: ctx.tool_call_count,
             terminal_cause_kind: None,
@@ -11477,6 +11577,7 @@ where
                 usage: self.reported_session_usage(),
                 run_usage: self.run_usage_delta(),
                 request_usage: self.run_request_usage.clone(),
+                reasoning_effort: self.run_reasoning_effort.clone(),
                 turns,
                 tool_calls,
                 terminal_cause_kind: public_terminal_cause_kind(cause_kind),

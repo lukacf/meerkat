@@ -9671,6 +9671,7 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
     fn test_format_agent_result_includes_skill_diagnostics() {
         let session_id = meerkat::SessionId::new();
         let result = meerkat_core::types::RunResult {
+            reasoning_effort: None,
             text: "ok".to_string(),
             session_id: session_id.clone(),
             usage: Default::default(),

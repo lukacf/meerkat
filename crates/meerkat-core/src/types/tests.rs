@@ -1122,6 +1122,7 @@ fn cumulative_delta_since_subtracts_every_counter_and_rejects_regression() {
 #[test]
 fn test_run_result_json_schema() {
     let result = RunResult {
+        reasoning_effort: None,
         text: "Task completed".to_string(),
         session_id: SessionId::new(),
         usage: Usage {
@@ -1487,6 +1488,7 @@ fn test_output_schema_from_type() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_run_result_with_structured_output() {
     let result = RunResult {
+        reasoning_effort: None,
         text: "Here's the structured data".to_string(),
         session_id: SessionId::new(),
         usage: Usage::default(),
@@ -1514,6 +1516,7 @@ fn test_run_result_with_structured_output() {
 #[test]
 fn test_run_result_without_structured_output_skips_field() {
     let result = RunResult {
+        reasoning_effort: None,
         text: "Regular response".to_string(),
         session_id: SessionId::new(),
         usage: Usage::default(),

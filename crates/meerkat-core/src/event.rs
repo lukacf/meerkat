@@ -1200,6 +1200,7 @@ pub fn agent_event_type(event: &AgentEvent) -> &'static str {
         AgentEvent::ToolResultsBoundedForRequest { .. } => "tool_results_bounded_for_request",
         AgentEvent::RequestedCompactionSkipped { .. } => "requested_compaction_skipped",
         AgentEvent::OperatorInstructionsApplied { .. } => "operator_instructions_applied",
+        AgentEvent::RequestReasoningEffortResolved { .. } => "request_reasoning_effort_resolved",
     }
 }
 
@@ -2514,6 +2515,13 @@ pub enum AgentEvent {
         /// `request_reasoning_lowered`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_reasoning: Option<crate::lifecycle::run_primitive::ReasoningBatchDisposition>,
+        /// The session's provider-neutral `reasoning_effort` level as it
+        /// resolves on the session's route when the run starts, before any
+        /// provider request; absent when the session sets no level. What
+        /// each request was sent with is reported per request by
+        /// `request_reasoning_effort_resolved`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_effort: Option<crate::ReasoningEffortResolution>,
     },
 
     /// Agent run completed successfully
@@ -3191,6 +3199,11 @@ pub enum AgentEvent {
         /// dispatched again, at `awaiting_model` the last committed round.
         round: u64,
         resume_point: RunResumePointKind,
+        /// The session's provider-neutral `reasoning_effort` level as it
+        /// resolves on the session's route when the run resumes; absent
+        /// when the session sets no level (see `run_started`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_effort: Option<crate::ReasoningEffortResolution>,
     },
     /// One model request of a run carried some of the run's own tool results
     /// shortened, for that request only: with them whole the request was over
@@ -3265,6 +3278,29 @@ pub enum AgentEvent {
         /// A delta's changes, sorted by slot; empty for a snapshot.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         changes: Vec<crate::InstructionChange>,
+    },
+    /// One provider request was sent with the session's provider-neutral
+    /// `reasoning_effort` level: the level the request named, the level
+    /// sent, the model, the route and the provider fields it was written
+    /// to. Published once for each request that was handed to the provider
+    /// (a turn's request, an extraction request, a compaction summary
+    /// request, a controller request, a model-fallback attempt), after the
+    /// request settled; a request refused before it was sent reports
+    /// nothing. Requests of a session that sets no level report nothing.
+    ///
+    /// Appended after every released variant: declaration order is the
+    /// implicit discriminant (the xtask `released_enum_ordinals` test).
+    RequestReasoningEffortResolved {
+        /// The provider turn the request belongs to; absent for a request
+        /// outside a turn (a compaction summary).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_number: Option<u32>,
+        /// Set when the request is a model-fallback attempt: the failed
+        /// attempt it replaces.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fallback_attempt: Option<u32>,
+        /// What the request was sent with.
+        resolution: crate::ReasoningEffortResolution,
     },
 }
 
@@ -3850,6 +3886,7 @@ mod tests {
     fn run_resumed_has_its_own_wire_name_and_round_trips() {
         let run_id = crate::lifecycle::RunId::new();
         let event = AgentEvent::RunResumed {
+            reasoning_effort: None,
             session_id: SessionId::new(),
             run_id: run_id.clone(),
             round: 2,
@@ -5091,6 +5128,7 @@ mod tests {
         // Test all event variants serialize correctly
         let events = vec![
             AgentEvent::RunStarted {
+                reasoning_effort: None,
                 request_reasoning: None,
                 identity: Default::default(),
                 session_id: SessionId::new(),
@@ -5502,6 +5540,7 @@ mod tests {
     #[test]
     fn run_started_pending_tail_serializes_typed_variant() {
         let event = AgentEvent::RunStarted {
+            reasoning_effort: None,
             request_reasoning: None,
             identity: Default::default(),
             session_id: SessionId::new(),
@@ -5963,6 +6002,7 @@ mod tests {
     fn test_agent_event_type_mapping_is_total_for_all_variants() {
         let events = vec![
             AgentEvent::RunStarted {
+                reasoning_effort: None,
                 request_reasoning: None,
                 identity: Default::default(),
                 session_id: SessionId::new(),

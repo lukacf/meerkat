@@ -5249,6 +5249,12 @@ pub struct RunResult {
     /// Skill subsystem diagnostics for operator surfaces.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skill_diagnostics: Option<crate::skills::SkillRuntimeDiagnostics>,
+    /// The provider-neutral `reasoning_effort` level the run's requests
+    /// named and what the run sent: one row per distinct resolution, in
+    /// first-use order, with its request count. Absent when the session
+    /// sets no level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<crate::ReasoningEffortReport>,
 }
 
 /// Reference to an artifact stored externally

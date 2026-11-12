@@ -18005,6 +18005,7 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
     fn test_run_result_to_response_carries_skill_diagnostics() {
         let session_id = SessionId::new();
         let result = meerkat_core::RunResult {
+            reasoning_effort: None,
             text: "ok".to_string(),
             session_id: session_id.clone(),
             usage: Default::default(),
@@ -19514,6 +19515,7 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
             let realm = meerkat_core::RealmId::parse("rest-cancel").unwrap();
             let response = run_result_to_response(
                 meerkat_core::types::RunResult {
+                    reasoning_effort: None,
                     text: "must not leak".to_string(),
                     session_id: SessionId::new(),
                     usage: meerkat_core::types::Usage::default(),

@@ -18492,6 +18492,7 @@ realm_profile = "worker-v2"
             _req: CreateSessionRequest,
         ) -> Result<meerkat_core::types::RunResult, SessionError> {
             Ok(meerkat_core::types::RunResult {
+                reasoning_effort: None,
                 text: String::new(),
                 session_id: self.session.id().clone(),
                 usage: meerkat_core::types::Usage::default(),
@@ -19105,6 +19106,7 @@ comms = true
                         .and_then(|build| build.initial_tool_filter.clone()),
                 );
             Ok(meerkat_core::RunResult {
+                reasoning_effort: None,
                 text: String::new(),
                 session_id,
                 usage: meerkat_core::types::Usage::default(),
@@ -19603,6 +19605,7 @@ comms = true
                 });
             }
             Ok(meerkat_core::RunResult {
+                reasoning_effort: None,
                 text: "owner terminal result".to_string(),
                 session_id: session_id.clone(),
                 usage: meerkat_core::types::Usage::default(),

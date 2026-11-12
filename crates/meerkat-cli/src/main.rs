@@ -28577,6 +28577,7 @@ default_model = "gemma"
 
         fn run_result(&self, text: &str, turns: u32) -> RunResult {
             RunResult {
+                reasoning_effort: None,
                 text: text.to_string(),
                 session_id: self.session_id.clone(),
                 usage: Usage::default(),
@@ -29743,6 +29744,7 @@ default_model = "gemma"
             }
 
             Ok(RunResult {
+                reasoning_effort: None,
                 text: "ok".to_string(),
                 session_id: sid,
                 usage: Usage::default(),
@@ -29805,6 +29807,7 @@ default_model = "gemma"
                 return Err(SessionError::NotFound { id: id.clone() });
             }
             Ok(RunResult {
+                reasoning_effort: None,
                 text: "ok".to_string(),
                 session_id: id.clone(),
                 usage: Usage::default(),
@@ -30213,6 +30216,7 @@ default_model = "gemma"
             _req: CreateSessionRequest,
         ) -> Result<RunResult, SessionError> {
             Ok(RunResult {
+                reasoning_effort: None,
                 text: String::new(),
                 session_id: self.session_id.clone(),
                 usage: Usage::default(),
@@ -30265,6 +30269,7 @@ default_model = "gemma"
                     .await;
             }
             Ok(RunResult {
+                reasoning_effort: None,
                 text: "streamed".to_string(),
                 session_id: self.session_id.clone(),
                 usage: Usage::default(),
@@ -30638,6 +30643,7 @@ default_model = "gemma"
         let temp = tempfile::tempdir().expect("temp dir");
         let scope = test_scope(temp.path().join("state"), "html-realm");
         let result = RunResult {
+            reasoning_effort: None,
             text: "<!doctype html><html><body>artifact</body></html>".to_string(),
             session_id: SessionId::new(),
             usage: Usage::default(),
@@ -30668,6 +30674,7 @@ default_model = "gemma"
         let temp = tempfile::tempdir().expect("temp dir");
         let scope = test_scope(temp.path().join("state"), "html-realm");
         let result = RunResult {
+            reasoning_effort: None,
             text: "<!doctype html><html><body>artifact</body></html>".to_string(),
             session_id: SessionId::new(),
             usage: Usage::default(),
@@ -40669,6 +40676,7 @@ supports_reasoning = true
     #[test]
     fn test_json_output_payload_includes_skill_diagnostics_field() {
         let result = RunResult {
+            reasoning_effort: None,
             text: "ok".to_string(),
             session_id: SessionId::new(),
             usage: Usage::default(),

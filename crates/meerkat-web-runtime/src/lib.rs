@@ -5285,6 +5285,7 @@ capabilities = [{capability_values}]
     #[test]
     fn start_turn_success_exposes_terminal_cause_kind_no_status_string() {
         let run = meerkat_core::RunResult {
+            reasoning_effort: None,
             text: "hello".to_string(),
             session_id: meerkat_core::SessionId::new(),
             usage: Default::default(),

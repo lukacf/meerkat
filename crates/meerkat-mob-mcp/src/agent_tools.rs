@@ -5495,6 +5495,7 @@ mod tests {
             )
             .await?;
             Ok(RunResult {
+                reasoning_effort: None,
                 text: "ok".to_string(),
                 session_id: sid,
                 usage: Usage::default(),
@@ -5531,6 +5532,7 @@ mod tests {
                 return Err(SessionError::NotFound { id: id.clone() });
             }
             Ok(RunResult {
+                reasoning_effort: None,
                 text: "ok".to_string(),
                 session_id: id.clone(),
                 usage: Usage::default(),

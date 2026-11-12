@@ -2281,6 +2281,7 @@ mod tests {
 
     fn make_run_result() -> RunResult {
         RunResult {
+            reasoning_effort: None,
             text: "hello".into(),
             session_id: SessionId::new(),
             usage: Usage::default(),

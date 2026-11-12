@@ -2128,8 +2128,8 @@ use meerkat_meta::identity_creation::{
     ConsequenceLine, CreateAgents, GetAgent, HookRefusal, IdentityChangeCall, IdentityChangeSpec,
     IdentityCreationPolicy, IdentityFamily, IdentityFamilyOptions, IdentityHostHooks,
     IdentityOutcome, IdentityRead, IdentityReadAnswer, IdentityRequest, InstructionOutcome,
-    InstructionStep, InstructionsChanged, OperationId, OperationState, PeerVisibility,
-    RequesterKind, Sha256Digest, ValidationRefusal,
+    InstructionStep, InstructionsChanged, ListAgents, OperationId, OperationState, PeerVisibility,
+    ReadDirectory, RequesterKind, Sha256Digest, ValidationRefusal,
 };
 use meerkat_meta::identity_first::contracts::RosterProvider;
 use meerkat_meta::identity_first::{
@@ -2545,6 +2545,21 @@ async fn launch_with(
     tokio::sync::mpsc::UnboundedReceiver<String>,
     Arc<FailNextSession>,
 ) {
+    launch_roster(state, mob_id, governed, deciders, Arc::new(InProcessRoster)).await
+}
+
+/// [`launch_with`], over the host's roster `roster`.
+async fn launch_roster(
+    state: &Path,
+    mob_id: &str,
+    governed: bool,
+    deciders: bool,
+    roster: Arc<dyn RosterProvider>,
+) -> (
+    UnifiedRuntime,
+    tokio::sync::mpsc::UnboundedReceiver<String>,
+    Arc<FailNextSession>,
+) {
     let (asked_tx, asked) = tokio::sync::mpsc::unbounded_channel();
     let fail_next_session = Arc::new(FailNextSession::default());
     let mut builder = UnifiedRuntimeBuilder::default()
@@ -2553,7 +2568,7 @@ async fn launch_with(
         .continuity_from_state_dir(state)
         .await
         .expect("open the state-dir identity substrate")
-        .roster_provider(Arc::new(InProcessRoster))
+        .roster_provider(roster)
         .identity_runtime_instance_id("meta-identity-methods")
         .session_hook(Arc::clone(&fail_next_session) as Arc<dyn SessionHook>)
         .default_llm_client(Arc::new(RecordingClient { asked: asked_tx }));
@@ -4489,6 +4504,172 @@ async fn an_agent_call_attributed_to_another_agent_than_its_sessions_member_is_r
         "{refused:?}"
     );
     assert!(rig.agent("third").await.is_none(), "nothing was created");
+    rig.shutdown().await;
+}
+
+/// The label by which a host says an agent is private to a person.
+const PRIVATE_TO: &str = "console.private_to";
+
+/// A host's roster with an agent that is private to a person: the two
+/// agents every row has, and `confidant`, whose labels name its person and
+/// whose first message runs at the launch, so the mob's record of its
+/// build names whom it is private to.
+struct RosterWithPrivate;
+
+#[async_trait]
+impl RosterProvider for RosterWithPrivate {
+    async fn roster(&self, _context: &RosterContext) -> Result<Vec<DurableAgentSpec>, RosterError> {
+        let mut confidant = roster_spec("confidant", "worker");
+        confidant
+            .labels
+            .insert(PRIVATE_TO.to_owned(), "person-1".to_owned());
+        confidant.initial_message = Some("Keep this between us.".to_owned().into());
+        Ok(vec![
+            roster_spec(HOST_A, "worker"),
+            roster_spec(PLANNER, "planner"),
+            confidant,
+        ])
+    }
+}
+
+/// The names a list of the family answers `requester`, archived agents
+/// included, in name order.
+async fn listed_to(
+    family: &Arc<dyn IdentityFamily>,
+    mob: &meerkat_mob::MobHandle,
+    requester: &ChangeRequester,
+) -> Vec<String> {
+    let list: ListAgents = serde_json::from_value(json!({"include_archived": true}))
+        .expect("a list as a surface writes it");
+    match family.read(mob, requester, IdentityRead::List(list)).await {
+        Ok(IdentityReadAnswer::List(page)) => {
+            let mut names: Vec<String> = page.agents.into_iter().map(|agent| agent.name).collect();
+            names.sort_unstable();
+            names
+        }
+        other => panic!("a list answers a page: {other:?}"),
+    }
+}
+
+/// The names a directory of the family offers `requester` as peers, in
+/// name order.
+async fn offered_to(
+    family: &Arc<dyn IdentityFamily>,
+    mob: &meerkat_mob::MobHandle,
+    requester: &ChangeRequester,
+) -> Vec<String> {
+    match family
+        .read(
+            mob,
+            requester,
+            IdentityRead::Directory(ReadDirectory::default()),
+        )
+        .await
+    {
+        Ok(IdentityReadAnswer::Directory(page)) => {
+            let mut names: Vec<String> = page.peers.into_iter().map(|peer| peer.name).collect();
+            names.sort_unstable();
+            names
+        }
+        other => panic!("a directory answers a page: {other:?}"),
+    }
+}
+
+/// An agent is shown no agent that is private to a person, on any read of
+/// the family: it is not listed, the directory does not offer it, a get
+/// and a plan of it answer as for a name no agent holds, and it is no peer
+/// (`peer_unknown`). The rule is the family's own: the host, and a person
+/// whose view of the mob shows the agent, read it as before, and a person
+/// whose view does not show it does not.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_is_shown_no_agent_that_is_private_to_a_person() {
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, asked, fail_next_session) = launch_roster(
+        temp.path(),
+        &fresh_mob_id(),
+        false,
+        false,
+        Arc::new(RosterWithPrivate),
+    )
+    .await;
+    assert!(runtime.attach_identity_policy(in_process_policy(), IdentityFamilyOptions::new()));
+    let mut rig = Rig {
+        runtime,
+        asked,
+        step: Arc::new(RecordingStep::default()),
+        fail_next_session,
+    };
+    assert!(
+        rig.asked("Keep this between us.").await,
+        "the private agent's first message runs"
+    );
+    let family = rig.family();
+    let mob = rig.runtime.mob_handle();
+    let host = ChangeRequester::host("ops");
+    let planner = ChangeRequester::agent_recorded(PLANNER);
+    let person = ChangeRequester::human("person-1");
+    let everyone = vec![
+        "confidant".to_owned(),
+        HOST_A.to_owned(),
+        PLANNER.to_owned(),
+    ];
+    let others = vec![HOST_A.to_owned(), PLANNER.to_owned()];
+    // The host reads every agent.
+    assert_eq!(listed_to(&family, &mob, &host).await, everyone);
+    assert_eq!(offered_to(&family, &mob, &host).await, everyone);
+
+    // An agent is shown the others only.
+    assert_eq!(listed_to(&family, &mob, &planner).await, others);
+    assert_eq!(offered_to(&family, &mob, &planner).await, others);
+    let got = family
+        .read(
+            &mob,
+            &planner,
+            IdentityRead::Get(GetAgent::new("confidant")),
+        )
+        .await
+        .expect_err("an agent gets no private agent");
+    let absent = family
+        .read(&mob, &planner, IdentityRead::Get(GetAgent::new("nobody")))
+        .await
+        .expect_err("a name no agent holds");
+    assert_eq!(got.kind_token(), "identity_unknown", "{got}");
+    assert_eq!(
+        (got.kind_token(), &got.field),
+        (absent.kind_token(), &absent.field),
+        "nothing tells the two apart"
+    );
+    let named = rig
+        .change(
+            &planner,
+            "peer-1",
+            create_of(json!([{"name": "gamma", "profile": "worker", "peers": ["confidant"]}])),
+        )
+        .await;
+    assert_eq!(
+        refusal_of(&named),
+        (
+            "peer_unknown".to_owned(),
+            Some("agents[0].peers[0]".to_owned())
+        ),
+        "{named:?}"
+    );
+    assert!(rig.agent("gamma").await.is_none(), "nothing was created");
+
+    // A person whose view of the mob shows the agent reads it, and one
+    // whose view does not show it does not: what a view shows is its own.
+    let shown = rig
+        .runtime
+        .identity_family_seen_by(Arc::new(SeesOnly(&["confidant", HOST_A, PLANNER])))
+        .expect("the family as a caller that sees every agent");
+    assert_eq!(listed_to(&shown, &mob, &person).await, everyone);
+    assert_eq!(offered_to(&shown, &mob, &person).await, everyone);
+    let hidden = rig
+        .runtime
+        .identity_family_seen_by(Arc::new(SeesOnly(&[HOST_A, PLANNER])))
+        .expect("the family as a caller that sees the two others");
+    assert_eq!(listed_to(&hidden, &mob, &person).await, others);
+    assert_eq!(offered_to(&hidden, &mob, &person).await, others);
     rig.shutdown().await;
 }
 

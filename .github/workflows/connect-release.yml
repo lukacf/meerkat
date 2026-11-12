@@ -41,6 +41,19 @@ name: Connect release
 #   To add a target, add its row to build_macos's matrix, its architecture to
 #   the check, and the triple to TARGETS in
 #   scripts/connect_release_macos_assets.py.
+# The complete macOS arm64 installation (the executables with the bundled
+# Python, Node/npm, integration library and setup resources), stage one:
+#   - `macos-stage` (dispatch): two hosted macos-15 jobs call the producer
+#     (connect/scripts/connect-candidate.py macos <step>) once per step from
+#     the dispatched commit. stage_macos_build fetches the pinned public
+#     inputs (connect/scripts/fetch-pinned-inputs.py: the committed pin file
+#     plus the crate rows derived from Cargo.lock), builds the library, the
+#     resources and the two executables with the resource digest;
+#     stage_macos_check builds the test executables, runs the installed
+#     checks and uploads the stage record as a workflow artifact. Nothing is
+#     published: no release, no tag, no token, no provider key. The stage
+#     record is read, scanned and reviewed outside the workflow before
+#     anything is assembled for a release (release/CONNECT-CANDIDATE.md).
 # Prerequisites (connect-candidate-monorepo patch): connect-candidate.py names
 # lukacf/meerkat and this workflow; after the workspace wire-up it must build
 # meerkat-connect from the root workspace instead of native-candidate/.
@@ -52,12 +65,17 @@ name: Connect release
   workflow_dispatch:
     inputs:
       mode:
-        description: "candidate: build one target; accept: accept an attested candidate; publish: add accepted assets; macos-build: build and check the macOS executables, publish nothing; macos-assets: build an existing tag's macOS executables and add them to its release"
+        description: "candidate: build one target; accept: accept an attested candidate; publish: add accepted assets; macos-build: build and check the macOS executables, publish nothing; macos-assets: build an existing tag's macOS executables and add them to its release; macos-stage: stage the complete macOS installation as a workflow artifact, publish nothing"
         required: true
         type: choice
-        options: [candidate, accept, publish, macos-build, macos-assets]
+        options: [candidate, accept, publish, macos-build, macos-assets, macos-stage]
       release_tag:
         description: macos-assets only - the existing connect-vX.Y.Z tag whose release gets the macOS executables
+        required: false
+        default: ""
+        type: string
+      rkat_release_tag:
+        description: macos-stage only - Core's published release tag (vX.Y.Z) whose rkat archive the consumer check runs; empty builds rkat from the dispatched commit
         required: false
         default: ""
         type: string
@@ -621,6 +639,413 @@ jobs:
           set -euo pipefail
           python3 scripts/connect_release_macos_assets.py --tag "${TAG}" --version "${VERSION}" \
             --download "${RUNNER_TEMP}/macos-download" --work "${RUNNER_TEMP}/macos-existing"
+
+  # Stage one of the complete macOS arm64 installation (dispatch,
+  # macos-stage). The producer runs one step per workflow step, so each has
+  # its own log, time and failure. Its records bind absolute paths: the
+  # checkout is the runner's default workspace and the work root a short
+  # fixed directory (macOS allows 104 bytes for a Unix socket path, and the
+  # installed checks keep theirs under the work root), the same two literals
+  # in both jobs, and each job's first step refuses any other layout.
+  # Network: the fetch step downloads the pinned public inputs and checks
+  # each against its pin; Cargo downloads the crates Cargo.lock pins; the
+  # library step's component build runs `npm ci` for the integrity-locked
+  # packages of connect/sdk/activepieces/package-lock.json; two installed
+  # checks read live public pages with a controlled model. No step holds a
+  # token or a provider key, and nothing leaves the run but its artifacts
+  # and the provenance attestation of the stage record's digest.
+  stage_macos_build:
+    name: Stage the complete macOS installation (library, resources, executables)
+    needs: [resolve]
+    if: github.event_name == 'workflow_dispatch' && needs.resolve.outputs.mode == 'macos-stage'
+    runs-on: macos-15
+    # A bound, not an estimate: no hosted run of these builds has been
+    # measured. GitHub ends a hosted job at 360 minutes.
+    timeout-minutes: 330
+    permissions:
+      contents: read
+    env:
+      CONNECT_CHECKOUT: /Users/runner/work/meerkat/meerkat
+      CONNECT_WORK: /private/tmp/cw
+      CONNECT_PINS: /private/tmp/cw/pins
+      CONNECT_RESOLVED_PINS: /private/tmp/cw/pins/library-pins-macos-arm64.resolved.json
+      PYTHONDONTWRITEBYTECODE: "1"
+    outputs:
+      work_artifact: ${{ steps.pack.outputs.work_artifact }}
+    steps:
+      - name: Checkout the dispatched source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.resolve.outputs.source_ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check the runner layout
+        shell: bash
+        run: |
+          set -euo pipefail
+          here="$(pwd -P)"
+          if [[ "${here}" != "${CONNECT_CHECKOUT}" ]]; then
+            echo "::error::the checkout is at ${here}, not ${CONNECT_CHECKOUT}" >&2
+            exit 1
+          fi
+          if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
+            echo "::error::not a macOS arm64 runner: $(uname -s) $(uname -m)" >&2
+            exit 1
+          fi
+          if [[ -e "${CONNECT_WORK}" || -L "${CONNECT_WORK}" ]]; then
+            echo "::error::the work root ${CONNECT_WORK} already exists" >&2
+            exit 1
+          fi
+          parent="$(dirname "${CONNECT_WORK}")"
+          if [[ ! -d "${parent}" || "$(cd "${parent}" && pwd -P)" != "${parent}" ]]; then
+            echo "::error::the work root's parent ${parent} is not a real directory" >&2
+            exit 1
+          fi
+          head="$(git rev-parse HEAD)"
+          if [[ "${head}" != "${GITHUB_SHA}" ]]; then
+            echo "::error::checked-out commit ${head} is not the dispatched commit ${GITHUB_SHA}" >&2
+            exit 1
+          fi
+          if [[ -n "$(git status --porcelain --untracked-files=normal)" ]]; then
+            echo "::error::the checkout is not clean" >&2
+            exit 1
+          fi
+          echo "checkout ${here} at ${head}; work root ${CONNECT_WORK}"
+          df -k "${parent}"
+
+      - name: Select Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@f08ac54821369508305fcb9e0121ec6e30ae9ada # 1.97.0
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Install zstd
+        shell: bash
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+        run: |
+          set -euo pipefail
+          command -v zstd >/dev/null 2>&1 || brew install zstd
+          zstd --version
+
+      - name: Preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 connect/scripts/connect-candidate.py macos preflight \
+            --work "${CONNECT_WORK}" --source-sha "${GITHUB_SHA}"
+
+      # The only step that downloads the pinned inputs. Cargo.lock is the pin
+      # for crates: the tool closure Cargo prints and the lock give the crate
+      # rows, and the fetch writes the resolved pin file every later step is
+      # given. Its record and the resolved file are kept under the work
+      # root's records, so the stage record carries them. The test first
+      # checks that this tree's closure resolves against its lock.
+      - name: Fetch the pinned public inputs
+        shell: bash
+        env:
+          CONNECT_PINS_TOOL_CLOSURE: "1"
+        run: |
+          set -euo pipefail
+          (cd connect && python3 -B -m unittest scripts.test_fetch_pinned_inputs)
+          connect/scripts/repo-cargo tree --locked --manifest-path "${CONNECT_CHECKOUT}/Cargo.toml" \
+            -p toolkit-package --features local-recipes,local-artifacts --target aarch64-apple-darwin \
+            -e normal,build --prefix none --format "{p}" > "${CONNECT_WORK}/tool-closure.txt"
+          python3 -I connect/scripts/fetch-pinned-inputs.py \
+            --pins connect/release/library-pins-macos-arm64.json \
+            --closure "${CONNECT_WORK}/tool-closure.txt" --lock Cargo.lock \
+            --destination "${CONNECT_PINS}"
+          mkdir -p "${CONNECT_WORK}/records/pinned-inputs"
+          cp "${CONNECT_PINS}/FETCHED.json" "${CONNECT_RESOLVED_PINS}" "${CONNECT_WORK}/records/pinned-inputs/"
+
+      - name: Build the integration library
+        shell: bash
+        env:
+          CARGO_BUILD_JOBS: "2"
+        run: |
+          set -euo pipefail
+          python3 connect/scripts/connect-candidate.py macos library \
+            --work "${CONNECT_WORK}" --pins "${CONNECT_RESOLVED_PINS}" --pinned-inputs "${CONNECT_PINS}"
+
+      - name: Package the resources
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 connect/scripts/connect-candidate.py macos resources \
+            --work "${CONNECT_WORK}" --pins "${CONNECT_RESOLVED_PINS}" --pinned-inputs "${CONNECT_PINS}"
+
+      # CARGO_BUILD_JOBS as in build_macos: two rustc processes bound the
+      # memory the largest crates need together on a hosted runner.
+      - name: Build and sign the executables
+        shell: bash
+        env:
+          CARGO_BUILD_JOBS: "2"
+        run: |
+          set -euo pipefail
+          python3 connect/scripts/connect-candidate.py macos build --work "${CONNECT_WORK}"
+
+      # No later step reads Cargo's output (the producer copies what it
+      # builds into the work root), and the pack below needs the disk.
+      - name: Free the Cargo output
+        shell: bash
+        env:
+          RUST_LANE_ID: connect-macos-arm64
+        run: |
+          set -euo pipefail
+          connect/scripts/repo-cargo clean
+          df -k "${CONNECT_WORK}"
+
+      # The check job restores the whole work root at the same path: one
+      # uncompressed tar keeps modes and links, which a workflow artifact's
+      # own packing does not.
+      - name: Pack the work root for the check job
+        id: pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 022
+          tar -cf "${RUNNER_TEMP}/connect-work.tar" -C "$(dirname "${CONNECT_WORK}")" "$(basename "${CONNECT_WORK}")"
+          (cd "${RUNNER_TEMP}" && shasum -a 256 connect-work.tar > connect-work.tar.sha256)
+          ls -l "${RUNNER_TEMP}/connect-work.tar"
+          echo "work_artifact=connect-macos-arm64-work-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload the work root
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ steps.pack.outputs.work_artifact }}
+          path: |
+            ${{ runner.temp }}/connect-work.tar
+            ${{ runner.temp }}/connect-work.tar.sha256
+          if-no-files-found: error
+          overwrite: false
+          include-hidden-files: true
+          compression-level: 0
+          retention-days: 3
+
+  # The second half of stage one: the test executables, the installed checks
+  # and the stage record. The stage record is the producer's directory,
+  # uploaded unchanged; the shutdown review in it stays pending and the CLI
+  # product is not assembled here.
+  stage_macos_check:
+    name: Stage the complete macOS installation (installed checks, stage record)
+    needs: [resolve, stage_macos_build]
+    if: github.event_name == 'workflow_dispatch' && needs.resolve.outputs.mode == 'macos-stage'
+    runs-on: macos-15
+    timeout-minutes: 330
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      CONNECT_CHECKOUT: /Users/runner/work/meerkat/meerkat
+      CONNECT_WORK: /private/tmp/cw
+      CONNECT_PINS: /private/tmp/cw/pins
+      CONNECT_RESOLVED_PINS: /private/tmp/cw/pins/library-pins-macos-arm64.resolved.json
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Checkout the dispatched source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.resolve.outputs.source_ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check the runner layout
+        shell: bash
+        run: |
+          set -euo pipefail
+          here="$(pwd -P)"
+          if [[ "${here}" != "${CONNECT_CHECKOUT}" ]]; then
+            echo "::error::the checkout is at ${here}, not ${CONNECT_CHECKOUT}" >&2
+            exit 1
+          fi
+          if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
+            echo "::error::not a macOS arm64 runner: $(uname -s) $(uname -m)" >&2
+            exit 1
+          fi
+          if [[ -e "${CONNECT_WORK}" || -L "${CONNECT_WORK}" ]]; then
+            echo "::error::the work root ${CONNECT_WORK} already exists" >&2
+            exit 1
+          fi
+          parent="$(dirname "${CONNECT_WORK}")"
+          if [[ ! -d "${parent}" || "$(cd "${parent}" && pwd -P)" != "${parent}" ]]; then
+            echo "::error::the work root's parent ${parent} is not a real directory" >&2
+            exit 1
+          fi
+          head="$(git rev-parse HEAD)"
+          if [[ "${head}" != "${GITHUB_SHA}" ]]; then
+            echo "::error::checked-out commit ${head} is not the dispatched commit ${GITHUB_SHA}" >&2
+            exit 1
+          fi
+          if [[ -n "$(git status --porcelain --untracked-files=normal)" ]]; then
+            echo "::error::the checkout is not clean" >&2
+            exit 1
+          fi
+          echo "checkout ${here} at ${head}; work root ${CONNECT_WORK}"
+          df -k "${parent}"
+
+      - name: Select Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@f08ac54821369508305fcb9e0121ec6e30ae9ada # 1.97.0
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Install zstd
+        shell: bash
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+        run: |
+          set -euo pipefail
+          command -v zstd >/dev/null 2>&1 || brew install zstd
+          zstd --version
+
+      - name: Download the work root
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ needs.stage_macos_build.outputs.work_artifact }}
+          path: ${{ runner.temp }}/connect-work
+
+      - name: Restore the work root at its path
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 022
+          if [[ -e "${CONNECT_WORK}" || -L "${CONNECT_WORK}" ]]; then
+            echo "::error::the work root ${CONNECT_WORK} already exists" >&2
+            exit 1
+          fi
+          (cd "${RUNNER_TEMP}/connect-work" && shasum -a 256 -c connect-work.tar.sha256)
+          tar -xpf "${RUNNER_TEMP}/connect-work/connect-work.tar" -C "$(dirname "${CONNECT_WORK}")"
+          rm -f "${RUNNER_TEMP}/connect-work/connect-work.tar"
+          if [[ ! -f "${CONNECT_WORK}/records/preflight.step.json" || ! -f "${CONNECT_RESOLVED_PINS}" ]]; then
+            echo "::error::${CONNECT_WORK} is not a preflighted work root with its resolved pin file" >&2
+            exit 1
+          fi
+
+      - name: Stage the products and build the test executables
+        shell: bash
+        env:
+          CARGO_BUILD_JOBS: "2"
+        run: |
+          set -euo pipefail
+          python3 connect/scripts/connect-candidate.py macos stage \
+            --work "${CONNECT_WORK}" --pins "${CONNECT_RESOLVED_PINS}" --pinned-inputs "${CONNECT_PINS}"
+
+      - name: Check the installed gateway
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 connect/scripts/connect-candidate.py macos check-gateway --work "${CONNECT_WORK}"
+
+      - name: Check the installed CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 connect/scripts/connect-candidate.py macos check-cli --work "${CONNECT_WORK}"
+
+      # With rkat_release_tag: Core's published rkat archive for this
+      # architecture, taken by that release's own checksum file (public
+      # release assets, no token). Without it rkat is built from the
+      # dispatched commit, and the record says so: such a stage record shows
+      # the check on macOS and is not one a release is assembled from.
+      - name: Check a fresh rkat consumer
+        shell: bash
+        env:
+          RKAT_RELEASE_TAG: ${{ inputs.rkat_release_tag }}
+          CARGO_BUILD_JOBS: "2"
+        run: |
+          set -euo pipefail
+          if [[ -z "${RKAT_RELEASE_TAG}" ]]; then
+            python3 connect/scripts/connect-candidate.py macos check-consumer --work "${CONNECT_WORK}" \
+              --rkat-from-checkout
+            exit 0
+          fi
+          if [[ ! "${RKAT_RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::rkat_release_tag must be Core's release tag vX.Y.Z; got '${RKAT_RELEASE_TAG}'" >&2
+            exit 1
+          fi
+          archive="rkat-${RKAT_RELEASE_TAG#v}-aarch64-apple-darwin.tar.gz"
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RKAT_RELEASE_TAG}"
+          directory="${RUNNER_TEMP}/rkat-release"
+          mkdir "${directory}"
+          curl -fsSL --retry 3 --max-time 600 -o "${directory}/checksums.sha256" "${base}/checksums.sha256"
+          curl -fsSL --retry 3 --max-time 600 -o "${directory}/${archive}" "${base}/${archive}"
+          expected="$(awk -v name="${archive}" '$2 == name { print $1 }' "${directory}/checksums.sha256")"
+          if [[ ! "${expected}" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::checksums.sha256 of ${RKAT_RELEASE_TAG} has no single row for ${archive}" >&2
+            exit 1
+          fi
+          actual="$(shasum -a 256 "${directory}/${archive}" | cut -d' ' -f1)"
+          if [[ "${actual}" != "${expected}" ]]; then
+            echo "::error::${archive} is ${actual}, not the published ${expected}" >&2
+            exit 1
+          fi
+          python3 connect/scripts/connect-candidate.py macos check-consumer --work "${CONNECT_WORK}" \
+            --rkat-archive "${directory}/${archive}" --rkat-archive-sha256 "${expected}"
+
+      - name: Check the setup conversation start
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 connect/scripts/connect-candidate.py macos check-conversation --work "${CONNECT_WORK}"
+
+      - name: Check the official Playwright install
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 connect/scripts/connect-candidate.py macos check-official-install --work "${CONNECT_WORK}"
+
+      - name: Write the stage record
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 connect/scripts/connect-candidate.py macos stage-record \
+            --work "${CONNECT_WORK}" --output "${CONNECT_WORK}/artifact"
+
+      - name: Attest the stage record
+        id: provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
+        with:
+          subject-path: /private/tmp/cw/artifact/STAGE.json
+
+      # The bundle is an artifact of its own: the stage record holds exactly
+      # the files STAGE.json lists.
+      - name: Retain the provenance bundle
+        shell: bash
+        env:
+          BUNDLE_PATH: ${{ steps.provenance.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          mkdir "${RUNNER_TEMP}/stage-provenance"
+          cp -- "${BUNDLE_PATH}" "${RUNNER_TEMP}/stage-provenance/connect-macos-arm64-stage-provenance.jsonl"
+
+      - name: Upload the stage record
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: connect-macos-arm64-stage-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /private/tmp/cw/artifact
+          if-no-files-found: error
+          overwrite: false
+          include-hidden-files: true
+          retention-days: 90
+
+      - name: Upload the stage provenance
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: connect-macos-arm64-stage-provenance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/stage-provenance/connect-macos-arm64-stage-provenance.jsonl
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 90
 
   build:
     name: Build and verify ${{ inputs.target }}

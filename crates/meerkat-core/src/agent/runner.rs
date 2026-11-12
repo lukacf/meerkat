@@ -739,6 +739,16 @@ where
         metadata.terminal = true;
         metadata.outcome = Some(snapshot.terminal_outcome);
         metadata.detail = Some(error.to_string());
+        // A turn that failed for a refused reasoning effort level keeps the
+        // typed refusal: the session runtime hands this witness to the
+        // surface as the failed turn's error, and a surface reads the
+        // refusal from its reason to answer the turn as it answers a
+        // refused build.
+        if metadata.reason.is_none()
+            && matches!(error.primary_error(), AgentError::ReasoningEffortRefused(_))
+        {
+            metadata.reason = crate::event::AgentErrorReason::from_agent_error(error);
+        }
         self.runtime_terminal_failure_witness = Some(Ok(metadata));
     }
 

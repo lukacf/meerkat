@@ -706,10 +706,15 @@ composition without the built-in identity and member store commits no change
   retryable refusal leaves the member Dormant and its next wake asks again
   once the retry is due, and a refusal for good records the member broken
   until it is respawned or reset. The seat's labels are its row's labels:
-  Core lowers them from the row at a fresh spawn, and at a wake or a
-  restore a seat that trails its row takes the row's labels before the
-  host is asked
-  (see Update). A build must carry exactly the seat's labels, since what
+  Core lowers them from the row at a fresh spawn; at a wake or a restore
+  they are the labels the member was last seated with, or the row's
+  labels while the row records that the seat is owed a label restamp
+  (see Update). Core reads the row once at each such build, before the
+  host is asked; a row the identity store cannot serve then, or holds in
+  a form this build cannot read, ends the build for a retry as a store
+  that cannot serve the member (`ResumeGateUnavailable`), never as the
+  host's refusal, with the host asked nothing and the member left Dormant
+  and not broken. A build must carry exactly the seat's labels, since what
   decides on a member's labels reads its seat. Core compares them at every
   build it composes, on the host's answer and again on the labels the
   build carries once the host's spawn customizer ran, whether or not a
@@ -729,9 +734,11 @@ composition without the built-in identity and member store commits no change
   whose build step is not ready to answer refuses retryably: until the
   host's preparer is composed the seat is not built. A seat an earlier
   release left with other labels than its row
-  (`IdentityRecordCensus::seats_stale` above zero after an upgrade) needs
-  no step first: a start reads its row's labels into its roster entry, and
-  its next build carries them. A seat Core
+  (`IdentityRecordCensus::seats_stale` above zero after an upgrade)
+  carries no record of an owed restamp, so no start and no build moves its
+  labels: it is respawned with its row's labels, or its identity updated
+  while its member is idle, before its host adopts the seat composition
+  or a spawn customizer that sets labels. A seat Core
   holds Dormant asks nothing until it is built. A placed or externally
   bound identity is hosted on its first use,
   one whose creation its host holds (`CreatedIdentityRequest::held_creation`)
@@ -755,10 +762,11 @@ composition without the built-in identity and member store commits no change
   keeps its identity entry, session, conversation and edges, nothing is
   built or woken, and no kickoff runs again. A member that holds work is
   not interrupted: the update answers `Deferred`. A label update of a busy
-  agent is recorded at once, the mob's roster reads the row's labels at
-  once, and the running session takes them at its next build (a key the
-  row dropped stays in a resumed session's own peer metadata, as at every
-  resume); the member
+  agent is recorded in its row, the mob's roster reads the row's labels
+  from the step that commits the row (whatever the member step answers,
+  and whether or not the update's caller is still there), and the running
+  session takes them at its next build (a key the row dropped stays in a
+  resumed session's own peer metadata, as at every resume); the member
   keeps its generation, fence and session, and no seat row is written.
   The same holds when the member step fails (`Failed`) and for a member a
   same-session successor cannot serve (placed, wired to a placed member,
@@ -766,13 +774,30 @@ composition without the built-in identity and member store commits no change
   answers `Kept`. The roster is not the journal: the member's last seat
   row keeps the labels it was seated with until its restamp, and so do
   the binding journal's labels and `IdentityRecordCensus::seats_stale`,
-  which read that row. The restamp stays owed: a retry of the same update
-  (it replays) or the identity's next update carries it out once the
-  member is idle, as a respawn or a reset does. A seat that
-  trails its row for any other cause takes its row's labels on the roster
-  at the mob's next start (which reads the rows and builds nothing) and at
-  its next build before the host is asked, so no answered label update
-  leaves its member refused its build. A roster-owned identity's label
+  which read that row. The restamp stays owed, and the row records it
+  (`CreatedIdentityRecord::label_restamp_owed`, counted by
+  `IdentityRecordCensus::label_restamps_owed`): the update's commit writes
+  it, in its own transaction, when a member holds the identity and its
+  last seat row carries other labels than the updated row, and the row
+  lets it go once a seat row carries the row's labels. A retry of the
+  same update (it replays) or the identity's next update carries the
+  restamp out once the member is idle (a retry while it still holds work
+  restamps nothing); a respawn with the row's labels, a rotation, a reset
+  and a runtime-mode or role restamp settle it too, and an archive or a
+  removal drops it. While it is owed, a start seats the row's labels on
+  the member's roster entry (reading the rows it reads anyway; nothing is
+  built, woken or written) and a build of the member is compared with the
+  row's labels, so no answered label update leaves its member refused its
+  build, in one process or across restarts; a build writes no seat row
+  and settles nothing. A seat whose row owes no restamp is left alone by
+  a start and compared with its own labels at a build: a label only the
+  seat carries is kept or refused, never dropped there, and goes at the
+  identity's next update, which makes an idle member's seat equal its
+  row. A host's own declaration of a store-owned identity under created
+  custody restamps no label: a label reaches a store-owned seat through
+  its row. Releases 0.9.9 through 0.9.14 read a row that records an owed
+  restamp as unreadable for that identity, so owed restamps are settled
+  before a rollback. A roster-owned identity's label
   change keeps its member: the declared apply stores no labels. A
   runtime-mode
   change restamps the member on its own session; a profile change is the

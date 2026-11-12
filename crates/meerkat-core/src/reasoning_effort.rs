@@ -1,11 +1,17 @@
-//! Vocabulary of the provider-neutral `reasoning_effort` option.
+//! The provider-neutral `reasoning_effort` option: its vocabulary and its
+//! resolver.
 //!
-//! Types only. A request names one level in the [`EffortLevel`] vocabulary;
-//! whether a provider request can carry it depends on the model and on the
-//! route that serves the request: the backend (a provider-matrix backend
-//! kind) and the provider API the request is sent on. This module names the
-//! route, what a client observes about it, the typed refusal of a level, and
-//! the reports of the level a request was sent with. It decides nothing.
+//! A request names one level in the [`EffortLevel`] vocabulary; whether a
+//! provider request can carry it depends on the model and on the route that
+//! serves the request: the backend (a provider-matrix backend kind) and the
+//! provider API the request is sent on. This module names the route, what a
+//! client observes about it, the typed refusal of a level, and the reports
+//! of the level a request was sent with. Its resolver
+//! ([`resolve_reasoning_effort`]) decides, for a requested level, a model
+//! and a route observation, what to write on a provider request or the
+//! typed refusal; [`supported_reasoning_levels`] is its facts step alone.
+
+mod resolve;
 
 use std::fmt;
 
@@ -15,6 +21,12 @@ use crate::Provider;
 use crate::model_profile::capabilities::EffortLevel;
 use crate::provider_matrix::{
     AnthropicBackendKind, GoogleBackendKind, OpenAiBackendKind, SelfHostedBackendKind,
+};
+
+pub(crate) use resolve::explicit_provider_effort;
+pub use resolve::{
+    ReasoningLevelFacts, ReasoningResolveInput, ReasoningResolveMode, direct_route_observation,
+    resolve_reasoning_effort, supported_reasoning_levels,
 };
 
 /// The provider API a request is sent on.
@@ -104,6 +116,18 @@ impl ReasoningBackend {
             || SelfHostedBackendKind::ALL
                 .iter()
                 .any(|kind| kind.as_str() == backend)
+    }
+
+    /// The source that states the effort levels this backend's routes
+    /// accept: the kind's own `reasoning_levels_source()`, the facts policy
+    /// of the provider matrix, decided per kind.
+    pub fn levels_source(self) -> ReasoningFactsSource {
+        match self {
+            Self::OpenAi(kind) => kind.reasoning_levels_source(),
+            Self::Anthropic(kind) => kind.reasoning_levels_source(),
+            Self::Google(kind) => kind.reasoning_levels_source(),
+            Self::SelfHosted(kind) => kind.reasoning_levels_source(),
+        }
     }
 }
 
@@ -246,16 +270,21 @@ pub enum ReasoningEffortRefusalReason {
     ConflictingReasoningMode,
 }
 
-/// The source of the effort levels a route accepts for a model.
+/// The source of the effort levels a route accepts for a model. Each
+/// backend kind names its own (`reasoning_levels_source()` on the
+/// provider-matrix kinds, [`ReasoningBackend::levels_source`]); a refusal
+/// and a resolution report it as `facts`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ReasoningFactsSource {
-    /// The model's catalog row.
+    /// The model's catalog row: the backend forwards the provider's own API
+    /// to the provider's own validation.
     Catalog,
-    /// The account's model list.
+    /// The account's model list entry for the model: the backend answers
+    /// for itself, and the catalog row is never a source of its levels.
     Account,
-    /// The operator's model configuration.
+    /// The levels the operator declared in the model's configuration.
     Operator,
 }
 
@@ -276,8 +305,8 @@ pub struct ReasoningEffortRefusal {
     /// The model the request would use.
     pub model: String,
     /// The route the request would be served on. `None` when the client
-    /// that serves the request reports no route and the model's provider
-    /// has no direct route to name: a route is never guessed.
+    /// that serves the request reports no route: a route nobody observed
+    /// is never guessed.
     pub route: Option<ReasoningRoute>,
     /// Why the level is refused.
     pub reason: ReasoningEffortRefusalReason,
@@ -880,10 +909,9 @@ mod tests {
             conflict
         );
 
-        // A refusal that names no route (no client observation, and a
-        // provider with no direct route to name) writes `route` as an
-        // explicit `null`, in its place, and reads back. A document that
-        // leaves the key out reads as the same refusal.
+        // A refusal that names no route (no client observation) writes
+        // `route` as an explicit `null`, in its place, and reads back. A
+        // document that leaves the key out reads as the same refusal.
         let unrouted = ReasoningEffortRefusal {
             provider: Provider::Other,
             model: "<model id>".to_owned(),

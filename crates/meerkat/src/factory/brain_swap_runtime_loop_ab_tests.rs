@@ -595,6 +595,9 @@ struct AbEnvironment {
     client_build_models: Arc<StdMutex<Vec<String>>>,
     resolved_auth_bindings: Arc<StdMutex<Vec<AuthBindingRef>>>,
     reasoning_route: ScriptedReasoningRoute,
+    /// Whether the configuration enables model fallback, with the route's
+    /// model B as the one chain target.
+    fallback_to_b: bool,
 }
 
 impl AbHarness {
@@ -796,6 +799,16 @@ async fn build_harness_seeded(
 }
 
 fn new_environment(profile: PersistenceProfile, route: RouteSpec) -> Arc<AbEnvironment> {
+    new_environment_with(profile, route, false)
+}
+
+/// [`new_environment`]; with `fallback_to_b` the configuration enables model
+/// fallback and names the route's model B as the one chain target.
+fn new_environment_with(
+    profile: PersistenceProfile,
+    route: RouteSpec,
+    fallback_to_b: bool,
+) -> Arc<AbEnvironment> {
     Arc::new(AbEnvironment {
         profile,
         route,
@@ -805,6 +818,7 @@ fn new_environment(profile: PersistenceProfile, route: RouteSpec) -> Arc<AbEnvir
         client_build_models: Arc::new(StdMutex::new(Vec::new())),
         resolved_auth_bindings: Arc::new(StdMutex::new(Vec::new())),
         reasoning_route: ScriptedReasoningRoute::default(),
+        fallback_to_b,
     })
 }
 
@@ -861,7 +875,15 @@ async fn try_attach_harness(
     }
     factory.provider_registry = Arc::new(registry);
 
-    let config = ab_test_config(route, environment.availability.as_ref());
+    let mut config = ab_test_config(route, environment.availability.as_ref());
+    if environment.fallback_to_b {
+        config.model_fallback.enabled = Some(true);
+        config.model_fallback.chain = vec![meerkat_core::config::ModelFallbackTarget {
+            model: route.model_b.to_string(),
+            provider: Some(route.provider_b),
+            auth_binding: Some(expected_auth_binding_named(route.binding_b)),
+        }];
+    }
     if environment.availability.is_available(route.model_a) {
         meerkat_core::resolve_explicit_auth_binding_target(
             &config,
@@ -2057,4 +2079,76 @@ async fn a_brain_swap_keeps_the_level_and_requests_are_refused_until_it_is_clear
             .and_then(|params| params.reasoning_effort),
         None
     );
+}
+
+/// A session's fallback client is built for the level the session holds at
+/// that build: its chain target carries that level. A caller's change of the
+/// level, and a clear, each build the session's own client alone, so no
+/// fallback client, and no chain target that carries the earlier level,
+/// outlives the change. The session's next build (here a cold restart)
+/// builds the chain target again, for the level the session holds then.
+#[tokio::test]
+async fn a_level_change_or_clear_replaces_the_fallback_client() {
+    use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+    use meerkat_core::model_profile::capabilities::EffortLevel;
+
+    let route = SAME_PROVIDER_ROUTE;
+    let mut harness = attach_harness(
+        new_environment_with(PersistenceProfile::WholeBlob, route, true),
+        None,
+    )
+    .await;
+    // The account's list states both levels for every model of the route.
+    harness.set_reasoning_route(Some(account_route_stating(&[
+        EffortLevel::Low,
+        EffortLevel::High,
+    ])));
+
+    for (step, level) in [
+        ("set", Some(EffortLevel::High)),
+        ("change", Some(EffortLevel::Low)),
+        ("clear", None),
+    ] {
+        // The session as it was built: its own client and the chain
+        // target's, the fallback client's two candidates.
+        let built = harness.client_build_models();
+        assert!(
+            built.iter().any(|model| model == route.model_a)
+                && built.iter().any(|model| model == route.model_b),
+            "{step}: a session build builds the fallback chain target too: {built:?}"
+        );
+
+        harness.clear_client_build_models();
+        let change = match level {
+            Some(level) => TurnMetadataOverride::Set(level),
+            None => TurnMetadataOverride::Clear,
+        };
+        harness
+            .adapter
+            .reconfigure_session_llm_identity(
+                &harness.session_id,
+                level_request(None, Some(change)),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{step}: the level change is applied: {error}"));
+        let rebuilt = harness.client_build_models();
+        assert!(
+            !rebuilt.is_empty() && rebuilt.iter().all(|model| model == route.model_a),
+            "{step}: the change builds the session's own client alone, no chain target: \
+             {rebuilt:?}"
+        );
+        assert_eq!(
+            harness
+                .live_identity()
+                .await
+                .provider_params
+                .and_then(|params| params.reasoning_effort),
+            level,
+            "{step}: the session holds the new level"
+        );
+
+        // The session's next build is for the level it holds now.
+        harness.clear_client_build_models();
+        harness = harness.cold_restart().await;
+    }
 }

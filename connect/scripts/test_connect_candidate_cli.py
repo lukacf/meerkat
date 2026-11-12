@@ -1380,6 +1380,18 @@ def test_accept_review_records_the_acceptance_of_one_exact_stage(lane, capsys):
     (stage / "records" / (p.CLI_SHUTDOWN + ".log")).write_text("another observation\n")
     assert p.macos_main(["accept-review", "--stage", str(stage), "--output", str(lane.root / "second.json")]) == 1
     assert not (lane.root / "second.json").exists()
+    # Even a stage record that agrees with itself is refused when an observation is not the one the
+    # pending record binds: the record and its row were changed together here.
+    changed = stage / "records" / (p.CLI_SHUTDOWN + ".log")
+    value = p.read_json(stage / "STAGE.json")
+    for row in value["files"]:
+        if row["path"] == "records/" + changed.name:
+            row.update(bytes=changed.stat().st_size, sha256=p.digest(changed))
+    dump(stage / "STAGE.json", value)
+    assert p.checked_stage(stage)["revision"] == REVISION
+    with pytest.raises(ValueError, match="an observation the record binds is missing or changed"):
+        p.macos_accept_review(stage, lane.root / "third.json")
+    assert not (lane.root / "third.json").exists()
 
 
 def test_the_repository_scanners_own_report_is_an_accepted_report(tmp_path):

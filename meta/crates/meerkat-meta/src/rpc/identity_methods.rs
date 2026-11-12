@@ -155,12 +155,34 @@ pub(crate) fn console_requester(person: Option<&str>) -> ChangeRequester {
 
 /// The agents a Console caller may view, as the family asks which agents a
 /// caller may see: a peer the caller may not view is answered as a name no
-/// agent holds.
+/// agent holds. An agent the family read is decided again as its own record
+/// reads it (its profile as its role, and its labels), so a rule about a
+/// role or a label, and the rule about an agent private to a person, hold
+/// for an agent no member is seated for.
 pub(crate) struct ViewedAgents(pub(crate) AccessView);
 
 impl crate::identity_creation::PeerVisibility for ViewedAgents {
     fn sees(&self, name: &str) -> bool {
         self.0.can_view_agent(name)
+    }
+
+    fn sees_record(
+        &self,
+        name: &str,
+        profile: &str,
+        labels: &std::collections::BTreeMap<String, String>,
+    ) -> bool {
+        self.0
+            .decide_agent_with_attributes(
+                crate::access::ACTION_AGENT_VIEW,
+                &crate::access::AgentResourceAttributes {
+                    identity: name.to_owned(),
+                    agent_id: None,
+                    role: Some(profile.to_owned()),
+                    labels: labels.clone(),
+                },
+            )
+            .is_allow()
     }
 }
 

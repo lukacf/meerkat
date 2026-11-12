@@ -5303,6 +5303,115 @@ async fn no_change_adds_or_removes_the_label_that_says_an_agent_is_private() {
     rig.shutdown().await;
 }
 
+/// A taken name cannot be created, whoever asks: one namespace holds
+/// every name. To a requester that is not shown every agent (an agent; a
+/// person whose view of the mob hides some) the refusal says only that the
+/// name is taken, with one holder token whatever holds it: an agent it is
+/// not shown, an agent it is shown, or a removed agent's name. The host
+/// reads what holds the name.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_taken_name_tells_a_requester_of_limited_sight_nothing_of_its_holder() {
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, asked, fail_next_session) = launch_roster(
+        temp.path(),
+        &fresh_mob_id(),
+        false,
+        false,
+        Arc::new(RosterWithPrivate {
+            first_message: false,
+        }),
+    )
+    .await;
+    assert!(runtime.attach_identity_policy(in_process_policy(), IdentityFamilyOptions::new()));
+    let rig = Rig {
+        runtime,
+        asked,
+        step: Arc::new(RecordingStep::default()),
+        fail_next_session,
+    };
+    let mob = rig.runtime.mob_handle();
+    let host = ChangeRequester::host("ops");
+    let planner = ChangeRequester::agent_recorded(PLANNER);
+    // A removed agent's name.
+    let made = rig
+        .change(
+            &host,
+            "t-1",
+            create_of(json!([{"name": "former", "profile": "worker"}])),
+        )
+        .await;
+    assert_eq!(made.token(), "done", "{made:?}");
+    let archived = rig
+        .change(
+            &host,
+            "t-2",
+            IdentityChangeSpec::Archive(agent_ref("former", &rig.digest("former").await)),
+        )
+        .await;
+    assert_eq!(archived.token(), "done", "{archived:?}");
+    let removed = rig
+        .change(
+            &host,
+            "t-3",
+            IdentityChangeSpec::Remove(agent_ref("former", &rig.digest("former").await)),
+        )
+        .await;
+    assert_eq!(removed.token(), "done", "{removed:?}");
+
+    // What a refused create says of the name: the kind and the holder.
+    let taken = |outcome: IdentityOutcome| {
+        let data = outcome
+            .refusal()
+            .unwrap_or_else(|| panic!("the create is refused: {outcome:?}"))
+            .to_data();
+        json!({"kind": data["kind"], "by": data["by"]})
+    };
+    let create = |name: &str| create_of(json!([{"name": name, "profile": "worker"}]));
+    let one = json!({"kind": "name_taken", "by": "identity"});
+    // An agent: the private agent it is not shown, an agent it is shown,
+    // and the removed name read alike.
+    for (request_id, name) in [("n-1", "confidant"), ("n-2", HOST_A), ("n-3", "former")] {
+        let refused = rig.change(&planner, request_id, create(name)).await;
+        assert_eq!(taken(refused), one, "an agent, under {name}");
+    }
+    // A person whose view of the mob hides some agents.
+    let hidden = rig
+        .runtime
+        .identity_family_seen_by(Arc::new(SeesOnly(&[HOST_A, PLANNER])))
+        .expect("the family as a caller that sees the two others");
+    let person = ChangeRequester::human("person-2");
+    for (request_id, name) in [("n-1", "confidant"), ("n-2", HOST_A), ("n-3", "former")] {
+        let operation_id =
+            OperationId::for_request(&person.recorded(), request_id).expect("a request id");
+        let refused = hidden
+            .change(
+                &mob,
+                &person,
+                IdentityChangeCall::new(operation_id, create(name)),
+            )
+            .await;
+        assert_eq!(
+            taken(refused),
+            one,
+            "a person of limited sight, under {name}"
+        );
+    }
+    // The host reads what holds the name.
+    let refused = rig.change(&host, "n-3", create("former")).await;
+    assert_eq!(
+        taken(refused),
+        json!({"kind": "name_taken", "by": "removed"}),
+        "the host, under the removed name"
+    );
+    let refused = rig.change(&host, "n-1", create("confidant")).await;
+    assert_eq!(
+        taken(refused),
+        json!({"kind": "name_taken", "by": "identity"}),
+        "the host, under an agent's name"
+    );
+    rig.shutdown().await;
+}
+
 /// A member private to a person asks for no change of agents: the family
 /// refuses it `private_requester` before anything is read of its request,
 /// for a change and for a plan, and nothing is created.

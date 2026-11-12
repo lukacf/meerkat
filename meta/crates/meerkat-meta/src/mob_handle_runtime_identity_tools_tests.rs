@@ -499,6 +499,144 @@ async fn a_private_member_this_process_did_not_build_is_refused_private_requeste
     runtime.clear_identity_runtime_authority();
 }
 
+/// A surface that does not know its member yet knows neither who asks nor
+/// whom that member is private to, and offers no identity tool until it
+/// does: a session no roster row names reads no member, its tool list names
+/// no identity tool, and its call is answered as a tool that does not
+/// exist, with the family never called. For a member the roster names, the
+/// tool list reads from its own row whether it is private to a person; a
+/// member with no row to read is not known to be private to no one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_surface_that_does_not_know_its_member_yet_is_offered_no_identity_tool() {
+    let dir = tempfile::tempdir().expect("state dir");
+    let (runtime, family, private, shared) = members_this_process_did_not_build(dir.path()).await;
+    let mob = runtime.handle();
+    let caller_of = |surface: &AutoWireParentMobToolDispatcher| {
+        surface
+            .caller
+            .clone()
+            .expect("the surface was built for a member")
+    };
+
+    let unknown = surface_with_owners(
+        &runtime,
+        meerkat_core::types::SessionId::new(),
+        crate::private_owners::PrivateOwners::default(),
+    );
+    assert!(
+        caller_of(&unknown).member_in(&mob).is_none(),
+        "no roster row names the session: its member is not known yet"
+    );
+    assert_eq!(identity_tools_of(&unknown), Vec::<String>::new());
+    assert!(
+        matches!(
+            call(&unknown, IDENTITY_LIST, json!({})).await,
+            Err(ToolError::NotFound { .. })
+        ),
+        "its call is answered as a tool that does not exist"
+    );
+    assert_eq!(
+        family.calls.load(Ordering::SeqCst),
+        0,
+        "the family was never called"
+    );
+
+    let side = AgentIdentity::from("side");
+    assert_eq!(caller_of(&private).member_in(&mob), Some(side.clone()));
+    assert_eq!(
+        caller_of(&private).private_now(&mob, &side),
+        Some(true),
+        "its own roster row names the person it is private to"
+    );
+    let known = AgentIdentity::from("shared");
+    assert_eq!(caller_of(&shared).member_in(&mob), Some(known.clone()));
+    assert_eq!(
+        caller_of(&shared).private_now(&mob, &known),
+        Some(false),
+        "its own roster row names nobody"
+    );
+    assert_eq!(
+        caller_of(&shared).private_now(&mob, &AgentIdentity::from("nobody")),
+        None,
+        "a member with no roster row to read: whom it is private to is not known"
+    );
+    runtime.clear_identity_runtime_authority();
+}
+
+/// Nothing a tool list read of whom its member is private to is kept: a
+/// member that becomes private after its first listing (its labels changed
+/// in this process, by a respawn on its own session) is offered no identity
+/// tool at its next listing, and its call is refused `private_requester`,
+/// on a surface whose record of built members knows nothing of the change.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_member_that_becomes_private_is_offered_no_identity_tool_at_its_next_listing() {
+    let dir = tempfile::tempdir().expect("state dir");
+    let (runtime, family, _private, shared) = members_this_process_did_not_build(dir.path()).await;
+    let member = AgentIdentity::from("shared");
+    let session = runtime
+        .handle()
+        .resolve_bridge_session_id(&member)
+        .await
+        .expect("the member's session");
+    assert_eq!(
+        identity_tools_of(&shared),
+        IDENTITY_TOOLS,
+        "its first listing: private to no one, it is offered the identity tools"
+    );
+
+    Box::pin(
+        runtime.handle().respawn_member(
+            member.clone(),
+            meerkat_mob::MemberRespawn::new()
+                .with_labels(BTreeMap::from([(
+                    crate::access::PRIVATE_TO_LABEL.to_string(),
+                    "alice".to_string(),
+                )]))
+                .with_wake(true),
+        ),
+    )
+    .await
+    .expect("the member is seated again on its session with the label");
+    assert_eq!(
+        runtime.handle().resolve_bridge_session_id(&member).await,
+        Some(session.clone()),
+        "the same session, so the same surface serves the member"
+    );
+    let row = runtime
+        .handle()
+        .get_member(&member)
+        .await
+        .expect("the roster answers")
+        .expect("the member has a roster row");
+    assert_eq!(crate::access::private_owner(&row.labels), Some("alice"));
+    assert!(
+        IdentityAgentTools::new(
+            Arc::clone(&family) as Arc<dyn IdentityFamily>,
+            runtime.handle()
+        )
+        .grant_admits_spawn_tooling(&session),
+        "its grant still admits spawn tooling: only its row keeps the tools from it"
+    );
+
+    assert_eq!(
+        identity_tools_of(&shared),
+        Vec::<String>::new(),
+        "its next listing: its row names a person now, and it is offered no identity tool"
+    );
+    match call(&shared, IDENTITY_LIST, json!({})).await {
+        Err(ToolError::PolicyDenied { denial }) => {
+            assert_eq!(denial.code, "private_requester", "{}", denial.message);
+        }
+        other => panic!("its call is refused as a policy denial: {other:?}"),
+    }
+    assert_eq!(
+        family.calls.load(Ordering::SeqCst),
+        0,
+        "the family was never called"
+    );
+    runtime.clear_identity_runtime_authority();
+}
+
 /// A mob whose identity family takes no changes has no identity tools: the
 /// wrapper offers none, and answers a call of one as a tool that does not
 /// exist. That is a mob with no family at all, a mob whose family serves

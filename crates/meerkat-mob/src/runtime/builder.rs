@@ -1439,7 +1439,7 @@ pub(super) fn member_endpoint_key_held_refusal(
     agent_identity: &AgentIdentity,
 ) -> String {
     format!(
-        "member '{agent_identity}' cannot join mob '{mob_id}': another member of this host already holds its comms key, and a mob admits a comms key for one member"
+        "member '{agent_identity}' cannot join mob '{mob_id}': another member of its mob already holds its comms key, and a mob admits a comms key for one member"
     )
 }
 
@@ -1449,7 +1449,7 @@ pub(super) fn member_endpoint_key_held_refusal(
 /// member alone, as [`member_endpoint_key_held_refusal`] does.
 pub(super) fn member_endpoint_key_held_reason(agent_identity: &AgentIdentity) -> String {
     format!(
-        "member '{agent_identity}' cannot run: another member of this host already holds its comms key, so it holds no endpoint; retire '{agent_identity}' to remove it"
+        "member '{agent_identity}' cannot run: another member of its mob already holds its comms key, so it holds no endpoint; retire '{agent_identity}' to remove it"
     )
 }
 

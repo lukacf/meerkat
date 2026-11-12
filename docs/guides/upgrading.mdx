@@ -130,6 +130,145 @@ record keeps its slot. For each listed mob, do one of these first:
 - destroy the mob, or move its database out of the mob root, as for a mob
   an earlier release refuses.
 
+## Upgrading to 0.9.14
+
+This section is for systems running 0.9.13. The full list of changes is in
+the CHANGELOG under `## [0.9.14]`.
+
+Meerkat 0.9.14 is Core 0.9.14, Meta 0.9.14 and Connect 0.9.14, released
+together.
+
+### Replay to OpenAI-wire services (Rust)
+
+`meerkat-core`: `ReplayPlan::build` with an OpenAI-wire `ReplayTarget`, and
+`ReplayWireFamily::OpenAi.strip_foreign_metadata`, no longer keep
+OpenAI-family provider metadata: a target planned that way names no service,
+so none of that metadata is its own. Anthropic and Gemini targets are
+unchanged.
+
+**Do:** a provider adapter for an OpenAI-wire service plans with
+`ReplayPlan::build_with_openai_continuity` and asks
+`ReplayPlan::step_admission`.
+
+### Sessions on OpenAI-family routes after a restart
+
+Encrypted reasoning items, hosted-tool items, item ids and response ids are
+replayed only to the service the running process received them from (the
+public OpenAI API, the ChatGPT backend, Azure OpenAI, GitHub Copilot or a
+self-hosted server). A process knows the issuer only of what it received
+itself, and that knowledge is not stored. So after the restart of this
+upgrade, and after any later restart or a resume from the store in a new
+process, earlier turns are replayed without their encrypted reasoning,
+hosted-tool call items and item ids, on the same service too; the steps of
+the new process replay in full. The first request after a restart renders
+those earlier turns differently than the request before it did, and the
+provider's prompt cache misses once from the first such turn on. Nothing in
+a stored session, an event, an export or an SDK payload changes.
+
+### A request refused inside a Responses stream fails once
+
+On the Responses stream of `OpenAiClient` (the OpenAI API, the ChatGPT
+backend, Azure OpenAI, GitHub Copilot `/responses` and a self-hosted server
+in Responses mode), a request refused with the stream error code
+`invalid_request_body`, `invalid_encrypted_content`, `invalid_prompt`,
+`invalid_value`, `invalid_argument`, `unsupported_value` or
+`unsupported_parameter` is now `LlmError::InvalidRequest`
+(`provider_error_kind` `invalid_request`, non-retryable), or the
+context-overflow, oversized-request or exhausted-quota class when the
+message names one, and `model_not_found` is `LlmError::ModelNotFound`
+(`reason_type` `llm_invalid_model`). Through 0.9.13 such a request was sent
+again until the retry policy was used up and the turn ended as
+`retry exhausted`; the turn now fails once, on the LLM failure itself.
+`usage_limit_reached` (the ChatGPT backend's plan usage limit) is
+`LlmError::QuotaExhausted`, non-retryable, wherever that list is read; in an
+HTTP 429 body it was a rate limit, which is retried.
+
+**Do:** code that matched the `retry exhausted` outcome for these refusals
+matches the new class, and code that treated `usage_limit_reached` as a rate
+limit treats it as an exhausted quota.
+
+### GitHub Copilot routes: the default client identity
+
+The default client identity a Copilot route sends is
+`Editor-Version: vscode/1.145.2` (was `vscode/1.107.0`),
+`Editor-Plugin-Version: copilot-chat/0.73.0` (was `copilot-chat/0.35.0`) and
+`User-Agent: GitHubCopilotChat/0.73.0` (was `GitHubCopilotChat/0.35.0`). Two
+public values change with it: the constant
+`meerkat_auth_core::github_copilot::GITHUB_COPILOT_USER_AGENT` and what
+`meerkat_copilot::CopilotBackendConfig::default()` returns. A route whose
+backend `options` set `user_agent`, `editor_version` or
+`editor_plugin_version` keeps its own values on the token exchange, the
+identity lookup, the model listing and inference.
+
+**Do:** code that compares against the earlier value of the constant or of
+the default configuration compares against the new one.
+
+### File writes the operating system refuses
+
+A file write that the operating system refuses (a file size limit, a quota,
+a full filesystem that allocates at write time, or an I/O error) now fails
+the operation with the error it already returns for a failed open or rename,
+publishes nothing and removes its temporary file: the file it would have
+replaced stays as it was, and a file that did not exist is not created.
+Through 0.9.13 such a write could replace the file with an empty one while
+the operation reported success. A realm lease record is the one file that is
+still emptied, on purpose and only at a heartbeat that cannot replace it. A
+file an earlier release already emptied is not restored.
+
+**Do:** where a write may have been refused under an earlier release, check
+these files for an empty one:
+
+- a credential file of the file credential store
+  (`<credentials>/<realm>/<slot>.json`): an empty one no longer loads;
+- `realm_manifest.json`: with an empty one every open of that realm fails to
+  parse it, and so do `rkat realm list` and `rkat realm prune` for the whole
+  state root;
+- `.rkat/tasks.json`, the builtin task tools' JSON task file: with an empty
+  one every stored task was lost. Only the file task store writes this file;
+  the shipped `rkat`, `rkat-rpc`, `rkat-rest` and `rkat-mcp` binaries keep
+  tasks in SQLite.
+
+### Meta 0.9.14
+
+Meta 0.9.14 pins Core `=0.9.14`. The full list is in `meta/CHANGELOG.md`
+under `## [0.9.14]`.
+
+- Security: a mob that a member private to a person creates with its own
+  `mob_create` stays private to that person after a restart, so every member
+  spawned into it after the restart is private to that person too. In 0.9.11
+  through 0.9.13 such a mob came back private to no one. A mob whose
+  creation record says that several rosters named the session that created
+  it, and picks none (`MobProvenance::Ambiguous`), no longer comes back
+  private to no one: after a restart a spawn into it is refused, and the
+  members already seated in it keep the owner their own spawn gave them.
+
+### Connect 0.9.14
+
+Connect 0.9.14 is GitHub release `connect-v0.9.14` in `lukacf/meerkat`, a
+full release that is never the repository's latest. The full list is in
+`connect/CHANGELOG.md` under `## [0.9.14]`.
+
+- `@rkat/toolkit` accepts its optional peers `@rkat/sdk` and
+  `@rkat/meta-sdk` from 0.9.14 below 0.10.0 (`>=0.9.14 <0.10.0`; it accepted
+  them from 0.9.10). **Do:** upgrade `@rkat/toolkit`, `@rkat/sdk` and
+  `@rkat/meta-sdk` together.
+
+### Rolling back to 0.9.13
+
+No stored format changed: 0.9.13 and 0.9.14 write the same rows for the same
+response.
+
+## Upgrading to 0.9.13
+
+Meerkat 0.9.13 is Core 0.9.13, Meta 0.9.13 and Connect 0.9.13, released
+together. It changed the packaging of the `meerkat-meta` crate only: the
+crate is published without its integration test directory, which brings it
+back under the registry's limit. Core 0.9.13 has no code changes, and Meta
+0.9.13 and Connect 0.9.13 hold every change of their 0.9.12, so there is no
+step beyond those of "Upgrading to 0.9.12" below. The `meerkat-meta` 0.9.12
+crate was never published: a Rust host moves from `meerkat-meta` 0.9.11 to
+0.9.13.
+
 ## Upgrading to 0.9.12
 
 This section is for systems running 0.9.11. The full list of changes is in

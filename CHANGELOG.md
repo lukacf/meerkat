@@ -161,33 +161,34 @@ them.
   without the recorded sections (only the MCP server's `meerkat_resume`
   with `system_prompt` and direct `AgentFactory` embedders build that way).
 
-- `meerkat-mob`: a member that is owed the mob's operator instruction
-  snapshot when a delivery wakes it has it recorded during the wake, after
-  its conversation is loaded and before it is Live. A record owed to a
-  member seated dormant on a conversation it already has is therefore in
-  effect at the first run after the seat when the member's session takes the
-  write then. A write that fails stays owed: the mob tries again at every
-  wake of the member and on its own retry, at most 30 seconds apart, and the
-  entry reaches the first run that starts after a write succeeded. A write
-  the session refuses because its target or a slot belongs to another owner
-  (`owned_by_session`, `owned_by_other_mob`, `slot_managed_by_activation`)
-  is blocked: the status shows it with its kind, and it is not tried again
-  until a write selects the member again, the member is seated again, or
-  the mob restarts. Before, the record reached the session whenever the
-  mob's delivery next landed, and where the store-only record could not
-  reach the conversation until the member's wake had loaded it, the run that
-  woke the member started without the record and the agent got it one run
-  late (0.9.9 to 0.9.14). The wake never holds the mob for the record: the
-  mob answers other commands meanwhile, and a session that does not answer
-  the write within 5 seconds leaves the member Live and owed. Limits: only
-  the wake a delivery causes orders the record before the member's run. A
-  member seated eagerly on a conversation (a spawn with a Resume launch) and
-  a member the mob materializes itself at a start or a lift are recorded by
-  the mob's own delivery, tried at once when the member is Live and not
-  ordered before a run of it; a member that stays Live between runs is not
-  tried at each run start. A member the mob brings up itself at a start or
-  a lift with work already queued may start that run before the write is
-  tried; the entry then reaches the first run that starts after the write.
+- `meerkat-mob`: a record owed to a local member seated dormant on a
+  conversation it already has is tried at every wake a delivery causes,
+  after the conversation is loaded and before the member is Live. When the
+  member's session takes the write then (it answers within 5 seconds, the
+  mob's journal answers the read of the member's own records within 5
+  seconds, and no other delivery to the member is in flight past 5
+  seconds), the record is in that conversation before the run that woke the
+  member starts, and that run carries the entry once. A write that fails or
+  is not answered in time leaves the member owed: the mob tries again at
+  once when the member is Live again and then on its own retry, at most 30
+  seconds after its previous attempt ended, and the entry reaches the first
+  run that starts after a write succeeded. A write an owner refuses, or a
+  session service that keeps no durable session document, blocks the
+  member: the record is not tried again until a write selects the member
+  again, the member is seated again, or the mob restarts. Before, the
+  record reached the session whenever the mob's delivery next landed, and
+  where the store-only record could not reach the conversation until the
+  member's wake had loaded it, the run that woke the member started without
+  the record and the agent got it one run late (0.9.9 through 0.9.14). The mob
+  answers other commands while a wake tries its record. Limits: a lift, a
+  start, a warm reload and a placed member do not pass the wake step. A
+  member seated eagerly on a conversation (a spawn with a Resume launch)
+  and a member the mob brings up itself are recorded by the mob's own
+  delivery, tried at once when the member is Live and not ordered before a
+  run of it. A member the mob brings up itself at a start or a lift with
+  work already queued may start that run before the write is tried; the
+  entry then reaches the first run that starts after the write. A member
+  that stays Live between runs is not tried at each run start.
 
 ### Upgrade notes
 
@@ -212,6 +213,294 @@ them.
   Mobs within both totals are unaffected in either direction. A journal an
   earlier release wrote replays on this one without a refusal. See "Rolling
   back to 0.9.14" in `docs/guides/upgrading.mdx`.
+
+## [0.9.14] - 2026-11-11
+
+### Highlights
+
+- A session whose history one OpenAI-family service produced no longer
+  fails its first turn on another (the OpenAI API, the ChatGPT backend, Azure
+  OpenAI, GitHub Copilot, a self-hosted server): encrypted reasoning and the
+  other opaque items of a response are replayed only to the service that
+  issued them (0.5.2 through 0.9.13). After a restart, earlier turns are
+  replayed without that material. See Breaking, Added, Fixed and Known
+  limitations.
+
+- A request that an OpenAI-family service refuses inside a response stream
+  fails once, with the service's cause, instead of being sent again until
+  the retry policy is used up (0.8.25 through 0.9.13). See Fixed.
+
+- GitHub Copilot routes send a current client identity, so the Copilot API
+  no longer marks every listed model `client_version_deprecated`. See
+  Changed.
+
+- A file write that the operating system refuses (a full disk, a quota, a
+  file size limit) no longer replaces a stored credential, a realm manifest,
+  a task file or an export with an empty file while the operation reports
+  success (0.3.0 through 0.9.13). See Fixed.
+
+### Breaking
+
+- Behaviour-only (not measured by the gate): `meerkat-core`:
+  `ReplayPlan::build` with an OpenAI-wire `ReplayTarget`, and
+  `ReplayWireFamily::OpenAi.strip_foreign_metadata`, no longer keep
+  OpenAI-family provider metadata: a target planned that way names no service,
+  so none of that metadata is its own. A provider adapter for an OpenAI-wire
+  service plans with `ReplayPlan::build_with_openai_continuity` and asks
+  `ReplayPlan::step_admission` (see Added and Fixed). Anthropic and Gemini
+  targets are unchanged.
+
+### Added
+
+- `meerkat-core`: `OpenAiContinuityIssuer` (a kind of service,
+  `OpenAiContinuityService`, at an endpoint: `at_base_url`,
+  `self_hosted_server`, `service`), `OpenAiContinuityLedger` (what the
+  running process received from which service: `new`, `with_generation`,
+  `process`, `record_response`, `record_step`, `received_step_from`),
+  `OpenAiContinuityMaterial`, `OpenAiContinuityTarget`,
+  `ReplayStepAdmission` (`of`, `admits`, `admits_provider_items`,
+  `strip_foreign_metadata`: the one owner of whether a step's provider
+  material is replayed to a target), `ReplayPlan::
+  build_with_openai_continuity` and `ReplayPlan::step_admission`. None of
+  them has a serialized form.
+
+- `meerkat-llm-core`: `LlmReplayProjection::with_replay_witness` and
+  `messages`, and `PreparedLlmRequest::replay_witness`: a projecting client's
+  own evidence of what it decided, carried with the request beside the route
+  witness.
+
+- `meerkat-openai`: `OpenAiClient::continuity_issuer`, `continuity_ledger`
+  and `with_continuity_ledger`, and `OpenAiCompatibleClient::
+  with_self_hosted_server`, `continuity_issuer` and `with_continuity_ledger`.
+  A client is the issuer its service kind and base URL make it; a self-hosted
+  client that declares its configured server is that server.
+  `with_continuity_ledger` gives a client a record of its own in place of
+  the process's.
+
+### Changed
+
+- `meerkat-copilot`, `meerkat-auth-core` (GitHub Copilot routes): the
+  default client identity a Copilot route sends is a recent one again:
+  `Editor-Version: vscode/1.145.2` (was `vscode/1.107.0`),
+  `Editor-Plugin-Version: copilot-chat/0.73.0` (was `copilot-chat/0.35.0`)
+  and `User-Agent: GitHubCopilotChat/0.73.0` (was
+  `GitHubCopilotChat/0.35.0`). Two public values change with it: the
+  constant `meerkat_auth_core::github_copilot::GITHUB_COPILOT_USER_AGENT`
+  and what `meerkat_copilot::CopilotBackendConfig::default()` returns. With
+  the values sent through 0.9.13 the Copilot API answered a model listing
+  with a `client_version_deprecated` warning on every entry. Live list
+  reads show that the warning follows `Editor-Version` alone
+  (`vscode/1.118.0` is marked, `vscode/1.130.0` is not) and that the plugin
+  and User-Agent versions do not move it; all three are raised together so
+  that the identity stays one client (the plugin version is the one the
+  editor's public repository pairs with that editor release). Nothing else
+  in the listing changes with the new values: the same entries and the same
+  `capabilities.limits`. The headers go on the token exchange, the identity
+  lookup (User-Agent only), the model listing and inference, as before, and
+  on those requests a route whose backend `options` set `user_agent`,
+  `editor_version` or `editor_plugin_version` keeps its own values. The
+  device sign-in's own OAuth requests to GitHub, the device-code request
+  and the token poll among them, send the same User-Agent constant; no
+  backend option changes it there. Rows now pin the three values, the
+  User-Agent of the device sign-in's requests, and the
+  `X-GitHub-Api-Version` of the model listing and of inference, which
+  nothing asserted before.
+
+### Fixed
+
+- `meerkat-openai`, `meerkat-core`: a session whose history one OpenAI-wire
+  service produced no longer fails its first turn on another. Before, the
+  turn ended with a provider refusal (for example `Invalid request:
+  {"error":{"message":"","code":"invalid_request_body"}}` from GitHub
+  Copilot for a history the public OpenAI API produced), because encrypted
+  reasoning items, hosted-tool items, item ids and response ids were replayed
+  to every backend that speaks the Responses grammar (the public OpenAI API,
+  the ChatGPT backend, Azure OpenAI, GitHub Copilot, self-hosted servers),
+  and only the service that issued such material can read it. This could
+  happen between a self-hosted `responses` server and another backend since
+  0.5.2, and between the public OpenAI API and GitHub Copilot since 0.8.31,
+  through 0.9.13. A model or route fallback inside one turn took the same
+  path.
+
+  Such material is now replayed only to the service the running process
+  received it from. A service is a kind of backend at an endpoint: the base
+  URL requests go to, or the configured self-hosted server
+  (`[self_hosted.servers.<id>]`); two Azure OpenAI resources, two
+  self-hosted servers, and the public API behind another base URL are
+  different services. A step (one provider response) the process received
+  from the target service replays exactly as before. Any other step is sent
+  as the conversation it was, in the form a history from another provider
+  family already takes: the assistant text as a plain message, each tool
+  call and its output paired by `call_id`, and no reasoning item, hosted-tool
+  item, item id, phase or `previous_response_id`. A step is replayed whole
+  or in that form, never in part, and one request can carry both kinds.
+
+  The cost, stated plainly: a process knows the issuer only of what it
+  received itself, and that knowledge is not stored. It is shared by every
+  session and mob of the process (the issuer is the service, not the
+  session) and is lost when the process starts again and, a generation of
+  4,096 responses at a time, once the process has received 4,096 to 8,192
+  later responses (sooner when responses carry very many items: a generation
+  also closes at 262,144 pieces of material; a response is always recorded
+  whole). So after a restart, or a resume from the store in a new
+  process, earlier turns are replayed without their encrypted reasoning,
+  hosted-tool call items (a web search's queries, sources and citations;
+  the answer text stays) and item ids, on the same service too; the steps
+  of the new process replay in full. The first request after a restart, and
+  the first after a generation is forgotten, therefore renders those earlier
+  turns differently than the request before it did, and the provider's
+  prompt cache misses once from the first such turn on. Nothing in a stored
+  session, an event, an export or an SDK payload changes: 0.9.13 and this
+  release write the same rows for the same response.
+
+  With `store: true`, the `previous_response_id` shortcut is taken only when
+  the last step is one the process received from the target service. The
+  existing resend without it, when the service no longer has the response,
+  is unchanged.
+
+  An embedder that builds an `OpenAiCompatibleClient` itself and declares no
+  server (`with_self_hosted_server`) is the self-hosted server at its base
+  URL. Anthropic thinking signatures and Gemini thought signatures are still
+  replayed to every backend of their wire family.
+
+- `meerkat-openai`, `meerkat-llm-core` (the Responses stream parser of
+  `OpenAiClient`, which serves the OpenAI API, the ChatGPT backend, Azure
+  OpenAI, GitHub Copilot `/responses` and a self-hosted server in Responses
+  mode): how the client reads a failure reported inside an HTTP 200 stream.
+  - Given a `response.failed` event without an error object (`error` null,
+    or an object that names no code, type or message), the client ended the
+    response there as `ServerError { status: 500, message: "response
+    failed" }`, a retryable class, and did not read an `error` event after
+    it (0.6.7 through 0.9.13). It now reads on for the cause: an `error`
+    event that carries a code and a message, at the top level of the event
+    or under `error`, or a `response.failed` that carries them. Nothing in
+    between is read as output. When no cause comes (the stream ends, a frame
+    cannot be read, or sixteen other frames follow) the response fails as
+    `ServerError { status: 500 }` with a message that says so, retryable as
+    before; an `error` event that carries nothing ends the wait as the
+    unknown class, and a reset connection as `ConnectionReset`, both
+    retryable too. While it waits the client reports no stream liveness, so
+    the stream-inactivity window keeps running. This stream shape was not
+    observed from a live service and its rows are synthetic; a live request
+    that the Copilot route refused was answered with HTTP 400 and the code
+    `invalid_request_body`, which was terminal already.
+  - As stream error codes, `invalid_request_body`,
+    `invalid_encrypted_content`, `invalid_prompt`, `invalid_value`,
+    `invalid_argument`, `unsupported_value`, `unsupported_parameter` and
+    `model_not_found` were the unknown class, which is retried (0.8.25
+    through 0.9.13): a request refused with one of them in a stream `error`
+    or `response.failed` event was sent again until the retry policy was
+    used up (four attempts with the default `max_retries = 3`) and the turn
+    ended as `retry exhausted`, where the same refusal over HTTP fails at
+    once. The first seven, and `invalid_request_error`, which had that class
+    already, are now classified as an HTTP 400 with the same message is:
+    `LlmError::InvalidRequest` (`provider_error_kind` `invalid_request`,
+    non-retryable) with the message `<code>: <the service's message>`, or
+    the context-overflow, oversized-request or exhausted-quota class when
+    the message names one. `model_not_found` is `LlmError::ModelNotFound`
+    (`reason_type` `llm_invalid_model`), the class of an HTTP 404 with that
+    code and of the realtime adapter. The message is read as text: one that
+    is itself a JSON object never selects a policy stop. The turn fails
+    once, on the LLM failure itself and not on used-up retries. A code
+    outside this list is classified the same way, as the invalid request,
+    when its error object's `type` is `invalid_request_error` (this includes
+    a code that names an authentication fault: terminal, though not the
+    class an HTTP 401 has); with any other type, or with none, it is still
+    the unknown class and is retried.
+  - An error object that names no `code` is classified by its `type` when
+    the type is `invalid_request_error` or an exhausted-quota code. Any
+    other type selects no class: the event keeps its default, as before
+    (the retryable server error for a `response.failed`, the unknown class
+    for an `error` event), so a type alone is never a policy stop.
+  - `usage_limit_reached` (the ChatGPT backend's plan usage limit) is now an
+    exhausted-quota code wherever that list is read:
+    `LlmError::QuotaExhausted`, non-retryable, as a Responses stream code or
+    type, in an HTTP 429 body of any provider (a rate limit, retried,
+    through 0.9.13), in another HTTP 4xx body (an invalid request before),
+    on the OpenAI realtime and live error paths and in an Anthropic stream
+    rate-limit object.
+
+  The cause is provider text. On a client with an authorizer it passes the
+  authorizer's credential redaction, like every other error a stream ends
+  with. No request is changed and nothing is retried in another form.
+
+- `meerkat-auth-core`, `meerkat-store`, `meerkat-tools`, `rkat`: a file write
+  that the operating system refuses no longer replaces the file with an empty
+  one while the operation reports success. These writers write a temporary
+  file, sync it and rename it onto the target. They wrote through tokio's
+  `File`, whose `sync_all` waits for the write but does not return the
+  write's error, so a write refused by a file size limit (`RLIMIT_FSIZE`), a
+  quota, a full filesystem that allocates at write time, or an I/O error
+  went unreported: the sync of the empty temporary file succeeded and the
+  rename published it. A payload above 2 MiB could instead end short. The
+  files, through 0.9.13:
+  - a credential file of the file credential store
+    (`<credentials>/<realm>/<slot>.json`, since 0.6.0): a login, a token
+    refresh or a secret save returned success, and the stored credential was
+    replaced by an empty file that no longer loads;
+  - `realm_manifest.json` (since 0.3.3): the first open of a realm, or
+    selecting governance for one, returned success and left an empty
+    manifest; every later open of that realm failed to parse it, and so did
+    `rkat realm list` and `rkat realm prune` for the whole state root;
+  - a realm lease record (`leases/<instance>.json`, since 0.3.3), at a
+    surface's start and at each heartbeat: an empty record is counted as
+    unreadable, so the instance was not listed as active and `rkat realm
+    delete` refused without `--force`;
+  - a blob object (since 0.7.27): the put itself failed at its read-back,
+    but the empty or short object stayed at the content address, where reads
+    report it as corrupt, until an identical put rewrote it;
+  - the builtin task tools' JSON task file (`.rkat/tasks.json`, since 0.3.0):
+    creating, updating or deleting a task returned success, and every stored
+    task was lost. Only the file task store writes this file: a Rust
+    embedding that builds the `meerkat` facade without its `session-store`
+    feature, or that builds its tools with the SDK helpers
+    `create_dispatcher_with_builtins_persisted` or
+    `create_dispatcher_with_builtins_in_project`. The shipped `rkat`,
+    `rkat-rpc`, `rkat-rest` and `rkat-mcp` binaries are built with
+    `session-store` and keep tasks in SQLite;
+  - an ATIF trajectory export (`rkat session export-atif`, `rkat run
+    --export-atif`, since 0.8.22): reported as written, and empty or short.
+
+  Each of these writes now fails with the error the operation already
+  returns for a failed open or rename, publishes nothing and removes its
+  temporary file: the file it would have replaced stays as it was, and a
+  file that did not exist is not created. A realm whose first open fails
+  this way opens normally once writes work again. A lease record is the one
+  file that is still emptied, now on purpose and only at a heartbeat: a
+  holder whose heartbeat cannot replace its record (the write is refused, or
+  the temporary file cannot be created or renamed) empties its own record,
+  which needs no free space. An empty record is counted as unreadable, so
+  `rkat realm delete` and `rkat realm prune` keep refusing without `--force`
+  while the holder is alive on a full disk. Left as it was, the last good
+  record would go stale 30 seconds later and both commands would remove the
+  realm under the running holder, as they could through 0.9.13 when a
+  heartbeat failed to create or rename its temporary file. The next
+  heartbeat that succeeds restores the record; a refused write at a
+  surface's start still fails the start and writes nothing. The realm
+  manifest lock and the first-start marker (since 0.8.4), which such a write
+  left empty without effect, now fail the same way and are removed, so
+  neither stays behind to be waited on. A file an earlier release already
+  emptied is not restored.
+
+### Known limitations
+
+- The issuer of OpenAI-family continuity material is the service (a kind of
+  backend at an endpoint), not the account or organisation. Material one
+  credential received is still replayed under another credential of the
+  same service at the same endpoint inside one process (two API keys of
+  different organisations, two ChatGPT accounts, two Copilot accounts on one
+  API host). Whether a service refuses that is not known; it was not tested.
+
+- `rustix` 1.1.5 in Cargo.lock is named by RUSTSEC-2026-0486, as in 0.9.12
+  and 0.9.13: the `getxattr` and `listxattr` functions of `rustix::fs` (with
+  their `l` and `f` forms) mark bytes they never wrote as initialized when
+  they are given a zero-length buffer. `meerkat-core` depends on `rustix`
+  directly, and it is also taken through `fs4`, `tempfile`, `which`, and
+  `xattr` through `tar`. No Meerkat crate calls those functions. Of the
+  crates Meerkat builds with only `xattr` does, and `tar`, the one crate
+  that uses `xattr`, calls it only to set attributes while unpacking, so
+  Meerkat's own use is not known to be affected. `rustix` 1.1.6 has the
+  fix; this release still builds with 1.1.5.
 
 ## [0.9.13] - 2026-11-11
 
@@ -48049,7 +48338,8 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.13...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.14...HEAD
+[0.9.14]: https://github.com/lukacf/meerkat/compare/v0.9.13...v0.9.14
 [0.9.13]: https://github.com/lukacf/meerkat/compare/v0.9.12...v0.9.13
 [0.9.12]: https://github.com/lukacf/meerkat/compare/v0.9.11...v0.9.12
 [0.9.11]: https://github.com/lukacf/meerkat/compare/v0.9.10...v0.9.11

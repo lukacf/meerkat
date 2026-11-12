@@ -1258,6 +1258,74 @@ async fn a_settled_record_without_a_destroyed_receipt_keeps_its_mob_id() {
     realm.fixture.stop().await;
 }
 
+/// Whether the console decides the mob of `incarnation`, listed under
+/// `mob_id`, as a council's.
+async fn decided_as_a_councils(
+    aggregator: &MetaConsoleAggregator,
+    mob_id: &str,
+    incarnation: meerkat_core::service::MobIncarnationId,
+) -> bool {
+    aggregator
+        .council_owns_mob_for_test(RUNTIME, mob_id, incarnation)
+        .await
+        .expect("the runtime's council decision")
+}
+
+/// The console lists a nested mob's members before it reads the council
+/// record. A council's mob listed while the council ran and decided after
+/// its record settled stays the council's, so the seats just listed are not
+/// shown as an ordinary mob's members: the runtime no longer holds that
+/// incarnation. That holds with no mob under the id and with an ordinary mob
+/// created under it since; the ordinary mob's own incarnation is no
+/// council's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mob_listed_before_its_council_settled_stays_the_councils() {
+    let realm = Realm::start().await;
+    let aggregator = console(&realm.fixture, Arc::new(AllowAllConsoleVisibilityPolicy));
+    let council = Council::convene(&realm.fixture, &realm.gate).await;
+    let state = mob_tools(&realm.fixture);
+    let mob = meerkat_mob::MobId::from(council.mob.as_str());
+    // What a listing made now keeps of the council's mob. The handle is not
+    // kept: a held one would keep the council's destroy from draining.
+    let listed = state
+        .handle_for(&mob)
+        .await
+        .expect("the council's temporary mob")
+        .incarnation();
+    assert!(
+        decided_as_a_councils(&aggregator, &council.mob, listed).await,
+        "a running council owns its temporary mob"
+    );
+
+    council.end(&realm.fixture, &realm.gate).await;
+    council.settled(&realm.fixture).await;
+    assert!(
+        decided_as_a_councils(&aggregator, &council.mob, listed).await,
+        "the mob listed before the council's destroy is the council's after its record settled"
+    );
+
+    seat_nested_mob(&state, &council.mob, REUSE_MEMBER).await;
+    let ordinary = state
+        .handle_for(&mob)
+        .await
+        .expect("the ordinary mob under the council's mob id")
+        .incarnation();
+    assert!(
+        listed != ordinary,
+        "a destroy and a create under one id start a new incarnation"
+    );
+    assert!(
+        decided_as_a_councils(&aggregator, &council.mob, listed).await,
+        "the mob listed before the council's destroy stays the council's with an ordinary mob \
+         under its id"
+    );
+    assert!(
+        !decided_as_a_councils(&aggregator, &council.mob, ordinary).await,
+        "the ordinary mob created under the settled council's mob id is no council's"
+    );
+    realm.fixture.stop().await;
+}
+
 /// The person a private member belongs to, and that person's private-owner
 /// key.
 const OWNER: &str = "owner@example.test";

@@ -1849,6 +1849,22 @@ impl MetaConsoleAggregator {
         .await
     }
 
+    /// Test seam: whether a council of `runtime_key`'s runtime owns the mob
+    /// of `incarnation` listed under `mob_id`, as the member listing decides
+    /// it for a mob handle it listed. `None` without that runtime or its
+    /// mob tool state.
+    #[cfg(test)]
+    pub(crate) async fn council_owns_mob_for_test(
+        &self,
+        runtime_key: &str,
+        mob_id: &str,
+        incarnation: meerkat_core::service::MobIncarnationId,
+    ) -> Option<bool> {
+        let entry = self.inner.runtimes.read().ok()?.get(runtime_key).cloned()?;
+        let state = entry.runtime.agent_mob_mcp_state()?;
+        Some(Box::pin(council::council_owns_mob(&state, mob_id, incarnation)).await)
+    }
+
     #[cfg(test)]
     pub(crate) async fn list_identities_fresh(
         &self,
@@ -5253,8 +5269,12 @@ async fn delegate_member_sources(entry: &RuntimeEntry) -> Vec<ResolvedConsoleMem
         // before its seating, so the seats of a council admitted over the
         // mob meanwhile are never listed against the record's absence.
         let members = handle.list_members_observation_snapshot().await;
-        let council_participant =
-            Box::pin(council::council_owns_mob(&state, mob_id.as_str(), &handle)).await;
+        let council_participant = Box::pin(council::council_owns_mob(
+            &state,
+            mob_id.as_str(),
+            handle.incarnation(),
+        ))
+        .await;
         for member in members {
             resolved.push(ResolvedConsoleMember {
                 entry: entry.clone(),

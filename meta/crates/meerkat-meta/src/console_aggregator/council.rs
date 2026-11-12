@@ -27,7 +27,7 @@
 
 use std::sync::Arc;
 
-use meerkat_mob::MobHandle;
+use meerkat_core::service::MobIncarnationId;
 use meerkat_mob::forked_participant::ForkedParticipantRef;
 use meerkat_mob::temporary_council::{
     TEMPORARY_COUNCIL_MOB_ID_PREFIX, TemporaryCouncilId, TemporaryCouncilParticipantCustody,
@@ -149,41 +149,41 @@ async fn council_record(state: &Arc<meerkat_mob_mcp::MobMcpState>, mob_id: &str)
     CouncilRecord::Settled(CouncilSeats::of(&record.participants, settled_at_ms))
 }
 
-/// Whether the runtime holds, now, the mob `handle` was taken from under
-/// `mob_id`: the same incarnation, which a mob keeps in its creation record
-/// from its create to its destroy.
+/// Whether the runtime holds, now, a mob of `incarnation` under `mob_id`: a
+/// mob keeps its incarnation in its creation record from its create to its
+/// destroy.
 async fn holds_incarnation(
     state: &Arc<meerkat_mob_mcp::MobMcpState>,
     mob_id: &str,
-    handle: &MobHandle,
+    incarnation: MobIncarnationId,
 ) -> bool {
     Box::pin(state.mob_handles_snapshot())
         .await
         .unwrap_or_default()
         .iter()
-        .any(|(held_id, held)| {
-            held_id.as_str() == mob_id && held.incarnation() == handle.incarnation()
-        })
+        .any(|(held_id, held)| held_id.as_str() == mob_id && held.incarnation() == incarnation)
 }
 
-/// Whether a council recorded in `state`'s council store owns the mob
-/// `handle`, which the runtime listed under `mob_id`, as its temporary mob.
+/// Whether a council recorded in `state`'s council store owns the mob of
+/// `incarnation`, which the runtime listed under `mob_id`, as its temporary
+/// mob. The listing passes the incarnation of the handle it listed.
 ///
 /// A record that has not settled owns the mob held under its id. A settled
 /// record owns none the runtime holds now: its council destroyed its mob
 /// before it settled, and a destroy and a create under one id start a new
-/// incarnation. So `handle` is an ordinary mob when the runtime still holds
-/// its incarnation after the record read settled; a handle listed before
-/// that destroy names no mob the runtime holds now, and stays a council's.
+/// incarnation. So the listed mob is an ordinary mob when the runtime still
+/// holds its incarnation after the record read settled; an incarnation
+/// listed before that destroy names no mob the runtime holds now, and stays
+/// a council's.
 pub(super) async fn council_owns_mob(
     state: &Arc<meerkat_mob_mcp::MobMcpState>,
     mob_id: &str,
-    handle: &MobHandle,
+    incarnation: MobIncarnationId,
 ) -> bool {
     match council_record(state, mob_id).await {
         CouncilRecord::Absent => false,
         CouncilRecord::Owns => true,
-        CouncilRecord::Settled(_) => !holds_incarnation(state, mob_id, handle).await,
+        CouncilRecord::Settled(_) => !holds_incarnation(state, mob_id, incarnation).await,
     }
 }
 

@@ -277,7 +277,15 @@ on the stdio gateway every agent. An agent is shown no agent that is
 private to one person (one whose labels carry `console.private_to`),
 whatever it asks: its `list` and its `directory` leave such an agent out,
 and a `get`, a `plan` or a change of it answers `identity_unknown`,
-exactly as a name no agent holds. Who is private is read from the agent's
+exactly as a name no agent holds. A create under its name is the one
+thing that differs from a name no agent holds: one namespace holds every
+name, so a taken name cannot be created, and the create is refused
+`name_taken`. The refusal says nothing of what holds the name to a
+caller that is not shown every agent (an agent, or a Console caller that
+does not administer the runtime): `by` reads `identity` whether the
+holder is an agent the caller is shown, one it is not, a removed agent's
+name or a worker member. The host and an administrator read the holder
+(`identity`, `removed`, `worker`, `unreadable`). Who is private is read from the agent's
 own record, never from what the running host happened to start, so the
 rule holds for an agent that has not run since its host started. A `get`
 names to an agent only the peers it is shown, and who asked for an agent

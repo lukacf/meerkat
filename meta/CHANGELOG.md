@@ -81,7 +81,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - An agent is shown no agent that is private to one person (one whose
   labels carry `console.private_to`): its list and its directory leave
   such an agent out, and a get, a plan or a change of it answers
-  `identity_unknown`, as a name no agent holds. Every read of the family
+  `identity_unknown`, as a name no agent holds. A create under its name
+  is refused `name_taken`, as under any taken name (one namespace holds
+  every name, so a taken name cannot be created); to a caller that is
+  not shown every agent (an agent, a Console caller that does not
+  administer the runtime) `name_taken` reads `by: identity` whatever
+  holds the name, and only the host and an administrator read `removed`,
+  `worker` or `unreadable`. Every read of the family
   and every peer a change names goes through this one rule; what a
   person's view of the mob shows is unchanged. Who is private is read
   from the agent's own record, so the rule holds for an agent that has
@@ -391,6 +397,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- An agent created at run time (an identity whose record is its row) is
+  built from the same host inputs as a configured agent on its profile: the
+  model, the system prompt, the additional instructions, the provider
+  parameters and the context the host's customizer sets. Core seats such an
+  identity from its row, so Core now asks Meta's build preparer to compose
+  its seat at every build of its member
+  (`MemberBuildPreparer::prepare_store_owned_seat`), and Meta lowers the
+  customizer's draft onto that seat through the lowering a configured
+  identity's seat is composed with. Every build takes the model and the
+  provider parameters; the first build of the member's session takes the
+  system prompt, the instructions and the context, in the agent's first
+  life and in the fresh life a reset or a delete starts, so the two lives
+  are built from the same inputs. The customizer runs once per build.
+  No build relies on an earlier answer, so a restart changes nothing, and an
+  agent on a profile whose resume mask names the model keeps the host's
+  model after a restart, as a configured one does. Through 0.9.13 such an
+  agent got the customizer's tools only and ran on its profile's own model
+  and prompt. A customizer that fails, or a draft that does not lower,
+  refuses the build retryable, as a failed tool publication does.
+  `SessionBridge::lower_store_owned_seat_build` is the bridge's part of it
+  (defaulted; a bridge that wraps another forwards it).
+
 - An agent's `mob_check_member` and `mob_retire_member` naming a member
   private to a person the agent does not act for, and the refusal of a
   private member's `council`, read whom the member is private to from the
@@ -401,6 +429,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   after a restart) was checked and retired by another agent, and convened
   a council. The host's record still adds what a roster row cannot say (a
   member that left the roster).
+
 - The first build of an identity created at run time carries the host
   customizer's tools: the member Core starts at the create to run the
   identity's first message, and the member Core wakes before a roster pass
@@ -422,6 +451,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   member Core holds as an identity entry, the identity its member id
   encodes. A member with the label resolves exactly as before, and a plain
   worker still resolves to no identity.
+
+- The console joins the live roster row of an agent whose record is its
+  row to its durable identity record. It took a live row for the record's
+  member only when the row carried the `agent_identity` label, which such
+  an agent's seat does not, so the console listed the agent twice in the
+  identities list, and inspecting it, retiring it or sending to it from
+  the console was refused with "stale durable identity alias" (since
+  0.9.13, for an agent a host created through Core or adopted into the
+  store). The row is now matched by Core's member id, which the durable
+  record carries, for every agent alike.
 
 - The console experience read labels an agent by its registration's
   display name when it has one, else by its name: the roster, the sidebar
@@ -446,14 +485,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Known limitations
 
-- A member of an identity whose record is its row that the mob's start
-  restores before the identity runtime is bound (one that owes work) is
-  built without the host customizer's tools until its next build, as
+- Before the identity runtime is composed, the host's customizer cannot
+  run. A member of an identity whose record is its row that the mob's
+  start spawns then (a seat the start owes it) is built from its row
+  alone: without the customizer's tools until its next build, and without
+  its system prompt, instructions and context for that life. One the
+  start restores then (one that owes work) is refused for now and built
+  once the runtime is composed, with both; on a runtime that learns of its
+  customizer only at its identity bootstrap it is built without them, as
   before.
 
-- A host customizer's model, system prompt, provider parameters, labels
-  and context for a build do not reach the seat of such an identity, at its
-  create or at a reset: Core seats it from its row. Its tools do.
+- The labels a host customizer sets on a build's draft do not reach the
+  member of an identity whose record is its row: its roster labels are its
+  row's, at its create and at a reset. A rule that matches a label only the
+  customizer adds (an access rule's `match_labels`, for example) matches a
+  configured agent and not such an agent. The customizer's model, system
+  prompt, instructions, provider parameters, context and tools do reach it.
 - `identity_creation::normalize_create` refuses a name in a reserved
   namespace `invalid_name` at the agent's `name`: a name that starts with
   `mk--` (the encoded member-id namespace) or with `rt:` (the namespace of

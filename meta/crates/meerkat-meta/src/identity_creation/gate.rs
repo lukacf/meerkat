@@ -152,6 +152,13 @@ struct AttachedFamily {
 pub trait PeerVisibility: Send + Sync {
     /// Whether the caller may see the agent `name`.
     fn sees(&self, name: &str) -> bool;
+
+    /// Whether the caller is one its host shows every agent of the mob (an
+    /// administrator of the runtime): a refusal may then say what holds a
+    /// name. A view says so itself; by default it does not.
+    fn sees_every_agent(&self) -> bool {
+        false
+    }
 }
 
 impl IdentityFamilySlot {
@@ -694,6 +701,39 @@ impl IdentityGate {
             seen: Some(seen),
             ..self.clone()
         }
+    }
+
+    /// Whether `requester` is shown every agent of the mob: the host, and
+    /// a caller whose view says so. An agent never is (an agent private
+    /// to a person is hidden from it), and neither is a caller with any
+    /// other view.
+    fn shown_every_agent(&self, requester: &ChangeRequester) -> bool {
+        !matches!(requester, ChangeRequester::Agent { .. })
+            && self
+                .seen
+                .as_ref()
+                .is_none_or(|seen| seen.sees_every_agent())
+    }
+
+    /// `outcome` as `requester` reads it. A taken name cannot be created,
+    /// whoever asks, so a refused create always says that much; what holds
+    /// the name (an agent, a removed agent's name, a worker member) is
+    /// told only to a requester that is shown every agent. To any other
+    /// the holder reads `identity` whatever it is, so the refusal of a
+    /// name an agent it is not shown holds is the refusal of any taken
+    /// name.
+    fn shown_outcome(
+        &self,
+        requester: &ChangeRequester,
+        mut outcome: IdentityOutcome,
+    ) -> IdentityOutcome {
+        if !self.shown_every_agent(requester)
+            && let IdentityOutcome::Refused(refusal) = &mut outcome
+            && let IdentityRefusalKind::NameTaken { by } = &mut refusal.kind
+        {
+            *by = super::NameTakenBy::Identity;
+        }
+        outcome
     }
 
     /// Whether the caller's view of the mob shows the agent `name`: every
@@ -1752,10 +1792,11 @@ impl IdentityFamily for IdentityGate {
         requester: &ChangeRequester,
         call: IdentityChangeCall,
     ) -> IdentityOutcome {
-        match self.changed(mob, requester, &call).await {
+        let outcome = match self.changed(mob, requester, &call).await {
             Ok(outcome) => outcome,
             Err(refusal) => IdentityOutcome::Refused(refusal),
-        }
+        };
+        self.shown_outcome(requester, outcome)
     }
 
     async fn withdraw(
@@ -1766,6 +1807,33 @@ impl IdentityFamily for IdentityGate {
     ) -> Result<Withdrawn, IdentityRefusal> {
         if self.policy.is_none() {
             return Err(no_policy(ChangeClass::Create));
+        }
+        // A withdrawal is admitted as a change is: a member private to a
+        // person asks for none, and a call attributed to another agent
+        // than its session's member withdraws nothing of that agent's.
+        if self.is_private(mob, requester).await? {
+            return Err(IdentityRefusal::new(IdentityRefusalKind::PrivateRequester));
+        }
+        if let Some(refusal) = requester.refused_by_its_session(mob).await {
+            return Err(refusal);
+        }
+        // Of the host only its operator withdraws another requester's
+        // change. A host surface that is not the operator (a Console caller
+        // that is no verified person) is neither the requester nor the
+        // host, whatever surface the call came through.
+        if matches!(
+            requester,
+            ChangeRequester::Host {
+                operator: false,
+                ..
+            }
+        ) {
+            return Err(
+                IdentityRefusal::new(IdentityRefusalKind::DecisionNotFound).with_detail(
+                    "A held change is withdrawn by the requester that asked for it, or by the \
+                     host's operator: this caller is neither, and nothing was withdrawn.",
+                ),
+            );
         }
         match &self.decisions {
             Some(decisions) => decisions.withdraw(mob, requester, &request),
@@ -1840,6 +1908,14 @@ impl IdentityFamily for IdentityGate {
                 )))
             }
             IdentityRead::Operation(operation_id) => {
+                // An agent reads its own operations only: another
+                // requester's reads to it as one nobody asked. The host and
+                // a person read what their surface admits them to.
+                if matches!(requester, ChangeRequester::Agent { .. })
+                    && !operation_id.is_of(&requester.recorded())
+                {
+                    return Ok(IdentityReadAnswer::Operation(OperationState::Unknown));
+                }
                 let state = match committed_outcome(mob, &operation_id).await {
                     Ok(Some(outcome)) => OperationState::Outcome(outcome),
                     // No change committed under it: a decision may hold it.

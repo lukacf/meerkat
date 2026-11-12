@@ -1435,9 +1435,11 @@ impl IdentityGate {
                 )),
             };
         };
+        // How the host prepares an agent of each profile is the launch
+        // executor's to add: a change a person approved commits through
+        // the same executor and gets the same.
         let commit = ChangeCommit::new(mob, &call.operation_id, requester, consent, request)
-            .of_configured_target(judged.configured_target)
-            .with_preparations(policy.preparations());
+            .of_configured_target(judged.configured_target);
         let committed = self
             .executor
             .commit(commit)
@@ -1897,12 +1899,17 @@ impl AgentSpecs for GateSpecs {
     }
 }
 
-/// The launch's executor: Core's change path, and after each change that
+/// The launch's executor: Core's change path, under the preparation the
+/// launch's policy names for each profile, and after each change that
 /// committed, the identity runtime's registration of each agent it wrote.
-/// It is the one place that registration is asked from, whoever commits:
-/// the gate at once, or the decisions' driver after a person approved.
+/// It is the one place both are asked from, whoever commits: the gate at
+/// once, or the decisions' driver after a person approved. So a create a
+/// person approved is prepared exactly as one the rules allow at once.
 struct LaunchExecutor {
     core: CoreChangeExecutor,
+    /// The launch's identity policy, whose `preparation` says how the host
+    /// prepares an agent of each profile before its first use.
+    policy: Option<Arc<IdentityCreationPolicy>>,
     /// A back-edge, as the gate's own.
     identities: Weak<IdentityRuntime>,
 }
@@ -1910,6 +1917,13 @@ struct LaunchExecutor {
 #[async_trait]
 impl IdentityChangeExecutor for LaunchExecutor {
     async fn commit(&self, commit: ChangeCommit<'_>) -> Result<ChangeCommitted, ExecutorError> {
+        // A commit that names no preparation gets the launch's: every
+        // create of the launch commits an agent of a prepared profile
+        // pending its preparation.
+        let commit = match (self.policy.as_deref(), commit.preparations) {
+            (Some(policy), None) => commit.with_preparations(policy.preparations()),
+            _ => commit,
+        };
         let committed = self.core.commit(commit).await?;
         // Each agent the change wrote is served from its record from now
         // on: registered, registered again or forgotten, with no wake.
@@ -1939,6 +1953,7 @@ pub(crate) fn change_executor(
             Some(step) => core.with_instruction_step(step),
             None => core,
         },
+        policy: policy.cloned(),
         identities: Arc::downgrade(identities),
     })
 }

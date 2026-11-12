@@ -47,6 +47,7 @@ them.
   never wakes a member from another namespace. `publish_wake_route` and
   `retract_wake_route` now document that second publisher: a host forwarder
   never publishes over an owner's route and never retracts one.
+
 - `meerkat-comms`: `InprocRegistry::publish_forwarder_wake_route` publishes
   a host forwarder's wake route, marked as such. A send scoped to the
   route's namespace finds it like any wake route; a lookup in any namespace

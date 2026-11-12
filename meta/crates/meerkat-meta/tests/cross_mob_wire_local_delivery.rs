@@ -2670,17 +2670,27 @@ async fn the_bilateral_wire_refuses_a_key_a_member_of_a_wiring_mob_is_seated_und
 
     // A member of the mob on one side is seated under the key of the member
     // on the other side: refused in plain words, and neither row changed.
-    for (namespace, key) in [
-        (left.namespace(), transport_key(&bob)),
-        (right.namespace(), transport_key(&alice)),
+    for (namespace, key, holder) in [
+        (
+            left.namespace(),
+            transport_key(&bob),
+            "this mob".to_string(),
+        ),
+        (
+            right.namespace(),
+            transport_key(&alice),
+            format!("mob {:?}", right.mob_id),
+        ),
     ] {
         assert!(registry.publish_wake_route(&namespace, key, "dave", seated.clone()));
         let refusal = Box::pin(left.runtime.wire_cross_mob("alice", "bob", "wake-seated-b"))
             .await
             .expect_err("a member of a wiring mob is seated under that key");
         assert!(
-            refusal.to_string().contains("already holds that key"),
-            "the refusal must say what is wrong: {refusal}"
+            refusal
+                .to_string()
+                .contains(&format!("{holder} already holds that key")),
+            "the refusal must name the mob that holds the key ({holder}): {refusal}"
         );
         assert!(left.trusts().await.is_empty(), "alice's row changed");
         assert!(right.trusts().await.is_empty(), "bob's row changed");

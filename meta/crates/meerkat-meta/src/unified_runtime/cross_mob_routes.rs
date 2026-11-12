@@ -717,6 +717,26 @@ pub(super) fn refuse_locally_seated_key(
     local_mob_id: &str,
     spec: &TrustedPeerDescriptor,
 ) -> Result<(), CrossMobError> {
+    refuse_seated_key(local_mob_id, spec, "this mob")
+}
+
+/// [`refuse_locally_seated_key`] for the OTHER mob of a bilateral wire: a
+/// member of `peer_mob_id` is seated under the key of `spec`, the wiring
+/// mob's own member. The refusal names that mob.
+pub(super) fn refuse_key_seated_in_peer_mob(
+    peer_mob_id: &str,
+    spec: &TrustedPeerDescriptor,
+) -> Result<(), CrossMobError> {
+    refuse_seated_key(peer_mob_id, spec, &format!("mob {peer_mob_id:?}"))
+}
+
+/// Refuse `spec` when a member of the mob `local_mob_id` is seated under its
+/// key; `holder` is how the refusal names that mob.
+fn refuse_seated_key(
+    local_mob_id: &str,
+    spec: &TrustedPeerDescriptor,
+    holder: &str,
+) -> Result<(), CrossMobError> {
     let Some(remote_namespace) = inproc_peer_namespace(spec) else {
         return Ok(());
     };
@@ -735,7 +755,7 @@ pub(super) fn refuse_locally_seated_key(
         return Ok(());
     }
     Err(CrossMobError::InprocAlias(format!(
-        "this mob already holds that key under another name, so {:?} cannot be wired in-process",
+        "{holder} already holds that key under another name, so {:?} cannot be wired in-process",
         spec.name.as_str()
     )))
 }

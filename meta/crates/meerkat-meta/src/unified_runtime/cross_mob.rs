@@ -1080,7 +1080,7 @@ async fn wire_bilateral_transaction(
         super::cross_mob_routes::refuse_locally_seated_key(&local_mob_id, &peer_spec)?;
     }
     if !peer_wired || !peer_agent_ready {
-        super::cross_mob_routes::refuse_locally_seated_key(&peer_mob_id, &local_spec)?;
+        super::cross_mob_routes::refuse_key_seated_in_peer_mob(&peer_mob_id, &local_spec)?;
     }
     let mut local_mutated = false;
     let mut peer_mutated = false;
@@ -1487,7 +1487,7 @@ async fn wire_cross_mob_transaction(
             // to the other mob's member: refused before either row changes,
             // as `wire_local_edge` refuses it.
             super::cross_mob_routes::refuse_locally_seated_key(&local_mob_id, &remote_spec)?;
-            super::cross_mob_routes::refuse_locally_seated_key(&remote_mob_id, &local_spec)?;
+            super::cross_mob_routes::refuse_key_seated_in_peer_mob(&remote_mob_id, &local_spec)?;
             mutate_member_unchecked(
                 local_handle.clone(),
                 &local_member_id,

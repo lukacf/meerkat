@@ -10,8 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Upgrade
 
 - Between two mobs of one process, an edge that `meta/cross_mob/wire`
-  recorded under 0.9.9 through 0.9.14 delivered nothing in those releases
-  (every send over it was refused). Such edges become live at the upgrade:
+  recorded in an earlier release delivered nothing there (through 0.9.14
+  every send over it was refused). Such edges become live at the upgrade:
   the first send over one is delivered, and builds the recipient when it
   is not built. Before upgrading, unwire the ones you do not want
   (`meta/cross_mob/unwire`).
@@ -119,8 +119,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   and a later one-sided wire reaches nobody. `meta/cross_mob/wire` and the
   managed topology's wire refuse, with nothing changed, a member of the
   other mob whose key a member of the wiring mob is seated under, as
-  `wire_local` does (`inproc alias error: this mob already holds that key
-  ...`).
+  `wire_local` does (`inproc alias error: ... already holds that key under
+  another name ...`, naming the mob that holds it).
 
   The
   in-process form with the member's key (`remote_pubkey_b64` from
@@ -160,6 +160,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `unwire_local` on both gateways, each with the other member's current
   `peer_info`, then `wire_cross_mob` again.
 - With member socket endpoints, run one member per gateway today.
+- Between two mobs of one process: after a member that a member of
+  another mob is wired to was released and built again while its runtime
+  kept running, a sender that belongs to no mob's namespace (a host
+  session with no realm of its own) and addresses that member by its key
+  is refused (`materialization_lost`). The next peer message a member of
+  the wired mob sends to that member clears it. Members of either mob are
+  not affected.
 
 ## [0.9.14] - 2026-11-11
 

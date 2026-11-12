@@ -308,6 +308,22 @@ fn reseat_spec(row: &MemberSpawnedEvent, session_id: SessionId) -> super::SpawnM
     spec
 }
 
+/// Whether `identity` is a store-owned entry in `state`: the host composes
+/// the seat of such an identity's member at each of its builds
+/// ([`super::MemberBuildPreparer::prepare_store_owned_seat`]), since Core
+/// seats it from its row with no host step. A roster-owned identity's host
+/// composed its spec itself, and a worker is no identity entry.
+#[cfg(feature = "runtime-adapter")]
+pub(super) fn host_composes_seat(
+    state: &mob_dsl::MobMachineState,
+    identity: &AgentIdentity,
+) -> bool {
+    state
+        .identity_entry_origins
+        .get(&mob_dsl::AgentIdentity::from_domain(identity))
+        == Some(&mob_dsl::IdentityEntryOrigin::Created)
+}
+
 /// The created entries owed their seat that a start seats again, in
 /// identity order, each with its archived session record if it has one.
 /// None when the mob is not running, its destroy is admitted, the

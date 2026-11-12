@@ -57,6 +57,32 @@ them.
   afterwards. A request that names no floor keeps what the member builds
   with. Additive: `MemberRespawn` is non-exhaustive.
 
+- Mob: `MemberBuildPreparer::prepare_store_owned_seat` lets a host compose
+  the seat of a store-owned identity's member for each of its builds. Core
+  seats such a member from its row in the mob's identity store, with no
+  host step, so until now its host could give it tools only. The method
+  receives the request Core lowered and sets build inputs on it, as a host
+  does on the spec of a member it spawns itself. Core asks at every build
+  of the member, before the host's spawn customizer and before
+  `prepare_member_build`: before the fresh spawn of its create (one with a
+  first message), of a start's owed seat and of a rotation, and at every
+  wake and boot restore. A seat Core holds Dormant asks nothing until it is
+  built. Every build takes the profile and model overrides of the answer
+  (the model and the provider parameters); the first build of the member's
+  session also takes the context, the additional instructions, the system
+  prompt override and the other first-build inputs. A later build keeps
+  what its session was first built with. No build relies on an earlier
+  answer, so the host answers the same from the row and its own
+  state each time, and may be asked more than once for one seat. The seat's
+  labels, runtime mode, binding, placement and first message stay as Core
+  lowered them, and an answer that changed the seat's identity, role,
+  launch mode or custody is refused. A refusal fails the build before
+  anything is built: at a spawn the identity stays owed its seat and the
+  mob's next start asks again; at a wake or a restore the member stays
+  Dormant (`BuildPreparationRetry`) or is recorded broken, as for a refused
+  build preparation. Additive: the method is defaulted and composes
+  nothing, so hosts that do not implement it see no change.
+
 ### Fixed
 
 - Mob: Core asks the host's member build preparer

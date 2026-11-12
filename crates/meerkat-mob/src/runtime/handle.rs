@@ -6633,6 +6633,11 @@ pub struct MobHandle {
     /// The host's rule for the members a member's own operator tools may not
     /// know of ([`super::MobBuilder::with_member_tool_audience`]).
     pub(super) member_tool_audience: Option<Arc<dyn super::MemberToolAudience>>,
+    /// The host's preparer of member builds
+    /// ([`super::MobBuilder::with_member_build_preparer`]), the one the
+    /// actor asks: this handle asks it to compose the seat of a store-owned
+    /// identity before it sends that identity's fresh spawn.
+    pub(super) member_build_preparer: Option<Arc<dyn super::MemberBuildPreparer>>,
 }
 
 /// Per-member retained per-spawn tool overlays (`SpawnMemberSpec::external_tools`)
@@ -6697,6 +6702,19 @@ impl MobHandle {
         let mut handle = self.clone();
         handle.public_owner = None;
         handle
+    }
+
+    /// The read-only view the host's build preparer receives from this
+    /// handle: the mob under the owner's authority its launch minted,
+    /// whichever lane this handle's own commands travel on, the view a wake
+    /// and a boot restore hand it. The preparer is the host's callback, and
+    /// a read handle issues no actor command.
+    fn host_read_handle(&self) -> super::MobReadHandle {
+        self.non_owning()
+            .with_command_authority(crate::control_policy::CommandAuthority::principal(
+                crate::control_policy::MobControlPrincipal::Owner,
+            ))
+            .read_handle()
     }
 
     /// Give this handle the mob's root public-owner token. Called once, on
@@ -15169,6 +15187,30 @@ impl MobHandle {
             crate::control_policy::CommandAuthorityKind::AgentLane
         ) {
             spec.mark_agent_creation();
+        }
+        // A store-owned identity is seated from its row, with no host step:
+        // its host composes the seat of its fresh local spawn here, before
+        // the spawn is sent (the kickoff spawn of its create, and the spawn
+        // a start or a rotation owes it). That spawn is the first build of
+        // its session, so it takes everything the host composed. A refusal
+        // fails the spawn with the host's reason: nothing is sent, and the
+        // identity stays owed its seat.
+        if spec.created_custody
+            && matches!(spec.launch_mode, crate::launch::MemberLaunchMode::Fresh)
+            && spec.placement.is_none()
+            && matches!(spec.binding, None | Some(crate::RuntimeBinding::Session))
+            && let Some(preparer) = self.member_build_preparer.as_ref()
+        {
+            let composed = Box::pin(super::member_build_preparer::compose_store_owned_seat(
+                preparer.as_ref(),
+                self.host_read_handle(),
+                &mut spec,
+                true,
+            ))
+            .await;
+            composed.map_err(|refusal| {
+                super::member_build_preparer::spawn_refusal_error(&spec.identity, refusal)
+            })?;
         }
         let spawn_source = SpawnSource::for_launch_mode(spawn_source, &spec.launch_mode);
         match self

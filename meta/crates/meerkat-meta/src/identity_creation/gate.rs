@@ -1472,6 +1472,14 @@ impl IdentityGate {
         if self.policy.is_none() {
             return Err(no_policy(ChangeClass::Create));
         }
+        // One request id names one operation, held or committed: an
+        // operation a decision holds, or held, is that change's, and a
+        // settle is never committed beside it.
+        if let Some(decisions) = &self.decisions
+            && decisions.held(mob, &call.operation_id).await?.is_some()
+        {
+            return Err(IdentityRefusal::new(IdentityRefusalKind::OperationReused));
+        }
         let settle = PreparationSettle::new(mob, &call.operation_id, requester, &call.name);
         let committed = self
             .executor

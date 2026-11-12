@@ -5154,6 +5154,10 @@ struct FailingChangeCommit {
     inner: Arc<dyn crate::store::MobIdentityMemberStore>,
     fails: fn(&crate::store::IdentityChangeWrite) -> bool,
     armed: AtomicBool,
+    /// The store reads of one identity's row.
+    row_reads: AtomicU64,
+    /// The store reads of a page of identities' rows.
+    page_reads: AtomicU64,
 }
 
 impl FailingChangeCommit {
@@ -5170,6 +5174,8 @@ impl FailingChangeCommit {
                 .expect("the in-memory storage has the identity member store"),
             fails,
             armed: AtomicBool::new(true),
+            row_reads: AtomicU64::new(0),
+            page_reads: AtomicU64::new(0),
         });
         storage.identity_member =
             Some(Arc::clone(&failing) as Arc<dyn crate::store::MobIdentityMemberStore>);
@@ -5291,7 +5297,97 @@ impl crate::store::MobIdentityMemberStore for FailingChangeCommit {
         mob_id: &MobId,
         identity: &AgentIdentity,
     ) -> Result<Option<CreatedIdentityObservation>, MobStoreError> {
+        self.row_reads.fetch_add(1, Ordering::SeqCst);
         self.inner.observe_created_identity(mob_id, identity).await
+    }
+
+    async fn observe_created_identities(
+        &self,
+        mob_id: &MobId,
+        identities: &[AgentIdentity],
+    ) -> Result<BTreeMap<AgentIdentity, CreatedIdentityObservation>, MobStoreError> {
+        self.page_reads.fetch_add(1, Ordering::SeqCst);
+        self.inner
+            .observe_created_identities(mob_id, identities)
+            .await
+    }
+}
+
+/// Row (RED): many identities' rows are read in pages, one store read per
+/// page of names, so a host that serves K store-owned identities reads
+/// their rows with a number of store reads that does not grow with K beyond
+/// pages. The answer is each identity's row as the one-row read answers it,
+/// and a name the store holds no row of is absent.
+///
+/// RED on the old tree: no such read exists; a host reads one row per
+/// identity.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn many_identities_rows_are_read_in_pages_not_one_store_read_each() {
+    for count in [3_usize, crate::IDENTITY_ENTRY_PAGE_MAX + 4] {
+        let mut storage = MobStorage::in_memory();
+        let reads = FailingChangeCommit::wrap(&mut storage, |_| false);
+        let mob = StoreOwnedMob::build(
+            store_owned_definition(&format!("paged-rows-{count}")),
+            storage,
+            |builder| builder,
+        )
+        .await;
+        let names = (0..count)
+            .map(|index| format!("paged-{index:03}"))
+            .collect::<Vec<_>>();
+        for chunk in names.chunks(64) {
+            let created = mob
+                .create_outcome(
+                    StoreOwnedIdentityCreate::new(
+                        operation(&format!("create-{}", chunk[0])),
+                        IdentityChangeRequesterInput::host("console"),
+                        chunk
+                            .iter()
+                            .map(|name| CreatedIdentityRequest::new(spec(name, "worker")))
+                            .collect(),
+                    ),
+                    ALLOW,
+                )
+                .await
+                .expect("the create commits");
+            assert!(matches!(
+                created.change,
+                IdentityChangeOutcome::Committed { .. }
+            ));
+        }
+        let mut asked = names.iter().map(|name| id(name)).collect::<Vec<_>>();
+        asked.push(id("paged-no-such-row"));
+
+        reads.row_reads.store(0, Ordering::SeqCst);
+        reads.page_reads.store(0, Ordering::SeqCst);
+        let rows = mob
+            .handle
+            .identity_records(&asked)
+            .await
+            .expect("the rows read");
+        assert_eq!(
+            (
+                reads.page_reads.load(Ordering::SeqCst),
+                reads.row_reads.load(Ordering::SeqCst)
+            ),
+            (
+                asked.len().div_ceil(crate::IDENTITY_ENTRY_PAGE_MAX) as u64,
+                0
+            ),
+            "{count} identities are read in pages, with no read of one row"
+        );
+        assert_eq!(rows.len(), count, "a name with no row is absent");
+        for name in [&names[0], &names[count - 1]] {
+            assert_eq!(
+                rows.get(&id(name)),
+                mob.handle
+                    .identity_record(&id(name))
+                    .await
+                    .expect("the row reads")
+                    .as_ref(),
+                "{name}'s row is the one the one-row read answers"
+            );
+        }
     }
 }
 

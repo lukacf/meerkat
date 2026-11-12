@@ -37,6 +37,14 @@ them.
 
 ### Added
 
+- Mob: `MobHandle::identity_records` reads the rows of many identities in
+  the mob's identity store at once, in pages of at most
+  `IDENTITY_ENTRY_PAGE_MAX` names, one store read per page, where
+  `identity_record` reads one row per call. A host that serves many
+  store-owned identities reads their rows at a start with a number of store
+  reads that does not grow with their number beyond pages. A name the store
+  holds no row of is absent from the answer. Additive.
+
 - Mob: `MemberRespawn::with_compaction_floor` (and the public field
   `MemberRespawn::compaction_floor`) seats a member's same-session
   successor (`MobHandle::respawn_member`) with an auto-compact floor.

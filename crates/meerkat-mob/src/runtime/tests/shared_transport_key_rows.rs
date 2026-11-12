@@ -17,7 +17,10 @@
 //!   key another member holds is listed broken alone, and the mob starts;
 //! * while a spawn's activation has not published the member's trusted peer,
 //!   the member's key has no wake route, whether the activation then ends in
-//!   a member, in a rollback, or meets a retire on the way.
+//!   a member, in a rollback, or meets a retire on the way;
+//! * a member its host declared, refused because another member holds its
+//!   key, is built once and then parked: the reconciler builds it again only
+//!   when its declaration changes or a member of the mob is retired.
 //!
 //! One row pins a known limitation: the runtime of a refused member is built
 //! before MobMachine judges its endpoint, and building it takes the in-process
@@ -1318,11 +1321,25 @@ async fn a_stopped_mobs_journal_with_a_row_of_another_members_key_starts_and_lif
         );
     }
 
+    // What MobMachine holds of the broken member, for the retire's message.
+    let held_of_carol = |mob: &KeyMob| {
+        let state = mob.handle.machine_state_watch_rx.borrow();
+        let carol = dsl::AgentIdentity::from_domain(&id("carol"));
+        format!(
+            "materialization {:?}, restore failure {}, retirements routed archive-only {:?}",
+            state.member_materialization.get(&carol),
+            state.member_restore_failures.contains_key(&carol),
+            state.runtime_retire_archive_only
+        )
+    };
+    let before_the_lift = held_of_carol(&mob);
+
     // The mob lifts with the broken member in it.
     tokio::time::timeout(STEP, mob.handle.resume())
         .await
         .expect("the lift answers")
         .expect("the stopped mob lifts");
+    let after_the_lift = held_of_carol(&mob);
     let listed = mob.listed().await;
     assert_eq!(
         listed
@@ -1345,7 +1362,12 @@ async fn a_stopped_mobs_journal_with_a_row_of_another_members_key_starts_and_lif
     tokio::time::timeout(STEP, mob.handle.retire(carol.clone()))
         .await
         .expect("the retire answers")
-        .expect("the broken member retires");
+        .unwrap_or_else(|error| {
+            panic!(
+                "the broken member retires: {error}; MobMachine held of it before the lift: \
+                 {before_the_lift}; after the lift: {after_the_lift}"
+            )
+        });
     assert!(
         !mob.machine_holds(&carol),
         "the retired member is gone from MobMachine"
@@ -1360,4 +1382,335 @@ async fn a_stopped_mobs_journal_with_a_row_of_another_members_key_starts_and_lif
         "only the holder is left, with no error"
     );
     assert_eq!(mob.recorded_endpoint(&alice), Some(alice_endpoint));
+}
+
+// ---------------------------------------------------------------------
+// A declared member refused for a held key
+// ---------------------------------------------------------------------
+
+/// The seed of the key a declared member's session loads before its host
+/// declares it.
+const OWN_KEY: &str = "a-key-of-its-own";
+
+/// Longer than the first three backoff periods of a failed reconcile attempt
+/// together (250 ms, 500 ms, 1 s): a refused declared member that is tried
+/// again is built at least three more times inside it.
+const SEVERAL_BACKOFF_PERIODS: Duration = Duration::from_millis(2_500);
+
+/// A mob over the persistent session service, where a host's declarations
+/// are reconciled: `alice` holds the shared key, and `carol`, whose host
+/// declared it, has been refused for that key by the reconciler's build.
+struct DeclaredKeyMob {
+    handle: MobHandle,
+    storage: MobStorage,
+    alice_endpoint: dsl::MemberPeerEndpoint,
+    carol_session: SessionId,
+}
+
+impl DeclaredKeyMob {
+    /// `alice` spawns on the shared key and `carol` on a key of its own.
+    /// From then on carol's session loads the shared key, as every local
+    /// member's session does on a host on socket comms, and carol's host
+    /// declares it: the reconciler retires carol's member and builds it
+    /// again on its declared session, where MobMachine refuses its endpoint.
+    /// Returns once the reconciler recorded that refusal.
+    async fn with_carol_refused(label: &str) -> Self {
+        let session_store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let blob_store: Arc<dyn meerkat_core::BlobStore> =
+            Arc::new(meerkat_store::MemoryBlobStore::new());
+        let service = Arc::new(meerkat_session::PersistentSessionService::new(
+            PersistentMockBuilder,
+            16,
+            session_store,
+            runtime_store,
+            blob_store,
+        ));
+        let storage = MobStorage::in_memory();
+        let handle = MobBuilder::new(
+            with_unique_mob_id(sample_definition(), label),
+            storage.clone(),
+        )
+        .with_session_service(service)
+        .create()
+        .await
+        .expect("create the mob");
+        let (alice, carol) = (id("alice"), id("carol"));
+        let alice_session = SessionId::new();
+        set_persistent_mock_comms_seed(&alice_session, SHARED_KEY);
+        tokio::time::timeout(STEP, handle.spawn_spec(spec_on(&alice, &alice_session)))
+            .await
+            .expect("the spawn answers")
+            .expect("the key's first member spawns");
+        let carol_session = SessionId::new();
+        set_persistent_mock_comms_seed(&carol_session, OWN_KEY);
+        tokio::time::timeout(STEP, handle.spawn_spec(spec_on(&carol, &carol_session)))
+            .await
+            .expect("the spawn answers")
+            .expect("a member on a key of its own spawns");
+        assert_eq!(
+            handle.resolve_bridge_session_id(&carol).await,
+            Some(carol_session.clone()),
+            "the member serves on the session the row seeds"
+        );
+        let alice_endpoint = handle
+            .machine_state_watch_rx
+            .borrow()
+            .member_peer_endpoints
+            .get(&dsl::AgentIdentity::from_domain(&alice))
+            .cloned()
+            .expect("the first member's endpoint is recorded");
+        let mob = Self {
+            handle,
+            storage,
+            alice_endpoint,
+            carol_session,
+        };
+        let carol_endpoint = mob
+            .endpoint(&carol)
+            .expect("the second member's endpoint is recorded");
+        assert_ne!(
+            carol_endpoint.signing_key.0, mob.alice_endpoint.signing_key.0,
+            "the members start on two keys"
+        );
+
+        set_persistent_mock_comms_seed(&mob.carol_session, SHARED_KEY);
+        super::member_history::adopt_existing_member(
+            &mob.handle,
+            &carol,
+            &mob.carol_session,
+            "worker",
+        )
+        .await;
+        mob.await_refusal(1).await;
+        mob
+    }
+
+    /// The endpoint MobMachine records for `identity`.
+    fn endpoint(&self, identity: &AgentIdentity) -> Option<dsl::MemberPeerEndpoint> {
+        self.handle
+            .machine_state_watch_rx
+            .borrow()
+            .member_peer_endpoints
+            .get(&dsl::AgentIdentity::from_domain(identity))
+            .cloned()
+    }
+
+    /// How often carol's session was built.
+    fn carol_builds(&self) -> u64 {
+        persistent_mock_comms_builds(&self.carol_session)
+    }
+
+    /// Carol's reconcile status, once one is stored.
+    async fn carol_status(&self) -> Option<crate::identity::IdentityConvergenceStatus> {
+        match self
+            .handle
+            .identity_convergence_status(&id("carol"))
+            .await
+            .expect("read the reconcile status")
+        {
+            crate::identity::IdentityStoredObservation::Valid(status) => Some(status),
+            _ => None,
+        }
+    }
+
+    /// Wait until the reconciler recorded, for revision `intent_revision` of
+    /// carol's declaration, that its build was refused for its comms key.
+    async fn await_refusal(
+        &self,
+        intent_revision: u64,
+    ) -> crate::identity::IdentityConvergenceStatus {
+        let refused = tokio::time::timeout(STEP, async {
+            loop {
+                if let Some(status) = self.carol_status().await
+                    && status.intent_revision == Some(intent_revision)
+                    && matches!(
+                        status.decision,
+                        Some(
+                            crate::identity::IdentityReconcileDecision::Backoff
+                                | crate::identity::IdentityReconcileDecision::RepairBlocked
+                        )
+                    )
+                    && status
+                        .detail
+                        .as_deref()
+                        .is_some_and(|detail| detail.contains("comms key"))
+                {
+                    break status;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        match refused {
+            Ok(status) => status,
+            Err(_) => panic!(
+                "the reconciler records the refusal of revision {intent_revision}; latest status: {:?}",
+                self.carol_status().await
+            ),
+        }
+    }
+
+    /// Watch carol's build count for several backoff periods: it stays at
+    /// `builds`.
+    async fn carol_is_not_built_again(&self, builds: u64) {
+        let until = Instant::now() + SEVERAL_BACKOFF_PERIODS;
+        while Instant::now() < until {
+            assert_eq!(
+                self.carol_builds(),
+                builds,
+                "a declared member refused for a held key is not built again; latest status: {:?}",
+                self.carol_status().await
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Carol's reconcile is parked: its status is repair-blocked with a text
+    /// that names carol alone and says what ends the wait.
+    async fn assert_carol_parked(&self) {
+        let status = self.carol_status().await.expect("carol has a status");
+        assert!(
+            matches!(
+                status.decision,
+                Some(crate::identity::IdentityReconcileDecision::RepairBlocked)
+            ),
+            "a held key parks the declared member: {status:?}"
+        );
+        let detail = status.detail.clone().expect("the status carries a text");
+        assert_caller_text(&detail, &id("carol"), &id("alice"), &self.alice_endpoint);
+        assert!(
+            detail.contains("declaration changes") && detail.contains("retired"),
+            "the text says what ends the wait: {detail}"
+        );
+    }
+}
+
+/// A declared member that is refused because another member holds its comms
+/// key is built once and then parked: the reconciler does not build it again
+/// backoff period after backoff period (each build takes the in-process
+/// route of the key from the member that holds it). The holder is untouched
+/// and nothing of the refused member is left.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_declared_member_refused_for_a_held_key_is_built_once_and_parked() {
+    let mob = DeclaredKeyMob::with_carol_refused("held-key-park").await;
+    let (alice, carol) = (id("alice"), id("carol"));
+    let builds = mob.carol_builds();
+    mob.carol_is_not_built_again(builds).await;
+    mob.assert_carol_parked().await;
+    assert_eq!(
+        mob.endpoint(&alice),
+        Some(mob.alice_endpoint.clone()),
+        "the holder keeps its endpoint"
+    );
+    assert_eq!(
+        mob.endpoint(&carol),
+        None,
+        "the refused member holds no endpoint"
+    );
+    assert!(
+        mob.handle
+            .get_member(&carol)
+            .await
+            .expect("the roster answers")
+            .is_none(),
+        "nothing of the refused member is left in the roster"
+    );
+}
+
+/// The retirement of the member that holds the key ends the park: the next
+/// reconcile pass builds the declared member, once, and it serves on the
+/// key.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_holders_retirement_lets_the_next_pass_build_the_member_parked_for_its_held_key() {
+    let mob = DeclaredKeyMob::with_carol_refused("held-key-park-retire").await;
+    let (alice, carol) = (id("alice"), id("carol"));
+    let builds = mob.carol_builds();
+    mob.carol_is_not_built_again(builds).await;
+
+    tokio::time::timeout(STEP, mob.handle.retire(alice.clone()))
+        .await
+        .expect("the retire answers")
+        .expect("the holder retires");
+    super::member_history::await_adoption_convergence(&mob.handle, &carol).await;
+
+    assert_eq!(
+        mob.carol_builds(),
+        builds + 1,
+        "the holder's retirement let one build through"
+    );
+    let endpoint = mob
+        .endpoint(&carol)
+        .expect("the declared member holds its endpoint");
+    assert_eq!(
+        endpoint.signing_key.0, mob.alice_endpoint.signing_key.0,
+        "on the key the retired member held"
+    );
+    assert_eq!(
+        mob.endpoint(&alice),
+        None,
+        "the retired member holds nothing"
+    );
+}
+
+/// A changed declaration ends the park too: the reconciler builds the member
+/// once for the new revision, and parks it again while the key is still
+/// held.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_changed_declaration_releases_the_member_parked_for_its_held_key() {
+    let mob = DeclaredKeyMob::with_carol_refused("held-key-park-declaration").await;
+    let carol = id("carol");
+    let builds = mob.carol_builds();
+    mob.carol_is_not_built_again(builds).await;
+
+    let record = match mob
+        .storage
+        .identity
+        .observe_identity_intent(mob.handle.mob_id(), &carol)
+        .await
+        .expect("read the declaration")
+    {
+        crate::identity::IdentityStoredObservation::Valid(record) => record,
+        other => panic!("the declaration is stored: {other:?}"),
+    };
+    let mut declaration = match &record.intent {
+        crate::identity::IdentityIntent::Present { member, .. } => {
+            member.material.member_tool_declaration()
+        }
+        crate::identity::IdentityIntent::Absent { .. } => panic!("the declaration is present"),
+    };
+    declaration.category_overrides.shell = ToolCategoryOverride::Enable;
+    let update = mob
+        .handle
+        .apply_member_tool_declaration(crate::identity::ApplyMemberToolDeclaration {
+            mob_id: mob.handle.mob_id().clone(),
+            agent_identity: carol.clone(),
+            request_id: crate::identity::MemberToolMutationId::new("enable-shell")
+                .expect("valid mutation id"),
+            expected_intent_revision: 1,
+            declaration,
+            convergence: crate::identity::IdentityConvergenceMode::CancelActive,
+        })
+        .await
+        .expect("the host changes the declaration");
+    assert!(
+        matches!(
+            update.commit,
+            crate::identity::MemberToolCommitOutcome::Committed {
+                desired_revision: 2
+            }
+        ),
+        "the declaration has a second revision: {:?}",
+        update.commit
+    );
+
+    mob.await_refusal(2).await;
+    assert_eq!(
+        mob.carol_builds(),
+        builds + 1,
+        "the changed declaration let one build through"
+    );
+    mob.carol_is_not_built_again(builds + 1).await;
+    mob.assert_carol_parked().await;
 }

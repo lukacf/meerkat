@@ -531,6 +531,24 @@ describe("an outcome in words", () => {
     expect(agentChangeConfirmWords("remove", "Scout").consequence).toContain(harvest);
     expect(agentChangeConfirmWords("unarchive", "Scout").consequence).not.toContain("harvest");
   });
+
+  it("says before the removal of an agent that waits for its host that it never started", () => {
+    // An agent whose host has not finished preparing it has no member: it
+    // has no conversation to harvest, and an archive is no choice for it.
+    // The removal is still for good, and its name is still spent.
+    const waiting = agentChangeConfirmWords("remove", "The porter", { waiting: true });
+    expect(waiting.question).toBe("Remove The porter for good?");
+    expect(waiting.confirm).toBe("Remove for good");
+    expect(waiting.consequence).toBe("It never started: its host has not finished preparing it, so it has no conversation and nothing was run for it. Its name can never be used again, and this cannot be undone.");
+    expect(waiting.consequence).not.toMatch(/harvest|Archive|schedule/);
+    // An agent that has a member, or had one, is asked as before, whatever
+    // is said of waiting; so is every other change.
+    const seated = agentChangeConfirmWords("remove", "Scout");
+    expect(agentChangeConfirmWords("remove", "Scout", { waiting: false })).toEqual(seated);
+    expect(seated.consequence).toContain("Its last conversation is harvested");
+    expect(agentChangeConfirmWords("archive", "Scout", { waiting: true })).toEqual(agentChangeConfirmWords("archive", "Scout"));
+    expect(agentChangeConfirmWords("unarchive", "Scout", { waiting: true })).toEqual(agentChangeConfirmWords("unarchive", "Scout"));
+  });
 });
 
 describe("who reaches an agent and how it runs", () => {

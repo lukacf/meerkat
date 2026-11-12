@@ -1658,7 +1658,10 @@ describe("long-term agents in the console", () => {
     expect(waiting.querySelector("[title='porter']") === null).toBe(false);
     expect(waiting.textContent).toContain("Waiting for its host");
     expect(waiting.textContent || "").not.toMatch(/preparation|pending|_|human\.0123abcd/);
-    expect(waiting.querySelectorAll("button").length).toBe(0);
+    // Nothing can be done with it yet but to give it up: Remove is its one
+    // control. It is not archived, so it has no Unarchive.
+    expect(Array.from(waiting.querySelectorAll("button")).map((button) => button.getAttribute("data-testid")))
+      .toEqual(["roster-waiting-action:porter:remove"]);
     // The archived agent is listed as before, with its controls, and each
     // agent is in its own group only. An agent that has a member is in none.
     const archived = await find(view, "roster-archived:oldhand");
@@ -1802,5 +1805,62 @@ describe("long-term agents in the console", () => {
     expect((await find(view, "roster-waiting:porter")).textContent).toContain("Waiting for its host");
     expect(present(view, "roster-archived-error")).toBe(false);
     view.unmount();
+  }, 60_000);
+
+  it("an_agent_that_waits_for_its_host_can_be_removed_from_the_list_and_is_asked_as_one_that_never_started", async () => {
+    // A host can give up on an agent it cannot prepare. The agent then
+    // waits for ever, with no member and no row of the roster: the list
+    // under the roster is the one place a person can remove it from. The
+    // gateway judges the removal, as it does for an archived agent.
+    const family = createScriptedIdentityFamily();
+    family.seed({ name: "porter", display_name: "The porter", profile: "worker", readiness: "preparation_pending" });
+    family.seed({ name: "oldhand", display_name: "Old hand", profile: "worker", archived: true });
+    const { view } = await openRoster(family);
+    await openArchived(view);
+    const waiting = await find(view, "roster-waiting:porter");
+    expect(within(waiting).getByTestId("roster-waiting-action:porter:remove").textContent).toBe("Remove");
+    expect(present(view, "roster-waiting-action:porter:unarchive")).toBe(false);
+    expect(present(view, "roster-archived-action:porter:remove")).toBe(false);
+    expect(calls(family, "meta/identity/remove")).toEqual([]);
+
+    // The question is the removal's, for an agent that never started:
+    // nothing is harvested, and an archive is no choice for it.
+    fireEvent.click(within(waiting).getByTestId("roster-waiting-action:porter:remove"));
+    const confirm = await find(view, "identity-confirm:porter:remove");
+    expect(confirm.textContent).toContain("Remove The porter for good?");
+    expect(confirm.textContent).toContain("It never started: its host has not finished preparing it");
+    expect(confirm.textContent).toContain("Its name can never be used again, and this cannot be undone.");
+    expect(confirm.textContent || "").not.toMatch(/harvest|Archive is the reversible choice|schedule/);
+    expect(within(confirm).queryByTestId("identity-confirm-archive-instead") === null).toBe(true);
+    // Nothing is sent before the person confirms.
+    expect(calls(family, "meta/identity/remove")).toEqual([]);
+    const digest = family.handle("meta/identity/get", { name: "porter" }).result.spec_digest;
+    fireEvent.click(within(confirm).getByTestId("identity-confirm-yes"));
+    await waitFor(() => expect(noticeWords(view.getByTestId("identity-notice"))).toContain("The porter is removed"), { timeout: 5_000 });
+    expect(noticeWords(view.getByTestId("identity-notice"))).toContain("Its name can never be used again.");
+    expect(noticeWords(view.getByTestId("identity-notice"))).not.toMatch(/schedule/);
+    expect(calls(family, "meta/identity/remove")).toEqual([{ request_id: expect.stringMatching(/\S/), name: "porter", expected_spec_digest: digest }]);
+    expect(family.agents.has("porter")).toBe(false);
+    // The list, read again, no longer shows it; the archived agent is as it was.
+    await gone(view, "roster-waiting:porter");
+    await find(view, "roster-archived:oldhand");
+    fireEvent.click(view.getByTestId("identity-confirm-cancel"));
+
+    // An archived agent is asked as before: it had a conversation.
+    fireEvent.click(view.getByTestId("roster-archived-action:oldhand:remove"));
+    const archived = await find(view, "identity-confirm:oldhand:remove");
+    expect(archived.textContent).toContain("Its last conversation is harvested, as for any agent that leaves the team.");
+    expect(archived.textContent || "").not.toContain("It never started");
+    view.unmount();
+    cleanup();
+
+    // A launch that offers no removal offers none of a waiting agent either.
+    const kept = createScriptedIdentityFamily({ flags: { can_remove: false } });
+    kept.seed({ name: "porter", display_name: "The porter", profile: "worker", readiness: "preparation_pending" });
+    const second = await openRoster(kept);
+    await openArchived(second.view);
+    const row = await find(second.view, "roster-waiting:porter");
+    expect(row.querySelectorAll("button").length).toBe(0);
+    second.view.unmount();
   }, 60_000);
 });

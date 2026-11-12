@@ -659,7 +659,9 @@ function createScriptedIdentityFamily(options = {}) {
      * (`setAffordances`), so a row can turn one input off, or on.
      */
     experienceAgents() {
-      const own = [...agents.values()].filter(agent => !agent.archived).map((agent) => {
+      // An archived agent has no member, and neither has one that still
+      // waits for its host's preparation: the roster has no row for them.
+      const own = [...agents.values()].filter(agent => !agent.archived && agent.readiness !== "preparation_pending").map((agent) => {
         const scripted = affordances.get(agent.name) || {};
         const offered = !agent.configured;
         return {

@@ -1633,6 +1633,56 @@ describe("long-term agents in the console", () => {
     warden.view.unmount();
   }, 60_000);
 
+  it("an_agent_that_waits_for_its_host_is_listed_with_the_archived_agents_by_name_and_without_actions", async () => {
+    // An agent whose create is committed and whose host still prepares it
+    // has no member: the roster has no row for it. The list of the agents
+    // without a member (the archived ones) shows it too, as one more state:
+    // its name first, a plain state, and no control, since nothing can be
+    // done with it yet.
+    const family = createScriptedIdentityFamily();
+    family.seed({
+      name: "porter", display_name: "The porter", profile: "worker",
+      readiness: "preparation_pending", open_operations: ["human.0123abcd.request-9"],
+    });
+    family.seed({ name: "oldhand", display_name: "Old hand", profile: "worker", archived: true });
+    const { view } = await openRoster(family);
+    await find(view, "roster-row:warden");
+    expect(present(view, "roster-row:porter")).toBe(false);
+
+    // The control names both kinds and reads nothing before it is opened.
+    expect((await find(view, "roster-archived-open")).textContent).toBe("Archived and waiting agents");
+    expect(calls(family, "meta/identity/list")).toEqual([]);
+    await openArchived(view);
+    const waiting = await find(view, "roster-waiting:porter");
+    expect(waiting.querySelector(".identity-archived__name")?.textContent).toBe("The porter");
+    expect(waiting.querySelector("[title='porter']") === null).toBe(false);
+    expect(waiting.textContent).toContain("Waiting for its host");
+    expect(waiting.textContent || "").not.toMatch(/preparation|pending|_|human\.0123abcd/);
+    expect(waiting.querySelectorAll("button").length).toBe(0);
+    // The archived agent is listed as before, with its controls, and each
+    // agent is in its own group only. An agent that has a member is in none.
+    const archived = await find(view, "roster-archived:oldhand");
+    expect(within(archived).queryByTestId("roster-archived-action:oldhand:unarchive") === null).toBe(false);
+    expect(present(view, "roster-archived:porter")).toBe(false);
+    expect(present(view, "roster-waiting:oldhand")).toBe(false);
+    expect(present(view, "roster-waiting:warden")).toBe(false);
+    expect(present(view, "roster-archived:warden")).toBe(false);
+    const section = view.getByTestId("roster-archived");
+    expect(section.textContent).toContain("Waiting for their host");
+    expect(section.textContent).toContain("Archived");
+
+    // Once its host is done the agent has a member: the list, read again
+    // when it is opened again, no longer shows it.
+    family.agents.get("porter").readiness = "dormant";
+    fireEvent.click(view.getByTestId("roster-archived-open"));
+    await gone(view, "roster-archived");
+    fireEvent.click(view.getByTestId("roster-archived-open"));
+    await find(view, "roster-archived:oldhand");
+    expect(present(view, "roster-waiting:porter")).toBe(false);
+    expect(view.getByTestId("roster-archived").textContent).not.toContain("Waiting for their host");
+    view.unmount();
+  }, 60_000);
+
   it("an_agent_its_hosts_configuration_also_lists_says_so_at_its_status", async () => {
     const family = createScriptedIdentityFamily();
     const status = (extra: Record<string, unknown> = {}) => ({

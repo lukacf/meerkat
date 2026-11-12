@@ -27,6 +27,7 @@ use meerkat_core::{
 };
 use meerkat_runtime::RuntimeStore;
 
+mod operator_instruction_forks;
 mod operator_instruction_reseat;
 
 const WAIT: Duration = Duration::from_secs(30);

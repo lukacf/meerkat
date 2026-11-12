@@ -9606,10 +9606,15 @@ impl MobBuilder {
             // Roster is a projection only. Build it after the authoritative
             // carrier/event reconciliation and machine recovery have succeeded.
             let mut roster = Roster::project(&mob_events);
-            // A store-owned identity's seat whose session no build created
-            // takes its descriptive inputs from the identity's row, its
-            // record: an update after the seat applies at the first build.
+            // A store-owned identity's row is its record. Its seat carries
+            // the row's labels, whatever its last seat row holds (a label
+            // update that no restamp followed left that row behind): the
+            // rows are read already, so the roster follows them here, with
+            // no build, no wake and no row written. Its seat whose session
+            // no build created also takes its descriptive inputs from the
+            // row: an update after the seat applies at the first build.
             for (identity, spec) in &recovered_created_rows.specs {
+                roster.set_store_owned_seat_labels(identity, &spec.labels);
                 if super::boot_plan::domain_member_seat_session_unborn(
                     initial_dsl_authority.state(),
                     identity,

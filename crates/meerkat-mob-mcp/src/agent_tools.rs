@@ -8650,6 +8650,98 @@ mod tests {
         );
     }
 
+    /// The rows `mob_list_members` answers `tools` for the mob `mob_id`.
+    async fn listed_member_rows(
+        tools: &Arc<dyn AgentToolDispatcher>,
+        mob_id: &str,
+    ) -> Vec<serde_json::Value> {
+        let raw = serde_json::value::RawValue::from_string(json!({ "mob_id": mob_id }).to_string())
+            .unwrap();
+        let listed = tools
+            .dispatch(ToolCallView {
+                id: "audience-list",
+                name: "mob_list_members",
+                args: &raw,
+            })
+            .await
+            .expect("mob_list_members dispatches");
+        let payload: serde_json::Value =
+            serde_json::from_str(&listed.result.text_content()).expect("list payload");
+        payload["members"]
+            .as_array()
+            .expect("members array")
+            .clone()
+    }
+
+    /// The sorted strings of the array `field` of a listed row.
+    fn listed_names(row: &serde_json::Value, field: &str) -> Vec<String> {
+        let mut names: Vec<String> = row[field]
+            .as_array()
+            .expect("an array of names")
+            .iter()
+            .map(|name| name.as_str().expect("a name").to_owned())
+            .collect();
+        names.sort_unstable();
+        names
+    }
+
+    /// The `wired_to` of a row `mob_list_members` answers names no member the
+    /// host's member tool audience hides from the caller: a member wired to
+    /// a hidden member is listed with its other peers only. A caller the
+    /// member is not hidden from reads the whole wiring.
+    #[tokio::test]
+    async fn mob_list_members_names_no_hidden_member_in_wired_to() {
+        let state = MobMcpState::new_in_memory();
+        let handle = host_mob_with_kept_members(
+            &state,
+            "peers-audience",
+            &[
+                ("peers-kept", Some("ann")),
+                ("peers-keeper", Some("ann")),
+                ("peers-shown", None),
+                ("peers-caller", None),
+            ],
+        )
+        .await;
+        // The host wires a member every caller is shown to the kept member
+        // and to the caller.
+        for peer in ["peers-kept", "peers-caller"] {
+            handle
+                .wire(
+                    AgentIdentity::from("peers-shown"),
+                    AgentIdentity::from(peer),
+                )
+                .await
+                .expect("the host wires the members");
+        }
+        let scope = || scope_only_authority("peers-audience", handle.live_incarnation());
+        let wired_to_of_shown = |member: &'static str| {
+            let state = Arc::clone(&state);
+            let handle = handle.clone();
+            let authority = scope();
+            async move {
+                let tools = member_mob_tools(&state, &handle, member, authority).await;
+                let rows = listed_member_rows(&tools, "peers-audience").await;
+                let row = rows
+                    .iter()
+                    .find(|row| row["agent_identity"] == "peers-shown")
+                    .expect("the shown member is listed");
+                listed_names(row, "wired_to")
+            }
+        };
+
+        assert_eq!(
+            wired_to_of_shown("peers-caller").await,
+            vec!["peers-caller".to_owned()],
+            "a listed row names no peer the audience hides from the caller"
+        );
+        assert_eq!(
+            wired_to_of_shown("peers-keeper").await,
+            vec!["peers-caller".to_owned(), "peers-kept".to_owned()],
+            "a caller the member is not hidden from reads the whole wiring"
+        );
+    }
+
     /// The classification behind `wired`: only a committed edge between the
     /// caller and the new member reports it wired, whatever was requested.
     #[test]

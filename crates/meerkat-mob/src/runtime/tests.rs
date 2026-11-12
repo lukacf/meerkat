@@ -30699,6 +30699,153 @@ async fn wire_members_answer_a_member_hidden_from_the_caller_as_absent() {
         .expect("a caller the member is not hidden from unwires it");
 }
 
+/// The `wired_to` of a listed row names no member the host's member tool
+/// audience hides from the caller: a member wired to a hidden member is
+/// listed with its other peers only. A caller the member is not hidden from
+/// reads the whole wiring.
+#[tokio::test]
+async fn list_members_names_no_hidden_member_in_wired_to() {
+    let handle = mob_with_kept_members(&[
+        ("peers-kept", Some("ann")),
+        ("peers-keeper", Some("ann")),
+        ("peers-shown", None),
+        ("peers-caller", None),
+    ])
+    .await;
+    // The host wires a member every caller is shown to the kept member and
+    // to the caller.
+    for peer in ["peers-kept", "peers-caller"] {
+        handle
+            .wire(
+                AgentIdentity::from("peers-shown"),
+                AgentIdentity::from(peer),
+            )
+            .await
+            .expect("the host wires the members");
+    }
+    let wired_to_of_shown = |tools: Arc<dyn AgentToolDispatcher>| async move {
+        let listed = dispatch_operator_tool(&tools, "list_members", serde_json::json!({}))
+            .await
+            .expect("list_members dispatches");
+        let payload: serde_json::Value =
+            serde_json::from_str(&listed.result.text_content()).expect("list payload");
+        let row = payload["members"]
+            .as_array()
+            .expect("members array")
+            .iter()
+            .find(|entry| entry["agent_identity"] == "peers-shown")
+            .expect("the shown member is listed")
+            .clone();
+        let mut peers: Vec<String> = row["wired_to"]
+            .as_array()
+            .expect("wired_to array")
+            .iter()
+            .map(|peer| peer.as_str().unwrap().to_owned())
+            .collect();
+        peers.sort_unstable();
+        peers
+    };
+
+    assert_eq!(
+        wired_to_of_shown(manage_scope_tools(&handle, "peers-caller").await).await,
+        vec!["peers-caller".to_owned()],
+        "a listed row names no peer the audience hides from the caller"
+    );
+    assert_eq!(
+        wired_to_of_shown(manage_scope_tools(&handle, "peers-keeper").await).await,
+        vec!["peers-caller".to_owned(), "peers-kept".to_owned()],
+        "a caller the member is not hidden from reads the whole wiring"
+    );
+}
+
+/// A listed row names no external peer the host's member tool audience
+/// hides from the caller: neither in its `wired_to` nor with the peer's
+/// descriptor. A caller the peer is not hidden from reads both.
+#[tokio::test]
+async fn list_members_names_no_hidden_external_peer_of_a_listed_member() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    // A member of another mob, and the name its peers know it by.
+    let remote_definition = with_unique_mob_id(sample_definition(), "audience-remote");
+    let remote_mob_id = remote_definition.id.clone();
+    let remote = MobBuilder::new(remote_definition, MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create the other mob");
+    let mut remote_spec = SpawnMemberSpec::new("worker", AgentIdentity::from("ext-kept"));
+    remote_spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    remote
+        .spawn_spec(remote_spec)
+        .await
+        .expect("spawn the other mob's member");
+    let remote_entry = remote
+        .get_member(&AgentIdentity::from("ext-kept"))
+        .await
+        .expect("read the other mob's member")
+        .expect("the other mob's member is seated");
+    let descriptor = external_descriptor_from_published_member(&remote_mob_id, &remote_entry);
+    let external = AgentIdentity::from(descriptor.name.as_str());
+
+    let handle = MobBuilder::new(
+        with_unique_mob_id(sample_definition_with_mob_tools(), "audience-home"),
+        MobStorage::in_memory(),
+    )
+    .with_session_service(service.clone())
+    .with_member_tool_audience(Arc::new(HideMemberFrom {
+        caller: AgentIdentity::from("ext-caller"),
+        target: external.clone(),
+    }))
+    .create()
+    .await
+    .expect("create mob");
+    for member in ["ext-shown", "ext-caller", "ext-other"] {
+        let mut spec = SpawnMemberSpec::new("worker", AgentIdentity::from(member));
+        spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+        handle.spawn_spec(spec).await.expect("spawn the member");
+    }
+    handle
+        .wire(
+            AgentIdentity::from("ext-shown"),
+            PeerTarget::External(descriptor),
+        )
+        .await
+        .expect("the host wires the member to the external peer");
+    let row_of_shown = |caller: &'static str| {
+        let handle = handle.clone();
+        async move {
+            let tools = manage_scope_tools(&handle, caller).await;
+            let listed = dispatch_operator_tool(&tools, "list_members", serde_json::json!({}))
+                .await
+                .expect("list_members dispatches");
+            let payload: serde_json::Value =
+                serde_json::from_str(&listed.result.text_content()).expect("list payload");
+            payload["members"]
+                .as_array()
+                .expect("members array")
+                .iter()
+                .find(|entry| entry["agent_identity"] == "ext-shown")
+                .expect("the wired member is listed")
+                .clone()
+        }
+    };
+
+    let row = row_of_shown("ext-other").await;
+    assert!(
+        row["wired_to"]
+            .as_array()
+            .expect("wired_to array")
+            .contains(&serde_json::json!(external.as_str()))
+            && row["external_peer_specs"].get(external.as_str()).is_some(),
+        "a caller the external peer is not hidden from reads it in the row: {row}"
+    );
+    let row = row_of_shown("ext-caller").await;
+    assert!(
+        !row.to_string().contains(external.as_str()),
+        "a listed row names no external peer the audience hides from the caller: {row}"
+    );
+}
+
 /// A force cancel reaches a fork child's run one of two typed ways. A run
 /// already current receives an exact boundary cancel (`boundary_cancelled`);
 /// a run still queued is abandoned at the cancel point, so its supervised run

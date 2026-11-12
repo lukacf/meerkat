@@ -7581,6 +7581,15 @@ pub struct SpawnMemberSpec {
     /// refused. Set only by the fork seat's resolution; never taken from
     /// caller-supplied arguments.
     pub(crate) dispatch_admission_lineage: bool,
+    /// Whether the mob answers the source of this request's fork launch as
+    /// a member it does not hold. Set only by the member tools, for a source
+    /// the host's member tool audience hides from the calling member
+    /// ([`MobHandle::fork_source_answered_absent`]), so such a fork gets the
+    /// answer of a fork of a name the mob does not hold, at the place the
+    /// mob looks the source up. It lives on the request alone: nothing
+    /// records, logs or answers it, and a host's own requests never carry
+    /// it.
+    pub(crate) fork_source_answered_absent: bool,
 }
 
 impl std::fmt::Debug for SpawnMemberSpec {
@@ -7721,6 +7730,7 @@ impl SpawnMemberSpec {
             created_custody: false,
             approval_branch: None,
             dispatch_admission_lineage: false,
+            fork_source_answered_absent: false,
         }
     }
 
@@ -11396,13 +11406,16 @@ impl MobHandle {
     /// hides from `caller`: the one place the audience is asked. The member
     /// tools that name or list members ask through it: `member_status`,
     /// `retire_member`, `force_cancel_member`, `wire_members`,
-    /// `unwire_members` and `list_members`, and the mob tools'
-    /// `mob_check_member`, `mob_retire_member`, `mob_wire`, `mob_unwire`,
-    /// `mob_list_members` and `council`.
+    /// `unwire_members`, `list_members`, `spawn_member` and
+    /// `spawn_many_members` (the source of a fork launch, and the member a
+    /// resumed session is bound to), and the mob tools' `mob_check_member`,
+    /// `mob_retire_member`, `mob_wire`, `mob_unwire`, `mob_list_members`,
+    /// `council` and `mob_destroy` (the members its report names).
     ///
     /// A hidden member is one the caller's tools answer exactly as a member
     /// the mob does not hold: a tool that names it answers member not
-    /// found, and a list leaves its row out whole. `caller` is the member
+    /// found, a resume of its session answers as a resume of a session
+    /// nobody holds, and a list or a destroy report leaves it out whole. `caller` is the member
     /// the call was made for: the member bound to the session that made it,
     /// or the placed member whose request the controlling side serves.
     /// `None` is a call made by no member of this mob (a host's own
@@ -11449,7 +11462,9 @@ impl MobHandle {
     /// It is the first of the two, in the order the mob looks them up, that
     /// is hidden or that the roster holds no row for, so the answer names
     /// the end a name the mob does not hold would have named in the hidden
-    /// member's place. `None` when neither end is hidden (the mob answers
+    /// member's place. The mob's wire and unwire commands look both members
+    /// up, local first, before any refusal about either member; this order
+    /// follows theirs. `None` when neither end is hidden (the mob answers
     /// the call itself) and when both names are the same (a call the mob
     /// refuses without looking a member up). `peer` is `None` for a peer
     /// that is no member of the mob.
@@ -11510,6 +11525,98 @@ impl MobHandle {
                 .retain(|peer, _| !hidden.contains(peer));
         }
         rows
+    }
+
+    /// For the member tools that spawn: whether `launch_mode` forks a member
+    /// the host's member tool audience ([`Self::members_hidden_from`]) hides
+    /// from `caller`. The tool marks such a request
+    /// (`SpawnMemberSpec::fork_source_answered_absent`) and the mob answers
+    /// it as a fork of a name it does not hold. `false` for every other
+    /// launch and when the host installed no audience.
+    pub(super) async fn fork_source_answered_absent(
+        &self,
+        caller: Option<&AgentIdentity>,
+        launch_mode: &crate::launch::MemberLaunchMode,
+    ) -> bool {
+        let crate::launch::MemberLaunchMode::Fork {
+            source_member_id, ..
+        } = launch_mode
+        else {
+            return false;
+        };
+        !self
+            .members_hidden_from(caller, std::slice::from_ref(source_member_id))
+            .await
+            .is_empty()
+    }
+
+    /// For the member tools that spawn: the refusal `caller` is answered in
+    /// place of `error`, the refusal of a launch that resumes session
+    /// `resumed`, when `error` says the session is bound to a member of this
+    /// mob that the host's member tool audience
+    /// ([`Self::members_hidden_from`]) hides from `caller`. It is the
+    /// refusal of a resume of a session nobody holds
+    /// ([`MobError::SessionUnavailableForResume`], absent), so the caller is
+    /// told neither the member nor the mob. `None` when `error` is answered
+    /// as it is: every other refusal, a session bound to a member the
+    /// caller is shown or to a member of another mob, and a host with no
+    /// audience.
+    ///
+    /// The refusal of a resume that declares a role carries the bound
+    /// member in its text alone; for it the member is read from the roster
+    /// by the session, never from the text.
+    pub(super) async fn resume_refusal_answered_absent(
+        &self,
+        caller: Option<&AgentIdentity>,
+        resumed: Option<&SessionId>,
+        error: &MobError,
+    ) -> Option<MobError> {
+        let resumed = resumed?;
+        self.member_tool_audience.as_ref()?;
+        let bound = match error {
+            MobError::ResumeSessionBoundToAnotherMember {
+                bound_mob_id,
+                bound_member_id,
+                ..
+            } if bound_mob_id == &self.definition().id => bound_member_id.clone(),
+            MobError::MemberRoleMigrationRejected { .. } => self
+                .roster()
+                .await
+                .find_by_bridge_session_id(resumed)
+                .map(|entry| entry.agent_identity.clone())?,
+            _ => return None,
+        };
+        if self
+            .members_hidden_from(caller, std::slice::from_ref(&bound))
+            .await
+            .is_empty()
+        {
+            return None;
+        }
+        Some(MobError::SessionUnavailableForResume {
+            session_id: resumed.clone(),
+            reason: crate::error::SessionResumeUnavailableReason::Absent,
+            runtime_state: None,
+            verdict: None,
+        })
+    }
+
+    /// [`Self::resume_refusal_answered_absent`] for one entry of a spawn of
+    /// many: the entry's failure as `caller` is answered, classified again
+    /// when its refusal is replaced.
+    pub(super) async fn spawn_many_failure_shown_to(
+        &self,
+        caller: Option<&AgentIdentity>,
+        resumed: Option<&SessionId>,
+        failure: MobSpawnManyFailure,
+    ) -> Result<MobSpawnManyFailure, MobError> {
+        match self
+            .resume_refusal_answered_absent(caller, resumed, &failure.error)
+            .await
+        {
+            Some(absent) => self.classify_spawn_many_failure(absent).await,
+            None => Ok(failure),
+        }
     }
 
     async fn resolve_peer_connectivity(

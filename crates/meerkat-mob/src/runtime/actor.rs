@@ -36937,6 +36937,17 @@ impl MobActor {
             } = &spec.launch_mode
         {
             let source = source_member_id.clone();
+            // A source the member tools marked (the host's member tool
+            // audience hides it from the calling member) is answered here
+            // as a source the roster does not hold: this is the place a fork
+            // source is first looked up, so both get the same answer after
+            // the same earlier refusals.
+            if spec.fork_source_answered_absent {
+                reject_spawn_before_custody!(
+                    "prompt_fork_dispatch_admission",
+                    MobError::MemberNotFound(source)
+                );
+            }
             match self.prompt_fork_dispatch_lineage(&source, &spec).await {
                 Ok(lineage) => spec.dispatch_admission_lineage = lineage,
                 Err(error) => {
@@ -37194,6 +37205,8 @@ impl MobActor {
             // whose lineage carries an admission: the seat's membership
             // commit records it in MobMachine, and the spawn row persists it.
             dispatch_admission_lineage,
+            // Answered at the fork source's first lookup; nothing else reads it.
+            fork_source_answered_absent: _,
         } = spec;
         let dispatch_admission = super::fork_build::SpawnDispatchAdmissionFacts {
             lineage: dispatch_admission_lineage,
@@ -39724,6 +39737,8 @@ impl MobActor {
             // Refused below: a placed member cannot carry a process-local
             // admission, which such a lineage needs at every build.
             dispatch_admission_lineage,
+            // Answered at the fork source's first lookup; nothing else reads it.
+            fork_source_answered_absent: _,
         } = spec;
         let Some(host) = placement else {
             fail!(MobError::Internal(
@@ -41463,6 +41478,7 @@ impl MobActor {
             created_custody: _,
             // A policy auto-spawn is fresh: it continues no lineage.
             dispatch_admission_lineage: _,
+            fork_source_answered_absent: _,
         } = member_spec;
 
         if agent_identity.is_system_reserved() {
@@ -51586,6 +51602,9 @@ impl MobActor {
                 MemberIncarnationFence::from_entry(entry),
             )
         };
+        if let Some(refusal) = refusal {
+            return Err(refusal);
+        }
 
         // MobMachine's verdict says what the local member's runtime is owed:
         // a member that is not materialized is owed no trust row now (its

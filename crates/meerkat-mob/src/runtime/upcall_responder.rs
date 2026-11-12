@@ -695,9 +695,11 @@ impl MobUpcallSeams {
         self.ensure_spawn_tool_scope(context, tool_name).await?;
         self.ensure_spawn_member_scope(context, tool_name, &spec)
             .await?;
-        let domain_spec = self
+        let mut domain_spec = self
             .domain_spawn_spec(tool_name, requester, bound, spec)?
             .with_creation_source(self.capture_creation_source(requester).await);
+        self.mark_hidden_fork_source(requester, &mut domain_spec)
+            .await;
         let result = self
             .handle
             .spawn_spec(domain_spec)
@@ -721,13 +723,16 @@ impl MobUpcallSeams {
                 .await?;
         }
         let creation_source = self.capture_creation_source(requester).await;
-        let domain_specs = specs
+        let mut domain_specs = specs
             .into_iter()
             .map(|spec| {
                 self.domain_spawn_spec(tool_name, requester, bound, spec)
                     .map(|spec| spec.with_creation_source(creation_source.clone()))
             })
             .collect::<Result<Vec<_>, _>>()?;
+        for spec in &mut domain_specs {
+            self.mark_hidden_fork_source(requester, spec).await;
+        }
         let results = self
             .handle
             .spawn_many(domain_specs)
@@ -747,6 +752,18 @@ impl MobUpcallSeams {
             .collect::<Vec<_>>();
         self.record_provenance(tool_name, context).await;
         Ok(json!({ "results": results }))
+    }
+
+    /// Mark `spec` when its launch forks a member the host's member tool
+    /// audience hides from the requesting member: the mob then answers the
+    /// fork as a fork of a name it does not hold (the local dispatcher's
+    /// `mark_hidden_fork_source` twin; the audience is asked about the
+    /// placed member whose request this is).
+    async fn mark_hidden_fork_source(&self, requester: &AgentIdentity, spec: &mut SpawnMemberSpec) {
+        spec.fork_source_answered_absent = self
+            .handle
+            .fork_source_answered_absent(Some(requester), &spec.launch_mode)
+            .await;
     }
 
     async fn capture_creation_source(

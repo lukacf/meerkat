@@ -224,8 +224,8 @@ them.
   follows the recorded intent). A seat recorded ephemeral (by a release
   from 0.9.9 on, or the seat an adoption kept from a plain worker) becomes
   a durable identity's at the identity's next seat: a reset, an unarchive,
-  or a respawn of its member (`MobHandle::respawn_member`), which keeps
-  the conversation.
+  a seat a start owes, or a respawn of its member
+  (`MobHandle::respawn_member`), which keeps the conversation.
 
 ## [0.9.13] - 2026-11-11
 

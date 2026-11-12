@@ -1339,6 +1339,9 @@ export function AgentRecordFacts({
             { label: "Name", value: record.name },
             { label: "Spec digest", value: record.specDigest },
             typeof record.specRevision === "number" ? { label: "Spec revision", value: record.specRevision } : null,
+            // What is open for the agent, by id: the count is the record's
+            // own line above.
+            ...record.openOperations.map((operationId) => ({ label: "Open operation", value: operationId })),
           ]}
         />
       </div>

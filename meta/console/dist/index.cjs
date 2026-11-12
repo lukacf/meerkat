@@ -76809,7 +76809,10 @@ function AgentRecordFacts({
           items: [
             { label: "Name", value: record10.name },
             { label: "Spec digest", value: record10.specDigest },
-            typeof record10.specRevision === "number" ? { label: "Spec revision", value: record10.specRevision } : null
+            typeof record10.specRevision === "number" ? { label: "Spec revision", value: record10.specRevision } : null,
+            // What is open for the agent, by id: the count is the record's
+            // own line above.
+            ...record10.openOperations.map((operationId) => ({ label: "Open operation", value: operationId }))
           ]
         }
       )

@@ -1756,6 +1756,33 @@ impl IdentityFamily for IdentityGate {
         if self.policy.is_none() {
             return Err(no_policy(ChangeClass::Create));
         }
+        // A withdrawal is admitted as a change is: a member private to a
+        // person asks for none, and a call attributed to another agent
+        // than its session's member withdraws nothing of that agent's.
+        if self.is_private(mob, requester).await? {
+            return Err(IdentityRefusal::new(IdentityRefusalKind::PrivateRequester));
+        }
+        if let Some(refusal) = requester.refused_by_its_session(mob).await {
+            return Err(refusal);
+        }
+        // Of the host only its operator withdraws another requester's
+        // change. A host surface that is not the operator (a Console caller
+        // that is no verified person) is neither the requester nor the
+        // host, whatever surface the call came through.
+        if matches!(
+            requester,
+            ChangeRequester::Host {
+                operator: false,
+                ..
+            }
+        ) {
+            return Err(
+                IdentityRefusal::new(IdentityRefusalKind::DecisionNotFound).with_detail(
+                    "A held change is withdrawn by the requester that asked for it, or by the \
+                     host's operator: this caller is neither, and nothing was withdrawn.",
+                ),
+            );
+        }
         match &self.decisions {
             Some(decisions) => decisions.withdraw(mob, requester, &request),
             None => Err(IdentityRefusal::new(IdentityRefusalKind::DecisionNotFound)),

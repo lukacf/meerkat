@@ -933,8 +933,11 @@ fn gating_audit_entry_visible(
 /// conflict, which the caller may not be allowed to read: a console that can
 /// identify a person serves that text to an admin only
 /// ([`AccessView::kept_apart_from_other_people`]) and leaves the conflict's
-/// entity and topic to every caller who may see the entry. The stored entry
-/// is unchanged.
+/// entity and topic to every caller who may see the entry. The entry of a
+/// failed conflict lookup carries the error of the failed read, which can
+/// quote the memory module's answer: that text is served to an admin only
+/// as well, and the entry still says that the lookup failed and for what.
+/// The stored entry is unchanged.
 fn gating_audit_entry_served(
     mut entry: crate::runtime::GatingAuditEntry,
     access_view: Option<&AccessView>,
@@ -946,6 +949,15 @@ fn gating_audit_entry_served(
             .and_then(Value::as_object_mut)
     {
         conflict.remove("reason");
+    }
+    // The entry of a failed conflict lookup carries the failed read's
+    // error text, which can quote what the memory module answered about
+    // the conflict.
+    if access_view.is_some_and(AccessView::kept_apart_from_other_people)
+        && entry.event_type == crate::runtime::MEMORY_CONFLICT_LOOKUP_FAILED_EVENT
+        && let Some(detail) = entry.detail.as_object_mut()
+    {
+        detail.remove("error");
     }
     entry
 }

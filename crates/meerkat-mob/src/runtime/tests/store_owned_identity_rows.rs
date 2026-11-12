@@ -1962,6 +1962,193 @@ async fn a_label_updates_restamp_keeps_the_members_session_conversation_kickoff_
     assert_eq!(mob.wired_to("desk").await, wired, "its edge stands");
 }
 
+/// A host's spawn customizer that sets one label on every build it is asked
+/// about, as a host that labels its members in its build step does.
+struct LabellingCustomizer;
+
+impl LabellingCustomizer {
+    /// The label it sets: a refusal names the key, never the value.
+    const LABEL: (&'static str, &'static str) = ("host_zone", "host-secret-zone");
+
+    /// A spec's labels with the customizer's label among them.
+    fn labelled(mut labels: BTreeMap<String, String>) -> BTreeMap<String, String> {
+        labels.insert(Self::LABEL.0.to_string(), Self::LABEL.1.to_string());
+        labels
+    }
+
+    /// A store-owned mob whose host installs the customizer and no build
+    /// preparer.
+    async fn mob(label: &str) -> StoreOwnedMob {
+        let mob = StoreOwnedMob::build(
+            store_owned_definition(label),
+            MobStorage::in_memory(),
+            |builder| builder.with_spawn_member_customizer(Arc::new(Self)),
+        )
+        .await;
+        mob.service.set_keep_alive_turns_complete_immediately(true);
+        mob
+    }
+
+    /// Whether `reason` names the customizer's label as added, by its key
+    /// and with the remedy, and never its value.
+    fn refused_by_key(reason: &str) -> bool {
+        reason.contains(&format!("added [{}]", Self::LABEL.0))
+            && reason.contains("row")
+            && !reason.contains(Self::LABEL.1)
+    }
+}
+
+impl crate::runtime::SpawnMemberCustomizer for LabellingCustomizer {
+    fn customize_spawn(
+        &self,
+        _ctx: &crate::runtime::SpawnCustomizationContext,
+        spec: &mut SpawnMemberSpec,
+    ) -> Result<(), MobError> {
+        spec.labels
+            .get_or_insert_with(BTreeMap::new)
+            .insert(Self::LABEL.0.to_string(), Self::LABEL.1.to_string());
+        Ok(())
+    }
+}
+
+/// Row (RED): a store-owned member's labels are compared with its seat's on
+/// the labels its build carries, after the host's spawn customizer. A
+/// customizer that adds a label the identity's row lacks is refused for
+/// good, naming the key and never the value: the kickoff spawn of a create
+/// fails, the identity is owed its seat and nothing is built; the first
+/// wake of a Dormant seat fails and nothing is built. No build preparer is
+/// configured: the comparison does not depend on one.
+///
+/// RED on the old tree: the customizer's label reaches the kickoff spawn's
+/// seat and the wake's build unchecked.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_spawn_customizer_label_a_store_owned_seat_lacks_is_refused_naming_the_key() {
+    let mob = LabellingCustomizer::mob("customizer-label-refused").await;
+    let created = mob
+        .create_outcome(kickoff_create("kicked", "Wait."), ALLOW)
+        .await
+        .expect("the create commits");
+    match created.embodied.get(&id("kicked")) {
+        Some(crate::runtime::DeclaredEntryOutcome::Failed { error }) => assert!(
+            LabellingCustomizer::refused_by_key(&error.to_string()),
+            "the failed spawn names the label key and the remedy, and no value: {error}"
+        ),
+        other => panic!(
+            "the kickoff spawn of a seat the customizer labelled is answered failed: {other:?}"
+        ),
+    }
+    mob.unseated_for("kicked", UnseatedEntryCause::SeatOwed)
+        .await;
+    assert!(!mob.is_member("kicked").await, "no member");
+
+    committed(
+        mob.create(host_create("create-quiet", &["quiet"]), ALLOW)
+            .await,
+    );
+    let refused = wake(&mob, "quiet").await;
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|error| LabellingCustomizer::refused_by_key(&error.to_string())),
+        "the wake fails naming the label key and the remedy, and no value: {refused:?}"
+    );
+    assert_eq!(mob.builds().await, 0, "nothing was built");
+    assert!(
+        mob.service
+            .recorded_start_turn_prompts()
+            .await
+            .into_iter()
+            .all(|(_, prompt)| prompt != "Wait."),
+        "a refused build runs nothing"
+    );
+}
+
+/// Row: the twins of the row above build. A store-owned identity whose row
+/// carries the label the customizer sets is built, at its kickoff spawn and
+/// at a Dormant seat's first wake, and its member carries its row's labels.
+/// A roster-declared member is not compared: the customizer labels its
+/// build as before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_spawn_customizer_label_the_row_carries_builds_and_a_roster_member_is_not_compared() {
+    let mob = LabellingCustomizer::mob("customizer-label-in-row").await;
+    let labelled = |name: &str| {
+        let base = spec(name, "worker");
+        let labels = LabellingCustomizer::labelled(base.labels.clone());
+        base.with_labels(labels)
+    };
+    let created = mob
+        .create_outcome(
+            StoreOwnedIdentityCreate::new(
+                operation("create-kicked"),
+                IdentityChangeRequesterInput::host("console"),
+                vec![CreatedIdentityRequest::new(
+                    labelled("kicked")
+                        .with_runtime_mode_override(crate::MobRuntimeMode::AutonomousHost)
+                        .with_initial_message(meerkat_core::types::ContentInput::from("Begin.")),
+                )],
+            ),
+            ALLOW,
+        )
+        .await
+        .expect("the create commits");
+    assert!(
+        matches!(
+            created.embodied.get(&id("kicked")),
+            Some(crate::runtime::DeclaredEntryOutcome::Embodied { .. })
+        ),
+        "a seat whose row carries the customizer's label is spawned: {created:?}"
+    );
+    kicked_off(&mob, "kicked", "Begin.").await;
+    assert_eq!(
+        mob.spawn_row("kicked").await.labels,
+        labelled("kicked").labels,
+        "the member carries its row's labels"
+    );
+
+    committed(
+        mob.create(
+            StoreOwnedIdentityCreate::new(
+                operation("create-quiet"),
+                IdentityChangeRequesterInput::host("console"),
+                vec![CreatedIdentityRequest::new(labelled("quiet"))],
+            ),
+            ALLOW,
+        )
+        .await,
+    );
+    let session = mob.session("quiet").await;
+    wake(&mob, "quiet")
+        .await
+        .expect("a seat whose row carries the customizer's label is built");
+    assert_eq!(builds_on(&mob, &session).await.len(), 1, "one build");
+
+    // A roster-declared member: seated Dormant from its declaration, built
+    // at its first wake with the customizer's label on its build.
+    let declared = mob.declare(&["roster"]).await;
+    assert!(
+        matches!(
+            declared.entries.get(&id("roster")),
+            Some(crate::runtime::DeclaredEntryOutcome::Seated { .. })
+        ),
+        "{declared:?}"
+    );
+    let session = mob.session("roster").await;
+    wake(&mob, "roster")
+        .await
+        .expect("a roster-declared member's build is not compared");
+    let builds = builds_on(&mob, &session).await;
+    assert_eq!(builds.len(), 1, "one build");
+    assert_eq!(
+        builds[0]
+            .peer_meta_labels
+            .get(LabellingCustomizer::LABEL.0)
+            .map(String::as_str),
+        Some(LabellingCustomizer::LABEL.1),
+        "the customizer labels the roster-declared member's build as before: {:?}",
+        builds[0]
+    );
+}
+
 /// Row: a create of more identities than one change commits is refused
 /// `batch_too_large`, and nothing is written.
 #[tokio::test]

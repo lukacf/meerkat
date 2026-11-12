@@ -13540,13 +13540,12 @@ pub(crate) async fn send_console_human_on_mob(
         .with_interaction_id(meerkat_core::interaction::InteractionId(interaction));
     if let Some(requester) = attribution.requester.as_ref() {
         spec = spec.with_requester(requester.clone());
-        // A signed-in person typed THIS turn's text (a live operator send,
-        // not a scheduled fire or a probe): the row records the person's
-        // console attestation and typed-text authorship.
-        if attribution.typed_text {
-            spec = spec
-                .with_requester_origin(Some(meerkat_core::RequesterOrigin::ConsoleSignedIn))
-                .with_person_typed_text();
+        // A signed-in person sent THIS turn themselves (a live operator
+        // send, not a scheduled fire or a probe): the row records the
+        // person's console attestation as the requester's origin. It is not
+        // stamped typed text, so the voice mirror keeps its behaviour.
+        if attribution.signed_in_send {
+            spec = spec.with_requester_origin(Some(meerkat_core::RequesterOrigin::ConsoleSignedIn));
         }
     }
     if let Some(label) = attribution.sender_label.as_ref() {

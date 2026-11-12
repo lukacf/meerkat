@@ -2800,15 +2800,12 @@ async fn submit_internal_bridge_work(
     if let Some(requester) = work.requester {
         spec = match work.requester_origin {
             // A person the host relays and attests under its own authority:
-            // ordinary work carrying the requester and typed-text authorship.
+            // ordinary work carrying the requester with its recorded origin.
             Some(meerkat_core::RequesterOrigin::HostAttested) => {
                 spec.with_host_attested_requester(requester.clone())
             }
-            // A signed-in person who typed this turn's text on the console.
-            Some(meerkat_core::RequesterOrigin::ConsoleSignedIn) => spec
-                .with_requester(requester.clone())
-                .with_requester_origin(Some(meerkat_core::RequesterOrigin::ConsoleSignedIn))
-                .with_person_typed_text(),
+            // A signed-in person who sent this turn on the console: the
+            // requester with origin `console_signed_in`, nothing else.
             origin => spec
                 .with_requester(requester.clone())
                 .with_requester_origin(origin),

@@ -1772,12 +1772,14 @@ export class MetaRuntime {
       handlingMode?: "queue";
       /**
        * The person this host attests, under its own host authority, as the
-       * original requester of `content` (text that person typed). The
-       * member's turn records that person as its direct requester with
-       * origin `host_attested`. Only the host route accepts it. A gateway
-       * that does not advertise the `send_host_attested_requester` feature
-       * capability would ignore it, so it is refused with
-       * {@link CapabilityUnavailableError} before anything is sent.
+       * original requester of `content` (content that person sent through
+       * the host). The member's turn records that person as its direct
+       * requester with origin `host_attested`; the turn is not marked as
+       * typed text, so a live voice channel treats it as before. Only the
+       * host route accepts it. A gateway that does not advertise the
+       * `send_host_attested_requester` feature capability would ignore it,
+       * so it is refused with {@link CapabilityUnavailableError} before
+       * anything is sent.
        */
       requester?: HostAttestedRequester;
     },

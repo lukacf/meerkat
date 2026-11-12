@@ -9,9 +9,86 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Breaking
 
+- Distilled memory taint is now decided by what each extraction call read,
+  not by the whole history of the session. A distilled record lands clean
+  only when every transcript row its extraction call read is proven clean
+  from recorded facts, and the only rows proven clean are a person's own
+  input admitted through an attested door: a conversational user row whose
+  direct requester is a person AND whose recorded requester origin is
+  `console_signed_in` (a person signed in to the Console sent it) or
+  `host_attested` (the host relayed it on `meta/send` and vouched for the
+  person), with a render class absent or a user prompt, and a turn input
+  that is not runtime-authored. The requester origin is the one fact this
+  rule reads; the typed-text turn stamp is not read. The Distiller reads
+  those rows in a call of their own and reads the whole window in a second
+  call, whose records are unknown evidence. In plain words:
+  - Fewer records are quarantined where a person stated the fact through an
+    attested door: a signed-in Console send, or a host's `meta/send` with a
+    `requester`. Such a statement is stored active even when the session
+    read untrusted content earlier.
+  - More records are quarantined elsewhere. Records distilled from the
+    agent's own replies and from tool results were ACTIVE before in sessions
+    that read nothing untrusted, and are QUARANTINED now, because such rows
+    are never proven clean. An untrusted tool result read before a restart
+    classes `unproven` after it, not `tainted`, unless its row persisted a
+    taint declaration.
+  - Still quarantined: anything drawn from a peer message, a tool result,
+    provider server-tool content, the agent's own replies, a compaction
+    summary or compaction discards, user text with no attested origin
+    (including a scheduled fire, an operator probe and a governed console's
+    send), and every record of a call that read any such row. Unknown
+    evidence always quarantines, with or without a session taint tracker; a
+    missing, empty, malformed or unknown origin is never clean.
+  - The rendered body of a skill a send selected rides the same committed
+    row as the person's words, but it is configuration, not evidence: the
+    Distiller's projection of a user row drops every `SkillContext` block,
+    so a skill body never becomes clean (or any) distilled evidence.
+  - A window that holds both proven-clean rows and other rows now costs two
+    extraction calls instead of one. A window of only one kind is one call,
+    as before. Both calls complete before anything is written: if either
+    fails, nothing is stored and the window is read again on the next run.
+  - A host whose sends carry no attested person gets no proven-clean rows,
+    so every one of its distilled records quarantines.
+  - No existing quarantined record is released by an upgrade; review and the
+    steward keep deciding those.
+  - Quarantined records now carry a class set at write time: `tainted` when a
+    taint fact was known then (a row the extraction call read whose persisted
+    facts declare it tainted, a tracker fact, a reset boundary, or a tainted
+    author), otherwise `unproven`, which means only that no taint fact was
+    known, not that the input was benign. Records quarantined before this
+    release read as `tainted`. The Hygienist's span hard block reads up to
+    256 records of each class, and the steward's dream window of 16 gives
+    each class half while the other can fill it, so `unproven` volume does
+    not push a `tainted` record out of those windows.
+  Agent recorder writes and steward writes are unchanged. Reset boundaries
+  still quarantine every distillate over the session. The cited range stays
+  provenance only, and a clean record keeps a cited range only when every
+  row in it is a row its call read. Struct and trait changes:
+  `memory::records::EvidenceRef` gains `clean_input:
+  Option<CleanExtractionInput>` and `declared_tainted_input: bool`, and
+  `memory::records::MemoryProvenance` gains `quarantine_class:
+  Option<QuarantineClass>` (all three serde-defaulted, omitted when `None` or
+  `false`); `memory::distiller::TranscriptMessage` gains `proven_clean: bool`
+  and `declared_tainted: bool`; new `memory::records::CleanExtractionInput`,
+  `QuarantineClass` and `QuarantineVerdict`,
+  `memory::distiller::proven_clean_row`,
+  `memory::distiller::declared_tainted_row` and
+  `memory::capabilities::quarantine_review_window`;
+  `StewardStore::quarantined_records` takes a `QuarantineClass`; and
+  `LlmWriteGate` gains `quarantine_verdict` (defaulted). The `distiller-eval`
+  binary reports a `clean_call` verdict, and distiller fixtures accept
+  `attested_person` on user rows.
 - `identity_first::BridgeDelivery` gains the public field
   `requester_origin: Option<meerkat_core::RequesterOrigin>`. A bridge that
   builds one with a struct literal adds it; `BridgeDelivery::new` sets `None`.
+- `POST /console/send` now refuses a body that names `requester` (HTTP 400
+  `requester_not_accepted`, nothing recorded) instead of ignoring the field,
+  as the `meta/console/send` handlers already refuse it (`-32602`).
+- The requester a turn records (as tool callbacks and turn and transcript
+  events carry it) gains an `origin` field when the admitting door recorded
+  one (`console_signed_in` or `host_attested`). SDK readers treat the value
+  as open: one they do not know reads as not attested, never clean, so a
+  later third value is not a breaking change.
 
 ### Added
 
@@ -20,34 +97,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (`{"kind": "person", "id": "<opaque host-scoped stable id>"}`; one kind for
   now, unknown kinds and fields are refused). The member's admitted input and
   the turn's rows record that person as the turn's direct requester, with
-  origin `host_attested` and typed-text authorship (`TranscriptTurnInput::
-  TypedText`). Absent, the send is today's, byte for byte. It is accepted only
-  on the host route (the gateway's stdin RPC): the Console does not serve
-  `meta/send`, a Console send that passes a `requester` is refused, and no
-  agent tool, peer or comms delivery, schedule, flow or fork can set one. It
-  does not combine with `idempotency_key` (a keyed send is a member
-  continuation, which carries no requester). `meta/capabilities` advertises it
-  as the feature capability `send_host_attested_requester`; the Meta Python
-  SDK (`send(..., requester=...)`) and TypeScript SDK (`send(..., {
-  requester })`) refuse it, typed, on a gateway that does not.
+  origin `host_attested`. Absent, the send is today's, byte for byte. It is
+  accepted only on the host route (the gateway's stdin RPC): the Console does
+  not serve `meta/send`, a Console send that passes a `requester` is refused,
+  and no agent tool, peer or comms delivery, schedule, flow or fork can set
+  one. `meta/capabilities` advertises it as the feature capability
+  `send_host_attested_requester`; the Meta Python SDK
+  (`send(..., requester=...)`) and TypeScript SDK (`send(..., { requester })`)
+  refuse it, typed, on a gateway that does not.
 - A signed-in person's live Console send (origin kind `operator` or none)
-  now stamps the turn's row as typed text, with the person as its direct
-  requester and origin `console_signed_in`; a redispatch of a recorded send
-  carries exactly what the send's frame recorded. A scheduled fire, an
-  operator probe and every internal emitter name the person (a fire) or no
-  one, but never typed text or an origin. These are the rows the Distiller's
-  evidence-scoped taint treats as a person's own typed input (see the
-  distilled memory taint entry under Breaking).
+  records the person as the turn's direct requester with origin
+  `console_signed_in`; a redispatch of a recorded send derives the origin
+  from what the send's frame recorded (its sender and origin kind), which
+  grants nothing new. A scheduled fire, an operator probe and every internal
+  emitter name the person (a fire) or no one, but never an origin.
+- Neither door stamps the turn as typed text (`TranscriptTurnInput::
+  TypedText`). That stamp keeps its one existing reader, the live voice
+  mirror, which replays typed-text turns quietly as text chat: Console and
+  host-attested sends stay voiced conversation on a live voice channel,
+  exactly as before. "Typed" in these entries means only that the person
+  authored the content, which the door vouches for.
 
 ### Known limitations
 
-- The supervisor bridge is not widened: a member it reaches does not carry
-  the requester, and its rows name none. A delivery path that cannot carry
-  the requester onto an admitted runtime input (a placed member, or one
-  without a runtime-backed session) refuses the send typed instead of
-  delivering it without one.
+- A `requester` does not combine with `idempotency_key` (a keyed send is a
+  member continuation, which carries no requester), so an unkeyed retry of
+  the same relayed text commits a second clean row. Exactly-once delivery
+  with attestation is a follow-up.
+- A governed console's sends record no attested origin, so they never yield
+  clean distilled rows.
+- The supervisor bridge refuses a requester rather than carrying it. A
+  delivery path that cannot carry the requester onto an admitted runtime
+  input (a placed member, or one without a runtime-backed session) refuses
+  the send typed instead of delivering it without one.
 - The requester has no display name yet: the sender label rides only the
   Console's host-human lane.
+- In-process Rust hosts can set these facts through the mob `WorkSpec`
+  setters and Core's `TurnRequester::with_origin`: the embedding host is
+  trusted for them by convention. They are not reachable from any wire door
+  other than `meta/send` on the host route.
 
 ### Security
 
@@ -71,67 +159,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   restart cannot read who it is private to, so a spawn into it is refused
   from then on, and the members already seated in it keep the owner their
   own spawn gave them.
-
-### Breaking
-
-- Distilled memory taint is now decided by what each extraction call read,
-  not by the whole history of the session. A distilled record lands clean
-  only when every transcript row its extraction call read is proven clean
-  from typed facts, and the only rows proven clean are a person's own typed
-  input: a conversational user row whose turn input is typed text and whose
-  host-stamped direct requester is a person (render class absent or a user
-  prompt). The Distiller reads those rows in a call of their own and reads
-  the whole window in a second call, whose records are unknown evidence. In
-  plain words:
-  - Fewer records are quarantined where a person typed the fact, but only
-    for rows a host stamps with the typing person: a console sign-in send is
-    stamped today, while a host that relays a person's text through
-    `meta/send` is stamped only together with the companion requester-route
-    change. Such a statement is stored active even when the session read
-    untrusted content earlier.
-  - More records are quarantined elsewhere. Records distilled from the
-    agent's own replies and from tool results were ACTIVE before in sessions
-    that read nothing untrusted, and are QUARANTINED now, because such rows
-    are never proven clean.
-  - Still quarantined: anything drawn from a peer message, a tool result,
-    provider server-tool content, the agent's own replies, a compaction
-    summary or compaction discards, or user text without the host's person
-    attestation, and every record of a call that read any such row. Unknown
-    evidence always quarantines, with or without a session taint tracker; a
-    missing, empty or malformed trust fact is never clean.
-  - A window that holds both proven-clean rows and other rows now costs two
-    extraction calls instead of one. A window of only one kind is one call,
-    as before. Both calls complete before anything is written: if either
-    fails, nothing is stored and the window is read again on the next run.
-  - A host whose sends carry no person requester gets no proven-clean rows,
-    so every one of its distilled records quarantines.
-  - No existing quarantined record is released by an upgrade; review and the
-    steward keep deciding those.
-  - Quarantined records now carry a class set at write time: `tainted` when a
-    taint fact was known then (a row the extraction call read whose persisted
-    facts declare it tainted, a tracker fact, a reset boundary, or a tainted
-    author), otherwise `unproven`, which means only that no taint fact was
-    known, not that the input was benign. Records quarantined before this
-    release read as `tainted`. The Hygienist's span hard block reads up to
-    256 records of each class, and the steward's dream window of 16 gives
-    each class half while the other can fill it, so `unproven` volume does
-    not push a `tainted` record out of those windows.
-  Agent recorder writes and steward writes are unchanged. Reset boundaries
-  still quarantine every distillate over the session. The cited range stays
-  provenance only, and a clean record keeps a cited range only when every
-  row in it is a row its call read. Struct and trait changes:
-  `memory::records::EvidenceRef` gains `clean_input:
-  Option<CleanExtractionInput>` and `declared_tainted_input: bool`, and `memory::records::MemoryProvenance`
-  gains `quarantine_class: Option<QuarantineClass>` (all three
-  serde-defaulted, omitted when `None` or `false`); `memory::distiller::TranscriptMessage` gains
-  `proven_clean: bool` and `declared_tainted: bool`; new `memory::records::CleanExtractionInput`,
-  `QuarantineClass` and `QuarantineVerdict`, `memory::distiller::proven_clean_row`,
-  `memory::distiller::declared_tainted_row`
-  and `memory::capabilities::quarantine_review_window`;
-  `StewardStore::quarantined_records` takes a `QuarantineClass`; and
-  `LlmWriteGate` gains `quarantine_verdict` (defaulted). The
-  `distiller-eval` binary reports a `clean_call` verdict, and distiller
-  fixtures accept `attested_person` on user rows.
 
 ## [0.9.13] - 2026-11-11
 

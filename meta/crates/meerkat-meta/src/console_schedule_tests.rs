@@ -1574,7 +1574,7 @@ async fn turn_requester(
                 .read_session_history(&session, 0, None)
                 .await
                 .expect("history read");
-            if let Some(requester) = page.messages.iter().find_map(|message| match message {
+            if let Some((requester, fired)) = page.messages.iter().find_map(|message| match message {
                 meerkat_core::Message::User(user) if user.text_content() == content => {
                     // TR-S1b, kept as a regression (R2): a schedule's fire
                     // names the schedule's person as requester but is no
@@ -1596,10 +1596,34 @@ async fn turn_requester(
                         None,
                         "TR-S1b: a scheduled fire names no attestation origin"
                     );
-                    Some(user.identity.requester.clone())
+                    Some((user.identity.requester.clone(), message.clone()))
                 }
                 _ => None,
             }) {
+                // Cross-check on the local merge with the taint branch, (c):
+                // the real fired row carries the same facts as a live person's
+                // send except the attested origin, so it is not rule-3 clean
+                // and its fact after a tainted peer message QUARANTINES.
+                assert!(
+                    !crate::memory::distiller::proven_clean_row(&fired),
+                    "CROSS-CHECK (c): a scheduled fire is not rule-3 clean"
+                );
+                if requester.is_some() {
+                    let when: &'static str = Box::leak(content.to_string().into_boxed_str());
+                    let statuses =
+                        crate::memory::distiller::evidence_taint_tests::status_after_tainted_peer(
+                            fired, when,
+                        )
+                        .await
+                        .expect("distillation of the real fired row");
+                    assert!(
+                        !statuses.is_empty()
+                            && statuses.iter().all(
+                                crate::memory::distiller::evidence_taint_tests::status_is_quarantined
+                            ),
+                        "CROSS-CHECK (c): QUARANTINED: {statuses:?}"
+                    );
+                }
                 return requester;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;

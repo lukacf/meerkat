@@ -718,7 +718,7 @@ impl TranscriptSource for SessionStoreTranscriptSource {
 /// evidence (it is configuration, and it would dwarf the window); tool
 /// results are evidence (operator-visible ground truth) but rendered
 /// tersely.
-fn project_message(message: &Message) -> Option<(&'static str, String)> {
+pub(crate) fn project_message(message: &Message) -> Option<(&'static str, String)> {
     match message {
         Message::System(_) => None,
         Message::SystemNotice(notice) => notice
@@ -729,7 +729,7 @@ fn project_message(message: &Message) -> Option<(&'static str, String)> {
         // attached to a send) is what the agent was given, not what was
         // said: distilling it would turn recalled memory into new evidence.
         Message::User(user) if user.transcript_role.is_injected_context() => None,
-        Message::User(user) => Some(("user", user.text_content())),
+        Message::User(user) => Some(("user", person_text(user))),
         Message::BlockAssistant(assistant) => Some((
             "assistant",
             assistant.text_blocks().collect::<Vec<_>>().join("\n"),
@@ -745,24 +745,61 @@ fn project_message(message: &Message) -> Option<(&'static str, String)> {
     }
 }
 
+/// A user row's text without the rendered bodies of skills its send
+/// selected. A skill body is configuration the host attached to the turn
+/// (like the system prompt), not what the person said: it is never evidence,
+/// and in particular never part of a clean row's text, even though it rides
+/// the same committed row as the person's typed words.
+fn person_text(user: &UserMessage) -> String {
+    let mut text = String::new();
+    for block in &user.content {
+        if matches!(
+            block,
+            meerkat_core::types::ContentBlock::SkillContext { .. }
+        ) {
+            continue;
+        }
+        let projection = block.text_projection();
+        if !text.is_empty() && !projection.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&projection);
+    }
+    text
+}
+
 /// Rule 3 of evidence-scoped taint (§10.1): a row is proven clean only when
-/// it is a person's own typed input, attested by the surface that admitted
-/// it rather than by its text. That is a conversational user row whose turn
-/// input is typed text and whose host-stamped requester is a person that
-/// reached the turn directly, with no render class or a user-prompt one.
-/// Nothing else is proven clean by this rule; a row without these facts is
+/// it is a person's own input, attested by the door that admitted it rather
+/// than by its text. That is a conversational user row whose requester is a
+/// person that reached the turn directly AND whose recorded requester origin
+/// is one of the two attested doors: `console_signed_in` (a person signed in
+/// to the console sent it themselves) or `host_attested` (the host relayed it
+/// and vouched for the person on `meta/send`), with no render class or a
+/// user-prompt one, and a turn input that is not runtime-authored. The origin
+/// is the one attestation this rule reads; the typed-text turn stamp is not
+/// read here (it belongs to the voice mirror).
+/// Nothing else is proven clean by this rule; a row without these facts,
+/// including a row whose origin is a value this build does not know, is
 /// unknown, never clean.
 pub fn proven_clean_row(message: &Message) -> bool {
     let Message::User(user) = message else {
         return false;
     };
+    let Some(requester) = user.identity.requester.as_ref() else {
+        return false;
+    };
     user.transcript_role.is_conversational()
-        && user.identity.turn_input == Some(meerkat_core::types::TranscriptTurnInput::TypedText)
-        && user
-            .identity
-            .requester
-            .as_ref()
-            .and_then(meerkat_core::TurnRequester::direct_principal)
+        && user.identity.turn_input
+            != Some(meerkat_core::types::TranscriptTurnInput::RuntimeAuthored)
+        && matches!(
+            requester.origin(),
+            Some(
+                meerkat_core::RequesterOrigin::ConsoleSignedIn
+                    | meerkat_core::RequesterOrigin::HostAttested
+            )
+        )
+        && requester
+            .direct_principal()
             .is_some_and(|principal| principal.kind == meerkat_core::PrincipalKind::Human)
         && user
             .render_metadata
@@ -4407,4 +4444,4 @@ mod tests {
 
 #[cfg(test)]
 #[path = "distiller_evidence_taint_tests.rs"]
-mod evidence_taint_tests;
+pub(crate) mod evidence_taint_tests;

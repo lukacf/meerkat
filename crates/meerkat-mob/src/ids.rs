@@ -634,11 +634,6 @@ pub struct WorkSpec {
     /// [`Self::with_host_attested_requester`]; never accepted from a wire.
     #[serde(skip)]
     pub(crate) requester_origin: Option<meerkat_core::RequesterOrigin>,
-    /// Whether the content is text the requester typed (stamped on the turn's
-    /// rows as [`meerkat_core::types::TranscriptTurnInput::TypedText`]). Only
-    /// a host-attested requester's work sets it.
-    #[serde(skip)]
-    pub(crate) typed_text: bool,
     /// Request-only context for this member turn
     /// ([`meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata::request_only_context`]):
     /// projected into the turn's model requests and never stored, so only a
@@ -696,7 +691,6 @@ impl WorkSpec {
             request_reasoning: None,
             requester: None,
             requester_origin: None,
-            typed_text: false,
             request_only_context: None,
             sender_label: None,
         }
@@ -728,15 +722,20 @@ impl WorkSpec {
     }
 
     /// Carry a person the host attests under its own host authority as this
-    /// work's original requester, with the content as text that person typed.
-    /// Unlike [`Self::with_requester`] this rides ordinary (non host-human)
-    /// work: the host relayed a person's text and vouches for who sent it.
-    /// Agents, peers, schedules and flows have no way to set it.
+    /// work's original requester, recorded with origin
+    /// [`meerkat_core::RequesterOrigin::HostAttested`]. Unlike
+    /// [`Self::with_requester`] this rides ordinary (non host-human) work: the
+    /// host relayed a person's text and vouches for who sent it. Agents,
+    /// peers, schedules and flows have no way to set it. It does not mark the
+    /// turn as typed text: the voice mirror keeps treating it as it treats any
+    /// other host input.
+    ///
+    /// The embedding host is trusted for this fact: an in-process caller with
+    /// a `WorkSpec` is host authority by convention, not a wire door.
     #[must_use]
     pub fn with_host_attested_requester(mut self, requester: meerkat_core::PrincipalRef) -> Self {
         self.requester = Some(requester);
         self.requester_origin = Some(meerkat_core::RequesterOrigin::HostAttested);
-        self.typed_text = true;
         self
     }
 
@@ -744,20 +743,12 @@ impl WorkSpec {
     /// console's signed-in person). A host-attested requester is set only
     /// through [`Self::with_host_attested_requester`]; the member delivery
     /// refuses an origin that does not match the work's authorship.
+    ///
+    /// The embedding host is trusted for this fact: an in-process caller with
+    /// a `WorkSpec` is host authority by convention, not a wire door.
     #[must_use]
     pub fn with_requester_origin(mut self, origin: Option<meerkat_core::RequesterOrigin>) -> Self {
         self.requester_origin = origin;
-        self
-    }
-
-    /// Mark the content as text the work's requester typed for THIS turn (a
-    /// signed-in person's live console send), stamped on the turn's rows as
-    /// [`meerkat_core::types::TranscriptTurnInput::TypedText`]. Only the
-    /// console's person send sets it; scheduled fires, probes, agents, peers,
-    /// flows and forks never do. Work without a requester refuses it.
-    #[must_use]
-    pub fn with_person_typed_text(mut self) -> Self {
-        self.typed_text = true;
         self
     }
 

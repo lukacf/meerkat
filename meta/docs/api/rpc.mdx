@@ -2505,6 +2505,72 @@ change alone never refuses a send.
 
 ---
 
+## Host-attested requester
+
+`meta/send` takes an optional `"requester"`: a person the host attests, under
+its own host authority, as the original requester of the content it relays
+(text that person sent through the host, such as a chat message the host
+received). The closed form has one kind:
+
+```json
+{"kind": "person", "id": "<opaque host-scoped stable id>"}
+```
+
+Any other kind, a missing or empty `id`, or any other field is refused with
+`-32602` before anything is delivered. The member's admitted input and the
+turn's rows record the person as the turn's direct requester, with requester
+origin `host_attested`. A Console send by a signed-in person records origin
+`console_signed_in` the same way. Without `"requester"` the send is
+unchanged.
+
+**What the origin is, and what it is not.** The recorded origin says which
+attested door admitted the person's own input. It is the one fact the agent
+memory Distiller reads to class a row as a person's own, clean input (see
+[agent memory](/meta/concepts/memory)). It is not the typed-text turn stamp:
+neither door stamps a turn as typed text, so a live voice channel treats
+these turns exactly as it treats any other host input (voiced conversation,
+not quiet text chat). "Typed" in this section means only that the person
+authored the content; the host vouches for that, the content does not prove
+it.
+
+**Where it is accepted.** Only the host route accepts it: the gateway's
+stdin RPC, the caller that holds the gateway's host authority. The Console
+does not serve `meta/send`, and a Console send that names a `requester`
+(`meta/console/send`, or the body of `POST /console/send`) is refused
+(`-32602`, or HTTP 400 `requester_not_accepted`) and records nothing. No agent
+tool, peer or comms delivery, schedule, flow or fork can name one. A member
+delivery path that cannot carry the requester onto an admitted runtime input
+(a placed member, or one without a runtime-backed session) refuses the send
+typed instead of delivering it without one, and so does the supervisor
+bridge.
+
+**Limits.**
+
+- A `requester` does not combine with `idempotency_key` (`-32602`: a keyed
+  send is a member continuation, which carries no requester). An unkeyed
+  retry of the same relayed text is a second send and commits a second row;
+  exactly-once delivery with attestation is not offered yet.
+- A governed console (one whose sends run under a governance association)
+  records no `console_signed_in` origin, so its sends never yield clean
+  memory rows. This is a declared limit, not an oversight.
+- In-process Rust hosts can set the same facts through the mob `WorkSpec`
+  setters and the Core `TurnRequester::with_origin`: the embedding host is
+  trusted for these facts by convention; they are not reachable from any
+  wire door other than the one above.
+
+**Readers.** The requester recorded on a turn (as seen by tool callbacks and
+in turn and transcript events) gains an `origin` field when one was
+recorded. SDK readers treat it as open: a value they do not know reads as
+"not attested" (never clean), so a later third origin is not a breaking
+change.
+
+`meta/capabilities` advertises the feature capability
+`send_host_attested_requester`. A gateway without it ignores the field, so a
+client checks for it first; the Meta SDKs refuse a requester, typed, when it
+is not advertised.
+
+---
+
 ## Identity delivery and turn tickets
 
 Identity-addressed methods (these, the identity status, inspect and

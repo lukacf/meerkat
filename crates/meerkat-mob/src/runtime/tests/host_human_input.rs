@@ -946,12 +946,14 @@ async fn host_human_requester_reaches_the_member_input_and_its_turn() {
 /// A person the host attests under its own host authority rides ordinary
 /// (not host-human) work: the member's admitted input names that person as
 /// its requester, and the turn's row records it as a direct requester with
-/// origin `host_attested` and typed-text authorship. An origin that does not
+/// origin `host_attested`. The row is NOT stamped typed text: the voice
+/// mirror reads that stamp as text chat, and a relayed send keeps the voice
+/// behaviour every other host input has. An origin that does not
 /// match the work is refused before any admission: a console-signed-in
 /// origin on ordinary work, a host-attested one on host human input, and an
 /// origin with no requester.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_host_attested_requester_reaches_ordinary_work_and_its_typed_turn() {
+async fn a_host_attested_requester_reaches_ordinary_work_with_its_recorded_origin() {
     use meerkat_core::RequesterOrigin;
     const RELAYED: &str = "text a person typed that the host relays";
     let fixture = Fixture::new().await;
@@ -995,9 +997,8 @@ async fn a_host_attested_requester_reaches_ordinary_work_and_its_typed_turn() {
         "the row names the attested person as its direct requester"
     );
     assert_eq!(
-        row.identity.turn_input,
-        Some(meerkat_core::types::TranscriptTurnInput::TypedText),
-        "the relayed text is typed text"
+        row.identity.turn_input, None,
+        "the relayed text is not stamped typed text (the voice mirror keeps its behaviour)"
     );
 
     let rows_before = fixture.input_count().await;
@@ -1058,20 +1059,6 @@ async fn a_host_attested_requester_reaches_ordinary_work_and_its_typed_turn() {
     assert!(
         origin_without_requester.is_err(),
         "an origin needs a requester"
-    );
-    let typed_without_requester = fixture
-        .handle
-        .submit_work_with_mode_and_delivery_identity_bounded(
-            &scope,
-            WorkSpec::new("generic work", WorkOrigin::External).with_person_typed_text(),
-            HandlingMode::Queue,
-            delivery("typed-without-requester"),
-            deadline(),
-        )
-        .await;
-    assert!(
-        typed_without_requester.is_err(),
-        "typed-text authorship needs the person who typed it"
     );
     assert_eq!(
         fixture.input_count().await,

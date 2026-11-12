@@ -611,7 +611,7 @@ impl ConsoleSender {
                 .model_label
                 .clone()
                 .and_then(meerkat_mob::SenderLabel::new),
-            typed_text: false,
+            signed_in_send: false,
         }
     }
 }
@@ -623,28 +623,29 @@ impl ConsoleSender {
 pub(crate) struct ConsoleHumanAttribution {
     pub(crate) requester: Option<meerkat_core::PrincipalRef>,
     pub(crate) sender_label: Option<meerkat_mob::SenderLabel>,
-    /// Whether a signed-in person typed THIS turn's text: a send with a
+    /// Whether a signed-in person sent THIS turn themselves: a send with a
     /// person requester whose origin is a live operator send (`operator` or
-    /// no kind). A scheduled fire, a probe or any internal emitter carries the
-    /// person as requester but is not typed text.
-    pub(crate) typed_text: bool,
+    /// no kind). Such a send records the requester with origin
+    /// `console_signed_in`. A scheduled fire, a probe or any internal emitter
+    /// carries the person as requester but records no origin.
+    pub(crate) signed_in_send: bool,
 }
 
 impl ConsoleHumanAttribution {
     /// The attribution a send's recorded sender carries; none without one.
-    /// It claims no typed text: see [`Self::of_send`].
+    /// It claims no signed-in send: see [`Self::of_send`].
     pub(crate) fn of_sender(sender: Option<&ConsoleSender>) -> Self {
         sender.map(ConsoleSender::attribution).unwrap_or_default()
     }
 
-    /// The attribution of a send by `sender` declaring `origin_kind`: typed
-    /// text only for a person's live operator send.
+    /// The attribution of a send by `sender` declaring `origin_kind`: a
+    /// signed-in send only for a person's live operator send.
     pub(crate) fn of_send(
         sender: Option<&ConsoleSender>,
         origin_kind: Option<ConsoleTurnOrigin>,
     ) -> Self {
         let mut attribution = Self::of_sender(sender);
-        attribution.typed_text = attribution.requester.is_some()
+        attribution.signed_in_send = attribution.requester.is_some()
             && matches!(origin_kind, None | Some(ConsoleTurnOrigin::Operator));
         attribution
     }

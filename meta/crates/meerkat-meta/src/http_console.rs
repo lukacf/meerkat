@@ -2745,6 +2745,21 @@ struct ConsoleSendBody {
     request: ConsoleSendRequest,
     #[serde(default)]
     expected_caller_scope: Option<String>,
+    /// A `requester` the body names, present even when `null`. A console
+    /// send never names its requester (see
+    /// [`console_send_requester_refusal`]): the handler refuses the send
+    /// rather than ignoring the field, as the RPC console sends do.
+    #[serde(default, deserialize_with = "present_value")]
+    requester: Option<Value>,
+}
+
+/// `Some` for a field that is present, `null` included; `None` (by
+/// `#[serde(default)]`) only when the field is absent.
+fn present_value<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    <Value as serde::Deserialize>::deserialize(deserializer).map(Some)
 }
 
 async fn console_send_handler(
@@ -2762,6 +2777,13 @@ async fn console_send_handler(
     };
     if let Err(refusal) = auth_context.refuse_other_caller(body.expected_caller_scope.as_deref()) {
         return refusal.into_response();
+    }
+    if body.requester.is_some() {
+        return console_json_error(
+            StatusCode::BAD_REQUEST,
+            "requester_not_accepted",
+            CONSOLE_SEND_REQUESTER_REFUSAL,
+        );
     }
     let request = body.request;
     if let Some(refusal) = reserved_origin_kind_refusal(&request) {
@@ -2816,12 +2838,16 @@ pub(crate) fn console_sends_name_requesters(decisions: &RuntimeDecisionState) ->
 /// the host-attested parameter of the host route's `meta/send`, is refused
 /// rather than ignored.
 pub(crate) fn console_send_requester_refusal(params: &Value) -> Option<String> {
-    params.get("requester").map(|_| {
-        "requester is not accepted on a console send: the console records its signed-in person \
-         itself"
-            .to_string()
-    })
+    params
+        .get("requester")
+        .map(|_| CONSOLE_SEND_REQUESTER_REFUSAL.to_string())
 }
+
+/// Why a console send that names a `requester` is refused, on every console
+/// send surface (`POST /console/send` and the three `meta/console/send`
+/// handlers).
+pub(crate) const CONSOLE_SEND_REQUESTER_REFUSAL: &str = "requester is not accepted on a console \
+     send: the console records its signed-in person itself";
 
 /// Why a console send over HTTP may not claim its declared `origin_kind`: the
 /// kinds of Meerkat's own internal emitters (a schedule, a connector, a flow,
@@ -33007,6 +33033,7 @@ mod console_viewer_resolver_tests {
                     skill_refs: Vec::new(),
                 },
                 expected_caller_scope: None,
+                requester: None,
             }),
         )
         .await
@@ -33544,6 +33571,7 @@ mod console_human_admission_tests {
                 Json(ConsoleSendBody {
                     request: send.clone(),
                     expected_caller_scope: None,
+                    requester: None,
                 }),
             )
             .await

@@ -84,6 +84,9 @@ pub struct TurnRequester {
 ///
 /// Core carries the value and never interprets it: it names which host door
 /// vouched for the principal, not who the principal is or what it may do.
+/// Readers treat it as open (`#[non_exhaustive]` here; SDK readers treat an
+/// unknown value as "not attested"), so a later variant is not a breaking
+/// change for them.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -118,6 +121,10 @@ impl TurnRequester {
     }
 
     /// The same requester, recording how its ingress attested it.
+    ///
+    /// The embedding host is trusted for this fact: an in-process caller is
+    /// host authority by convention. No wire door reaches this setter; the
+    /// doors that record an origin are the host's own.
     #[must_use]
     pub fn with_origin(mut self, origin: Option<RequesterOrigin>) -> Self {
         self.origin = origin;

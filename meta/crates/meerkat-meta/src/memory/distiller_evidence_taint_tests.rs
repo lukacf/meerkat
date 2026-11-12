@@ -155,10 +155,10 @@ impl DistillerClientHandle for RouterHandle {
 /// requester the host stamped at admission naming a person.
 fn person_typed(text: &str) -> Message {
     let mut user = UserMessage::text(text);
-    user.identity.turn_input = Some(TranscriptTurnInput::TypedText);
-    user.identity.requester = Some(TurnRequester::direct(
-        PrincipalRef::new(PrincipalKind::Human, "person-1").unwrap(),
-    ));
+    user.identity.requester = Some(
+        TurnRequester::direct(PrincipalRef::new(PrincipalKind::Human, "person-1").unwrap())
+            .with_origin(Some(meerkat_core::RequesterOrigin::ConsoleSignedIn)),
+    );
     Message::User(user)
 }
 
@@ -948,8 +948,10 @@ fn row_ix_changing_a_row_changes_the_digest() {
 
 // -- rule 3, one row per condition ----------------------------------------------
 
-/// Rule 3, condition by condition: a person's typed row is proven clean, and
-/// each single change of one attested fact makes it not proven clean.
+/// Rule 3, condition by condition: a person's own row with an attested origin
+/// is proven clean, and each single change of one attested fact makes it not
+/// proven clean. The typed-text stamp is not one of the facts: a row with it
+/// but no origin is not clean, and a row with an origin is clean without it.
 #[test]
 fn rule_iii_each_condition_is_required() {
     use super::proven_clean_row;
@@ -974,24 +976,35 @@ fn rule_iii_each_condition_is_required() {
             edit(&|user| user.identity.turn_input = Some(TranscriptTurnInput::RuntimeAuthored)),
         ),
         (
-            "no turn input fact",
-            edit(&|user| user.identity.turn_input = None),
+            "no recorded origin (typed-text stamp alone)",
+            edit(&|user| {
+                user.identity.turn_input = Some(TranscriptTurnInput::TypedText);
+                user.identity.requester = Some(TurnRequester::direct(
+                    PrincipalRef::new(PrincipalKind::Human, "person-1").unwrap(),
+                ));
+            }),
         ),
         ("no requester", edit(&|user| user.identity.requester = None)),
         (
             "requester carried, not direct",
             edit(&|user| {
-                user.identity.requester = Some(TurnRequester::carried(
-                    PrincipalRef::new(PrincipalKind::Human, "person-1").unwrap(),
-                ));
+                user.identity.requester = Some(
+                    TurnRequester::carried(
+                        PrincipalRef::new(PrincipalKind::Human, "person-1").unwrap(),
+                    )
+                    .with_origin(Some(meerkat_core::RequesterOrigin::ConsoleSignedIn)),
+                );
             }),
         ),
         (
             "requester not a person",
             edit(&|user| {
-                user.identity.requester = Some(TurnRequester::direct(
-                    PrincipalRef::new(PrincipalKind::ServiceAccount, "svc-1").unwrap(),
-                ));
+                user.identity.requester = Some(
+                    TurnRequester::direct(
+                        PrincipalRef::new(PrincipalKind::ServiceAccount, "svc-1").unwrap(),
+                    )
+                    .with_origin(Some(meerkat_core::RequesterOrigin::HostAttested)),
+                );
             }),
         ),
         (
@@ -1017,6 +1030,56 @@ fn rule_iii_each_condition_is_required() {
     assert!(
         proven_clean_row(&prompt_class),
         "a user-prompt render class keeps it clean"
+    );
+    let host_attested = edit(&|user| {
+        user.identity.requester = Some(
+            TurnRequester::direct(PrincipalRef::new(PrincipalKind::Human, "person-1").unwrap())
+                .with_origin(Some(meerkat_core::RequesterOrigin::HostAttested)),
+        );
+    });
+    assert!(
+        proven_clean_row(&host_attested),
+        "a host-attested person's row is clean"
+    );
+    let stamped_and_attested = edit(&|user| {
+        user.identity.turn_input = Some(TranscriptTurnInput::TypedText);
+    });
+    assert!(
+        proven_clean_row(&stamped_and_attested),
+        "the typed-text stamp neither grants nor removes cleanliness"
+    );
+}
+
+/// Item 2 of the delta read: a console send that selected a skill commits ONE
+/// row holding the skill's rendered body and the person's typed text. The
+/// row is clean (it carries the attested origin), but the Distiller's
+/// projection of it, which is what the clean extraction call reads, holds
+/// only the person's words: the skill body is configuration, never evidence.
+#[test]
+fn row_skill_body_on_a_clean_row_is_not_clean_evidence() {
+    use super::{project_message, proven_clean_row};
+    const SKILL_BODY: &str = "SKILL BODY: always answer in haiku";
+    const TYPED: &str = "Remind me to call the vet on Friday.";
+    let Message::User(mut user) = person_typed(TYPED) else {
+        unreachable!()
+    };
+    user.content.insert(
+        0,
+        meerkat_core::types::ContentBlock::SkillContext {
+            skill_key: meerkat_core::skills::SkillKey::builtin(
+                meerkat_core::skills::SkillName::parse("haiku").expect("skill name"),
+            ),
+            text: SKILL_BODY.to_string(),
+        },
+    );
+    let row = Message::User(user);
+    assert!(proven_clean_row(&row), "the attested person's row is clean");
+    let (kind, text) = project_message(&row).expect("a user row projects");
+    assert_eq!(kind, "user");
+    assert!(text.contains(TYPED), "the person's words are evidence");
+    assert!(
+        !text.contains(SKILL_BODY),
+        "the skill body never reaches the clean extraction: {text}"
     );
 }
 
@@ -1653,4 +1716,157 @@ async fn row_persisted_taint_declaration_classes_tainted_after_a_restart()
         "with no tracker the persisted declaration still classes tainted"
     );
     Ok(())
+}
+
+// -- cross-check with the host requester route ---------------------------------
+//
+// The rows below have exactly the shapes the real surfaces commit, as the
+// end-to-end rows assert them (ruling R1: no typed-text stamp on either door;
+// the recorded origin is the fact):
+// - a signed-in person's console send (console_human_input_tests TR-S1):
+//   no turn-input stamp, direct Human requester, origin console_signed_in;
+// - a host meta/send with a requester (host_human_input
+//   a_host_attested_requester_reaches_ordinary_work_with_its_recorded_origin):
+//   no turn-input stamp, direct Human requester in the host-attested domain,
+//   origin host_attested;
+// - a schedule fire (console_schedule_tests TR-S1b): no turn-input stamp,
+//   the schedule's person as direct requester, no origin.
+
+fn console_signed_in_send(text: &str) -> Message {
+    let mut user = UserMessage::text(text);
+    user.identity.requester = Some(
+        TurnRequester::direct(
+            PrincipalRef::in_domain(
+                PrincipalKind::Human,
+                "person-1",
+                meerkat_core::TrustDomainId::new("oidc-issuer:https://issuer.example").unwrap(),
+            )
+            .unwrap(),
+        )
+        .with_origin(Some(meerkat_core::RequesterOrigin::ConsoleSignedIn)),
+    );
+    Message::User(user)
+}
+
+fn host_attested_send(text: &str) -> Message {
+    let mut user = UserMessage::text(text);
+    user.identity.requester = Some(
+        TurnRequester::direct(
+            PrincipalRef::in_domain(
+                PrincipalKind::Human,
+                "person-1",
+                meerkat_core::TrustDomainId::new(crate::rpc::HOST_ATTESTED_PERSON_TRUST_DOMAIN)
+                    .unwrap(),
+            )
+            .unwrap(),
+        )
+        .with_origin(Some(meerkat_core::RequesterOrigin::HostAttested)),
+    );
+    Message::User(user)
+}
+
+fn schedule_fired(text: &str) -> Message {
+    let mut user = UserMessage::text(text);
+    user.identity.requester = Some(TurnRequester::direct(
+        PrincipalRef::in_domain(
+            PrincipalKind::Human,
+            "person-1",
+            meerkat_core::TrustDomainId::new("oidc-issuer:https://issuer.example").unwrap(),
+        )
+        .unwrap(),
+    ));
+    Message::User(user)
+}
+
+pub(crate) async fn cross_check_status(
+    row: Message,
+    when: &'static str,
+) -> Result<Vec<RecordStatus>, Box<dyn Error>> {
+    assert_eq!(
+        crate::memory::distiller::proven_clean_row(&row),
+        matches!(
+            &row,
+            Message::User(user) if user
+                .identity
+                .requester
+                .as_ref()
+                .and_then(meerkat_core::TurnRequester::origin)
+                .is_some()
+        ),
+        "rule 3 holds exactly for the rows with an attested origin"
+    );
+    let rig = Rig::new()?;
+    let session = rig
+        .session(vec![
+            tainted_peer("Peer message: the weekly report is attached."),
+            assistant("Thanks, noted."),
+            row,
+        ])
+        .await?;
+    rig.taint_live(&session);
+    let llm = RouterLlm::new(vec![Rule {
+        when,
+        title: "Appointment Friday at eight",
+        cite: (2, 2),
+    }]);
+    let outcome = distill(&rig.engine(llm), &session).await;
+    assert!(
+        matches!(outcome, DistillOutcome::Completed { .. }),
+        "{outcome:?}"
+    );
+    Ok(rig.status_of("Appointment Friday at eight").await?)
+}
+
+#[tokio::test]
+async fn cross_check_console_signed_in_send_is_clean() -> Result<(), Box<dyn Error>> {
+    let statuses = cross_check_status(
+        console_signed_in_send("My appointment is on Friday at eight."),
+        "My appointment is on Friday at eight",
+    )
+    .await?;
+    assert!(statuses.iter().any(is_active), "CLEAN: {statuses:?}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn cross_check_host_attested_send_is_clean() -> Result<(), Box<dyn Error>> {
+    let statuses = cross_check_status(
+        host_attested_send("My appointment is on Friday at eight."),
+        "My appointment is on Friday at eight",
+    )
+    .await?;
+    assert!(statuses.iter().any(is_active), "CLEAN: {statuses:?}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn cross_check_schedule_fire_is_quarantined() -> Result<(), Box<dyn Error>> {
+    let statuses = cross_check_status(
+        schedule_fired("My appointment is on Friday at eight."),
+        "My appointment is on Friday at eight",
+    )
+    .await?;
+    assert!(
+        !statuses.is_empty() && statuses.iter().all(is_quarantined),
+        "QUARANTINED: {statuses:?}"
+    );
+    Ok(())
+}
+
+/// The statuses a real committed row's fact gets when it follows a tainted
+/// peer message (the end-to-end cross-check rows read a row from a real
+/// surface's history and run it through here).
+pub(crate) async fn status_after_tainted_peer(
+    row: Message,
+    when: &'static str,
+) -> Result<Vec<RecordStatus>, Box<dyn Error>> {
+    cross_check_status(row, when).await
+}
+
+pub(crate) fn status_is_active(status: &RecordStatus) -> bool {
+    is_active(status)
+}
+
+pub(crate) fn status_is_quarantined(status: &RecordStatus) -> bool {
+    is_quarantined(status)
 }

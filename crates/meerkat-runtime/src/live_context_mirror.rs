@@ -784,6 +784,46 @@ mod tests {
         }
     }
 
+    /// Ruling R1 of the Meta host-requester delta read: a person's send that
+    /// records an attested requester origin (a signed-in console send,
+    /// `console_signed_in`, or a host-relayed send, `host_attested`) is not a
+    /// typed-text turn. Its rows carry the origin and no `TypedText` stamp,
+    /// so the live voice mirror keeps treating them as conversation (voiced),
+    /// exactly as before the origin existed.
+    #[test]
+    fn attested_requester_rows_without_the_typed_stamp_stay_voiced() {
+        use crate::meerkat_machine::dsl::LiveContextRowSource::Conversation;
+        for origin in [
+            meerkat_core::RequesterOrigin::ConsoleSignedIn,
+            meerkat_core::RequesterOrigin::HostAttested,
+        ] {
+            let mut sent = UserMessage::text("My appointment is on Friday at eight.");
+            sent.identity.requester = Some(
+                meerkat_core::TurnRequester::direct(
+                    meerkat_core::PrincipalRef::new(meerkat_core::PrincipalKind::Human, "person-1")
+                        .expect("principal"),
+                )
+                .with_origin(Some(origin)),
+            );
+            let mut reply =
+                meerkat_core::types::BlockAssistantMessage::snapshot(vec![AssistantBlock::Text {
+                    text: "Noted: Friday at eight.".into(),
+                    meta: None,
+                }]);
+            reply.identity.requester = sent.identity.requester.clone();
+            assert_eq!(
+                row_source(&Message::User(sent)),
+                Conversation,
+                "{origin:?}: the person's row stays voiced"
+            );
+            assert_eq!(
+                row_source(&Message::BlockAssistant(reply)),
+                Conversation,
+                "{origin:?}: its reply stays voiced"
+            );
+        }
+    }
+
     #[test]
     fn identical_live_transcript_text_is_never_echoed() {
         let row = classify(

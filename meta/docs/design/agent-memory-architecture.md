@@ -1047,11 +1047,16 @@ as a deliverable rather than asserting "the runtime knows":
 - **Distilled writes are evidence-scoped.** For the Distiller the decision is
   what each extraction call READ, not the session's history. A distilled record
   is clean only when every transcript row its call read is proven clean from
-  typed, persisted facts; unknown always quarantines, and a missing trust fact
-  is never clean. The only rows proven clean are a person's own typed input: a
-  conversational user row whose turn input is typed text and whose
-  host-stamped direct requester is a person (render class absent or a user
-  prompt). The Distiller reads those rows in a call of their own and stamps
+  recorded, persisted facts; unknown always quarantines, and a missing or
+  unknown trust fact is never clean. The only rows proven clean are a
+  person's own input admitted through an attested door: a conversational user
+  row whose direct requester is a person and whose recorded requester origin
+  is `console_signed_in` or `host_attested` (render class absent or a user
+  prompt; turn input not runtime-authored). The origin is the one fact the
+  rule reads. The typed-text turn stamp belongs to the live voice mirror and
+  is not read; the attested doors do not set it. A `SkillContext` block (a
+  selected skill's rendered body) on such a row is configuration, not
+  evidence, and the Distiller's projection drops it. The Distiller reads those rows in a call of their own and stamps
   its records with that call's input (`EvidenceRef::clean_input`: the row
   indices and a digest of the rows, naming only rows the render budget kept);
   the whole window is read by a second call whose records quarantine. Both

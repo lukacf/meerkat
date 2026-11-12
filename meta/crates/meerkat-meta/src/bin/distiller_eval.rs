@@ -19,7 +19,7 @@
 //! verdict for a record of the whole-window call, which reads every row;
 //! `clean_call` is the verdict for a record of the clean call, which reads
 //! only the rows proven clean (`attested_person` user rows: a person's own
-//! typed input with a host-stamped requester), present when any row is. `--mock` swaps the live model for a scripted
+//! input with an attested requester origin), present when any row is. `--mock` swaps the live model for a scripted
 //! client that extracts nothing (`[]`) — the doctrine's preferred output —
 //! so the noop scorecard plumbing runs end-to-end without credentials.
 //!
@@ -95,8 +95,9 @@ impl FixtureRecordMeta {
 struct FixtureTranscriptMessage {
     role: String,
     text: String,
-    /// A user row the host attested as a person's own typed input (a
-    /// conversational typed-text row with a host-stamped person requester).
+    /// A user row an attested door admitted as a person's own input (a
+    /// conversational row whose person requester carries the recorded origin
+    /// `console_signed_in` or `host_attested`).
     #[serde(default)]
     attested_person: bool,
 }

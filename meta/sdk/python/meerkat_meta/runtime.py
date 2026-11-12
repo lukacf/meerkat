@@ -1437,11 +1437,17 @@ class MetaRuntime:
         """Send conversational content to an addressable identity.
 
         ``requester`` names the person this host attests, under its own host
-        authority, as the original requester of ``content`` (text that person
-        typed): ``{"kind": "person", "id": "<opaque host-scoped stable id>"}``.
+        authority, as the original requester of ``content`` (content that
+        person sent through the host):
+        ``{"kind": "person", "id": "<opaque host-scoped stable id>"}``.
         The member's turn records that person as its direct requester with
-        origin ``host_attested``. Only the host route accepts it. It does not
-        combine with ``idempotency_key``. A gateway that does not advertise the
+        origin ``host_attested``; the turn is not marked as typed text, so a
+        live voice channel treats it as before. Reading a turn's requester
+        back, its ``origin`` is an open value (``"console_signed_in"`` and
+        ``"host_attested"`` today): treat any value you do not know as not
+        attested; a later third value is not a breaking change. Only the host
+        route accepts it. It does not combine with ``idempotency_key``, so an
+        unkeyed retry is a second send. A gateway that does not advertise the
         ``send_host_attested_requester`` feature capability would ignore it, so
         it is refused with :class:`CapabilityUnavailableError` before anything
         is sent.

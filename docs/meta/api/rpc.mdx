@@ -2507,39 +2507,6 @@ change alone never refuses a send.
 
 ---
 
-## Host-attested requester
-
-`meta/send` takes an optional `"requester"`: a person the host attests, under
-its own host authority, as the original requester of the content it relays
-(text that person typed). The closed form has one kind:
-
-```json
-{"kind": "person", "id": "<opaque host-scoped stable id>"}
-```
-
-Any other kind, a missing or empty `id`, or any other field is refused with
-`-32602` before anything is delivered. The member's admitted input and the
-turn's rows record the person as the turn's direct requester, with origin
-`host_attested` (a Console signed-in send records `console_signed_in`) and
-typed-text authorship. Without `"requester"` the send is unchanged.
-
-Only the host route accepts it: the gateway's stdin RPC, the caller that
-holds the gateway's host authority. The Console does not serve `meta/send`,
-and a Console send (`meta/console/send`) that passes a `requester` is refused
-with `-32602`. No agent tool, peer or comms delivery, schedule, flow or fork
-can name one. A `requester` does not combine with `idempotency_key` (`-32602`:
-a keyed send is a member continuation, which carries no requester). A member
-delivery path that cannot carry the requester onto an admitted runtime input
-(a placed member, or one without a runtime-backed session) refuses the send typed
-instead of delivering it without one; the supervisor bridge does not carry it.
-
-`meta/capabilities` advertises the feature capability
-`send_host_attested_requester`. A gateway without it ignores the field, so a
-client checks for it first; the Meta SDKs refuse a requester, typed, when it
-is not advertised.
-
----
-
 ## Identity delivery and turn tickets
 
 Identity-addressed methods (these, the identity status, inspect and

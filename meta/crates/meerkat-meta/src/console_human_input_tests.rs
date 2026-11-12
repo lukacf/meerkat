@@ -357,12 +357,12 @@ comms = true
             .with_interaction_id(meerkat_core::interaction::InteractionId(interaction));
         if let Some(requester) = requester {
             // The same work the console's person send committed: the
-            // signed-in person who typed it, so the replay is that send's.
+            // signed-in person who sent it, so the replay is that send's.
             spec = spec
                 .with_requester(requester.clone())
-                .with_requester_origin(Some(meerkat_core::RequesterOrigin::ConsoleSignedIn))
-                .with_person_typed_text();
+                .with_requester_origin(Some(meerkat_core::RequesterOrigin::ConsoleSignedIn));
         }
+        let replayed_session = member.bridge_session_id().map(ToString::to_string);
         let turn = handle
             .start_host_human_input_bounded(
                 member.agent_runtime_id,
@@ -379,6 +379,30 @@ comms = true
             .await
             .unwrap()
             .unwrap();
+        // Cross-check on the local merge, (d): this replays an already
+        // delivered send. It commits no second row, so nothing new can be
+        // proven clean: the one row is the send's own first delivery.
+        if let Some(session) = replayed_session {
+            let history = self
+                .unified
+                .mob_runtime()
+                .read_session_history(&session, 0, None)
+                .await
+                .expect("the session's history reads")
+                .messages;
+            let rows = history
+                .iter()
+                .filter(|message| {
+                    matches!(message, Message::User(user)
+                        if user.transcript_role == TranscriptUserRole::Conversational
+                            && user.text_content() == content)
+                })
+                .count();
+            assert_eq!(
+                rows, 1,
+                "CROSS-CHECK (d): a replay of a delivered send adds no row"
+            );
+        }
     }
 
     /// Observe the exact console turn to completion by replaying its
@@ -1636,12 +1660,13 @@ async fn console_human_redispatch_carries_the_requester_its_frame_recorded() {
                 .with_origin(Some(meerkat_core::RequesterOrigin::ConsoleSignedIn))
         ),
         "the redispatched turn names the requester the frame recorded, as the \
-         signed-in person who typed it"
+         signed-in person who sent it"
     );
     // TR-S1, inverted (the reader's finding, fixed): a signed-in person's
     // console send is conversational, names that person as its direct
-    // requester and is stamped as typed text, so the distiller's rule 3 can
-    // hold for it.
+    // requester with origin console_signed_in (asserted above), so the
+    // distiller's rule 3 holds for it. Ruling R1: it carries no typed-text
+    // stamp, so the voice mirror keeps its behaviour.
     assert!(
         row.identity
             .requester
@@ -1651,9 +1676,28 @@ async fn console_human_redispatch_carries_the_requester_its_frame_recorded() {
         "TR-S1: the row has a direct person requester"
     );
     assert_eq!(
-        row.identity.turn_input,
-        Some(meerkat_core::types::TranscriptTurnInput::TypedText),
-        "TR-S1: a console person's typed send carries the typed-text stamp"
+        row.identity.turn_input, None,
+        "TR-S1: a console person's send carries no typed-text stamp (R1)"
+    );
+    // Cross-check, (a) and (d): this is the first delivery, after a restart,
+    // of a recorded console send the person made (its origin comes from what
+    // the send's frame recorded, ruling R3). The real committed row is rule-3
+    // clean, and its fact after a tainted peer message is stored ACTIVE.
+    assert!(
+        crate::memory::distiller::proven_clean_row(&history[position]),
+        "CROSS-CHECK (a)/(d): the console person's row is rule-3 clean"
+    );
+    let statuses = crate::memory::distiller::evidence_taint_tests::status_after_tainted_peer(
+        history[position].clone(),
+        RECORDED,
+    )
+    .await
+    .expect("distillation of the real row");
+    assert!(
+        statuses
+            .iter()
+            .any(crate::memory::distiller::evidence_taint_tests::status_is_active),
+        "CROSS-CHECK (a): CLEAN, the fact is stored active: {statuses:?}"
     );
     let label = position
         .checked_sub(1)
@@ -2792,4 +2836,303 @@ async fn a_self_hosted_vision_model_takes_an_image_through_meta_send_message() {
     let stopped = unified.mob_handle().stop().await;
     unified.mob_runtime().stop_runtime_delivery();
     stopped.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// End-to-end rows to the stored record for the two attested doors (item 4 of
+// the Core lead's delta read 2; started from the reader's probes E2E-A..C).
+// Ruling R1: the clean class reads the recorded requester origin; neither
+// door stamps typed text, so the voice mirror (which reads that stamp as
+// quiet text chat) keeps its behaviour.
+// ---------------------------------------------------------------------------
+
+fn e2e_console_person() -> (
+    meerkat_core::PrincipalRef,
+    crate::console_aggregator::ConsoleSendScope,
+    crate::console_aggregator::ConsoleSender,
+) {
+    let alice = meerkat_core::PrincipalRef::in_domain(
+        meerkat_core::PrincipalKind::Human,
+        "alice-oidc-sub",
+        meerkat_core::TrustDomainId::new("oidc-issuer:https://issuer.example.test")
+            .expect("trust domain"),
+    )
+    .expect("qualified person");
+    let scope = crate::console_aggregator::ConsoleSendScope::Human {
+        issuer: "https://issuer.example.test".to_string(),
+        subject: "alice-oidc-sub".to_string(),
+    };
+    let sender = crate::console_aggregator::ConsoleSender {
+        kind: crate::console_aggregator::ConsoleActorKind::Person,
+        assurance: crate::console_aggregator::ConsoleActorKind::Person.assurance(),
+        display_name: Some("alice@example.test".to_string()),
+        caller_scope: "alice-caller-scope".to_string(),
+        requester: Some(alice.clone()),
+        model_label: Some("Message from alice@example.test".to_string()),
+    };
+    (alice, scope, sender)
+}
+
+/// The first committed row of the member's session whose serialized form
+/// holds `marker`, whatever its kind.
+async fn e2e_row_holding(h: &Harness, marker: &str) -> Message {
+    tokio::time::timeout(WAIT, async {
+        loop {
+            let history = h
+                .unified
+                .mob_runtime()
+                .read_session_history(&h.session_id.to_string(), 0, None)
+                .await
+                .expect("the session's history reads")
+                .messages;
+            if let Some(message) = history.into_iter().find(|message| {
+                serde_json::to_string(message).is_ok_and(|text| text.contains(marker))
+            }) {
+                break message;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("E2E: the member committed a row holding the marker")
+}
+
+async fn e2e_console_send_as(
+    h: &Harness,
+    request: ConsoleSendRequest,
+    scope: crate::console_aggregator::ConsoleSendScope,
+    sender: crate::console_aggregator::ConsoleSender,
+) -> ConsoleInteractionAccepted {
+    let governance = super::ConsoleSendGovernance {
+        scope,
+        sender: Some(sender),
+        ..Default::default()
+    };
+    let accepted = super::console_send_identity_first_governed(
+        &h.aggregator,
+        h.identity_runtime.clone(),
+        None,
+        request,
+        &governance,
+    )
+    .await
+    .map_err(super::CheckedConsoleSendError::into_send_error)
+    .expect("E2E: the console send is accepted");
+    h.wait_status(&accepted, ConsoleFrameStatus::Delivered)
+        .await;
+    accepted
+}
+
+/// The real committed row, distilled after a tainted peer message, through to
+/// the stored memory record: ACTIVE when the row is clean, QUARANTINED when
+/// it is not.
+async fn e2e_assert_stored(row: Message, text: &'static str, clean: bool, case: &str) {
+    let statuses =
+        crate::memory::distiller::evidence_taint_tests::status_after_tainted_peer(row, text)
+            .await
+            .expect("distillation of the real committed row");
+    if clean {
+        assert!(
+            statuses
+                .iter()
+                .any(crate::memory::distiller::evidence_taint_tests::status_is_active),
+            "{case}: the fact is stored ACTIVE: {statuses:?}"
+        );
+    } else {
+        assert!(
+            !statuses.is_empty()
+                && statuses
+                    .iter()
+                    .all(crate::memory::distiller::evidence_taint_tests::status_is_quarantined),
+            "{case}: the fact is stored QUARANTINED: {statuses:?}"
+        );
+    }
+}
+
+/// E2E-A: a LIVE send (not a redispatch) by a signed-in person through the
+/// real console send path commits a row with origin `console_signed_in` and
+/// no typed-text stamp (voiced on the live mirror, as before), which the
+/// Distiller's rule 3 reads as proven clean; the same person's operator-probe
+/// send and a send whose sender names no requester do not.
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_a_live_console_person_send_is_rule3_clean_probe_and_anonymous_are_not() {
+    use crate::memory::distiller::proven_clean_row;
+    const TYPED: &str = "E2E-A-TYPED my deploy day is Tuesday";
+    const PROBE: &str = "E2E-A-PROBE are you there";
+    const ANON: &str = "E2E-A-ANON a send that names no requester";
+    let h = Harness::new(WAIT).await;
+    let (alice, scope, sender) = e2e_console_person();
+
+    e2e_console_send_as(
+        &h,
+        h.request("tr2-a-typed", TYPED),
+        scope.clone(),
+        sender.clone(),
+    )
+    .await;
+    let typed = e2e_row_holding(&h, TYPED).await;
+    let Message::User(row) = &typed else {
+        panic!("E2E-A: the typed send is a user row: {typed:?}");
+    };
+    assert_eq!(
+        row.identity.requester,
+        Some(
+            meerkat_core::TurnRequester::direct(alice.clone())
+                .with_origin(Some(meerkat_core::RequesterOrigin::ConsoleSignedIn))
+        ),
+        "E2E-A: live send names the person, origin console_signed_in"
+    );
+    assert_eq!(
+        row.identity.turn_input, None,
+        "E2E-A: no typed-text stamp, so the voice mirror keeps voicing it"
+    );
+    assert!(
+        proven_clean_row(&typed),
+        "E2E-A: the live console person row is rule-3 clean: {typed:?}"
+    );
+    e2e_assert_stored(typed, TYPED, true, "E2E-A live signed-in send").await;
+
+    let probe_request = ConsoleSendRequest {
+        origin_kind: Some(crate::console_aggregator::ConsoleTurnOrigin::OperatorProbe),
+        ..h.request("tr2-a-probe", PROBE)
+    };
+    e2e_console_send_as(&h, probe_request, scope.clone(), sender.clone()).await;
+    let probe = e2e_row_holding(&h, PROBE).await;
+    assert!(
+        !proven_clean_row(&probe),
+        "E2E-A: an operator probe by the same person is not clean: {probe:?}"
+    );
+    e2e_assert_stored(probe, PROBE, false, "E2E-A operator probe").await;
+
+    let anonymous = crate::console_aggregator::ConsoleSender {
+        requester: None,
+        model_label: None,
+        ..sender
+    };
+    e2e_console_send_as(&h, h.request("tr2-a-anon", ANON), scope, anonymous).await;
+    let anon = e2e_row_holding(&h, ANON).await;
+    assert!(
+        !proven_clean_row(&anon),
+        "E2E-A: a send that names no requester is not clean: {anon:?}"
+    );
+    e2e_assert_stored(anon, ANON, false, "E2E-A anonymous send").await;
+    h.stop().await;
+}
+
+/// E2E-B: `send_host_attested` through the REAL session bridge and mob: the
+/// committed row names the attested person with origin `host_attested`,
+/// carries no typed-text stamp (voiced on the live mirror, as before) and is
+/// rule-3 clean; the same host's plain send is not.
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_b_host_attested_send_commits_a_rule3_clean_row_through_the_real_bridge() {
+    use crate::memory::distiller::proven_clean_row;
+    const RELAYED: &str = "E2E-B-RELAYED my favourite colour is cobalt";
+    const PLAIN: &str = "E2E-B-PLAIN a host send without a requester";
+    let h = Harness::new(WAIT).await;
+    let person = meerkat_core::PrincipalRef::in_domain(
+        meerkat_core::PrincipalKind::Human,
+        "person-7",
+        meerkat_core::TrustDomainId::new("host-attested").expect("trust domain"),
+    )
+    .expect("principal");
+    h.identity_runtime
+        .send_host_attested(
+            &h.identity,
+            None,
+            &ContentInput::Text(RELAYED.to_string()),
+            &person,
+            false,
+            None,
+        )
+        .await
+        .expect("E2E-B: the host-attested send is admitted");
+    let relayed = e2e_row_holding(&h, RELAYED).await;
+    let Message::User(row) = &relayed else {
+        panic!("E2E-B: the relayed send is a user row: {relayed:?}");
+    };
+    assert_eq!(
+        row.identity.requester,
+        Some(
+            meerkat_core::TurnRequester::direct(person.clone())
+                .with_origin(Some(meerkat_core::RequesterOrigin::HostAttested))
+        ),
+        "E2E-B: the row names the attested person, origin host_attested"
+    );
+    assert_eq!(
+        row.identity.turn_input, None,
+        "E2E-B: no typed-text stamp, so the voice mirror keeps voicing it"
+    );
+    assert!(
+        proven_clean_row(&relayed),
+        "E2E-B: the host-attested row is rule-3 clean: {relayed:?}"
+    );
+    e2e_assert_stored(relayed, RELAYED, true, "E2E-B host-attested send").await;
+
+    h.identity_runtime
+        .send(&h.identity, &ContentInput::Text(PLAIN.to_string()))
+        .await
+        .expect("E2E-B: the plain host send is admitted");
+    let plain = e2e_row_holding(&h, PLAIN).await;
+    assert!(
+        !proven_clean_row(&plain),
+        "E2E-B: a host send without a requester is not clean: {plain:?}"
+    );
+    e2e_assert_stored(plain, PLAIN, false, "E2E-B plain host send").await;
+    h.stop().await;
+}
+
+/// E2E-C (item 2): a signed-in person's console send that SELECTS A SKILL
+/// commits one conversational user row holding the skill body (a
+/// `SkillContext` block) next to the typed text. The row is rule-3 clean, but
+/// the Distiller's projection of it, which is what the clean extraction call
+/// reads, holds only the person's words: the skill body never becomes clean
+/// evidence.
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_c_a_selected_skill_body_stays_out_of_the_clean_extraction() {
+    use crate::memory::distiller::proven_clean_row;
+    const TYPED: &str = "E2E-C-TYPED please summarise the week";
+    let skills = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let (config, chosen, _other) = house_style_skill_config(skills.path());
+    let h = Harness::with_meerkat_config(config).await;
+    let (_alice, scope, sender) = e2e_console_person();
+    let request = ConsoleSendRequest {
+        skill_refs: vec![SkillRef::Structured(chosen)],
+        ..h.request("tr2-c-skill", TYPED)
+    };
+    e2e_console_send_as(&h, request, scope, sender).await;
+    let message = e2e_row_holding(&h, TYPED).await;
+    let Message::User(row) = &message else {
+        panic!("E2E-C: the send is a user row: {message:?}");
+    };
+    assert_eq!(
+        row.transcript_role,
+        TranscriptUserRole::Conversational,
+        "E2E-C: the row is conversational"
+    );
+    assert!(
+        row.content.iter().any(|block| matches!(
+            block,
+            meerkat_core::types::ContentBlock::SkillContext { .. }
+        )),
+        "E2E-C: the typed row holds a SkillContext block: {row:?}"
+    );
+    assert!(
+        proven_clean_row(&message),
+        "E2E-C: the attested person's row is rule-3 clean"
+    );
+    assert!(
+        row.text_content().contains(SKILL_BODY),
+        "E2E-C: the committed row does hold the skill body (the model needs it)"
+    );
+    let (_, projected) =
+        crate::memory::distiller::project_message(&message).expect("E2E-C: the user row projects");
+    assert!(
+        projected.contains(TYPED),
+        "E2E-C: the person's words are evidence: {projected}"
+    );
+    assert!(
+        !projected.contains(SKILL_BODY),
+        "E2E-C: the skill body never reaches the clean extraction: {projected}"
+    );
+    h.stop().await;
 }

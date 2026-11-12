@@ -461,9 +461,9 @@ struct ConsoleHumanSend<'a> {
     /// The sender label the agent's model reads right before the message
     /// (only on the local host-human lane).
     sender_label: Option<&'a meerkat_mob::SenderLabel>,
-    /// Whether a signed-in person typed this turn's text (a live operator
+    /// Whether a signed-in person sent this turn themselves (a live operator
     /// send, never a scheduled fire or a probe).
-    typed_text: bool,
+    signed_in_send: bool,
 }
 
 enum DeliveryPreparation<'a> {
@@ -11876,7 +11876,7 @@ impl IdentityRuntime {
                             skill_references: &skill_references,
                             requester: attribution.requester.as_ref(),
                             sender_label: attribution.sender_label.as_ref(),
-                            typed_text: attribution.typed_text,
+                            signed_in_send: attribution.signed_in_send,
                         }),
                         expected_spec_digest: None,
                         sender: None,
@@ -12344,13 +12344,14 @@ impl IdentityRuntime {
                             delivery.requester = console_human
                                 .as_ref()
                                 .and_then(|human| human.requester.cloned());
-                            // A signed-in person who typed this turn's text:
-                            // recorded with the requester (and, through it,
-                            // typed-text authorship). A scheduled fire or a
-                            // probe names the person but no origin.
+                            // A signed-in person who sent this turn: recorded
+                            // with the requester as its origin. A scheduled
+                            // fire or a probe names the person but no origin.
                             delivery.requester_origin = console_human
                                 .as_ref()
-                                .is_some_and(|human| human.typed_text && human.requester.is_some())
+                                .is_some_and(|human| {
+                                    human.signed_in_send && human.requester.is_some()
+                                })
                                 .then_some(meerkat_core::RequesterOrigin::ConsoleSignedIn);
                             delivery.request_only_context = request_only_context.clone();
                             delivery.sender_label = console_human

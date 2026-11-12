@@ -13,9 +13,49 @@ Meta 0.9.14 is part of Meerkat 0.9.14 (Core 0.9.14, Meta 0.9.14 and Connect
 0.9.14, released together) and pins Core `=0.9.14`.
 
 A mob that a member private to a person creates itself stays private to
-that person after a restart. See Security.
+that person after a restart. A console with sign-in shows a timeline frame
+stored without member attributes to an administrator only. See Security and
+Upgrade.
 
 ### Security
+
+- On a console with sign-in, a timeline frame stored without the attributes
+  of the member that wrote it is shown to an administrator only, whatever
+  the access rules say and whoever holds the member's name now. In 0.9.11
+  through 0.9.13 such a frame was decided by its member's name alone. A
+  deny rule on `agent.view` refused it only when the rule's subject matched
+  the reader and its selector was a role, a label or another named agent;
+  under allow rules, under any other deny rule and with the access
+  configuration off, the console judged it by what it knew of the member
+  holding that name at the read. A signed-in person who was neither an
+  administrator nor the member's owner could therefore be served such a
+  frame of a member private to another person, once that member had left
+  and a shared member held its name, or while the console did not know the
+  ended member. The frames written without attributes were a member's memory
+  events, the initial message of a spawn, a console send to a member with no
+  session, and lifecycle and failure records; the initial message and the
+  send carry text.
+- The initial message of a spawn is written under a member only by the
+  spawn that made that member. In 0.9.11 through 0.9.13 the console also
+  derived it from the spawning agent's session history, under whatever name
+  the call gave and whether or not the call was refused, so a call made in
+  a private member's turn that named a shared member put its text on that
+  member's timeline for everyone who may view it. A refused call now leaves
+  no frame under the name it gave.
+- Frames written from this release on carry their member's attributes
+  wherever the writer can name the member: a member's memory events
+  (one that names its session by that session's member, one that names none
+  by the member seated under the name), a spawn's initial message, a send
+  to a member with no session, lifecycle records, interaction failures and
+  live image records. A frame is still stored without attributes, and is
+  then read by an administrator only, when no member holds its name at the
+  write (a memory harvest or a lifecycle record written after its member
+  left the roster), when it names a session whose member is gone and no
+  earlier frame of that session holds attributes, and when no runtime is
+  registered for it. The console's own frames (`_system`, `__console__`)
+  are decided by those identities, as before.
+- With no runtime registered, a console serves no stored frame whose member
+  sat in a nested mob (a mob other than its runtime's own).
 
 - A mob that a member private to a person creates with its own `mob_create`
   stays private to that person after a restart, so every member spawned into
@@ -38,6 +78,29 @@ that person after a restart. See Security.
   from then on, and the members already seated in it keep the owner their
   own spawn gave them.
 
+### Upgrade
+
+- Timeline frames that 0.9.13 and earlier stored without member attributes
+  (member memory events, spawn initial messages, sends to a member with no
+  session, lifecycle and failure records) are no longer shown to anyone but
+  an administrator on a console with sign-in: not to another person, and
+  not to the member's owner. A console with sign-in and no access
+  configuration has no administrator, so it shows them to nobody. Frames
+  written from 0.9.14 on are not affected, and nothing is removed from the
+  console log. A console without sign-in shows them as before: it has one
+  anonymous operator and nobody to keep apart.
+
+### Changed
+
+- A spawn's initial message appears once on the spawned member's timeline,
+  as the `user_input` frame the spawn writes
+  (`source_event_type: spawn_initial_message`). The copy derived from the
+  spawning agent's session history
+  (`session_history_spawn_initial_message`) is no longer written. The call,
+  its arguments and its result stay on the spawning agent's own timeline.
+- A member's memory event that names its session (`session_key`) carries
+  the same value as `session_id` on its timeline frame.
+
 ### Known limitations
 
 - `rustix` 1.1.5 in Cargo.lock is named by RUSTSEC-2026-0486, as in 0.9.12
@@ -50,6 +113,15 @@ that person after a restart. See Security.
   `xattr`, calls it only to set attributes while unpacking, so Meta's own
   use is not known to be affected. `rustix` 1.1.6 has the fix; this release
   still builds with 1.1.5.
+- On a console whose visibility policy includes nested mob members (the
+  policy trait's default; the stock gateway policy does not), a temporary
+  council's participants are still listed as members in this release, and
+  their stored history holds a copy of the source member's earlier turns: a
+  caller denied the source can read them through a participant. Affects
+  0.8.27 through 0.9.14. Keep the stock policy, or deny the participants by
+  name (`council-p0`, ...). The 0.9.13 notes said the release after it would
+  no longer list them; that change is not in 0.9.14 and follows in a later
+  release.
 
 ## [0.9.13] - 2026-11-11
 

@@ -691,6 +691,9 @@ enum SeatScript {
     Change(SeatChange),
     /// Answer other labels than the seat's.
     Labels(LabelChange),
+    /// Answer each listed identity's seat with the labels listed for it, as
+    /// a host that reads the labels from the identity's row does.
+    RowLabels(BTreeMap<AgentIdentity, BTreeMap<String, String>>),
 }
 
 /// How a scripted host's answer changes a store-owned seat's labels.
@@ -915,6 +918,11 @@ impl crate::runtime::MemberBuildPreparer for ScriptedPreparer {
                 *seat = seat.clone().with_created_custody(false);
             }
             SeatScript::Labels(change) => change.apply(seat),
+            SeatScript::RowLabels(rows) => {
+                if let Some(labels) = rows.get(&seat.identity) {
+                    seat.labels = Some(labels.clone());
+                }
+            }
         }
         Ok(())
     }
@@ -1714,6 +1722,244 @@ async fn a_later_build_takes_the_hosts_model_again_and_keeps_its_first_builds_in
         Some(second.model),
         "the roster holds the override the host answered at this build"
     );
+}
+
+/// Row (RED): a label update of a seated store-owned identity seats its
+/// row's labels at once, so the member's next build agrees with a host that
+/// answers the row's labels. `quiet` is a Dormant seat no build created
+/// yet; `built` was built before the update and is live and idle at it.
+/// Each update restamps its member on its own session at the next
+/// generation, the new seat row carries the row's labels, and no seat is
+/// stale. The next build of each, and the one after a restart, is asked
+/// about a seat with the row's labels and builds the member.
+///
+/// RED on the old tree: the update keeps the member with the labels it was
+/// seated with, and the next build is refused for good, naming the changed
+/// key, because the host answers the row's labels.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_label_update_seats_the_rows_labels_and_the_next_build_agrees_with_the_host() {
+    let preparer = ScriptedPreparer::new();
+    let mut mob = seat_composing_mob("label-update-restamps", &preparer).await;
+    let names = ["quiet", "built"];
+    committed(mob.create(host_create("create-desks", &names), ALLOW).await);
+    wake(&mob, "built")
+        .await
+        .expect("the first wake builds the member");
+    let moved = |name: &str| {
+        BTreeMap::from([
+            ("team".to_string(), "beta".to_string()),
+            ("desk".to_string(), name.to_string()),
+        ])
+    };
+    let mut kinds = Vec::new();
+    let mut seated = Vec::new();
+    for name in names {
+        let before = spec(name, "worker");
+        seated.push((
+            mob.generation(name).await.expect("a member"),
+            mob.session(name).await,
+        ));
+        let updated = mob
+            .update(
+                &format!("relabel-{name}"),
+                before.clone().with_labels(moved(name)),
+                &spec_digest(&before),
+            )
+            .await
+            .expect("the label update commits");
+        kinds.push(answer_kind(
+            updated.applied.as_ref().expect("the update's answer"),
+        ));
+    }
+
+    // The host answers each seat from its identity's row.
+    let rows = SeatScript::RowLabels(names.iter().map(|name| (id(name), moved(name))).collect());
+    preparer.compose_seats(rows);
+    let builds_with_the_rows_labels = |mob: &StoreOwnedMob, name: &'static str| {
+        let handle = mob.handle.clone();
+        async move {
+            let woken = tokio::time::timeout(STEP, handle.ensure_member_live(&id(name)))
+                .await
+                .expect("the wake answers");
+            assert!(
+                woken.is_ok(),
+                "{name}: the build after a label update agrees with a host that answers the \
+                 row's labels: {woken:?}"
+            );
+            let entry = handle
+                .get_member(&id(name))
+                .await
+                .expect("roster read")
+                .expect("a member");
+            assert_eq!(
+                entry.labels,
+                moved(name),
+                "{name}: the member carries its row's labels"
+            );
+        }
+    };
+    for name in names {
+        builds_with_the_rows_labels(&mob, name).await;
+    }
+    assert_eq!(kinds, ["restamped", "restamped"]);
+    for (name, (generation, session)) in names.into_iter().zip(seated) {
+        assert_eq!(mob.session(name).await, session, "{name}: the same session");
+        assert_eq!(
+            mob.generation(name).await,
+            generation.next(),
+            "{name}: the label update seated the next generation"
+        );
+        assert_eq!(
+            mob.spawn_row(name).await.labels,
+            moved(name),
+            "{name}: the update's seat row carries the row's labels"
+        );
+    }
+    assert_eq!(seats_stale(&mob).await, 0, "no seat is stale");
+    mob.restart_configured(MobCompositionAuthority::Authoritative, {
+        let preparer = preparer.clone();
+        move |builder| builder.with_member_build_preparer(preparer)
+    })
+    .await;
+    mob.service.set_keep_alive_turns_complete_immediately(true);
+    for name in names {
+        builds_with_the_rows_labels(&mob, name).await;
+    }
+}
+
+/// Row (RED): the restamp a label update seats its row's labels with keeps
+/// the member. `desk` was created with a first message and a peer, ran its
+/// kickoff and was built; after the update it is the same store-owned
+/// entry on the same session at the next generation, its edge to its peer
+/// stands, its durable session holds what it held, and its kickoff is not
+/// run again. Its next build resumes that session (it mints none), so its
+/// next run continues the conversation.
+///
+/// RED on the old tree: the update restamps nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_label_updates_restamp_keeps_the_members_session_conversation_kickoff_and_edges() {
+    use crate::identity::{OwnedEdgeAdmission, OwnedIdentityEdge};
+    let mob = StoreOwnedMob::new("label-update-keeps-member").await;
+    mob.service.set_keep_alive_turns_complete_immediately(true);
+    committed(
+        mob.create(host_create("create-peer", &["peer"]), ALLOW)
+            .await,
+    );
+    let before = spec("desk", "worker")
+        .with_runtime_mode_override(crate::MobRuntimeMode::AutonomousHost)
+        .with_initial_message(meerkat_core::types::ContentInput::from("Begin."));
+    let created = mob
+        .create_outcome(
+            StoreOwnedIdentityCreate::new(
+                operation("create-desk"),
+                IdentityChangeRequesterInput::host("console"),
+                vec![CreatedIdentityRequest::new(before.clone()).with_peers(vec![
+                    OwnedIdentityEdge::new(
+                        "peer",
+                        OwnedEdgeAdmission::rule("team-peers").expect("a peer rule id"),
+                    ),
+                ])],
+            ),
+            ALLOW,
+        )
+        .await
+        .expect("the create commits");
+    assert!(
+        matches!(
+            created.embodied.get(&id("desk")),
+            Some(crate::runtime::DeclaredEntryOutcome::Embodied { .. })
+        ),
+        "{created:?}"
+    );
+    let session = kicked_off(&mob, "desk", "Begin.").await;
+    let generation = mob.generation("desk").await.expect("desk is a member");
+    let wired = mob.wired_to("desk").await;
+    assert_eq!(
+        wired,
+        BTreeSet::from([id("peer")]),
+        "desk is wired to its peer"
+    );
+    let conversation = |mob: &StoreOwnedMob| {
+        let service = mob.service.clone();
+        let session = session.clone();
+        async move {
+            crate::runtime::session_service::MobSessionService::load_persisted_session(
+                service.as_ref(),
+                &session,
+            )
+            .await
+            .expect("the durable session reads")
+            .map(|held| held.messages().len())
+        }
+    };
+    let held = conversation(&mob).await;
+    assert!(held.is_some(), "the member's session is durable");
+
+    let moved = BTreeMap::from([("team".to_string(), "beta".to_string())]);
+    let updated = mob
+        .update(
+            "relabel-desk",
+            before.clone().with_labels(moved.clone()),
+            &spec_digest(&before),
+        )
+        .await
+        .expect("the label update commits");
+    assert!(
+        matches!(
+            updated.applied,
+            Some(crate::runtime::DeclaredEntryOutcome::Restamped { .. })
+        ),
+        "the label update restamps the member: {updated:?}"
+    );
+    assert_eq!(mob.session("desk").await, session, "the same session");
+    assert_eq!(
+        mob.generation("desk").await,
+        generation.next(),
+        "the next generation"
+    );
+    assert!(
+        matches!(
+            mob.read("desk"),
+            IdentityEntryRead::Entry(view)
+                if view.origin == IdentityEntryOrigin::Created
+                    && matches!(view.standing, EntryStanding::Seated(_))
+        ),
+        "the same store-owned entry, seated"
+    );
+    assert_eq!(mob.wired_to("desk").await, wired, "its edge stands");
+    assert_eq!(
+        conversation(&mob).await,
+        held,
+        "its durable session holds what it held"
+    );
+
+    wake(&mob, "desk")
+        .await
+        .expect("the restamped member's next wake builds it");
+    let builds = builds_on(&mob, &session).await;
+    let rebuilt = builds.last().expect("the member's build after the restamp");
+    assert!(
+        builds.len() > 1,
+        "the wake after the restamp built the member"
+    );
+    assert_eq!(
+        rebuilt.session_build_intent,
+        meerkat_core::SessionBuildIntent::Resume,
+        "the build after the restamp resumes the member's session: {rebuilt:?}"
+    );
+    assert_eq!(
+        rebuilt.resume_session_id.as_ref(),
+        Some(&session),
+        "on the session the member held"
+    );
+    assert_eq!(conversation(&mob).await, held, "the conversation is kept");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        turns_with_prompt(&mob, &session, "Begin.").await,
+        1,
+        "the kickoff is not run again"
+    );
+    assert_eq!(mob.wired_to("desk").await, wired, "its edge stands");
 }
 
 /// Row: a create of more identities than one change commits is refused

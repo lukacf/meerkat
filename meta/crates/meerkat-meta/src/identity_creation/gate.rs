@@ -686,51 +686,80 @@ impl IdentityGate {
         }
     }
 
-    /// Whether the caller may see the agent `name`.
-    fn sees(&self, name: &str) -> bool {
-        self.seen.as_ref().is_none_or(|seen| seen.sees(name))
+    /// Whether `requester` is shown the agent `name`: the one rule every
+    /// read of the family goes through, and every peer a change names. A
+    /// caller is shown the agents its view of the mob shows it (every
+    /// agent, for a call that has no view), and an agent is shown no member
+    /// that is private to a person, whatever view its call has.
+    fn sees(&self, mob: &MobHandle, requester: &ChangeRequester, name: &str) -> bool {
+        if self.seen.as_ref().is_some_and(|seen| !seen.sees(name)) {
+            return false;
+        }
+        !(matches!(requester, ChangeRequester::Agent { .. }) && self.is_private_member(mob, name))
     }
 
-    /// `summary` as the caller is shown it: who asked for the agent is left
-    /// out when that is an agent the caller may not see.
-    fn shown_summary(&self, mut summary: AgentSummary) -> AgentSummary {
+    /// Whether the agent `name` is a member private to a person, as the
+    /// mob's own record of its members says.
+    fn is_private_member(&self, mob: &MobHandle, name: &str) -> bool {
+        self.private_members.as_ref().is_some_and(|members| {
+            core_member_name(name)
+                .is_some_and(|member| members.is_private(mob.mob_id().as_str(), member.as_str()))
+        })
+    }
+
+    /// `summary` as `requester` is shown it: who asked for the agent is
+    /// left out when that is an agent the requester is not shown.
+    fn shown_summary(
+        &self,
+        mob: &MobHandle,
+        requester: &ChangeRequester,
+        mut summary: AgentSummary,
+    ) -> AgentSummary {
         if summary.provenance.as_ref().is_some_and(|asked| {
-            asked.requester_kind == RequesterKind::Agent && !self.sees(&asked.requester)
+            asked.requester_kind == RequesterKind::Agent
+                && !self.sees(mob, requester, &asked.requester)
         }) {
             summary.provenance = None;
         }
         summary
     }
 
-    /// `record` as the caller is shown it: its peers are the ones the
-    /// caller may see.
-    fn shown_record(&self, mut record: AgentRecord) -> AgentRecord {
-        record.peers.retain(|peer| self.sees(peer));
-        record.agent = self.shown_summary(record.agent);
+    /// `record` as `requester` is shown it: its peers are the ones the
+    /// requester is shown.
+    fn shown_record(
+        &self,
+        mob: &MobHandle,
+        requester: &ChangeRequester,
+        mut record: AgentRecord,
+    ) -> AgentRecord {
+        record.peers.retain(|peer| self.sees(mob, requester, peer));
+        record.agent = self.shown_summary(mob, requester, record.agent);
         record
     }
 
     /// The cursor of a page whose last shown agent is `last`, when the mob
-    /// has more after `next`: the mob's own for a caller that sees every
-    /// agent, and the last agent the caller was shown otherwise, so a
-    /// cursor never names an agent the caller may not see.
-    fn cursor(&self, last: &str, next: &meerkat_mob::AgentIdentity) -> String {
-        match self.seen {
-            Some(_) => last.to_owned(),
-            None => identity_name_of_member(next),
+    /// has more after `next`: the mob's own for a requester that is shown
+    /// every agent, and the last agent the requester was shown otherwise
+    /// (a call that has a view, and an agent), so a cursor never names an
+    /// agent the requester is not shown.
+    fn cursor(
+        &self,
+        requester: &ChangeRequester,
+        last: &str,
+        next: &meerkat_mob::AgentIdentity,
+    ) -> String {
+        if self.seen.is_some() || matches!(requester, ChangeRequester::Agent { .. }) {
+            last.to_owned()
+        } else {
+            identity_name_of_member(next)
         }
     }
 
-    /// Whether the caller may name the agent `name` as a peer: one it may
-    /// see, that is no member private to a person.
-    fn may_name(&self, mob: &MobHandle, name: &str) -> bool {
-        if self.seen.as_ref().is_some_and(|seen| !seen.sees(name)) {
-            return false;
-        }
-        !self.private_members.as_ref().is_some_and(|members| {
-            core_member_name(name)
-                .is_some_and(|member| members.is_private(mob.mob_id().as_str(), member.as_str()))
-        })
+    /// Whether `requester` may name the agent `name` as a peer: one it is
+    /// shown, that is no member private to a person (such a member is
+    /// nobody's peer).
+    fn may_name(&self, mob: &MobHandle, requester: &ChangeRequester, name: &str) -> bool {
+        self.sees(mob, requester, name) && !self.is_private_member(mob, name)
     }
 
     /// This family, of a mob whose runtime is governed when `governed`.
@@ -764,11 +793,7 @@ impl IdentityGate {
         let ChangeRequester::Agent { identity, .. } = requester else {
             return false;
         };
-        let Some(members) = &self.private_members else {
-            return false;
-        };
-        core_member_name(identity)
-            .is_some_and(|member| members.is_private(mob.mob_id().as_str(), member.as_str()))
+        self.is_private_member(mob, identity)
     }
 
     /// The agent `name`, as its record reads; `None` for a name no agent
@@ -863,11 +888,21 @@ impl IdentityGate {
         })
     }
 
-    /// The agent a change of one agent names, or `identity_unknown` at
-    /// `name`; a name that is no agent name is `invalid_name`.
-    async fn target(&self, mob: &MobHandle, name: &str) -> Result<AgentFacts, IdentityRefusal> {
+    /// The agent a read or a change of one agent names, or
+    /// `identity_unknown` at `name`: for a name no agent holds, and for an
+    /// agent `requester` is not shown, which nothing tells apart. A name
+    /// that is no agent name is `invalid_name`.
+    async fn target(
+        &self,
+        mob: &MobHandle,
+        requester: &ChangeRequester,
+        name: &str,
+    ) -> Result<AgentFacts, IdentityRefusal> {
         if core_member_name(name).is_none() {
             return Err(IdentityRefusal::new(IdentityRefusalKind::InvalidName).at("name"));
+        }
+        if !self.sees(mob, requester, name) {
+            return Err(unknown_agent("name"));
         }
         self.agent(mob, name)
             .await?
@@ -912,11 +947,12 @@ impl IdentityGate {
         &self,
         mob: &MobHandle,
         policy: &IdentityCreationPolicy,
+        requester: &ChangeRequester,
         names: &[String],
     ) -> Result<BTreeMap<String, PeerFacts>, IdentityRefusal> {
         let mut peers = BTreeMap::new();
         for name in names {
-            if peers.contains_key(name) || !self.may_name(mob, name) {
+            if peers.contains_key(name) || !self.may_name(mob, requester, name) {
                 continue;
             }
             if let Some(agent) = self.agent(mob, name).await? {
@@ -1011,7 +1047,7 @@ impl IdentityGate {
                         .cloned()
                         .collect()
                 };
-                let peers = self.peer_facts(mob, policy, &named).await?;
+                let peers = self.peer_facts(mob, policy, requester, &named).await?;
                 let normalized = normalize_create(
                     policy,
                     &RequestContext {
@@ -1028,9 +1064,11 @@ impl IdentityGate {
                 })
             }
             IdentityChangeSpec::Update(update) => {
-                let target = self.target(mob, &update.name).await?;
+                let target = self.target(mob, requester, &update.name).await?;
                 let spec = update.to_update_spec(policy, &target.spec.labels)?;
-                let peers = self.peer_facts(mob, policy, &update.peers_add).await?;
+                let peers = self
+                    .peer_facts(mob, policy, requester, &update.peers_add)
+                    .await?;
                 let normalized = normalize_update(
                     policy,
                     &RequestContext {
@@ -1045,7 +1083,7 @@ impl IdentityGate {
                 Ok(Judged::of(normalized, &target))
             }
             IdentityChangeSpec::Archive(agent) => {
-                let target = self.target(mob, &agent.name).await?;
+                let target = self.target(mob, requester, &agent.name).await?;
                 let normalized = normalize_archive(
                     policy,
                     &facts,
@@ -1056,7 +1094,7 @@ impl IdentityGate {
                 Ok(Judged::of(normalized, &target))
             }
             IdentityChangeSpec::Unarchive(agent) => {
-                let target = self.target(mob, &agent.name).await?;
+                let target = self.target(mob, requester, &agent.name).await?;
                 let normalized = normalize_unarchive(
                     policy,
                     &facts,
@@ -1067,7 +1105,7 @@ impl IdentityGate {
                 Ok(Judged::of(normalized, &target))
             }
             IdentityChangeSpec::Remove(agent) => {
-                let target = self.target(mob, &agent.name).await?;
+                let target = self.target(mob, requester, &agent.name).await?;
                 let normalized = normalize_remove(
                     policy,
                     &facts,
@@ -1078,7 +1116,7 @@ impl IdentityGate {
                 Ok(Judged::of(normalized, &target))
             }
             IdentityChangeSpec::Adopt(agent) => {
-                let target = self.target(mob, &agent.name).await?;
+                let target = self.target(mob, requester, &agent.name).await?;
                 let normalized = normalize_adopt(
                     policy,
                     &facts,
@@ -1351,8 +1389,14 @@ impl IdentityGate {
         Ok(committed.outcome)
     }
 
-    /// The page of the mob's agents `list` names.
-    async fn list(&self, mob: &MobHandle, list: &ListAgents) -> Result<AgentPage, IdentityRefusal> {
+    /// The page of the mob's agents `list` names, as `requester` is shown
+    /// them.
+    async fn list(
+        &self,
+        mob: &MobHandle,
+        requester: &ChangeRequester,
+        list: &ListAgents,
+    ) -> Result<AgentPage, IdentityRefusal> {
         let after = match &list.after {
             Some(after) => Some(core_member_name(after).ok_or_else(|| {
                 IdentityRefusal::new(IdentityRefusalKind::InvalidName).at("after")
@@ -1373,7 +1417,9 @@ impl IdentityGate {
                     unreadable(view);
                     continue;
                 };
-                if !self.sees(&agent.name) || (agent.archived && !list.include_archived) {
+                if !self.sees(mob, requester, &agent.name)
+                    || (agent.archived && !list.include_archived)
+                {
                     continue;
                 }
                 if list
@@ -1383,10 +1429,12 @@ impl IdentityGate {
                 {
                     continue;
                 }
-                agents.push(self.shown_summary(agent.summary()));
+                agents.push(self.shown_summary(mob, requester, agent.summary()));
             }
             match (page.next, agents.last()) {
-                (Some(next), Some(last)) => break Some(self.cursor(&last.name, &next)),
+                (Some(next), Some(last)) => {
+                    break Some(self.cursor(requester, &last.name, &next));
+                }
                 (Some(next), None) => after = Some(next),
                 (None, _) => break None,
             }
@@ -1475,7 +1523,7 @@ impl IdentityGate {
                     continue;
                 };
                 if agent.archived
-                    || !self.sees(&agent.name)
+                    || !self.sees(mob, requester, &agent.name)
                     || !query_selects(query, &agent.name, agent.spec.display_name.as_deref())
                 {
                     continue;
@@ -1486,7 +1534,9 @@ impl IdentityGate {
                 ));
             }
             match (page.next, peers.last()) {
-                (Some(next), Some(last)) => break Some(self.cursor(&last.name, &next)),
+                (Some(next), Some(last)) => {
+                    break Some(self.cursor(requester, &last.name, &next));
+                }
                 (Some(next), None) => after = Some(next),
                 (None, _) => break None,
             }
@@ -1657,12 +1707,16 @@ impl IdentityFamily for IdentityGate {
         read: IdentityRead,
     ) -> Result<IdentityReadAnswer, IdentityRefusal> {
         match read {
-            IdentityRead::List(list) => Ok(IdentityReadAnswer::List(self.list(mob, &list).await?)),
+            IdentityRead::List(list) => Ok(IdentityReadAnswer::List(
+                self.list(mob, requester, &list).await?,
+            )),
             IdentityRead::Get(GetAgent { name, .. }) => {
-                let agent = self.target(mob, &name).await?;
-                Ok(IdentityReadAnswer::Get(Box::new(
-                    self.shown_record(agent.record()),
-                )))
+                let agent = self.target(mob, requester, &name).await?;
+                Ok(IdentityReadAnswer::Get(Box::new(self.shown_record(
+                    mob,
+                    requester,
+                    agent.record(),
+                ))))
             }
             IdentityRead::Operation(operation_id) => {
                 let state = match committed_outcome(mob, &operation_id).await {

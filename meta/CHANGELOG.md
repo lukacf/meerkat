@@ -70,6 +70,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A change names as peers only agents its caller may see: on the Console a
   peer the caller may not view is answered `peer_unknown`, as a name no
   agent holds, and never `peer_not_allowed`.
+- An agent is shown no agent that is private to one person (one whose
+  labels carry `console.private_to`): its list and its directory leave
+  such an agent out, and a get, a plan or a change of it answers
+  `identity_unknown`, as a name no agent holds. Every read of the family
+  and every peer a change names goes through this one rule; what a
+  person's view of the mob shows is unchanged.
 - Every refusal of the family is one JSON-RPC error, code `-32058`
   (`meerkat_meta::rpc::IDENTITY_REFUSED_CODE`), whose `data` is `{kind,
   field?, retryable, detail}` and the kind's own members; `kind` is a closed

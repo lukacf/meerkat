@@ -392,8 +392,13 @@ class MacosLane:
                 archive.addfile(info, io.BytesIO(data))
         rows.append({"kind": "release-download", "name": "node", "version": "v24.19.0", "file": node.name,
                      "sha256": p.digest(node), "sha512": None, "use": ["acquisition node", "runtime node"]})
-        self.pins = root / "library-pins.json"
+        # The resolved pin file and the fetch step's record that binds it to the committed pins and the lock.
+        self.pins = self.pinned / "library-pins-macos-arm64.resolved.json"
         dump(self.pins, {"schema": "connect-library-pins/1", "target": "macos-arm64", "pins": rows})
+        self.fetched = {"schema": "connect-pinned-inputs/1", "pins_sha256": value["library"]["pins"]["sha256"],
+            "lock_sha256": p.digest(CONNECT.parent / "Cargo.lock"), "files": [],
+            "resolved_pins": {"file": self.pins.name, "rows": len(rows), "sha256": p.digest(self.pins)}}
+        dump(self.pinned / "FETCHED.json", self.fetched)
         monkeypatch.setattr(p, "macos_input_file", lambda: self.inputs)
         monkeypatch.setattr(p, "require_native_host", lambda target: None)
         monkeypatch.setattr(p, "macos_checkout", lambda: (REVISION, TREE))
@@ -1028,6 +1033,10 @@ def test_stage_record_holds_the_gateway_product_and_a_pending_review_never_the_c
         "official_playwright_install": "passed"}
     assert stage["revision"] == REVISION and stage["work_root"] == str(lane.work)
     assert stage["checkout_root"] == str(CONNECT.parent) and stage["resources_sha256"] == RESOURCES
+    # The fetch binding travels with the records: committed pins, resolved pin file, Cargo.lock.
+    assert stage["pins_sha256"] == lane.selection["library"]["pins"]["sha256"]
+    assert stage["resolved_pins_sha256"] == p.digest(lane.pins) != stage["pins_sha256"]
+    assert stage["lock_sha256"] == p.digest(CONNECT.parent / "Cargo.lock")
     paths = [row["path"] for row in stage["files"]]
     assert paths == sorted(paths) and len(paths) == len(set(paths))
     version = lane.versions["connect"]
@@ -1048,7 +1057,8 @@ def test_stage_record_holds_the_gateway_product_and_a_pending_review_never_the_c
                    "binary/toolkit_gateway", "binary/packaged_setup", "binary/cli_paired_host",
                    "binary/meerkat-connect.signature.json", "binary/toolkit_gateway.facts.json",
                    "tools/toolkit-node-plan.build.json", "tools/dependencies.txt", "components/components.json",
-                   "records/native-build.json", "records/native-build.log",
+                   "records/native-build.json", "records/native-build.log", "records/pinned-inputs/FETCHED.json",
+                   "records/pinned-inputs/library-pins-macos-arm64.resolved.json",
                    "records/gateway-build-record.json", "records/cli-build-record.json", "sdk/SDK-WHEELS.json",
                    "cli-qualification/installed-composition.json", "cli-qualification/consumer.json",
                    "cli-qualification/native-shutdown-review.pending.json",
@@ -1258,6 +1268,36 @@ def test_recorder_runs_a_child_with_exactly_the_given_environment(tmp_path, monk
     inherited, log = record.run("inherited", [p.sys.executable, "-I", "-c",
         "import os; print('CONNECT_INERT_SECRET_API_KEY' in os.environ)"], cwd=tmp_path)
     assert log.read_text().strip() == "True" and "CONNECT_INERT_SECRET_API_KEY" not in inherited["env"]
+
+
+@pytest.mark.parametrize("fault", ("committed_pins", "resolved_file", "lock", "no_record", "another_fetch_later"))
+def test_pinned_inputs_are_bound_to_the_committed_pins_the_resolved_file_and_the_lock(lane, fault):
+    lane.step("preflight")
+    record = lane.pinned / "FETCHED.json"
+    changed = copy.deepcopy(lane.fetched)
+    if fault == "committed_pins":
+        changed["pins_sha256"] = "0" * 64
+    elif fault == "resolved_file":
+        changed["resolved_pins"]["sha256"] = "0" * 64
+    elif fault == "lock":
+        changed["lock_sha256"] = "0" * 64
+    if fault == "no_record":
+        record.unlink()
+    elif fault != "another_fetch_later":
+        dump(record, changed)
+    if fault == "another_fetch_later":
+        lane.step("library")
+        kept = lane.work / "records/pinned-inputs"
+        assert (kept / "FETCHED.json").read_bytes() == record.read_bytes()
+        assert (kept / lane.pins.name).read_bytes() == lane.pins.read_bytes()
+        changed["files"] = [{"kind": "crate", "file": "inert-1.0.0.crate", "bytes": 1, "sha256": "1" * 64}]
+        dump(record, changed)
+        with pytest.raises(ValueError, match="another fetch"):
+            lane.step("resources")
+    else:
+        with pytest.raises((ValueError, FileNotFoundError)):
+            lane.step("library")
+        assert "tool-toolkit-local-recipes" not in lane.names(), "refused before anything was built"
 
 
 def test_official_playwright_install_is_the_backends_command_with_the_closures_node_and_npm(lane):

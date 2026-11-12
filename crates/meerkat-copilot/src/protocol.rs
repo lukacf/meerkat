@@ -716,8 +716,11 @@ impl CopilotModelSupports {
     /// name an [`EffortLevel`], each once, in the order the enum declares
     /// them (`none` to `max`). A word that names no level is left out, so a
     /// statement of such words only is `Some` and empty, like an empty
-    /// statement: the entry states that the model takes none of the levels
-    /// Meerkat knows.
+    /// statement. The two say different things: an empty statement says
+    /// that the model takes no level, and a statement made only of words
+    /// this binary does not know as levels cannot be read. A caller that
+    /// judges a level by the statement tells them apart by
+    /// [`Self::reasoning_effort`], which keeps the words.
     ///
     /// [`EffortLevel`]: meerkat_core::model_profile::capabilities::EffortLevel
     #[must_use]

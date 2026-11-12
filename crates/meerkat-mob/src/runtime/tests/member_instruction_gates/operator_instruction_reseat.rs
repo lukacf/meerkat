@@ -83,6 +83,7 @@ impl Fixture {
                 STANDING,
                 OperatorInstructionTarget::Member {
                     agent_identity: self.identity.clone(),
+                    include_forks: false,
                 },
             ))
             .await
@@ -177,6 +178,7 @@ impl Fixture {
                 "Another record.",
                 OperatorInstructionTarget::Member {
                     agent_identity: AgentIdentity::from("nobody"),
+                    include_forks: false,
                 },
             )),
         )
@@ -726,6 +728,7 @@ async fn an_eager_seat_on_a_conversation_is_recorded_by_the_mobs_delivery() {
             STANDING,
             OperatorInstructionTarget::Member {
                 agent_identity: fixture.identity.clone(),
+                include_forks: false,
             },
         ))
         .await

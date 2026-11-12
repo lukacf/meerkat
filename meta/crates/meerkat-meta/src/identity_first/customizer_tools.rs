@@ -512,7 +512,7 @@ fn same_dispatcher(a: &Arc<dyn AgentToolDispatcher>, b: &Arc<IdentityCustomizerT
 /// spawns that target the identity's member id. A member is an identity's
 /// when the identity is registered, when its labels carry the
 /// runtime-authoritative `agent_identity` label, or when Core holds its
-/// member id as an identity entry ([`Self::watch_identity_entries`]). Every
+/// member id as an identity entry (`Self::watch_identity_entries`). Every
 /// other member is left untouched.
 pub struct CustomizerToolsSpawnCustomizer {
     /// The registry it attaches from. Unset while the composition that

@@ -409,6 +409,7 @@ impl IdentityRuntime {
             content_sha256: Some(digest),
             target: OperatorInstructionTarget::Member {
                 agent_identity: member,
+                include_forks: false,
             },
         };
         match mob.set_operator_instruction(write).await {

@@ -6582,45 +6582,47 @@ mod tests {
     fn mob_machine_instruction_snapshot_natives_have_the_rust_semantics_in_tla() {
         // The DSL authority, the kernel oracle and the generated TLA give
         // the operator-instruction natives one meaning: the widest member
-        // snapshot, the shared records (every slot that is not
-        // member-targeted) plus the most any one member holds of its own,
-        // in records and in Active body bytes; and, with a write applied,
-        // the widest snapshot that holds the written slot (the written
-        // member's, or the widest of all for a shared write).
+        // snapshot the records allow, the shared records (every slot that
+        // is not member-targeted) plus the most one name holds of its own,
+        // alone or with what another name's records pass to its forks, in
+        // records and in Active body bytes; and, with a write applied, the
+        // widest snapshot of the maps the write leaves.
         let schema = meerkat_machine_schema::catalog::dsl::dsl_mob_machine();
         let model = render_machine_semantic_model(&schema).expect("render model");
         let widest_slots = r#"mob_machine_instruction_widest_snapshot_slots(target_kind, target_member) ==
-    LET member_slots == {candidate_slot \in DOMAIN target_kind : target_kind[candidate_slot] = "Member" /\ candidate_slot \in DOMAIN target_member}
-        own_counts == {Cardinality({own_slot \in member_slots : target_member[own_slot] = target_member[named_slot]}) : named_slot \in member_slots}
-        widest_own == IF own_counts = {} THEN 0 ELSE CHOOSE own_count \in own_counts : \A other_count \in own_counts : own_count >= other_count
+    LET member_slots == {candidate_slot \in DOMAIN target_kind : target_kind[candidate_slot] \in {"Member", "MemberAndForks"} /\ candidate_slot \in DOMAIN target_member}
+        instruction_fork_slots == {candidate_slot \in member_slots : target_kind[candidate_slot] = "MemberAndForks"}
+        instruction_member_names == {target_member[named_slot] : named_slot \in member_slots}
+        InstructionOwnOf(named_member) == Cardinality({own_slot \in member_slots : target_member[own_slot] = named_member})
+        InstructionForForksOf(named_member) == Cardinality({own_slot \in instruction_fork_slots : target_member[own_slot] = named_member})
+        instruction_snapshots == {InstructionOwnOf(named_member) : named_member \in instruction_member_names} \cup {InstructionOwnOf(name_pair[1]) + InstructionForForksOf(name_pair[2]) : name_pair \in {candidate_pair \in instruction_member_names \X instruction_member_names : candidate_pair[1] # candidate_pair[2]}}
+        widest_own == IF instruction_snapshots = {} THEN 0 ELSE CHOOSE snapshot_size \in instruction_snapshots : \A other_size \in instruction_snapshots : snapshot_size >= other_size
     IN Cardinality(DOMAIN target_kind \ member_slots) + widest_own
 "#;
         let widest_bytes = r#"mob_machine_instruction_widest_snapshot_active_bytes(slot_effect, slot_bytes, target_kind, target_member) ==
-    LET member_slots == {candidate_slot \in DOMAIN slot_effect : candidate_slot \in DOMAIN target_kind /\ target_kind[candidate_slot] = "Member" /\ candidate_slot \in DOMAIN target_member}
+    LET member_slots == {candidate_slot \in DOMAIN slot_effect : candidate_slot \in DOMAIN target_kind /\ target_kind[candidate_slot] \in {"Member", "MemberAndForks"} /\ candidate_slot \in DOMAIN target_member}
+        instruction_fork_slots == {candidate_slot \in member_slots : target_kind[candidate_slot] = "MemberAndForks"}
+        instruction_member_names == {target_member[named_slot] : named_slot \in member_slots}
         ActiveBytesOf(instruction_slots) == session_document_instruction_active_bytes([instruction_slot \in instruction_slots |-> slot_effect[instruction_slot]], slot_bytes)
-        own_bytes == {ActiveBytesOf({own_slot \in member_slots : target_member[own_slot] = target_member[named_slot]}) : named_slot \in member_slots}
-        widest_own == IF own_bytes = {} THEN 0 ELSE CHOOSE own_total \in own_bytes : \A other_total \in own_bytes : own_total >= other_total
+        InstructionOwnOf(named_member) == ActiveBytesOf({own_slot \in member_slots : target_member[own_slot] = named_member})
+        InstructionForForksOf(named_member) == ActiveBytesOf({own_slot \in instruction_fork_slots : target_member[own_slot] = named_member})
+        instruction_snapshots == {InstructionOwnOf(named_member) : named_member \in instruction_member_names} \cup {InstructionOwnOf(name_pair[1]) + InstructionForForksOf(name_pair[2]) : name_pair \in {candidate_pair \in instruction_member_names \X instruction_member_names : candidate_pair[1] # candidate_pair[2]}}
+        widest_own == IF instruction_snapshots = {} THEN 0 ELSE CHOOSE snapshot_size \in instruction_snapshots : \A other_size \in instruction_snapshots : snapshot_size >= other_size
     IN ActiveBytesOf(DOMAIN slot_effect \ member_slots) + widest_own
 "#;
-        let write_slots = r#"mob_machine_instruction_write_snapshot_slots(target_kind, target_member, slot, kind, member) ==
+        let write_slots = r"mob_machine_instruction_write_snapshot_slots(target_kind, target_member, slot, kind, member) ==
     LET kind_after == MapSet(target_kind, slot, kind)
         member_after == IF member = None THEN [other_slot \in DOMAIN target_member \ {slot} |-> target_member[other_slot]] ELSE MapSet(target_member, slot, member.value)
-        member_slots == {candidate_slot \in DOMAIN kind_after : kind_after[candidate_slot] = "Member" /\ candidate_slot \in DOMAIN member_after}
-    IN IF slot \in member_slots
-       THEN Cardinality(DOMAIN kind_after \ member_slots) + Cardinality({own_slot \in member_slots : member_after[own_slot] = member_after[slot]})
-       ELSE mob_machine_instruction_widest_snapshot_slots(kind_after, member_after)
-"#;
+    IN mob_machine_instruction_widest_snapshot_slots(kind_after, member_after)
+";
         let write_bytes = r#"mob_machine_instruction_write_snapshot_active_bytes(slot_effect, slot_bytes, target_kind, target_member, slot, body_bytes, kind, member) ==
     LET effect_after == MapSet(slot_effect, slot, "Active")
         bytes_after == MapSet(slot_bytes, slot, body_bytes)
         kind_after == MapSet(target_kind, slot, kind)
         member_after == IF member = None THEN [other_slot \in DOMAIN target_member \ {slot} |-> target_member[other_slot]] ELSE MapSet(target_member, slot, member.value)
-        member_slots == {candidate_slot \in DOMAIN effect_after : candidate_slot \in DOMAIN kind_after /\ kind_after[candidate_slot] = "Member" /\ candidate_slot \in DOMAIN member_after}
-        ActiveBytesOf(instruction_slots) == session_document_instruction_active_bytes([instruction_slot \in instruction_slots |-> effect_after[instruction_slot]], bytes_after)
-    IN IF slot \in member_slots
-       THEN ActiveBytesOf(DOMAIN effect_after \ member_slots) + ActiveBytesOf({own_slot \in member_slots : member_after[own_slot] = member_after[slot]})
-       ELSE mob_machine_instruction_widest_snapshot_active_bytes(effect_after, bytes_after, kind_after, member_after)
+    IN mob_machine_instruction_widest_snapshot_active_bytes(effect_after, bytes_after, kind_after, member_after)
 "#;
+
         for (native, definition) in [
             (
                 "mob_machine_instruction_widest_snapshot_slots",
@@ -12691,11 +12693,13 @@ impl<'a> MachineTlaCompiler<'a> {
         // the session document's slot-set natives (the body bytes of a slot
         // set's Active slots), rendered for this machine too.
         self.render_session_document_native_helpers(out);
-        // The widest member snapshot of the records: the shared records
-        // (every slot that is not member-targeted) plus the most any one
-        // member holds of its own. A slot is member-targeted while its kind
-        // is Member and the member map names it (the Rust authorities
-        // agree).
+        // The widest member snapshot the records allow: the shared records
+        // (every slot that is not member-targeted) plus the most one name
+        // holds of its own, alone or together with what another name's
+        // records pass to that name's forks (any name may be seated as a
+        // fork of another). A slot is member-targeted while its kind is
+        // Member or MemberAndForks and the member map names it (the Rust
+        // authorities agree).
         writeln!(
             out,
             "{}(target_kind, target_member) ==",
@@ -12704,15 +12708,31 @@ impl<'a> MachineTlaCompiler<'a> {
         .expect("write to string");
         pushln!(
             out,
-            "    LET member_slots == {{candidate_slot \\in DOMAIN target_kind : target_kind[candidate_slot] = \"Member\" /\\ candidate_slot \\in DOMAIN target_member}}"
+            "    LET member_slots == {{candidate_slot \\in DOMAIN target_kind : target_kind[candidate_slot] \\in {{\"Member\", \"MemberAndForks\"}} /\\ candidate_slot \\in DOMAIN target_member}}"
         );
         pushln!(
             out,
-            "        own_counts == {{Cardinality({{own_slot \\in member_slots : target_member[own_slot] = target_member[named_slot]}}) : named_slot \\in member_slots}}"
+            "        instruction_fork_slots == {{candidate_slot \\in member_slots : target_kind[candidate_slot] = \"MemberAndForks\"}}"
         );
         pushln!(
             out,
-            "        widest_own == IF own_counts = {{}} THEN 0 ELSE CHOOSE own_count \\in own_counts : \\A other_count \\in own_counts : own_count >= other_count"
+            "        instruction_member_names == {{target_member[named_slot] : named_slot \\in member_slots}}"
+        );
+        pushln!(
+            out,
+            "        InstructionOwnOf(named_member) == Cardinality({{own_slot \\in member_slots : target_member[own_slot] = named_member}})"
+        );
+        pushln!(
+            out,
+            "        InstructionForForksOf(named_member) == Cardinality({{own_slot \\in instruction_fork_slots : target_member[own_slot] = named_member}})"
+        );
+        pushln!(
+            out,
+            "        instruction_snapshots == {{InstructionOwnOf(named_member) : named_member \\in instruction_member_names}} \\cup {{InstructionOwnOf(name_pair[1]) + InstructionForForksOf(name_pair[2]) : name_pair \\in {{candidate_pair \\in instruction_member_names \\X instruction_member_names : candidate_pair[1] # candidate_pair[2]}}}}"
+        );
+        pushln!(
+            out,
+            "        widest_own == IF instruction_snapshots = {{}} THEN 0 ELSE CHOOSE snapshot_size \\in instruction_snapshots : \\A other_size \\in instruction_snapshots : snapshot_size >= other_size"
         );
         pushln!(
             out,
@@ -12728,7 +12748,15 @@ impl<'a> MachineTlaCompiler<'a> {
         .expect("write to string");
         pushln!(
             out,
-            "    LET member_slots == {{candidate_slot \\in DOMAIN slot_effect : candidate_slot \\in DOMAIN target_kind /\\ target_kind[candidate_slot] = \"Member\" /\\ candidate_slot \\in DOMAIN target_member}}"
+            "    LET member_slots == {{candidate_slot \\in DOMAIN slot_effect : candidate_slot \\in DOMAIN target_kind /\\ target_kind[candidate_slot] \\in {{\"Member\", \"MemberAndForks\"}} /\\ candidate_slot \\in DOMAIN target_member}}"
+        );
+        pushln!(
+            out,
+            "        instruction_fork_slots == {{candidate_slot \\in member_slots : target_kind[candidate_slot] = \"MemberAndForks\"}}"
+        );
+        pushln!(
+            out,
+            "        instruction_member_names == {{target_member[named_slot] : named_slot \\in member_slots}}"
         );
         writeln!(
             out,
@@ -12738,22 +12766,28 @@ impl<'a> MachineTlaCompiler<'a> {
         .expect("write to string");
         pushln!(
             out,
-            "        own_bytes == {{ActiveBytesOf({{own_slot \\in member_slots : target_member[own_slot] = target_member[named_slot]}}) : named_slot \\in member_slots}}"
+            "        InstructionOwnOf(named_member) == ActiveBytesOf({{own_slot \\in member_slots : target_member[own_slot] = named_member}})"
         );
         pushln!(
             out,
-            "        widest_own == IF own_bytes = {{}} THEN 0 ELSE CHOOSE own_total \\in own_bytes : \\A other_total \\in own_bytes : own_total >= other_total"
+            "        InstructionForForksOf(named_member) == ActiveBytesOf({{own_slot \\in instruction_fork_slots : target_member[own_slot] = named_member}})"
+        );
+        pushln!(
+            out,
+            "        instruction_snapshots == {{InstructionOwnOf(named_member) : named_member \\in instruction_member_names}} \\cup {{InstructionOwnOf(name_pair[1]) + InstructionForForksOf(name_pair[2]) : name_pair \\in {{candidate_pair \\in instruction_member_names \\X instruction_member_names : candidate_pair[1] # candidate_pair[2]}}}}"
+        );
+        pushln!(
+            out,
+            "        widest_own == IF instruction_snapshots = {{}} THEN 0 ELSE CHOOSE snapshot_size \\in instruction_snapshots : \\A other_size \\in instruction_snapshots : snapshot_size >= other_size"
         );
         pushln!(
             out,
             "    IN ActiveBytesOf(DOMAIN slot_effect \\ member_slots) + widest_own"
         );
-        // The records of the widest snapshot that holds the written slot
-        // once a write is applied: the written member's snapshot for a
-        // member-targeted write, the widest of all for a shared one. The
-        // record maps the write leaves: the slot takes the write's kind, and
-        // names the write's member or no member (the Rust authorities
-        // agree, without building those maps).
+        // The records of the widest member snapshot once a write is applied:
+        // the widest snapshot of the record maps the write leaves, where the
+        // slot takes the write's kind and names the write's member or no
+        // member (the Rust authorities agree, without building those maps).
         writeln!(
             out,
             "{}(target_kind, target_member, slot, kind, member) ==",
@@ -12765,18 +12799,9 @@ impl<'a> MachineTlaCompiler<'a> {
             out,
             "        member_after == IF member = None THEN [other_slot \\in DOMAIN target_member \\ {{slot}} |-> target_member[other_slot]] ELSE MapSet(target_member, slot, member.value)"
         );
-        pushln!(
-            out,
-            "        member_slots == {{candidate_slot \\in DOMAIN kind_after : kind_after[candidate_slot] = \"Member\" /\\ candidate_slot \\in DOMAIN member_after}}"
-        );
-        pushln!(out, "    IN IF slot \\in member_slots");
-        pushln!(
-            out,
-            "       THEN Cardinality(DOMAIN kind_after \\ member_slots) + Cardinality({{own_slot \\in member_slots : member_after[own_slot] = member_after[slot]}})"
-        );
         writeln!(
             out,
-            "       ELSE {}(kind_after, member_after)",
+            "    IN {}(kind_after, member_after)",
             prefix("mob_machine_instruction_widest_snapshot_slots")
         )
         .expect("write to string");
@@ -12801,24 +12826,9 @@ impl<'a> MachineTlaCompiler<'a> {
             out,
             "        member_after == IF member = None THEN [other_slot \\in DOMAIN target_member \\ {{slot}} |-> target_member[other_slot]] ELSE MapSet(target_member, slot, member.value)"
         );
-        pushln!(
-            out,
-            "        member_slots == {{candidate_slot \\in DOMAIN effect_after : candidate_slot \\in DOMAIN kind_after /\\ kind_after[candidate_slot] = \"Member\" /\\ candidate_slot \\in DOMAIN member_after}}"
-        );
         writeln!(
             out,
-            "        ActiveBytesOf(instruction_slots) == {}([instruction_slot \\in instruction_slots |-> effect_after[instruction_slot]], bytes_after)",
-            prefix("session_document_instruction_active_bytes")
-        )
-        .expect("write to string");
-        pushln!(out, "    IN IF slot \\in member_slots");
-        pushln!(
-            out,
-            "       THEN ActiveBytesOf(DOMAIN effect_after \\ member_slots) + ActiveBytesOf({{own_slot \\in member_slots : member_after[own_slot] = member_after[slot]}})"
-        );
-        writeln!(
-            out,
-            "       ELSE {}(effect_after, bytes_after, kind_after, member_after)",
+            "    IN {}(effect_after, bytes_after, kind_after, member_after)",
             prefix("mob_machine_instruction_widest_snapshot_active_bytes")
         )
         .expect("write to string");

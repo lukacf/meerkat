@@ -587,10 +587,17 @@ impl MobActor {
         // reads them off the actor, and only when it mints the session, so
         // a wake that continues a session reads no journal row.
         let operator_instruction_bodies = self.operator_instructions.bodies.for_member(Vec::new());
-        let operator_instruction_member_rows = self
-            .operator_instructions
-            .bodies
-            .member_journal_reads(self.dsl_authority.state(), &identity);
+        let operator_instruction_member_rows = {
+            // The member is seated: its fork lineage root is MobMachine's.
+            let state = self.dsl_authority.state();
+            let lineage_root =
+                super::super::operator_instruction_delivery::member_lineage_root(state, &identity);
+            self.operator_instructions.bodies.member_journal_reads(
+                state,
+                &identity,
+                lineage_root.as_ref(),
+            )
+        };
         let fork_rule = self.fork_overlay_rule(&entry).await;
         // The overlay this process last built the member with, which the
         // member keeps (a released member, or a revival through its wake), as
@@ -1179,10 +1186,19 @@ impl MobActor {
             self.roll_back_member_wake(run, rollback);
             return;
         };
-        let rows = self
-            .operator_instructions
-            .bodies
-            .member_journal_reads(self.dsl_authority.state(), &run.identity);
+        let rows = {
+            // The member is seated: its fork lineage root is MobMachine's.
+            let state = self.dsl_authority.state();
+            let lineage_root = super::super::operator_instruction_delivery::member_lineage_root(
+                state,
+                &run.identity,
+            );
+            self.operator_instructions.bodies.member_journal_reads(
+                state,
+                &run.identity,
+                lineage_root.as_ref(),
+            )
+        };
         let shared = Arc::clone(&self.operator_instructions.delivery);
         let events = Arc::clone(&self.events);
         let identity = run.identity.clone();

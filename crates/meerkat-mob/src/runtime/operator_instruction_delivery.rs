@@ -191,17 +191,25 @@ impl OperatorInstructionBodies {
     }
 
     /// The journal rows `agent_identity`'s snapshot needs read: for each
-    /// Active member-targeted record that names it and whose body this
-    /// store locates, the slot key, the digest and the row's cursor. A
-    /// member holds few records of its own, whatever the mob holds.
+    /// Active member-targeted record whose body this store locates and
+    /// that names the member, or names its fork lineage root
+    /// (`lineage_root`, see [`member_lineage_root`]) and was written for
+    /// that member and its forks, the slot key, the digest and the row's
+    /// cursor. A member holds few records of its own and of its root's,
+    /// whatever the mob holds.
     pub(crate) fn member_journal_reads(
         &self,
         state: &mob_dsl::MobMachineState,
         agent_identity: &AgentIdentity,
+        lineage_root: Option<&AgentIdentity>,
     ) -> Vec<(String, String, u64)> {
         let mut reads = Vec::new();
         for (key, member) in &state.operator_instruction_target_member {
-            if member.0.as_str() != agent_identity.as_str()
+            let names_member = member.0.as_str() == agent_identity.as_str();
+            let names_root = lineage_root.is_some_and(|root| root.as_str() == member.0.as_str())
+                && state.operator_instruction_target_kind.get(key)
+                    == Some(&mob_dsl::InstructionTargetKind::MemberAndForks);
+            if !(names_member || names_root)
                 || state.operator_instruction_effect.get(key)
                     != Some(&mob_dsl::InstructionEffect::Active)
             {
@@ -219,9 +227,11 @@ impl OperatorInstructionBodies {
     }
 
     /// The bodies one member's snapshot reads: the held bodies of the shared
-    /// records, and `read`, the member's own bodies as its journal rows
-    /// hold them (slot key, digest, body). What a snapshot built off the
-    /// mob's actor is handed, so it carries no other member's body.
+    /// records, and `read`, the member-targeted bodies of its snapshot as
+    /// their journal rows hold them (slot key, digest, body: its own, and
+    /// for a fork its root's records for forks, as
+    /// [`Self::member_journal_reads`] names them). What a snapshot built
+    /// off the mob's actor is handed, so it carries no other member's body.
     pub(crate) fn for_member(&self, read: Vec<(String, String, Arc<str>)>) -> Self {
         let mut by_slot: BTreeMap<String, (String, RecordBody)> = self
             .by_slot
@@ -489,13 +499,42 @@ impl OperatorInstructionShell {
 // Snapshots
 // ---------------------------------------------------------------------------
 
+/// The fork lineage root MobMachine holds for `agent_identity`
+/// (`member_instruction_lineage`): the first member of the fork family a
+/// fork-derived member belongs to, `None` for a member that is not
+/// fork-derived. The one read every snapshot, body read and status row of a
+/// seated member takes its root from; the shell keeps no copy.
+pub(crate) fn member_lineage_root(
+    state: &mob_dsl::MobMachineState,
+    agent_identity: &AgentIdentity,
+) -> Option<AgentIdentity> {
+    state
+        .member_instruction_lineage
+        .get(&mob_dsl::AgentIdentity::from_domain(agent_identity))
+        .map(|root| AgentIdentity::from(root.0.as_str()))
+}
+
+/// The root a fork of `source` seated as `child` records: the root `source`
+/// itself holds in MobMachine when it is fork-derived, else `source`. A
+/// child whose root would be its own name has no lineage (the records for
+/// that name select it already).
+pub(crate) fn fork_lineage_root(
+    state: &mob_dsl::MobMachineState,
+    source: &AgentIdentity,
+    child: &AgentIdentity,
+) -> Option<AgentIdentity> {
+    let root = member_lineage_root(state, source).unwrap_or_else(|| source.clone());
+    (&root != child).then_some(root)
+}
+
 /// Whether the record of `key` in `state` selects `agent_identity`, a member
-/// of profile `member_profile`.
+/// of profile `member_profile` whose fork lineage root is `lineage_root`.
 fn record_selects(
     state: &mob_dsl::MobMachineState,
     key: &str,
     agent_identity: &AgentIdentity,
     member_profile: &str,
+    lineage_root: Option<&AgentIdentity>,
 ) -> bool {
     let Some(kind) = state.operator_instruction_target_kind.get(key) else {
         return false;
@@ -508,12 +547,13 @@ fn record_selects(
         .operator_instruction_target_member
         .get(key)
         .map(|member| member.0.as_str());
-    mob_dsl::operator_instruction_target_applies(
+    mob_dsl::operator_instruction_target_applies_to_lineage(
         *kind,
         profile,
         member,
         Some(member_profile),
         agent_identity.as_str(),
+        lineage_root.map(AgentIdentity::as_str),
     )
 }
 
@@ -560,33 +600,49 @@ fn machine_revision(key: &str, revision: u64) -> Result<InstructionRevision, Mob
     })
 }
 
-/// Whether the record of `key` in `state` is member-targeted at a member
-/// other than `agent_identity`: such a record is in that member's snapshot
-/// only.
+/// Whether the record of `key` in `state` is member-targeted and not in the
+/// snapshot of `agent_identity`, a member whose fork lineage root is
+/// `lineage_root`: a record for a member alone that names another member,
+/// or a record for a member and its forks that names neither the member
+/// nor its root. Such a record is in the snapshots of the members it names
+/// or reaches only.
 fn record_targets_another_member(
     state: &mob_dsl::MobMachineState,
     key: &str,
     agent_identity: &AgentIdentity,
+    lineage_root: Option<&AgentIdentity>,
 ) -> bool {
-    state.operator_instruction_target_kind.get(key) == Some(&mob_dsl::InstructionTargetKind::Member)
-        && state
-            .operator_instruction_target_member
-            .get(key)
-            .is_some_and(|member| member.0.as_str() != agent_identity.as_str())
+    let Some(member) = state.operator_instruction_target_member.get(key) else {
+        return false;
+    };
+    let names_member = member.0.as_str() == agent_identity.as_str();
+    match state.operator_instruction_target_kind.get(key) {
+        Some(mob_dsl::InstructionTargetKind::Member) => !names_member,
+        Some(mob_dsl::InstructionTargetKind::MemberAndForks) => {
+            !names_member && lineage_root.is_none_or(|root| root.as_str() != member.0.as_str())
+        }
+        _ => false,
+    }
 }
 
 /// One member's whole snapshot at the machine's generation: the shared
-/// records (every member's, or a profile's) and the member-targeted records
-/// that name this member, each with its body when it is Active and its
-/// target selects the member (Absent otherwise, so a member that left a
-/// profile's selector revokes the slot). Another member's member-targeted
-/// record is not in it: a record that moves to another member leaves this
-/// member's snapshot, and its session revokes a slot its target no longer
-/// names. So a snapshot's size follows the shared records and the member's
-/// own, never the number of other members that hold a record.
+/// records (every member's, or a profile's), the member-targeted records
+/// that name this member and, for a fork-derived member, the records
+/// written for its fork lineage root and its forks, each with its body when
+/// it is Active and its target selects the member (Absent otherwise, so a
+/// member that left a profile's selector revokes the slot). Another
+/// member's member-targeted record is not in it: a record that moves to
+/// another member leaves this member's snapshot, and its session revokes a
+/// slot its target no longer names. So a snapshot's size follows the shared
+/// records, the member's own and its root's records for forks, never the
+/// number of other members that hold a record.
 ///
-/// `bodies` holds the shared records' bodies. The member's own bodies come
-/// from it too when the caller resolved them
+/// `lineage_root` is the member's fork lineage root: MobMachine's own
+/// ([`member_lineage_root`]) for a seated member, and for a fork child that
+/// is not seated yet the root its seat records ([`fork_lineage_root`]).
+///
+/// `bodies` holds the shared records' bodies. The member-targeted bodies
+/// come from it too when the caller resolved them
 /// ([`OperatorInstructionBodies::for_member`]), or from `journal`, the mob's
 /// events in cursor order, at a start that has them in hand.
 pub(crate) fn member_instruction_record(
@@ -596,17 +652,18 @@ pub(crate) fn member_instruction_record(
     mob_id: &MobId,
     agent_identity: &AgentIdentity,
     member_profile: &str,
+    lineage_root: Option<&AgentIdentity>,
 ) -> Result<InstructionTargetRecord, MobError> {
     let mut slots = Vec::new();
     for (key, revision) in &state.operator_instruction_revision {
-        if record_targets_another_member(state, key, agent_identity) {
+        if record_targets_another_member(state, key, agent_identity, lineage_root) {
             continue;
         }
         let slot = machine_slot(key)?;
         let revision = machine_revision(key, *revision)?;
         let selected = state.operator_instruction_effect.get(key)
             == Some(&mob_dsl::InstructionEffect::Active)
-            && record_selects(state, key, agent_identity, member_profile);
+            && record_selects(state, key, agent_identity, member_profile, lineage_root);
         let body = if selected {
             let digest = state
                 .operator_instruction_digest
@@ -650,17 +707,33 @@ pub(crate) fn member_profile(
 }
 
 /// How many current members the record of `key` selects. A member-targeted
-/// record selects its one member when it is seated: it is looked up, not
-/// searched for among the seats.
+/// record selects its one member when it is seated, and one written for a
+/// member and its forks also the seated members whose fork lineage root
+/// that member is: both are looked up (the member in the seats, the forks
+/// in MobMachine's lineage), not searched for among the seats.
 pub(crate) fn matched_members(state: &mob_dsl::MobMachineState, key: &str) -> u64 {
-    if state.operator_instruction_target_kind.get(key)
-        == Some(&mob_dsl::InstructionTargetKind::Member)
-    {
-        return state
-            .operator_instruction_target_member
-            .get(key)
-            .is_some_and(|member| state.identity_to_runtime.contains_key(member))
-            .into();
+    let kind = state.operator_instruction_target_kind.get(key);
+    if matches!(
+        kind,
+        Some(
+            mob_dsl::InstructionTargetKind::Member | mob_dsl::InstructionTargetKind::MemberAndForks
+        )
+    ) {
+        let Some(member) = state.operator_instruction_target_member.get(key) else {
+            return 0;
+        };
+        let named = u64::from(state.identity_to_runtime.contains_key(member));
+        if kind != Some(&mob_dsl::InstructionTargetKind::MemberAndForks) {
+            return named;
+        }
+        let forks = state
+            .member_instruction_lineage
+            .iter()
+            .filter(|(fork, root)| {
+                *root == member && *fork != member && state.identity_to_runtime.contains_key(*fork)
+            })
+            .count() as u64;
+        return named + forks;
     }
     state
         .identity_to_runtime
@@ -670,14 +743,209 @@ pub(crate) fn matched_members(state: &mob_dsl::MobMachineState, key: &str) -> u6
                 .member_profile_names
                 .get(*identity)
                 .map_or("", String::as_str);
+            // A shared record: its target reads no lineage.
             record_selects(
                 state,
                 key,
                 &AgentIdentity::from(identity.0.as_str()),
                 profile,
+                None,
             )
         })
         .count() as u64
+}
+
+/// The widest member snapshot a mob's records allow once a write is applied,
+/// and what it is made of, in records or in Active body bytes: MobMachine's
+/// bound (`mob_machine_instruction_widest_of`), with the names it reads.
+///
+/// Any name may be seated as a fork of another, so the bound takes, over
+/// the names the member-targeted records name, the most one name holds of
+/// its own together with the most another name's records pass to its
+/// forks, and adds the shared records. A write MobMachine refuses for the
+/// slot limit or the Active byte budget is refused because this snapshot
+/// would be full; the refusal is the typed one, and the mob's log names
+/// the member and the make-up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WidestSnapshot {
+    /// The member whose snapshot would be the widest.
+    pub(crate) member: String,
+    /// What the shared records (every member's, or a profile's) count.
+    pub(crate) shared: u64,
+    /// What the member-targeted records that name the member count.
+    pub(crate) own: u64,
+    /// The other member whose records for its forks count the most, when
+    /// any does: the member's snapshot would hold them were it seated as a
+    /// fork of that member.
+    pub(crate) forks_of: Option<String>,
+    /// What that other member's records for its forks count.
+    pub(crate) from_forks: u64,
+}
+
+impl WidestSnapshot {
+    /// The whole snapshot: what the limit is held against.
+    pub(crate) fn total(&self) -> u64 {
+        self.shared
+            .saturating_add(self.own)
+            .saturating_add(self.from_forks)
+    }
+
+    /// The widest of `tallies` (per name: what it holds of its own, and how
+    /// much of that its forks take) over `shared`; `None` when no
+    /// member-targeted record names anyone (every snapshot is the shared
+    /// records).
+    fn of(shared: u64, tallies: &BTreeMap<&str, (u64, u64)>) -> Option<Self> {
+        let mut top: Option<(&str, u64)> = None;
+        let mut second: Option<(&str, u64)> = None;
+        for (name, (_, fork)) in tallies {
+            match top {
+                Some((_, most)) if *fork <= most => {
+                    if second.is_none_or(|(_, next)| *fork > next) {
+                        second = Some((*name, *fork));
+                    }
+                }
+                Some(previous) => {
+                    second = Some(previous);
+                    top = Some((*name, *fork));
+                }
+                None => top = Some((*name, *fork)),
+            }
+        }
+        let mut widest: Option<Self> = None;
+        for (name, (own, _)) in tallies {
+            let from_another = match top {
+                Some((top_name, _)) if top_name != *name => top,
+                Some(_) => second,
+                None => None,
+            };
+            let (forks_of, from_forks) = match from_another {
+                Some((other, count)) if count > 0 => (Some(other.to_owned()), count),
+                _ => (None, 0),
+            };
+            let candidate = Self {
+                member: (*name).to_owned(),
+                shared,
+                own: *own,
+                forks_of,
+                from_forks,
+            };
+            if widest
+                .as_ref()
+                .is_none_or(|widest| candidate.total() > widest.total())
+            {
+                widest = Some(candidate);
+            }
+        }
+        widest
+    }
+}
+
+/// The widest member snapshot, in records, once `slot` is written with
+/// `kind` and `member` over the records `state` holds (MobMachine's
+/// `mob_machine_instruction_write_snapshot_slots`, with its names).
+pub(crate) fn widest_snapshot_slots_after_write(
+    state: &mob_dsl::MobMachineState,
+    slot: &str,
+    kind: mob_dsl::InstructionTargetKind,
+    member: Option<&str>,
+) -> Option<WidestSnapshot> {
+    let mut shared = 0_u64;
+    let mut tallies = BTreeMap::<&str, (u64, u64)>::new();
+    let written = std::iter::once((member, kind));
+    let others = state
+        .operator_instruction_target_kind
+        .iter()
+        .filter(|(other, _)| other.as_str() != slot)
+        .map(|(other, other_kind)| {
+            (
+                state
+                    .operator_instruction_target_member
+                    .get(other)
+                    .map(|name| name.0.as_str()),
+                *other_kind,
+            )
+        });
+    for (record_member, record_kind) in written.chain(others) {
+        tally_record(
+            &mut shared,
+            &mut tallies,
+            record_member,
+            Some(record_kind),
+            1,
+        );
+    }
+    WidestSnapshot::of(shared, &tallies)
+}
+
+/// The widest member snapshot, in Active body bytes, once `slot` is written
+/// Active at `body_bytes` with `kind` and `member` over the records `state`
+/// holds (MobMachine's `mob_machine_instruction_write_snapshot_active_bytes`,
+/// with its names).
+pub(crate) fn widest_snapshot_active_bytes_after_write(
+    state: &mob_dsl::MobMachineState,
+    slot: &str,
+    body_bytes: u64,
+    kind: mob_dsl::InstructionTargetKind,
+    member: Option<&str>,
+) -> Option<WidestSnapshot> {
+    let mut shared = 0_u64;
+    let mut tallies = BTreeMap::<&str, (u64, u64)>::new();
+    let written = std::iter::once((member, Some(kind), body_bytes));
+    let others = state
+        .operator_instruction_effect
+        .iter()
+        .filter(|(other, effect)| {
+            other.as_str() != slot && **effect == mob_dsl::InstructionEffect::Active
+        })
+        .map(|(other, _)| {
+            (
+                state
+                    .operator_instruction_target_member
+                    .get(other)
+                    .map(|name| name.0.as_str()),
+                state.operator_instruction_target_kind.get(other).copied(),
+                state
+                    .operator_instruction_body_bytes
+                    .get(other)
+                    .copied()
+                    .unwrap_or(0),
+            )
+        });
+    for (record_member, record_kind, record_bytes) in written.chain(others) {
+        tally_record(
+            &mut shared,
+            &mut tallies,
+            record_member,
+            record_kind,
+            record_bytes,
+        );
+    }
+    WidestSnapshot::of(shared, &tallies)
+}
+
+/// Count one record into the tallies of a widest snapshot: a member-targeted
+/// record (kind Member or MemberAndForks, naming a member) under its
+/// member's own, and one for a member and its forks also under what the
+/// member's forks take; any other record as shared.
+fn tally_record<'a>(
+    shared: &mut u64,
+    tallies: &mut BTreeMap<&'a str, (u64, u64)>,
+    member: Option<&'a str>,
+    kind: Option<mob_dsl::InstructionTargetKind>,
+    count: u64,
+) {
+    match (member, kind) {
+        (Some(name), Some(mob_dsl::InstructionTargetKind::Member)) => {
+            let tally = tallies.entry(name).or_insert((0, 0));
+            tally.0 = tally.0.saturating_add(count);
+        }
+        (Some(name), Some(mob_dsl::InstructionTargetKind::MemberAndForks)) => {
+            let tally = tallies.entry(name).or_insert((0, 0));
+            tally.0 = tally.0.saturating_add(count);
+            tally.1 = tally.1.saturating_add(count);
+        }
+        _ => *shared = shared.saturating_add(count),
+    }
 }
 
 /// Whether a member's build carries its snapshot at birth: the mob has
@@ -700,8 +968,10 @@ pub(crate) fn birth_carries_member_instructions(
 /// owed delivery then answers "already recorded" without a write. A build
 /// that continues an existing session carries nothing (that member receives
 /// its snapshot by delivery), nor does a mob that never recorded a
-/// generation. `bodies` and `journal` are as
-/// [`member_instruction_record`] reads them.
+/// generation. `bodies`, `journal` and `lineage_root` are as
+/// [`member_instruction_record`] reads them: the member is not seated yet,
+/// so a fork's birth names the root its seat records.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn carry_member_instruction_birth(
     request: &mut meerkat_core::service::CreateSessionRequest,
     state: &mob_dsl::MobMachineState,
@@ -710,6 +980,7 @@ pub(crate) fn carry_member_instruction_birth(
     mob_id: &MobId,
     agent_identity: &AgentIdentity,
     member_profile: &str,
+    lineage_root: Option<&AgentIdentity>,
 ) -> Result<(), MobError> {
     if !birth_carries_member_instructions(request, state) {
         return Ok(());
@@ -728,6 +999,7 @@ pub(crate) fn carry_member_instruction_birth(
         mob_id,
         agent_identity,
         member_profile,
+        lineage_root,
     )?;
     carrier
         .record_instruction_target(record)
@@ -743,6 +1015,21 @@ pub(crate) fn carry_member_instruction_birth(
 // ---------------------------------------------------------------------------
 // Delivery
 // ---------------------------------------------------------------------------
+
+/// MobMachine's answer for the birth of a durable fork child, read in one
+/// actor step before the child is seated.
+#[derive(Debug)]
+pub(crate) struct ForkMemberInstructionBirth {
+    /// The fork lineage root the child's seat records ([`fork_lineage_root`]
+    /// over the fork's source), `None` when the child has no lineage. The
+    /// fork carries it to the seat, so the seat records the root this
+    /// snapshot was built with.
+    pub(crate) root: Option<AgentIdentity>,
+    /// The child's whole snapshot at the mob's generation for its committed
+    /// session, when the mob has recorded a generation: the fork records it
+    /// there before the seat.
+    pub(crate) delivery: Option<MemberInstructionDelivery>,
+}
 
 /// MobMachine's answer to one delivery request.
 #[derive(Debug)]
@@ -1821,15 +2108,21 @@ impl MobHandle {
                 }
             }
         };
-        // The records of the member's snapshot: the shared records and its
-        // own. Another member's member-targeted record is listed only while
-        // this member's session still records it or has it in effect (a
-        // record that moved away, until the session revokes it).
+        // The records of the member's snapshot: the shared records, its own
+        // and, for a fork-derived member, the records written for its fork
+        // lineage root and its forks (the root MobMachine holds for it).
+        // Any other member-targeted record is listed only while this
+        // member's session still records it or has it in effect (a record
+        // that moved away, until the session revokes it).
+        let lineage_root = member_lineage_root(state, identity);
         let slots = desired
             .iter()
             .filter(|record| match &record.target {
-                OperatorInstructionTarget::Member { agent_identity }
-                    if agent_identity != identity =>
+                OperatorInstructionTarget::Member {
+                    agent_identity,
+                    include_forks,
+                } if agent_identity != identity
+                    && !(*include_forks && lineage_root.as_ref() == Some(agent_identity)) =>
                 {
                     read.as_ref().is_some_and(|read| {
                         read.target
@@ -1847,6 +2140,7 @@ impl MobHandle {
                     record,
                     identity,
                     &profile,
+                    lineage_root.as_ref(),
                     read.as_ref(),
                     &delivery_state,
                     unborn,
@@ -1907,6 +2201,48 @@ impl MobHandle {
             reply_tx,
         })
         .await?
+    }
+
+    /// Record a durable fork child's operator instruction snapshot in its
+    /// committed session `fork_session_id`, before the child is seated, and
+    /// answer the fork lineage root its seat records.
+    ///
+    /// The actor reads MobMachine's state in one step: the root `child`
+    /// descends from as a fork of `source`, and, when the mob has recorded
+    /// a generation, the child's whole snapshot under that root (the shared
+    /// records, and the records written for the root and its forks). The
+    /// committed child has no live actor, so the session service records
+    /// the snapshot store-only, before the seat, and
+    /// the delivery MobMachine owes the child at its seat answers "already
+    /// recorded". A mob that never recorded a generation writes nothing.
+    pub(crate) async fn record_fork_member_instruction_birth(
+        &self,
+        source: &AgentIdentity,
+        child: &AgentIdentity,
+        profile_name: &ProfileName,
+        fork_session_id: &SessionId,
+    ) -> Result<Option<AgentIdentity>, MobError> {
+        let birth = self
+            .send_actor_command(|reply_tx| MobCommand::PrepareForkMemberInstructionBirth {
+                source: source.clone(),
+                child: child.clone(),
+                profile_name: profile_name.clone(),
+                fork_session_id: fork_session_id.clone(),
+                reply_tx,
+            })
+            .await??;
+        if let Some(delivery) = birth.delivery {
+            Arc::clone(&self.session_service)
+                .record_member_instruction_target(delivery)
+                .await
+                .map_err(|error| {
+                    MobError::Internal(format!(
+                        "the session of fork child {child} did not take its operator \
+                         instruction snapshot: {error}"
+                    ))
+                })?;
+        }
+        Ok(birth.root)
     }
 
     /// Feed what member sessions did with delivered snapshots back to
@@ -1996,18 +2332,22 @@ fn desired_records(
     Ok(desired)
 }
 
-/// One slot's status for one member.
+/// One slot's status for one member, whose fork lineage root is
+/// `lineage_root`.
 #[allow(clippy::too_many_arguments)]
 fn member_slot_status(
     record: &OperatorInstructionRecordStatus,
     identity: &AgentIdentity,
     profile: &str,
+    lineage_root: Option<&AgentIdentity>,
     read: Option<&SessionInstructionRead>,
     delivery: &MemberInstructionDeliveryState,
     unborn: bool,
     lowering: meerkat_core::InstructionLowering,
 ) -> MemberInstructionSlotStatus {
-    let selected = record.target.selects(identity, &ProfileName::from(profile));
+    let selected = record
+        .target
+        .selects_in_lineage(identity, profile, lineage_root);
     let desired = MemberInstructionSlotView {
         revision: record.revision,
         effect: if record.effect == meerkat_core::InstructionEffect::Active && selected {
@@ -2220,6 +2560,14 @@ mod tests {
     fn member(name: &str) -> OperatorInstructionTarget {
         OperatorInstructionTarget::Member {
             agent_identity: AgentIdentity::from(name),
+            include_forks: false,
+        }
+    }
+
+    fn member_and_forks(name: &str) -> OperatorInstructionTarget {
+        OperatorInstructionTarget::Member {
+            agent_identity: AgentIdentity::from(name),
+            include_forks: true,
         }
     }
 
@@ -2355,7 +2703,7 @@ mod tests {
                 mob_dsl::AgentIdentity::from_domain(&AgentIdentity::from(target)),
             );
         }
-        let reads = bodies.member_journal_reads(&state, &AgentIdentity::from("b"));
+        let reads = bodies.member_journal_reads(&state, &AgentIdentity::from("b"), None);
         assert_eq!(
             reads,
             vec![(slot_key("agent-b"), digest(own_b), 9)],
@@ -2363,7 +2711,7 @@ mod tests {
         );
         assert!(
             bodies
-                .member_journal_reads(&state, &AgentIdentity::from("z"))
+                .member_journal_reads(&state, &AgentIdentity::from("z"), None)
                 .is_empty(),
             "a member without a record of its own reads no row"
         );
@@ -2730,6 +3078,7 @@ mod tests {
                 &record,
                 &identity,
                 "worker",
+                None,
                 Some(&read),
                 &MemberInstructionDeliveryState::Current,
                 false,
@@ -2741,5 +3090,304 @@ mod tests {
                 "{lowering:?}"
             );
         }
+    }
+
+    /// A fork-derived member's snapshot holds the shared records, its own
+    /// and the records written for its fork lineage root and its forks,
+    /// with their bodies read from the root's journal rows; a record for
+    /// the root alone, a record for another member and its forks, and a
+    /// record for the fork between are not in it. The count of a record's
+    /// members follows the same lineage.
+    #[test]
+    fn a_forks_snapshot_holds_its_roots_records_for_forks() {
+        let shared = "Answer formally.";
+        let family = "Sign as the family of a.";
+        let root_alone = "Only a reads this.";
+        let between = "Only b reads this.";
+        let other = "The family of z signs otherwise.";
+        let own = "You are the fork c.";
+        let journal = vec![
+            committed_row(
+                3,
+                "tone",
+                1,
+                Some(shared),
+                OperatorInstructionTarget::Mob,
+                1,
+            ),
+            committed_row(4, "family", 1, Some(family), member_and_forks("a"), 2),
+            committed_row(5, "root-alone", 1, Some(root_alone), member("a"), 3),
+            committed_row(6, "between", 1, Some(between), member_and_forks("b"), 4),
+            committed_row(7, "other", 1, Some(other), member_and_forks("z"), 5),
+            committed_row(8, "own", 1, Some(own), member("c"), 6),
+        ];
+        let bodies = OperatorInstructionBodies::from_events(&journal);
+        assert_eq!(
+            bodies.held_body_bytes(),
+            shared.len(),
+            "a record for a member and its forks is located, never held"
+        );
+        let digest = |body: &str| InstructionContentDigest::for_body(body).as_str().to_owned();
+        let dsl = |name: &str| mob_dsl::AgentIdentity::from_domain(&AgentIdentity::from(name));
+        let mut state = mob_dsl::MobMachineState {
+            operator_instruction_generation: 6,
+            ..Default::default()
+        };
+        for event in &journal {
+            let MobEventKind::OperatorInstructionCommitted(committed) = &event.kind else {
+                unreachable!("the journal holds committed records only");
+            };
+            let key = committed.slot.machine_key();
+            let (kind, profile, member) = committed.target.machine_parts();
+            state.operator_instruction_revision.insert(key.clone(), 1);
+            state
+                .operator_instruction_effect
+                .insert(key.clone(), mob_dsl::InstructionEffect::Active);
+            state.operator_instruction_digest.insert(
+                key.clone(),
+                committed
+                    .content_sha256
+                    .as_ref()
+                    .expect("an Active record has a digest")
+                    .as_str()
+                    .to_owned(),
+            );
+            state
+                .operator_instruction_target_kind
+                .insert(key.clone(), kind);
+            if !profile.is_empty() {
+                state
+                    .operator_instruction_target_profile
+                    .insert(key.clone(), profile);
+            }
+            if let Some(member) = member {
+                state
+                    .operator_instruction_target_member
+                    .insert(key, dsl(&member));
+            }
+        }
+        // a is the root; b is a fork of a; c is a fork of b, so its root is
+        // a too.
+        for (name, generation) in [("a", 1), ("b", 1), ("c", 1)] {
+            let identity = AgentIdentity::from(name);
+            state.identity_to_runtime.insert(
+                dsl(name),
+                mob_dsl::AgentRuntimeId::from_domain(&crate::ids::AgentRuntimeId::new(
+                    identity,
+                    crate::ids::Generation::new(generation),
+                )),
+            );
+            state
+                .member_profile_names
+                .insert(dsl(name), "worker".to_string());
+        }
+        state.member_instruction_lineage.insert(dsl("b"), dsl("a"));
+        state.member_instruction_lineage.insert(dsl("c"), dsl("a"));
+        let c = AgentIdentity::from("c");
+        let root = member_lineage_root(&state, &c);
+        assert_eq!(root, Some(AgentIdentity::from("a")));
+        assert_eq!(
+            fork_lineage_root(&state, &AgentIdentity::from("b"), &AgentIdentity::from("d")),
+            Some(AgentIdentity::from("a")),
+            "a fork of a fork records the first member"
+        );
+        assert_eq!(
+            fork_lineage_root(&state, &AgentIdentity::from("b"), &AgentIdentity::from("a")),
+            None,
+            "a name seated as a fork of its own fork family has no lineage"
+        );
+
+        let mut reads = bodies.member_journal_reads(&state, &c, root.as_ref());
+        reads.sort();
+        assert_eq!(
+            reads,
+            vec![
+                (slot_key("family"), digest(family), 4),
+                (slot_key("own"), digest(own), 8),
+            ],
+            "the fork reads its own row and its root's row for forks"
+        );
+        assert_eq!(
+            bodies.member_journal_reads(&state, &c, None),
+            vec![(slot_key("own"), digest(own), 8)],
+            "without a lineage the member reads its own row only"
+        );
+
+        let record = member_instruction_record(
+            &state,
+            &bodies,
+            Some(&journal),
+            &MobId::from("mob"),
+            &c,
+            "worker",
+            root.as_ref(),
+        )
+        .expect("the fork's snapshot");
+        let slots: Vec<(String, Option<&str>)> = record
+            .slots
+            .iter()
+            .map(|slot| (slot.slot.key.to_string(), slot.body.as_deref()))
+            .collect();
+        assert_eq!(
+            slots,
+            vec![
+                ("family".to_string(), Some(family)),
+                ("own".to_string(), Some(own)),
+                ("tone".to_string(), Some(shared)),
+            ],
+            "the shared record, the fork's own and its root's record for forks, nothing else"
+        );
+        let plain = member_instruction_record(
+            &state,
+            &bodies,
+            Some(&journal),
+            &MobId::from("mob"),
+            &c,
+            "worker",
+            None,
+        )
+        .expect("the snapshot of a member that is not fork-derived");
+        assert!(
+            plain
+                .slots
+                .iter()
+                .all(|slot| slot.slot.key.as_str() != "family"),
+            "a member with no lineage is not under another member's record for forks"
+        );
+
+        assert_eq!(
+            matched_members(&state, &slot_key("family")),
+            3,
+            "the root and both forks of its family"
+        );
+        assert_eq!(
+            matched_members(&state, &slot_key("between")),
+            1,
+            "a record for a fork and its forks selects that fork only"
+        );
+        assert_eq!(matched_members(&state, &slot_key("root-alone")), 1);
+        assert_eq!(
+            matched_members(&state, &slot_key("other")),
+            0,
+            "nobody of that name or family is seated"
+        );
+        assert_eq!(matched_members(&state, &slot_key("tone")), 3);
+    }
+
+    /// The widest snapshot names the member whose snapshot a refused write
+    /// would fill and what it is made of. A member with 64 records of its
+    /// own beside another member's first record for forks names both: the
+    /// record for forks counts in the other member's snapshot. Bytes are
+    /// counted over the Active records the same way.
+    #[test]
+    fn the_widest_snapshot_names_the_full_member_and_the_member_whose_forks_count() {
+        let dsl = |name: &str| mob_dsl::AgentIdentity::from_domain(&AgentIdentity::from(name));
+        let mut state = mob_dsl::MobMachineState::default();
+        for index in 0..64 {
+            let key = slot_key(&format!("own-{index}"));
+            state
+                .operator_instruction_target_kind
+                .insert(key.clone(), mob_dsl::InstructionTargetKind::Member);
+            state
+                .operator_instruction_target_member
+                .insert(key.clone(), dsl("b"));
+            state
+                .operator_instruction_effect
+                .insert(key.clone(), mob_dsl::InstructionEffect::Active);
+            state.operator_instruction_body_bytes.insert(key, 10);
+        }
+        let shared = slot_key("tone");
+        state
+            .operator_instruction_target_kind
+            .insert(shared.clone(), mob_dsl::InstructionTargetKind::Mob);
+        state
+            .operator_instruction_effect
+            .insert(shared.clone(), mob_dsl::InstructionEffect::Active);
+        state.operator_instruction_body_bytes.insert(shared, 7);
+
+        // The first record for a and its forks: b's snapshot would hold it
+        // were b seated as a fork of a.
+        let widest = widest_snapshot_slots_after_write(
+            &state,
+            &slot_key("family"),
+            mob_dsl::InstructionTargetKind::MemberAndForks,
+            Some("a"),
+        )
+        .expect("member-targeted records name members");
+        assert_eq!(
+            widest,
+            WidestSnapshot {
+                member: "b".to_string(),
+                shared: 1,
+                own: 64,
+                forks_of: Some("a".to_string()),
+                from_forks: 1,
+            }
+        );
+        assert_eq!(widest.total(), 66);
+
+        // The same record for a alone passes nothing to forks: the widest
+        // snapshot is b's own.
+        let widest = widest_snapshot_slots_after_write(
+            &state,
+            &slot_key("family"),
+            mob_dsl::InstructionTargetKind::Member,
+            Some("a"),
+        )
+        .expect("member-targeted records name members");
+        assert_eq!(
+            (
+                widest.member.as_str(),
+                widest.forks_of.as_deref(),
+                widest.total()
+            ),
+            ("b", None, 65)
+        );
+
+        // A rewrite of one of b's own slots is counted once, as written.
+        let widest = widest_snapshot_slots_after_write(
+            &state,
+            &slot_key("own-0"),
+            mob_dsl::InstructionTargetKind::MemberAndForks,
+            Some("b"),
+        )
+        .expect("member-targeted records name members");
+        assert_eq!((widest.own, widest.from_forks, widest.total()), (64, 0, 65));
+
+        // Active bytes: b's 640 of its own, the shared 7, and the 100 the
+        // written record for a passes to forks.
+        let widest = widest_snapshot_active_bytes_after_write(
+            &state,
+            &slot_key("family"),
+            100,
+            mob_dsl::InstructionTargetKind::MemberAndForks,
+            Some("a"),
+        )
+        .expect("member-targeted records name members");
+        assert_eq!(
+            widest,
+            WidestSnapshot {
+                member: "b".to_string(),
+                shared: 7,
+                own: 640,
+                forks_of: Some("a".to_string()),
+                from_forks: 100,
+            }
+        );
+
+        // Shared records only: no member is named.
+        let mut shared_only = mob_dsl::MobMachineState::default();
+        shared_only
+            .operator_instruction_target_kind
+            .insert(slot_key("tone"), mob_dsl::InstructionTargetKind::Mob);
+        assert_eq!(
+            widest_snapshot_slots_after_write(
+                &shared_only,
+                &slot_key("style"),
+                mob_dsl::InstructionTargetKind::Profile,
+                None,
+            ),
+            None
+        );
     }
 }

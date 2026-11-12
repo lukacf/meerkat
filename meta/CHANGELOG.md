@@ -637,6 +637,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `HeldBootstrapRefusal::ExistingContinuity`, as the add of a configured
   identity that has continuity does. It answered `IdentityStoreOwned`.
 
+- `meta/instruction_status` shows the fork scope of a record: a member
+  target written for the member and the forks of its fork family (Meerkat's
+  `include_forks`, new in Core 0.9.15) reads `{"kind": "member",
+  "identity": ..., "include_forks": true}`. A record for the member alone
+  reads as before, without the member.
+
 ### Fixed
 
 - An agent created at run time that the mob's start seats before the
@@ -824,6 +830,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   closes that window). A change of a paused schedule's target through
   Meerkat's own methods (its prompt, for one) makes its pause a pause by
   name: the agent's unarchive does not resume it.
+
+- `meta/set_instruction` cannot write a record for a member and its forks:
+  it writes for the member alone and refuses a target that carries
+  `include_forks`. `meta/instruction_status` shows the scope of a record
+  written elsewhere. A Rust host that embeds Meta sets the scope through
+  the mob handle's `set_operator_instruction`.
 
 - An agent whose instructions were edited while the gateway was down, whose
   conversation was built through 0.9.14 and that has no instruction record

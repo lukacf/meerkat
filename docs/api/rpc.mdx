@@ -1467,17 +1467,49 @@ A mob member's session belongs to its mob: `session/set_instruction` and
 the roster: a member added later, or moved to the profile later, receives the
 record then, and a target that names a missing profile or member selects
 nobody. A member's snapshot is the shared records (targeted at every member
-or at a profile) plus the member-targeted records that name it; another
-member's member-targeted record is not in it. The limits bound one member's
+or at a profile) plus the member-targeted records that name it (and, for a
+fork, the records written for the first member of its fork family and its
+forks, see `include_forks` below); any other
+member-targeted record is not in it. The limits bound one member's
 snapshot: at most 64 records and 1 MiB of Active bodies, the shared records
 and the member's own together (`slot_limit_exceeded`,
 `active_set_budget_exceeded`). A mob therefore holds a member-targeted
 record for each of any number of members, while the shared records, which
 are in every snapshot, stay within 64 and 1 MiB. The limits count a
 member-targeted record under the member it names, seated or not, and a
-shared record must fit beside the most any one name holds; a refused shared
+shared record must fit beside the most any one name holds (and beside what
+another name's records pass to its forks); a refused shared
 write does not name that member (the status read's `desired` list shows each
 record's target).
+
+A member target may carry `include_forks`
+(`{"kind":"member","agent_identity":"worker-1","include_forks":true}`; a
+boolean, false when absent and left out of every answer when false). The
+record then follows the member's fork family from its root: written for a
+member that is not itself a fork it selects that member and every fork
+below it, forks of forks included; written for a member that is itself a
+fork it selects that member only (a fork of a fork follows the records
+written for the first member of its family). The family's root is a name,
+as a member target is: its forks keep following the records written for
+that name after the root is removed, so a record written with
+`include_forks` for a new member seated under that name also reaches the
+earlier member's forks. A
+selected durable fork's snapshot, with the record, is recorded before its
+seat (a helper fork is born with it), a higher revision and the revoke
+reach a seated fork as entries appended at its next fresh run start, and
+the fork's row of `mob/instruction_status` lists the record (each member's
+row lists the records of its snapshot; the write's `matched_members` counts
+the seated members the record selects).
+Without it a member-targeted record is its member's alone and a fork runs
+without it. Such a record counts in the snapshot of every other name too,
+so it is refused when it would not fit beside the most another name holds
+(a member that holds 64 records of its own blocks every such write for
+another member); the refusal does not name that member, the mob's log does
+(a warning at the refused write names the member whose snapshot would be
+full and what fills it, or says that the shared records alone fill every
+snapshot).
+See [operator instructions in the mobs guide](/guides/mobs#operator-instructions)
+for the fork routes and what a fork's model reads.
 
 <CodeGroup>
 ```json Request
@@ -1516,7 +1548,9 @@ absent; `next_offset` names the next page), optionally for one `namespace`,
 (`live`, `dormant` or `unborn`), its `delivery` (the `recorded_generation`,
 and `state` `current`, `owed` with the `generation` and the `last_failure`,
 or `blocked` with a `reason`), per slot of its snapshot (the shared records
-and the member-targeted records that name it, plus a record that moved to
+and the member-targeted records that name it, for a fork also the records
+written with `include_forks` for the first member of its fork family, plus
+a record that moved to
 another member until the member's session has revoked it; for a member whose
 session the read does not reach, such a record leaves its slots at once and
 its `delivery` reads `owed` until the new snapshot is recorded) the `desired`,

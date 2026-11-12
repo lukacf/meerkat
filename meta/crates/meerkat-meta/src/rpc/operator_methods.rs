@@ -547,13 +547,21 @@ struct InstructionStatusParams {
 }
 
 /// A record's target as Meta's host verbs name it: a member target names the
-/// member's Meta identity.
+/// member's Meta identity, and carries Meerkat's fork scope when the record
+/// was written for the member and the forks of its fork family (left out
+/// when false, so a record for the member alone reads as it always did).
 #[derive(Debug, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum InstructionTargetView {
     Mob,
-    Profile { profile: String },
-    Member { identity: String },
+    Profile {
+        profile: String,
+    },
+    Member {
+        identity: String,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        include_forks: bool,
+    },
 }
 
 impl From<meerkat_contracts::WireInstructionTarget> for InstructionTargetView {
@@ -563,10 +571,17 @@ impl From<meerkat_contracts::WireInstructionTarget> for InstructionTargetView {
             meerkat_contracts::WireInstructionTarget::Profile { profile } => {
                 Self::Profile { profile }
             }
-            meerkat_contracts::WireInstructionTarget::Member { agent_identity } => Self::Member {
+            // Meta's status view names a member target by its Meta identity
+            // and shows the record's fork scope as Meerkat holds it. Meta's
+            // own write verb cannot set the scope.
+            meerkat_contracts::WireInstructionTarget::Member {
+                agent_identity,
+                include_forks,
+            } => Self::Member {
                 identity: crate::member_comms_id::durable_identity_for_roster_member(
                     &agent_identity,
                 ),
+                include_forks,
             },
         }
     }
@@ -818,10 +833,13 @@ pub(super) async fn handle_set_instruction(
                 Ok(resolved) => resolved,
                 Err(response) => return *response,
             };
+            // The host verb names one agent's own instructions: the record
+            // is that member's alone.
             meerkat_mob::OperatorInstructionTarget::Member {
                 agent_identity: crate::member_comms_id::roster_member_id_for_identity(
                     resolved.identity.as_str(),
                 ),
+                include_forks: false,
             }
         }
     };

@@ -1777,6 +1777,7 @@ async fn a_dormant_resume_seat_binds_the_hosts_session_at_the_seat() {
 fn member_target(identity: &AgentIdentity) -> OperatorInstructionTarget {
     OperatorInstructionTarget::Member {
         agent_identity: identity.clone(),
+        include_forks: false,
     }
 }
 

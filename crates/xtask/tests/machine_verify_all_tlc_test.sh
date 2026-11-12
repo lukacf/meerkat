@@ -1195,33 +1195,52 @@ if run_part audits-h; then
 fi
 
 # The MobMachine operator-instruction region (the mob's desired records, the
-# owed computation and each member's delivery facts: owed, recorded,
-# blocked) is empty in the MobMachine ci sweep, whose AgentIdentityValues
+# owed computation, each member's delivery facts: owed, recorded,
+# blocked, and the fork lineage a record written for a member and its forks
+# follows) is empty in the MobMachine ci sweep, whose AgentIdentityValues
 # are {}, so its member arms and member invariants hold there only
 # vacuously. A hand-written audit over the same generated model
-# (operator_instruction_delivery_audit.tla) checks two runs over their whole
+# (operator_instruction_delivery_audit.tla) checks three runs over their whole
 # reachable space under a mob generation bound and a VIEW without the step
-# and topology counters: the write run (two bound Dormant members under two
+# and topology counters and the identity life marker: the write run (two
+# bound Dormant members under two
 # profiles; every write, revoke, preparation, record and refusal arm its
-# domains reach for a mob, a profile and each of the two members as a member
-# target, so a record also moves from one member to the other) and the seat run
+# domains reach for a mob, a profile, each of the two members as a member
+# target and each as a member-and-forks target, so a record also moves from
+# one member to the other, the replay of a record or its revoke, and either
+# member's fork lineage recorded with the other as its root), the seat run
 # (two identities seated, bound, made unborn seats, born, retired by a
 # releasing retire and unseated around writes, with the release verdict of
-# their sessions). Beside every generated invariant it checks that a
-# committed write owes the new generation to exactly the members the slot's
-# old or new target selects, a seat owes the mob's generation, an unseat
+# their sessions, their fork lineage and the end of an unseated identity's
+# life) and the fork run (three identities seated, unseated and seated again
+# as a second incarnation around a
+# member target and two member-and-forks targets, any of them recorded as a
+# fork of any other, so two forks of one member, a root that itself holds an
+# entry and a member that is neither the
+# record's member nor its fork). Beside every generated invariant it checks
+# that a committed write, revoke or replay owes the new generation to exactly
+# the members the slot's old or new target selects (a record for a member
+# and its forks selects the member and every member whose lineage root it
+# is), a seat owes the mob's generation, an unseat
 # leaves no delivery fact, a delivery is prepared only for an owed, bound,
-# born member (a placed member as a local one), and no region step touches
+# born member (a placed member as a local one), a lineage record writes the
+# root it is given and no other entry (a repeated one changes nothing), owes
+# its member the mob's generation and is admitted
+# only before the member's session recorded a snapshot, the end of an
+# identity leaves it no lineage entry, no other step (a second seat of the
+# same name among them) changes an entry, and no region step touches
 # residency or wakes. It
 # first checks that the generated model defines every arm it drives,
-# requires each run's covered arms to fire and its twelve witnesses reached
-# (among them a retiring member's release, after its retire unbound it, and
-# a member-to-member retarget that owes both members), one
-# run each, and with --mutants refuses five seeded defects, each by the
+# requires each run's covered arms to fire and its twenty-four witnesses
+# reached
+# (among them a retiring member's release, after its retire unbound it,
+# a member-to-member retarget that owes both members, a fork owed while
+# the member it descends from is not seated, and a fork seated again that a
+# record for its root owes), one
+# run each, and with --mutants refuses seventeen seeded defects, each by the
 # property it targets run as the only property, and requires a live-only
 # delivery and a bound-only release verdict to leave their witnesses
-# unreachable. No run uses -continue. Not yet measured; it joins this shard
-# as the lightest one measured locally.
+# unreachable. No run uses -continue.
 operator_instruction_delivery_audit="${workspace_root}/specs/machines/mob_machine/operator_instruction_delivery_audit.sh"
 if [[ ! -x "${operator_instruction_delivery_audit}" ]]; then
   echo "error: operator-instruction delivery audit runner is missing from workspace runfiles: ${operator_instruction_delivery_audit}" >&2
@@ -1660,11 +1679,15 @@ run_machine_verify() {
 # audits-g = member residency's whole-space runs (--part spaces), alone: the
 # audit 473-627, the shard 605-630 s;
 # audits-h = input controller hold with --mutants 126-192, the MobMachine
-# operator-instruction delivery audit with --mutants 82-134, the
+# operator-instruction delivery audit with --mutants 269 with its fork
+# run (90207 states, about 66 s of it), its lineage witnesses and mutants
+# (measured once locally with 8 TLC workers on a loaded host; 82-134 before
+# them), the
 # SessionDocumentMachine instruction boundary audit with --mutants 41-70 and
 # activation-body retirement audit with --mutants 15-23, and the
 # ScheduleLifecycleMachine superseded-ack retention audit with --mutants
-# 7-11: 389-445 s;
+# 7-11: 389-445 s before the delivery audit's fork run, which adds about
+# 135-190 s (the shard is not measured again with it);
 # audits-i = member residency's witness runs (--part witnesses), alone: the
 # audit 346-542, the shard 357-565 s;
 # audits-j = durable decision with --mutants, alone: the audit 182-372, the

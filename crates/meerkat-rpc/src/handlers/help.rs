@@ -88,6 +88,7 @@ fn help_create_session_params(
         enable_workgraph: Some(false),
         budget_limits: None,
         provider_params: None,
+        reasoning_effort: None,
         auth_binding: None,
         preload_skills: None,
         skill_refs: None,

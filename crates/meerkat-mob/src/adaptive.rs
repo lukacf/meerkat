@@ -351,7 +351,8 @@ pub struct FinishResult {
 /// So is the provider-neutral reasoning effort level
 /// (`provider_params.reasoning_effort`), for the same reason: a decision
 /// that carries it anyway is parsed and judged by the member's build like
-/// any other provider params.
+/// any other provider params. And so is the `reasoning_effort` resume
+/// override that makes a profile decide that level on resume.
 #[cfg(feature = "schema")]
 pub fn layer_decision_schema() -> Result<serde_json::Value, serde_json::Error> {
     let mut schema = serde_json::to_value(schemars::schema_for!(LayerDecision))?;
@@ -448,6 +449,14 @@ pub fn layer_decision_schema() -> Result<serde_json::Value, serde_json::Error> {
             .and_then(serde_json::Value::as_object_mut)
     {
         definitions.remove("EffortLevel");
+    }
+    // Nor the resume override that makes a profile decide that level: the
+    // released vocabulary is `model`, `provider` and `provider_params`.
+    if let Some(fields) = schema
+        .pointer_mut("/$defs/ResumeOverrideField/oneOf")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        fields.retain(|field| field["const"].as_str() != Some("reasoning_effort"));
     }
     Ok(schema)
 }

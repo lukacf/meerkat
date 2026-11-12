@@ -112,6 +112,13 @@ pub struct RestCreateSessionRequest {
     /// config). Parsed fail-closed at the wire boundary (K2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_params: Option<crate::wire::runtime::WireProviderParamsOverride>,
+    /// The session's provider-neutral reasoning effort level: `none`,
+    /// `minimal`, `low`, `medium`, `high`, `xhigh` or `max` (one spelling
+    /// each). The same setting as `provider_params.reasoning_effort`; a
+    /// request that gives both must give the same level. A level the model
+    /// or its route does not accept is refused before any provider request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<meerkat_core::model_profile::capabilities::EffortLevel>,
     /// Skills to preload into the system prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preload_skills: Option<Vec<SkillKey>>,
@@ -157,6 +164,16 @@ pub struct RestContinueSessionRequest {
     /// Omit to inherit the current/persisted session value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub structured_output_retries: Option<u32>,
+    /// Set, clear, or keep the session's provider-neutral reasoning effort
+    /// level from this message on: a level (or `{"action":"set","value":
+    /// <level>}`) sets it, `{"action":"clear"}` removes it, and omission
+    /// keeps the level the session recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<
+        crate::wire::runtime::WireTurnMetadataOverride<
+            meerkat_core::model_profile::capabilities::EffortLevel,
+        >,
+    >,
     /// Keep session alive after turn completes, listening for comms messages.
     /// None = inherit persisted session intent, Some(true) = enable,
     /// Some(false) = disable.

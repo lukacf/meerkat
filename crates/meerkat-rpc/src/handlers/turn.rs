@@ -30,7 +30,8 @@ use meerkat_runtime::SessionServiceRuntimeExt;
 
 /// Parameters for `turn/start`.
 ///
-/// `provider_params` and `auth_binding` carry the canonical Inherit/Set/Clear
+/// `provider_params`, `reasoning_effort` and `auth_binding` carry the
+/// canonical Inherit/Set/Clear
 /// tri-state via [`TurnMetadataOverride`]: `None` keeps the session's current
 /// value, `Some(Set)` overrides it, `Some(Clear)` removes it. Unknown fields
 /// (including the retired `clear_*` split wire form) fail closed at the serde
@@ -80,6 +81,17 @@ pub struct StartTurnParams {
     pub provider_params: Option<
         TurnMetadataOverride<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
     >,
+    /// Set, clear, or keep the session's provider-neutral reasoning effort
+    /// level, for this turn and the turns after it: a level (or
+    /// `{"action":"set","value":<level>}`) sets it, `{"action":"clear"}`
+    /// removes it, and omission keeps it. It is its own field: a turn that
+    /// replaces or clears `provider_params` keeps the level unless it also
+    /// names this field, or its new params name the nested
+    /// `reasoning_effort` key. Since 0.9.15; an older server refuses the
+    /// field.
+    #[serde(default)]
+    pub reasoning_effort:
+        Option<TurnMetadataOverride<meerkat_core::model_profile::capabilities::EffortLevel>>,
     #[serde(default)]
     pub auth_binding: Option<TurnMetadataOverride<meerkat_core::AuthBindingRef>>,
     /// Host-attached injected context for this turn. Each entry materializes
@@ -115,9 +127,7 @@ impl StartTurnParams {
             output_schema: self.output_schema.take(),
             structured_output_retries: self.structured_output_retries,
             provider_params: self.provider_params.take(),
-            // `turn/start` has no parameter for the level; a level named
-            // inside `provider_params` rides there.
-            reasoning_effort: None,
+            reasoning_effort: self.reasoning_effort.take(),
             auth_binding: self.auth_binding.take(),
             transient_turn_context: self.transient_turn_context.take(),
         }
@@ -246,7 +256,8 @@ pub struct TurnOverrides {
     >,
     /// The session's provider-neutral reasoning effort level for this turn
     /// and the turns after it, as the runtime input's turn metadata carries
-    /// it. No `turn/start` parameter sets it.
+    /// it: the `reasoning_effort` parameter of `turn/start` and
+    /// `mob/turn_start`.
     pub reasoning_effort:
         Option<TurnMetadataOverride<meerkat_core::model_profile::capabilities::EffortLevel>>,
     pub auth_binding: Option<TurnMetadataOverride<meerkat_core::AuthBindingRef>>,
@@ -572,8 +583,7 @@ mod start_turn_params_tests {
             ),
             (None, None),
         ] {
-            let mut params = parse(value.clone())
-                .unwrap_or_else(|error| panic!("turn/start reads {value:?}: {error}"));
+            let mut params = parse(value.clone()).expect("turn/start reads the tri-state");
             let overrides = params.take_turn_overrides();
             assert_eq!(
                 overrides.reasoning_effort, expected,

@@ -325,3 +325,133 @@ fn resolve_session_provider_params_is_the_rule_the_identity_override_applies() {
         );
     }
 }
+
+/// A build folds a request's own `reasoning_effort` parameter into its
+/// params by the one rule, and a resumed build that claims the level decides
+/// the session's level with the result: the level it holds, or none.
+#[test]
+fn build_provider_params_fold_the_level_by_the_one_rule() {
+    use super::{resolve_build_provider_params, resolve_resumed_session_llm_identity};
+    use TurnMetadataOverride::{Clear, Set};
+
+    let plain = params(Some(0.7), None);
+    let with_high = params(Some(0.7), Some(EffortLevel::High));
+    for (request_params, field, folded) in [
+        (None, None, None),
+        (
+            None,
+            Some(Set(EffortLevel::High)),
+            Some(params(None, Some(EffortLevel::High))),
+        ),
+        (
+            Some(&plain),
+            Some(Set(EffortLevel::High)),
+            Some(with_high.clone()),
+        ),
+        // Both spellings, equal.
+        (
+            Some(&with_high),
+            Some(Set(EffortLevel::High)),
+            Some(with_high.clone()),
+        ),
+        // The nested key alone is the same setting.
+        (Some(&with_high), None, Some(with_high.clone())),
+        (Some(&plain), None, Some(plain.clone())),
+        (None, Some(Clear), None),
+        (Some(&plain), Some(Clear), Some(plain.clone())),
+    ] {
+        assert_eq!(
+            resolve_build_provider_params(request_params, field.clone()).unwrap(),
+            folded,
+            "{request_params:?} / {field:?}"
+        );
+    }
+
+    // On a resumed build: the durable session holds `medium` beside a
+    // temperature. A request that names the level claims it.
+    let durable = identity(Some(params(Some(0.2), Some(EffortLevel::Medium))));
+    let resumed = |request_params: Option<&ProviderParamsOverride>,
+                   field: Option<TurnMetadataOverride<EffortLevel>>,
+                   claims_params: bool| {
+        let mask = crate::service::ResumeOverrideMask {
+            provider_params: claims_params,
+            reasoning_effort: field.is_some(),
+            ..Default::default()
+        };
+        let candidate = identity(resolve_build_provider_params(request_params, field).unwrap());
+        resolve_resumed_session_llm_identity(candidate, &durable, &mask).provider_params
+    };
+    // A level replaces the durable one and keeps the other durable params.
+    assert_eq!(
+        resumed(None, Some(Set(EffortLevel::High)), false),
+        Some(params(Some(0.2), Some(EffortLevel::High)))
+    );
+    // The explicit clear removes it.
+    assert_eq!(
+        resumed(None, Some(Clear), false),
+        Some(params(Some(0.2), None))
+    );
+    // A resume that names neither keeps it.
+    assert_eq!(
+        resumed(None, None, false),
+        Some(params(Some(0.2), Some(EffortLevel::Medium)))
+    );
+    // A resume that replaces the params without the key keeps it.
+    assert_eq!(
+        resumed(Some(&plain), None, true),
+        Some(params(Some(0.7), Some(EffortLevel::Medium)))
+    );
+    // A resume that replaces the params and clears the level removes it.
+    assert_eq!(
+        resumed(Some(&plain), Some(Clear), true),
+        Some(plain.clone())
+    );
+    // A clear on a session whose params hold nothing else leaves no params.
+    let only_level = identity(Some(params(None, Some(EffortLevel::Medium))));
+    let mask = crate::service::ResumeOverrideMask {
+        reasoning_effort: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        resolve_resumed_session_llm_identity(
+            identity(resolve_build_provider_params(None, Some(Clear)).unwrap()),
+            &only_level,
+            &mask
+        )
+        .provider_params,
+        None
+    );
+}
+
+/// A request that names the level twice, as its own parameter and as the
+/// nested key of its params, must ask for one outcome.
+#[test]
+fn a_build_that_names_the_level_twice_must_agree() {
+    use super::resolve_build_provider_params;
+    use TurnMetadataOverride::{Clear, Set};
+
+    let nested_low = params(Some(0.7), Some(EffortLevel::Low));
+    let refused = resolve_build_provider_params(Some(&nested_low), Some(Set(EffortLevel::High)))
+        .expect_err("two different levels are refused");
+    assert_eq!(
+        refused,
+        SessionLlmIdentityOverrideError::ReasoningEffortSpellingsDisagree {
+            top_level: Some(EffortLevel::High),
+            nested: EffortLevel::Low,
+        }
+    );
+    assert_eq!(
+        refused.to_string(),
+        "reasoning_effort is 'high' but provider_params.reasoning_effort is 'low': set one of \
+         them, or the same level in both"
+    );
+    let refused = resolve_build_provider_params(Some(&nested_low), Some(Clear))
+        .expect_err("a clear beside a nested level is refused");
+    assert_eq!(
+        refused,
+        SessionLlmIdentityOverrideError::ReasoningEffortSpellingsDisagree {
+            top_level: None,
+            nested: EffortLevel::Low,
+        }
+    );
+}

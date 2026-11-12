@@ -991,6 +991,23 @@ pub fn build_capabilities_response(config: &Config) -> CapabilitiesResponse {
     }
 }
 
+/// The levels the provider-neutral `reasoning_effort` option accepts for a
+/// model on its provider's own API, as the resolver states them: the
+/// model's catalog row, intersected with what the direct route can express.
+/// `None` when no source states them (the self-hosted family, whose levels
+/// the operator declares, and a model id with no catalog row). Reads the
+/// compiled catalog only: no fetch, no session.
+fn direct_route_reasoning_effort_levels(
+    provider: meerkat_core::Provider,
+    model_id: &str,
+) -> Option<Vec<meerkat_core::model_profile::capabilities::EffortLevel>> {
+    let observation = meerkat_core::direct_route_observation(provider)?;
+    let catalog_row = meerkat_models::canonical().capabilities_for(provider, model_id);
+    meerkat_core::supported_reasoning_levels(provider, Some(&observation), catalog_row)
+        .supported()
+        .map(<[_]>::to_vec)
+}
+
 /// Build a [`meerkat_contracts::ModelsCatalogResponse`] from the resolved model registry.
 ///
 /// This is **not** a pure compiled-in snapshot: it reads the config-backed
@@ -1051,6 +1068,9 @@ pub fn build_models_catalog_response(
                                 header_value: header.header_value.clone(),
                             })
                             .collect(),
+                        reasoning_effort_levels: direct_route_reasoning_effort_levels(
+                            provider, &entry.id,
+                        ),
                     });
                     Ok(meerkat_contracts::CatalogModelEntry {
                         id: entry.id.clone(),

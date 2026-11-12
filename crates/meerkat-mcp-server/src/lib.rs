@@ -841,6 +841,15 @@ pub struct MeerkatRunInput {
     /// Provider-specific parameters (e.g., thinking config).
     #[serde(default)]
     pub provider_params: Option<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
+    /// The session's provider-neutral reasoning effort level: `none`,
+    /// `minimal`, `low`, `medium`, `high`, `xhigh` or `max`. Meerkat checks it
+    /// against the model on the route that serves the request and writes the
+    /// provider's own field; a level the model or route does not accept is
+    /// refused before any provider request. The same setting as
+    /// `provider_params.reasoning_effort`; an input that gives both must give
+    /// the same level.
+    #[serde(default)]
+    pub reasoning_effort: Option<meerkat_core::model_profile::capabilities::EffortLevel>,
     /// Explicit budget limits for this run.
     #[serde(default)]
     pub budget_limits: Option<BudgetLimitsInput>,
@@ -879,6 +888,40 @@ pub struct MeerkatRunInput {
     pub auth_binding: Option<meerkat_contracts::WireAuthBindingRef>,
 }
 
+/// The provider params a `meerkat_run` session's build seats: the input's
+/// params with its `reasoning_effort` level folded in by Core's one rule. An
+/// input that names the level twice with two different levels is refused.
+fn run_build_provider_params(
+    input: &MeerkatRunInput,
+) -> Result<Option<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>, ToolCallError> {
+    meerkat_core::resolve_build_provider_params(
+        input.provider_params.as_ref(),
+        input
+            .reasoning_effort
+            .map(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set),
+    )
+    .map_err(|error| ToolCallError::invalid_params(error.to_string()))
+}
+
+/// The provider params a `meerkat_resume` rebuild names. A resume that sets
+/// or clears `reasoning_effort` also claims the session's level
+/// (`ResumeOverrideMask::reasoning_effort`), so the rebuilt session holds
+/// that level, or none; a resume that names none keeps the recorded level,
+/// also when it replaces the other params. A clear beside params that name
+/// a level, and two different levels, are refused.
+fn resume_build_provider_params(
+    input: &MeerkatResumeInput,
+) -> Result<Option<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>, ToolCallError> {
+    use meerkat_contracts::wire::runtime::WireTurnMetadataOverride;
+    use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+    let level = input.reasoning_effort.clone().map(|level| match level {
+        WireTurnMetadataOverride::Set(level) => TurnMetadataOverride::Set(level),
+        WireTurnMetadataOverride::Clear => TurnMetadataOverride::Clear,
+    });
+    meerkat_core::resolve_build_provider_params(input.provider_params.as_ref(), level)
+        .map_err(|error| ToolCallError::invalid_params(error.to_string()))
+}
+
 fn mcp_resume_requires_rebuild(input: &MeerkatResumeInput) -> bool {
     !input.tool_results.is_empty()
         || !input.tools.is_empty()
@@ -888,6 +931,7 @@ fn mcp_resume_requires_rebuild(input: &MeerkatResumeInput) -> bool {
         || input.output_schema.is_some()
         || input.structured_output_retries.is_some()
         || input.provider_params.is_some()
+        || input.reasoning_effort.is_some()
         || input.hooks_override.is_some()
         || input.enable_builtins.is_some()
         || input
@@ -2171,6 +2215,17 @@ pub struct MeerkatResumeInput {
     /// Provider-specific parameters (e.g., thinking config).
     #[serde(default)]
     pub provider_params: Option<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
+    /// Set, clear, or keep the session's provider-neutral reasoning effort
+    /// level from this turn on: a level (`"high"`) sets it,
+    /// `{"action": "clear"}` removes it, and omitting the field keeps the
+    /// level the session recorded. It is its own setting: `provider_params`
+    /// that name no level keep the recorded one.
+    #[serde(default)]
+    pub reasoning_effort: Option<
+        meerkat_contracts::wire::runtime::WireTurnMetadataOverride<
+            meerkat_core::model_profile::capabilities::EffortLevel,
+        >,
+    >,
     /// Explicit budget limits for this resumed run.
     #[serde(default)]
     pub budget_limits: Option<BudgetLimitsInput>,
@@ -4470,6 +4525,7 @@ async fn handle_meerkat_help(
         enable_mob: Some(false),
         enable_web_search: Some(false),
         provider_params: None,
+        reasoning_effort: None,
         budget_limits: None,
         preload_skills: None,
         skill_refs: None,
@@ -4522,6 +4578,9 @@ async fn handle_meerkat_run_with_help_tools(
     )>,
 ) -> Result<Value, ToolCallError> {
     validate_public_peer_meta(input.peer_meta.as_ref()).map_err(ToolCallError::invalid_params)?;
+    // The level has one home, the build's provider params: both spellings
+    // of it must agree before anything is built.
+    let build_provider_params = run_build_provider_params(&input)?;
     let ingress = state.runtime_ingress_context();
     let keep_alive_override =
         resolve_keep_alive(input.keep_alive).map_err(ToolCallError::invalid_params)?;
@@ -4690,7 +4749,7 @@ async fn handle_meerkat_run_with_help_tools(
                 // `session` only claims the new session's id.
                 resume_session_intent: meerkat_core::SessionBuildIntent::Mint,
                 budget_limits: input.budget_limits.clone().map(Into::into),
-                provider_params: input.provider_params.clone(),
+                provider_params: build_provider_params.clone(),
                 call_timeout_override: meerkat_core::CallTimeoutOverride::Inherit,
                 external_tools,
                 // The session service decides hosting when it creates the actor.
@@ -4756,6 +4815,7 @@ async fn handle_meerkat_run_with_help_tools(
                     max_tokens: input.max_tokens.is_some(),
                     structured_output_retries: input.structured_output_retries.is_some(),
                     provider_params: input.provider_params.is_some(),
+                    reasoning_effort: input.reasoning_effort.is_some(),
                     preload_skills: input.preload_skills.is_some(),
                     keep_alive: keep_alive_override.is_some(),
                     comms_name: input.comms_name.is_some(),
@@ -4865,6 +4925,9 @@ async fn handle_meerkat_resume(
     request_context: Option<RequestContext>,
 ) -> Result<Value, ToolCallError> {
     validate_public_peer_meta(input.peer_meta.as_ref()).map_err(ToolCallError::invalid_params)?;
+    // The level a rebuild seats, by Core's one rule: a resume that names
+    // `reasoning_effort` claims the session's level below.
+    let resume_provider_params = resume_build_provider_params(&input)?;
     let ingress = state.runtime_ingress_context();
     // A ConfigError is a TRUE fault and must not be laundered into a default config.
     let config = state
@@ -5184,7 +5247,7 @@ async fn handle_meerkat_resume(
             resume_session: Some(session.clone()),
             resume_session_intent: meerkat_core::SessionBuildIntent::Resume,
             budget_limits: input.budget_limits.clone().map(Into::into),
-            provider_params: input.provider_params.clone(),
+            provider_params: resume_provider_params.clone(),
             call_timeout_override: meerkat_core::CallTimeoutOverride::Inherit,
             external_tools,
             // The session service decides hosting when it creates the actor.
@@ -5262,6 +5325,7 @@ async fn handle_meerkat_resume(
                 max_tokens: input.max_tokens.is_some(),
                 structured_output_retries: input.structured_output_retries.is_some(),
                 provider_params: input.provider_params.is_some(),
+                reasoning_effort: input.reasoning_effort.is_some(),
                 preload_skills: input.preload_skills.is_some(),
                 keep_alive: keep_alive_override.is_some(),
                 comms_name: input.comms_name.is_some(),
@@ -7518,6 +7582,7 @@ mod tests {
             enable_mob: None,
             enable_web_search: None,
             provider_params: None,
+            reasoning_effort: None,
             budget_limits: None,
             preload_skills: None,
             skill_refs: None,
@@ -9647,6 +9712,114 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
         }
     }
 
+    /// The level of `meerkat_run` reaches the build inside its provider
+    /// params, and `meerkat_resume` folds its tri-state the same way: a
+    /// level beside params that name none is added, a clear leaves the
+    /// params without one, and two different outcomes are refused.
+    #[test]
+    fn mcp_reasoning_effort_build_params_and_resume_claim() {
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let run = |input: serde_json::Value| {
+            let input: MeerkatRunInput = serde_json::from_value(input).expect("run input");
+            run_build_provider_params(&input)
+        };
+        let Ok(folded) = run(json!({
+            "prompt": "Hello",
+            "reasoning_effort": "high",
+            "provider_params": {"temperature": 0.2}
+        })) else {
+            panic!("a level beside other params is folded");
+        };
+        let folded = folded.expect("params");
+        assert_eq!(folded.reasoning_effort, Some(EffortLevel::High));
+        assert_eq!(folded.temperature, Some(0.2));
+        let Ok(nested) = run(json!({
+            "prompt": "Hello",
+            "reasoning_effort": "low",
+            "provider_params": {"reasoning_effort": "low"}
+        })) else {
+            panic!("the same level in both is accepted");
+        };
+        assert_eq!(
+            nested.and_then(|params| params.reasoning_effort),
+            Some(EffortLevel::Low)
+        );
+        let Ok(none) = run(json!({"prompt": "Hello"})) else {
+            panic!("an input without a level builds");
+        };
+        assert_eq!(none, None);
+        assert!(
+            run(json!({
+                "prompt": "Hello",
+                "reasoning_effort": "high",
+                "provider_params": {"reasoning_effort": "low"}
+            }))
+            .is_err(),
+            "two different levels are refused"
+        );
+
+        let resume = |reasoning_effort: Option<serde_json::Value>,
+                      provider_params: Option<serde_json::Value>| {
+            let mut input = json!({
+                "session_id": "01234567-89ab-cdef-0123-456789abcdef",
+                "prompt": "Continue"
+            });
+            if let Some(value) = reasoning_effort {
+                input["reasoning_effort"] = value;
+            }
+            if let Some(value) = provider_params {
+                input["provider_params"] = value;
+            }
+            let input: MeerkatResumeInput = serde_json::from_value(input).expect("resume input");
+            resume_build_provider_params(&input)
+        };
+        let level_of = |result: Result<
+            Option<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
+            ToolCallError,
+        >| match result {
+            Ok(params) => params.and_then(|params| params.reasoning_effort),
+            Err(_) => panic!("the resume input asks for one outcome"),
+        };
+        assert_eq!(
+            level_of(resume(Some(json!("medium")), None)),
+            Some(EffortLevel::Medium)
+        );
+        assert_eq!(
+            level_of(resume(Some(json!({"action": "clear"})), None)),
+            None
+        );
+        assert_eq!(level_of(resume(None, None)), None);
+        assert_eq!(
+            level_of(resume(
+                Some(json!("medium")),
+                Some(json!({"temperature": 0.5}))
+            )),
+            Some(EffortLevel::Medium)
+        );
+        // Params that name no level keep the recorded one: nothing is named.
+        assert_eq!(
+            level_of(resume(None, Some(json!({"temperature": 0.5})))),
+            None
+        );
+        assert!(
+            resume(
+                Some(json!({"action": "clear"})),
+                Some(json!({"reasoning_effort": "low"}))
+            )
+            .is_err(),
+            "a clear beside params that name a level is refused"
+        );
+        assert!(
+            resume(
+                Some(json!("high")),
+                Some(json!({"reasoning_effort": "low"}))
+            )
+            .is_err(),
+            "two different levels are refused"
+        );
+    }
+
     #[test]
     fn test_meerkat_run_input_with_tools() {
         let input_json = json!({
@@ -10428,6 +10601,7 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
                 enable_mob: None,
                 enable_web_search: None,
                 provider_params: None,
+                reasoning_effort: None,
                 budget_limits: None,
                 preload_skills: None,
                 skill_refs: None,
@@ -10483,6 +10657,7 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
                 enable_mob: None,
                 enable_web_search: None,
                 provider_params: None,
+                reasoning_effort: None,
                 budget_limits: None,
                 preload_skills: None,
                 skill_refs: None,
@@ -10877,6 +11052,7 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
                 enable_mob: None,
                 enable_web_search: None,
                 provider_params: None,
+                reasoning_effort: None,
                 budget_limits: None,
                 preload_skills: None,
                 skill_refs: None,
@@ -10962,6 +11138,7 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
                 enable_mob: None,
                 enable_web_search: None,
                 provider_params: None,
+                reasoning_effort: None,
                 budget_limits: None,
                 preload_skills: None,
                 skill_refs: None,
@@ -11031,6 +11208,7 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
                 enable_mob: None,
                 enable_web_search: None,
                 provider_params: None,
+                reasoning_effort: None,
                 budget_limits: None,
                 preload_skills: None,
                 skill_refs: None,
@@ -11154,6 +11332,7 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
                 enable_mob: None,
                 enable_web_search: None,
                 provider_params: None,
+                reasoning_effort: None,
                 budget_limits: None,
                 preload_skills: None,
                 skill_refs: None,
@@ -11295,6 +11474,7 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
                 enable_mob: None,
                 enable_web_search: None,
                 provider_params: None,
+                reasoning_effort: None,
                 budget_limits: None,
                 preload_skills: None,
                 skill_refs: None,
@@ -11429,6 +11609,7 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
                 enable_mob: None,
                 enable_web_search: None,
                 provider_params: None,
+                reasoning_effort: None,
                 budget_limits: None,
                 preload_skills: None,
                 skill_refs: None,
@@ -11537,6 +11718,7 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
                 enable_mob: None,
                 enable_web_search: None,
                 provider_params: None,
+                reasoning_effort: None,
                 budget_limits: None,
                 preload_skills: None,
                 skill_refs: None,
@@ -11643,6 +11825,7 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
                 enable_mob: None,
                 enable_web_search: None,
                 provider_params: None,
+                reasoning_effort: None,
                 budget_limits: None,
                 preload_skills: None,
                 skill_refs: None,

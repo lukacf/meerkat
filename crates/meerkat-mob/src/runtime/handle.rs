@@ -1870,6 +1870,9 @@ pub fn profile_to_wire(profile: &crate::Profile) -> meerkat_contracts::WireMobPr
                 crate::profile::ResumeOverrideField::ProviderParams => {
                     meerkat_contracts::WireMobResumeOverrideField::ProviderParams
                 }
+                crate::profile::ResumeOverrideField::ReasoningEffort => {
+                    meerkat_contracts::WireMobResumeOverrideField::ReasoningEffort
+                }
             })
             .collect(),
         skills: profile.skills.clone(),

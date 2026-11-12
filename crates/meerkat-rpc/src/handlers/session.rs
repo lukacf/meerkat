@@ -412,6 +412,12 @@ pub struct CreateSessionParams {
     /// Provider-specific parameters (e.g., thinking config).
     #[serde(default)]
     pub provider_params: Option<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
+    /// The session's provider-neutral reasoning effort level: `none`,
+    /// `minimal`, `low`, `medium`, `high`, `xhigh` or `max`. The same
+    /// setting as `provider_params.reasoning_effort`; a request that gives
+    /// both must give the same level.
+    #[serde(default)]
+    pub reasoning_effort: Option<meerkat_core::model_profile::capabilities::EffortLevel>,
     /// Override the realm-scoped auth binding for this session.
     #[serde(default)]
     pub auth_binding: Option<meerkat_contracts::wire::WireAuthBindingRef>,
@@ -442,6 +448,24 @@ pub struct CreateSessionParams {
     /// These are merged with globally registered tools at build time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_tools: Option<Vec<meerkat_core::ToolDef>>,
+}
+
+impl CreateSessionParams {
+    /// The provider params the session's build seats: the request's params
+    /// with its `reasoning_effort` level folded in by Core's one rule. A
+    /// request that names the level twice with two different levels is
+    /// refused with the rule's text.
+    fn build_provider_params(
+        &self,
+    ) -> Result<Option<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>, String>
+    {
+        meerkat_core::resolve_build_provider_params(
+            self.provider_params.as_ref(),
+            self.reasoning_effort
+                .map(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set),
+        )
+        .map_err(|error| error.to_string())
+    }
 }
 
 fn canonical_skill_ids(
@@ -620,6 +644,13 @@ pub(crate) async fn create_session_with_params_on_route_and_configured_mcp(
     }
     let model_was_explicit = params.model.is_some();
     let provider_was_explicit = params.provider.is_some();
+    let reasoning_effort_was_explicit = params.reasoning_effort.is_some();
+    // The level has one home, the build's provider params: both spellings
+    // of it must agree before anything is built.
+    let provider_params = match params.build_provider_params() {
+        Ok(provider_params) => provider_params,
+        Err(message) => return RpcResponse::error(id, error::INVALID_PARAMS, message),
+    };
     let auth_binding_was_explicit = params.auth_binding.is_some();
     let provider = match params
         .provider
@@ -701,7 +732,8 @@ pub(crate) async fn create_session_with_params_on_route_and_configured_mcp(
     // AgentFactory.mob_tools. No per-handler wiring needed; the factory resolves
     // it at build time.
     build_config.budget_limits = params.budget_limits;
-    build_config.provider_params = params.provider_params;
+    build_config.provider_params = provider_params;
+    build_config.resume_override_mask.reasoning_effort = reasoning_effort_was_explicit;
     build_config.resume_override_mask.auth_binding = auth_binding_was_explicit;
     build_config.auth_binding = model_resolution.auth_binding;
     build_config.additional_instructions = params.additional_instructions;
@@ -1366,6 +1398,62 @@ mod tests {
             .to_string();
             assert!(error.contains("`xhigh`"), "{not_a_level}: {error}");
         }
+    }
+
+    /// The level of `session/create` reaches the build inside its provider
+    /// params, where every other surface puts it; the nested key is the same
+    /// setting, and two different levels are refused.
+    #[test]
+    fn session_create_folds_the_level_into_the_build_params() {
+        use super::CreateSessionParams;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let build_params = |request: serde_json::Value| {
+            serde_json::from_value::<CreateSessionParams>(request)
+                .expect("session/create params")
+                .build_provider_params()
+        };
+        let level_of = |request: serde_json::Value| {
+            build_params(request)
+                .expect("the level is folded")
+                .and_then(|params| params.reasoning_effort)
+        };
+        assert_eq!(
+            level_of(serde_json::json!({"prompt": "hello", "reasoning_effort": "high"})),
+            Some(EffortLevel::High)
+        );
+        assert_eq!(
+            level_of(serde_json::json!({
+                "prompt": "hello",
+                "provider_params": {"reasoning_effort": "low"},
+            })),
+            Some(EffortLevel::Low)
+        );
+        let both = build_params(serde_json::json!({
+            "prompt": "hello",
+            "reasoning_effort": "xhigh",
+            "provider_params": {"temperature": 0.2, "reasoning_effort": "xhigh"},
+        }))
+        .expect("the same level in both is accepted")
+        .expect("params");
+        assert_eq!(both.reasoning_effort, Some(EffortLevel::Xhigh));
+        assert_eq!(both.temperature, Some(0.2));
+        assert_eq!(
+            build_params(serde_json::json!({"prompt": "hello"})),
+            Ok(None)
+        );
+
+        let refused = build_params(serde_json::json!({
+            "prompt": "hello",
+            "reasoning_effort": "high",
+            "provider_params": {"reasoning_effort": "low"},
+        }))
+        .expect_err("two different levels are refused");
+        assert_eq!(
+            refused,
+            "reasoning_effort is 'high' but provider_params.reasoning_effort is 'low': set one \
+             of them, or the same level in both"
+        );
     }
 
     #[test]

@@ -10357,6 +10357,39 @@ pub fn resolve_session_provider_params(
     ))
 }
 
+/// The provider params a build seats from a request that names the
+/// provider-neutral reasoning effort level beside its params.
+///
+/// Every surface that takes `reasoning_effort` as a parameter of its own
+/// (session create on RPC, REST, MCP, the CLI and the web runtime, and the
+/// resume inputs that rebuild a session) folds it into the build's params
+/// here, so the level has one home, the params' `reasoning_effort` key, and
+/// one rule: [`resolve_session_provider_params`], for a build that has no
+/// params yet.
+///
+/// - A level (`Set`) is written into the params. Params that name the nested
+///   key too must name the same level.
+/// - `Clear` (a resume input that removes the session's level) leaves the
+///   params without a level, and is refused beside params that name one.
+/// - Absent leaves the params as given, their nested key included.
+///
+/// A resumed build whose request names the level also claims it
+/// ([`crate::service::ResumeOverrideMask::reasoning_effort`]), so that the
+/// result decides the session's level: the level it holds, or none.
+pub fn resolve_build_provider_params(
+    params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+    reasoning_effort: Option<TurnMetadataOverride<crate::model_profile::capabilities::EffortLevel>>,
+) -> Result<
+    Option<crate::lifecycle::run_primitive::ProviderParamsOverride>,
+    SessionLlmIdentityOverrideError,
+> {
+    resolve_session_provider_params(
+        None,
+        params.map(TurnMetadataOverride::Set),
+        reasoning_effort,
+    )
+}
+
 /// The rule of [`resolve_session_provider_params`], for a change whose two
 /// spellings of the level cannot disagree: either that function compared
 /// them, or the caller holds the level in one place.

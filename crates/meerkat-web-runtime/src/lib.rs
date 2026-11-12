@@ -187,6 +187,10 @@ struct SessionConfig {
     /// Opaque application context passed through to the agent build pipeline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_context: Option<serde_json::Value>,
+    /// The session's provider-neutral reasoning effort level. The build
+    /// carries it in its provider params, where every surface puts it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<meerkat_core::model_profile::capabilities::EffortLevel>,
 }
 
 fn default_max_tokens() -> u32 {
@@ -1758,6 +1762,13 @@ fn build_session_request_with_auth_binding(
     }
     build_config.additional_instructions = config.additional_instructions.clone();
     build_config.app_context = config.app_context.clone();
+    build_config.provider_params = meerkat_core::resolve_build_provider_params(
+        None,
+        config
+            .reasoning_effort
+            .map(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set),
+    )
+    .map_err(|error| err_str("invalid_config", error))?;
 
     Ok(meerkat_core::service::CreateSessionRequest {
         injected_context: Vec::new(),
@@ -3410,12 +3421,16 @@ mod tests {
         use meerkat_core::model_profile::capabilities::EffortLevel;
 
         let level_of = |config_json: serde_json::Value| {
-            let config = parse_session_config(&config_json.to_string())
-                .unwrap_or_else(|error| panic!("the config is read: {error}"));
-            let Ok(request) =
-                super::build_session_request_with_auth_binding(None, &config.model, &config, None)
-            else {
-                panic!("the session request is built");
+            let config =
+                parse_session_config(&config_json.to_string()).expect("the config is read");
+            let request = match super::build_session_request_with_auth_binding(
+                None,
+                &config.model,
+                &config,
+                None,
+            ) {
+                Ok(request) => request,
+                Err(_) => unreachable!("the session request is built"),
             };
             request
                 .build

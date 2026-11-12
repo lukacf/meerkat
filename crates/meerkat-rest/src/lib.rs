@@ -2574,6 +2574,7 @@ pub use meerkat_contracts::wire::RestCreateSessionRequest as CreateSessionReques
 fn rest_continue_requires_rebuild(req: &ContinueSessionRequest) -> bool {
     req.model.is_some()
         || req.provider.is_some()
+        || req.reasoning_effort.is_some()
         || req.auth_binding.is_some()
         || req.max_tokens.is_some()
         || req.output_schema.is_some()
@@ -2588,6 +2589,47 @@ fn rest_continue_system_prompts(req: &ContinueSessionRequest) -> Vec<String> {
     req.system_prompt.iter().cloned().collect()
 }
 
+/// The provider params a created session's build seats: the request's
+/// params with its `reasoning_effort` level folded in by Core's one rule. A
+/// request that names the level twice with two different levels is refused.
+fn create_session_build_provider_params(
+    req: &CreateSessionRequest,
+) -> Result<Option<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>, ApiError> {
+    let params = req.provider_params.clone().map(Into::into);
+    meerkat_core::resolve_build_provider_params(
+        params.as_ref(),
+        req.reasoning_effort
+            .map(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set),
+    )
+    .map_err(|error| ApiError::BadRequest(error.to_string()))
+}
+
+/// The provider params a continue request's rebuild names, and whether the
+/// rebuild claims the session's reasoning effort level: a request that sets
+/// or clears the level claims it, so the rebuilt session holds that level
+/// (or none) beside its recorded params; a request that names none leaves
+/// the recorded level alone.
+fn continue_session_build_provider_params(
+    req: &ContinueSessionRequest,
+) -> Result<
+    (
+        Option<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
+        bool,
+    ),
+    ApiError,
+> {
+    use meerkat_contracts::wire::runtime::WireTurnMetadataOverride;
+    use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+    let level = req.reasoning_effort.clone().map(|level| match level {
+        WireTurnMetadataOverride::Set(level) => TurnMetadataOverride::Set(level),
+        WireTurnMetadataOverride::Clear => TurnMetadataOverride::Clear,
+    });
+    let claims_level = level.is_some();
+    meerkat_core::resolve_build_provider_params(None, level)
+        .map(|params| (params, claims_level))
+        .map_err(|error| ApiError::BadRequest(error.to_string()))
+}
+
 fn create_session_resume_override_mask(
     req: &CreateSessionRequest,
     keep_alive_override: Option<bool>,
@@ -2599,6 +2641,7 @@ fn create_session_resume_override_mask(
         max_tokens: req.max_tokens.is_some(),
         structured_output_retries: req.structured_output_retries.is_some(),
         provider_params: req.provider_params.is_some(),
+        reasoning_effort: req.reasoning_effort.is_some(),
         preload_skills: req.preload_skills.is_some(),
         keep_alive: keep_alive_override.is_some(),
         comms_name: req.comms_name.is_some(),
@@ -5815,6 +5858,7 @@ fn help_request_to_create_session(
         enable_workgraph: Some(false),
         budget_limits: None,
         provider_params: None,
+        reasoning_effort: None,
         preload_skills: None,
         skill_refs: None,
         labels: None,
@@ -5871,6 +5915,12 @@ async fn create_session_inner(
     {
         return RequestTerminal::RespondWithoutPublish(Err(e));
     }
+    // The level has one home, the build's provider params: both spellings
+    // of it must agree before anything is built.
+    let build_provider_params = match create_session_build_provider_params(&req) {
+        Ok(params) => params,
+        Err(e) => return RequestTerminal::RespondWithoutPublish(Err(e)),
+    };
     let keep_alive_override = match resolve_keep_alive(req.keep_alive) {
         Ok(v) => v,
         Err(e) => return RequestTerminal::RespondWithoutPublish(Err(e)),
@@ -6036,7 +6086,7 @@ async fn create_session_inner(
         // `pre_session` only claims the new session's id.
         resume_session_intent: meerkat_core::SessionBuildIntent::Mint,
         budget_limits: req.budget_limits,
-        provider_params: req.provider_params.clone().map(Into::into),
+        provider_params: build_provider_params,
         external_tools: help_tools.or(mcp_external_tools),
         // The session service decides hosting when it creates the actor.
         hosting: meerkat_core::session_hosting::SessionHostingIntent::default(),
@@ -7001,6 +7051,11 @@ async fn continue_session_inner(
     if let Err(e) = validate_public_peer_meta(req.peer_meta.as_ref()) {
         return RequestTerminal::RespondWithoutPublish(Err(e));
     }
+    let (continue_provider_params, continue_claims_reasoning_effort) =
+        match continue_session_build_provider_params(&req) {
+            Ok(v) => v,
+            Err(e) => return RequestTerminal::RespondWithoutPublish(Err(e)),
+        };
     let path_session_id = match resolve_session_id_for_state(id, state) {
         Ok(v) => v,
         Err(e) => return RequestTerminal::RespondWithoutPublish(Err(e)),
@@ -7339,7 +7394,7 @@ async fn continue_session_inner(
             resume_session: Some(session),
             resume_session_intent: meerkat_core::SessionBuildIntent::Resume,
             budget_limits: None,
-            provider_params: None,
+            provider_params: continue_provider_params,
             external_tools: None,
             // The session service decides hosting when it creates the actor.
             hosting: meerkat_core::session_hosting::SessionHostingIntent::default(),
@@ -7394,6 +7449,9 @@ async fn continue_session_inner(
                 auth_binding: auth_binding_override.is_some(),
                 max_tokens: req.max_tokens.is_some(),
                 structured_output_retries: req.structured_output_retries.is_some(),
+                // A request that sets or clears the level decides it; the
+                // session's other recorded params stay.
+                reasoning_effort: continue_claims_reasoning_effort,
                 keep_alive: keep_alive_override.is_some(),
                 comms_name: req.comms_name.is_some(),
                 peer_meta: req.peer_meta.is_some(),
@@ -11478,6 +11536,7 @@ mod tests {
                     system_prompt: None,
                     output_schema: None,
                     structured_output_retries: None,
+                    reasoning_effort: None,
                     keep_alive: None,
                     comms_name: None,
                     peer_meta: None,
@@ -11602,6 +11661,7 @@ mod tests {
                         system_prompt: None,
                         output_schema: None,
                         structured_output_retries: None,
+                        reasoning_effort: None,
                         keep_alive: None,
                         comms_name: None,
                         peer_meta: None,
@@ -11845,6 +11905,7 @@ mod tests {
                     system_prompt: None,
                     output_schema: None,
                     structured_output_retries: None,
+                    reasoning_effort: None,
                     keep_alive: None,
                     comms_name: None,
                     peer_meta: None,
@@ -12066,6 +12127,7 @@ mod tests {
                 system_prompt: None,
                 output_schema: None,
                 structured_output_retries: None,
+                reasoning_effort: None,
                 keep_alive: None,
                 comms_name: None,
                 peer_meta: None,
@@ -12131,6 +12193,7 @@ mod tests {
                     system_prompt: None,
                     output_schema: None,
                     structured_output_retries: None,
+                    reasoning_effort: None,
                     keep_alive: None,
                     comms_name: None,
                     peer_meta: None,
@@ -12270,6 +12333,7 @@ mod tests {
                 system_prompt: None,
                 output_schema: None,
                 structured_output_retries: None,
+                reasoning_effort: None,
                 keep_alive: None,
                 comms_name: None,
                 peer_meta: None,
@@ -12367,6 +12431,7 @@ mod tests {
                     system_prompt: None,
                     output_schema: None,
                     structured_output_retries: None,
+                    reasoning_effort: None,
                     keep_alive: None,
                     comms_name: None,
                     peer_meta: None,
@@ -12511,6 +12576,7 @@ mod tests {
                 system_prompt: None,
                 output_schema: None,
                 structured_output_retries: None,
+                reasoning_effort: None,
                 keep_alive: Some(true),
                 comms_name: None,
                 peer_meta: None,
@@ -12587,6 +12653,7 @@ mod tests {
                 system_prompt: None,
                 output_schema: None,
                 structured_output_retries: None,
+                reasoning_effort: None,
                 keep_alive: None,
                 comms_name: None,
                 peer_meta: None,
@@ -16858,6 +16925,7 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
                     system_prompt: None,
                     output_schema: None,
                     structured_output_retries: None,
+                    reasoning_effort: None,
                     keep_alive: None,
                     comms_name: None,
                     peer_meta: None,
@@ -16967,6 +17035,93 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
         }
     }
 
+    /// The level of a create request reaches the build inside its provider
+    /// params (two different levels are refused), and a continue request
+    /// that sets or clears the level claims it on the rebuild.
+    #[test]
+    fn rest_reasoning_effort_build_params_and_resume_claim() {
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let create = |body: serde_json::Value| {
+            let request: CreateSessionRequest =
+                serde_json::from_value(body).expect("create request");
+            create_session_build_provider_params(&request)
+        };
+        let Ok(folded) = create(serde_json::json!({
+            "prompt": "hello",
+            "reasoning_effort": "high",
+            "provider_params": {"temperature": 0.2},
+        })) else {
+            panic!("a level beside other params is folded");
+        };
+        let folded = folded.expect("params");
+        assert_eq!(folded.reasoning_effort, Some(EffortLevel::High));
+        assert_eq!(folded.temperature, Some(0.2));
+        let Ok(nested) = create(serde_json::json!({
+            "prompt": "hello",
+            "reasoning_effort": "low",
+            "provider_params": {"reasoning_effort": "low"},
+        })) else {
+            panic!("the same level in both is accepted");
+        };
+        assert_eq!(
+            nested.and_then(|params| params.reasoning_effort),
+            Some(EffortLevel::Low)
+        );
+        let Ok(none) = create(serde_json::json!({"prompt": "hello"})) else {
+            panic!("a request without a level builds");
+        };
+        assert_eq!(none, None);
+        match create(serde_json::json!({
+            "prompt": "hello",
+            "reasoning_effort": "high",
+            "provider_params": {"reasoning_effort": "low"},
+        })) {
+            Err(ApiError::BadRequest(message)) => assert_eq!(
+                message,
+                "reasoning_effort is 'high' but provider_params.reasoning_effort is 'low': set \
+                 one of them, or the same level in both"
+            ),
+            _ => panic!("two different levels are a bad request"),
+        }
+        let request: CreateSessionRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "hello",
+            "reasoning_effort": "high",
+        }))
+        .expect("create request");
+        assert!(create_session_resume_override_mask(&request, None).reasoning_effort);
+
+        let resume = |reasoning_effort: Option<serde_json::Value>| {
+            let mut body = serde_json::json!({
+                "session_id": "01234567-89ab-cdef-0123-456789abcdef",
+                "prompt": "Continue",
+            });
+            if let Some(value) = reasoning_effort {
+                body["reasoning_effort"] = value;
+            }
+            let request: ContinueSessionRequest =
+                serde_json::from_value(body).expect("continue request");
+            match continue_session_build_provider_params(&request) {
+                Ok((params, claims)) => (params.and_then(|params| params.reasoning_effort), claims),
+                Err(_) => panic!("a continue request's level is never contradictory"),
+            }
+        };
+        assert_eq!(
+            resume(Some(serde_json::json!("medium"))),
+            (Some(EffortLevel::Medium), true)
+        );
+        assert_eq!(
+            resume(Some(serde_json::json!({"action": "clear"}))),
+            (None, true),
+            "a clear claims the level and names none"
+        );
+        assert_eq!(
+            resume(None),
+            (None, false),
+            "absent keeps the recorded level"
+        );
+    }
+
     #[test]
     fn test_rest_continue_requires_rebuild_matches_surface_contract() {
         let mut req = ContinueSessionRequest {
@@ -16977,6 +17132,7 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
             system_prompt: None,
             output_schema: None,
             structured_output_retries: None,
+            reasoning_effort: None,
             keep_alive: None,
             comms_name: None,
             peer_meta: None,
@@ -17175,6 +17331,7 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
                 system_prompt: None,
                 output_schema: None,
                 structured_output_retries: None,
+                reasoning_effort: None,
                 keep_alive: Some(true),
                 comms_name: None,
                 peer_meta: None,
@@ -17259,6 +17416,7 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
                 system_prompt: None,
                 output_schema: None,
                 structured_output_retries: None,
+                reasoning_effort: None,
                 keep_alive: None,
                 comms_name: None,
                 peer_meta: None,
@@ -17354,6 +17512,7 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
                 system_prompt: None,
                 output_schema: None,
                 structured_output_retries: None,
+                reasoning_effort: None,
                 keep_alive: None,
                 comms_name: None,
                 peer_meta: None,
@@ -17449,6 +17608,7 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
                 system_prompt: None,
                 output_schema: None,
                 structured_output_retries: None,
+                reasoning_effort: None,
                 keep_alive: None,
                 comms_name: None,
                 peer_meta: None,
@@ -17534,6 +17694,7 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
                     system_prompt: None,
                     output_schema: None,
                     structured_output_retries: None,
+                    reasoning_effort: None,
                     keep_alive: None,
                     comms_name: None,
                     peer_meta: None,

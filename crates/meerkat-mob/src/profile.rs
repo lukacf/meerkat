@@ -462,6 +462,11 @@ pub enum ResumeOverrideField {
     Provider,
     /// Re-apply the profile `provider_params` on resume.
     ProviderParams,
+    /// Make the profile decide the provider-neutral reasoning effort level
+    /// on resume: the level its `provider_params` name, or none. Without it
+    /// a resumed member keeps the level its session recorded, also when
+    /// `provider_params` is re-applied.
+    ReasoningEffort,
 }
 
 impl Profile {
@@ -504,6 +509,7 @@ impl Profile {
                 ResumeOverrideField::Model => mask.model = true,
                 ResumeOverrideField::Provider => mask.provider = true,
                 ResumeOverrideField::ProviderParams => mask.provider_params = true,
+                ResumeOverrideField::ReasoningEffort => mask.reasoning_effort = true,
             }
         }
         mask

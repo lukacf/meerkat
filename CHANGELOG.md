@@ -35,6 +35,21 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- Behaviour-only (not measured by the gate): `meerkat-core`, `rkat`: on Unix
+  a config document the engine writes is readable by its owner only, so an
+  account that read one through group permissions loses that access at the
+  document's next write unless its directory has the setgid bit. See
+  Security and the Upgrade notes.
+
+- Behaviour-only (not measured by the gate): `rkat`: `--comms-binding-out`
+  replaces what is at its path with a new owner-only file instead of writing
+  into it. A named pipe, a socket, a device or a directory at the path, a
+  symbolic link to one of them, and any path in `/proc` or in `/dev` outside
+  `/dev/shm` (`/dev/stdout`) is refused, and another account can no longer
+  read the binding file. See Security and the Upgrade notes.
+
 ### Added
 
 - `meerkat-mob`: `MobSessionService::recorded_build_instructions(session_id)`
@@ -97,6 +112,23 @@ them.
   three fields still reads, and an earlier release reads one that has them.
   Affects 0.8.0 through 0.9.14.
 
+- `meerkat-core`: a configuration write that failed at the write itself was
+  reported as saved and replaced the document with an empty file. When the
+  filesystem refused the bytes of a config document or of its
+  `config_state.json` (a full disk on a filesystem that allocates at write
+  time, a quota, a file size limit, an I/O error), the store synced and
+  renamed its temporary file without the write's result, so the empty file
+  took the document's place and the caller (`rkat config set` and `patch`,
+  JSON-RPC `config/set` and `config/patch`, the REST and MCP config writes)
+  saw success. The write now fails with the filesystem's error, publishes
+  nothing and removes its temporary file: the document it could not replace
+  stays as it was, the contract the credential, realm, blob, task and
+  trajectory file writes have since 0.9.14. A write that fails at
+  its sync or its rename removes its temporary file too, where it left a
+  `.config.tmp.<id>` or `.config_state.tmp.<id>` file behind on every
+  attempt, and so does a failed `mcp.toml` write. Affects 0.3.3 through
+  0.9.14.
+
 - `meerkat`, `meerkat-mob` (0.5.1 through 0.9.14): a session keeps the
   instruction sections it was built with. A session's durable build state
   records the `additional_instructions` of its build, and every build wrote
@@ -126,6 +158,134 @@ them.
   earlier releases load unchanged and a resume that writes no prompt
   leaves their stored build state as it is; a record an earlier release
   erased stays absent.
+
+### Security
+
+- `meerkat-core`, `rkat`: the configuration documents the engine writes are
+  owner-only on Unix, whatever the process umask. They are a config document
+  (`~/.rkat/config.toml`, a project's `.rkat/config.toml`, a realm's own
+  `config.toml`), the `config_state.json` beside it, and `mcp.toml`
+  (`~/.rkat/mcp.toml`, a project's `.rkat/mcp.toml`). Every write gave them
+  the umask's mode (0644 under the common 022, 0664 under 002), and so did
+  the temporary file of the write before it was renamed into place, so every
+  local user could read them. A document can hold credential material by
+  documented configuration: an auth profile's
+  `source = { kind = "inline_secret", ... }`, the `env` values of a
+  `command` source, and the literal `args`, `env` and `headers` of an MCP
+  server (a realm's `[[tools.mcp_servers]]`, or `mcp.toml`). One rule now
+  decides the mode, and the file has it from its creation, before any byte
+  is written: 0640, readable by the directory's group, when the document's
+  directory has the setgid bit (a directory shared through its group on
+  purpose), and 0600 in every other directory. A document is never
+  group-writable and never readable by others, and a rewrite never adds a
+  permission the file lacked: a document its owner made 0400 stays 0400.
+  `rkat init` writes the project document it copies from the user document
+  by the same rule, and only into a file it creates: a symbolic link at the
+  document's path now fails the command, where a link to nothing was
+  followed. The engine changes the mode of no directory. The
+  documents have had the umask's mode since 0.3.0, and the inline secret
+  source since 0.6.0. Affects 0.3.0 through 0.9.14.
+
+- `rkat`: `--comms-binding-out` wrote its binding file, which carries the
+  comms runtime's bootstrap token, with the umask's mode (0644 under the
+  common 022) and into whatever was at its path: a file already there kept
+  its own mode, and a symbolic link was followed. The binding file is now a
+  new file that takes the place of the one at its path, with three limits:
+  - The path is replaced, never written through. A regular file at the path
+    is removed. A symbolic link at the path is never followed: a link to a
+    regular file or to nothing is replaced by the binding file (the file it
+    pointed to stays as it was, and nothing is created where it pointed),
+    and a link to a named pipe, a socket, a device or a directory is
+    refused, as those things themselves are. A path in `/proc`, or in `/dev`
+    other than under `/dev/shm` (a memory file system for ordinary files),
+    is refused whatever it holds: `/dev/stdout`, for one, also when standard
+    output is redirected to a file. A refusal comes before anything is
+    removed or created, with an error that names what is there. The
+    directory of the path must allow the removal and the creation of a file.
+  - On Unix the file is 0600 from its creation, whatever the umask and
+    whatever mode the file before it had.
+  - A supervisor that runs under another account than `rkat` cannot read
+    it.
+
+  Affects 0.6.33 through 0.9.14.
+
+- `meerkat-comms`: `Keypair::save` created `identity.key` with the umask's
+  mode and made it 0600 only after it had written the key, so the secret
+  key was readable by every local user for a moment, and stayed so when the
+  save failed in between. The file is now 0600 on Unix from its creation,
+  and a key file that already exists is made 0600 before the key is written
+  to it. `Keypair::load_or_generate`, which the stock hosts use, already
+  created the file 0600. Affects 0.3.0 through 0.9.14.
+
+### Upgrade notes
+
+- A configuration document an earlier release wrote keeps its mode until
+  the engine next rewrites it. To make the existing ones owner-only now, run
+  `chmod 600` on each that exists: `~/.rkat/config.toml`,
+  `~/.rkat/config_state.json` and `~/.rkat/mcp.toml`; a project's
+  `.rkat/config.toml` and `.rkat/mcp.toml`; and each realm's `config.toml`
+  and `config_state.json` in its realm directory
+  (`<project-root>/.rkat/realms/<realm>/` for the CLI, or
+  `<state-root>/<realm>/`). A binding file `--comms-binding-out` wrote
+  earlier keeps its mode until it is written again: `chmod 600` it, or
+  delete it once the supervisor has read it.
+
+- A configuration document that several local accounts read through group
+  permissions (a project checkout or a realm directory shared by a group,
+  or an install that runs a helper or a verifier under another account) is
+  no longer readable by the group after a rewrite, unless its directory has
+  the setgid bit. Set it once on each shared directory, `chmod g+s <dir>`
+  (the `.rkat` directory of a shared project, a shared realm directory),
+  and the documents written there are 0640 with the directory's group. A
+  document the engine already rewrote as 0600 stays 0600: `chmod g+r` it
+  once. An install that cannot set the bit grants the read itself after each
+  write, with `chmod g+r` or an ACL on the document: a write replaces the
+  file, so a grant on the file before it does not carry over, and a default
+  ACL on the directory does not reach a file that is created 0600. Other
+  accounts never get write access through the document's mode, and nothing
+  is readable by others. The admission fence file keeps its own rule:
+  `admission.lock` is 0640 with its directory's group in every directory.
+
+- `rkat run --comms-binding-out <PATH>` no longer writes into what is
+  already at the path: it removes the file there and creates a new one that
+  only its owner can read (0600 on Unix), whatever the umask and whatever
+  mode the older file had. What changes for an install that relied on the
+  old write:
+  - A symbolic link at the path is replaced by a regular file, whether it
+    pointed to a regular file or to nothing. Before, the binding was written
+    through the link into the file it named; now that file is left as it
+    was, or not created, and does not receive the binding. Give the flag
+    the path of the file itself.
+  - A named pipe, a socket, a device or a directory at the path, and a
+    symbolic link to one of them, is refused and left untouched. So is any
+    path in `/proc` or in `/dev`, whatever it holds; `/dev/shm`, a memory
+    file system for ordinary files, is the one exception.
+    `--comms-binding-out /dev/stdout`, or a named pipe a
+    supervisor reads the binding from, worked before and is now an error:
+    write the binding to a regular file (one under `/dev/shm` will do) and
+    have the supervisor read that.
+  - The directory of the path must let `rkat` remove and create a file in
+    it. A binding file that was created for `rkat` in a directory it cannot
+    write could be rewritten in place before, and now fails.
+  - A supervisor that runs under another account than `rkat` can no longer
+    read the binding file (under the common umask 022 it could). Run the
+    supervisor under the same account, or grant it the read after each
+    write (`chmod`, or an ACL on the file): the file is a new one every
+    time, so a grant on the older file does not carry over. The descriptor
+    file of `rkat mob host --descriptor-out` is owner-only in the same way.
+
+### Known limitations
+
+- The owner-only rule of this release (see Security) covers the
+  configuration documents, the comms binding file and `identity.key`. Two
+  other files that can hold a token still take their mode from the umask
+  alone: the mob store's database file, which stores the bootstrap token of
+  an external member's binding, and Meta's composition manifest beside a
+  persistent mob's storage, which records the mob definition with its MCP
+  servers' arguments, environment and headers (also when the adoption of
+  pre-0.9 state rewrites it: that second writer gives the file the
+  permissions the manifest had). Keep the directories that hold them closed
+  to other accounts, or run under a umask of 077.
 
 ## [0.9.14] - 2026-11-11
 

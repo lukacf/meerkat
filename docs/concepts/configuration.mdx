@@ -210,6 +210,37 @@ with the active non-global realm document at
 `<state-root>/<realm>/config.toml`, which is the canonical raw head store used
 by CLI/RPC/REST/MCP runtime composition.
 
+### File permissions
+
+A config document can hold credential material: an auth profile's inline
+secret, the `env` values of a `command` credential source, and the literal
+`args`, `env` and `headers` of an MCP server. On Unix the engine therefore
+writes every config document, the `config_state.json` beside it and
+`mcp.toml` readable by their owner only (mode 0600), whatever the process
+umask. The file has that mode from its creation, before any byte is written,
+and a write replaces the document with it, so a document an earlier release
+left readable by others becomes private at its next write. A write never adds
+a permission the file lacked: a document its owner made 0400 stays 0400.
+
+The one exception is a directory shared through its group on purpose. When a
+document's directory has the setgid bit, the documents written there are
+0640: readable by the directory's group, which the directory gives them,
+never writable by it and never readable by others. Set the bit once on a
+directory that several accounts read (`chmod g+s <dir>`), such as the `.rkat`
+directory of a shared project or a realm directory a helper under another
+account reads. A document that is already 0600 there stays 0600 until its
+owner runs `chmod g+r` on it. Where the bit cannot be set, grant the read
+after each write, with `chmod g+r` or an ACL on the document: a write
+replaces the file, so a grant on the file before it does not carry over, and
+a default ACL on the directory does not reach a file that is created 0600.
+
+The engine changes the mode of no directory: a directory it creates takes
+the umask's mode, and an existing one keeps its own. A document written
+before this rule keeps its mode until the engine writes it again; `chmod 600`
+tightens it at once. The admission fence file follows its own rule (see
+[Realm Admission Fences](/concepts/realm-admission#permissions)), and the
+credential store keeps its files 0600 in 0700 directories.
+
 ## Backend and storage settings
 
 Session backend is pinned per realm in `realm_manifest.json` (`sqlite`, `jsonl`, or `memory`).

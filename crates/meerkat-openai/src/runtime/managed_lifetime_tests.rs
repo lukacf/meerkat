@@ -496,6 +496,7 @@ async fn managed_lifetime_child() {
         .unwrap();
     assert_eq!(connection.credential_identity, account);
     let authorizer = connection.resolved_authorizer();
+    let signing_authorizer = authorizer.clone();
     let client = OpenAiProviderRuntime.build_client(connection).unwrap();
     let original_pin = Arc::clone(&client);
     consume(&client).await.unwrap();
@@ -663,6 +664,29 @@ async fn managed_lifetime_child() {
             assert_eq!(final_tokens.account_id, original.account_id);
             assert!(owner.snapshot(&lease).generation > first_snapshot.generation);
             assert_eq!(owner.snapshot(&lease).phase, Some(AuthLeasePhase::Valid));
+            // A response that repeats a bearer this client signed with (its
+            // header as sent, the bare value, a URL carrying it) loses it:
+            // the current access token and the one the refresh replaced.
+            let signing_authorizer =
+                signing_authorizer.expect("managed resolution retains its actual HttpAuthorizer");
+            for echo in [
+                format!("upstream echo: rejected request with header authorization: Bearer {NEW}"),
+                format!("upstream echo: credential {NEW} was refused, as {OLD} was"),
+                format!(
+                    "upstream echo: GET http://upstream.invalid/v1/models?session={OLD}&page=2"
+                ),
+            ] {
+                let mut diagnostic = echo;
+                signing_authorizer.redact_response_diagnostic(&mut diagnostic);
+                assert!(
+                    !diagnostic.contains(OLD) && !diagnostic.contains(NEW),
+                    "a credential is left in: {diagnostic}"
+                );
+                assert!(
+                    diagnostic.contains("upstream echo"),
+                    "the text around the credential is kept: {diagnostic}"
+                );
+            }
         } else {
             assert_eq!(final_tokens, after_first_tokens);
             assert_eq!(owner.snapshot(&lease), first_snapshot);

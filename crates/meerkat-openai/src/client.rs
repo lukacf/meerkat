@@ -1459,12 +1459,18 @@ impl OpenAiClient {
             .map(|(request, _)| request)
     }
 
-    /// Remove from `diagnostic`, text a response carried, any credential the
-    /// authorizer signed the request with: a provider, proxy or gateway can
+    /// Remove from `diagnostic`, text a response carried, the credential
+    /// that signed the request: the authorizer's, or without an authorizer
+    /// this client's own API key. A provider, proxy or gateway can
     /// echo the request's headers in an error.
     fn redact_diagnostic(&self, diagnostic: &mut String) {
-        if let Some(authorizer) = &self.authorizer {
-            authorizer.redact_response_diagnostic(diagnostic);
+        match &self.authorizer {
+            Some(authorizer) => authorizer.redact_response_diagnostic(diagnostic),
+            None => meerkat_core::redact::redact_credentials(diagnostic, |visit| {
+                if let Some(api_key) = &self.api_key {
+                    visit(api_key);
+                }
+            }),
         }
     }
 
@@ -2029,16 +2035,16 @@ impl OpenAiClient {
                 return Ok(response);
             }
             let headers = response.headers().clone();
-            let mut text = response
+            let text = response
                 .text()
                 .await
                 .map_err(|error| LlmError::StreamParseError {
                     message: format!("cannot read Responses rejection body: {error}"),
                 })?;
-            // The body is redacted before it is classified, and the decoded
-            // error again: a JSON escape can hide an echoed credential from
-            // the first pass and decoding reveals it.
-            self.redact_diagnostic(&mut text);
+            // The rejection is classified from the body as received, and the
+            // error built from it is redacted: what the redaction removes
+            // can then never change the error's class. (The continuation
+            // fallback below reads the same body; it never shows it.)
             let rejection =
                 self.redacted_error(LlmError::from_http_response(status, text.clone(), &headers));
             // A policy stop must reach the recovery owner before auth refresh
@@ -3127,6 +3133,29 @@ impl ImageGenerationExecutor for OpenAiClient {
         &self,
         request: ProviderImageGenerationRequest,
     ) -> Result<ProviderImageGenerationOutput, LlmError> {
+        // What a failed image request reports comes from the response (a
+        // rejection body, a stream error event): it is redacted as every
+        // other response diagnostic is.
+        let mut result = self.execute_image_plan(request).await;
+        match &mut result {
+            Ok(output) => {
+                for warning in &mut output.warnings {
+                    if let ImageGenerationWarning::ProviderExecutionFailed { message } = warning {
+                        self.redact_diagnostic(message);
+                    }
+                }
+            }
+            Err(error) => error.redact_diagnostics(|message| self.redact_diagnostic(message)),
+        }
+        result
+    }
+}
+
+impl OpenAiClient {
+    async fn execute_image_plan(
+        &self,
+        request: ProviderImageGenerationRequest,
+    ) -> Result<ProviderImageGenerationOutput, LlmError> {
         match request.execution_plan.clone() {
             plan if OpenAiImageGenerationProfile.matches_provider_id(&plan.provider.0) => {
                 match plan.backend {
@@ -3998,9 +4027,9 @@ impl OpenAiClient {
 
         // Every error the stream ends with is redacted here, whichever path
         // built it (a rejection body, an error event, a parse failure).
-        streaming::redact_stream_diagnostics(
+        streaming::redact_stream_errors(
             streaming::ensure_terminal_done(self.record_received_continuity(inner)),
-            self.authorizer.as_deref(),
+            move |diagnostic: &mut String| self.redact_diagnostic(diagnostic),
         )
     }
 }
@@ -6213,6 +6242,719 @@ mod tests {
         );
     }
 
+    /// An authorizer that redacts response text by itself is the only
+    /// redaction of its route's errors: the client asks it and adds no step
+    /// of its own. Text the authorizer leaves, credential-shaped or not,
+    /// reaches the error as the provider sent it. (The made-up value is
+    /// assembled here so no scanner reads the source as a secret.)
+    #[tokio::test]
+    async fn an_authorizer_that_redacts_by_itself_is_the_only_redaction_of_a_stream_error() {
+        let unsigned = format!("{}7", "notsignedbythisroute".repeat(2));
+        let sent = format!(
+            "upstream echo: authorization: Bearer {AUTHORIZATION_CANARY}; another route sent api_key={unsigned}"
+        );
+        let event = serde_json::json!({"type": "error", "code": "server_error", "message": sent});
+        let body = format!("data: {event}\n\n");
+        let app = Router::new().fallback(move || {
+            let body = body.clone();
+            async move { ([("content-type", "text/event-stream")], body).into_response() }
+        });
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind echoing server");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve echoing server");
+        });
+        let client =
+            OpenAiClient::new_with_base_url("unused".to_string(), format!("http://{addr}"))
+                .with_authorizer(Arc::new(CanaryBearerAuthorizer));
+        let request = LlmRequest::new("gpt-5.4", vec![Message::User(UserMessage::text("hello"))]);
+        let events = client.stream(&request).collect::<Vec<_>>().await;
+        server.abort();
+        let error = events
+            .into_iter()
+            .find_map(|event| match event {
+                Err(error)
+                | Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Error { error },
+                }) => Some(error),
+                Ok(_) => None,
+            })
+            .expect("the stream ends in an error");
+        let LlmError::ServerError {
+            status: 500,
+            message,
+        } = &error
+        else {
+            panic!("the stream error keeps its class: {error:?}");
+        };
+        assert_eq!(
+            message,
+            &format!(
+                "upstream echo: authorization: Bearer <redacted>; another route sent api_key={unsigned}"
+            ),
+            "the authorizer's replacement and nothing else"
+        );
+        // The step a client without such an authorizer applies would have
+        // replaced the value: without that, this row could not notice a
+        // second step.
+        let mut stepped = message.clone();
+        meerkat_core::redact::redact_credentials(&mut stepped, |_| {});
+        assert!(
+            !stepped.contains(&unsigned),
+            "the credential-shape step replaces the value: {stepped}"
+        );
+    }
+
+    /// How the upstream repeats the credential that signed the request.
+    #[derive(Debug, Clone, Copy)]
+    enum CredentialEcho {
+        /// HTTP 400 whose message names the credential header as sent.
+        HeaderLine,
+        /// HTTP 400 whose message carries the credential alone.
+        Bare,
+        /// HTTP 400 whose message carries a URL with the credential in it.
+        Url,
+        /// HTTP 200 stream whose `error` event names the header as sent.
+        StreamError,
+        /// HTTP 200 stream that fails with a code of its own and names the
+        /// header as sent in its message. `code` is the code the event
+        /// carries; `None` makes the code itself repeat the credential,
+        /// after a fixed word. The failure arrives as an `error` event, or
+        /// as a `response.failed` event when `failed_response` is set.
+        StreamCodedError {
+            code: Option<&'static str>,
+            failed_response: bool,
+        },
+    }
+
+    /// The message an upstream that received the credential header `name`
+    /// with `value` answers with.
+    fn credential_echo_message(echo: CredentialEcho, name: &str, value: &str) -> String {
+        let bare = value.strip_prefix("Bearer ").unwrap_or(value);
+        match echo {
+            CredentialEcho::HeaderLine
+            | CredentialEcho::StreamError
+            | CredentialEcho::StreamCodedError { .. } => {
+                format!("upstream echo: rejected request with header {name}: {value}")
+            }
+            CredentialEcho::Bare => format!("upstream echo: credential {bare} was refused"),
+            CredentialEcho::Url => format!(
+                "upstream echo: GET http://upstream.invalid/v1/models?session={bare}&page=2 failed"
+            ),
+        }
+    }
+
+    /// Answers every request, whatever its path, by repeating the header
+    /// that carries its credential (`authorization`, or Azure's `api-key`).
+    async fn spawn_credential_echo_server(
+        echo: CredentialEcho,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new().fallback(move |headers: HeaderMap| async move {
+            let (name, value) = ["authorization", "api-key"]
+                .into_iter()
+                .find_map(|name| {
+                    let value = headers.get(name)?.to_str().ok()?;
+                    Some((name, value.to_string()))
+                })
+                .unwrap_or(("authorization", String::new()));
+            let message = credential_echo_message(echo, name, &value);
+            match echo {
+                CredentialEcho::StreamError => {
+                    let event = serde_json::json!({
+                        "type": "error",
+                        "code": "server_error",
+                        "message": message,
+                    });
+                    (
+                        [("content-type", "text/event-stream")],
+                        format!("data: {event}\n\n"),
+                    )
+                        .into_response()
+                }
+                CredentialEcho::StreamCodedError {
+                    code,
+                    failed_response,
+                } => {
+                    let bare = value.strip_prefix("Bearer ").unwrap_or(&value);
+                    let code = code.map_or_else(
+                        || format!("rejected_credential:{bare}"),
+                        ToString::to_string,
+                    );
+                    let event = if failed_response {
+                        serde_json::json!({
+                            "type": "response.failed",
+                            "response": {
+                                "id": "resp_echo",
+                                "status": "failed",
+                                "error": {"code": code, "message": message},
+                            },
+                        })
+                    } else {
+                        serde_json::json!({"type": "error", "code": code, "message": message})
+                    };
+                    (
+                        [("content-type", "text/event-stream")],
+                        format!("data: {event}\n\n"),
+                    )
+                        .into_response()
+                }
+                CredentialEcho::HeaderLine | CredentialEcho::Bare | CredentialEcho::Url => (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": {"message": message, "type": "invalid_request_error"},
+                    })),
+                )
+                    .into_response(),
+            }
+        });
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind echoing server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve echoing server");
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    /// Who signs the request with the credential.
+    #[derive(Debug, Clone, Copy)]
+    enum CredentialSigner {
+        /// The client's own API key, sent as `Authorization: Bearer`: an
+        /// API-key route, which has no authorizer.
+        ClientApiKey,
+        /// The client's own API key on the Azure OpenAI wire, sent as
+        /// `api-key`.
+        ClientAzureApiKey,
+        /// A static bearer authorizer.
+        StaticBearerAuthorizer,
+    }
+
+    fn credential_signed_client(
+        signer: CredentialSigner,
+        base_url: String,
+        credential: &str,
+    ) -> OpenAiClient {
+        match signer {
+            CredentialSigner::ClientApiKey => {
+                OpenAiClient::new_with_base_url(credential.to_string(), base_url)
+            }
+            CredentialSigner::ClientAzureApiKey => {
+                OpenAiClient::new_with_base_url(credential.to_string(), base_url)
+                    .with_azure_openai_wire(AzureOpenAiWireConfig::default())
+            }
+            CredentialSigner::StaticBearerAuthorizer => {
+                OpenAiClient::new_with_optional_api_key_and_base_url(None, base_url)
+                    .with_authorizer(Arc::new(
+                        meerkat_auth_core::authorizers::StaticBearerAuthorizer::new(
+                            credential.to_string(),
+                            "static-bearer",
+                        ),
+                    ))
+            }
+        }
+    }
+
+    /// The failure of one request through `client` as the agent loop carries
+    /// it: the `AgentError` (`Display` and `Debug`), the typed turn error
+    /// (its `detail` and `reason`) and every event published for the attempt.
+    async fn agent_failure_forms(client: Arc<dyn LlmClient>) -> String {
+        use meerkat_core::AgentLlmClient as _;
+        let (events_tx, mut events_rx) = tokio::sync::mpsc::channel(64);
+        let adapter =
+            LlmClientAdapter::with_event_channel(client, "gpt-5.4".to_string(), events_tx);
+        let error = match adapter
+            .stream_response(
+                &[Message::User(UserMessage::text("hello"))],
+                &[],
+                256,
+                None,
+                None,
+            )
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("the request fails"),
+        };
+        let metadata = meerkat_core::TurnErrorMetadata::from_agent_error(&error)
+            .expect("a provider failure has typed turn error metadata");
+        let metadata = serde_json::to_value(&metadata).expect("metadata JSON");
+        assert!(
+            metadata["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("upstream echo")),
+            "the provider's answer reaches the typed detail: {metadata}"
+        );
+        let events = std::iter::from_fn(|| events_rx.try_recv().ok()).collect::<Vec<_>>();
+        format!("{error} {error:?} {metadata} {events:?}")
+    }
+
+    /// A provider, proxy or gateway that repeats the request's credential
+    /// (its header as sent, the bare value, a URL carrying it, or a stream
+    /// `error` event) never puts it in the error the Responses client
+    /// returns (`Display`, `Debug`, wire JSON) or in what the agent loop
+    /// derives from it (the `AgentError`, the typed turn error's `detail`
+    /// and `reason.provider_error.message`, published events), whether the
+    /// client's own API key (as a bearer, or as Azure's `api-key`) or an
+    /// authorizer signed the request. The server's answer still reaches the
+    /// error.
+    #[tokio::test]
+    async fn echoed_credential_stays_out_of_responses_errors_for_every_signer() {
+        let credential = format!("responses-{}", "madeupcredential".repeat(3));
+        for signer in [
+            CredentialSigner::ClientApiKey,
+            CredentialSigner::ClientAzureApiKey,
+            CredentialSigner::StaticBearerAuthorizer,
+        ] {
+            for echo in [
+                CredentialEcho::HeaderLine,
+                CredentialEcho::Bare,
+                CredentialEcho::Url,
+                CredentialEcho::StreamError,
+            ] {
+                let (base_url, server) = spawn_credential_echo_server(echo).await;
+                let client = credential_signed_client(signer, base_url, &credential);
+                let request =
+                    LlmRequest::new("gpt-5.4", vec![Message::User(UserMessage::text("hello"))]);
+                let events = client.stream(&request).collect::<Vec<_>>().await;
+                let error = events
+                    .into_iter()
+                    .find_map(|event| match event {
+                        Err(error)
+                        | Ok(LlmEvent::Done {
+                            outcome: LlmDoneOutcome::Error { error },
+                        }) => Some(error),
+                        Ok(_) => None,
+                    })
+                    .unwrap_or_else(|| panic!("{signer:?} {echo:?}: the stream ends in an error"));
+                let rendered = format!(
+                    "{error} {error:?} {}",
+                    serde_json::to_string(&error).expect("error JSON")
+                );
+                let agent_forms = agent_failure_forms(Arc::new(client)).await;
+                server.abort();
+                for (surface, text) in [("client error", &rendered), ("agent", &agent_forms)] {
+                    assert!(
+                        !text.contains(&credential),
+                        "{signer:?} {echo:?}: the {surface} leaked the credential: {text}"
+                    );
+                    assert!(
+                        text.contains("upstream echo"),
+                        "{signer:?} {echo:?}: the server's answer reached the {surface}: {text}"
+                    );
+                }
+                if matches!(echo, CredentialEcho::HeaderLine) {
+                    // The rejection keeps its class, and the redaction removes
+                    // the credential and nothing else: the body is still the
+                    // JSON the server sent.
+                    let LlmError::InvalidRequest { message } = &error else {
+                        panic!("{signer:?}: the rejection keeps its class: {error:?}");
+                    };
+                    let body: serde_json::Value =
+                        serde_json::from_str(message).unwrap_or_else(|parse| {
+                            panic!("{signer:?}: the body is kept whole: {parse}: {message}")
+                        });
+                    assert!(
+                        body["error"]["message"].as_str().is_some_and(|echoed| {
+                            echoed.starts_with("upstream echo: rejected request with header ")
+                                && echoed.ends_with("[REDACTED]")
+                        }),
+                        "{signer:?}: only the credential is replaced: {message}"
+                    );
+                    assert!(
+                        body["error"]
+                            .as_object()
+                            .is_some_and(|fields| fields.len() > 1),
+                        "{signer:?}: the fields after the message are kept: {message}"
+                    );
+                    assert!(
+                        agent_forms.contains("\"provider_error\":{\"message\":"),
+                        "{signer:?}: the typed reason carries the provider message: {agent_forms}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A stream that fails with more than a server error's message: a model
+    /// the service does not know (the message becomes the error's `model`),
+    /// a refused request (the code goes in front of the message), and a
+    /// code that itself repeats the credential (the code is a log field and
+    /// part of the error), as an `error` event and as a `response.failed`
+    /// event. None of them puts the credential in the error the Responses
+    /// client returns, in what the agent loop derives from it and publishes,
+    /// or in a field the client logs, whoever signed the request; each keeps
+    /// its class.
+    #[tokio::test]
+    async fn echoed_credential_stays_out_of_coded_stream_errors_and_their_log_fields() {
+        let log = LogCapture::default();
+        let capture = CaptureSubscriber::dispatch(log.clone());
+        // A second registered dispatcher makes callsite interest come from
+        // every dispatcher, so a callsite first reached under no subscriber
+        // still reaches this one.
+        let _anchor = CaptureSubscriber::dispatch(LogCapture::default());
+        let _guard = tracing::dispatcher::set_default(&capture);
+
+        let credential = format!("responses-{}", "madeupcredential".repeat(3));
+        for signer in [
+            CredentialSigner::ClientApiKey,
+            CredentialSigner::ClientAzureApiKey,
+            CredentialSigner::StaticBearerAuthorizer,
+        ] {
+            for (code, failed_response) in [
+                (Some("model_not_found"), false),
+                (Some("invalid_request_body"), true),
+                (None, false),
+                (None, true),
+            ] {
+                let echo = CredentialEcho::StreamCodedError {
+                    code,
+                    failed_response,
+                };
+                let (base_url, server) = spawn_credential_echo_server(echo).await;
+                let client = credential_signed_client(signer, base_url, &credential);
+                let request =
+                    LlmRequest::new("gpt-5.4", vec![Message::User(UserMessage::text("hello"))]);
+                let events = client.stream(&request).collect::<Vec<_>>().await;
+                let error = events
+                    .into_iter()
+                    .find_map(|event| match event {
+                        Err(error)
+                        | Ok(LlmEvent::Done {
+                            outcome: LlmDoneOutcome::Error { error },
+                        }) => Some(error),
+                        Ok(_) => None,
+                    })
+                    .unwrap_or_else(|| panic!("{signer:?} {echo:?}: the stream ends in an error"));
+                let rendered = format!(
+                    "{error} {error:?} {}",
+                    serde_json::to_string(&error).expect("error JSON")
+                );
+                let agent_forms = agent_failure_forms(Arc::new(client)).await;
+                server.abort();
+                for (surface, text) in [("client error", &rendered), ("agent", &agent_forms)] {
+                    assert!(
+                        !text.contains(&credential),
+                        "{signer:?} {echo:?}: the {surface} leaked the credential: {text}"
+                    );
+                    assert!(
+                        text.contains("upstream echo"),
+                        "{signer:?} {echo:?}: the server's answer reached the {surface}: {text}"
+                    );
+                }
+                match (code, &error) {
+                    (Some("model_not_found"), LlmError::ModelNotFound { model }) => assert!(
+                        model.starts_with("upstream echo: rejected request with header "),
+                        "{signer:?} {echo:?}: the message is the model: {model}"
+                    ),
+                    (Some(code), LlmError::InvalidRequest { message }) => assert!(
+                        message.starts_with(&format!(
+                            "{code}: upstream echo: rejected request with header "
+                        )),
+                        "{signer:?} {echo:?}: the code stands in front of the message: {message}"
+                    ),
+                    (None, LlmError::Unknown { message }) => assert!(
+                        message.starts_with("rejected_credential:[REDACTED]: upstream echo: "),
+                        "{signer:?} {echo:?}: the code keeps its word and loses the credential: {message}"
+                    ),
+                    _ => panic!("{signer:?} {echo:?}: the failure keeps its class: {error:?}"),
+                }
+            }
+        }
+
+        let logged = log.text();
+        assert!(
+            logged.contains("upstream echo") && logged.contains("rejected_credential:"),
+            "the capture saw the client's error log fields, the code included: {logged}"
+        );
+        assert!(
+            !logged.contains(&credential),
+            "a log field leaked the credential: {logged}"
+        );
+    }
+
+    /// A rejection is redacted where it is read, before the stream carries
+    /// it: the error the request step returns holds no credential by itself,
+    /// whoever signed the request, and keeps its class. (The stream's last
+    /// wrapper redacts the same error again; this row pins the first step,
+    /// which a caller of the request step outside the stream relies on.)
+    #[tokio::test]
+    async fn a_rejection_is_redacted_where_it_is_read() {
+        let credential = format!("responses-{}", "madeupcredential".repeat(3));
+        for signer in [
+            CredentialSigner::ClientApiKey,
+            CredentialSigner::ClientAzureApiKey,
+            CredentialSigner::StaticBearerAuthorizer,
+        ] {
+            for echo in [
+                CredentialEcho::HeaderLine,
+                CredentialEcho::Bare,
+                CredentialEcho::Url,
+            ] {
+                let (base_url, server) = spawn_credential_echo_server(echo).await;
+                let client = credential_signed_client(signer, base_url, &credential);
+                let endpoint = client.responses_endpoint();
+                let error = client
+                    .responses_response_with_fallback(
+                        &endpoint,
+                        &serde_json::json!({"stream": true}),
+                        None,
+                        meerkat_core::HttpAuthorizationContent::default(),
+                        None,
+                        &mut Vec::new(),
+                    )
+                    .await
+                    .expect_err("the request is rejected");
+                server.abort();
+                let rendered = format!(
+                    "{error} {error:?} {}",
+                    serde_json::to_string(&error).expect("error JSON")
+                );
+                assert!(
+                    !rendered.contains(&credential),
+                    "{signer:?} {echo:?}: the rejection leaked the credential: {rendered}"
+                );
+                assert!(
+                    rendered.contains("upstream echo"),
+                    "{signer:?} {echo:?}: the server's answer reached the rejection: {rendered}"
+                );
+                assert!(
+                    matches!(error, LlmError::InvalidRequest { .. }),
+                    "{signer:?} {echo:?}: the rejection keeps its class: {error:?}"
+                );
+            }
+        }
+    }
+
+    /// An image request the provider refuses with a body that repeats the
+    /// request's credential reports the refusal without the credential.
+    #[tokio::test]
+    async fn echoed_credential_stays_out_of_an_image_request_failure() {
+        let credential = format!("responses-{}", "madeupcredential".repeat(3));
+        for signer in [
+            CredentialSigner::ClientApiKey,
+            CredentialSigner::StaticBearerAuthorizer,
+        ] {
+            for echo in [CredentialEcho::HeaderLine, CredentialEcho::Bare] {
+                let (base_url, server) = spawn_credential_echo_server(echo).await;
+                let client = credential_signed_client(signer, base_url, &credential);
+                let output = client
+                    .execute_image_generation(
+                        image_executor_request_json(hosted_openai_plan_json()),
+                    )
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!("{signer:?} {echo:?}: a provider failure output: {error}")
+                    });
+                server.abort();
+                let rendered = format!("{:?}", output.warnings);
+                assert!(
+                    !rendered.contains(&credential),
+                    "{signer:?} {echo:?}: the warning leaked the credential: {rendered}"
+                );
+                assert!(
+                    rendered.contains("upstream echo"),
+                    "{signer:?} {echo:?}: the server's answer reached the warning: {rendered}"
+                );
+            }
+        }
+    }
+
+    /// An image request whose streamed answer cannot be read fails with the
+    /// parse error. The parser quotes the value it could not read, so a
+    /// data line that repeats the request's credential there would put it
+    /// in the error: the error carries the answer without the credential.
+    #[tokio::test]
+    async fn echoed_credential_stays_out_of_an_image_request_error() {
+        let credential = format!("responses-{}", "madeupcredential".repeat(3));
+        let app = Router::new().fallback(|headers: HeaderMap| async move {
+            let authorization = headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default();
+            // `output_index` is a number: the parser reports the text it
+            // finds in its place.
+            let event = serde_json::json!({
+                "type": "response.created",
+                "output_index": format!("upstream echo: header authorization: {authorization}"),
+            });
+            (
+                [("content-type", "text/event-stream")],
+                format!("data: {event}\n\n"),
+            )
+                .into_response()
+        });
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind echoing stream server");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve echoing stream server");
+        });
+        for signer in [
+            CredentialSigner::ClientApiKey,
+            CredentialSigner::StaticBearerAuthorizer,
+        ] {
+            let client = credential_signed_client(signer, format!("http://{addr}"), &credential)
+                .with_chatgpt_backend_wire();
+            let error = match client
+                .execute_image_generation(image_executor_request_json(hosted_openai_plan_json()))
+                .await
+            {
+                Err(error) => error,
+                Ok(output) => panic!(
+                    "{signer:?}: an unreadable stream is an error: {:?}",
+                    output.warnings
+                ),
+            };
+            assert!(
+                matches!(error, LlmError::StreamParseError { .. }),
+                "{signer:?}: {error:?}"
+            );
+            let rendered = format!("{error} {error:?}");
+            assert!(
+                !rendered.contains(&credential),
+                "{signer:?}: the error leaked the credential: {rendered}"
+            );
+            assert!(
+                rendered.contains("upstream echo"),
+                "{signer:?}: the server's answer reached the error: {rendered}"
+            );
+        }
+        server.abort();
+    }
+
+    /// A refusal for exhausted quota stays one whatever the redaction
+    /// removes from its body. This body repeats the request's credential
+    /// and holds the begin marker of a private-key block, which the shape
+    /// rules replace together with its whole line: the error is classified
+    /// from the body as received, and carries no credential.
+    #[tokio::test]
+    async fn a_quota_refusal_keeps_its_class_whatever_the_redaction_removes() {
+        let credential = format!("responses-{}", "madeupcredential".repeat(3));
+        let app = Router::new().fallback(|headers: HeaderMap| async move {
+            let authorization = headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default();
+            // (The marker is assembled here so no scanner reads the source
+            // as a secret.)
+            let marker = format!("-----BEGIN {}-----", "PRIVATE KEY");
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({
+                    "error": {
+                        "message": format!(
+                            "You exceeded your current quota. Request header \
+                             authorization: {authorization} {marker}"
+                        ),
+                        "type": "insufficient_quota",
+                        "code": "insufficient_quota",
+                    },
+                })),
+            )
+                .into_response()
+        });
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind quota refusal server");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve quota refusal server");
+        });
+        for signer in [
+            CredentialSigner::ClientApiKey,
+            CredentialSigner::StaticBearerAuthorizer,
+        ] {
+            let client = credential_signed_client(signer, format!("http://{addr}"), &credential);
+            let request =
+                LlmRequest::new("gpt-5.4", vec![Message::User(UserMessage::text("hello"))]);
+            let events = client.stream(&request).collect::<Vec<_>>().await;
+            let error = events
+                .into_iter()
+                .find_map(|event| match event {
+                    Err(error)
+                    | Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Error { error },
+                    }) => Some(error),
+                    Ok(_) => None,
+                })
+                .unwrap_or_else(|| panic!("{signer:?}: the stream ends in an error"));
+            assert!(
+                matches!(error, LlmError::QuotaExhausted { .. }),
+                "{signer:?}: an exhausted quota stays one: {error:?}"
+            );
+            let rendered = format!(
+                "{error} {error:?} {}",
+                serde_json::to_string(&error).expect("error JSON")
+            );
+            assert!(
+                !rendered.contains(&credential),
+                "{signer:?}: the error leaked the credential: {rendered}"
+            );
+        }
+        server.abort();
+    }
+
+    /// An ordinary provider error that carries no credential (a message, a
+    /// type, a code, a request id, a URL without credentials) reaches the
+    /// caller byte for byte, whoever signed the request.
+    #[tokio::test]
+    async fn an_error_without_a_credential_is_returned_unchanged() {
+        const BODY: &str = r#"{"error":{"message":"The model `gpt-5.4` does not exist or you do not have access to it. See https://docs.upstream.invalid/v1/models?page=2 for the list.","type":"invalid_request_error","param":"model","code":"model_not_found"},"request_id":"req_0123456789abcdef"}"#;
+        let app = Router::new().fallback(|| async {
+            (
+                StatusCode::BAD_REQUEST,
+                [("content-type", "application/json")],
+                BODY,
+            )
+        });
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ordinary error server");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve ordinary error server");
+        });
+        let credential = format!("responses-{}", "madeupcredential".repeat(3));
+        for signer in [
+            CredentialSigner::ClientApiKey,
+            CredentialSigner::ClientAzureApiKey,
+            CredentialSigner::StaticBearerAuthorizer,
+        ] {
+            let client = credential_signed_client(signer, format!("http://{addr}"), &credential);
+            let request =
+                LlmRequest::new("gpt-5.4", vec![Message::User(UserMessage::text("hello"))]);
+            let events = client.stream(&request).collect::<Vec<_>>().await;
+            let error = events
+                .into_iter()
+                .find_map(|event| match event {
+                    Err(error)
+                    | Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Error { error },
+                    }) => Some(error),
+                    Ok(_) => None,
+                })
+                .unwrap_or_else(|| panic!("{signer:?}: the stream ends in an error"));
+            assert!(
+                matches!(&error, LlmError::InvalidRequest { message } if message == BODY),
+                "{signer:?}: {error:?}"
+            );
+        }
+        server.abort();
+    }
     /// Serves each element of `chunks` as a separate paced HTTP body chunk so
     /// tests can pin per-chunk wire behavior (lifecycle-only chunks etc.).
     async fn paced_responses_sse(State(chunks): State<Vec<String>>) -> impl IntoResponse {

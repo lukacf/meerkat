@@ -651,7 +651,6 @@ async def test_a_change_that_stops_or_restores_an_agent_says_what_became_of_its_
         assert adopted.agents[0].schedules is None
 
 
-@_ahead("preparation")
 async def test_the_host_settles_the_preparation_of_an_agent_it_created(tmp_path):
     async with gateway(tmp_path, policy=_THE_HOST_PREPARES_WRITERS) as identities:
         waiting = await identities.create(
@@ -683,10 +682,11 @@ async def test_the_host_settles_the_preparation_of_an_agent_it_created(tmp_path)
             await identities.settle_preparation("nobody", request_id="settle-nobody")
         assert refused.value.kind == "identity_unknown"
         assert refused.value.field == "name"
-        # An agent of a profile the policy does not prepare awaits none.
+        # An agent the host configures, of a profile the policy does not
+        # prepare, awaits none.
         with pytest.raises(IdentityRefusedError) as refused:
             await identities.settle_preparation("scout", request_id="settle-scout")
-        assert refused.value.kind in ("preparation_not_pending", "owner_read_only")
+        assert refused.value.kind == "preparation_not_pending"
 
 
 @_ahead("roster_listing_superseded")
@@ -757,7 +757,6 @@ async def test_get_list_the_directory_and_a_plan_say_when_the_roster_lists_an_ag
         assert await planned_rename("editor", digest) is False
 
 
-@_ahead("preparation_reads")
 async def test_an_agent_that_waits_for_its_host_says_so_and_names_its_create(tmp_path):
     async with gateway(tmp_path, policy=_THE_HOST_PREPARES_WRITERS) as identities:
         runtime = identities._runtime
@@ -780,7 +779,6 @@ async def test_an_agent_that_waits_for_its_host_says_so_and_names_its_create(tmp
         assert (status.preparation_pending, status.archived) == (False, False)
 
 
-@_ahead("preparation_reads")
 async def test_an_archived_agent_says_so_on_its_status(tmp_path):
     async with gateway(tmp_path) as identities:
         runtime = identities._runtime
@@ -800,7 +798,6 @@ async def test_an_archived_agent_says_so_on_its_status(tmp_path):
         assert (await runtime.status("scout")).archived is False
 
 
-@_ahead("preparation_reads")
 async def test_a_held_change_of_an_agent_is_one_of_its_open_operations(tmp_path):
     async with gateway(tmp_path, policy=_A_PERSON_DECIDES_A_DESCRIPTIVE_CHANGE) as identities:
         digest = await _created(identities)

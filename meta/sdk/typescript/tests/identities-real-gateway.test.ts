@@ -629,7 +629,7 @@ describe("identity family on a real gateway", () => {
 
   it(
     "the host settles the preparation of an agent it created",
-    { skip: ahead("preparation") },
+    { skip },
     async () => {
       await withGateway(async (identities) => {
         const waiting = await identities.create([{ name: "editor", profile: "writer" }], {
@@ -668,21 +668,19 @@ describe("identity family on a real gateway", () => {
         );
         assert.equal(unknown.kind, "identity_unknown");
         assert.equal(unknown.field, "name");
-        // An agent of a profile the policy does not prepare awaits none.
+        // An agent the host configures, of a profile the policy does not
+        // prepare, awaits none.
         const none = await refusedBy(
           identities.settlePreparation("scout", { requestId: "settle-scout" }),
         );
-        assert.ok(
-          none.kind === "preparation_not_pending" || none.kind === "owner_read_only",
-          none.kind,
-        );
+        assert.equal(none.kind, "preparation_not_pending");
       }, THE_HOST_PREPARES_WRITERS);
     },
   );
 
   it(
     "an agent that waits for its host says so and names its create",
-    { skip: ahead("preparation_reads") },
+    { skip },
     async () => {
       await withGateway(async (identities, rpc) => {
         const status = async (identity: string) =>
@@ -714,7 +712,7 @@ describe("identity family on a real gateway", () => {
 
   it(
     "an archived agent says so on its status",
-    { skip: ahead("preparation_reads") },
+    { skip },
     async () => {
       await withGateway(async (identities, rpc) => {
         const status = async (identity: string) =>
@@ -741,7 +739,7 @@ describe("identity family on a real gateway", () => {
 
   it(
     "a held change of an agent is one of its open operations",
-    { skip: ahead("preparation_reads") },
+    { skip },
     async () => {
       await withGateway(async (identities) => {
         const digest = await created(identities);

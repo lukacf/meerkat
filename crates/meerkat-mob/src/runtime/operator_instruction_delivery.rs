@@ -842,6 +842,17 @@ pub(crate) fn report_wake_failure(
     shared.record_failure(agent_identity, RetryFailure::new(class, text));
 }
 
+/// A member's delivery lock and the release epoch read under it. A wake
+/// carries it from its epoch step to its write, so the write faces the very
+/// lock the epoch was read under: a lock the bookkeeping pruned and made
+/// anew in between (a retirement that released and completed) would start
+/// at the same number again.
+#[derive(Debug)]
+pub(crate) struct MemberRelease {
+    lock: Arc<tokio::sync::Mutex<u64>>,
+    epoch: u64,
+}
+
 /// `agent_identity`'s release epoch, read under the member's delivery lock,
 /// off the mob's actor: a delivery in flight for the member holds the lock
 /// while it writes the member's session, and is waited for here, at most
@@ -850,18 +861,20 @@ pub(crate) async fn member_release_epoch(
     shared: &OperatorInstructionDeliveryShared,
     agent_identity: &AgentIdentity,
     bound: Duration,
-) -> Option<u64> {
+) -> Option<MemberRelease> {
     let lock = shared.member_lock(agent_identity);
-    tokio::time::timeout(bound, async move { *lock.lock().await })
+    let epoch = tokio::time::timeout(bound, async { *lock.lock().await })
         .await
-        .ok()
+        .ok()?;
+    Some(MemberRelease { lock, epoch })
 }
 
 /// Record one member's prepared snapshot in its local session at the
 /// member's wake, off the mob's actor, as the delivery owner records it:
 /// under the member's delivery lock, and only while the member's release
-/// epoch is still `epoch`, the one read before the snapshot was prepared (a
-/// release that landed since moved it on, and nothing is written after it).
+/// epoch is still `release`'s, the one read before the snapshot was prepared
+/// (a release that landed since moved it on, and nothing is written after
+/// it). The lock is the one that epoch was read under.
 ///
 /// The write runs on a task of its own and is waited for at most `bound`:
 /// a session that is waiting for its turn boundary or its store does not
@@ -874,15 +887,14 @@ pub(crate) async fn record_owed_snapshot_at_wake(
     session_service: Arc<dyn super::session_service::MobSessionService>,
     agent_identity: AgentIdentity,
     delivery: MemberInstructionDelivery,
-    epoch: u64,
+    release: MemberRelease,
     bound: Duration,
 ) -> WakeInstructionRecord {
     let session_id = delivery.session_id().clone();
     let generation = delivery.generation();
-    let lock = shared.member_lock(&agent_identity);
     let write = crate::tokio::spawn(async move {
-        let held = lock.lock().await;
-        if *held != epoch {
+        let held = release.lock.lock().await;
+        if *held != release.epoch {
             return None;
         }
         let answer = session_service
@@ -956,6 +968,12 @@ fn classify_delivery_result(
             block,
         })
     };
+    let retry = |error: &SessionInstructionError| {
+        DeliveryResult::Retry(RetryFailure::new(
+            record_failure_class(error),
+            error.to_string(),
+        ))
+    };
     match result {
         // The session holds a later generation under this mob's id than the
         // mob ever minted: an earlier incarnation of the mob id recorded it
@@ -979,6 +997,14 @@ fn classify_delivery_result(
             session_id: session_id.clone(),
             generation,
         }),
+        // Only a service that keeps no durable session document answers
+        // this (the in-memory service, and the default of a wrapper that
+        // does not forward the record): a permanent condition, so the
+        // member is blocked. A durable service whose store fails answers a
+        // store error, which is retried below.
+        Err(SessionInstructionError::DurabilityUnavailable) => {
+            blocked(mob_dsl::MemberInstructionBlock::DurabilityUnavailable)
+        }
         Err(SessionInstructionError::Refused(InstructionWriteError::OwnedBySession)) => {
             blocked(mob_dsl::MemberInstructionBlock::OwnedBySession)
         }
@@ -988,15 +1014,8 @@ fn classify_delivery_result(
         Err(SessionInstructionError::Refused(InstructionWriteError::SlotManagedByActivation {
             ..
         })) => blocked(mob_dsl::MemberInstructionBlock::SlotManagedByActivation),
-        // Every other failure leaves the member owed and is tried again: a
-        // session whose store cannot take the record now
-        // (`durability_unavailable`) included, since a store comes back.
-        // Only the three refusals above, which an operator has to clear,
-        // block the member.
-        Err(other) => DeliveryResult::Retry(RetryFailure::new(
-            record_failure_class(&other),
-            other.to_string(),
-        )),
+        // Every other failure leaves the member owed and is tried again.
+        Err(other) => retry(&other),
     }
 }
 
@@ -1044,6 +1063,9 @@ fn classify_placed_delivery_result(
             InstructionSetErrorCode::PreparedAuthorizationRequired => {
                 blocked(mob_dsl::MemberInstructionBlock::MemberHostUnsupported)
             }
+            InstructionSetErrorCode::DurabilityUnavailable => {
+                blocked(mob_dsl::MemberInstructionBlock::DurabilityUnavailable)
+            }
             InstructionSetErrorCode::OwnedBySession => {
                 blocked(mob_dsl::MemberInstructionBlock::OwnedBySession)
             }
@@ -1053,8 +1075,6 @@ fn classify_placed_delivery_result(
             InstructionSetErrorCode::SlotManagedByActivation => {
                 blocked(mob_dsl::MemberInstructionBlock::SlotManagedByActivation)
             }
-            // `durability_unavailable` included: the member stays owed and
-            // the record is tried again, as for a local session.
             other => DeliveryResult::Retry(RetryFailure::new(
                 refusal_class(other),
                 format!("the member's session on its member host refused the record: {other:?}"),

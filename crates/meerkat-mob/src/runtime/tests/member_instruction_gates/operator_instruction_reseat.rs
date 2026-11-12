@@ -775,12 +775,15 @@ async fn a_release_between_the_preparation_and_the_write_writes_nothing() {
             .await
             .expect("no delivery holds the member's lock");
     // The release: under the member's lock, its epoch moves on.
-    let released_at = {
+    {
         let lock = shared.member_lock(&fixture.identity);
         let mut epoch = lock.lock().await;
         *epoch = epoch.wrapping_add(1);
-        *epoch
-    };
+    }
+    let released_at =
+        member_release_epoch(&shared, &fixture.identity, WAKE_INSTRUCTION_RECORD_BOUND)
+            .await
+            .expect("no delivery holds the member's lock");
     let delivery = || {
         MemberInstructionDelivery::authorized(
             session_id.clone(),

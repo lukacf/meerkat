@@ -1429,9 +1429,8 @@ pub trait MobSessionService:
     /// the mob's with this snapshot; another mob's target is refused.
     ///
     /// The default is a typed refusal, never a silent success: a decorator
-    /// that does not forward it leaves its members owed, visibly (the
-    /// status shows the refusal's text as their last failure, and the mob
-    /// goes on trying). Every production wrapper over a durable
+    /// that does not forward it blocks its members' deliveries visibly
+    /// (`durability_unavailable`). Every production wrapper over a durable
     /// owner forwards it.
     async fn record_member_instruction_target(
         self: Arc<Self>,

@@ -723,7 +723,7 @@ impl MobActor {
                 }
                 // A service that keeps no durable document holds no target to
                 // release; so does a session service wrapper that does not
-                // forward the release (its members' deliveries stayed owed
+                // forward the release (its members' deliveries were blocked
                 // the same way).
                 Err(meerkat_core::service::SessionInstructionError::DurabilityUnavailable) => {
                     tracing::warn!(

@@ -175,10 +175,11 @@ struct WakeTopology {
 enum WakeStep {
     Planned(Box<Result<WakePlan, MobError>>),
     /// The first step of an owed member's operator instruction record, read
-    /// off the actor: the member's release epoch (`None`: its delivery lock
-    /// stayed held past the bound) and the bodies of its own records.
+    /// off the actor: the member's delivery lock with the release epoch read
+    /// under it (`None`: the lock stayed held past the bound) and the bodies
+    /// of its own records.
     InstructionEpoch {
-        epoch: Option<u64>,
+        epoch: Option<super::super::operator_instruction_delivery::MemberRelease>,
         own_bodies: Result<Vec<(String, String, Arc<str>)>, MobError>,
     },
     /// The second step: what the member's session did with the snapshot the
@@ -1151,11 +1152,12 @@ impl MobActor {
     /// the bodies of the member's own records are read from their journal
     /// rows; on the actor, MobMachine prepares the delivery
     /// (`PrepareMemberInstructionDelivery`); off the actor again, the
-    /// session takes the record, under the lock and only while the epoch
-    /// stands. Each wait off the actor has its own short bound
-    /// ([`WAKE_INSTRUCTION_RECORD_BOUND`]): past it the wake goes on and the
-    /// member stays owed. A member that is owed nothing, and a placed
-    /// member (its session is on its member host), goes straight to
+    /// session takes the record, under that same lock and only while the
+    /// epoch stands. Each wait off the actor has its own short bound
+    /// ([`WAKE_INSTRUCTION_RECORD_BOUND`]): the wait for the lock, the read
+    /// of the journal rows and the session's answer. Past it the wake goes
+    /// on and the member stays owed. A member that is owed nothing, and a
+    /// placed member (its session is on its member host), goes straight to
     /// readiness: one lookup in the machine's state, nothing read or built.
     async fn dispatch_member_wake_instructions(
         &mut self,
@@ -1193,7 +1195,15 @@ impl MobActor {
                 let epoch =
                     member_release_epoch(&shared, &identity, WAKE_INSTRUCTION_RECORD_BOUND).await;
                 let own_bodies = if epoch.is_some() && !rows.is_empty() {
-                    read_journaled_bodies(events.as_ref(), rows).await
+                    let read = read_journaled_bodies(events.as_ref(), rows);
+                    match crate::tokio::time::timeout(WAKE_INSTRUCTION_RECORD_BOUND, read).await {
+                        Ok(read) => read,
+                        Err(_) => Err(MobError::Internal(
+                            "the mob's journal did not answer the read of the member's own \
+                             operator instruction bodies within the wake's bound"
+                                .to_string(),
+                        )),
+                    }
                 } else {
                     Ok(Vec::new())
                 };
@@ -1214,7 +1224,7 @@ impl MobActor {
         &mut self,
         run: WakeRun,
         rollback: Option<WakeRollback>,
-        epoch: Option<u64>,
+        epoch: Option<super::super::operator_instruction_delivery::MemberRelease>,
         own_bodies: Result<Vec<(String, String, Arc<str>)>, MobError>,
     ) {
         use super::super::operator_instruction_delivery::{

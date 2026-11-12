@@ -273,7 +273,12 @@ switch (state.outcome) {
 
 </CodeGroup>
 
-`withdraw` ends a held decision without writing anything. A person decides a
+`withdraw` ends a held decision without writing anything. After a withdrawal
+the operation reads `refused` with kind `decision_closed`
+(`state: withdrawn`), a second `withdraw` answers `decision_closed` too, and
+the same `request_id` cannot be asked again: ask the change under a new one.
+
+A person decides a
 held change through the [durable decision methods](/api/rpc#durable-decision-methods);
 the person who asked cannot decide their own request. In this release the
 host's own consequence lines come from a Rust host composition only: a

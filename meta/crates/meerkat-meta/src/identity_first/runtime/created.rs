@@ -588,9 +588,6 @@ impl IdentityRuntime {
     /// The caller must NOT hold the identity's lifecycle lock: a row that
     /// changed or left is registered or forgotten under that lock, which is
     /// not reentrant.
-    // Called by the identity change path, which is not in this crate yet:
-    // until it is, only the rows call it.
-    #[allow(dead_code)]
     pub(crate) async fn register_from_row(
         &self,
         name: &AgentIdentity,

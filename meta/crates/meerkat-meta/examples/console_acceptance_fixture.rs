@@ -229,6 +229,43 @@ image_generation = {live_images}
             .lease_provider(Arc::new(LocalLeaseProvider::new()));
     }
     let runtime = Arc::new(Box::pin(builder.build()).await?);
+    // META_FIXTURE_IDENTITY_POLICY=1: the runtime serves the changes and
+    // reads of its long-term agents (`meta/identity/*`) under a policy that
+    // allows every change of an agent of the fixture's profile to any
+    // requester, and holds the create of the two names `held-one` and
+    // `held-two` for a decision of the approver `owner`.
+    if std::env::var("META_FIXTURE_IDENTITY_POLICY")
+        .ok()
+        .as_deref()
+        == Some("1")
+    {
+        assert!(
+            identity_mode,
+            "the identity policy needs the identity-first runtime (META_FIXTURE_MODE=identity)"
+        );
+        let policy = meerkat_meta::identity_creation::IdentityCreationPolicy::parse(&json!({
+            "enabled": true,
+            "peers": {"default": "allow"},
+            "approval": {"rules": [
+                {"change": ["create", "descriptive", "capability", "peers", "profile",
+                            "archive", "remove", "adopt"],
+                 "target": {"profile": ["lead"]},
+                 "outcome": {"kind": "allow"}},
+                {"change": ["create"],
+                 "target": {"identity": ["held-one", "held-two"]},
+                 "outcome": {"kind": "require_approval", "approver": {"id": "owner"}}},
+            ]},
+        }))
+        .map_err(|refusal| refusal.to_string())?
+        .ok_or("the fixture's identity policy is enabled")?;
+        assert!(
+            runtime.attach_identity_policy(
+                Arc::new(policy),
+                meerkat_meta::identity_creation::IdentityFamilyOptions::new(),
+            ),
+            "the identity-first runtime takes the policy"
+        );
+    }
     let gating_file = storage
         .as_ref()
         .map(|dir| std::path::Path::new(dir).join("gating.json"));

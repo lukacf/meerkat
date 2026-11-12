@@ -418,8 +418,11 @@ impl super::MobHandle {
     /// ([`super::IdentityCreateOutcome::embodied`] answered it failed): it
     /// is seated from its row's spec, and a spec that owes a kickoff is
     /// embodied, so its kickoff runs once. It decides nothing new: each seat
-    /// is the declared apply's own verdict under created custody. A mob
-    /// that is not running, and a candidate composition, seat nothing.
+    /// is the declared apply's own verdict under created custody. The pass
+    /// also carries out what the rows keep owed besides a seat, as a start
+    /// does: the retirement of a removed or archived identity whose member
+    /// is not retiring yet. A mob that is not running, and a candidate
+    /// composition, seat nothing.
     ///
     /// Answers the identities still owed their seat afterwards, in identity
     /// order: empty when every one was seated. It never fails its caller;

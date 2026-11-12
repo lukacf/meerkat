@@ -37,6 +37,14 @@ them.
 
 ### Added
 
+- `MobHandle::seat_owed_store_owned_identities` seats, while the mob runs,
+  every store-owned identity that is owed its seat (the spawn of its
+  create's kickoff failed), and answers the identities still owed
+  afterwards. It runs the pass a start runs, so a host need not restart the
+  mob to seat such an identity; its kickoff then runs once. The pass also
+  carries out what the rows keep owed besides: the retirement of a removed
+  or archived identity whose member is not retiring yet.
+
 - Mob: `MobHandle::identity_records` reads the rows of many identities in
   the mob's identity store at once, in pages of at most
   `IDENTITY_ENTRY_PAGE_MAX` names, one store read per page, where
@@ -83,6 +91,15 @@ them.
   build preparation. Additive: the method is defaulted and composes
   nothing, so hosts that do not implement it see no change.
 
+### Changed
+
+- Durable decisions of the kinds `identity.create`, `identity.update`,
+  `identity.archive`, `identity.unarchive`, `identity.remove` and
+  `identity.adopt` (a change of an agent) are decided by people only
+  (`DECIDED_BY_PEOPLE_ONLY`): a hold of one that names a reviewer is refused
+  `ReviewStageNotAllowed`, so an agent never approves a change of an agent.
+  No released surface held a decision of these kinds.
+
 ### Fixed
 
 - Mob: Core asks the host's member build preparer
@@ -99,11 +116,6 @@ them.
   and the mob's next start asks again. A hold the host asks for
   (`HoldUntilReleased`) holds the member's run starts until
   `release_member_run_starts`. Hosts with no preparer see no change.
-- `MobHandle::seat_owed_store_owned_identities` seats, while the mob runs,
-  every store-owned identity that is owed its seat (the spawn of its
-  create's kickoff failed), and answers the identities still owed
-  afterwards. It runs the pass a start runs, so a host need not restart the
-  mob to seat such an identity; its kickoff then runs once.
 
 ## [0.9.13] - 2026-11-11
 

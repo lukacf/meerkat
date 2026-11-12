@@ -20,12 +20,256 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Rust API of `meerkat-meta`, `identity_creation`: `NameTakenBy` loses the
   variants `Declared` and `Created` and gains `Identity`. A `name_taken`
   refusal names its holder as `identity`, `removed`, `worker` or `unreadable`.
+  With two variants gone the three that stay each moved up one place:
+  the implicit discriminants of `Removed`, `Worker` and `Unreadable` are 1, 2
+  and 3 (they were 2, 3 and 4), and their places in the derived order
+  (`PartialOrd`, `Ord`) moved with them. The order among the three is
+  unchanged; `Identity` sorts first, where `Declared` did.
 - Rust API of `meerkat-meta`: `IdentityStatus` gains the member `record`
   (`IdentityRecordFacts`), so a struct literal of it needs the member
   (`record: Default::default()`). The status as written on the wire is
   unchanged while the record's members are unset.
+- `runtime_options.identity_creation` (and the Rust form a native host
+  returns): a policy that names the approval outcome `notify` or `review`, or
+  a `preparation` other than `none`, is refused at init, with the policy path
+  and what to write instead. Before, such a policy was accepted and nothing
+  acted on it. No notice reaches an approver for `notify` yet, no reviewer
+  decides for `review` yet, and no method settles a preparation yet: write
+  `allow` or `require_approval`, and leave `preparation` out.
+- Rust, source only: `CustomizerToolsSpawnCustomizer` no longer implements
+  the auto traits `UnwindSafe` and `RefUnwindSafe`. It now holds a
+  late-bound reference to the session bridge, through which it asks whether
+  Core holds a member as an identity entry, and a session bridge has
+  neither trait. No Meerkat code relied on them.
+
+### Added
+
+- `meta/identity/*`: host methods that change a mob's long-term agents while
+  it runs, on the stdio gateway and on `POST /console/rpc`: `create` (1 to
+  256 agents, all or nothing), `update`, `archive`, `unarchive`, `remove`,
+  `adopt` (release a configured agent from configuration: it keeps its
+  member, session and history, and is changed at run time from then on),
+  `withdraw` and `changes_hold`, and the reads `list`, `get`, `operation`,
+  `directory` and `plan`. An agent created this way is the same kind of
+  agent as a configured one; who asked for it is recorded and grants or
+  limits nothing. A create seats its agents dormant and wakes nothing, and a
+  read never wakes an agent. See "Agent changes" in the RPC reference.
+- Every launch whose mob has long-term agents serves the methods and lists
+  them in `meta/capabilities`. Their changes need the launch's identity
+  policy (`runtime_options.identity_creation`, which until now was checked
+  and then dropped). The policy is default deny: each change class of a
+  request is judged by its own rules and the strictest outcome applies. A
+  launch without a policy, or with one whose `enabled` is false, serves the
+  reads and refuses every change and every `plan` `change_denied`, with a
+  sentence that says the launch gives no identity creation policy; its
+  agents are unchanged. See the new policy reference,
+  `docs/reference/identity-policy.mdx`.
+- A change whose rule says `require_approval` answers `pending_decision`
+  and is held as a durable decision; once a person approved it through
+  `meta/decisions/decide`, the launch carries it out by itself and
+  `meta/identity/operation` reads `done`. `meta/identity/withdraw` ends a
+  change that is still held. An agent that asked is told the outcome by a
+  keyed message to itself. A person's approval is evidence, never authority
+  over the policy: when the approved change is carried out, the policy the
+  launch has then is asked again, and a change it denies now is not
+  executed (`meta/identity/operation` says it was denied).
+- `GET /console/experience`: `affordances.can_change_identity` and
+  `affordances.can_remove_identity` are false for an agent the host's
+  configuration declares, so a client offers no control that could only be
+  refused `owner_read_only`.
+- A change names as peers only agents its caller may see: on the Console a
+  peer the caller may not view is answered `peer_unknown`, as a name no
+  agent holds, and never `peer_not_allowed`.
+- An agent is shown no agent that is private to one person (one whose
+  labels carry `console.private_to`): its list and its directory leave
+  such an agent out, and a get, a plan or a change of it answers
+  `identity_unknown`, as a name no agent holds. Every read of the family
+  and every peer a change names goes through this one rule; what a
+  person's view of the mob shows is unchanged. Who is private is read
+  from the agent's own record, so the rule holds for an agent that has
+  not run since its host started, and such an agent asks for no change
+  itself (`private_requester`). Who asked for an agent is left out of
+  what an agent reads once the asker's record can no longer be read (a
+  removed agent); the host reads it as before.
+- Every refusal of the family is one JSON-RPC error, code `-32058`
+  (`meerkat_meta::rpc::IDENTITY_REFUSED_CODE`), whose `data` is `{kind,
+  field?, retryable, detail}` and the kind's own members; `kind` is a closed
+  vocabulary. Params that are not what a method takes are that error too
+  (`invalid_request`).
+- A change names its operation with `request_id`: the same requester and
+  request answer the same state again and write nothing twice, another
+  request under the id is `operation_reused`, and two requesters that choose
+  the same id name two operations.
+- One spec digest names an agent on every surface: `list`, `get`, an outcome
+  and `stale_spec.current_digest` agree, before and after an adoption.
+- A create whose first message did not start answers `seat: "owed"` for
+  that agent; the mob seats it at the next change of the family or at its
+  next start, without a restart, and its first message runs once then. A mob
+  whose runtime is governed refuses a create that gives a first message
+  (`unsupported`, `first_message_in_governed_realm`) before anything is
+  written.
+- Console access actions `agent.identity.create`, `agent.identity.manage`
+  (update, archive, unarchive and adopt, on the named agent) and
+  `agent.identity.remove` (on the named agent). `GET /console/experience`
+  carries `identity_changes: {available, can_create, can_change,
+  can_remove}` and, per listed agent, `affordances.can_change_identity` and
+  `affordances.can_remove_identity`.
+- Rust: `UnifiedRuntime::attach_identity_policy` attaches a launch's
+  policy; `UnifiedRuntime::identity_family` reads the family, attached
+  whenever the runtime has an identity runtime, and
+  `UnifiedRuntime::identity_changes_enabled` says whether its policy is
+  present and enabled; `identity_creation::{IdentityFamilyOptions,
+  IdentityFamilySlot, IdentityHostHooks}`;
+  `IdentityCreationPolicy::check_served`;
+  `IdentityRuntime::{attach_identity_family, attach_identity_reads,
+  identity_family, identity_family_seen_by, identity_changes_enabled}`;
+  `identity_creation::{PeerVisibility, AgentSpecs, AGENT_SPECS_NOT_GIVEN,
+  FIRST_MESSAGE_IN_GOVERNED_REALM}`, `CoreChangeExecutor::with_agent_specs`,
+  `IdentityFamilyOptions::with_decision_notices`,
+  `UnifiedRuntime::identity_family_seen_by` and `rpc::{HOST_RPC_SURFACE,
+  IDENTITY_REFUSED_CODE}`.
+- On the Console: `meta/identity/plan` needs what the change it plans
+  needs, on the agent it names; `meta/identity/operation` answers the
+  caller's own operations, and another requester's only to a caller with
+  `runtime.admin`; `meta/identity/withdraw` is the signed-in requester's; a
+  signed-in person with `runtime.admin` holds and releases the mob's
+  changes; a `get` names only the peers its caller may view, and no page's
+  `next` names an agent the caller may not view.
+- `proposer` and `source_evidence` are the host's to state: a person and
+  an agent that send one are refused `invalid_request` at the member.
+- One `request_id` names one change and one held decision: another change
+  under the id of a held one, of whatever kind, is `operation_reused`.
+- `name_taken` names the agent of the request that asked for the name
+  (`field: "agents[i].name"`), also when an existing agent holds it.
+- An update answers an `instructions` member only where the launch has an
+  instruction step for updates and the update names `set.instructions`.
+- An agent's change is refused `invalid_request` when the identity its
+  surface attributed to the call is not the member of the session the call
+  ran in (`ChangeRequester::agent_session`): the policy judges the first and
+  Core reads the grant of the second, so the two are one agent. It is
+  refused when the change is asked for, before anything is held, so a
+  person is never asked to decide such a call; a plan of it is refused the
+  same.
+
+- Changes of agents that a person decides. A change whose outcome under the
+  host's identity policy is `require_approval` is held as one durable
+  decision of kind `identity.create`, `identity.update`, `identity.archive`,
+  `identity.unarchive`, `identity.remove` or `identity.adopt` and answers
+  `pending_decision`; the same request id answers the same state, any
+  other request under it is `operation_reused`, and nothing else is written,
+  built or woken while it is held. One decision covers the whole request: a
+  create of several agents is one decision. Its deadline is the policy's
+  timeout for the change, and a decision nobody decided by then ends
+  `expired`. A person decides it through `meta/decisions/decide` (the stdio
+  operator, or a person an application attests from its own channel); these
+  kinds are decided by people only. A person cannot approve a request the
+  decision records as theirs (`self_approval`): a request a signed-in
+  Console person asked, and a request a host asked that names the person as
+  its `proposer` by their principal key. A request a host asks with no such
+  proposer is the host's, whoever the application carried it for. The
+  requester or the host withdraws a change that is still held.
+- The rendering a person approves shows, ahead of anything the requester
+  wrote, the host's consequence lines and what the mob declares for every
+  profile an agent of the request runs on: its model, auth binding, skill
+  names and tool configuration, with one digest of the whole declaration
+  (the profile, the wiring rules that name it, the definitions of its
+  skills). An MCP server the profile configures is shown by its name and its
+  configuration is never rendered; a profile that names no server of the
+  host is shown to reach every server the host offers. A profile bound to a
+  realm profile is read from the realm, and the change is refused
+  `unsupported` where the host cannot read it. When the approved change is
+  carried out the request is rendered again: a declaration or host lines
+  that differ, or an agent that moved to another profile, refuse it
+  `subject_widened` and close the decision, and an agent that changed
+  otherwise is refused `stale_spec`. A refusal the same request may outlive
+  releases the attempt
+  and keeps the approval. Consequence lines come from a Rust host
+  composition (`GatewayHostComposition::identity_consequences`); a host
+  behind an SDK supplies none in this release.
+- An approved change is carried out once: a gateway that stops between the
+  commit and the decision's settlement settles it executed at its next
+  start and commits nothing twice. An agent that asked is told the outcome
+  by a message to its own name once its decision ended; a host surface or a
+  person that asked reads the operation's state. A decision is carried out
+  only by a gateway whose launch enables the identity policy.
+- On the Console, the requester of a change of an agent reads its own
+  request whole (`meta/decisions/get`, `rendering`), as the requester of a
+  tool grant does.
+- Rust: `identity_creation::IdentityDecisions` (the holder of these
+  decisions: `hold`, `held`, `withdraw`, `render`, `executors`,
+  `spawn_driver`), `HeldChangeHost`, `IdentityDecisionNotices`,
+  `KeyedSendNotices`, `HostConsequences`, `render_held_v1` with
+  `ToolConfigurations`, and `durable_decisions::DecisionExecutorDriver`,
+  which drives a runtime's decision executors: one pass at start, one after
+  each change of a decision (`RuntimeDecisions::notify_work`), and a tick
+  only while a decision of its kinds waits. A host with no such decision
+  makes no further pass, and a pass with nothing owed reads decision records
+  only. `HeldChangeHost::realm_profile` is the read of a realm profile a
+  host gives the holder.
+- Behaviour of `identity_creation::render_v1`: the rendering of an update and
+  of a removal no longer has the line `Expected spec digest`, so the subject
+  digest of such a request differs from the one 0.9.13 computed for it. No
+  rendering shows that digest; the request digest still covers it. Nothing
+  stored a rendering before this release.
+- Behaviour of `identity_creation::normalize_create`, `normalize_update` and
+  `normalize_remove`: a refusal's `field` is a path into the request as every
+  surface writes it. `identities[i].spec.identity` is `agents[i].name`,
+  `identities[i].spec.profile`, `.labels` and `.context` are
+  `agents[i].profile`, `agents[i].labels` and `agents[i].context`,
+  `identities[i].spec.binding` (a bootstrap token, which no request as
+  written can carry) is the agent itself, `agents[i]`,
+  `identities[i].peers[j]` is `agents[i].peers[j]`, `identities` is `agents`,
+  `identity` is `name`, `set.descriptive_labels` and `set.authority_fields`
+  are `set.labels`, and `set.peers_add[j]` is `peers_add[j]`.
+
+
+- Rust API of `meerkat-meta`, `identity_creation`: the interface of the
+  identity family, with nothing reachable by a caller of the gateways yet.
+  - The family and its wire types: the trait `IdentityFamily` and the
+    requests every surface writes (`CreateAgents`, `AgentSpec`,
+    `UpdateAgent`, `AgentSet`, `AgentRef`, `OperationRef`, `ListAgents`,
+    `GetAgent`, `ReadDirectory`, `ChangesHoldRequest`), with their answers
+    (`AgentPage`, `AgentSummary`, `AgentRecord`, `DirectoryPage`,
+    `ChangePlan` and the types they hold).
+  - The typed outcome `IdentityOutcome` (`done`, `pending_decision`,
+    `pending_preparation`, `refused`), with `AgentOutcome`, `AgentSeat`,
+    `AgentChangeState`, `InstructionOutcome` and
+    `InstructionNextSessionReason`.
+  - `OperationId`, the one way a caller's request id becomes an operation
+    id, namespaced by the requester, and `ToolCallOrigin` for a tool call
+    that gives none.
+  - The executor seam: `IdentityChangeExecutor`, `CoreChangeExecutor`,
+    `ChangeCommit`, `ChangeCommitted`, `ChangeRequester`, `ChangeConsent`,
+    `ExecutorError`, `InstructionStep`, `committed_outcome`,
+    `refusal_of_core`, `refusal_of_error`. It commits a create, an archive,
+    an unarchive and a removal through Core; an update and an adoption
+    answer `unsupported`.
+  - Request actions and normalization for an archive, an unarchive and an
+    adoption (`ArchiveIdentitySpec`, `UnarchiveIdentitySpec`,
+    `AdoptIdentitySpec`, `normalize_archive`, `normalize_unarchive`,
+    `normalize_adopt`), and ten refusal kinds: `privileged_field`,
+    `grant_revoked`, `private_requester`, `owner_read_only`,
+    `not_adoptable`, `not_archived`, `declared_apply_open`, `purge_refused`,
+    `mob_not_running`, `purged`. Their variants of `IdentityRefusalKind`
+    (which is `non_exhaustive`) are declared after every earlier one, so no
+    earlier variant's implicit discriminant moves. A refusal carries a
+    detail sentence (`IdentityRefusal::detail`, `to_refused`).
+- Rust API of `meerkat-meta`: `IdentityRecordFacts`, the record facts of an
+  identity's status (spec digest and revision, archived, preparation
+  pending, provenance, open operations), each absent on the wire while
+  unset. Nothing sets them yet.
 
 ### Changed
+
+- An access rule with the pattern `agent.*` or `*` covers the three new
+  `agent.identity.*` actions, as it covers every action a release adds to a
+  family. They only open the methods: the identity policy still judges every
+  change, and without a policy every change is refused.
+
+- `runtime_options.identity_creation`: an approval rule may name the change
+  classes `archive` (an archive and an unarchive) and `adopt`, and
+  `approval.timeouts_ms` takes `archive` and `adopt` (4 hours each by
+  default). A launch that names them was refused at init before.
 
 - Meta serves an identity whose record is its row in the mob's identity
   store (one created at run time, or one a host adopted into the store) as
@@ -152,6 +396,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `SessionBridge::lower_store_owned_seat_build` is the bridge's part of it
   (defaulted; a bridge that wraps another forwards it).
 
+- An agent's `mob_check_member` and `mob_retire_member` naming a member
+  private to a person the agent does not act for, and the refusal of a
+  private member's `council`, read whom the member is private to from the
+  member's own roster row (its `console.private_to` label). They asked
+  only the running host's record of the members it had started, so
+  through 0.9.13 a private member the host had not started since its
+  launch (seated and never run, or any private member in the moments
+  after a restart) was checked and retired by another agent, and convened
+  a council. The host's record still adds what a roster row cannot say (a
+  member that left the roster).
 - The first build of an identity created at run time carries the host
   customizer's tools: the member Core starts at the create to run the
   identity's first message, and the member Core wakes before a roster pass
@@ -223,6 +477,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   customizer adds (an access rule's `match_labels`, for example) matches a
   configured agent and not such an agent. The customizer's model, system
   prompt, instructions, provider parameters, context and tools do reach it.
+- `identity_creation::normalize_create` refuses a name in a reserved
+  namespace `invalid_name` at the agent's `name`: a name that starts with
+  `mk--` (the encoded member-id namespace) or with `rt:` (the namespace of
+  generated runtime aliases). It admitted such names before.
+- `identity_creation::IdentityRefusalKind::AdmissionUnsettled` is retryable
+  (`is_retryable`), as Core's refusal of the same name is.
 
 ## [0.9.13] - 2026-11-11
 

@@ -186,10 +186,10 @@ fn envelope(
     proposer: Option<&String>,
     source_evidence: Option<&SourceEvidence>,
 ) -> RequestEnvelope {
-    let mut envelope = RequestEnvelope::default();
-    envelope.proposer = proposer.cloned();
-    envelope.source_evidence = source_evidence.cloned();
-    envelope
+    RequestEnvelope {
+        proposer: proposer.cloned(),
+        source_evidence: source_evidence.cloned(),
+    }
 }
 
 /// What an update sets. An absent member is unchanged.
@@ -290,13 +290,7 @@ impl UpdateAgent {
             .map(DisplayName::parse)
             .transpose()
             .map_err(|_| malformed("set.display_name"))?;
-        let mut set = UpdateSetSpec::default();
-        set.profile = profile.as_deref().map(ProfileName::from);
-        set.display_name = display_name;
-        set.additional_instructions = instructions.clone();
-        set.context = context.clone();
-        set.peers_add = self.peers_add.clone();
-        set.peers_remove = self.peers_remove.clone();
+        let (mut authority_fields, mut descriptive_labels) = (None, None);
         if labels.is_some() || !labels_remove.is_empty() {
             let mut next = current_labels.clone();
             for key in labels_remove {
@@ -325,16 +319,28 @@ impl UpdateAgent {
             let (authority, descriptive) = split(&next);
             let (authority_now, descriptive_now) = split(current_labels);
             if authority != authority_now {
-                set.authority_fields = Some(authority);
+                authority_fields = Some(authority);
             }
             if descriptive != descriptive_now {
-                set.descriptive_labels = Some(descriptive);
+                descriptive_labels = Some(descriptive);
             }
         }
-        let mut update: UpdateIdentitySpec =
-            UpdateIdentitySpec::new(self.name.clone(), self.expected_spec_digest.clone());
-        update.set = set;
-        Ok(update)
+        Ok(UpdateIdentitySpec {
+            identity: self.name.clone(),
+            expected_spec_digest: self.expected_spec_digest.clone(),
+            set: UpdateSetSpec {
+                profile: profile.as_deref().map(ProfileName::from),
+                addressability: None,
+                runtime_mode_override: None,
+                display_name,
+                additional_instructions: instructions.clone(),
+                context: context.clone(),
+                descriptive_labels,
+                authority_fields,
+                peers_add: self.peers_add.clone(),
+                peers_remove: self.peers_remove.clone(),
+            },
+        })
     }
 
     /// What the host plane adds to the request.
@@ -437,6 +443,11 @@ impl OperationRef {
 
 /// What one change of the family asks, before the host's rules are applied
 /// to it.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "a change is built once per call and moved into the family once; boxing the \
+              update would change a type every surface of the family already builds"
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum IdentityChangeSpec {
@@ -670,7 +681,9 @@ pub enum IdentityReadAnswer {
     Plan(Box<ChangePlan>),
 }
 
-/// A page of the mob's agents, in name order.
+/// A page of the mob's agents, in one stable order that `after` continues.
+/// The order is the mob's own order of its agents, not an alphabetical one
+/// for every name.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
 pub struct AgentPage {
@@ -693,7 +706,9 @@ pub struct AgentSummary {
     pub display_name: Option<String>,
     /// Its profile, which gives its model, tools and skills.
     pub profile: String,
-    /// The digest of its spec: what a change names as the spec it read.
+    /// The digest of its spec: Core's digest of the spec in its row form,
+    /// the one spec digest every surface shows, and what a change names as
+    /// the spec it read.
     pub spec_digest: Sha256Digest,
     /// Its spec revision, when its record counts one.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -707,8 +722,35 @@ pub struct AgentSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provenance: Option<AgentProvenance>,
     /// The operations open for it: held decisions and pending preparation.
+    /// An operation id tells who asked (its text carries the requester's
+    /// kind and a digest of its id), so it is for the host plane: an
+    /// answer an agent reads leaves this empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub open_operations: Vec<OperationId>,
+}
+
+impl AgentSummary {
+    /// The agent `name` of `profile`, at the spec whose digest is
+    /// `spec_digest`, with its member standing at `readiness`: not
+    /// archived, with nothing else said of it.
+    pub fn new(
+        name: impl Into<String>,
+        profile: impl Into<String>,
+        spec_digest: Sha256Digest,
+        readiness: AgentReadiness,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            display_name: None,
+            profile: profile.into(),
+            spec_digest,
+            spec_revision: None,
+            archived: false,
+            readiness,
+            provenance: None,
+            open_operations: Vec::new(),
+        }
+    }
 }
 
 /// Where an agent's member stands. Advisory: a client tolerates a value it
@@ -747,6 +789,26 @@ pub struct AgentProvenance {
     pub at_ms: u64,
     /// The consent it committed under. Advisory.
     pub consent: ConsentSummary,
+}
+
+impl AgentProvenance {
+    /// How (`entered`), at whose request (`requester_kind`, `requester`),
+    /// when (`at_ms`) and under what consent an agent came to exist.
+    pub fn new(
+        entered: AgentEntered,
+        requester_kind: RequesterKind,
+        requester: impl Into<String>,
+        at_ms: u64,
+        consent: ConsentSummary,
+    ) -> Self {
+        Self {
+            entered,
+            requester_kind,
+            requester: requester.into(),
+            at_ms,
+            consent,
+        }
+    }
 }
 
 /// How an agent's record entered. Advisory: a client tolerates a value it
@@ -798,6 +860,20 @@ pub struct AgentRecord {
     pub peers: Vec<String>,
 }
 
+impl AgentRecord {
+    /// The record of `agent`, with no instructions, context, labels or
+    /// peers yet.
+    pub fn new(agent: AgentSummary) -> Self {
+        Self {
+            agent,
+            instructions: Vec::new(),
+            context: None,
+            labels: BTreeMap::new(),
+            peers: Vec::new(),
+        }
+    }
+}
+
 /// The state of one operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -830,8 +906,21 @@ pub struct DirectoryPage {
 pub struct DirectoryProfile {
     /// The profile.
     pub profile: String,
-    /// Whether the caller may create an agent of it.
+    /// Whether the caller may create an agent of it. Written flat on the
+    /// entry: `verdict`, with `lines` or `reason` beside it.
+    #[serde(flatten)]
     pub verdict: DirectoryVerdict,
+}
+
+impl DirectoryProfile {
+    /// The profile `profile`, with what the host's rules give the caller
+    /// for it.
+    pub fn new(profile: impl Into<String>, verdict: DirectoryVerdict) -> Self {
+        Self {
+            profile: profile.into(),
+            verdict,
+        }
+    }
 }
 
 /// One agent of the directory.
@@ -845,11 +934,33 @@ pub struct DirectoryPeer {
     pub display_name: Option<String>,
     /// Its profile.
     pub profile: String,
-    /// Whether the caller may list it as a peer.
+    /// Whether the caller may list it as a peer. Written flat on the
+    /// entry: `verdict`, with `lines` or `reason` beside it.
+    #[serde(flatten)]
     pub verdict: DirectoryVerdict,
 }
 
-/// What the host's rules give one entry of the directory.
+impl DirectoryPeer {
+    /// The agent `name` of `profile`, with what the host's rules give the
+    /// caller for it as a peer.
+    pub fn new(
+        name: impl Into<String>,
+        profile: impl Into<String>,
+        verdict: DirectoryVerdict,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            display_name: None,
+            profile: profile.into(),
+            verdict,
+        }
+    }
+}
+
+/// What the host's rules give one entry of the directory. An entry
+/// writes it flat: `"verdict": "allowed"`, `"verdict": "needs_decision"`
+/// with `lines`, or `"verdict": "not_allowed"` with `reason` when the
+/// host's rule gives one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "verdict", rename_all = "snake_case")]
 #[non_exhaustive]
@@ -890,6 +1001,30 @@ pub struct ChangePlan {
     pub subject_digest: Sha256Digest,
     /// The canonical rendering a decider would be shown, whole.
     pub rendering: String,
+}
+
+impl ChangePlan {
+    /// The plan of a change: the outcome the rules give it, the change
+    /// class that decided, the decision's timeout, the digests of the
+    /// request and of its rendering, and the rendering.
+    pub fn new(
+        outcome: ApprovalKind,
+        change: ChangeClass,
+        timeout_ms: u64,
+        request_digest: Sha256Digest,
+        subject_digest: Sha256Digest,
+        rendering: impl Into<String>,
+    ) -> Self {
+        Self {
+            outcome,
+            change,
+            approver_id: None,
+            timeout_ms,
+            request_digest,
+            subject_digest,
+            rendering: rendering.into(),
+        }
+    }
 }
 
 /// The family: what every surface calls. Each method takes the mob as a

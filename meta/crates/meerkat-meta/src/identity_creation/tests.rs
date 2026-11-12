@@ -54,6 +54,24 @@ fn policy() -> IdentityCreationPolicy {
     parse(&policy_json())
 }
 
+/// [`policy_json`] as a launch accepts it in this release: no rule names an
+/// outcome that nothing carries out yet (each such rule asks for a
+/// person's approval instead), and no profile is prepared.
+fn served_policy_json() -> Value {
+    let mut value = policy_json();
+    if let Some(rules) = value["approval"]["rules"].as_array_mut() {
+        for rule in rules {
+            if matches!(rule["outcome"]["kind"].as_str(), Some("notify" | "review")) {
+                rule["outcome"] = json!({
+                    "kind": "require_approval",
+                    "approver": rule["outcome"]["approver"].clone(),
+                });
+            }
+        }
+    }
+    value
+}
+
 fn refusal_of(value: &Value) -> PolicyRefusal {
     IdentityCreationPolicy::parse(value).expect_err("a refused policy")
 }
@@ -156,7 +174,11 @@ fn only_created(request: &IdentityRequest) -> &CreatedSpec {
             [created] => created,
             _ => panic!("one created identity"),
         },
-        RequestAction::Update(_) | RequestAction::Remove { .. } => panic!("a create request"),
+        RequestAction::Update(_)
+        | RequestAction::Remove { .. }
+        | RequestAction::Archive { .. }
+        | RequestAction::Unarchive { .. }
+        | RequestAction::Adopt { .. } => panic!("a create request"),
     }
 }
 
@@ -395,7 +417,11 @@ fn created_spec<'a>(request: &'a IdentityRequest, identity: &str) -> &'a Created
             .iter()
             .find(|created| created.spec.identity.as_str() == identity)
             .expect("the identity"),
-        RequestAction::Update(_) | RequestAction::Remove { .. } => panic!("a create request"),
+        RequestAction::Update(_)
+        | RequestAction::Remove { .. }
+        | RequestAction::Archive { .. }
+        | RequestAction::Unarchive { .. }
+        | RequestAction::Adopt { .. } => panic!("a create request"),
     }
 }
 
@@ -405,14 +431,22 @@ fn created_spec_mut<'a>(request: &'a mut IdentityRequest, identity: &str) -> &'a
             .iter_mut()
             .find(|created| created.spec.identity.as_str() == identity)
             .expect("the identity"),
-        RequestAction::Update(_) | RequestAction::Remove { .. } => panic!("a create request"),
+        RequestAction::Update(_)
+        | RequestAction::Remove { .. }
+        | RequestAction::Archive { .. }
+        | RequestAction::Unarchive { .. }
+        | RequestAction::Adopt { .. } => panic!("a create request"),
     }
 }
 
 fn updated_mut(request: &mut IdentityRequest) -> &mut UpdatedSpec {
     match &mut request.action {
         RequestAction::Update(updated) => updated,
-        RequestAction::Create { .. } | RequestAction::Remove { .. } => panic!("an update request"),
+        RequestAction::Create { .. }
+        | RequestAction::Remove { .. }
+        | RequestAction::Archive { .. }
+        | RequestAction::Unarchive { .. }
+        | RequestAction::Adopt { .. } => panic!("an update request"),
     }
 }
 
@@ -931,23 +965,31 @@ fn a_constructed_preparation_needs_its_deadline_and_a_native_host() {
     .expect_err("no native host");
     assert_eq!(refusal.path, "preparation.analyst");
     assert_eq!(refusal.kind, PolicyRefusalKind::NeedsNativeHost);
+    // With a native host it is not the host the launch lacks. The launch
+    // still refuses the policy in this release, at the preparation's mode:
+    // no method settles a preparation yet.
+    let unserved = resolve(
+        Some(Ok(None)),
+        RuntimeOptionPolicy::Enabled(Box::new(policy)),
+        true,
+    )
+    .expect_err("no preparation is carried out in this release");
+    assert_eq!(unserved.path, "preparation.analyst.mode");
     assert!(
-        resolve(
-            Some(Ok(None)),
-            RuntimeOptionPolicy::Enabled(Box::new(policy)),
-            true,
-        )
-        .unwrap()
-        .is_some()
+        matches!(unserved.kind, PolicyRefusalKind::Unsupported { .. }),
+        "{unserved}"
     );
-    // Only a constructed preparation needs a native host.
+    // Only a constructed preparation needs a native host: a required one is
+    // refused for what it is, not for a host.
     value["preparation"] = json!({"analyst": {"mode": "required"}});
     let required = parse(&value);
     assert!(!required.needs_native_host());
+    let unserved = resolve(None, RuntimeOptionPolicy::Enabled(Box::new(required)), true)
+        .expect_err("no preparation is carried out in this release");
+    assert_eq!(unserved.path, "preparation.analyst.mode");
     assert!(
-        resolve(None, RuntimeOptionPolicy::Enabled(Box::new(required)), true)
-            .unwrap()
-            .is_some()
+        matches!(unserved.kind, PolicyRefusalKind::Unsupported { .. }),
+        "{unserved}"
     );
     value["preparation"] =
         json!({"analyst": {"mode": "constructed", "construction_deadline_ms": 10}});
@@ -987,7 +1029,7 @@ fn a_launch_without_persistence_refuses_a_policy_from_either_source() {
 
 #[test]
 fn the_policy_comes_from_the_option_or_the_host_never_both() {
-    let policy = policy();
+    let policy = parse(&served_policy_json());
     let from_option = resolve(
         None,
         RuntimeOptionPolicy::Enabled(Box::new(policy.clone())),
@@ -1092,8 +1134,8 @@ fn the_launch_refuses_a_profile_the_mob_does_not_define() {
     .expect_err("the host's policy is checked too");
     assert_eq!(refusal.path, "approval.rules[1].target.profile");
     // Every profile of the mob may be named.
-    let mut known = policy_json();
-    known["preparation"] = json!({"lead": {"mode": "required"}});
+    let mut known = served_policy_json();
+    known["preparation"] = json!({"lead": {"mode": "none"}});
     known["approval"]["rules"][1]["target"] = json!({"profile": ["assistant", "analyst", "lead"]});
     let option = RuntimeOptionPolicy::parse(&known).expect("a valid policy");
     assert!(resolve(None, option, true).unwrap().is_some());
@@ -2088,7 +2130,6 @@ Requester: agent "lead-1"
 Proposer: none
 Source evidence: none
 Identity: "helper"
-Expected spec digest: sha256:f492d9d2daff15216fd985868a9d8de35c95ab45cfffbc22e9415834da650d7f
 Changes: descriptive capability peers profile
 
 Update of: "helper"
@@ -2123,7 +2164,6 @@ Source subject: "user-9"
 Source reference: "event:42"
 Source observed at ms: 1730000000000
 Identity: "helper"
-Expected spec digest: sha256:f492d9d2daff15216fd985868a9d8de35c95ab45cfffbc22e9415834da650d7f
 
 Consequences (0):
 
@@ -2660,9 +2700,6 @@ fn a_changed_update_or_remove_field_cannot_be_approved_by_an_old_tap() {
     }
     let updates = [
         change(|request| updated_mut(request).identity = "other".to_owned()),
-        change(|request| {
-            updated_mut(request).expected_spec_digest = Sha256Digest::of(b"another spec");
-        }),
         change(|request| updated_mut(request).profile = None),
         change(|request| updated_mut(request).profile = migration("assistant", "lead")),
         change(|request| updated_mut(request).profile = migration("lead", "analyst")),
@@ -2698,20 +2735,12 @@ fn a_changed_update_or_remove_field_cannot_be_approved_by_an_old_tap() {
                 .insert("stranger".to_owned());
         }),
     ];
-    let removes = [
-        change(|request| {
-            request.action = RequestAction::Remove {
-                identity: "other".to_owned(),
-                expected_spec_digest: helper_spec_digest(),
-            };
-        }),
-        change(|request| {
-            request.action = RequestAction::Remove {
-                identity: "helper".to_owned(),
-                expected_spec_digest: Sha256Digest::of(b"another spec"),
-            };
-        }),
-    ];
+    let removes = [change(|request| {
+        request.action = RequestAction::Remove {
+            identity: "other".to_owned(),
+            expected_spec_digest: helper_spec_digest(),
+        };
+    })];
     for (base, changes) in [
         (golden_update(), updates.as_slice()),
         (golden_remove(), removes.as_slice()),

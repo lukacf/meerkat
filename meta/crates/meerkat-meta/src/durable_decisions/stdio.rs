@@ -440,12 +440,15 @@ impl StdioDecisionConnection {
             Arc::clone(&self.open),
         );
         match owner.decide(&decision_id, &decision, &eligibility) {
-            Ok(row) => wire::success(
-                id,
-                DecisionResult {
-                    decision: wire_decision(&row, false),
-                },
-            ),
+            Ok(row) => {
+                decisions.notify_work();
+                wire::success(
+                    id,
+                    DecisionResult {
+                        decision: wire_decision(&row, false),
+                    },
+                )
+            }
             Err(error) => wire::decision_error(id, error),
         }
     }
@@ -614,12 +617,15 @@ impl StdioDecisionConnection {
         };
         let eligibility = LiveHolderEligibility::attested(access, approver_id, identity, input);
         match owner.decide(&decision_id, &decision, &eligibility) {
-            Ok(row) => wire::success(
-                id,
-                DecisionResult {
-                    decision: wire_decision(&row, false),
-                },
-            ),
+            Ok(row) => {
+                decisions.notify_work();
+                wire::success(
+                    id,
+                    DecisionResult {
+                        decision: wire_decision(&row, false),
+                    },
+                )
+            }
             Err(error) => wire::decision_error(id, error),
         }
     }
@@ -908,12 +914,15 @@ fn withdraw(id: &Value, params: Value, decisions: &RuntimeDecisions) -> Value {
         .owner()
         .withdraw(&decision_id, &DecisionWithdrawer::Host)
     {
-        Ok(row) => wire::success(
-            id,
-            DecisionResult {
-                decision: wire_decision(&row, false),
-            },
-        ),
+        Ok(row) => {
+            decisions.notify_work();
+            wire::success(
+                id,
+                DecisionResult {
+                    decision: wire_decision(&row, false),
+                },
+            )
+        }
         Err(error) => wire::decision_error(id, error),
     }
 }

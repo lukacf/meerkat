@@ -2800,8 +2800,8 @@ async fn handle_unified_rpc_json_inner(
                 methods.extend_from_slice(tool_grant_methods::TOOL_GRANT_METHODS);
             }
             // The family of changes and reads of the mob's long-term agents,
-            // derived from its registry: served and advertised by a
-            // launch that has an identity policy, which attached it.
+            // derived from its registry: served and advertised by every
+            // launch that has an identity runtime, which attached it.
             if identity_ctx
                 .map(|ctx| ctx.runtime.runtime())
                 .or_else(|| runtime.identity_runtime_ref())

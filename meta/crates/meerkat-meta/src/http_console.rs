@@ -1299,17 +1299,45 @@ pub async fn console_json_handler(
     }
     if response.status == 200 && uri.path() == "/console/experience" {
         // Whether this console serves changes of the mob's long-term agents
-        // to the caller, and which of them the caller's grants admit.
+        // to the caller (its launch has an enabled identity policy and the
+        // console is not read-only), and which of them the caller's grants
+        // admit.
         let identity_changes_available = !state.decisions.console.read_only
             && state
                 .runtime
                 .as_ref()
                 .and_then(MobRuntime::installed_identity_runtime)
-                .is_some_and(|identity_runtime| identity_runtime.identity_family().is_some());
+                .is_some_and(|identity_runtime| identity_runtime.identity_changes_enabled());
+        // The agents whose record is their row in the mob's identity
+        // store: the ones a run-time change can change. An agent its host
+        // configures is offered no control.
+        let mut changed_at_run_time = std::collections::BTreeSet::new();
+        if identity_changes_available
+            && let Some(identity_runtime) = state
+                .runtime
+                .as_ref()
+                .and_then(MobRuntime::installed_identity_runtime)
+        {
+            let listed: Vec<String> = response
+                .body
+                .pointer("/agent_sidebar/live_snapshot/agents")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|agent| agent.get("identity").and_then(Value::as_str))
+                .map(str::to_owned)
+                .collect();
+            for name in listed {
+                if identity_runtime.record_is_store_owned(&name).await {
+                    changed_at_run_time.insert(name);
+                }
+            }
+        }
         crate::runtime::apply_identity_changes_to_experience(
             &mut response.body,
             caller.as_ref().map(|caller| &caller.audience),
             identity_changes_available,
+            &|name| changed_at_run_time.contains(name),
         );
         attach_console_send_dedupe(&mut response.body, state.console_aggregator.as_ref());
         if let Some(runtimes) = panel_runtimes {
@@ -5976,8 +6004,10 @@ fn console_rpc_access_requirements(
         // existing agent; a change of one agent is judged on that agent,
         // and its removal, which is permanent, under an action of its own.
         // Holding the mob's changes is the runtime's administration. A
-        // withdrawal names its caller's own operation, which only a caller
-        // that may ask for a change has, so it needs what viewing needs.
+        // plan is judged as the change it plans, on the agent that change
+        // names. A withdrawal and an operation read name an operation, and
+        // their handler answers only the caller's own: they need what
+        // viewing needs.
         crate::rpc::identity_methods::IDENTITY_CREATE => {
             one(crate::access::ACTION_AGENT_IDENTITY_CREATE, None)
         }
@@ -5994,10 +6024,20 @@ fn console_rpc_access_requirements(
         // The reads: one agent is judged on that agent; a list and the
         // directory leave out the agents the caller may not view.
         crate::rpc::identity_methods::IDENTITY_GET => one(ACTION_AGENT_VIEW, target),
+        crate::rpc::identity_methods::IDENTITY_PLAN => {
+            match params.get("change").and_then(Value::as_str) {
+                Some("create") => one(crate::access::ACTION_AGENT_IDENTITY_CREATE, None),
+                Some("remove") => one(crate::access::ACTION_AGENT_IDENTITY_REMOVE, target),
+                Some("update" | "archive" | "unarchive" | "adopt") => {
+                    one(crate::access::ACTION_AGENT_IDENTITY_MANAGE, target)
+                }
+                // A plan that names no change is refused by its handler.
+                _ => one(ACTION_AGENT_VIEW, None),
+            }
+        }
         crate::rpc::identity_methods::IDENTITY_LIST
         | crate::rpc::identity_methods::IDENTITY_DIRECTORY
         | crate::rpc::identity_methods::IDENTITY_OPERATION
-        | crate::rpc::identity_methods::IDENTITY_PLAN
         | crate::rpc::identity_methods::IDENTITY_WITHDRAW => one(ACTION_AGENT_VIEW, None),
         // Recovering a send answers only the caller's own sends to the
         // identity, so it needs exactly what sending there needs.
@@ -6435,11 +6475,11 @@ pub(crate) fn console_method_member_fields(method: &str) -> Option<&'static [Con
         | crate::rpc::identity_methods::IDENTITY_UNARCHIVE
         | crate::rpc::identity_methods::IDENTITY_REMOVE
         | crate::rpc::identity_methods::IDENTITY_ADOPT
-        | crate::rpc::identity_methods::IDENTITY_GET => NAMED_AGENT,
+        | crate::rpc::identity_methods::IDENTITY_GET
+        | crate::rpc::identity_methods::IDENTITY_PLAN => NAMED_AGENT,
         crate::rpc::identity_methods::IDENTITY_LIST
         | crate::rpc::identity_methods::IDENTITY_DIRECTORY
         | crate::rpc::identity_methods::IDENTITY_OPERATION
-        | crate::rpc::identity_methods::IDENTITY_PLAN
         | crate::rpc::identity_methods::IDENTITY_WITHDRAW
         | crate::rpc::identity_methods::IDENTITY_CHANGES_HOLD => NO_MEMBER,
         // The voice and live channel methods name the member they speak
@@ -13157,9 +13197,15 @@ async fn handle_console_runtime_rpc_with_visibility(
     // that person by, or the host on its console surface when the caller is
     // no verified person; never the host's operator.
     if crate::rpc::identity_methods::is_identity_family_method(request.method.as_str())
-        && let Some(family) = identity_runtime
-            .as_ref()
-            .and_then(|identity_runtime| identity_runtime.identity_family())
+        && let Some(family) = identity_runtime.as_ref().and_then(|identity_runtime| {
+            // A caller under access rules names only the peers it may view.
+            match access_view {
+                Some(view) => identity_runtime.identity_family_seen_by(Arc::new(
+                    crate::rpc::identity_methods::ViewedAgents(view.clone()),
+                )),
+                None => identity_runtime.identity_family(),
+            }
+        })
     {
         let handle = runtime.handle();
         let person = governance
@@ -13173,7 +13219,9 @@ async fn handle_console_runtime_rpc_with_visibility(
             mob: &handle,
             family: family.as_ref(),
             requester: crate::rpc::identity_methods::console_requester(
-                person.as_ref().map(|person| person.as_str()),
+                person
+                    .as_ref()
+                    .map(meerkat_core::approval::decision::DecisionPrincipalKey::as_str),
             ),
             access: access_view,
         };
@@ -36632,6 +36680,120 @@ mod tool_grant_console_access_tests {
         for method in ["meta/tool_grants/grant", "meta/tool_grants/revoke"] {
             assert!(is_console_mutating_rpc_method(method), "{method}");
         }
+    }
+}
+
+#[cfg(test)]
+mod identity_family_console_access_tests {
+    use super::*;
+    use crate::rpc::identity_methods::{
+        IDENTITY_FAMILY_METHODS, is_identity_family_mutating_method,
+    };
+
+    /// On the console a create needs `agent.identity.create`, a change of
+    /// one agent `agent.identity.manage` on that agent, its removal
+    /// `agent.identity.remove` on it and the hold of the mob's changes
+    /// `runtime.admin`; the reads need `agent.view`, a get on the agent it
+    /// names. A read-only console refuses exactly the family's writers, and
+    /// every method names its members in the member field table, a create
+    /// the agents it creates.
+    #[test]
+    fn the_console_gates_identity_changes_on_their_actions_and_reads_on_view() {
+        let named = json!({
+            "request_id": "r-1",
+            "name": "scout",
+            "expected_spec_digest": "sha256:00",
+        });
+        let scout = Some("scout".to_string());
+        assert_eq!(
+            console_rpc_access_requirements(
+                "meta/identity/create",
+                &json!({ "agents": [{ "name": "scout", "profile": "worker" }] })
+            ),
+            Some(vec![("agent.identity.create", None)])
+        );
+        for method in [
+            "meta/identity/update",
+            "meta/identity/archive",
+            "meta/identity/unarchive",
+            "meta/identity/adopt",
+        ] {
+            assert_eq!(
+                console_rpc_access_requirements(method, &named),
+                Some(vec![("agent.identity.manage", scout.clone())]),
+                "{method}"
+            );
+        }
+        assert_eq!(
+            console_rpc_access_requirements("meta/identity/remove", &named),
+            Some(vec![("agent.identity.remove", scout.clone())])
+        );
+        assert_eq!(
+            console_rpc_access_requirements("meta/identity/changes_hold", &json!({ "held": true })),
+            Some(vec![(ACTION_RUNTIME_ADMIN, None)])
+        );
+        assert_eq!(
+            console_rpc_access_requirements("meta/identity/get", &json!({ "name": "scout" })),
+            Some(vec![(ACTION_AGENT_VIEW, scout)])
+        );
+        // A plan is judged as the change it plans, on the agent it names.
+        let planned = |change: &str| {
+            let mut params = named.clone();
+            params["change"] = json!(change);
+            console_rpc_access_requirements("meta/identity/plan", &params)
+        };
+        assert_eq!(
+            console_rpc_access_requirements(
+                "meta/identity/plan",
+                &json!({"change": "create", "agents": [{"name": "scout", "profile": "worker"}]})
+            ),
+            Some(vec![("agent.identity.create", None)])
+        );
+        for change in ["update", "archive", "unarchive", "adopt"] {
+            assert_eq!(
+                planned(change),
+                Some(vec![("agent.identity.manage", Some("scout".to_string()))]),
+                "{change}"
+            );
+        }
+        assert_eq!(
+            planned("remove"),
+            Some(vec![("agent.identity.remove", Some("scout".to_string()))])
+        );
+        for method in [
+            "meta/identity/list",
+            "meta/identity/directory",
+            "meta/identity/operation",
+            "meta/identity/withdraw",
+        ] {
+            assert_eq!(
+                console_rpc_access_requirements(method, &json!({})),
+                Some(vec![(ACTION_AGENT_VIEW, None)]),
+                "{method}"
+            );
+        }
+        for method in IDENTITY_FAMILY_METHODS {
+            assert_eq!(
+                is_console_mutating_rpc_method(method),
+                is_identity_family_mutating_method(method),
+                "{method}"
+            );
+            assert!(
+                console_method_member_fields(method).is_some(),
+                "{method} is in the member field table"
+            );
+        }
+        assert_eq!(
+            console_method_members(
+                "meta/identity/create",
+                &json!({ "agents": [{ "name": "scout" }, { "name": "ledger" }] })
+            ),
+            ["scout", "ledger"]
+        );
+        assert_eq!(
+            console_method_members("meta/identity/remove", &named),
+            ["scout"]
+        );
     }
 }
 

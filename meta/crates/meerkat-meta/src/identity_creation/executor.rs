@@ -13,15 +13,17 @@
 //!
 //! Before Core is called the seam refuses, for every requester:
 //! - a requester that is not the one the request records
-//!   (`invalid_request`);
+//!   (`invalid_request`, of no field);
 //! - a member private to a person (`private_requester`);
 //! - a change, other than an adoption, of an agent its host configures
 //!   (`owner_read_only`).
 //!
-//! The first implementation, [`CoreChangeExecutor`], commits a create, an
-//! archive, an unarchive and a removal through Core's handle. An update and
-//! an adoption answer `unsupported` until their bodies are filled: see the
-//! functions marked `BODY TO FILL`.
+//! The first implementation, [`CoreChangeExecutor`], commits every change
+//! through Core's handle. An update reads the agent's record from Core and
+//! commits its spec whole, with what the update names replaced; an adoption
+//! commits the spec the agent's host configures now. Both ask the launch
+//! what Core does not hold ([`AgentSpecs`]): the spec a host configures for
+//! an agent, and which label keys its policy declares authority fields.
 //!
 //! After a commit the seam calls the instruction step it was given
 //! ([`InstructionStep`]), twice: after an update that changed an agent's
@@ -30,15 +32,20 @@
 //! archive calls nothing: an archived agent keeps what the step holds, so
 //! its unarchive resumes on its current instructions.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use meerkat_core::SessionId;
 use meerkat_mob::{
+    AdoptionSource, CreatedIdentityObservation, IdentityAddressability, IdentityAdoption,
     IdentityChangeEntryOutcome, IdentityChangeOutcome, IdentityChangeReceipt,
-    IdentityChangeRefusal, IdentityNameHolder, IdentityOperation, IdentityPolicyOutcome, MobError,
-    MobHandle,
+    IdentityChangeRefusal, IdentityGrantRequest, IdentityNameHolder, IdentityOperation,
+    IdentityPolicyOutcome, MobError, MobHandle, OwnedEdgeAdmission, OwnedIdentityEdge,
+    StoreOwnedIdentityUpdate,
 };
+
+use crate::identity_first::{AgentAddressability, DurableAgentSpec};
 
 use super::approval::{ApprovalPlan, PlannedOutcome};
 use super::digest::Sha256Digest;
@@ -47,13 +54,18 @@ use super::outcome::{
     AgentChangeState, AgentOutcome, AgentSeat, IdentityOutcome, InstructionOutcome,
     InstructionsChanged,
 };
+use super::policy::PreparationRule;
 use super::refusal::{
     IdentityRefusal, IdentityRefusalKind, NameTakenBy, NotAdoptableReason, RequestProblem,
 };
 use super::request::{
-    IdentityRequest, RequestAction, Requester, UpdatedSpec, core_member_name,
+    EdgeBasis, IdentityRequest, RequestAction, Requester, UpdatedSpec, core_member_name,
     identity_name_of_member,
 };
+
+mod core_commit;
+
+pub(crate) use core_commit::row_spec;
 
 /// The consent a change commits under, as Core's commit takes it: the
 /// host's rule committed it without a decision (`Policy`, `allow` or
@@ -162,6 +174,34 @@ impl ChangeRequester {
         }
     }
 
+    /// The refusal of an agent's call that its surface attributed to
+    /// another agent than the member of the session the call ran in:
+    /// `invalid_request`, naming no field (a defect of the surface). The
+    /// policy judges the attributed identity, and Core reads the grant of
+    /// the session's member and records that member as the requester, so
+    /// the two are one agent. `None` for a call that is its session's
+    /// member's, for a session no member of `mob` holds (Core's to
+    /// answer), for an agent admitted by its recorded identity, and for
+    /// the host and a human. The family asks it when it admits a change,
+    /// before anything is held, and the seam asks it again before Core is
+    /// asked for a grant.
+    pub(crate) async fn refused_by_its_session(&self, mob: &MobHandle) -> Option<IdentityRefusal> {
+        let Self::Agent {
+            identity,
+            admission: AgentAdmission::Session(session),
+            ..
+        } = self
+        else {
+            return None;
+        };
+        let (member, _) = mob.member_of_session(session).await?;
+        (core_member_name(identity).as_ref() != Some(&member)).then(|| {
+            IdentityRefusal::new(IdentityRefusalKind::InvalidRequest {
+                problem: RequestProblem::Conflicting,
+            })
+        })
+    }
+
     /// This requester, marked a member private to a person when `private`
     /// (an agent requester only; the host and a human are no members).
     #[must_use]
@@ -216,6 +256,14 @@ pub struct ChangeCommit<'a> {
     /// run-time change of it, other than its adoption, is refused
     /// `owner_read_only` before Core is called. Never set for a create.
     pub configured_target: bool,
+    /// How the host prepares an agent of each profile before its first use,
+    /// by profile, from its policy (`IdentityCreationPolicy::preparations`).
+    /// A create commits each agent with its profile's mode: an agent of a
+    /// profile the host prepares is committed pending its preparation, has
+    /// no member and is not usable until the host settles it, and the
+    /// create answers `pending_preparation`. `None`, and a profile the map
+    /// lacks, prepare nothing.
+    pub preparations: Option<&'a BTreeMap<String, PreparationRule>>,
 }
 
 impl std::fmt::Debug for ChangeCommit<'_> {
@@ -228,6 +276,7 @@ impl std::fmt::Debug for ChangeCommit<'_> {
             .field("consent", &self.consent)
             .field("request", &self.request)
             .field("configured_target", &self.configured_target)
+            .field("preparations", &self.preparations)
             .finish()
     }
 }
@@ -249,7 +298,19 @@ impl<'a> ChangeCommit<'a> {
             consent,
             request,
             configured_target: false,
+            preparations: None,
         }
+    }
+
+    /// This commit, with how the host prepares an agent of each profile
+    /// before its first use (`IdentityCreationPolicy::preparations`).
+    #[must_use]
+    pub fn with_preparations(
+        mut self,
+        preparations: &'a BTreeMap<String, PreparationRule>,
+    ) -> Self {
+        self.preparations = Some(preparations);
+        self
     }
 
     /// This commit, of an agent its host configures when `configured`.
@@ -366,13 +427,30 @@ pub trait IdentityChangeExecutor: Send + Sync {
     async fn commit(&self, commit: ChangeCommit<'_>) -> Result<ChangeCommitted, ExecutorError>;
 }
 
+/// What the seam asks its launch about the agents of the mob, beside what
+/// Core holds: the spec an agent's host configures for it now, and which
+/// label keys the launch's policy declares authority fields. The family's
+/// implementation gives it ([`CoreChangeExecutor::with_agent_specs`]).
+#[async_trait]
+pub trait AgentSpecs: Send + Sync {
+    /// The spec the host configures for the agent `name` of `mob` now;
+    /// `None` when it configures no agent of that name.
+    async fn configured_spec(&self, mob: &MobHandle, name: &str) -> Option<DurableAgentSpec>;
+
+    /// Whether the label key `key` is an authority field of the launch's
+    /// policy.
+    fn is_authority_field(&self, key: &str) -> bool;
+}
+
 /// The executor over Core's change path: each change is one call of the
-/// mob's handle (`create_store_owned_identities`, `archive_identity`,
-/// `unarchive_identity`, `remove_identity`), which commits the agents'
-/// records, their seats and the receipt in one store transaction.
+/// mob's handle (`create_store_owned_identities`,
+/// `update_store_owned_identity`, `archive_identity`, `unarchive_identity`,
+/// `remove_identity`, `adopt_identity`), which commits the agents' records,
+/// their seats and the receipt in one store transaction.
 #[derive(Clone, Default)]
 pub struct CoreChangeExecutor {
     instructions: Option<Arc<dyn InstructionStep>>,
+    specs: Option<Arc<dyn AgentSpecs>>,
 }
 
 impl CoreChangeExecutor {
@@ -386,6 +464,15 @@ impl CoreChangeExecutor {
     #[must_use]
     pub fn with_instruction_step(mut self, step: Arc<dyn InstructionStep>) -> Self {
         self.instructions = Some(step);
+        self
+    }
+
+    /// This executor, asking `specs` about the mob's agents. Without it an
+    /// adoption and an update of labels answer `unsupported`
+    /// ([`AGENT_SPECS_NOT_GIVEN`]).
+    #[must_use]
+    pub fn with_agent_specs(mut self, specs: Arc<dyn AgentSpecs>) -> Self {
+        self.specs = Some(specs);
         self
     }
 
@@ -416,6 +503,7 @@ impl std::fmt::Debug for CoreChangeExecutor {
         formatter
             .debug_struct("CoreChangeExecutor")
             .field("instruction_step", &self.instructions.is_some())
+            .field("agent_specs", &self.specs.is_some())
             .finish()
     }
 }
@@ -432,22 +520,56 @@ impl IdentityChangeExecutor for CoreChangeExecutor {
             .map_err(ExecutorError::Request)?;
         let operation = IdentityOperation::new(commit.operation_id.as_str(), digest.as_str());
         match &commit.request.action {
-            RequestAction::Create { .. }
-            | RequestAction::Archive { .. }
-            | RequestAction::Unarchive { .. }
-            | RequestAction::Remove { .. } => Ok(ChangeCommitted::refused(IdentityRefusal::new(
-                IdentityRefusalKind::Unsupported {
-                    feature: format!(
-                        "{} of an agent through the executor",
-                        commit.request.action.token()
-                    ),
-                },
-            ))),
+            RequestAction::Create { identities } => {
+                core_commit::create(self, &commit, operation, identities).await
+            }
+            RequestAction::Archive {
+                identity,
+                expected_spec_digest,
+            } => {
+                core_commit::entry_change(
+                    self,
+                    &commit,
+                    operation,
+                    core_commit::EntryChange::Archive,
+                    identity,
+                    expected_spec_digest,
+                )
+                .await
+            }
+            RequestAction::Unarchive {
+                identity,
+                expected_spec_digest,
+            } => {
+                core_commit::entry_change(
+                    self,
+                    &commit,
+                    operation,
+                    core_commit::EntryChange::Unarchive,
+                    identity,
+                    expected_spec_digest,
+                )
+                .await
+            }
+            RequestAction::Remove {
+                identity,
+                expected_spec_digest,
+            } => {
+                core_commit::entry_change(
+                    self,
+                    &commit,
+                    operation,
+                    core_commit::EntryChange::Remove,
+                    identity,
+                    expected_spec_digest,
+                )
+                .await
+            }
             RequestAction::Update(update) => commit_update(self, &commit, operation, update).await,
             RequestAction::Adopt {
                 identity,
                 expected_spec_digest,
-            } => commit_adopt(&commit, operation, identity, expected_spec_digest).await,
+            } => commit_adopt(self, &commit, operation, identity, expected_spec_digest).await,
         }
     }
 }
@@ -455,12 +577,12 @@ impl IdentityChangeExecutor for CoreChangeExecutor {
 /// What the seam refuses before Core is called, for every requester.
 fn refused_before_core(commit: &ChangeCommit<'_>) -> Option<IdentityRefusal> {
     if commit.request.requester != commit.requester.recorded() {
-        return Some(
-            IdentityRefusal::new(IdentityRefusalKind::InvalidRequest {
-                problem: RequestProblem::Conflicting,
-            })
-            .at("requester"),
-        );
+        // The requester is no field of a request as written: a surface
+        // that attributes another requester than the request records has
+        // a defect, and the refusal names no field.
+        return Some(IdentityRefusal::new(IdentityRefusalKind::InvalidRequest {
+            problem: RequestProblem::Conflicting,
+        }));
     }
     if commit.requester.is_private_member() {
         return Some(IdentityRefusal::new(IdentityRefusalKind::PrivateRequester));
@@ -475,61 +597,254 @@ fn refused_before_core(commit: &ChangeCommit<'_>) -> Option<IdentityRefusal> {
     None
 }
 
-/// The feature an update through the seam answers until its body is filled.
-pub const UPDATE_NOT_BUILT: &str = "an update of an agent";
-/// The feature an adoption through the seam answers until its body is
-/// filled.
-pub const ADOPT_NOT_BUILT: &str = "an adoption of an agent";
+/// The feature an adoption, and an update of labels, answer through an
+/// executor that was given nothing to read the mob's agents with
+/// ([`CoreChangeExecutor::with_agent_specs`]).
+pub const AGENT_SPECS_NOT_GIVEN: &str = "a change that reads what the launch knows of its agents";
 
-/// BODY TO FILL (the executor and host methods part): commit an update.
-///
-/// What the body does: read the agent's record from Core
-/// (`MobHandle::identity_record`), apply `update` to its spec whole, refuse
-/// placement, binding and backend `unsupported`, admit an agent requester's
-/// grant (`core_commit::requester_input` with
-/// `IdentityGrantRequest::for_update`), call
-/// `MobHandle::update_store_owned_identity` with the peers added and
-/// removed, and answer [`core_commit::committed`] of its change. When the
-/// update changed the agent's instructions text
-/// (`InstructionsChanged::between` of the record's text before the update
-/// and `update.additional_instructions`), call
-/// `executor.after_update(commit.mob, &change)` after the commit and record
-/// its answer on the agent ([`IdentityOutcome::with_instruction_outcome`]);
-/// otherwise record `InstructionOutcome::Unchanged`.
-/// A refusal of Core's goes through [`refusal_of_error`], which answers the
-/// retryable `admission_unsettled` for a member step in flight.
-async fn commit_update(
-    _executor: &CoreChangeExecutor,
-    _commit: &ChangeCommit<'_>,
-    _operation: IdentityOperation,
-    _update: &UpdatedSpec,
-) -> Result<ChangeCommitted, ExecutorError> {
-    Ok(ChangeCommitted::refused(IdentityRefusal::new(
-        IdentityRefusalKind::Unsupported {
-            feature: UPDATE_NOT_BUILT.to_owned(),
-        },
-    )))
+/// A refused change, as a commit answers it.
+fn refused(refusal: IdentityRefusal) -> Result<ChangeCommitted, ExecutorError> {
+    Ok(ChangeCommitted::refused(refusal))
 }
 
-/// BODY TO FILL (the executor and host methods part): commit an adoption.
+/// Commit an update. The agent's record is read from Core and the update
+/// is applied to its spec whole: what the update names is replaced and
+/// everything else stays, the half of the labels it does not name
+/// included. Core commits the new spec against the digest the requester
+/// read and refuses `stale_spec` when the record moved since. An agent
+/// placed on a member host, bound to an external process or given a
+/// backend is not changed through this surface.
 ///
-/// An adoption releases an agent from configuration: from it on the agent
-/// is changed at run time and configuration no longer declares it. What the
-/// body does: read the spec the agent's host configures now (the spec whose
-/// digest is `expected_spec_digest`), refuse `stale_spec` when it moved,
-/// and call `MobHandle::adopt_identity` with `AdoptionSource::roster` of
-/// that spec, then answer [`core_commit::committed`] of its change.
-async fn commit_adopt(
-    _commit: &ChangeCommit<'_>,
-    _operation: IdentityOperation,
-    _identity: &str,
-    _expected_spec_digest: &Sha256Digest,
+/// After the commit, when the update named instructions and changed the
+/// agent's text, the instruction step is asked and its answer is the
+/// agent's instruction outcome; one that named the text the record held
+/// before it answers `unchanged`. An update that names no instructions
+/// answers none, and so does an operation Core replays: what became of the
+/// change is part of the answer of the commit that made it, and the step is
+/// not asked again. The step takes the agent's lifecycle lock itself: none
+/// is held here. A refusal of Core's goes through [`refusal_of_error`], which
+/// answers the retryable `admission_unsettled` for a member step in flight.
+async fn commit_update(
+    executor: &CoreChangeExecutor,
+    commit: &ChangeCommit<'_>,
+    operation: IdentityOperation,
+    update: &UpdatedSpec,
 ) -> Result<ChangeCommitted, ExecutorError> {
-    Ok(ChangeCommitted::refused(IdentityRefusal::new(
-        IdentityRefusalKind::Unsupported {
-            feature: ADOPT_NOT_BUILT.to_owned(),
+    let member = match core_name(&update.identity, "name") {
+        Ok(member) => member,
+        Err(refusal) => return refused(refusal),
+    };
+    let unknown = || IdentityRefusal::new(IdentityRefusalKind::IdentityUnknown).at("name");
+    let record = commit
+        .mob
+        .identity_record(&member)
+        .await
+        .map_err(|error| ExecutorError::Core(Box::new(error)))?;
+    let Some(CreatedIdentityObservation::Created(record)) = record else {
+        return refused(unknown());
+    };
+    let Some(current) = record.spec.clone() else {
+        return refused(unknown());
+    };
+    for (set, feature) in [
+        (
+            current.placement.is_some(),
+            "placement of an agent on a member host",
+        ),
+        (current.binding.is_some(), "a runtime binding of an agent"),
+        (current.backend.is_some(), "a backend of an agent"),
+    ] {
+        if set {
+            return refused(
+                IdentityRefusal::new(IdentityRefusalKind::Unsupported {
+                    feature: feature.to_owned(),
+                })
+                .at("name"),
+            );
+        }
+    }
+    let mut spec = current.clone();
+    if let Some(profile) = &update.profile {
+        spec.profile = profile.to.clone();
+    }
+    if let Some(addressability) = update.addressability {
+        spec.addressability = match addressability {
+            AgentAddressability::Addressable => IdentityAddressability::Addressable,
+            AgentAddressability::InternalOnly => IdentityAddressability::InternalOnly,
+        };
+    }
+    if let Some(runtime_mode) = update.runtime_mode_override {
+        spec.runtime_mode_override = Some(runtime_mode);
+    }
+    if let Some(display_name) = &update.display_name {
+        spec.display_name = Some(display_name.as_str().to_owned());
+    }
+    if let Some(instructions) = &update.additional_instructions {
+        spec.additional_instructions = instructions.clone();
+    }
+    if let Some(context) = &update.context {
+        spec.context = Some(context.clone());
+    }
+    if update.descriptive_labels.is_some() || update.authority_fields.is_some() {
+        // Each half of the labels is replaced whole, and the half the
+        // update does not name stays. Which key is an authority field is
+        // the launch's policy's to say.
+        let Some(specs) = executor.specs.as_ref() else {
+            return refused(IdentityRefusal::new(IdentityRefusalKind::Unsupported {
+                feature: AGENT_SPECS_NOT_GIVEN.to_owned(),
+            }));
+        };
+        let (authority_now, descriptive_now): (BTreeMap<String, String>, BTreeMap<String, String>) =
+            current
+                .labels
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .partition(|(key, _)| specs.is_authority_field(key));
+        let mut labels = update.descriptive_labels.clone().unwrap_or(descriptive_now);
+        labels.extend(update.authority_fields.clone().unwrap_or(authority_now));
+        spec.labels = labels;
+    }
+    let grant = matches!(commit.requester, ChangeRequester::Agent { .. })
+        .then(|| IdentityGrantRequest::for_update(&current.profile, &spec));
+    let requester = match core_commit::requester_input(commit, &operation, grant).await? {
+        Ok(requester) => requester,
+        Err(refusal) => return refused(refusal),
+    };
+    let mut peers_add = Vec::with_capacity(update.peers_add.len());
+    for (peer, basis) in &update.peers_add {
+        let EdgeBasis::Rule { id } = basis;
+        let Ok(peer) = core_name(peer, "peers_add") else {
+            return refused(IdentityRefusal::new(IdentityRefusalKind::PeerUnknown).at("peers_add"));
+        };
+        let Ok(rule) = OwnedEdgeAdmission::rule(id.as_str()) else {
+            return refused(
+                IdentityRefusal::new(IdentityRefusalKind::InvalidRequest {
+                    problem: RequestProblem::Malformed,
+                })
+                .at("peers_add"),
+            );
+        };
+        peers_add.push(OwnedIdentityEdge::new(peer, rule));
+    }
+    let mut peers_remove = Vec::with_capacity(update.peers_remove.len());
+    for peer in &update.peers_remove {
+        match core_name(peer, "peers_remove") {
+            Ok(peer) => peers_remove.push(peer),
+            Err(refusal) => return refused(refusal),
+        }
+    }
+    let previous = current.additional_instructions.clone();
+    let now = spec.additional_instructions.clone();
+    let preparation = core_commit::preparation_of(commit, spec.profile.as_str());
+    let mut change = StoreOwnedIdentityUpdate::new(
+        operation,
+        requester,
+        spec,
+        update.expected_spec_digest.as_str(),
+    )
+    .with_preparation(preparation);
+    change.peers_add = peers_add;
+    change.peers_remove = peers_remove;
+    let mut committed = match commit
+        .mob
+        .update_store_owned_identity(change, commit.consent)
+        .await
+    {
+        Ok(updated) => core_commit::committed(commit, &updated.change)?,
+        // Core's receipt is read first: an update Core committed although
+        // its call erred is answered as committed, and it has changed the
+        // agent's instructions all the same, so the step runs for it too.
+        Err(error) => {
+            let answered = executor.after_core_error(commit, error).await?;
+            if answered.outcome.refusal().is_some() {
+                return Ok(answered);
+            }
+            answered
+        }
+    };
+    // An update that names no instructions says nothing of them, and
+    // neither does Core's replay of an operation that committed before
+    // (the record holds its text by now, which is not `unchanged`); one
+    // that names the text the record held leaves it unchanged.
+    let instructions = match &update.additional_instructions {
+        None => None,
+        Some(_) if committed.replayed => None,
+        Some(_) => match InstructionsChanged::between(update.identity.clone(), previous, now) {
+            Some(changed) => executor.after_update(commit.mob, &changed).await,
+            None => Some(InstructionOutcome::Unchanged),
         },
-    )))
+    };
+    if let Some(instructions) = instructions {
+        committed.outcome = committed
+            .outcome
+            .with_instruction_outcome(&update.identity, instructions);
+    }
+    Ok(committed)
+}
+
+/// Commit an adoption. An adoption releases an agent from configuration:
+/// from it on the agent is changed at run time and configuration no longer
+/// declares it. The spec the agent's host configures now becomes its
+/// record's spec, when it is the one whose digest the requester read
+/// (`stale_spec` with the current digest otherwise); the agent keeps its
+/// member, its session and its history.
+async fn commit_adopt(
+    executor: &CoreChangeExecutor,
+    commit: &ChangeCommit<'_>,
+    operation: IdentityOperation,
+    identity: &str,
+    expected_spec_digest: &Sha256Digest,
+) -> Result<ChangeCommitted, ExecutorError> {
+    let member = match core_name(identity, "name") {
+        Ok(member) => member,
+        Err(refusal) => return refused(refusal),
+    };
+    let Some(specs) = executor.specs.as_ref() else {
+        return refused(IdentityRefusal::new(IdentityRefusalKind::Unsupported {
+            feature: AGENT_SPECS_NOT_GIVEN.to_owned(),
+        }));
+    };
+    let unknown = || IdentityRefusal::new(IdentityRefusalKind::IdentityUnknown).at("name");
+    let Some(configured) = specs.configured_spec(commit.mob, identity).await else {
+        return refused(unknown());
+    };
+    let Some(row) = row_spec(&configured) else {
+        return refused(unknown());
+    };
+    let current_digest = row
+        .spec_digest()
+        .ok()
+        .as_deref()
+        .and_then(Sha256Digest::parse);
+    let Some(current_digest) = current_digest else {
+        return refused(unknown());
+    };
+    if &current_digest != expected_spec_digest {
+        return refused(
+            IdentityRefusal::new(IdentityRefusalKind::StaleSpec {
+                current_digest,
+                current_revision: None,
+            })
+            .at("expected_spec_digest"),
+        );
+    }
+    let grant = matches!(commit.requester, ChangeRequester::Agent { .. })
+        .then(|| IdentityGrantRequest::for_identity(row.profile.clone()));
+    let requester = match core_commit::requester_input(commit, &operation, grant).await? {
+        Ok(requester) => requester,
+        Err(refusal) => return refused(refusal),
+    };
+    match commit
+        .mob
+        .adopt_identity(
+            IdentityAdoption::new(operation, requester, member, AdoptionSource::roster(row)),
+            commit.consent,
+        )
+        .await
+    {
+        Ok(change) => core_commit::committed(commit, &change),
+        Err(error) => executor.after_core_error(commit, error).await,
+    }
 }
 
 /// The outcome Core recorded for the operation `operation_id` in `mob`:
@@ -541,9 +856,20 @@ pub async fn committed_outcome(
     mob: &MobHandle,
     operation_id: &OperationId,
 ) -> Result<Option<IdentityOutcome>, ExecutorError> {
+    match committed_receipt(mob, operation_id).await? {
+        Some(receipt) => outcome_of_receipt(mob, operation_id, &receipt).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// Core's receipt of the change that committed as `operation_id` in `mob`,
+/// `None` when none did.
+pub(super) async fn committed_receipt(
+    mob: &MobHandle,
+    operation_id: &OperationId,
+) -> Result<Option<IdentityChangeReceipt>, ExecutorError> {
     match mob.identity_operation(operation_id.as_str()).await {
-        Ok(Some(receipt)) => outcome_of_receipt(mob, operation_id, &receipt).map(Some),
-        Ok(None) => Ok(None),
+        Ok(receipt) => Ok(receipt),
         // A storage composition that commits no change holds no receipt.
         Err(MobError::IdentityChangeRefused {
             refusal: IdentityChangeRefusal::StorageUnsupported,
@@ -568,7 +894,7 @@ pub(super) fn outcome_of_change(
 /// change did to it, `pending_preparation` when one of them waits for its
 /// preparation and `done` otherwise. An agent's session is read from
 /// Core's published entry, which wakes nothing.
-fn outcome_of_receipt(
+pub(super) fn outcome_of_receipt(
     mob: &MobHandle,
     operation_id: &OperationId,
     receipt: &IdentityChangeReceipt,
@@ -595,10 +921,7 @@ fn outcome_of_receipt(
         agent.spec_revision = entry.revision;
         let standing = entry_standing(mob, &entry.identity);
         if let Some(meerkat_mob::EntryStanding::Seated(seated)) = &standing {
-            agent.session_id = seated
-                .session_id
-                .as_ref()
-                .map(|session| session.to_string());
+            agent.session_id = seated.session_id.as_ref().map(ToString::to_string);
         }
         if receipt.change == meerkat_mob::IdentityChangeKind::Create
             && state == AgentChangeState::Committed
@@ -644,6 +967,10 @@ fn entry_standing(
     }
 }
 
+/// The correlation of an `admission_unsettled` that answers a member step
+/// in flight.
+const MEMBER_STEP: &str = "member_step";
+
 /// The typed refusal of an error of Core's change path: a refusal of the
 /// change under its own kind ([`refusal_of_core`]), and a member step in
 /// flight as the retryable `admission_unsettled`. Any other error is no
@@ -651,9 +978,11 @@ fn entry_standing(
 pub fn refusal_of_error(error: MobError) -> Result<IdentityRefusal, ExecutorError> {
     match error {
         MobError::IdentityChangeRefused { refusal } => Ok(refusal_of_core(&refusal)),
-        MobError::LifecycleOperationPending { intent } => Ok(IdentityRefusal::new(
+        // Core's sentence for the step in flight is Core's own and stays
+        // off the wire: the correlation names what kind of step it is.
+        MobError::LifecycleOperationPending { .. } => Ok(IdentityRefusal::new(
             IdentityRefusalKind::AdmissionUnsettled {
-                correlation: intent,
+                correlation: MEMBER_STEP.to_owned(),
             },
         )),
         other => Err(ExecutorError::Core(Box::new(other))),
@@ -661,19 +990,18 @@ pub fn refusal_of_error(error: MobError) -> Result<IdentityRefusal, ExecutorErro
 }
 
 /// A refusal of Core's change path in the closed vocabulary, under Core's
-/// own kind token. Its detail is the kind's own sentence: Core's text may
-/// say where an agent's record lives, which no surface does. A malformed
-/// request keeps Core's words for what is malformed.
+/// own kind token. Its detail is the kind's own sentence, for every kind:
+/// Core's text may say where an agent's record lives, which no surface
+/// does, so none of Core's words is written.
 pub fn refusal_of_core(refusal: &IdentityChangeRefusal) -> IdentityRefusal {
     use IdentityChangeRefusal as Core;
     use IdentityRefusalKind as Kind;
     let kind = match refusal {
-        Core::InvalidRequest { problem } => {
-            return IdentityRefusal::new(Kind::InvalidRequest {
-                problem: RequestProblem::Malformed,
-            })
-            .with_detail(format!("The request is malformed: {problem}."));
-        }
+        // Core's words for what is malformed are Core's: they can say
+        // where a record lives, so the kind's own sentence is answered.
+        Core::InvalidRequest { .. } => Kind::InvalidRequest {
+            problem: RequestProblem::Malformed,
+        },
         Core::BatchTooLarge { max } => Kind::BatchTooLarge { max: *max as u64 },
         Core::ProfileUnknown { profile } => Kind::ProfileUnknown {
             profile: profile.as_str().to_owned(),

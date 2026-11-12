@@ -39,13 +39,43 @@
 //! - the executor seam (`executor`): commit this normalized request under
 //!   this consent, as this requester, in this mob, over Core's change path.
 //!
-//! The family's implementation over the host's rules, the decisions held
-//! for a change, the host RPC methods and the agent tools build on this
-//! module; none of them is here.
+//! The decisions held for a change (`decided`) stand on it: a change whose
+//! outcome is `require_approval` is held as a durable decision, decided by
+//! a person through the decisions surface, and carried out by the decision
+//! kind's executor through the seam.
+//!
+//! The family's implementation over the host's rules, the host RPC methods
+//! and the agent tools build on this module; none of them is here.
+
+/// The wire tokens of a closed vocabulary, listed once with their variants.
+/// It gives the type `ALL_TOKENS`, every token in declaration order, and
+/// `listed_token`, whose match is exhaustive: a variant that is not listed
+/// here with its token fails to compile, so the list cannot fall behind the
+/// type.
+macro_rules! closed_tokens {
+    ($type:ty { $($variant:ident => $token:literal),+ $(,)? }) => {
+        impl $type {
+            /// Every wire token of the vocabulary, in declaration order.
+            #[allow(
+                dead_code,
+                reason = "read by the rows that compare the SDKs' token files with this list"
+            )]
+            pub(crate) const ALL_TOKENS: &'static [&'static str] = &[$($token),+];
+
+            /// The value's wire token.
+            const fn listed_token(&self) -> &'static str {
+                match self {
+                    $(Self::$variant { .. } => $token),+
+                }
+            }
+        }
+    };
+}
 
 mod approval;
 mod config;
 mod consequences;
+mod decided;
 mod digest;
 mod escape;
 mod executor;
@@ -73,14 +103,19 @@ pub use config::{
     RequesterSelectorConfig, ReservedKeysConfig, SelectorConfig, TimeoutsConfig,
 };
 pub use consequences::{
-    CONSEQUENCES_CALLBACK, ConsequenceHook, ConsequenceLine, HookRefusal,
-    consequences_callback_params, parse_consequences_callback_result,
+    CONSEQUENCES_CALLBACK, ConsequenceHook, ConsequenceLine, HookRefusal, HostConsequences,
+    consequences_callback_params, host_consequences_of, parse_consequences_callback_result,
+};
+pub use decided::{
+    HELD_CHANGE_FORMAT, HeldChangeHost, HeldIdentityChange, HeldTarget, IDENTITY_DECISION_KINDS,
+    IdentityDecisionNotice, IdentityDecisionNotices, IdentityDecisions, KeyedSendNotices,
+    NoRequesterNotices, REQUESTER_TRUST_DOMAIN_PREFIX, SUBJECT_WIDENED_REFUSAL,
 };
 pub use digest::Sha256Digest;
 pub use executor::{
-    ADOPT_NOT_BUILT, AgentAdmission, ChangeCommit, ChangeCommitted, ChangeConsent, ChangeRequester,
-    CoreChangeExecutor, ExecutorError, IdentityChangeExecutor, InstructionStep, UPDATE_NOT_BUILT,
-    committed_outcome, consent_of_plan, refusal_of_core, refusal_of_error,
+    AGENT_SPECS_NOT_GIVEN, AgentAdmission, AgentSpecs, ChangeCommit, ChangeCommitted,
+    ChangeConsent, ChangeRequester, CoreChangeExecutor, ExecutorError, IdentityChangeExecutor,
+    InstructionStep, committed_outcome, consent_of_plan, refusal_of_core, refusal_of_error,
 };
 pub use family::{
     AgentEntered, AgentPage, AgentProvenance, AgentReadiness, AgentRecord, AgentRef, AgentSet,
@@ -90,7 +125,11 @@ pub use family::{
     ListAgents, OperationRef, OperationState, ReadDirectory, UpdateAgent, WithdrawRequest,
     Withdrawn,
 };
-pub use gate::IdentityFamilySlot;
+pub(crate) use gate::IdentityGate;
+pub use gate::{
+    FIRST_MESSAGE_IN_GOVERNED_REALM, IdentityFamilyOptions, IdentityFamilySlot, IdentityHostHooks,
+    PeerVisibility,
+};
 pub use operation::{OperationId, REQUEST_ID_MAX_BYTES, ToolCallOrigin};
 pub use outcome::{
     AgentChangeState, AgentOutcome, AgentSeat, IdentityOutcome, InstructionNextSessionReason,
@@ -109,8 +148,9 @@ pub use refusal::{
     PolicyRefusalKind, RequestProblem, ValidationRefusal,
 };
 pub use render::{
-    HOST_CONSEQUENCE_MAX_BYTES, HOST_CONSEQUENCES_MAX_BYTES, RENDERER, RENDERING_MAX_BYTES,
-    Rendering, labels, render_v1,
+    AgentTools, HOST_CONSEQUENCE_MAX_BYTES, HOST_CONSEQUENCES_MAX_BYTES, ProfileTools,
+    REALM_PROFILE_UNREADABLE, RENDERER, RENDERING_MAX_BYTES, Rendering, ToolConfigurations, labels,
+    render_held_v1, render_v1,
 };
 pub use request::{
     AdoptIdentitySpec, ArchiveIdentitySpec, CONSOLE_SURFACE, Consequence, ConsequenceEffect,

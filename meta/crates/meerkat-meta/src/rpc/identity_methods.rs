@@ -153,6 +153,17 @@ pub(crate) fn console_requester(person: Option<&str>) -> ChangeRequester {
     }
 }
 
+/// The agents a Console caller may view, as the family asks which agents a
+/// caller may see: a peer the caller may not view is answered as a name no
+/// agent holds.
+pub(crate) struct ViewedAgents(pub(crate) AccessView);
+
+impl crate::identity_creation::PeerVisibility for ViewedAgents {
+    fn sees(&self, name: &str) -> bool {
+        self.0.can_view_agent(name)
+    }
+}
+
 /// What the surface a call arrived on hands the family.
 pub(crate) struct IdentityFamilySurface<'a> {
     /// The mob the call acts in.
@@ -310,10 +321,52 @@ fn named_operation(
     parse::<OperationRef>(params)?.resolve(&surface.requester.recorded())
 }
 
+/// The requester part of an operation id: `<kind>.<digest>`, before the
+/// request id.
+fn operation_namespace(operation_id: &str) -> &str {
+    let mut dots = operation_id.match_indices('.');
+    dots.next();
+    dots.next()
+        .map_or(operation_id, |(at, _)| &operation_id[..at])
+}
+
+impl IdentityFamilySurface<'_> {
+    /// Whether the caller reads the operation `operation_id`: its own
+    /// always, and another requester's on the stdio gateway or as a Console
+    /// caller that administers the runtime. To every other caller another
+    /// requester's operation reads as one nobody asked.
+    fn reads_operation(&self, operation_id: &OperationId) -> bool {
+        let own = OperationId::for_request(&self.requester.recorded(), "own")
+            .ok()
+            .is_some_and(|probe| {
+                operation_namespace(probe.as_str()) == operation_namespace(operation_id.as_str())
+            });
+        own || self
+            .access
+            .is_none_or(|view| view.allows(crate::access::ACTION_RUNTIME_ADMIN))
+    }
+}
+
 async fn withdraw(
     surface: &IdentityFamilySurface<'_>,
     params: &Value,
 ) -> Result<Value, IdentityRefusal> {
+    // A held change is withdrawn by the verified requester that asked for
+    // it, or by the host's operator. A Console caller that is no verified
+    // person is neither, and withdraws nothing.
+    if matches!(
+        &surface.requester,
+        ChangeRequester::Host {
+            operator: false,
+            ..
+        }
+    ) {
+        return Err(
+            IdentityRefusal::new(IdentityRefusalKind::DecisionNotFound).with_detail(
+                "A held change is withdrawn by the signed-in person that asked for it, or by                  the host: this caller is neither, and nothing was withdrawn.",
+            ),
+        );
+    }
     let operation_id = named_operation(surface, params)?;
     let withdrawn = surface
         .family
@@ -383,6 +436,9 @@ async fn operation(
     params: &Value,
 ) -> Result<Value, IdentityRefusal> {
     let operation_id = named_operation(surface, params)?;
+    if !surface.reads_operation(&operation_id) {
+        return Ok(operation_answer(&operation_id, &OperationState::Unknown));
+    }
     match read(surface, IdentityRead::Operation(operation_id.clone())).await? {
         IdentityReadAnswer::Operation(state) => Ok(operation_answer(&operation_id, &state)),
         _ => Err(unexpected_answer()),
@@ -472,6 +528,39 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    /// A Console caller may name as a peer exactly the agents its access
+    /// rules let it view: every agent while access control is not
+    /// enforced, and under enforced rules the agents a rule grants
+    /// `agent.view` on.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn a_console_caller_sees_the_agents_its_rules_let_it_view() {
+        use crate::access::{ACTION_AGENT_VIEW, AccessControlConfig, AccessController, AccessRule};
+        use crate::identity_creation::PeerVisibility;
+
+        let open = AccessController::new(AccessControlConfig::default()).expect("controller");
+        let everyone = ViewedAgents(open.view_for_subject(Some("person@example.test")));
+        assert!(everyone.sees("scout") && everyone.sees("ledger"));
+
+        let enforced = AccessController::new(AccessControlConfig {
+            enabled: true,
+            admins: vec!["root@example.test".to_string()],
+            rules: vec![AccessRule {
+                id: "views-scout".to_string(),
+                actions: vec![ACTION_AGENT_VIEW.to_string()],
+                agents: vec!["scout".to_string()],
+                ..AccessRule::default()
+            }],
+            ..AccessControlConfig::default()
+        })
+        .expect("controller");
+        let person = ViewedAgents(enforced.view_for_subject(Some("person@example.test")));
+        assert!(person.sees("scout"));
+        assert!(!person.sees("ledger"), "no rule lets the caller view it");
+        let admin = ViewedAgents(enforced.view_for_subject(Some("root@example.test")));
+        assert!(admin.sees("ledger"), "an admin views every agent");
+    }
     use crate::identity_creation::{AgentChangeState, AgentOutcome, Requester, Sha256Digest};
 
     const DIGEST: &str = "sha256:0000000000000000000000000000000000000000000000000000000000000001";

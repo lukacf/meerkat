@@ -2061,8 +2061,9 @@ pub struct IdentityStatus {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct IdentityRecordFacts {
-    /// The digest of the identity's spec: what a change of it names as the
-    /// spec it read.
+    /// The digest of the identity's spec: Core's digest of the spec in its
+    /// row form, the one spec digest every surface shows, and what a change
+    /// of the identity names as the spec it read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spec_digest: Option<String>,
     /// The spec's revision, from 1, when the record counts one.

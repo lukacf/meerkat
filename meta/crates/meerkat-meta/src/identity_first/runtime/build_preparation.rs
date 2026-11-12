@@ -262,6 +262,39 @@ impl IdentityRuntime {
         }
     }
 
+    /// The runtime was just composed: ask Core, once, to seat every identity
+    /// whose record is its row that is owed its seat
+    /// (`SessionBridge::seat_created_identities_owed_their_seat`, the pass
+    /// the mob's start runs). The start embodies such a seat (one whose
+    /// spec owes a kickoff) before this runtime is composed, and the
+    /// preparer refuses that build, retryable, because the host's build
+    /// step cannot run yet; the identity then stays owed its seat. Seated
+    /// now, its member is built from the host's inputs as any build of it
+    /// is, and its kickoff runs once. It never fails the composition: an
+    /// identity Core could not seat stays owed its seat, which Core's entry
+    /// of its name and its delivery doors say, and the next start or the
+    /// next change of the mob's identities seats it.
+    async fn seat_created_identities_owed_their_seat(&self) {
+        let Some(bridge) = self.bridge.as_ref() else {
+            return;
+        };
+        match bridge.seat_created_identities_owed_their_seat().await {
+            Ok(still_owed) if still_owed.is_empty() => {}
+            Ok(still_owed) => tracing::warn!(
+                identities = ?still_owed,
+                "identities whose record is their row stay owed their seat after the identity \
+                 runtime was composed; Core's next start, or the next change of the mob's \
+                 identities, seats them"
+            ),
+            Err(BridgeError::Unsupported { .. }) => {}
+            Err(error) => tracing::warn!(
+                %error,
+                "the identities owed their seat could not be seated once the identity runtime \
+                 was composed; they stay owed their seat"
+            ),
+        }
+    }
+
     /// The runtime is composed: its roster is registered, and its customizer,
     /// customizer tool registry and services are installed. From now on the
     /// preparer prepares each registered identity's build inline. Every
@@ -274,6 +307,12 @@ impl IdentityRuntime {
     /// composition and reports after it is published at its report
     /// ([`Self::publish_held_member_build`]).
     ///
+    /// The first composition also asks Core, once, to seat the identities
+    /// whose record is their row that are owed their seat
+    /// ([`Self::seat_created_identities_owed_their_seat`]): the mob's start
+    /// embodied such a seat before this runtime was composed, and its build
+    /// was refused then, since no host build step could run.
+    ///
     /// The publications run with no lifecycle lock held, at most
     /// [`super::super::orchestrator::identity_restore_concurrency`] at once.
     /// A failed one records its reason: its member stays held until a later
@@ -282,9 +321,12 @@ impl IdentityRuntime {
         let Some(preparer) = self.member_build_preparer() else {
             return;
         };
-        preparer.compose();
+        let first_composition = preparer.compose();
         if !preparer.publishes_tools() {
             return;
+        }
+        if first_composition {
+            self.seat_created_identities_owed_their_seat().await;
         }
         let held = match self.members_core_holds_for_unpublished_tools() {
             Ok(held) => held,

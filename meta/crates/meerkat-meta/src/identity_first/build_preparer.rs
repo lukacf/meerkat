@@ -27,11 +27,13 @@
 //!   instructions and the system prompt at the first build of the member's
 //!   session. The customizer runs once for the build: the preparation that
 //!   follows in the same build answers what the composition found. Before
-//!   the identity runtime is composed there is no host step to run: a fresh
-//!   spawn is left as Core lowered it (a refusal would leave the identity
-//!   owed its seat until the mob's next start, which asks in the same
-//!   state), and a wake or a restore is refused retryable, so the member
-//!   stays Dormant and is asked again;
+//!   the identity runtime is composed there is no host step to run, so the
+//!   build is refused retryable and nothing is built from the row alone: a
+//!   wake or a restore leaves the member Dormant and is asked again, and a
+//!   fresh spawn (a seat the mob's start owes the identity) leaves the
+//!   identity owed its seat, which the composition seats
+//!   (`IdentityRuntime::compose_member_builds` asks Core to seat the
+//!   identities owed their seat, once);
 //! - before the identity runtime is composed (its roster registered, its
 //!   customizer and runtime services installed), an identity's member is
 //!   answered `HoldUntilReleased`: Core builds it and holds its run starts,
@@ -75,8 +77,8 @@ use super::types::AgentIdentity;
 pub(crate) const PUBLISHED_ONCE_COMPOSED: &str =
     "customizer tools are published once the identity runtime is composed";
 
-/// Why the seat of an identity whose record is its row is not composed for
-/// a wake or a restore while the identity runtime is not composed yet.
+/// Why the seat of an identity whose record is its row is not composed
+/// while the identity runtime is not composed yet.
 const SEAT_COMPOSED_ONCE_COMPOSED: &str = "the member's seat is composed from the host's build step once the identity runtime is \
      composed";
 
@@ -215,9 +217,10 @@ impl IdentityBuildPreparer {
 
     /// Mark the bound runtime composed: from now on a registered identity's
     /// build is prepared inline. A build held before is published by the
-    /// composition (Core names it) or by its report.
-    pub(crate) fn compose(&self) {
-        self.lock_state().composed = true;
+    /// composition (Core names it) or by its report. Answers whether this
+    /// call composed it: `false` for a runtime composed before.
+    pub(crate) fn compose(&self) -> bool {
+        !std::mem::replace(&mut self.lock_state().composed, true)
     }
 
     /// Read the live tools of `identity`'s member on `session_id` and write
@@ -401,7 +404,9 @@ impl IdentityBuildPreparer {
     /// draft is lowered onto the seat
     /// ([`IdentityRuntime::compose_store_owned_seat`]). The build's
     /// preparation, which Core asks next, then answers what the composition
-    /// found and does not run the customizer again.
+    /// found and does not run the customizer again. Before the runtime is
+    /// composed the build is refused, retryable: no member of such an
+    /// identity is built from its row alone.
     async fn compose_store_owned_seat(
         &self,
         seat: &mut SpawnMemberSpec,
@@ -422,24 +427,15 @@ impl IdentityBuildPreparer {
                 });
             }
             // The identity runtime is not composed yet, so its customizer
-            // cannot run. A fresh spawn is left as Core lowered it: refused,
-            // the identity would stay owed its seat until the mob's next
-            // start, which asks in this same state. A wake or a restore is
-            // refused for now: the member stays Dormant, and Core asks
-            // again once the retry is due.
+            // cannot run: the build is refused for now, whatever it is, and
+            // no member is built before the host's build step and its label
+            // rule were asked. A wake or a restore leaves the member
+            // Dormant, and Core asks again once the retry is due. A fresh
+            // spawn (a seat the mob's start owes the identity, embodied for
+            // its kickoff) leaves the identity owed its seat, and the
+            // composition seats it
+            // ([`IdentityRuntime::compose_member_builds`]).
             Some(Ok(_)) | None => {
-                if matches!(
-                    seat.launch_mode,
-                    meerkat_mob::launch::MemberLaunchMode::Fresh
-                ) {
-                    tracing::warn!(
-                        member = %seat.identity,
-                        "the member is spawned before the identity runtime is composed: it is \
-                         built from its row alone, and its host's customizer is not asked \
-                         about its build inputs or its labels"
-                    );
-                    return Ok(());
-                }
                 return Err(MemberBuildPreparationRefusal::Retryable {
                     reason: SEAT_COMPOSED_ONCE_COMPOSED.to_string(),
                 });

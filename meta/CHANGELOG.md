@@ -397,6 +397,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- An agent created at run time that the mob's start seats before the
+  host's identity runtime is composed is not built from its row alone.
+  That is an agent created with a first message whose first spawn failed
+  or was refused, so it is owed its seat: the start embodies it before the
+  host's customizer can run. Meta's build preparer refuses that build for
+  now, as it does for a wake and a restore, and the composition asks Core
+  once to seat the agents owed their seat
+  (`MobHandle::seat_owed_store_owned_identities`, through the new
+  defaulted `SessionBridge::seat_created_identities_owed_their_seat`). The
+  host's build step then decides each as at any build: an agent whose row
+  lacks a label the customizer sets stays refused its seat and never runs,
+  and every other one is built from the host's inputs (its model, system
+  prompt, instructions, provider parameters, context and tools) as a
+  configured agent is, and its first message runs once. Until the runtime
+  is composed the agent stays owed its seat, and a send to it is refused.
+
 - An agent created at run time (an identity whose record is its row) is
   built from the same host inputs as a configured agent on its profile: the
   model, the system prompt, the additional instructions, the provider
@@ -484,17 +500,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Known limitations
 
-- Before the identity runtime is composed, the host's customizer cannot
-  run. A member of an identity whose record is its row that the mob's
-  start spawns then (a seat the start owes it) is built from its row
-  alone: without the customizer's tools until its next build, and without
-  its system prompt, instructions and context for that life; the
-  customizer is not asked, so its labels are not compared with the seat's
-  for that build either. One the
-  start restores then (one that owes work) is refused for now and built
-  once the runtime is composed, with both; on a runtime that learns of its
-  customizer only at its identity bootstrap it is built without them, as
-  before.
+- On a runtime that learns of its agent customizer only at its identity
+  bootstrap (`UnifiedRuntime::bootstrap` over a spec that does not declare
+  one), a member of an identity whose record is its row that the mob's
+  start builds before that bootstrap (a seat the start owes it, or one that
+  owes work) is built from its row alone: without the customizer's tools,
+  system prompt, instructions and context, and with no comparison of the
+  customizer's labels with the seat's for that build. A runtime that
+  declares its customizer builds no such member before it is composed.
 
 - `identity_creation::normalize_create` refuses a name in a reserved
   namespace `invalid_name` at the agent's `name`: a name that starts with

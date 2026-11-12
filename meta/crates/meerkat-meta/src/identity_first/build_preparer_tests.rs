@@ -112,6 +112,9 @@ struct HoldingCore {
     released: Mutex<Vec<String>>,
     /// The members whose run starts Core holds for unpublished tools.
     held: Mutex<std::collections::BTreeSet<String>>,
+    /// How many times the identity runtime asked Core to seat the
+    /// identities owed their seat.
+    owed_seat_asks: std::sync::atomic::AtomicUsize,
 }
 
 impl HoldingCore {
@@ -134,6 +137,13 @@ impl HoldingCore {
 
 #[async_trait::async_trait]
 impl SessionBridge for HoldingCore {
+    async fn seat_created_identities_owed_their_seat(
+        &self,
+    ) -> Result<Vec<AgentIdentity>, BridgeError> {
+        self.owed_seat_asks.fetch_add(1, Ordering::SeqCst);
+        Ok(Vec::new())
+    }
+
     async fn create_session(
         &self,
         identity: &AgentIdentity,
@@ -398,8 +408,10 @@ async fn r109_after_the_composition_a_registered_identity_is_prepared_inline_and
 
 /// The seat of an identity whose record is its row is composed from the
 /// host's build step once per build, and only once the identity runtime is
-/// composed. Before that a fresh spawn's seat is left as Core lowered it
-/// and a wake's is refused retryable, and the customizer does not run.
+/// composed. Before that every build is refused retryable, a fresh spawn's
+/// (a seat the mob's start owes the identity) as a wake's: the seat is left
+/// untouched, the customizer does not run, and nothing is built from the
+/// row alone. The preparer's composition reports itself once.
 /// After it the customizer runs once, the draft is lowered onto the seat
 /// (its context and instructions; its labels, which are the seat's own),
 /// and the build's preparation that follows answers without running the
@@ -436,13 +448,20 @@ async fn a_store_owned_seat_is_composed_once_per_build_once_the_runtime_is_compo
         seat
     };
 
-    // Bound, not composed yet: there is no host step to run.
+    // Bound, not composed yet: there is no host step to run, so no build
+    // of the member is admitted, fresh or resumed.
     let mut fresh = lowered();
-    assert_eq!(preparer.compose_store_owned_seat(&mut fresh).await, Ok(()));
+    assert_eq!(
+        preparer.compose_store_owned_seat(&mut fresh).await,
+        Err(MemberBuildPreparationRefusal::Retryable {
+            reason: super::SEAT_COMPOSED_ONCE_COMPOSED.to_string(),
+        }),
+        "a fresh spawn's seat is refused for now: the identity stays owed its seat"
+    );
     assert_eq!(
         (fresh.context.clone(), fresh.model_override.clone()),
         (lowered().context, lowered().model_override),
-        "a fresh spawn's seat is left as Core lowered it"
+        "the refused seat is left as Core lowered it"
     );
     let mut wake = resumed();
     assert!(
@@ -453,6 +472,11 @@ async fn a_store_owned_seat_is_composed_once_per_build_once_the_runtime_is_compo
         "a wake's seat is refused for now"
     );
     assert_eq!(customizer.builds.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        core.owed_seat_asks.load(Ordering::SeqCst),
+        0,
+        "nothing asks Core to seat an owed identity before the composition"
+    );
 
     runtime
         .register(DurableAgentSpec {
@@ -464,6 +488,17 @@ async fn a_store_owned_seat_is_composed_once_per_build_once_the_runtime_is_compo
         .await
         .expect("the identity registers");
     runtime.compose_member_builds().await;
+    assert!(
+        !preparer.compose(),
+        "the runtime's composition composed the preparer: a later one is not the first"
+    );
+    runtime.compose_member_builds().await;
+    assert_eq!(
+        core.owed_seat_asks.load(Ordering::SeqCst),
+        1,
+        "the first composition asks Core once to seat the identities owed their seat, and \
+         a later one does not ask again"
+    );
 
     let mut seat = resumed();
     assert_eq!(preparer.compose_store_owned_seat(&mut seat).await, Ok(()));

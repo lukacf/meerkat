@@ -246,8 +246,10 @@ machine! {
             guard { self.lifecycle_phase == Phase::Paused }
             update {
                 // A pause for the target was for the target the schedule
-                // had. Pointed at another one, the schedule stays Paused
-                // and the pause is the reviser's own: nothing that follows
+                // had. The key is the whole target binding (whom the
+                // schedule names and what it sends), so a revise that
+                // changes either moves it: the schedule stays Paused and
+                // the pause is the reviser's own, and nothing that follows
                 // the old or the new target resumes it.
                 if target_binding_key != self.target_binding_key {
                     self.paused_for_target = false;
@@ -342,6 +344,11 @@ machine! {
             on input SyncTargetSnapshot { target_binding_key }
             guard { self.lifecycle_phase == Phase::Paused }
             update {
+                // A snapshot sync records the key of the binding the
+                // schedule already has, as it was materialized (a session
+                // bound on demand): the same target, so a pause for the
+                // target stays the target's. Only a revise gives a
+                // schedule another target (RevisePaused).
                 self.target_binding_key = target_binding_key;
             }
             to Paused

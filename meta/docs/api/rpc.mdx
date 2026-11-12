@@ -1420,7 +1420,11 @@ without one and send it its first input through the host's governed ingress.
 | `proposer`, `source_evidence` | | no | Recorded, never authority |
 
 `set.labels` sets each key it names and keeps the agent's other labels;
-`set.labels_remove` removes keys. `set.instructions` and `set.context`
+`set.labels_remove` removes keys. A reserved label the agent carries (one
+of Meta's own, or one the policy reserves, that its configuration gave it
+before its adoption) stays through an update that does not name it; an
+update that would change or remove it is refused `reserved_key`.
+`set.instructions` and `set.context`
 replace theirs whole. `set.profile` moves the agent to that profile's
 model, tools and skills on the same conversation.
 
@@ -1548,7 +1552,10 @@ asked for the change: a caller the Console could not verify withdraws
 nothing. A `get` names the peers the caller may view, and no page's `next`
 names an agent the caller may not view. The reads need
 `agent.view`: `get` on the named agent, and a list and the directory leave
-out the agents the caller may not view. A read-only Console refuses the
+out the agents the caller may not view. What the caller may view is
+decided on the agent's own record, its profile as its role and its labels,
+so a rule about a role or a label holds for an agent no member is seated
+for as it holds for a seated one. A read-only Console refuses the
 changes.
 
 The caller is the requester the policy judges: a signed-in person

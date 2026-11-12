@@ -374,6 +374,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   after a restart) was checked and retired by another agent, and convened
   a council. The host's record still adds what a roster row cannot say (a
   member that left the roster).
+- Meerkat's member tools (`member_status`, `retire_member`,
+  `force_cancel_member`) naming a member private to a person the calling
+  agent does not act for read whom the member is private to from the
+  member's own roster row too, and the member lists an agent's tools answer
+  (`mob_list_members`, `list_members`) leave such a member out, with manage
+  scope over the mob too: Meerkat hands Meta's audience the labels the
+  caller and the target carry on their roster rows
+  (`MemberToolAudience::hides`, Breaking in the root changelog) and asks it
+  for every member a list would name. The caller's own person is its
+  roster row's; the host's record speaks for a caller only when it has no
+  row, and for a target whenever its row names nobody.
+- On the Console, the reads and changes of the mob's agents
+  (`meta/identity/get`, `list`, `directory`, `plan` and every change)
+  decide what the caller may view on the agent's own record: its profile
+  as its role, and its labels. A rule of the access configuration that
+  names a role or labels, and the rule about an agent private to a person,
+  hold for an agent no member is seated for (an archived agent, and one
+  whose seat is owed) as they hold for a seated one. The peers and the
+  asker a read names, and the peers a change names, are decided the same
+  way, and an agent whose record cannot be read is not shown.
+- An update of an agent's labels (`meta/identity/update`, `set.labels` and
+  `set.labels_remove`) lets a reserved label the agent carries stay when
+  the update does not name it. An agent that was adopted with a label its
+  configuration gave it (one of Meta's own, or one the identity policy
+  reserves) takes an update of its other labels; it was refused
+  `reserved_key`. An update that would change or remove a reserved label
+  is refused `reserved_key` at `set.labels`.
 - The first build of an identity created at run time carries the host
   customizer's tools: the member Core starts at the create to run the
   identity's first message, and the member Core wakes before a roster pass

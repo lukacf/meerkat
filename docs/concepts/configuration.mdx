@@ -357,7 +357,9 @@ exhausted quota or credit (OpenAI `insufficient_quota`, Anthropic spend caps,
 Gemini daily quota), missing models, content filtering, context overflow, and
 oversized requests remain non-retryable. With the default `max_retries = 3`,
 a persistently unknown failure can make four provider attempts before
-returning `retry_exhausted`.
+returning `retry_exhausted`. The turn's typed error then names what failed:
+the `provider`, the typed `reason` of the last attempt and `retryable: true`
+(see the JSON-RPC [turn error](/api/rpc#turn-methods)).
 
 ## Turn and agent-lifetime bounds
 

@@ -122,6 +122,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (`field: "agents[i].name"`), also when an existing agent holds it.
 - An update answers an `instructions` member only where the launch has an
   instruction step for updates and the update names `set.instructions`.
+- An agent's change is refused `invalid_request` when the identity its
+  surface attributed to the call is not the member of the session the call
+  ran in (`ChangeRequester::agent_session`): the policy judges the first and
+  Core reads the grant of the second, so the two are one agent.
 
 - Changes of agents that a person decides. A change whose outcome under the
   host's identity policy is `require_approval` is held as one durable

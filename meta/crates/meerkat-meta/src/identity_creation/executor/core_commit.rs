@@ -175,6 +175,13 @@ fn at_request_field(commit: &ChangeCommit<'_>, refusal: IdentityRefusal) -> Iden
 /// The requester as Core's commit takes it. An agent's change carries its
 /// grant for `grant`, admitted by the session its tool call ran in or
 /// rebuilt from its recorded identity; Core checks it again at the commit.
+///
+/// The policy judged the identity the surface attributed to the call, and
+/// Core reads the grant of the session's member and records that member as
+/// the requester, so the two are one agent: a call attributed to another
+/// agent than its session's member is refused `invalid_request` before Core
+/// is asked for a grant (a defect of the surface, which names no field). A
+/// session no member of the mob holds is Core's to answer.
 pub(super) async fn requester_input(
     commit: &ChangeCommit<'_>,
     operation: &IdentityOperation,
@@ -202,6 +209,15 @@ pub(super) async fn requester_input(
             };
             let admitted = match admission {
                 AgentAdmission::Session(session) => {
+                    if let Some((member, _)) = commit.mob.member_of_session(session).await
+                        && core_member_name(identity).as_ref() != Some(&member)
+                    {
+                        return Ok(Err(IdentityRefusal::new(
+                            IdentityRefusalKind::InvalidRequest {
+                                problem: RequestProblem::Conflicting,
+                            },
+                        )));
+                    }
                     commit
                         .mob
                         .admit_identity_change_grant(session, operation, &grant)

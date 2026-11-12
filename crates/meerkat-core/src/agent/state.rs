@@ -4265,6 +4265,25 @@ where
                 )),
             });
         }
+        // The probe is handed the request as the client is: a copy whose
+        // reasoning effort level is resolved for the route the client serves
+        // now. The caller's copy keeps the provider-neutral level, which a
+        // client refuses as unresolved. A level the route refuses is dropped
+        // from the probe copy only: the request's own preparation refuses it
+        // next with the typed refusal, and this admission turns it into no
+        // other error.
+        let mut probe_params = request.provider_params.cloned();
+        if self
+            .resolve_request_reasoning_effort(
+                self.client.as_ref(),
+                Some(profile),
+                &mut probe_params,
+            )
+            .is_err()
+            && let Some(params) = probe_params.as_mut()
+        {
+            params.reasoning_effort = None;
+        }
         let pressure = self
             .client
             .request_pressure(
@@ -4272,7 +4291,7 @@ where
                 request.tools,
                 request.max_tokens,
                 request.temperature,
-                request.provider_params,
+                probe_params.as_ref(),
             )?
             .ok_or_else(|| AgentError::ModelFallbackResumeHeld {
                 target: Box::new(crate::AgentLlmFallbackSkippedTarget::new(

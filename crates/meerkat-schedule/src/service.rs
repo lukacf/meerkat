@@ -536,6 +536,11 @@ impl ScheduleService {
     /// target's lifecycle sends this and [`Self::resume_for_target`] for a
     /// target: a second sender's resume would end the first one's pause
     /// while its reason still holds.
+    ///
+    /// An update that changes the target of a schedule paused for its
+    /// target (whom it names, or what it sends: its prompt, for one) makes
+    /// the pause a pause by name: [`Self::resume_for_target`] then leaves
+    /// the schedule paused, and somebody resumes it by name.
     pub async fn pause_for_target(
         &self,
         schedule_id: &ScheduleId,

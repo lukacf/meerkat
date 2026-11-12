@@ -489,6 +489,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Known limitations
 
+- Schedules of an archived agent: Meta's own doors (the agents' schedule
+  tools, the Console) point no schedule at an archived agent. Meerkat's own
+  schedule methods (`schedule/create`, `schedule/update`, REST) do not judge
+  the target, and neither does a schedule tool call for a target that names
+  only a session: such a schedule for an archived agent is active and each
+  of its fires is refused at the delivery. An agent's schedule tool call
+  that reads its target just before the target's archive and writes just
+  after it can leave an active schedule the same way (the Console's create
+  closes that window). A change of a paused schedule's target through
+  Meerkat's own methods (its prompt, for one) makes its pause a pause by
+  name: the agent's unarchive does not resume it.
 - A member of an identity whose record is its row that the mob's start
   restores before the identity runtime is bound (one that owes work) is
   built without the host customizer's tools until its next build, as

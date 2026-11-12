@@ -906,6 +906,32 @@ impl Param {
                 )
                 .with_self_hosted_backend(SelfHostedBackendKind::SelfHosted)
                 .with_operator_reasoning_effort_levels(known.then(|| OPERATOR_LEVELS.to_vec()));
+                // The operator's configuration of the same server and model.
+                config.self_hosted.servers.insert(
+                    "local".to_string(),
+                    meerkat_core::config::SelfHostedServerConfig {
+                        base_url: format!("{base}/v1"),
+                        api_style: if self == Self::SelfHostedChat {
+                            meerkat_core::config::SelfHostedApiStyle::ChatCompletions
+                        } else {
+                            meerkat_core::config::SelfHostedApiStyle::Responses
+                        },
+                        ..Default::default()
+                    },
+                );
+                config.self_hosted.models.insert(
+                    SELF_HOSTED_MODEL.to_string(),
+                    meerkat_core::config::SelfHostedModelConfig {
+                        server: "local".to_string(),
+                        remote_model: SELF_HOSTED_MODEL.to_string(),
+                        display_name: "Remote model".to_string(),
+                        supports_temperature: true,
+                        supports_thinking: true,
+                        supports_reasoning: true,
+                        reasoning_effort_levels: known.then(|| OPERATOR_LEVELS.to_vec()),
+                        ..Default::default()
+                    },
+                );
                 Some(Fixture {
                     param: self,
                     provider: Provider::SelfHosted,
@@ -1026,13 +1052,19 @@ impl Param {
 }
 
 impl Fixture {
-    /// A level the route accepts for the model: an active one where the set
-    /// has one.
+    /// A level the route accepts for the model. Not `medium` where the set
+    /// has another active level: `medium` is what some clients send by
+    /// themselves, and the rows must tell the session's level from that.
     fn level(&self) -> EffortLevel {
-        self.supported
-            .iter()
-            .copied()
-            .find(|level| *level >= EffortLevel::Low)
+        [EffortLevel::High, EffortLevel::Low]
+            .into_iter()
+            .find(|level| self.supported.contains(level))
+            .or_else(|| {
+                self.supported
+                    .iter()
+                    .copied()
+                    .find(|level| *level >= EffortLevel::Low)
+            })
             .or_else(|| self.supported.first().copied())
             .expect("the fixture states levels")
     }
@@ -1383,6 +1415,26 @@ async fn supported_level_completes_with_tools_schema_and_streaming() {
         let (result, events) = run(&mut agent, "Hello.").await;
         let result = result.unwrap_or_else(|error| panic!("{param:?}: the control runs: {error}"));
         assert_eq!(control.recorded().len(), 1, "{param:?}");
+        // Without a level no route's effort field is written. The
+        // Responses clients of a model that takes reasoning send an effort
+        // of their own; that default is theirs and is left alone here.
+        let body = &control.recorded()[0].body;
+        if !matches!(
+            param,
+            Param::OpenAiDirect | Param::SelfHostedResponses | Param::CopilotResponses
+        ) {
+            for field in [
+                &body["reasoning"],
+                &body["reasoning_effort"],
+                &body["output_config"],
+                &body["generationConfig"]["thinkingConfig"],
+            ] {
+                assert!(field.is_null(), "{param:?}: {body}");
+            }
+        }
+        if param == Param::CopilotClaude {
+            assert!(body["thinking"].is_null(), "{param:?}: {body}");
+        }
         assert_eq!(result.reasoning_effort, None, "{param:?}");
         assert!(request_reports(&events).is_empty(), "{param:?}");
         assert_eq!(run_started_reports(&events), [None], "{param:?}");
@@ -1411,13 +1463,15 @@ async fn unsupported_level_is_refused_before_any_provider_request() {
         // On Copilot a level the catalog row lists and the entry does not:
         // the row is not a source there.
         if param.is_copilot()
-            && let Some(level) = fixture
-                .catalog
-                .as_ref()
-                .and_then(|row| row.iter().find(|level| !fixture.supported.contains(level)))
+            && let Some(row) = fixture.catalog.as_ref()
         {
+            let level = row
+                .iter()
+                .find(|level| !fixture.supported.contains(level))
+                .unwrap_or_else(|| panic!("{param:?}: the row lists more than the entry"));
             levels.push(*level);
         }
+        levels.sort();
         levels.dedup();
 
         for level in levels {
@@ -1844,4 +1898,154 @@ async fn a_refresh_that_changes_only_the_levels_re_resolves() {
         "the endpoint did not change"
     );
     assert_eq!(stub.recorded().len(), 0, "nothing is sent");
+}
+
+// ---------------------------------------------------------------------------
+// A session that lives across turns and builds
+// ---------------------------------------------------------------------------
+
+/// A session whose level was sent on one turn is refused on the next, once
+/// the account's list no longer states the level: the turn fails with the
+/// typed refusal that lists the new set, nothing is sent for it, and the
+/// session error a surface answers the turn with carries the same refusal.
+#[tokio::test]
+async fn refusal_inside_a_turn_is_the_typed_refusal() {
+    for param in COPILOT_PARAMS {
+        let stub = Stub::spawn(&[Reply::Text]).await;
+        let fixture = param.fixture(Stage::Stated, &stub.base).expect("staged");
+        let level = fixture.level();
+        let mut agent = build(&fixture, Build::level(level))
+            .await
+            .unwrap_or_else(|error| panic!("{param:?}: the agent builds: {error}"));
+
+        let (result, events) = run(&mut agent, "Hello.").await;
+        result.unwrap_or_else(|error| panic!("{param:?}: the first turn completes: {error}"));
+        assert_eq!(
+            request_reports(&events),
+            [fixture.resolution(level)],
+            "{param:?}"
+        );
+        let sent = stub.recorded();
+        assert_eq!(sent.len(), 1, "{param:?}");
+        fixture.assert_requests(&sent, level);
+
+        // The account's list now states the other levels only.
+        let remaining: Vec<EffortLevel> = fixture
+            .supported
+            .iter()
+            .copied()
+            .filter(|stated| *stated != level)
+            .collect();
+        assert!(!remaining.is_empty(), "{param:?}: the entry keeps a level");
+        let mut entry = fixture.entry.clone().expect("the seated entry");
+        entry["capabilities"]["supports"]["reasoning_effort"] = json!(wire(&remaining));
+        fixture
+            .copilot
+            .as_ref()
+            .expect("a Copilot fixture")
+            .seat(std::slice::from_ref(&entry));
+
+        let refusal = refused_run(&mut agent, &format!("{param:?}")).await;
+        assert_eq!(
+            refusal,
+            ReasoningEffortRefusal {
+                requested: level,
+                provider: fixture.provider,
+                model: fixture.model.clone(),
+                route: Some(fixture.route.clone()),
+                reason: ReasoningEffortRefusalReason::UnsupportedLevel,
+                supported: Some(remaining),
+                facts: Some(ReasoningFactsSource::Account),
+                conflicting_param: None,
+                conflicting_level: None,
+            },
+            "{param:?}"
+        );
+        assert_eq!(
+            stub.recorded().len(),
+            1,
+            "{param:?}: nothing is sent for the refused turn"
+        );
+
+        // The session error of the refused turn: the agent error's code,
+        // and structured data that reads back as the same refusal.
+        let error = meerkat_core::SessionError::Agent(AgentError::ReasoningEffortRefused(
+            Box::new(refusal.clone()),
+        ));
+        assert_eq!(error.code(), "AGENT_ERROR", "{param:?}");
+        let data = error
+            .structured_data()
+            .unwrap_or_else(|| panic!("{param:?}: the refusal has structured data"));
+        assert_eq!(
+            data["kind"],
+            meerkat_core::SessionError::REASONING_EFFORT_REFUSED_KIND,
+            "{param:?}"
+        );
+        assert_eq!(data["retryable"], false, "{param:?}");
+        assert_eq!(
+            meerkat_core::SessionError::reasoning_effort_refusal_from_data(&data),
+            Some(refusal),
+            "{param:?}"
+        );
+    }
+}
+
+/// A session built with a level, run once and resumed by a new build that
+/// does not name the level again still resolves it: the first request after
+/// the resume carries the route's field, and the run reports the level at
+/// its start, per request and in its result.
+#[tokio::test]
+async fn a_resumed_session_resolves_and_reports_its_level() {
+    for param in PARAMS {
+        let stub = Stub::spawn(&[Reply::Text]).await;
+        let fixture = param.fixture(Stage::Stated, &stub.base).expect("staged");
+        let level = fixture.level();
+        let expected = fixture.resolution(level);
+
+        let mut agent = build(&fixture, Build::level(level))
+            .await
+            .unwrap_or_else(|error| panic!("{param:?}: the agent builds: {error}"));
+        let (result, _) = run(&mut agent, "Hello.").await;
+        result.unwrap_or_else(|error| panic!("{param:?}: the first turn completes: {error}"));
+        assert_eq!(stub.recorded().len(), 1, "{param:?}");
+        let session = agent.session().clone();
+        drop(agent);
+
+        let mut resumed = build(
+            &fixture,
+            Build {
+                resume: Some(session),
+                ..Build::default()
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{param:?}: the resumed session builds: {error}"));
+        let (result, events) = run(&mut resumed, "And again.").await;
+        let result =
+            result.unwrap_or_else(|error| panic!("{param:?}: the resumed turn completes: {error}"));
+
+        let recorded = stub.recorded();
+        assert_eq!(recorded.len(), 2, "{param:?}: one request after the resume");
+        fixture.assert_requests(&recorded[1..], level);
+        assert_eq!(
+            run_started_reports(&events),
+            [Some(expected.clone())],
+            "{param:?}"
+        );
+        assert_eq!(request_reports(&events), [expected], "{param:?}");
+        let report = result
+            .reasoning_effort
+            .unwrap_or_else(|| panic!("{param:?}: the result reports the level"));
+        assert_eq!(report.requested, level, "{param:?}");
+        assert_eq!(report.sent.len(), 1, "{param:?}: {report:?}");
+        assert_eq!(
+            (
+                report.sent[0].level,
+                &report.sent[0].route,
+                report.sent[0].requests
+            ),
+            (level, &fixture.route, 1),
+            "{param:?}"
+        );
+    }
 }

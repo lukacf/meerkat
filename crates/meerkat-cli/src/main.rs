@@ -5704,8 +5704,8 @@ enum PrivateFileError {
     /// was removed, created or written.
     #[error(
         "{} is {found}. The file is written as a new file in place of the one at its path, \
-         never into what is there: give a path outside /dev and /proc that holds a regular \
-         file, or nothing yet",
+         never into what is there: give a path outside /dev and /proc (/dev/shm will do) \
+         that holds a regular file, or nothing yet",
         .path.display()
     )]
     NotReplaceable { path: PathBuf, found: NotAFile },
@@ -5715,8 +5715,10 @@ enum PrivateFileError {
 
 /// Whether `path` would be an entry of `/dev` or `/proc`: its directory,
 /// with every symbolic link resolved, is one of the two or lies under one.
-/// A directory that does not exist yet is judged by its nearest ancestor
-/// that does, since it would be created inside that one.
+/// `/dev/shm` and what lies under it is the exception: it is a memory file
+/// system for ordinary files. A directory that does not exist yet is judged
+/// by its nearest ancestor that does, since it would be created inside that
+/// one.
 #[cfg(all(unix, feature = "comms"))]
 async fn in_dev_or_proc(path: &Path) -> std::io::Result<bool> {
     let directory = path.parent().unwrap_or(path);
@@ -5728,7 +5730,8 @@ async fn in_dev_or_proc(path: &Path) -> std::io::Result<bool> {
         };
         match tokio::fs::canonicalize(ancestor).await {
             Ok(resolved) => {
-                return Ok(resolved.starts_with("/dev") || resolved.starts_with("/proc"));
+                let in_dev = resolved.starts_with("/dev") && !resolved.starts_with("/dev/shm");
+                return Ok(in_dev || resolved.starts_with("/proc"));
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
@@ -5801,7 +5804,8 @@ async fn not_replaceable(path: &Path) -> std::io::Result<Option<NotAFile>> {
 /// replaced by the new file (the link itself is removed, never its target),
 /// and a link to a named pipe, a socket, a device or a directory is
 /// refused, as those things themselves are. A path in `/dev` or `/proc` is
-/// refused whatever it holds: `/dev/stdout` is a symbolic link to a regular
+/// refused whatever it holds, except under `/dev/shm`, a memory file system
+/// for ordinary files: `/dev/stdout` is a symbolic link to a regular
 /// file when standard output is redirected to one, and a root process must
 /// never replace a link there.
 ///

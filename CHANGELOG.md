@@ -35,6 +35,59 @@ them.
 
 ## [Unreleased]
 
+### Fixed
+
+- `meerkat-core`: a turn that fails because a provider failure outlasted the
+  retries now says what failed. Its typed turn error (`error.data.error` of
+  a JSON-RPC turn, `details.error` of REST, the `error=` JSON of the CLI's
+  `turn abandoned` line, and the error of a runtime completion) kept
+  `kind: "retry_exhausted"` and its detail text but left out `provider`,
+  `retryable` and `reason`, the fields a provider failure that is not
+  retried (`kind: "llm_failure"`, a 400 for example) fills, so a caller
+  could tell a rate limit from an overloaded or unreachable provider only by
+  reading the detail text. It now carries `provider`, `reason` and
+  `retryable: true`. `reason` is the typed reason of the last failed
+  attempt: `llm_rate_limited` (with `retry_after_ms` when the provider sent
+  a hint), `llm_network_timeout`, `llm_call_timeout` (a call timeout or a
+  stalled stream), or `llm_provider_error` with the provider's error kind,
+  such as `server_overloaded`, `server_error` or `connection_reset`. After a
+  model fallback, `provider` and `reason` are those of the fallback target's
+  last failure. `retryable: true` names the class of the failure: one
+  Meerkat retries, which ended the turn after the retries its policy
+  allowed. A failure of that class can succeed on a later attempt; the field
+  does not say that this one will, least of all for the `unknown` and
+  `connection_reset` provider error kinds and for `llm_call_timeout`. It is
+  advice for the caller, and the number and timing of Meerkat's own retries
+  are unchanged. `kind`, `detail`, the JSON-RPC code and the `run_failed`
+  event are unchanged, and no field is new: a stored turn error without the
+  three fields still reads, and an earlier release reads one that has them.
+  Affects 0.8.0 through 0.9.13.
+
+## [0.9.14] - 2026-11-11
+
+### Highlights
+
+- A session whose history one OpenAI-family service produced no longer
+  fails its first turn on another (the OpenAI API, the ChatGPT backend, Azure
+  OpenAI, GitHub Copilot, a self-hosted server): encrypted reasoning and the
+  other opaque items of a response are replayed only to the service that
+  issued them (0.5.2 through 0.9.13). After a restart, earlier turns are
+  replayed without that material. See Breaking, Added, Fixed and Known
+  limitations.
+
+- A request that an OpenAI-family service refuses inside a response stream
+  fails once, with the service's cause, instead of being sent again until
+  the retry policy is used up (0.8.25 through 0.9.13). See Fixed.
+
+- GitHub Copilot routes send a current client identity, so the Copilot API
+  no longer marks every listed model `client_version_deprecated`. See
+  Changed.
+
+- A file write that the operating system refuses (a full disk, a quota, a
+  file size limit) no longer replaces a stored credential, a realm manifest,
+  a task file or an export with an empty file while the operation reports
+  success (0.3.0 through 0.9.13). See Fixed.
+
 ### Breaking
 
 - Behaviour-only (not measured by the gate): `meerkat-core`:
@@ -278,32 +331,6 @@ them.
   neither stays behind to be waited on. A file an earlier release already
   emptied is not restored.
 
-- `meerkat-core`: a turn that fails because a provider failure outlasted the
-  retries now says what failed. Its typed turn error (`error.data.error` of
-  a JSON-RPC turn, `details.error` of REST, the `error=` JSON of the CLI's
-  `turn abandoned` line, and the error of a runtime completion) kept
-  `kind: "retry_exhausted"` and its detail text but left out `provider`,
-  `retryable` and `reason`, the fields a provider failure that is not
-  retried (`kind: "llm_failure"`, a 400 for example) fills, so a caller
-  could tell a rate limit from an overloaded or unreachable provider only by
-  reading the detail text. It now carries `provider`, `reason` and
-  `retryable: true`. `reason` is the typed reason of the last failed
-  attempt: `llm_rate_limited` (with `retry_after_ms` when the provider sent
-  a hint), `llm_network_timeout`, `llm_call_timeout` (a call timeout or a
-  stalled stream), or `llm_provider_error` with the provider's error kind,
-  such as `server_overloaded`, `server_error` or `connection_reset`. After a
-  model fallback, `provider` and `reason` are those of the fallback target's
-  last failure. `retryable: true` names the class of the failure: one
-  Meerkat retries, which ended the turn after the retries its policy
-  allowed. A failure of that class can succeed on a later attempt; the field
-  does not say that this one will, least of all for the `unknown` and
-  `connection_reset` provider error kinds and for `llm_call_timeout`. It is
-  advice for the caller, and the number and timing of Meerkat's own retries
-  are unchanged. `kind`, `detail`, the JSON-RPC code and the `run_failed`
-  event are unchanged, and no field is new: a stored turn error without the
-  three fields still reads, and an earlier release reads one that has them.
-  Affects 0.8.0 through 0.9.13.
-
 ### Known limitations
 
 - The issuer of OpenAI-family continuity material is the service (a kind of
@@ -312,6 +339,17 @@ them.
   same service at the same endpoint inside one process (two API keys of
   different organisations, two ChatGPT accounts, two Copilot accounts on one
   API host). Whether a service refuses that is not known; it was not tested.
+
+- `rustix` 1.1.5 in Cargo.lock is named by RUSTSEC-2026-0486, as in 0.9.12
+  and 0.9.13: the `getxattr` and `listxattr` functions of `rustix::fs` (with
+  their `l` and `f` forms) mark bytes they never wrote as initialized when
+  they are given a zero-length buffer. `meerkat-core` depends on `rustix`
+  directly, and it is also taken through `fs4`, `tempfile`, `which`, and
+  `xattr` through `tar`. No Meerkat crate calls those functions. Of the
+  crates Meerkat builds with only `xattr` does, and `tar`, the one crate
+  that uses `xattr`, calls it only to set attributes while unpacking, so
+  Meerkat's own use is not known to be affected. `rustix` 1.1.6 has the
+  fix; this release still builds with 1.1.5.
 
 ## [0.9.13] - 2026-11-11
 
@@ -48149,7 +48187,8 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.13...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.14...HEAD
+[0.9.14]: https://github.com/lukacf/meerkat/compare/v0.9.13...v0.9.14
 [0.9.13]: https://github.com/lukacf/meerkat/compare/v0.9.12...v0.9.13
 [0.9.12]: https://github.com/lukacf/meerkat/compare/v0.9.11...v0.9.12
 [0.9.11]: https://github.com/lukacf/meerkat/compare/v0.9.10...v0.9.11

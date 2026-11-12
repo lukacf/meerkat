@@ -75839,7 +75839,14 @@ function requesterWords(provenance, personName) {
   return { kind: "host", words: Object.hasOwn(HOST_SURFACE_WORDS, provenance.requester) ? HOST_SURFACE_WORDS[provenance.requester] : "The host (".concat(provenance.requester, ")") };
 }
 var HARVEST_WORDS = "Its last conversation is harvested, as for any agent that leaves the team.";
-function agentChangeConfirmWords(change, name2) {
+function agentChangeConfirmWords(change, name2, state = {}) {
+  if (change === "remove" && state.waiting === true) {
+    return {
+      question: "Remove ".concat(name2, " for good?"),
+      consequence: "It never started: its host has not finished preparing it, so it has no conversation and nothing was run for it. Its name can never be used again, and this cannot be undone.",
+      confirm: "Remove for good"
+    };
+  }
   if (change === "archive") {
     return {
       question: "Archive ".concat(name2, "?"),
@@ -76557,10 +76564,11 @@ function AgentChangeConfirm({
   change,
   name: name2,
   displayName,
+  waiting,
   onClose,
   onArchiveInstead
 }) {
-  const words2 = agentChangeConfirmWords(change, displayName);
+  const words2 = agentChangeConfirmWords(change, displayName, { waiting });
   const sender = useChangeSender(api, change, displayName);
   const request = import_react81.default.useRef(null);
   const [reading, setReading] = import_react81.default.useState(false);
@@ -76639,6 +76647,7 @@ function AgentChangePanel({
   name: name2,
   displayName,
   controls,
+  waiting,
   onClose,
   onSwitch
 }) {
@@ -76650,6 +76659,7 @@ function AgentChangePanel({
       change,
       name: name2,
       displayName,
+      waiting,
       onClose,
       onArchiveInstead: change === "remove" && controls.archive ? () => onSwitch("archive") : void 0
     },
@@ -76697,6 +76707,7 @@ function ArchivedAgents({
     };
   }, [open, api.revision]);
   const controls = archivedAgentControls(api.flags);
+  const canGiveUp = controls.remove;
   const toggle = () => {
     if (open) {
       setAgents(null);
@@ -76719,12 +76730,17 @@ function ArchivedAgents({
           /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "cc-count", children: waiting.length })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("ul", { className: "identity-archived__list", children: waiting.map((agent) => (
-          // Nothing can be done with it yet, so it has no
-          // control: it joins the roster when its host is done.
+          // It has no member yet, so nothing can be done with
+          // it but to give it up: where the launch offers
+          // removals, Remove is its one control. It joins the
+          // roster when its host is done.
           /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)("li", { className: "identity-archived__row", "data-testid": "roster-waiting:".concat(agent.name), children: [
             /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-archived__name", title: agent.name, children: agentShownName(agent) }),
             /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-archived__meta", children: humanizeEnum(agent.profile) }),
-            /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-archived__actions", children: /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(StatusPill, { tone: "warn", variant: "quiet", children: "Waiting for its host" }) })
+            /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)("span", { className: "cc-btn-row identity-archived__actions", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(StatusPill, { tone: "warn", variant: "quiet", children: "Waiting for its host" }),
+              canGiveUp ? /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Button, { size: "sm", variant: "danger", onClick: () => onOpen(agent, "remove"), "data-testid": "roster-waiting-action:".concat(agent.name, ":remove"), children: "Remove" }) : null
+            ] })
           ] }, agent.name)
         )) }),
         /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-form__hint identity-archived__hint", children: "Its host is still preparing it. It joins the roster when that ends." })
@@ -77220,6 +77236,7 @@ function RosterPanel({
           name: agentChange.name,
           displayName: agentChange.displayName,
           controls: agentChange.controls,
+          waiting: agentChange.waiting,
           onClose: () => setAgentChange(null),
           onSwitch: (change) => setAgentChange({ ...agentChange, change })
         }
@@ -77393,7 +77410,13 @@ function RosterPanel({
               api: identityChanges,
               onOpen: (agent, change) => {
                 setCreating(false);
-                setAgentChange({ name: agent.name, displayName: agentShownName(agent), change, controls: { archive: false } });
+                setAgentChange({
+                  name: agent.name,
+                  displayName: agentShownName(agent),
+                  change,
+                  controls: { archive: false },
+                  waiting: waitsForItsHost(agent)
+                });
               }
             }
           ) : null

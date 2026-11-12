@@ -15,6 +15,7 @@ import {
   outcomeWords,
   planWords,
   answeredRefusalOf,
+  readRefusalSentence,
   refusalDetail,
   refusalFormField,
   refusalSentence,
@@ -70,11 +71,13 @@ function saidOf(refusal: IdentityRefusal): Said {
   return { sentence: refusalSentence(refusal), ...(detail ? { detail } : {}) };
 }
 
-/** A failed read in words: a refusal in the console's sentence for it, and
- * anything else as an answer that did not come. */
+/** A failed read in words: a refusal in the console's sentence for a read
+ * that was refused, and anything else as an answer that did not come. */
 function readFailure(error: unknown): Said {
   const refusal = answeredRefusalOf(error);
-  return refusal ? saidOf(refusal) : { sentence: "The console got no answer it can read.", detail: errorMessage(error) };
+  if (!refusal) return { sentence: "The console got no answer it can read.", detail: errorMessage(error) };
+  const detail = refusalDetail(refusal);
+  return { sentence: readRefusalSentence(refusal), ...(detail ? { detail } : {}) };
 }
 
 /**

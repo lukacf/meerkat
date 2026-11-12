@@ -1087,11 +1087,35 @@ export const REFUSAL_KINDS_WITH_A_SENTENCE: readonly string[] = Object.keys(REFU
 /** The sentence of a refusal whose kind the console does not know. */
 export const UNKNOWN_REFUSAL_SENTENCE = "The request was refused, and nothing was changed.";
 
+/** The feature an update names when it is refused `unsupported` because it
+ * would move an agent into a profile whose agents its host prepares before
+ * their first use. */
+const MOVE_INTO_PREPARED_PROFILE = "move_into_prepared_profile";
+
 /** The sentence of a refusal: the console's own for its kind, the plain one
  * for a kind the console does not know. Never the kind token, and never the
  * gateway's sentence: that one is the refusal's detail. */
 export function refusalSentence(refusal: IdentityRefusal): string {
+  // No matter of versions: the profile's agents are prepared before their
+  // first use, and an agent that moves there was not.
+  if (refusal.kind === "unsupported" && refusal.data.feature === MOVE_INTO_PREPARED_PROFILE) {
+    return "An agent cannot be moved into this profile: its host prepares the agents of this profile before their first use. Create a new agent in this profile instead.";
+  }
   return Object.hasOwn(REFUSAL_SENTENCES, refusal.kind) ? REFUSAL_SENTENCES[refusal.kind] : UNKNOWN_REFUSAL_SENTENCE;
+}
+
+/**
+ * The sentence of a refused read. A read of the team's agents names what is
+ * open for each, so where the team's held changes cannot be read the read
+ * is refused, with the kind a change that cannot be held is refused with.
+ * For a read it means "read again": nothing was asked of anybody, and the
+ * console does not answer as if nothing were open. Every other refusal of
+ * a read reads as it does anywhere.
+ */
+export function readRefusalSentence(refusal: IdentityRefusal): string {
+  return refusal.kind === "approval_unavailable"
+    ? "The team's open requests could not be read just now, so the console cannot say what waits for its agents. Try again shortly."
+    : refusalSentence(refusal);
 }
 
 /** What a refusal's Details disclosure holds: the gateway's own sentence,

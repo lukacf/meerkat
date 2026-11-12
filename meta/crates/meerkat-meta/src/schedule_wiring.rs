@@ -792,6 +792,156 @@ impl ScheduleMobTargetRegistry {
     }
 }
 
+/// The schedules of a launch, as the family of changes of its long-term
+/// agents has them follow an agent
+/// ([`crate::identity_creation::AgentSchedules`]): the schedules that
+/// target the agent (a member target of it, an identity target naming it,
+/// or a session target naming its session) are paused for their target by
+/// its archive, resumed by its unarchive when they are paused for their
+/// target, and ended by its removal. Whose pause a pause is, the schedule's
+/// own lifecycle records; nothing is kept here.
+#[derive(Clone)]
+pub struct MobAgentSchedules {
+    service: ScheduleService,
+    targets: ScheduleMobTargetRegistry,
+}
+
+impl MobAgentSchedules {
+    /// The schedules of `service`, whose targets `targets` resolves to the
+    /// members of the launch's mob.
+    #[must_use]
+    pub fn new(service: ScheduleService, targets: ScheduleMobTargetRegistry) -> Self {
+        Self { service, targets }
+    }
+
+    /// The schedules that target the agent `agent` of the mob `mob_id`
+    /// and are not deleted, in the service's order.
+    async fn targeting(
+        &self,
+        mob_id: &str,
+        agent: &str,
+    ) -> Result<Vec<Schedule>, meerkat::ScheduleDomainError> {
+        let Some(member) = crate::identity_creation::core_member_name(agent) else {
+            return Ok(Vec::new());
+        };
+        let mut targeting = Vec::new();
+        for schedule in self.service.list().await? {
+            if self
+                .targets
+                .target_names_member(&schedule.target, mob_id, member.as_str())
+                .await
+            {
+                targeting.push(schedule);
+            }
+        }
+        Ok(targeting)
+    }
+
+    fn named(schedule: &Schedule) -> crate::identity_creation::ScheduleRef {
+        crate::identity_creation::ScheduleRef::new(
+            schedule.schedule_id.to_string(),
+            schedule.config.name.clone(),
+        )
+    }
+}
+
+#[async_trait]
+impl crate::identity_creation::AgentSchedules for MobAgentSchedules {
+    async fn follow(
+        &self,
+        mob_id: &str,
+        agent: &str,
+        effect: crate::identity_creation::ScheduleEffect,
+    ) -> crate::identity_creation::SchedulesFollowed {
+        use crate::identity_creation::{ScheduleEffect, SchedulesFollowed};
+        let targeting = match self.targeting(mob_id, agent).await {
+            Ok(targeting) => targeting,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    agent,
+                    "the schedules that target an agent could not be listed: they do not follow \
+                     its change until the same request is asked again"
+                );
+                return SchedulesFollowed::new(effect, Vec::new(), true);
+            }
+        };
+        let mut followed = Vec::new();
+        let mut incomplete = false;
+        for schedule in &targeting {
+            let id = &schedule.schedule_id;
+            // Each call is the schedule's own lifecycle's to decide: it
+            // changes nothing where it has nothing to do. What is listed
+            // is read from what the call answers, never from the listing
+            // made before it.
+            let done = match effect {
+                ScheduleEffect::Paused => self
+                    .service
+                    .pause_for_target(id)
+                    .await
+                    .map(|(paused, _)| paused.paused_for_target()),
+                ScheduleEffect::Resumed => self
+                    .service
+                    .resume_for_target(id)
+                    .await
+                    .map(|(_, resumed)| resumed),
+                ScheduleEffect::Ended => self
+                    .service
+                    .delete(id)
+                    .await
+                    .map(|deleted| deleted.phase == SchedulePhase::Deleted),
+            };
+            match done {
+                Ok(true) => followed.push(Self::named(schedule)),
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        agent,
+                        schedule_id = %id,
+                        "a schedule that targets an agent did not follow its change: it does \
+                         when the same request is asked again"
+                    );
+                    incomplete = true;
+                }
+            }
+        }
+        SchedulesFollowed::new(effect, followed, incomplete)
+    }
+
+    async fn planned(
+        &self,
+        mob_id: &str,
+        agent: &str,
+        effect: crate::identity_creation::ScheduleEffect,
+    ) -> crate::identity_creation::SchedulesFollowed {
+        use crate::identity_creation::{ScheduleEffect, SchedulesFollowed};
+        match self.targeting(mob_id, agent).await {
+            Ok(targeting) => SchedulesFollowed::new(
+                effect,
+                targeting
+                    .iter()
+                    .filter(|schedule| match effect {
+                        ScheduleEffect::Paused => schedule.phase == SchedulePhase::Active,
+                        ScheduleEffect::Resumed => schedule.paused_for_target(),
+                        ScheduleEffect::Ended => true,
+                    })
+                    .map(Self::named)
+                    .collect(),
+                false,
+            ),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    agent,
+                    "the schedules that target an agent could not be listed for a plan"
+                );
+                SchedulesFollowed::new(effect, Vec::new(), true)
+            }
+        }
+    }
+}
+
 /// A schedule aimed at a member private to a person is hidden from every
 /// agent not private to that person (an agent whose turn no member's
 /// session makes is private to no one): its list leaves the schedule out,

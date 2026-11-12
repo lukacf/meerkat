@@ -357,6 +357,7 @@ pub struct State {
     pub planning_cursor_utc_ms: Option<u64>,
     pub next_occurrence_ordinal: u64,
     pub superseded_ack_ids: std::collections::BTreeSet<OccurrenceId>,
+    pub paused_for_target: bool,
 }
 impl Default for State {
     fn default() -> Self {
@@ -420,6 +421,14 @@ pub mod inputs {
         pub occurrence_id: OccurrenceId,
         pub superseding_revision: u64,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PauseForTarget {
+        pub at_utc_ms: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResumeForTarget {
+        pub at_utc_ms: u64,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -433,6 +442,8 @@ pub enum Input {
     Resume(inputs::Resume),
     Delete(inputs::Delete),
     ConfirmOccurrencesSuperseded(inputs::ConfirmOccurrencesSuperseded),
+    PauseForTarget(inputs::PauseForTarget),
+    ResumeForTarget(inputs::ResumeForTarget),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -446,6 +457,8 @@ impl Input {
             Self::Resume(_) => InputKind::Resume,
             Self::Delete(_) => InputKind::Delete,
             Self::ConfirmOccurrencesSuperseded(_) => InputKind::ConfirmOccurrencesSuperseded,
+            Self::PauseForTarget(_) => InputKind::PauseForTarget,
+            Self::ResumeForTarget(_) => InputKind::ResumeForTarget,
         }
     }
 }
@@ -460,6 +473,8 @@ pub enum InputKind {
     Resume,
     Delete,
     ConfirmOccurrencesSuperseded,
+    PauseForTarget,
+    ResumeForTarget,
 }
 
 pub mod effects {
@@ -514,6 +529,13 @@ pub enum TransitionId {
     ConfirmOccurrencesSupersededActive,
     ConfirmOccurrencesSupersededPaused,
     ConfirmOccurrencesSupersededDeleted,
+    PauseForTargetActive,
+    PauseForTargetPaused,
+    PauseForTargetDeleted,
+    ResumeForTargetPausedForTarget,
+    ResumeForTargetPausedByName,
+    ResumeForTargetActive,
+    ResumeForTargetDeleted,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -598,5 +620,6 @@ pub fn initial_state() -> State {
         planning_cursor_utc_ms: None,
         next_occurrence_ordinal: 0,
         superseded_ack_ids: Default::default(),
+        paused_for_target: false,
     }
 }

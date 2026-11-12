@@ -90,6 +90,7 @@ mod presentation;
 mod refusal;
 mod render;
 mod request;
+mod schedules;
 
 #[cfg(test)]
 mod interface_tests;
@@ -168,3 +169,4 @@ pub use request::{
     core_member_name, evaluate_peer, identity_name_of_member, normalize_adopt, normalize_archive,
     normalize_create, normalize_remove, normalize_unarchive, normalize_update,
 };
+pub use schedules::{AgentSchedules, ScheduleEffect, ScheduleRef, SchedulesFollowed};

@@ -2198,6 +2198,70 @@ fn render_v1_is_the_pinned_canonical_text() {
     }
 }
 
+/// A rendering names a person by their name, the id their principal key
+/// carries, as an agent's record names who asked for it: the key itself is
+/// never shown, for the requester or for a person a host names as the
+/// proposer. Any other proposer text is shown as it was written, and the
+/// request digest still binds the keys.
+#[test]
+fn a_rendering_names_a_person_and_never_shows_a_principal_key() {
+    const CAROL: &str = r#"principal:["human","example-domain","carol"]"#;
+    const DAVE: &str = r#"principal:["human","example-domain","dave"]"#;
+    let asked_by_a_person = IdentityRequest {
+        requester: Requester::Human {
+            principal: CAROL.to_owned(),
+        },
+        proposer: None,
+        ..golden_remove()
+    };
+    let shown = render(&asked_by_a_person);
+    assert!(
+        shown
+            .as_str()
+            .contains("\nRequester: human \"carol\"\nProposer: none\n"),
+        "{}",
+        shown.as_str()
+    );
+    assert!(!shown.as_str().contains("principal:"), "{}", shown.as_str());
+
+    let proposed_by_a_person = IdentityRequest {
+        proposer: Some(DAVE.to_owned()),
+        ..golden_remove()
+    };
+    let shown = render(&proposed_by_a_person);
+    assert!(
+        shown
+            .as_str()
+            .contains("\nRequester: host \"console\"\nProposer: \"dave\"\n"),
+        "{}",
+        shown.as_str()
+    );
+    assert!(!shown.as_str().contains("principal:"), "{}", shown.as_str());
+
+    // Another person's request is another request, whatever is shown.
+    let asked_by_another = IdentityRequest {
+        requester: Requester::Human {
+            principal: DAVE.to_owned(),
+        },
+        ..asked_by_a_person.clone()
+    };
+    assert_ne!(
+        asked_by_a_person.request_digest().expect("a digest"),
+        asked_by_another.request_digest().expect("a digest")
+    );
+    assert_ne!(
+        render(&asked_by_a_person).subject_digest(),
+        render(&asked_by_another).subject_digest()
+    );
+
+    // A proposer that is no person's key is shown as written.
+    assert!(
+        render(&golden_remove())
+            .as_str()
+            .contains("\nProposer: \"op-proposal-7\"\n")
+    );
+}
+
 #[test]
 fn render_v1_is_deterministic() {
     let first = render(&golden_create());

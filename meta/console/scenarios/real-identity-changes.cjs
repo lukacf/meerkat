@@ -271,6 +271,10 @@ async function fullStory() {
     record = (await call("meta/identity/get", { name: "scout" })).result;
     assert.equal(record.display_name, "Chief scout");
     assert.deepEqual(record.instructions, ["Scout the vault."]);
+    // The roster and the sidebar name the agent by its new display name:
+    // the experience read labels its row by it, and follows the update.
+    await agent("scout").getByText("Chief scout").first().waitFor();
+    await page.getByTestId("sidebar-agent:scout").getByText("Chief scout").first().waitFor();
     await page.getByTestId("identity-cancel").click();
 
     // Archive: the agent leaves the roster and is among the archived agents.

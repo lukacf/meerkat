@@ -25900,7 +25900,10 @@ var CONSOLE_RPC_METHODS = {
   identityGet: "meta/identity/get",
   identityList: "meta/identity/list",
   identityOperation: "meta/identity/operation",
-  identityDirectory: "meta/identity/directory"
+  identityDirectory: "meta/identity/directory",
+  identityAdopt: "meta/identity/adopt",
+  identityChangesHold: "meta/identity/changes_hold",
+  identityPlan: "meta/identity/plan"
 };
 
 // ../packages/console-core/src/sse-reader.ts
@@ -26490,7 +26493,8 @@ var CONSOLE_COMMAND_NAMES = {
   getAgentRecord: "getAgentRecord",
   listAgentRecords: "listAgentRecords",
   getAgentChange: "getAgentChange",
-  listAgentDirectory: "listAgentDirectory"
+  listAgentDirectory: "listAgentDirectory",
+  planAgentChange: "planAgentChange"
 };
 var IDENTITY_CHANGE_TARGETS = /* @__PURE__ */ new Set([
   "meta/roster",
@@ -26793,7 +26797,8 @@ var CONSOLE_COMMAND_SPECS = {
   [CONSOLE_COMMAND_NAMES.getAgentRecord]: { method: CONSOLE_RPC_METHODS.identityGet, targetKinds: IDENTITY_CHANGE_TARGETS },
   [CONSOLE_COMMAND_NAMES.listAgentRecords]: { method: CONSOLE_RPC_METHODS.identityList, targetKinds: IDENTITY_CHANGE_TARGETS },
   [CONSOLE_COMMAND_NAMES.getAgentChange]: { method: CONSOLE_RPC_METHODS.identityOperation, targetKinds: IDENTITY_CHANGE_TARGETS },
-  [CONSOLE_COMMAND_NAMES.listAgentDirectory]: { method: CONSOLE_RPC_METHODS.identityDirectory, targetKinds: IDENTITY_CHANGE_TARGETS }
+  [CONSOLE_COMMAND_NAMES.listAgentDirectory]: { method: CONSOLE_RPC_METHODS.identityDirectory, targetKinds: IDENTITY_CHANGE_TARGETS },
+  [CONSOLE_COMMAND_NAMES.planAgentChange]: { method: CONSOLE_RPC_METHODS.identityPlan, targetKinds: IDENTITY_CHANGE_TARGETS }
 };
 var identityCommandMethods = /* @__PURE__ */ new Set([
   CONSOLE_RPC_METHODS.inspectIdentity,
@@ -54992,7 +54997,10 @@ var CONSOLE_RPC_METHODS2 = {
   identityGet: "meta/identity/get",
   identityList: "meta/identity/list",
   identityOperation: "meta/identity/operation",
-  identityDirectory: "meta/identity/directory"
+  identityDirectory: "meta/identity/directory",
+  identityAdopt: "meta/identity/adopt",
+  identityChangesHold: "meta/identity/changes_hold",
+  identityPlan: "meta/identity/plan"
 };
 var CONSOLE_BLOB_PATH_PREFIX2 = "/blobs/";
 var CONSOLE_TIMELINE_REPLAY_UNAVAILABLE_CODE2 = -32013;
@@ -60849,7 +60857,8 @@ var CONSOLE_COMMAND_NAMES2 = {
   getAgentRecord: "getAgentRecord",
   listAgentRecords: "listAgentRecords",
   getAgentChange: "getAgentChange",
-  listAgentDirectory: "listAgentDirectory"
+  listAgentDirectory: "listAgentDirectory",
+  planAgentChange: "planAgentChange"
 };
 var LEGACY_INSPECT_IDENTITY_METHOD = "meta/inspect_identity";
 var IDENTITY_CHANGE_TARGETS2 = /* @__PURE__ */ new Set([
@@ -61153,7 +61162,8 @@ var CONSOLE_COMMAND_SPECS2 = {
   [CONSOLE_COMMAND_NAMES2.getAgentRecord]: { method: CONSOLE_RPC_METHODS2.identityGet, targetKinds: IDENTITY_CHANGE_TARGETS2 },
   [CONSOLE_COMMAND_NAMES2.listAgentRecords]: { method: CONSOLE_RPC_METHODS2.identityList, targetKinds: IDENTITY_CHANGE_TARGETS2 },
   [CONSOLE_COMMAND_NAMES2.getAgentChange]: { method: CONSOLE_RPC_METHODS2.identityOperation, targetKinds: IDENTITY_CHANGE_TARGETS2 },
-  [CONSOLE_COMMAND_NAMES2.listAgentDirectory]: { method: CONSOLE_RPC_METHODS2.identityDirectory, targetKinds: IDENTITY_CHANGE_TARGETS2 }
+  [CONSOLE_COMMAND_NAMES2.listAgentDirectory]: { method: CONSOLE_RPC_METHODS2.identityDirectory, targetKinds: IDENTITY_CHANGE_TARGETS2 },
+  [CONSOLE_COMMAND_NAMES2.planAgentChange]: { method: CONSOLE_RPC_METHODS2.identityPlan, targetKinds: IDENTITY_CHANGE_TARGETS2 }
 };
 function consoleCommandMethod2(command) {
   return CONSOLE_COMMAND_SPECS2[command].method;
@@ -67871,11 +67881,11 @@ function DecisionCard({ card, now: now3, own: own5 }) {
   const identityChange = isIdentityChangeDecision(card.kind);
   const withdrawable = open && identityChange && own5?.decisionIds.has(card.decisionId) === true;
   const [busy, setBusy] = import_react63.default.useState(false);
-  const [refusal, setRefusal] = import_react63.default.useState("");
+  const [refusal, setRefusal] = import_react63.default.useState(null);
   const withdraw = async () => {
     if (!own5) return;
     setBusy(true);
-    setRefusal("");
+    setRefusal(null);
     const refused2 = await own5.withdraw(card.decisionId);
     setBusy(false);
     if (refused2) setRefusal(refused2);
@@ -67922,7 +67932,13 @@ function DecisionCard({ card, now: now3, own: own5 }) {
           open ? /* @__PURE__ */ (0, import_jsx_runtime90.jsx)("p", { className: "cc-approval__hint cc-decision__hint", children: identityChange ? "Decide where it was presented. A person cannot approve their own request." : "Decide where it was presented." }) : null
         ] }),
         withdrawable ? /* @__PURE__ */ (0, import_jsx_runtime90.jsx)("div", { className: "cc-btn-row cc-decision__own", children: /* @__PURE__ */ (0, import_jsx_runtime90.jsx)(Button, { size: "sm", disabled: busy, onClick: () => void withdraw(), "data-testid": "decision-card-withdraw", children: "Withdraw request" }) }) : null,
-        refusal ? /* @__PURE__ */ (0, import_jsx_runtime90.jsx)("p", { className: "cc-decision__note cc-decision__refusal", role: "alert", "data-testid": "decision-card-withdraw-refused", children: refusal }) : null,
+        refusal ? /* @__PURE__ */ (0, import_jsx_runtime90.jsxs)(import_jsx_runtime90.Fragment, { children: [
+          /* @__PURE__ */ (0, import_jsx_runtime90.jsx)("p", { className: "cc-decision__note cc-decision__refusal", role: "alert", "data-testid": "decision-card-withdraw-refused", children: refusal.sentence }),
+          refusal.detail ? (
+            // The gateway's own sentence, for whoever needs the exact answer.
+            /* @__PURE__ */ (0, import_jsx_runtime90.jsx)(TechnicalDetails, { summary: "Details", inline: false, copyAll: false, showCount: false, className: "identity-refusal__details", testId: "identity-refusal-details", children: /* @__PURE__ */ (0, import_jsx_runtime90.jsx)("span", { className: "identity-refusal__gateway", children: refusal.detail }) })
+          ) : null
+        ] }) : null,
         /* @__PURE__ */ (0, import_jsx_runtime90.jsx)(
           TechnicalDetails,
           {
@@ -75047,26 +75063,14 @@ function lifecycleConfirmWords(action, name2) {
   };
 }
 var FOCUSABLE2 = "button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])";
-function LifecycleConfirm({
-  action,
-  name: name2,
-  actionLabel: actionLabel2,
-  onConfirm,
-  onCancel,
-  busy,
-  className,
-  testId,
-  confirmTestId,
-  cancelTestId
-}) {
-  const words2 = lifecycleConfirmWords(action, name2);
+function useConfirmDialog(onCancel, locked = false) {
   const rootRef = import_react80.default.useRef(null);
   const cancelRef = import_react80.default.useRef(null);
   const opener = import_react80.default.useRef(null);
-  const questionId = import_react80.default.useId();
-  const consequenceId = import_react80.default.useId();
   const cancelRefLatest = import_react80.default.useRef(onCancel);
   cancelRefLatest.current = onCancel;
+  const lockedLatest = import_react80.default.useRef(locked);
+  lockedLatest.current = locked;
   import_react80.default.useLayoutEffect(() => {
     const doc = rootRef.current?.ownerDocument;
     const active = doc?.activeElement;
@@ -75083,6 +75087,7 @@ function LifecycleConfirm({
     const onPointerDown = (event) => {
       const target = event.target;
       if (target && rootRef.current?.contains(target)) return;
+      if (lockedLatest.current) return;
       cancelRefLatest.current();
     };
     doc.addEventListener("pointerdown", onPointerDown, true);
@@ -75092,7 +75097,7 @@ function LifecycleConfirm({
     if (event.key === "Escape") {
       event.preventDefault();
       event.stopPropagation();
-      onCancel();
+      if (!lockedLatest.current) cancelRefLatest.current();
       return;
     }
     if (event.key !== "Tab") return;
@@ -75109,6 +75114,24 @@ function LifecycleConfirm({
       first.focus();
     }
   };
+  return { rootRef, cancelRef, onKeyDown };
+}
+function LifecycleConfirm({
+  action,
+  name: name2,
+  actionLabel: actionLabel2,
+  onConfirm,
+  onCancel,
+  busy,
+  className,
+  testId,
+  confirmTestId,
+  cancelTestId
+}) {
+  const words2 = lifecycleConfirmWords(action, name2);
+  const { rootRef, cancelRef, onKeyDown } = useConfirmDialog(onCancel);
+  const questionId = import_react80.default.useId();
+  const consequenceId = import_react80.default.useId();
   return /* @__PURE__ */ (0, import_jsx_runtime106.jsxs)(
     "div",
     {
@@ -75149,8 +75172,7 @@ function LifecycleConfirm({
 // src/lib/identity-changes.ts
 var IDENTITY_REFUSED_CODE = -32058;
 function agentShownName(agent) {
-  const display = agent.displayName?.trim();
-  return display && display !== agent.name ? display : agentDisplayTitle({ label: "", identity: agent.name, member_id: agent.name, agent_id: agent.name });
+  return agent.displayName?.trim() || agentDisplayTitle({ label: "", identity: agent.name, member_id: agent.name, agent_id: agent.name });
 }
 function identityChangeFlags(experience) {
   const section = experience?.identity_changes;
@@ -75340,10 +75362,43 @@ function parseIdentityOutcome(value) {
       return null;
   }
 }
+function parseChangePlan(value) {
+  const outcome = textOf6(rawOf(value)?.outcome);
+  return outcome ? { outcome } : null;
+}
+function planWords(plan) {
+  switch (plan.outcome) {
+    case "allow":
+    // A change its host is told about is made like an allowed one.
+    case "notify":
+      return { tone: "ok", label: "Allowed", line: "The host's rules allow this change." };
+    case "require_approval":
+      return { tone: "warn", label: "Needs a decision", line: "A person must decide this change before it is made." };
+    default:
+      return null;
+  }
+}
 function identityRefusalOf(error48) {
   const rpc2 = error48?.rpcError;
   if (rpc2?.code !== IDENTITY_REFUSED_CODE) return null;
   return refusalOf(rpc2.data, rpc2.message);
+}
+function answeredRefusalOf(error48) {
+  const own5 = identityRefusalOf(error48);
+  if (own5) return own5;
+  const failure2 = error48;
+  const rpc2 = failure2?.rpcError ?? failure2?.responseRpcError;
+  if (rpc2) {
+    const data = rawOf(rpc2.data) ?? {};
+    return { kind: textOf6(data.kind) ?? "", retryable: false, detail: textOf6(rpc2.message)?.trim() ?? "", data, origin: "gateway" };
+  }
+  if (failure2?.kind === "console-capability-unavailable") {
+    return { kind: "not_offered", retryable: false, detail: "", data: {}, origin: "console" };
+  }
+  if (failure2?.transportFailure === "caller_unknown") {
+    return { kind: "caller_unknown", retryable: false, detail: textOf6(failure2.message) ?? "", data: {}, origin: "console" };
+  }
+  return null;
 }
 var EMPTY_NEW_AGENT_DRAFT = {
   profile: "",
@@ -75366,12 +75421,9 @@ function createAgentsRequest(draft) {
     }]
   };
 }
-function ownDisplayName(record10) {
-  return record10.displayName && record10.displayName !== record10.name ? record10.displayName : "";
-}
 function editDraftOf(record10) {
   return {
-    displayName: ownDisplayName(record10),
+    displayName: record10.displayName ?? "",
     instructions: record10.instructions.length ? [...record10.instructions] : [""],
     context: record10.context === void 0 ? "" : JSON.stringify(record10.context, null, 2),
     labels: Object.entries(record10.labels).map(([key, value]) => ({ key, value })),
@@ -75385,7 +75437,7 @@ function sameJson(left, right) {
 function updateAgentRequest(record10, draft) {
   const set3 = {};
   const displayName = draft.displayName.trim();
-  if (displayName !== ownDisplayName(record10)) set3.display_name = displayName;
+  if (displayName !== (record10.displayName ?? "")) set3.display_name = displayName;
   const instructions = draft.instructions.filter((section) => section.trim().length > 0);
   if (!sameJson(instructions, record10.instructions)) set3.instructions = instructions;
   const contextText = draft.context.trim();
@@ -75558,8 +75610,77 @@ function outcomeWords2(change, outcome, name2) {
   if (instructions) lines.push(instructions);
   return { tone: "ok", title, lines };
 }
+var REFUSAL_SENTENCES = {
+  profile_unknown: "This team has no such profile. Pick one of the team's profiles.",
+  profile_not_allowed: "This profile is not one you may use here. Pick another profile.",
+  privileged_field: "This change sets something you may not set. Leave it out.",
+  grant_revoked: "You are no longer allowed to make this change. It was not made.",
+  reserved_key: "This label key is reserved by the host. Use another key.",
+  authority_field_needs_approval: "This label is one that only a person's decision sets. Leave it out.",
+  authority_field_invalid: "This label, or its value, is not one the host allows.",
+  text_too_large: "This text is too long. Shorten it; text is never cut.",
+  consequences_unavailable: "The host could not say what this change would lead to. Try again later.",
+  invalid_request: "Part of this change is missing, contradicts another part or is not valid. Correct it and try again.",
+  invalid_name: "This is not a valid agent name. Choose another.",
+  name_taken: "This name is taken. Choose another; a removed agent's name is never free again.",
+  peer_not_allowed: "The host's rules do not allow this peer. Leave it out.",
+  peer_unknown: "This peer is not an agent of this team that you can name. Pick another agent.",
+  batch_too_large: "This names more agents than one change can make. Make fewer at a time.",
+  validation_refused: "The host's own check refused this change.",
+  change_denied: "The host's rules do not allow you this change. It was not made, and asking again changes nothing.",
+  unsupported: "This change needs something this version does not support. Leave it out.",
+  identity_unknown: "This team has no agent of this name. It may have been removed.",
+  self_change_refused: "An agent cannot change itself.",
+  private_requester: "A private chat cannot ask for changes of agents. Nothing was made.",
+  stale_spec: "This agent changed since you opened it. Read it again, then make your change.",
+  operation_reused: "The team has already seen another change sent this way. Close this and start the change again.",
+  owner_read_only: "This agent is set up in the host's configuration and cannot be changed here. Change it in the configuration.",
+  not_adoptable: "This agent cannot be released from the host's configuration now.",
+  not_archived: "This agent is not archived, so there is nothing to bring back.",
+  declared_apply_open: "The host is applying its configuration. Try again shortly.",
+  admission_unsettled: "This agent is in the middle of another step. Try again once it has finished.",
+  predecessor_mismatch: "This agent is not as it was when the change was asked for. Read it again.",
+  import_refused: "Only the host itself can carry agents in from outside.",
+  purge_refused: "The host refused to purge the team's records.",
+  preparation_not_pending: "The host is not preparing this agent.",
+  preparation_mismatch: "The host's preparation of this agent belongs to another change.",
+  construction_open: "The host is still setting this agent up.",
+  stale_attempt: "The host's setup of this agent has moved on since this was asked.",
+  not_constructed: "The host has not started setting this agent up.",
+  construction_required: "The host must finish setting this agent up first.",
+  activation_pending: "This agent is being started, and nothing can replace that now.",
+  approval_unavailable: "This change needs a person's decision, and this team has nobody who can be asked. Nothing was made.",
+  decision_open: "A decision about this agent is already open. Wait for its outcome.",
+  subject_widened: "The change is no longer what was approved. Ask again.",
+  decision_closed: "The decision has ended. Ask again if the change is still wanted.",
+  decision_not_found: "There is no open request to act on. It may have been decided or withdrawn already.",
+  evidence_required: "The decision was not recorded as a person's own. Decide it again from the console.",
+  subject_changed: "What was shown is not what the decision is about. Open the decision again.",
+  presentation_incomplete: "The decision was not shown in full. Open the decision again.",
+  requester_cannot_decide: "A person cannot approve their own request.",
+  approver_not_eligible: "You are not the person who decides this request.",
+  decided_before_presentation: "The decision was answered before it was shown. Open the decision again.",
+  changes_held: "The host has paused changes of agents for now. Try again later.",
+  host_preparation_pending: "The host is still preparing this agent. Try again later.",
+  candidate_launch: "This is a trial launch of the team, and a trial launch changes nothing.",
+  identity_member: "This is a long-term agent, and this action is for short-lived helpers.",
+  storage_unsupported: "This team's storage cannot make changes of agents.",
+  mob_not_running: "The team is not running.",
+  purged: "The team's records were cleared before a downgrade, and changes are refused until the team restarts.",
+  construction_refused: "The host could not set this agent up.",
+  access_denied: "You do not have access to this. Nothing was changed.",
+  read_only: "This console is read-only. Nothing was changed.",
+  no_decision_store: "This team keeps no decisions, so there is no request to act on.",
+  not_offered: "This team does not offer this here. Nothing was sent.",
+  caller_unknown: "The console does not know who you are signed in as, so it sent nothing. Reload the page and sign in again."
+};
+var REFUSAL_KINDS_WITH_A_SENTENCE = Object.keys(REFUSAL_SENTENCES);
+var UNKNOWN_REFUSAL_SENTENCE = "The request was refused, and nothing was changed.";
 function refusalSentence(refusal) {
-  return refusal.detail || "The change was refused.";
+  return Object.hasOwn(REFUSAL_SENTENCES, refusal.kind) ? REFUSAL_SENTENCES[refusal.kind] : UNKNOWN_REFUSAL_SENTENCE;
+}
+function refusalDetail(refusal) {
+  return refusal.detail || null;
 }
 function verdictWords(entry) {
   switch (entry.verdict) {
@@ -75583,15 +75704,14 @@ function consentWords(form) {
 }
 var HOST_SURFACE_WORDS = {
   console: "This console",
-  rpc: "The host's own code",
-  configuration: "The host's configuration"
+  rpc: "The host's own code"
 };
 function requesterWords(provenance, personName) {
   if (provenance.requesterKind === "agent") return { kind: "agent", identity: provenance.requester };
   if (provenance.requesterKind === "human") {
-    return { kind: "person", name: personName(provenance.requester), key: provenance.requester };
+    return { kind: "person", name: personName(provenance.requester) };
   }
-  return { kind: "host", words: HOST_SURFACE_WORDS[provenance.requester] ?? "The host (".concat(provenance.requester, ")") };
+  return { kind: "host", words: Object.hasOwn(HOST_SURFACE_WORDS, provenance.requester) ? HOST_SURFACE_WORDS[provenance.requester] : "The host (".concat(provenance.requester, ")") };
 }
 function agentChangeConfirmWords(change, name2) {
   if (change === "archive") {
@@ -75618,6 +75738,18 @@ function agentChangeConfirmWords(change, name2) {
 // src/panels/IdentityChangePanels.tsx
 var import_react81 = __toESM(require("react"));
 var import_jsx_runtime107 = require("react/jsx-runtime");
+function saidOf(refusal) {
+  const detail = refusalDetail(refusal);
+  return { sentence: refusalSentence(refusal), ...detail ? { detail } : {} };
+}
+function readFailure(error48) {
+  const refusal = answeredRefusalOf(error48);
+  return refusal ? saidOf(refusal) : { sentence: "The console got no answer it can read.", detail: errorMessage(error48) };
+}
+function RefusalDetails({ detail }) {
+  if (!detail) return null;
+  return /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(TechnicalDetails, { summary: "Details", inline: false, copyAll: false, showCount: false, className: "identity-refusal__details", testId: "identity-refusal-details", children: /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-refusal__gateway", children: detail }) });
+}
 function Field({
   field,
   label: label2,
@@ -75630,7 +75762,10 @@ function Field({
     /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-form__label", children: label2 }),
     children({ describedBy: error48 ? errorId : void 0, invalid: Boolean(error48) }),
     hint ? /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-form__hint", children: hint }) : null,
-    error48 ? /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-form__error", id: errorId, role: "alert", "data-testid": "identity-field-error:".concat(field), children: error48 }) : null
+    error48 ? /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)(import_jsx_runtime107.Fragment, { children: [
+      /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-form__error", id: errorId, role: "alert", "data-testid": "identity-field-error:".concat(field), children: error48.sentence }),
+      /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(RefusalDetails, { detail: error48.detail })
+    ] }) : null
   ] });
 }
 var VERDICT_TONE = { ok: "ok", warn: "warn", crit: "crit", neutral: "neutral" };
@@ -75646,14 +75781,15 @@ function ProfilePicker({
   value,
   onChange,
   describedBy,
-  invalid: invalid2
+  invalid: invalid2,
+  verdicts = true
 }) {
   const name2 = import_react81.default.useId();
   const listed = directory.profiles.some((entry) => entry.profile === value) || !value ? directory.profiles : [{ profile: value, verdict: "", lines: [] }, ...directory.profiles];
   return /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)("div", { className: "identity-form__options", role: "radiogroup", "aria-label": "Profile", "aria-describedby": describedBy, "aria-invalid": invalid2 || void 0, "data-testid": "identity-field:profile", children: [
     listed.map((entry) => {
-      const words2 = verdictWords(entry);
-      return /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)("label", { className: cx("identity-form__option", !words2.pickable && "is-refused"), children: [
+      const pickable = !verdicts || verdictWords(entry).pickable;
+      return /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)("label", { className: cx("identity-form__option", !pickable && "is-refused"), children: [
         /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(
           "input",
           {
@@ -75661,13 +75797,13 @@ function ProfilePicker({
             name: name2,
             value: entry.profile,
             checked: value === entry.profile,
-            disabled: !words2.pickable,
+            disabled: !pickable,
             onChange: () => onChange(entry.profile),
             "data-testid": "identity-profile:".concat(entry.profile)
           }
         ),
         /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-form__option-name", children: humanizeEnum(entry.profile) }),
-        entry.verdict ? /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Verdict, { entry }) : null
+        verdicts && entry.verdict ? /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Verdict, { entry }) : null
       ] }, entry.profile);
     }),
     listed.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-form__hint", children: "This team lists no profile." }) : null
@@ -75720,12 +75856,21 @@ function IdentityResultNotice({
   onReload
 }) {
   if (result.kind === "note") {
-    return /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Notice, { tone: result.alert ? "crit" : "neutral", role: result.alert ? "alert" : "status", testId: "identity-notice", className: "identity-notice", children: /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { "data-outcome": result.alert ? "unread" : "note", className: "identity-notice__title", children: result.message }) });
+    return /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)(Notice, { tone: result.alert ? "crit" : "neutral", role: result.alert ? "alert" : "status", testId: "identity-notice", className: "identity-notice", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { "data-outcome": result.alert ? "unread" : "note", className: "identity-notice__title", children: result.message }),
+      /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(RefusalDetails, { detail: result.detail })
+    ] });
   }
   if (result.kind === "withdrawn") {
     return /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)(Notice, { tone: "neutral", role: "status", testId: "identity-notice", className: "identity-notice", children: [
       /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { "data-outcome": "withdrawn", className: "identity-notice__title", children: "The request is withdrawn" }),
       /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-notice__line", children: "Nothing changed." })
+    ] });
+  }
+  if (result.kind === "settled") {
+    return /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)(Notice, { tone: "neutral", role: "status", testId: "identity-notice", className: "identity-notice", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { "data-outcome": "settled", className: "identity-notice__title", children: "The request is no longer waiting for a decision" }),
+      /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-notice__line", children: "It was decided or withdrawn. The roster shows the team as it is now." })
     ] });
   }
   if (result.kind === "failed") {
@@ -75747,7 +75892,7 @@ function IdentityResultNotice({
   }
   if (result.kind === "refused") {
     const stale = result.refusal.kind === "stale_spec";
-    return /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(
+    return /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)(
       Notice,
       {
         tone: "crit",
@@ -75755,7 +75900,10 @@ function IdentityResultNotice({
         testId: "identity-notice",
         className: "identity-notice",
         action: result.refusal.retryable && onRetry ? /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Button, { size: "sm", disabled: busy, onClick: onRetry, "data-testid": "identity-retry", children: "Try again" }) : stale && onReload ? /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Button, { size: "sm", disabled: busy, onClick: onReload, "data-testid": "identity-reload", children: "Read it again" }) : void 0,
-        children: /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { "data-outcome": "refused", className: "identity-notice__title", children: refusalSentence(result.refusal) })
+        children: [
+          /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { "data-outcome": "refused", className: "identity-notice__title", children: refusalSentence(result.refusal) }),
+          /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(RefusalDetails, { detail: refusalDetail(result.refusal) })
+        ]
       }
     );
   }
@@ -75821,18 +75969,32 @@ function useChangeSender(api, change, name2) {
       setResult(answer);
     }
   };
+  const waiting = result?.kind === "outcome" && result.outcome.outcome === "pending_decision";
+  const requestId = slot.current?.requestId;
+  const listed = api.pending.some((entry) => entry.requestId === requestId);
+  const wasListed = import_react81.default.useRef(false);
+  import_react81.default.useEffect(() => {
+    if (!waiting) {
+      wasListed.current = false;
+    } else if (listed) {
+      wasListed.current = true;
+    } else if (wasListed.current) {
+      wasListed.current = false;
+      setResult({ kind: "settled" });
+    }
+  }, [waiting, listed]);
   return { busy, result, setResult, send, withdraw };
 }
 function fieldErrorOf(change, refusal) {
   const field = refusalFormField(change, refusal.field);
-  return field ? { [field]: refusalSentence(refusal) } : null;
+  return field ? { [field]: saidOf(refusal) } : null;
 }
 function keepsForm(result) {
   return result === null || result.kind === "refused" || result.kind === "failed" || result.kind === "note";
 }
 function useDirectory(api) {
   const [directory, setDirectory] = import_react81.default.useState(null);
-  const [error48, setError] = import_react81.default.useState("");
+  const [error48, setError] = import_react81.default.useState(null);
   const load = import_react81.default.useRef(api.loadDirectory);
   load.current = api.loadDirectory;
   import_react81.default.useEffect(() => {
@@ -75842,7 +76004,7 @@ function useDirectory(api) {
         if (active) setDirectory(value);
       },
       (failure2) => {
-        if (active) setError(errorMessage(failure2));
+        if (active) setError(readFailure(failure2));
       }
     );
     return () => {
@@ -75886,8 +76048,9 @@ function NewAgentForm({ api, onClose }) {
       },
       children: [
         open ? directoryError ? /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)(Notice, { tone: "crit", role: "alert", testId: "identity-directory-error", children: [
-          "The team's profiles could not be read: ",
-          directoryError
+          /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-notice__title", children: "The team's profiles could not be read." }),
+          /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-notice__line", children: directoryError.sentence }),
+          /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(RefusalDetails, { detail: directoryError.detail })
         ] }) : !directory ? /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(LoadingState, { label: "Loading the team's profiles", rows: 3 }) : /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)(import_jsx_runtime107.Fragment, { children: [
           /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Field, { field: "profile", label: "Profile", hint: "The profile gives the agent its model, tools and skills.", error: errors.profile, children: (ids) => /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(ProfilePicker, { directory, value: draft.profile, onChange: (profile) => set3("profile", "profile", profile), ...ids }) }),
           /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Field, { field: "name", label: "Name", hint: "How the agent is addressed. It cannot be changed later, and a removed agent's name is never free again.", error: errors.name, children: (ids) => /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(
@@ -75963,6 +76126,25 @@ function NewAgentForm({ api, onClose }) {
     }
   );
 }
+function useProfilePlan(api, record10, profile) {
+  const [answer, setAnswer] = import_react81.default.useState(null);
+  const plan = import_react81.default.useRef(api.plan);
+  plan.current = api.plan;
+  const name2 = record10?.name ?? "";
+  const digest = record10?.specDigest ?? "";
+  const key = record10 && profile && profile !== record10.profile ? "".concat(name2, "\n").concat(digest, "\n").concat(profile) : "";
+  import_react81.default.useEffect(() => {
+    if (!key) return void 0;
+    let active = true;
+    void plan.current("update", { name: name2, expected_spec_digest: digest, set: { profile } }).then((result) => {
+      if (active) setAnswer({ key, result });
+    });
+    return () => {
+      active = false;
+    };
+  }, [key, name2, digest, profile]);
+  return answer && answer.key === key ? answer.result : null;
+}
 function EditAgentForm({
   api,
   name: name2,
@@ -75971,7 +76153,7 @@ function EditAgentForm({
 }) {
   const [record10, setRecord] = import_react81.default.useState(null);
   const [draft, setDraft] = import_react81.default.useState(null);
-  const [loadError, setLoadError] = import_react81.default.useState("");
+  const [loadError, setLoadError] = import_react81.default.useState(null);
   const [errors, setErrors] = import_react81.default.useState({});
   const { directory, error: directoryError } = useDirectory(api);
   const sender = useChangeSender(api, "update", displayName);
@@ -75979,7 +76161,7 @@ function EditAgentForm({
   loadRecord.current = api.loadRecord;
   const read = import_react81.default.useCallback(() => {
     let active = true;
-    setLoadError("");
+    setLoadError(null);
     loadRecord.current(name2).then(
       (value) => {
         if (!active) return;
@@ -75987,7 +76169,7 @@ function EditAgentForm({
         setDraft(editDraftOf(value));
       },
       (failure2) => {
-        if (active) setLoadError(refusalMessage(failure2));
+        if (active) setLoadError(readFailure(failure2));
       }
     );
     return () => {
@@ -76004,7 +76186,7 @@ function EditAgentForm({
     setErrors({});
     const built = updateAgentRequest(record10, draft);
     if ("contextError" in built) {
-      setErrors({ context: built.contextError });
+      setErrors({ context: { sentence: built.contextError } });
       return;
     }
     if (!built.changed) {
@@ -76026,7 +76208,10 @@ function EditAgentForm({
   };
   const open = keepsForm(sender.result);
   const ready = record10 && draft && directory;
-  const failed = loadError || directoryError;
+  const failed = loadError ?? directoryError;
+  const profilePlan = useProfilePlan(api, record10, draft?.profile ?? "");
+  const planned = profilePlan?.kind === "plan" ? planWords(profilePlan.plan) : null;
+  const profileError = errors.profile ?? (profilePlan?.kind === "refused" ? saidOf(profilePlan.refusal) : void 0);
   return /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)(
     "form",
     {
@@ -76038,7 +76223,10 @@ function EditAgentForm({
         if (ready && !sender.busy) void submit();
       },
       children: [
-        open ? failed ? /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Notice, { tone: "crit", role: "alert", testId: "identity-load-error", children: failed }) : !ready ? /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(LoadingState, { label: "Loading the agent's record", rows: 3 }) : /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)(import_jsx_runtime107.Fragment, { children: [
+        open ? failed ? /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)(Notice, { tone: "crit", role: "alert", testId: "identity-load-error", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-notice__title", children: failed.sentence }),
+          /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(RefusalDetails, { detail: failed.detail })
+        ] }) : !ready ? /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(LoadingState, { label: "Loading the agent's record", rows: 3 }) : /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)(import_jsx_runtime107.Fragment, { children: [
           /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Field, { field: "display_name", label: "Display name", error: errors.display_name, children: (ids) => /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(
             "input",
             {
@@ -76056,7 +76244,7 @@ function EditAgentForm({
             {
               field: "instructions",
               label: "Instructions",
-              hint: "New instructions reach the agent at its next run. Earlier instructions are never rewritten.",
+              hint: "The result says when new instructions reach the agent. Earlier instructions are never rewritten.",
               error: errors.instructions,
               children: (ids) => /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(import_jsx_runtime107.Fragment, { children: draft.instructions.map((section, index3) => /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(
                 "textarea",
@@ -76074,7 +76262,13 @@ function EditAgentForm({
               )) })
             }
           ),
-          /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Field, { field: "profile", label: "Profile", hint: "A new profile moves the agent to that profile's model and tools, on the same conversation.", error: errors.profile, children: (ids) => /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(ProfilePicker, { directory, value: draft.profile, onChange: (profile) => set3("profile", "profile", profile), ...ids }) }),
+          /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Field, { field: "profile", label: "Profile", hint: "A new profile moves the agent to that profile's model and tools, on the same conversation.", error: profileError, children: (ids) => /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)(import_jsx_runtime107.Fragment, { children: [
+            /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(ProfilePicker, { directory, value: draft.profile, onChange: (profile) => set3("profile", "profile", profile), verdicts: false, ...ids }),
+            planned && profilePlan?.kind === "plan" ? /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)("span", { className: "identity-form__plan", role: "status", "data-testid": "identity-profile-plan", "data-plan": profilePlan.plan.outcome, children: [
+              /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(StatusPill, { tone: VERDICT_TONE[planned.tone], variant: "quiet", children: planned.label }),
+              /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { children: planned.line })
+            ] }) : null
+          ] }) }),
           /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Field, { field: "peers", label: "Peers", hint: "The agents it can message.", error: errors.peers, children: (ids) => /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(PeerPicker, { directory, value: draft.peers, exclude: name2, onChange: (peers) => set3("peers", "peers", peers), describedBy: ids.describedBy }) }),
           /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Field, { field: "labels", label: "Labels", error: errors.labels, children: (ids) => /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)("div", { className: "identity-form__labels", "aria-describedby": ids.describedBy, children: [
             draft.labels.map((label2, index3) => /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)("div", { className: "identity-form__label-row", children: [
@@ -76139,11 +76333,6 @@ function EditAgentForm({
     }
   );
 }
-function refusalMessage(error48) {
-  const rpc2 = error48?.rpcError;
-  const detail = rpc2?.data?.detail;
-  return typeof detail === "string" && detail.trim() ? detail : errorMessage(error48);
-}
 function AgentChangeConfirm({
   api,
   change,
@@ -76164,7 +76353,8 @@ function AgentChangeConfirm({
       try {
         request.current = agentRefRequest(await api.loadRecord(name2));
       } catch (error48) {
-        sender.setResult({ kind: "note", message: refusalMessage(error48), alert: true });
+        const said = readFailure(error48);
+        sender.setResult({ kind: "note", message: said.sentence, detail: said.detail, alert: true });
         return;
       } finally {
         setReading(false);
@@ -76178,15 +76368,23 @@ function AgentChangeConfirm({
   };
   const busy = reading || sender.busy;
   const open = keepsForm(sender.result);
+  const { rootRef, cancelRef, onKeyDown } = useConfirmDialog(onClose, busy);
+  import_react81.default.useEffect(() => {
+    if (!open) cancelRef.current?.focus({ preventScroll: true });
+  }, [open, cancelRef]);
   return /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)(
     "div",
     {
+      ref: rootRef,
       role: "alertdialog",
-      "aria-labelledby": questionId,
-      "aria-describedby": consequenceId,
+      "aria-modal": "true",
+      "aria-labelledby": open ? questionId : void 0,
+      "aria-describedby": open ? consequenceId : void 0,
+      "aria-label": open ? void 0 : "".concat(CHANGE_WORDS[change], " ").concat(displayName),
       className: "lifecycle-confirm identity-confirm",
       "data-action": change,
       "data-testid": "identity-confirm:".concat(name2, ":").concat(change),
+      onKeyDown,
       children: [
         open ? /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)(import_jsx_runtime107.Fragment, { children: [
           /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)("p", { className: "lifecycle-confirm__question", id: questionId, children: [
@@ -76210,7 +76408,7 @@ function AgentChangeConfirm({
         /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)("div", { className: "cc-btn-row lifecycle-confirm__actions", children: [
           open ? /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Button, { variant: change === "remove" ? "danger" : "primary", size: "sm", disabled: busy, onClick: () => void confirm(), "data-testid": "identity-confirm-yes", children: words2.confirm }) : null,
           open && change === "remove" && onArchiveInstead ? /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Button, { size: "sm", disabled: busy, onClick: onArchiveInstead, "data-testid": "identity-confirm-archive-instead", children: "Archive instead" }) : null,
-          /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Button, { size: "sm", variant: open ? "default" : "ghost", onClick: onClose, "data-testid": "identity-confirm-cancel", children: open ? "Cancel" : "Close" })
+          /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Button, { ref: cancelRef, size: "sm", variant: open ? "default" : "ghost", onClick: onClose, "data-testid": "identity-confirm-cancel", children: open ? "Cancel" : "Close" })
         ] })
       ]
     }
@@ -76254,37 +76452,59 @@ function AgentChangeButtons({
 }
 function ArchivedAgents({
   api,
-  roster,
   onOpen
 }) {
-  const [agents, setAgents] = import_react81.default.useState([]);
+  const [open, setOpen] = import_react81.default.useState(false);
+  const [agents, setAgents] = import_react81.default.useState(null);
+  const [error48, setError] = import_react81.default.useState(null);
   const load = import_react81.default.useRef(api.loadArchived);
   load.current = api.loadArchived;
+  const listId = import_react81.default.useId();
   import_react81.default.useEffect(() => {
+    if (!open) return void 0;
     let active = true;
-    load.current().then((value) => {
-      if (active) setAgents(value);
-    }, () => {
-    });
+    load.current().then(
+      (value) => {
+        if (!active) return;
+        setAgents(value);
+        setError(null);
+      },
+      (failure2) => {
+        if (active) setError(readFailure(failure2));
+      }
+    );
     return () => {
       active = false;
     };
-  }, [api.revision, roster]);
+  }, [open, api.revision]);
   const controls = archivedAgentControls(api.flags);
-  if (agents.length === 0) return null;
-  return /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)("section", { className: "identity-archived", "aria-label": "Archived agents", "data-testid": "roster-archived", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)("div", { className: "roster__group-head", children: [
-      "Archived ",
-      /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "cc-count", children: agents.length })
-    ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("ul", { className: "identity-archived__list", children: agents.map((agent) => /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)("li", { className: "identity-archived__row", "data-testid": "roster-archived:".concat(agent.name), children: [
-      /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-archived__name", title: agent.name, children: agentShownName(agent) }),
-      /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-archived__meta", children: humanizeEnum(agent.profile) }),
-      /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)("span", { className: "cc-btn-row identity-archived__actions", children: [
-        controls.unarchive ? /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Button, { size: "sm", onClick: () => onOpen(agent, "unarchive"), "data-testid": "roster-archived-action:".concat(agent.name, ":unarchive"), children: "Unarchive" }) : null,
-        controls.remove ? /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Button, { size: "sm", variant: "danger", onClick: () => onOpen(agent, "remove"), "data-testid": "roster-archived-action:".concat(agent.name, ":remove"), children: "Remove" }) : null
-      ] })
-    ] }, agent.name)) })
+  const toggle = () => {
+    if (open) {
+      setAgents(null);
+      setError(null);
+    }
+    setOpen(!open);
+  };
+  return /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)("div", { className: "identity-archived", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Button, { size: "sm", variant: "ghost", "aria-expanded": open, "aria-controls": open ? listId : void 0, onClick: toggle, "data-testid": "roster-archived-open", children: "Archived agents" }),
+    open ? /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("section", { className: "identity-archived__section", id: listId, "aria-label": "Archived agents", "data-testid": "roster-archived", children: error48 ? /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)(Notice, { tone: "crit", role: "alert", testId: "roster-archived-error", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-notice__title", children: "The archived agents could not be read." }),
+      /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-notice__line", children: error48.sentence }),
+      /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(RefusalDetails, { detail: error48.detail })
+    ] }) : agents === null ? /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(LoadingState, { label: "Loading the archived agents", rows: 2 }) : agents.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-form__hint", children: "No archived agents." }) : /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)(import_jsx_runtime107.Fragment, { children: [
+      /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)("div", { className: "roster__group-head", children: [
+        "Archived ",
+        /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "cc-count", children: agents.length })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("ul", { className: "identity-archived__list", children: agents.map((agent) => /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)("li", { className: "identity-archived__row", "data-testid": "roster-archived:".concat(agent.name), children: [
+        /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-archived__name", title: agent.name, children: agentShownName(agent) }),
+        /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-archived__meta", children: humanizeEnum(agent.profile) }),
+        /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)("span", { className: "cc-btn-row identity-archived__actions", children: [
+          controls.unarchive ? /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Button, { size: "sm", onClick: () => onOpen(agent, "unarchive"), "data-testid": "roster-archived-action:".concat(agent.name, ":unarchive"), children: "Unarchive" }) : null,
+          controls.remove ? /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Button, { size: "sm", variant: "danger", onClick: () => onOpen(agent, "remove"), "data-testid": "roster-archived-action:".concat(agent.name, ":remove"), children: "Remove" }) : null
+        ] })
+      ] }, agent.name)) })
+    ] }) }) : null
   ] });
 }
 var CHANGE_WORDS = {
@@ -76296,15 +76516,15 @@ var CHANGE_WORDS = {
 };
 function PendingIdentityRequests({ api }) {
   const [busy, setBusy] = import_react81.default.useState("");
-  const [error48, setError] = import_react81.default.useState("");
+  const [error48, setError] = import_react81.default.useState(null);
   if (api.pending.length === 0 && !error48) return null;
   const withdraw = async (requestId) => {
     setBusy(requestId);
-    setError("");
+    setError(null);
     const answer = await api.withdraw(requestId);
     setBusy("");
-    if (answer.kind === "refused") setError(refusalSentence(answer.refusal));
-    else if (answer.kind === "failed") setError(answer.message);
+    if (answer.kind === "refused") setError(saidOf(answer.refusal));
+    else if (answer.kind === "failed") setError({ sentence: "The console got no answer. The request may still be open.", detail: answer.message });
   };
   return /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)("section", { className: "identity-pending", "aria-label": "Requests waiting for a decision", "data-testid": "identity-pending", children: [
     api.pending.map((entry) => /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)(
@@ -76333,7 +76553,10 @@ function PendingIdentityRequests({ api }) {
       },
       entry.requestId
     )),
-    error48 ? /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Notice, { tone: "crit", role: "alert", testId: "identity-pending-error", children: error48 }) : null
+    error48 ? /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)(Notice, { tone: "crit", role: "alert", testId: "identity-pending-error", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-notice__title", children: error48.sentence }),
+      /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(RefusalDetails, { detail: error48.detail })
+    ] }) : null
   ] });
 }
 function AgentRecordFacts({
@@ -76367,7 +76590,7 @@ function AgentRecordFacts({
           items: [
             requester ? {
               label: "Asked for by",
-              value: requester.kind === "agent" ? /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(AgentName, { id: requester.identity, link: true }) : requester.kind === "person" ? /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { title: requester.key, children: requester.name }) : requester.words
+              value: requester.kind === "agent" ? /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(AgentName, { id: requester.identity, link: true }) : requester.kind === "person" ? requester.name : requester.words
             } : null,
             provenance ? { label: "When", value: /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("time", { dateTime: new Date(provenance.atMs).toISOString(), children: formatAbsoluteTime(provenance.atMs) }) } : null,
             provenance?.consentForm ? { label: "Consent", value: consentWords(provenance.consentForm) } : null,
@@ -76743,6 +76966,7 @@ function RosterPanel({
       subtitle: AGENT_CHANGE_WORDS[agentChange.change],
       onClose: () => setAgentChange(null),
       closeTestId: "roster-change-close",
+      autoFocus: agentChange.change === "edit",
       children: /* @__PURE__ */ (0, import_jsx_runtime108.jsx)(
         AgentChangePanel,
         {
@@ -76922,7 +77146,6 @@ function RosterPanel({
             ArchivedAgents,
             {
               api: identityChanges,
-              roster: agents,
               onOpen: (agent, change) => {
                 setCreating(false);
                 setAgentChange({ name: agent.name, displayName: agentShownName(agent), change, controls: { archive: false } });
@@ -77285,7 +77508,7 @@ var CHANGE_COMMANDS = {
   remove: "removeAgent"
 };
 function failure(error48) {
-  const refusal = identityRefusalOf(error48);
+  const refusal = answeredRefusalOf(error48);
   return refusal ? { kind: "refused", refusal } : { kind: "failed", message: errorMessage(error48) };
 }
 function useIdentityChanges({
@@ -77360,14 +77583,16 @@ function useIdentityChanges({
         return agents.filter((agent) => agent.archived);
       },
       change,
-      changeWhole: async (kind, name2, requestId, displayName) => {
-        let record10;
+      plan: async (kind, request) => {
+        let answer;
         try {
-          record10 = await loadRecord(name2);
+          answer = await runRef.current("planAgentChange", { ...request, change: kind, request_id: createConsoleId("agent-plan") });
         } catch (error48) {
-          return failure(error48);
+          const refusal = identityRefusalOf(error48);
+          return refusal ? { kind: "refused", refusal } : { kind: "unknown" };
         }
-        return change(kind, agentRefRequest(record10), requestId, displayName);
+        const plan = parseChangePlan(answer);
+        return plan ? { kind: "plan", plan } : { kind: "unknown" };
       },
       withdraw: async (requestId) => {
         try {
@@ -77545,7 +77770,7 @@ function AgentDetailsPanel({
   }
   if (menuItems.length) menuItems.push({ kind: "separator", id: "lifecycle" });
   const identityControls = identityChanges?.controls;
-  const setChanging = (change) => setChangingState((current) => ({ change, displayName: current?.displayName ?? name2 }));
+  const setChanging = (change) => setChangingState((current) => current && current.identity === identity ? { ...current, change } : { change, identity, displayName: name2 });
   if (identityControls?.edit) {
     menuItems.push({ kind: "item", id: "edit", label: "Edit\u2026", textValue: "Edit", onSelect: () => setChanging("edit"), testId: "inspect-action:".concat(identity, ":edit") });
   }
@@ -77611,17 +77836,18 @@ function AgentDetailsPanel({
         cancelTestId: "inspect-confirm-cancel:".concat(identity, ":").concat(confirming)
       }
     ) }) : null,
-    changing && identityChanges ? /* @__PURE__ */ (0, import_jsx_runtime109.jsx)("div", { className: "agent-details__confirm agent-details__change", "data-testid": "inspect-change:".concat(identity), children: /* @__PURE__ */ (0, import_jsx_runtime109.jsx)(
+    changing && changing.identity === identity && identityChanges ? /* @__PURE__ */ (0, import_jsx_runtime109.jsx)("div", { className: "agent-details__confirm agent-details__change", "data-testid": "inspect-change:".concat(identity), children: /* @__PURE__ */ (0, import_jsx_runtime109.jsx)(
       AgentChangePanel,
       {
         api: identityChanges.api,
         change: changing.change,
-        name: identity,
+        name: changing.identity,
         displayName: changing.displayName,
         controls: identityChanges.controls,
         onClose: () => setChangingState(null),
         onSwitch: setChanging
-      }
+      },
+      changing.identity
     ) }) : null,
     view ? /* @__PURE__ */ (0, import_jsx_runtime109.jsxs)(GlanceStrip, { ariaLabel: "".concat(name2, " today"), testId: "inspect-glance:".concat(identity), children: [
       /* @__PURE__ */ (0, import_jsx_runtime109.jsx)(
@@ -96092,8 +96318,11 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         const requestId = requests.get(decisionId);
         if (!requestId) return null;
         const answer = await withdrawIdentityRequest(requestId);
-        if (answer.kind === "refused") return refusalSentence(answer.refusal);
-        if (answer.kind === "failed") return answer.message;
+        if (answer.kind === "refused") {
+          const detail = refusalDetail(answer.refusal);
+          return { sentence: refusalSentence(answer.refusal), ...detail ? { detail } : {} };
+        }
+        if (answer.kind === "failed") return { sentence: "The console got no answer. The request may still be open.", detail: answer.message };
         void refreshDecisions().catch(() => {
         });
         return null;
@@ -98603,7 +98832,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
             target.identity
           ) : null
         ]
-      }
+      },
+      target.identity
     );
   }
   function renderHealthPanel(snapshot) {

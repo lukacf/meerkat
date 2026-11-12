@@ -9,7 +9,8 @@
 //!   vocabulary ([`IdentityRefusal`]), written so a caller can act.
 //!
 //! An agent's entry says what the change did to it, its spec digest and
-//! revision afterwards, for a create whether its seat is owed
+//! revision afterwards, for a create and for the settle of a preparation
+//! whether its seat is owed
 //! ([`AgentSeat`]) and, for an update, what became of an instructions change
 //! ([`InstructionOutcome`]): an instructions change reaches the agent at its
 //! next run; a run that starts within moments of the change may still use
@@ -195,10 +196,11 @@ pub struct AgentOutcome {
     /// answer today's session.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
-    /// Whether the agent a create committed is seated, as the agent stands
-    /// when the outcome is answered. Present on a create's outcome only,
-    /// and absent once the agent is neither seated nor owed its seat (it
-    /// was archived or removed since).
+    /// Whether the agent a create committed, or the settle of its
+    /// preparation seated, is seated, as the agent stands when the outcome
+    /// is answered. Present on the outcome of a create and of a settle
+    /// only, and absent once the agent is neither seated nor owed its seat
+    /// (it was archived or removed since).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seat: Option<AgentSeat>,
     /// What became of an update's instructions change. Present on an

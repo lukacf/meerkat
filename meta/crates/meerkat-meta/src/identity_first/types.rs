@@ -2046,45 +2046,34 @@ pub struct IdentityStatus {
     /// and optional on the wire.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub customizer_tools_pending: Option<CustomizerToolsPending>,
-    /// What the identity's record says of it ([`IdentityRecordFacts`]): its
-    /// spec digest and revision, whether it is archived or awaits its
-    /// preparation, how it came to exist, and its open operations. Its
-    /// members are members of the status on the wire, each additive and
-    /// absent while unset.
+    /// What Core's entry of the identity's name says of an identity no
+    /// member holds ([`IdentityRecordFacts`]): whether it is archived, and
+    /// whether it awaits its host's preparation. Its members are members of
+    /// the status on the wire, each additive and absent while unset, so the
+    /// status of a seated identity is written as before. The identity's
+    /// spec digest and revision, who asked for it and the operations open
+    /// for it are not on its status: `meta/identity/get` and
+    /// `meta/identity/list` answer them, to each caller what it may read.
     #[serde(flatten, default)]
     pub record: IdentityRecordFacts,
 }
 
-/// What an identity's record says of it, on its status: each member is
-/// additive and optional on the wire, and absent while unset. No member
-/// says where the record lives.
+/// Why no member holds an identity, on its status: each member is additive
+/// and optional on the wire, and absent while unset. Each is read from
+/// Core's entry of the identity's name on the read the status makes of it
+/// anyway, so no store is read and nothing is built, loaded or woken for
+/// it. No member says where the identity's record lives.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct IdentityRecordFacts {
-    /// The digest of the identity's spec: Core's digest of the spec in its
-    /// row form, the one spec digest every surface shows, and what a change
-    /// of the identity names as the spec it read.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub spec_digest: Option<String>,
-    /// The spec's revision, from 1, when the record counts one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub spec_revision: Option<u64>,
     /// Whether the identity is archived: it keeps its name and its record,
     /// has no member, and deliveries to it are refused until its unarchive.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub archived: bool,
-    /// Whether something is still being prepared for the identity before
-    /// its first use: it has no member yet.
+    /// Whether the identity awaits its host's preparation before its first
+    /// use: it has no member yet, and its host's settle seats it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub preparation_pending: bool,
-    /// How, when and at whose request the identity came to exist, when its
-    /// record says. Recorded and shown; never read for a decision.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provenance: Option<crate::identity_creation::AgentProvenance>,
-    /// The ids of the operations open for the identity: held decisions and
-    /// pending preparation.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub open_operations: Vec<String>,
 }
 
 /// A refused wake an operator has to act on, as

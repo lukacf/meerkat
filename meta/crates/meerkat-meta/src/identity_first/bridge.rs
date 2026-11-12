@@ -5101,6 +5101,19 @@ impl CoreIdentityEntry {
     pub fn holds_role_migration(&self) -> bool {
         self.host_preparation == Some(meerkat_mob::HostPreparationCause::RoleMigrationUndeclared)
     }
+
+    /// Whether no member holds the entry because it awaits its host's
+    /// preparation: its host's settle seats it.
+    pub fn awaits_host_preparation(&self) -> bool {
+        self.member.is_none()
+            && self.unseated == Some(meerkat_mob::UnseatedEntryCause::PreparationPending)
+    }
+
+    /// Whether no member holds the entry because it is archived: its
+    /// unarchive seats it again.
+    pub fn is_archived(&self) -> bool {
+        self.member.is_none() && self.unseated == Some(meerkat_mob::UnseatedEntryCause::Archived)
+    }
 }
 
 /// How Core holds a name ([`CoreIdentityEntry::kind`]).

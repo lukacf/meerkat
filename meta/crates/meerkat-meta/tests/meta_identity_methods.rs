@@ -57,7 +57,7 @@ const REFUSED: i64 = -32058;
 const LINE_WAIT: Duration = Duration::from_mins(3);
 
 /// The family's methods, in the order `meta/capabilities` lists them.
-const METHODS: [&str; 13] = [
+const METHODS: [&str; 14] = [
     "meta/identity/adopt",
     "meta/identity/get",
     "meta/identity/list",
@@ -71,6 +71,7 @@ const METHODS: [&str; 13] = [
     "meta/identity/changes_hold",
     "meta/identity/directory",
     "meta/identity/plan",
+    "meta/identity/settle_preparation",
 ];
 
 /// The rows' policy: the stdio host may make every change of an agent of
@@ -415,6 +416,11 @@ fn a_launch_without_an_enabled_identity_policy_serves_the_reads_and_refuses_ever
         no_policy(&withdrawn, "create", "meta/identity/withdraw");
         let held = gateway.refused("meta/identity/changes_hold", json!({"held": true}));
         no_policy(&held, "create", "meta/identity/changes_hold");
+        let settled = gateway.refused(
+            "meta/identity/settle_preparation",
+            json!({"request_id": "no-policy-settle", "name": HOST_A}),
+        );
+        no_policy(&settled, "create", "meta/identity/settle_preparation");
 
         // Nothing was written: no operation, and the agents are as they were.
         let unknown = gateway.ok(
@@ -435,7 +441,7 @@ fn a_launch_without_an_enabled_identity_policy_serves_the_reads_and_refuses_ever
 }
 
 /// The launch's identity policy reaches the family: the gateway lists the
-/// family's thirteen methods, and its reads answer the agents the host
+/// family's fourteen methods, and its reads answer the agents the host
 /// configures.
 #[test]
 fn the_launch_policy_reaches_the_family_and_its_methods_are_advertised() {
@@ -790,62 +796,43 @@ fn a_policy_naming_notify_or_review_is_refused_at_init() {
     }
 }
 
-/// A policy that names a preparation other than `none` is refused at
-/// init: no method of this release settles an agent's preparation, so an
-/// agent of such a profile would wait for it without end. The refusal names
-/// the policy path and says so.
+/// A policy that names the preparation `constructed` is refused at init:
+/// no launch of this release holds or activates a construction. The
+/// refusal names the policy path and the mode a host writes instead. The
+/// modes `none` and `required` are accepted: the host settles a required
+/// preparation with `meta/identity/settle_preparation`.
 #[test]
-fn a_policy_naming_a_preparation_is_refused_at_init() {
-    for (mode, rule) in [
-        ("required", json!({"mode": "required"})),
-        (
-            "constructed",
-            json!({"mode": "constructed", "construction_deadline_ms": 60_000}),
-        ),
-    ] {
-        let scratch = tempfile::tempdir().unwrap();
-        let mut gateway = Gateway::start(scratch.path());
-        let init = gateway.init(
-            &scratch.path().join("state"),
-            Some(json!({
-                "enabled": true,
-                "preparation": {"worker": rule},
-            })),
-        );
-        assert_eq!(init["error"]["code"], json!(-32602), "{mode}: {init:#}");
-        let message = init["error"]["message"].as_str().unwrap_or_default();
-        assert!(
-            message.contains("identity_creation.preparation.worker"),
-            "{mode}: {message}"
-        );
-        // A required preparation is refused for what it is. A constructed
-        // one needs a native host first, which the stdio gateway is not.
-        if mode == "required" {
-            assert!(
-                message.contains("identity_creation.preparation.worker.mode")
-                    && message.contains(mode)
-                    && message.contains("no method of this release settles"),
-                "{mode}: {message}"
-            );
-        } else {
-            assert!(
-                message.contains("needs a native host")
-                    && !message.contains("no method of this release settles"),
-                "{mode}: {message}"
-            );
-        }
-    }
-    // The mode `none` is what every profile has without a word: accepted.
+fn a_policy_naming_a_constructed_preparation_is_refused_at_init() {
     let scratch = tempfile::tempdir().unwrap();
     let mut gateway = Gateway::start(scratch.path());
     let init = gateway.init(
         &scratch.path().join("state"),
         Some(json!({
             "enabled": true,
-            "preparation": {"worker": {"mode": "none"}},
+            "preparation": {"worker": {"mode": "constructed", "construction_deadline_ms": 60_000}},
         })),
     );
-    assert!(init["error"].is_null(), "{init:#}");
+    assert_eq!(init["error"]["code"], json!(-32602), "{init:#}");
+    let message = init["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("identity_creation.preparation.worker.mode")
+            && message.contains("write required"),
+        "{message}"
+    );
+    // The mode `none` is what every profile has without a word, and the
+    // mode `required` is served: both are accepted.
+    for mode in ["none", "required"] {
+        let scratch = tempfile::tempdir().unwrap();
+        let mut gateway = Gateway::start(scratch.path());
+        let init = gateway.init(
+            &scratch.path().join("state"),
+            Some(json!({
+                "enabled": true,
+                "preparation": {"worker": {"mode": mode}},
+            })),
+        );
+        assert!(init["error"].is_null(), "{mode}: {init:#}");
+    }
 }
 
 /// A change whose rule says `require_approval` is held: it answers
@@ -1921,7 +1908,7 @@ fn names(gateway: &mut Gateway) -> Vec<String> {
     names
 }
 
-/// A candidate launch changes nothing: it refuses the family's eight
+/// A candidate launch changes nothing: it refuses the family's nine
 /// writers with the candidate refusal, before anything is read or written,
 /// and serves its reads.
 #[test]
@@ -1953,6 +1940,10 @@ fn a_candidate_launch_refuses_the_writers_and_serves_the_reads() {
             json!({"request_id": "candidate-1"}),
         ),
         ("meta/identity/changes_hold", json!({"held": true})),
+        (
+            "meta/identity/settle_preparation",
+            json!({"request_id": "candidate-1", "name": "scout"}),
+        ),
     ] {
         let answer = candidate.rpc(method, params);
         assert_eq!(
@@ -2669,7 +2660,11 @@ fn signed_console_decisions() -> meerkat_meta::RuntimeDecisionState {
         trusted_meta_toml: "modules = []\n".to_string(),
         auth: meerkat_meta::AuthPolicy {
             default_provider: meerkat_meta::AuthProvider::GoogleOAuth,
-            email_allowlist: vec!["root@example.org".to_string(), "ann@example.org".to_string()],
+            email_allowlist: vec![
+                "root@example.org".to_string(),
+                "ann@example.org".to_string(),
+                "bob@example.org".to_string(),
+            ],
         },
         trusted_oidc: meerkat_meta::TrustedOidcRuntimeConfig {
             discovery_json:
@@ -4116,6 +4111,204 @@ agents = ["gamma"]
         beta,
         "nothing of the unviewed agent changed"
     );
+    let _ = runtime.shutdown().await;
+}
+
+/// The Console serves an agent that waits for its host like any agent, and
+/// settles no preparation. A signed-in person creates an agent of a profile
+/// the host prepares: the create answers `pending_preparation` and the
+/// agent reads `preparation_pending`. The settle is the host's operator's,
+/// which no Console caller is: the Console lists it to nobody, a caller
+/// without `runtime.admin` does not reach it, and an administrator is
+/// refused `change_denied` by the family. The agent still waits.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_console_creates_an_agent_that_waits_and_settles_no_preparation() {
+    const ROOT: &str = "root@example.org";
+    const ANN: &str = "ann@example.org";
+    const SETTLE: &str = "meta/identity/settle_preparation";
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, app) = console_under(
+        temp.path(),
+        r#"
+enabled = true
+admins = ["root@example.org"]
+
+[[rules]]
+id = "works"
+actions = ["agent.identity.create", "agent.view", "agent.identity.manage"]
+"#,
+    )
+    .await;
+    let policy = IdentityCreationPolicy::parse(&json!({
+        "enabled": true,
+        "preparation": {"worker": {"mode": "required"}},
+        "approval": {"rules": [{
+            "change": ["create"],
+            "requester": {"kind": "human"},
+            "target": {"profile": ["worker"]},
+            "outcome": {"kind": "allow"},
+        }]},
+    }))
+    .expect("the policy parses")
+    .expect("the policy is enabled");
+    assert!(runtime.attach_identity_policy(Arc::new(policy), IdentityFamilyOptions::new()));
+
+    let made = console_rpc(
+        &app,
+        Some(ANN),
+        "meta/identity/create",
+        json!({"request_id": "ann-1", "agents": [{"name": "scout", "profile": "worker"}]}),
+    )
+    .await;
+    let made = console_ok(&made).clone();
+    assert_eq!(made["outcome"], json!("pending_preparation"), "{made:#}");
+    let readiness = |app: axum::Router| async move {
+        let read = console_rpc(
+            &app,
+            Some(ANN),
+            "meta/identity/get",
+            json!({"name": "scout"}),
+        )
+        .await;
+        console_ok(&read)["readiness"].clone()
+    };
+    assert_eq!(readiness(app.clone()).await, json!("preparation_pending"));
+
+    for subject in [ROOT, ANN] {
+        let capabilities = console_rpc(&app, Some(subject), "meta/capabilities", json!({})).await;
+        let listed = console_ok(&capabilities).to_string();
+        assert!(
+            listed.contains("meta/identity/create"),
+            "{subject} is listed the family: {listed}"
+        );
+        assert!(
+            !listed.contains(SETTLE),
+            "{subject} is not listed the host operator's method: {listed}"
+        );
+    }
+    let settle = json!({"request_id": "settle-1", "name": "scout"});
+    let denied = console_rpc(&app, Some(ANN), SETTLE, settle.clone()).await;
+    assert_eq!(
+        denied["error"]["data"]["kind"],
+        json!("access_denied"),
+        "{denied:#}"
+    );
+    let refused = console_rpc(&app, Some(ROOT), SETTLE, settle).await;
+    assert_eq!(refused["error"]["code"], json!(REFUSED), "{refused:#}");
+    assert_eq!(
+        refused["error"]["data"]["kind"],
+        json!("change_denied"),
+        "{refused:#}"
+    );
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("host's operator")),
+        "{refused:#}"
+    );
+    assert_eq!(
+        readiness(app.clone()).await,
+        json!("preparation_pending"),
+        "no Console caller settled it"
+    );
+    let _ = runtime.shutdown().await;
+}
+
+/// A Console caller reads the open operations it may read, and no other:
+/// the person who asked for an agent that waits for its host reads the
+/// create's operation on the agent, on a get and on a list; another person
+/// who may view the agent reads no operation of it (the member is absent,
+/// as for an agent nothing is open for); an administrator reads it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_console_caller_reads_the_open_operations_it_may_read() {
+    const ROOT: &str = "root@example.org";
+    const ANN: &str = "ann@example.org";
+    const BOB: &str = "bob@example.org";
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, app) = console_under(
+        temp.path(),
+        r#"
+enabled = true
+admins = ["root@example.org"]
+
+[[rules]]
+id = "works"
+actions = ["agent.identity.create", "agent.view", "agent.identity.manage"]
+"#,
+    )
+    .await;
+    let policy = IdentityCreationPolicy::parse(&json!({
+        "enabled": true,
+        "preparation": {"worker": {"mode": "required"}},
+        "approval": {"rules": [{
+            "change": ["create"],
+            "requester": {"kind": "human"},
+            "target": {"profile": ["worker"]},
+            "outcome": {"kind": "allow"},
+        }]},
+    }))
+    .expect("the policy parses")
+    .expect("the policy is enabled");
+    assert!(runtime.attach_identity_policy(Arc::new(policy), IdentityFamilyOptions::new()));
+
+    let made = console_rpc(
+        &app,
+        Some(ANN),
+        "meta/identity/create",
+        json!({"request_id": "ann-1", "agents": [{"name": "scout", "profile": "worker"}]}),
+    )
+    .await;
+    let made = console_ok(&made).clone();
+    assert_eq!(made["outcome"], json!("pending_preparation"), "{made:#}");
+    let operation = made["operation_id"].clone();
+    assert!(operation.is_string(), "{made:#}");
+
+    // What each caller reads of the waiting agent, by a get and by a list.
+    let read = |subject: &'static str| {
+        let app = app.clone();
+        async move {
+            let got = console_rpc(
+                &app,
+                Some(subject),
+                "meta/identity/get",
+                json!({"name": "scout"}),
+            )
+            .await;
+            let got = console_ok(&got).clone();
+            let listed = console_rpc(&app, Some(subject), "meta/identity/list", json!({})).await;
+            let listed = console_ok(&listed)["agents"]
+                .as_array()
+                .and_then(|agents| agents.iter().find(|agent| agent["name"] == json!("scout")))
+                .unwrap_or_else(|| panic!("{subject} is listed the agent: {listed:#}"))
+                .clone();
+            assert_eq!(
+                got["readiness"],
+                json!("preparation_pending"),
+                "{subject}: {got:#}"
+            );
+            [got, listed]
+        }
+    };
+    for agent in read(ANN).await {
+        assert_eq!(
+            agent["open_operations"],
+            json!([operation]),
+            "the person who asked reads their own operation: {agent:#}"
+        );
+    }
+    for agent in read(ROOT).await {
+        assert_eq!(
+            agent["open_operations"],
+            json!([operation]),
+            "an administrator reads any operation: {agent:#}"
+        );
+    }
+    for agent in read(BOB).await {
+        assert!(
+            agent.get("open_operations").is_none(),
+            "another person reads no operation they did not ask for: {agent:#}"
+        );
+    }
     let _ = runtime.shutdown().await;
 }
 

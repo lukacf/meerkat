@@ -691,16 +691,24 @@ impl crate::memory::steward::PrivateMemberSource for StewardPrivateMembers {
     }
 }
 
-/// [`PrivateOwners::member_tool_audience`].
+/// [`PrivateOwners::member_tool_audience`]. Whom a member is private to is
+/// said by its own roster row, the labels Meerkat hands in. This record of
+/// the members the process built or read adds to that on the side that can
+/// only hide more: for the target it is asked whenever the row names
+/// nobody or there is no row, so a member the record knows as private
+/// stays hidden; for the caller it is asked only when the caller has no
+/// row, so a caller whose row names nobody is never taken for a person's
+/// member on the record's word.
 impl meerkat_mob::MemberToolAudience for PrivateOwners {
     fn hides(
         &self,
         mob_id: &meerkat_mob::MobId,
         caller: Option<&meerkat_mob::AgentIdentity>,
-        _caller_labels: Option<&BTreeMap<String, String>>,
+        caller_labels: Option<&BTreeMap<String, String>>,
         target: &meerkat_mob::AgentIdentity,
-        _target_labels: Option<&BTreeMap<String, String>>,
+        target_labels: Option<&BTreeMap<String, String>>,
     ) -> bool {
+        let _ = (caller_labels, target_labels);
         let Some(owner) = self.owner_of(mob_id.as_str(), target.as_str()) else {
             return false;
         };
@@ -760,6 +768,82 @@ mod tests {
             crate::access::PRIVATE_TO_LABEL.to_string(),
             OWNER.to_string(),
         )])
+    }
+
+    /// The audience of the members' own operator tools reads whom a member
+    /// is private to from the roster labels it is handed, with a record
+    /// that knows no member: a member whose row names a person is hidden
+    /// from a caller whose row names nobody, from one whose row names
+    /// another person and from a call no member made, and not from a caller
+    /// whose row names the same person; a member whose row names nobody is
+    /// hidden from no one. The record only adds: a member it knows as
+    /// private stays hidden when its row names nobody, or it has no row.
+    #[test]
+    fn the_member_tool_audience_reads_the_owner_from_the_roster_labels() {
+        use meerkat_mob::MemberToolAudience as _;
+        let mob = meerkat_mob::MobId::from("mob");
+        let member = |name: &str| meerkat_mob::AgentIdentity::from(name);
+        let private = private_labels();
+        let shared = BTreeMap::new();
+        let other = BTreeMap::from([(
+            crate::access::PRIVATE_TO_LABEL.to_string(),
+            "console-caller:v1:bb".to_string(),
+        )]);
+
+        let unread = PrivateOwners::default();
+        let hides = |caller: Option<&BTreeMap<String, String>>,
+                     target: Option<&BTreeMap<String, String>>| {
+            unread.hides(
+                &mob,
+                caller.map(|_| member("caller")).as_ref(),
+                caller,
+                &member("target"),
+                target,
+            )
+        };
+        assert!(hides(Some(&shared), Some(&private)), "a shared caller");
+        assert!(hides(Some(&other), Some(&private)), "another person's");
+        assert!(hides(None, Some(&private)), "a call no member made");
+        assert!(!hides(Some(&private), Some(&private)), "the same person's");
+        assert!(!hides(Some(&shared), Some(&shared)), "a shared target");
+        assert!(!hides(Some(&private), Some(&shared)), "a shared target");
+        assert!(!hides(Some(&shared), None), "a target with no row");
+
+        let knows = PrivateOwners::default();
+        knows.record("mob", "target", Some(&private));
+        knows.record("mob", "caller", Some(&private));
+        for target in [Some(&shared), None] {
+            assert!(
+                knows.hides(
+                    &mob,
+                    Some(&member("other")),
+                    Some(&shared),
+                    &member("target"),
+                    target
+                ),
+                "the record adds: a member it knows as private stays hidden"
+            );
+        }
+        assert!(
+            !knows.hides(
+                &mob,
+                Some(&member("caller")),
+                None,
+                &member("target"),
+                Some(&shared)
+            ),
+            "the record speaks for a caller that has no row"
+        );
+        assert!(
+            knows.hides(
+                &mob,
+                Some(&member("caller")),
+                Some(&shared),
+                &member("target"),
+                Some(&private)
+            ),
+            "a caller whose row names nobody is no person's member on the record's word"
+        );
     }
 
     /// A spawn a private member asks for gets its owner and keeps no label

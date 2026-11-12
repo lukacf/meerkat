@@ -907,6 +907,28 @@ async fn a_memory_conflict_signal_is_shown_to_an_administrator_only() -> TestRes
             "another record on the system page is served to {reader}"
         );
     }
+    // The same rule where sign-in is optional, with the access configuration
+    // off: a caller who sends no token is kept apart on a console that can
+    // identify a person, and reads the signal, as a member's record with no
+    // witness, on a console that can identify nobody.
+    let open = crate::access::AccessController::new(crate::access::AccessControlConfig::default())
+        .expect("access controller");
+    let no_token = |identifies_people: bool| {
+        open.view_for_caller(None, None)
+            .on_console(identifies_people)
+    };
+    assert!(
+        !timeline_frame_visible_to(&no_token(true), &conflict),
+        "a caller with no token on a console that can identify a person is refused the signal"
+    );
+    assert!(
+        timeline_frame_visible_to(&no_token(true), &skipped),
+        "and still reads the other records on the system page"
+    );
+    assert!(
+        timeline_frame_visible_to(&no_token(false), &conflict),
+        "the one operator of a console that can identify nobody reads the signal"
+    );
     let _ = runtime.shutdown().await;
     Ok(())
 }

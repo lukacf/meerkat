@@ -296,6 +296,10 @@ impl meerkat_client::LlmClient for ScriptedModel {
 
 /// What the scripted family was called with.
 #[derive(Debug, Clone, PartialEq)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "a row's record of one call, compared whole"
+)]
 enum Seen {
     Change {
         requester: ChangeRequester,

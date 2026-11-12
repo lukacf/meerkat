@@ -99,7 +99,7 @@ A name that was removed is never available again (`name_taken`)."#,
     ),
     (
         "identity_update",
-        r#"Change a long-term agent of your mob: its display name, instructions, context, labels, profile or peers.
+        r"Change a long-term agent of your mob: its display name, instructions, context, labels, profile or peers.
 
 Send `expected_spec_digest`: the agent's `spec_digest` from identity_list, or from the last result that named it. If the agent changed meanwhile you get `stale_spec` with `current_digest`: read the agent again, then decide whether your change still applies.
 
@@ -109,7 +109,7 @@ An instructions change is in the agent's record at once. It reaches the agent at
 
 You cannot change yourself (`self_change_refused`). An agent that the host's configuration declares is changed there, not here (`owner_read_only`).
 
-The result's `outcome` is `done`, `pending_decision`, `pending_preparation` or `refused`, and `request_id` works, as for identity_create."#,
+The result's `outcome` is `done`, `pending_decision`, `pending_preparation` or `refused`, and `request_id` works, as for identity_create.",
         r#"{
   "additionalProperties": false,
   "properties": {
@@ -188,11 +188,11 @@ The result's `outcome` is `done`, `pending_decision`, `pending_preparation` or `
     ),
     (
         "identity_archive",
-        r#"Stop a long-term agent and keep it. Its name, record, conversation and memory stay; it has no running member, messages to it are refused, and identity_unarchive brings it back on the same conversation. Use this when the agent may be needed later; identity_remove is for good.
+        r"Stop a long-term agent and keep it. Its name, record, conversation and memory stay; it has no running member, messages to it are refused, and identity_unarchive brings it back on the same conversation. Use this when the agent may be needed later; identity_remove is for good.
 
 Send the agent's `name` and `expected_spec_digest` (its `spec_digest` from identity_list; a changed agent answers `stale_spec` with `current_digest`). You cannot archive yourself (`self_change_refused`).
 
-The result's `outcome` is `done` (the agent's `state` is `archiving` while its member stops, then `archived`), `pending_decision` or `refused`, and `request_id` works, as for identity_create."#,
+The result's `outcome` is `done` (the agent's `state` is `archiving` while its member stops, then `archived`), `pending_decision` or `refused`, and `request_id` works, as for identity_create.",
         r#"{
   "additionalProperties": false,
   "properties": {
@@ -218,11 +218,11 @@ The result's `outcome` is `done` (the agent's `state` is `archiving` while its m
     ),
     (
         "identity_unarchive",
-        r#"Bring an archived long-term agent back. It returns on the conversation it had, with its name, memory and current instructions, and takes messages again.
+        r"Bring an archived long-term agent back. It returns on the conversation it had, with its name, memory and current instructions, and takes messages again.
 
 Send the agent's `name` and `expected_spec_digest` (its `spec_digest` from identity_list with `include_archived: true`). An agent that is not archived answers `not_archived`. You cannot unarchive yourself (`self_change_refused`).
 
-The result's `outcome` is `done` (the agent's `state` is `restored`), `pending_decision` or `refused`, and `request_id` works, as for identity_create."#,
+The result's `outcome` is `done` (the agent's `state` is `restored`), `pending_decision` or `refused`, and `request_id` works, as for identity_create.",
         r#"{
   "additionalProperties": false,
   "properties": {
@@ -248,11 +248,11 @@ The result's `outcome` is `done` (the agent's `state` is `restored`), `pending_d
     ),
     (
         "identity_remove",
-        r#"Remove a long-term agent for good. Its member stops, its peer links end, and its name can never be used again, by anyone. Its conversation and memory are kept, and nothing can reach them. This cannot be undone: use identity_archive when the agent may be needed later.
+        r"Remove a long-term agent for good. Its member stops, its peer links end, and its name can never be used again, by anyone. Its conversation and memory are kept, and nothing can reach them. This cannot be undone: use identity_archive when the agent may be needed later.
 
 Send the agent's `name` and `expected_spec_digest` (its `spec_digest` from identity_list; a changed agent answers `stale_spec` with `current_digest`). You cannot remove yourself (`self_change_refused`).
 
-The result's `outcome` is `done` (the agent's `state` is `retiring` while its member stops, then `removed`), `pending_decision` or `refused`, and `request_id` works, as for identity_create."#,
+The result's `outcome` is `done` (the agent's `state` is `retiring` while its member stops, then `removed`), `pending_decision` or `refused`, and `request_id` works, as for identity_create.",
         r#"{
   "additionalProperties": false,
   "properties": {
@@ -278,11 +278,11 @@ The result's `outcome` is `done` (the agent's `state` is `retiring` while its me
     ),
     (
         "identity_list",
-        r#"List the long-term agents of your mob that your grant covers: every agent of a profile you may create agents of, whoever asked for it and however it came to exist. Read only: it never wakes an agent and loads nothing.
+        r"List the long-term agents of your mob that your grant covers: every agent of a profile you may create agents of, whoever asked for it and however it came to exist. Read only: it never wakes an agent and loads nothing.
 
 Each entry of `agents` has `name`, `display_name`, `profile`, `spec_digest` (what a change sends as `expected_spec_digest`), `spec_revision`, `archived` and `readiness`. `readiness` is `dormant` (nothing is loaded; its next delivery wakes it), `live`, `broken`, `preparation_pending`, `retiring` or `unseated` (archived, or its seat is owed).
 
-`profile` narrows the list to one profile; `include_archived` adds archived agents; when the result has `next`, pass it as `after` to read on."#,
+`profile` narrows the list to one profile; `include_archived` adds archived agents; when the result has `next`, pass it as `after` to read on.",
         r#"{
   "additionalProperties": false,
   "properties": {
@@ -304,11 +304,11 @@ Each entry of `agents` has `name`, `display_name`, `profile`, `spec_digest` (wha
     ),
     (
         "identity_directory",
-        r#"See what you may name before you create or change a long-term agent: `profiles`, the profiles of your mob, each with whether you may create an agent of it, and `peers`, the agents of your mob, each with whether you may list it as a peer. Read only: it never wakes an agent and loads nothing.
+        r"See what you may name before you create or change a long-term agent: `profiles`, the profiles of your mob, each with whether you may create an agent of it, and `peers`, the agents of your mob, each with whether you may list it as a peer. Read only: it never wakes an agent and loads nothing.
 
 Every entry has a `verdict`: `allowed`; `needs_decision` (a person decides a request that names it, and `lines` is what they are shown); `not_allowed` (with `reason` when the host's rule gives one).
 
-`query` keeps the entries whose name or display name contains the text; when the result has `next`, pass it as `after` to read on."#,
+`query` keeps the entries whose name or display name contains the text; when the result has `next`, pass it as `after` to read on.",
         r#"{
   "additionalProperties": false,
   "properties": {

@@ -25,8 +25,9 @@ use crate::access::{
 };
 use crate::auth::session_fence::ConsoleSessionFences;
 use crate::console_aggregator::{
-    ConsoleFrameSource, ConsoleFrameSourceKind, ConsoleFrameStatus, MetaConsoleAggregator,
-    NewConsoleFrame, timeline_frame_visible_to,
+    AllowAllConsoleVisibilityPolicy, ConsoleFrameSource, ConsoleFrameSourceKind,
+    ConsoleFrameStatus, ConsoleTimelineQuery, MetaConsoleAggregator, NewConsoleFrame,
+    timeline_frame_visible_to,
 };
 
 /// A console where sign-in is optional, and whether it can identify a
@@ -939,5 +940,105 @@ async fn an_ended_members_session_waits_for_the_first_read_of_who_members_are_pr
         "absent",
         "the private member's session"
     );
+    Ok(())
+}
+
+/// A member whose run is in flight is retired. The run ends on the console
+/// with a failure record that names the run's session: it carries the
+/// member's witness, so everyone who may view the member reads that the run
+/// ended. The retire notice itself names no session and carries no witness:
+/// an administrator reads it, no other person does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_run_in_flight_at_a_retire_ends_with_a_record_the_members_viewers_read() -> TestResult {
+    use crate::unified_runtime::in_flight_drain_tests::{ModelCalls, gated_runtime, seat_mid_turn};
+
+    let (_gate, gate) = tokio::sync::watch::channel(false);
+    let calls = Arc::new(ModelCalls::default());
+    let runtime = Arc::new(gated_runtime("kept-apart-cut-run", gate, Arc::clone(&calls)).await);
+    // The gateways drain runtime events on a task of their own.
+    let drain = Arc::clone(&runtime).spawn_event_drain_task();
+    let aggregator = MetaConsoleAggregator::in_memory();
+    aggregator.register_runtime_handles_with_policy(
+        "kept-apart",
+        "",
+        runtime.mob_runtime().clone(),
+        None,
+        runtime.console_events(),
+        Arc::new(AllowAllConsoleVisibilityPolicy),
+    );
+    let identity = seat_mid_turn(&runtime.mob_handle(), &calls, "alpha").await;
+    let frames = || async {
+        aggregator
+            .store()
+            .query_frames(ConsoleTimelineQuery {
+                identity: Some("alpha".to_string()),
+                limit: 1_000,
+                ..Default::default()
+            })
+            .await
+            .expect("stored frames")
+            .frames
+    };
+    // The run's start reaches the console, with the member's witness.
+    let mut started = None;
+    for _ in 0..200 {
+        started = frames()
+            .await
+            .into_iter()
+            .find(|frame| frame.kind == "run_started");
+        if started.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let started = started.ok_or("the run's start reaches the console")?;
+    let session = started
+        .session_id
+        .clone()
+        .ok_or("the run's start names its session")?;
+    assert!(started.source.member_provenance.is_some());
+
+    runtime.mob_handle().retire(identity.clone()).await?;
+    runtime
+        .record_console_lifecycle("alpha", "member_retired", json!({}))
+        .await;
+    let (mut ended, mut notice) = (None, None);
+    for _ in 0..200 {
+        let stored = frames().await;
+        ended = stored
+            .iter()
+            .find(|frame| matches!(frame.kind.as_str(), "interaction_failed" | "run_failed"))
+            .cloned();
+        notice = stored
+            .iter()
+            .find(|frame| frame.kind == "member_retired")
+            .cloned();
+        if ended.is_some() && notice.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let ended = ended.ok_or("the run in flight ends with a failure record")?;
+    let notice = notice.ok_or("the retire notice is stored")?;
+    let controller = everyone_drives_every_agent();
+    let person = controller.view_for_caller(Some(BOB), Some("bob-key"));
+    let admin = controller.view_for_caller(Some(ROOT), None);
+    assert_eq!(
+        ended.session_id.as_deref(),
+        Some(session.as_str()),
+        "the failure record names the run's session"
+    );
+    assert!(
+        ended.source.member_provenance.is_some() && timeline_frame_visible_to(&person, &ended),
+        "it carries the member's witness and a person who may view the member reads it"
+    );
+    assert!(
+        notice.session_id.is_none() && notice.source.member_provenance.is_none(),
+        "the retire notice names no session and carries no witness"
+    );
+    assert!(!timeline_frame_visible_to(&person, &notice));
+    assert!(timeline_frame_visible_to(&admin, &notice));
+    drain.abort();
+    let _ = runtime.shutdown().await;
     Ok(())
 }

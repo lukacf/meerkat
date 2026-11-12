@@ -6335,7 +6335,7 @@
         ]
       },
       "RequesterOrigin": {
-        "description": "How a turn's requester was attested at the ingress that admitted it.\n\nCore carries the value and never interprets it: it names which host door\nvouched for the principal, not who the principal is or what it may do.",
+        "description": "How a turn's requester was attested at the ingress that admitted it.\n\nCore carries the value and never interprets it: it names which host door\nvouched for the principal, not who the principal is or what it may do.\nReaders treat it as open (`#[non_exhaustive]` here; SDK readers treat an\nunknown value as \"not attested\"), so a later variant is not a breaking\nchange for them.",
         "oneOf": [
           {
             "const": "console_signed_in",
@@ -33166,7 +33166,7 @@
         ]
       },
       "RequesterOrigin": {
-        "description": "How a turn's requester was attested at the ingress that admitted it.\n\nCore carries the value and never interprets it: it names which host door\nvouched for the principal, not who the principal is or what it may do.",
+        "description": "How a turn's requester was attested at the ingress that admitted it.\n\nCore carries the value and never interprets it: it names which host door\nvouched for the principal, not who the principal is or what it may do.\nReaders treat it as open (`#[non_exhaustive]` here; SDK readers treat an\nunknown value as \"not attested\"), so a later variant is not a breaking\nchange for them.",
         "oneOf": [
           {
             "const": "console_signed_in",
@@ -51017,7 +51017,7 @@
         ]
       },
       "RequesterOrigin": {
-        "description": "How a turn's requester was attested at the ingress that admitted it.\n\nCore carries the value and never interprets it: it names which host door\nvouched for the principal, not who the principal is or what it may do.",
+        "description": "How a turn's requester was attested at the ingress that admitted it.\n\nCore carries the value and never interprets it: it names which host door\nvouched for the principal, not who the principal is or what it may do.\nReaders treat it as open (`#[non_exhaustive]` here; SDK readers treat an\nunknown value as \"not attested\"), so a later variant is not a breaking\nchange for them.",
         "oneOf": [
           {
             "const": "console_signed_in",
@@ -58814,7 +58814,7 @@
         "type": "object"
       },
       "RequesterOrigin": {
-        "description": "How a turn's requester was attested at the ingress that admitted it.\n\nCore carries the value and never interprets it: it names which host door\nvouched for the principal, not who the principal is or what it may do.",
+        "description": "How a turn's requester was attested at the ingress that admitted it.\n\nCore carries the value and never interprets it: it names which host door\nvouched for the principal, not who the principal is or what it may do.\nReaders treat it as open (`#[non_exhaustive]` here; SDK readers treat an\nunknown value as \"not attested\"), so a later variant is not a breaking\nchange for them.",
         "oneOf": [
           {
             "const": "console_signed_in",
@@ -72677,7 +72677,7 @@
         ]
       },
       "RequesterOrigin": {
-        "description": "How a turn's requester was attested at the ingress that admitted it.\n\nCore carries the value and never interprets it: it names which host door\nvouched for the principal, not who the principal is or what it may do.",
+        "description": "How a turn's requester was attested at the ingress that admitted it.\n\nCore carries the value and never interprets it: it names which host door\nvouched for the principal, not who the principal is or what it may do.\nReaders treat it as open (`#[non_exhaustive]` here; SDK readers treat an\nunknown value as \"not attested\"), so a later variant is not a breaking\nchange for them.",
         "oneOf": [
           {
             "const": "console_signed_in",
@@ -94128,7 +94128,7 @@
         ]
       },
       "RequesterOrigin": {
-        "description": "How a turn's requester was attested at the ingress that admitted it.\n\nCore carries the value and never interprets it: it names which host door\nvouched for the principal, not who the principal is or what it may do.",
+        "description": "How a turn's requester was attested at the ingress that admitted it.\n\nCore carries the value and never interprets it: it names which host door\nvouched for the principal, not who the principal is or what it may do.\nReaders treat it as open (`#[non_exhaustive]` here; SDK readers treat an\nunknown value as \"not attested\"), so a later variant is not a breaking\nchange for them.",
         "oneOf": [
           {
             "const": "console_signed_in",
@@ -109764,7 +109764,7 @@
         ]
       },
       "RequesterOrigin": {
-        "description": "How a turn's requester was attested at the ingress that admitted it.\n\nCore carries the value and never interprets it: it names which host door\nvouched for the principal, not who the principal is or what it may do.",
+        "description": "How a turn's requester was attested at the ingress that admitted it.\n\nCore carries the value and never interprets it: it names which host door\nvouched for the principal, not who the principal is or what it may do.\nReaders treat it as open (`#[non_exhaustive]` here; SDK readers treat an\nunknown value as \"not attested\"), so a later variant is not a breaking\nchange for them.",
         "oneOf": [
           {
             "const": "console_signed_in",
@@ -182476,7 +182476,7 @@
         ]
       },
       "RequesterOrigin": {
-        "description": "How a turn's requester was attested at the ingress that admitted it.\n\nCore carries the value and never interprets it: it names which host door\nvouched for the principal, not who the principal is or what it may do.",
+        "description": "How a turn's requester was attested at the ingress that admitted it.\n\nCore carries the value and never interprets it: it names which host door\nvouched for the principal, not who the principal is or what it may do.\nReaders treat it as open (`#[non_exhaustive]` here; SDK readers treat an\nunknown value as \"not attested\"), so a later variant is not a breaking\nchange for them.",
         "oneOf": [
           {
             "const": "console_signed_in",

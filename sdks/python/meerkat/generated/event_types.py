@@ -1943,6 +1943,9 @@ class PrincipalRef(TypedDict, total=False):
 #
 # Core carries the value and never interprets it: it names which host door
 # vouched for the principal, not who the principal is or what it may do.
+# Readers treat it as open (`#[non_exhaustive]` here; SDK readers treat an
+# unknown value as "not attested"), so a later variant is not a breaking
+# change for them.
 RequesterOrigin = Literal['console_signed_in', 'host_attested']
 
 

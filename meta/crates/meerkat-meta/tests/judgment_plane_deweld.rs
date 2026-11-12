@@ -887,6 +887,12 @@ fn fake_fact(id: String, identity: &str, updated_at_ms: u64, body: String) -> Me
 /// `body_bytes` bytes, each newer than any of router's) and three of
 /// router's. Returns the listed record ids and the row count each store read
 /// of the listing asked for.
+///
+/// The mob seats no member, so the console knows neither name. Its trusted
+/// key set holds no key: it can verify no token and identify nobody, and the
+/// caller is its one operator, restricted by the rules alone. A console that
+/// can identify a person shows the memory of a member it does not know to
+/// its administrator only, whatever the rules allow by name.
 async fn restricted_listing_reads(
     delivery: u64,
     body_bytes: usize,
@@ -934,7 +940,9 @@ async fn restricted_listing_reads(
     )
     .await
     .expect("classic runtime over the fake provider must build");
-    let app = runtime.build_reference_app_router(decision_state());
+    let mut decisions = decision_state();
+    decisions.trusted_oidc.jwks_json = r#"{"keys":[]}"#.to_string();
+    let app = runtime.build_reference_app_router(decisions);
 
     fake.state.records_page_reads.lock().unwrap().clear();
     let records = rpc(&app, "meta/memory/panel/records", json!({ "limit": limit })).await;

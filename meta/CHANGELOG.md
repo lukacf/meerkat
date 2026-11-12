@@ -8,8 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 A console that can identify a person shows a timeline frame stored without
-member attributes, and the memory steward's conflict signals, to an
-administrator only. See Security, Upgrade and Changed.
+member attributes, the memory steward's conflict signals and the system
+page's records that speak of an agent, to an administrator only. See
+Security, Upgrade and Changed.
 
 ### Security
 
@@ -57,10 +58,24 @@ administrator only. See Security, Upgrade and Changed.
   record or a record of an agent that an access rule keeps from the person
   reading. Affects 0.9.14 and earlier. On a console that can identify
   nobody the signal is read as a member's record with no attributes is, so
-  an access deny that matches the anonymous caller also refuses it. Gating
-  audit entries served by the Console no longer carry a memory conflict's
-  reason text, nor the error text of a failed conflict lookup, for people
-  who are not administrators.
+  an access deny that matches the anonymous caller also refuses it.
+- The system page's records that speak of an agent without being that
+  agent's own (a memory write that landed quarantined, a session's taint
+  transition, a promoted record and a promotion that awaits approval) are
+  shown to an administrator only as well. They name the author, session or
+  scope of the agent they are about and carry no message content. Affects
+  releases through 0.9.14.
+- On a console that can identify a person, gating audit entries served by
+  the Console no longer carry a memory conflict's reason text, nor the error
+  text of a failed conflict lookup, for a caller who is not an
+  administrator. The one operator of a console that can identify nobody
+  receives both as before.
+- On a console that can identify a person, a gating audit entry or pending
+  request whose origin is an agent the console does not know is shown to an
+  administrator only, like every other record the console cannot attribute.
+- In 0.9.11 through 0.9.14, on a console that does not require sign-in and
+  whose access rules are off, a caller who sent no token could read the
+  conversation of a private side chat after that side chat had ended.
 - A deny rule naming an agent's memory now also withholds the realm's dream
   history when the console does not know that agent (for example after it
   was retired); before, such a rule was not consulted for signed-in people
@@ -70,15 +85,18 @@ administrator only. See Security, Upgrade and Changed.
 
 ### Upgrade
 
-- No backfill is done. Timeline frames that 0.9.11 through 0.9.14 stored
-  without member attributes stay administrator-only: member memory events,
-  spawn initial messages, sends to a member with no session, lifecycle and
-  failure records, live image records. No setting or migration returns them
+- No backfill is done. A timeline frame stored without member attributes is
+  shown to administrators only, whichever release through 0.9.14 stored it
+  and whatever its kind: member memory events, spawn initial messages,
+  sends to a member with no session, lifecycle and failure records, live
+  image records, and every frame of a release that stored no member
+  attributes at all. No setting or migration returns them
   to the view of a person who is not an administrator, the member's owner
   included. Nothing is removed from the console log, and an administrator
   reads them as before.
-- The memory steward's conflict signals stored by earlier releases are
-  shown to an administrator only as well.
+- The memory steward's conflict signals stored by earlier releases, and the
+  system page's records of quarantined writes, taint transitions and
+  promotions, are shown to an administrator only as well.
 - A console that can identify a person and has no access configuration has
   no administrator: it shows these frames to nobody. A console that can
   identify nobody is unchanged: its one anonymous operator reads them as
@@ -108,11 +126,12 @@ administrator only. See Security, Upgrade and Changed.
 - People who are not administrators no longer see these records on the
   console timeline, whether this release or an earlier one wrote them:
   retire, reset, respawn and delete markers of an agent; memory harvest
-  records; the memory steward's conflict signals; the failure record of a
-  send that the console's log does not hold (a send made through the SDK,
-  or one made before the console log was replaced); a send to an identity
-  that has no member yet; and an image or memory record that names no
-  session. An administrator sees them all.
+  records; the memory steward's conflict signals; the system page's records
+  of quarantined writes, taint transitions and promotions; the failure
+  record of a send that the console's log does not hold (a send made
+  through the SDK, or one made before the console log was replaced); a send
+  to an identity that has no member yet; and an image or memory record that
+  names no session. An administrator sees them all.
 - A spawn's kickoff record (`user_input` with
   `source_event_type: spawn_initial_message`) is written for `fork_off` and
   `delegate` only, and carries the child's session as `session_id`.
@@ -143,22 +162,32 @@ administrator only. See Security, Upgrade and Changed.
   the read has succeeded, a console that can identify nobody serves its one
   operator as before, except for what belongs to an agent it now knows as
   private to a person.
+- The session of an agent that was private to a person is answered as a
+  session that does not exist to everyone but that person and an
+  administrator, also after the agent has ended and also on a console that
+  can identify nobody: the console takes the owner from the labels the
+  session was created with, read through the runtime's session service. A
+  session no agent holds whose owner the console cannot establish (the
+  read fails, or the runtime has no session service, as one made with
+  `MobRuntime::from_handle`) is answered so to every caller who is not an
+  administrator. The session of an ordinary agent that ended is attached
+  as before.
+- Three things this release gives up on purpose. The owner of a private
+  side chat no longer sees its lifecycle markers, memory harvest records and
+  the failure records of sends the console's log does not hold.
+  `mob_spawn_member`, `spawn_member` and `spawn_many_members` write no
+  kickoff record. A console that can identify nobody shows no frame stored
+  without member attributes until it has read who its agents are private
+  to.
 
 ### Known limitations
 
 - Memory panel: for a realm's dream history, a deny scoped by role or label
   that applies to the caller is treated as matching an agent the console
   does not know.
-- Console timeline: memory records on the system page (taint transitions,
-  quarantined writes, promotions) can show the session key, scope key or
-  author name of a member that is private to another person. They carry no
-  message content. A later release judges these records by the member they
-  name.
-- Console: the last-activity time of an agent name is kept per name and is
-  not filtered by who may see the member that acted. A person who can see an
-  agent under a name can therefore see when a member private to another
-  person acted under the same name. No content is shown. A later release
-  decides it with the frame rule.
+- Console: the last-activity time shown for an agent name is kept per name,
+  not per agent that held it. A later release decides it with the frame
+  rule.
 
 ## [0.9.14] - 2026-11-11
 

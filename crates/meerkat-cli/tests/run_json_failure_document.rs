@@ -655,6 +655,56 @@ fn a_resume_of_an_unknown_session_prints_its_code() {
     );
 }
 
+/// A typed failure before any turn that has typed data (`--resume` of a help
+/// session, which is never rebuilt from storage) prints that data as the
+/// document's details, as the other surfaces report the refusal.
+#[cfg(feature = "skills")]
+#[test]
+fn a_resume_of_a_help_session_prints_its_refusal_data() {
+    let roots = roots(start_loopback(bad_request()));
+    let help = rkat(
+        &roots,
+        &[
+            "help",
+            "-m",
+            MODEL,
+            "--provider",
+            "self-hosted",
+            "how do I resume a session?",
+        ],
+    );
+    assert_eq!(help.status, Some(1), "stderr:\n{}", help.stderr);
+    let finished = rkat(
+        &roots,
+        &["run", "--resume", "last", "--output", "json", "keep going"],
+    );
+    assert_eq!(finished.status, Some(12), "stderr:\n{}", finished.stderr);
+    let document = last_document(&finished);
+    assert_eq!(
+        document["error"]["code"], "SESSION_NOT_RUNNING",
+        "{document}"
+    );
+    assert_eq!(
+        document["error"]["message"],
+        stderr_error_line(&finished),
+        "{document}"
+    );
+    let details = &document["error"]["details"];
+    assert_eq!(details["kind"], "help_session_not_resumable", "{document}");
+    let session_id = details["session_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the details name no session: {document}"));
+    assert!(
+        stderr_error_line(&finished).contains(session_id),
+        "{document}"
+    );
+    assert_eq!(
+        details.as_object().map(serde_json::Map::len),
+        Some(2),
+        "{document}"
+    );
+}
+
 /// A check the CLI makes itself has no typed owner: `INTERNAL_ERROR`, no
 /// details, exit status 1.
 #[test]

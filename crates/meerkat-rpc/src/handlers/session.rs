@@ -1333,6 +1333,41 @@ mod tests {
         }
     }
 
+    /// `session/create` takes the provider-neutral `reasoning_effort` level
+    /// as a parameter of its own, in the one spelling per level.
+    #[test]
+    fn session_create_reads_the_reasoning_effort_level() {
+        use super::CreateSessionParams;
+
+        let create: CreateSessionParams = serde_json::from_value(serde_json::json!({
+            "prompt": "hello",
+            "reasoning_effort": "high",
+        }))
+        .expect("session/create reads a level");
+        assert!(
+            format!("{create:?}").contains("reasoning_effort: Some(High)"),
+            "the level is read, not ignored: {create:?}"
+        );
+
+        let absent: CreateSessionParams =
+            serde_json::from_value(serde_json::json!({"prompt": "hello"}))
+                .expect("session/create without a level");
+        assert!(
+            format!("{absent:?}").contains("reasoning_effort: None"),
+            "no level is named: {absent:?}"
+        );
+
+        for not_a_level in ["x_high", "extreme"] {
+            let error = serde_json::from_value::<CreateSessionParams>(serde_json::json!({
+                "prompt": "hello",
+                "reasoning_effort": not_a_level,
+            }))
+            .expect_err("a word outside the level vocabulary is refused")
+            .to_string();
+            assert!(error.contains("`xhigh`"), "{not_a_level}: {error}");
+        }
+    }
+
     #[test]
     fn create_session_provider_param_fails_closed_for_unknown_provider() {
         let err = super::parse_provider_param("provider-shaped-cache-key").unwrap_err();

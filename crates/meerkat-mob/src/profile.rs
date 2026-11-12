@@ -1060,6 +1060,38 @@ resume_overrides = ["model", "provider"]
         assert!(!mask.max_tokens);
     }
 
+    /// `resume_overrides = ["reasoning_effort"]` makes the profile decide a
+    /// resumed member's provider-neutral reasoning effort level: the level
+    /// its `provider_params` name, or none. Without it the member keeps the
+    /// level its session recorded.
+    #[test]
+    fn test_profile_resume_overrides_can_claim_the_reasoning_effort_level() {
+        let toml_str = r#"
+model = "claude-opus-4-8"
+resume_overrides = ["reasoning_effort"]
+"#;
+        let profile: Profile =
+            toml::from_str(toml_str).expect("`reasoning_effort` is a resume override");
+        let mask = profile.resume_override_mask();
+        assert!(mask.reasoning_effort);
+        assert!(!mask.provider_params);
+        assert!(!mask.model);
+
+        let unclaimed: Profile = toml::from_str(
+            r#"
+model = "claude-opus-4-8"
+resume_overrides = ["provider_params"]
+"#,
+        )
+        .unwrap();
+        let mask = unclaimed.resume_override_mask();
+        assert!(mask.provider_params);
+        assert!(
+            !mask.reasoning_effort,
+            "a `provider_params` claim alone keeps the recorded level"
+        );
+    }
+
     #[test]
     fn test_profile_resume_overrides_reject_unknown_fields() {
         let toml_str = r#"

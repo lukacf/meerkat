@@ -5152,6 +5152,54 @@ mod tests {
         );
     }
 
+    /// `mob/turn_start` takes the provider-neutral `reasoning_effort`
+    /// tri-state exactly as `turn/start` does.
+    #[test]
+    fn mob_turn_start_params_read_the_reasoning_effort_tri_state() {
+        let parse = |reasoning_effort: serde_json::Value| {
+            serde_json::from_value::<MobTurnStartParams>(serde_json::json!({
+                "mob_id": "mob-1",
+                "agent_identity": "worker",
+                "prompt": "continue",
+                "reasoning_effort": reasoning_effort,
+            }))
+        };
+        for (value, written) in [
+            (
+                serde_json::json!("low"),
+                serde_json::json!({"action": "set", "value": "low"}),
+            ),
+            (
+                serde_json::json!({"action": "clear"}),
+                serde_json::json!({"action": "clear"}),
+            ),
+        ] {
+            let params = parse(value.clone())
+                .unwrap_or_else(|error| panic!("turn_start reads {value}: {error}"));
+            assert_eq!(
+                serde_json::to_value(&params).expect("serialize")["reasoning_effort"],
+                written,
+                "{value}"
+            );
+        }
+        let absent = serde_json::from_value::<MobTurnStartParams>(serde_json::json!({
+            "mob_id": "mob-1",
+            "agent_identity": "worker",
+            "prompt": "continue",
+        }))
+        .expect("turn_start without a level");
+        assert!(
+            serde_json::to_value(&absent)
+                .expect("serialize")
+                .get("reasoning_effort")
+                .is_none()
+        );
+        let error = parse(serde_json::json!("x_high"))
+            .expect_err("`x_high` is not a level")
+            .to_string();
+        assert!(error.contains("`xhigh`"), "{error}");
+    }
+
     #[test]
     fn mob_create_params_reject_reserved_runtime_lifecycle_fields() {
         let err = serde_json::from_value::<MobCreateParams>(serde_json::json!({

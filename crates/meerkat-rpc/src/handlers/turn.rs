@@ -101,6 +101,29 @@ pub struct StartTurnParams {
     pub session_events: Option<bool>,
 }
 
+impl StartTurnParams {
+    /// Move the turn's identity and build overrides out of the params, in
+    /// the form the runtime carries them.
+    fn take_turn_overrides(&mut self) -> TurnOverrides {
+        TurnOverrides {
+            keep_alive: self.keep_alive,
+            model: self.model.take(),
+            provider: self.provider.take(),
+            self_hosted_server_id: self.self_hosted_server_id.take(),
+            max_tokens: self.max_tokens,
+            system_prompt: self.system_prompt.take(),
+            output_schema: self.output_schema.take(),
+            structured_output_retries: self.structured_output_retries,
+            provider_params: self.provider_params.take(),
+            // `turn/start` has no parameter for the level; a level named
+            // inside `provider_params` rides there.
+            reasoning_effort: None,
+            auth_binding: self.auth_binding.take(),
+            transient_turn_context: self.transient_turn_context.take(),
+        }
+    }
+}
+
 /// Where a session's build settings are set, for a refusal on a turn.
 pub(crate) const SET_BUILD_SETTINGS_ON_CREATE: &str =
     "set it on session/create, a deferred create included";
@@ -281,7 +304,7 @@ pub async fn handle_start(
 /// wire `turn/start` refuses it while parsing, and a typed caller here.
 pub async fn start_turn_with_params(
     id: Option<RpcId>,
-    params: StartTurnParams,
+    mut params: StartTurnParams,
     runtime: Arc<SessionRuntime>,
     notification_sink: &NotificationSink,
     _runtime_adapter: &Arc<meerkat_runtime::MeerkatMachine>,
@@ -326,6 +349,7 @@ pub async fn start_turn_with_params(
         }
     });
 
+    let overrides = params.take_turn_overrides();
     let skill_refs = match canonical_skill_ids(&runtime, params.skill_refs) {
         Ok(r) => r,
         Err(e) => {
@@ -335,23 +359,6 @@ pub async fn start_turn_with_params(
                 format!("Invalid skill_refs: {e}"),
             );
         }
-    };
-
-    let overrides = TurnOverrides {
-        keep_alive: params.keep_alive,
-        model: params.model,
-        provider: params.provider,
-        self_hosted_server_id: params.self_hosted_server_id,
-        max_tokens: params.max_tokens,
-        system_prompt: params.system_prompt,
-        output_schema: params.output_schema,
-        structured_output_retries: params.structured_output_retries,
-        provider_params: params.provider_params,
-        // `turn/start` has no parameter for the level; a level named inside
-        // `provider_params` rides there.
-        reasoning_effort: None,
-        auth_binding: params.auth_binding,
-        transient_turn_context: params.transient_turn_context,
     };
 
     // The turn's session/event copies go to this request's connection.
@@ -529,6 +536,73 @@ mod start_turn_params_tests {
             serde_json::from_value::<StartTurnParams>(inherit)
                 .expect("an explicit null keeps inheriting the session's setting");
         }
+    }
+
+    /// `turn/start` takes the provider-neutral `reasoning_effort` level as a
+    /// field of its own: a level sets it, `{"action": "clear"}` removes it,
+    /// and leaving it out keeps the session's level. The turn's overrides
+    /// carry it to the runtime unchanged.
+    #[test]
+    fn start_turn_params_read_the_reasoning_effort_tri_state() {
+        use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let parse = |reasoning_effort: Option<serde_json::Value>| {
+            let mut params = serde_json::json!({
+                "session_id": "session-1",
+                "prompt": "hello"
+            });
+            if let Some(value) = reasoning_effort {
+                params["reasoning_effort"] = value;
+            }
+            serde_json::from_value::<StartTurnParams>(params)
+        };
+        for (value, expected) in [
+            (
+                Some(serde_json::json!("low")),
+                Some(TurnMetadataOverride::Set(EffortLevel::Low)),
+            ),
+            (
+                Some(serde_json::json!({"action": "set", "value": "xhigh"})),
+                Some(TurnMetadataOverride::Set(EffortLevel::Xhigh)),
+            ),
+            (
+                Some(serde_json::json!({"action": "clear"})),
+                Some(TurnMetadataOverride::Clear),
+            ),
+            (None, None),
+        ] {
+            let mut params = parse(value.clone())
+                .unwrap_or_else(|error| panic!("turn/start reads {value:?}: {error}"));
+            let overrides = params.take_turn_overrides();
+            assert_eq!(
+                overrides.reasoning_effort, expected,
+                "{value:?} reaches the turn's overrides"
+            );
+            assert_eq!(
+                overrides.is_empty(),
+                expected.is_none(),
+                "a turn that names the level carries overrides: {value:?}"
+            );
+        }
+        for not_a_level in ["x_high", "extreme"] {
+            let error = parse(Some(serde_json::json!(not_a_level)))
+                .map(|_| ())
+                .expect_err("a word outside the level vocabulary is refused")
+                .to_string();
+            assert!(error.contains("`xhigh`"), "{not_a_level}: {error}");
+        }
+        // The level beside it does not open the type to other unknown fields.
+        let error = serde_json::from_value::<StartTurnParams>(serde_json::json!({
+            "session_id": "session-1",
+            "prompt": "hello",
+            "reasoning_effort": "low",
+            "reasoning_level": "low"
+        }))
+        .map(|_| ())
+        .expect_err("an unknown field is still refused")
+        .to_string();
+        assert!(error.contains("reasoning_level"), "{error}");
     }
 }
 

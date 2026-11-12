@@ -9581,6 +9581,72 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
         assert!(!input.verbose);
     }
 
+    /// `meerkat_run` takes the provider-neutral `reasoning_effort` level and
+    /// `meerkat_resume` its tri-state. A resume that names it rebuilds the
+    /// session, as a resume that names `provider_params` does.
+    #[test]
+    fn meerkat_run_and_resume_inputs_read_the_reasoning_effort() {
+        let run: MeerkatRunInput = serde_json::from_value(json!({
+            "prompt": "Hello",
+            "reasoning_effort": "high"
+        }))
+        .expect("meerkat_run reads a level");
+        assert!(
+            format!("{run:?}").contains("reasoning_effort: Some(High)"),
+            "the level is read, not ignored: {run:?}"
+        );
+        let run: MeerkatRunInput =
+            serde_json::from_value(json!({"prompt": "Hello"})).expect("meerkat_run");
+        assert!(format!("{run:?}").contains("reasoning_effort: None"));
+
+        let resume = |reasoning_effort: Option<serde_json::Value>| {
+            let mut input = json!({
+                "session_id": "01234567-89ab-cdef-0123-456789abcdef",
+                "prompt": "Continue"
+            });
+            if let Some(value) = reasoning_effort {
+                input["reasoning_effort"] = value;
+            }
+            serde_json::from_value::<MeerkatResumeInput>(input)
+        };
+        for (value, expected) in [
+            (json!("low"), "reasoning_effort: Some(Set(Low))"),
+            (
+                json!({"action": "set", "value": "xhigh"}),
+                "reasoning_effort: Some(Set(Xhigh))",
+            ),
+            (json!({"action": "clear"}), "reasoning_effort: Some(Clear)"),
+        ] {
+            let input = resume(Some(value.clone()))
+                .unwrap_or_else(|error| panic!("meerkat_resume reads {value}: {error}"));
+            assert!(
+                format!("{input:?}").contains(expected),
+                "{value} reads as {expected}: {input:?}"
+            );
+            assert!(
+                mcp_resume_requires_rebuild(&input),
+                "a resume that names the level rebuilds the session: {value}"
+            );
+        }
+        let keep = resume(None).expect("meerkat_resume without a level");
+        assert!(format!("{keep:?}").contains("reasoning_effort: None"));
+        assert!(!mcp_resume_requires_rebuild(&keep));
+
+        for not_a_level in ["x_high", "extreme"] {
+            let error = serde_json::from_value::<MeerkatRunInput>(json!({
+                "prompt": "Hello",
+                "reasoning_effort": not_a_level
+            }))
+            .expect_err("meerkat_run refuses a word outside the level vocabulary")
+            .to_string();
+            assert!(error.contains("`xhigh`"), "{not_a_level}: {error}");
+            let error = resume(Some(json!(not_a_level)))
+                .expect_err("meerkat_resume refuses a word outside the level vocabulary")
+                .to_string();
+            assert!(error.contains("`xhigh`"), "{not_a_level}: {error}");
+        }
+    }
+
     #[test]
     fn test_meerkat_run_input_with_tools() {
         let input_json = json!({

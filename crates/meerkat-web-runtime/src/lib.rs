@@ -3402,6 +3402,49 @@ mod tests {
         }
     }
 
+    /// The session config takes the provider-neutral `reasoning_effort`
+    /// level, and the session's build carries it where every other surface
+    /// does: in its provider params.
+    #[test]
+    fn session_config_reasoning_effort_reaches_the_session_build() {
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let level_of = |config_json: serde_json::Value| {
+            let config = parse_session_config(&config_json.to_string())
+                .unwrap_or_else(|error| panic!("the config is read: {error}"));
+            let Ok(request) =
+                super::build_session_request_with_auth_binding(None, &config.model, &config, None)
+            else {
+                panic!("the session request is built");
+            };
+            request
+                .build
+                .and_then(|build| build.provider_params)
+                .and_then(|params| params.reasoning_effort)
+        };
+        assert_eq!(
+            level_of(json!({"model": "test", "reasoning_effort": "high"})),
+            Some(EffortLevel::High)
+        );
+        assert_eq!(
+            level_of(json!({"model": "test", "reasoning_effort": "xhigh"})),
+            Some(EffortLevel::Xhigh)
+        );
+        assert_eq!(level_of(json!({"model": "test"})), None);
+
+        for not_a_level in ["x_high", "extreme"] {
+            let refused = parse_session_config(
+                &json!({"model": "test", "reasoning_effort": not_a_level}).to_string(),
+            )
+            .expect_err("a word outside the level vocabulary is refused");
+            assert_eq!(refused["code"], "invalid_config");
+            assert!(
+                refused.to_string().contains("xhigh"),
+                "the refusal lists the levels: {refused}"
+            );
+        }
+    }
+
     #[test]
     fn session_config_refuses_unknown_fields_and_excluded_requirements() {
         let unknown = parse_session_config(r#"{"model":"test","backend":"sqlite"}"#)

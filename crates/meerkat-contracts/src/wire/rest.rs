@@ -644,4 +644,88 @@ mod tests {
         .unwrap_err();
         assert!(err.to_string().contains("unexpected"));
     }
+
+    /// `POST /sessions` takes the provider-neutral `reasoning_effort` level
+    /// and `POST /sessions/{id}/messages` its tri-state: a level sets it,
+    /// `{"action": "clear"}` removes it, absent keeps the session's level.
+    #[test]
+    fn rest_create_and_continue_read_the_reasoning_effort() {
+        let create: RestCreateSessionRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "hello",
+            "reasoning_effort": "high",
+        }))
+        .expect("create reads a level");
+        assert_eq!(
+            serde_json::to_value(&create).expect("serialize")["reasoning_effort"],
+            serde_json::json!("high"),
+            "the level is read, not ignored"
+        );
+        let create: RestCreateSessionRequest =
+            serde_json::from_value(serde_json::json!({"prompt": "hello"}))
+                .expect("create without a level");
+        assert!(
+            serde_json::to_value(&create)
+                .expect("serialize")
+                .get("reasoning_effort")
+                .is_none(),
+            "no level is written when none is named"
+        );
+
+        for (value, written) in [
+            (
+                serde_json::json!("low"),
+                serde_json::json!({"action": "set", "value": "low"}),
+            ),
+            (
+                serde_json::json!({"action": "set", "value": "xhigh"}),
+                serde_json::json!({"action": "set", "value": "xhigh"}),
+            ),
+            (
+                serde_json::json!({"action": "clear"}),
+                serde_json::json!({"action": "clear"}),
+            ),
+        ] {
+            let request: RestContinueSessionRequest = serde_json::from_value(serde_json::json!({
+                "session_id": "session-1",
+                "prompt": "hello",
+                "reasoning_effort": value,
+            }))
+            .expect("continue reads the tri-state");
+            assert_eq!(
+                serde_json::to_value(&request).expect("serialize")["reasoning_effort"],
+                written,
+                "{value}"
+            );
+        }
+        let request: RestContinueSessionRequest = serde_json::from_value(serde_json::json!({
+            "session_id": "session-1",
+            "prompt": "hello",
+        }))
+        .expect("continue without a level");
+        assert!(
+            serde_json::to_value(&request)
+                .expect("serialize")
+                .get("reasoning_effort")
+                .is_none(),
+            "absent keeps the session's level"
+        );
+
+        for not_a_level in ["x_high", "extreme"] {
+            let error = serde_json::from_value::<RestCreateSessionRequest>(serde_json::json!({
+                "prompt": "hello",
+                "reasoning_effort": not_a_level,
+            }))
+            .expect_err("create refuses a word outside the level vocabulary")
+            .to_string();
+            assert!(error.contains("`xhigh`"), "{not_a_level}: {error}");
+            let error = serde_json::from_value::<RestContinueSessionRequest>(serde_json::json!({
+                "session_id": "session-1",
+                "prompt": "hello",
+                "reasoning_effort": not_a_level,
+            }))
+            .expect_err("continue refuses a word outside the level vocabulary")
+            .to_string();
+            assert!(error.contains("`xhigh`"), "{not_a_level}: {error}");
+        }
+    }
 }

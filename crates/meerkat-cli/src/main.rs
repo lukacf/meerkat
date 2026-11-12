@@ -31342,6 +31342,87 @@ default_model = "gemma"
         }
     }
 
+    /// `rkat run --reasoning-effort <LEVEL>` takes the seven levels and no
+    /// other word: `x_high` and any other word are argument errors (exit
+    /// status 2, the argument parser's text). `--no-reasoning-effort` clears
+    /// a resumed session's level, so it needs `--resume` and excludes the
+    /// level flag.
+    #[test]
+    fn test_run_reasoning_effort_flags_are_a_closed_value_set() {
+        for level in ["none", "minimal", "low", "medium", "high", "xhigh", "max"] {
+            if let Err(error) =
+                Cli::try_parse_from(["rkat", "run", "--reasoning-effort", level, "hi"])
+            {
+                panic!("--reasoning-effort {level} parses: {error}");
+            }
+            if let Err(error) = Cli::try_parse_from([
+                "rkat",
+                "run",
+                "--resume",
+                "last",
+                "--reasoning-effort",
+                level,
+                "hi",
+            ]) {
+                panic!("--resume --reasoning-effort {level} parses: {error}");
+            }
+        }
+        for word in ["x_high", "extreme", "HIGH"] {
+            let Err(error) = Cli::try_parse_from(["rkat", "run", "--reasoning-effort", word, "hi"])
+            else {
+                panic!("--reasoning-effort '{word}' is an argument error");
+            };
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::InvalidValue,
+                "'{word}': {error}"
+            );
+            assert_eq!(error.exit_code(), 2, "'{word}'");
+            assert!(
+                error.to_string().contains("xhigh"),
+                "the parser lists the levels for '{word}': {error}"
+            );
+        }
+
+        if let Err(error) = Cli::try_parse_from([
+            "rkat",
+            "run",
+            "--resume",
+            "last",
+            "--no-reasoning-effort",
+            "hi",
+        ]) {
+            panic!("--resume --no-reasoning-effort parses: {error}");
+        }
+        let Err(error) = Cli::try_parse_from(["rkat", "run", "--no-reasoning-effort", "hi"]) else {
+            panic!("--no-reasoning-effort needs --resume");
+        };
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument,
+            "{error}"
+        );
+        assert_eq!(error.exit_code(), 2);
+        let Err(error) = Cli::try_parse_from([
+            "rkat",
+            "run",
+            "--resume",
+            "last",
+            "--reasoning-effort",
+            "high",
+            "--no-reasoning-effort",
+            "hi",
+        ]) else {
+            panic!("a level and its removal exclude each other");
+        };
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::ArgumentConflict,
+            "{error}"
+        );
+        assert_eq!(error.exit_code(), 2);
+    }
+
     #[cfg(feature = "skills")]
     #[test]
     fn test_run_resume_parses_current_flags() {

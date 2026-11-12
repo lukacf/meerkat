@@ -16939,6 +16939,34 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
         );
     }
 
+    /// A continue request that names the provider-neutral reasoning effort
+    /// level, to set it or to clear it, rebuilds the session, as a request
+    /// that names another part of the LLM identity does.
+    #[test]
+    fn test_rest_continue_reasoning_effort_requires_rebuild() {
+        let request = |reasoning_effort: Option<serde_json::Value>| {
+            let mut body = serde_json::json!({
+                "session_id": "01234567-89ab-cdef-0123-456789abcdef",
+                "prompt": "Continue",
+            });
+            if let Some(value) = reasoning_effort {
+                body["reasoning_effort"] = value;
+            }
+            serde_json::from_value::<ContinueSessionRequest>(body).expect("continue request")
+        };
+        assert!(!rest_continue_requires_rebuild(&request(None)));
+        for value in [
+            serde_json::json!("high"),
+            serde_json::json!({"action": "set", "value": "low"}),
+            serde_json::json!({"action": "clear"}),
+        ] {
+            assert!(
+                rest_continue_requires_rebuild(&request(Some(value.clone()))),
+                "{value} decides the session's level"
+            );
+        }
+    }
+
     #[test]
     fn test_rest_continue_requires_rebuild_matches_surface_contract() {
         let mut req = ContinueSessionRequest {

@@ -2807,6 +2807,111 @@ family = "gemma-4"
         assert!(err.to_string().contains("unknown server"));
     }
 
+    /// `models/catalog` lists, per model, the levels the provider-neutral
+    /// `reasoning_effort` option accepts on the model's direct provider
+    /// route: exactly the levels the resolver accepts there. A model whose
+    /// levels no catalog row states lists none, and so does a self-hosted
+    /// model, whose levels only its operator states.
+    #[test]
+    fn models_catalog_lists_the_direct_route_reasoning_effort_levels() {
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+        use meerkat_core::{
+            Provider, ReasoningEffortDecidedBy, ReasoningEffortRefusalReason,
+            ReasoningResolveInput, ReasoningResolveMode,
+        };
+
+        let mut config = Config::default();
+        config
+            .merge_toml_str(
+                r#"
+[self_hosted.servers.local]
+base_url = "http://localhost:11434"
+[self_hosted.models.reasoner]
+server = "local"
+remote_model = "reasoner"
+supports_reasoning = true
+reasoning_effort_levels = ["low", "high"]
+"#,
+            )
+            .expect("a self-hosted model that declares levels");
+        let catalog =
+            serde_json::to_value(build_models_catalog_response(&config).expect("catalog response"))
+                .expect("serialize the catalog");
+
+        let ladder = [
+            EffortLevel::None,
+            EffortLevel::Minimal,
+            EffortLevel::Low,
+            EffortLevel::Medium,
+            EffortLevel::High,
+            EffortLevel::Xhigh,
+            EffortLevel::Max,
+        ];
+        let mut models_with_levels = 0;
+        let mut self_hosted_models = 0;
+        for group in catalog["providers"].as_array().expect("providers") {
+            let provider: Provider =
+                serde_json::from_value(group["provider"].clone()).expect("a typed provider");
+            for model in group["models"].as_array().expect("models") {
+                let id = model["id"].as_str().expect("model id");
+                let listed = &model["profile"]["reasoning_effort_levels"];
+                let Some(observation) = meerkat_core::direct_route_observation(provider) else {
+                    self_hosted_models += 1;
+                    assert!(
+                        listed.is_null(),
+                        "{provider:?} model '{id}' has no direct route to list levels for: {listed}"
+                    );
+                    continue;
+                };
+                let row = meerkat_models::canonical().capabilities_for(provider, id);
+                let mut accepted = Vec::new();
+                let mut unknown = false;
+                for level in ladder {
+                    let mut params = None;
+                    match meerkat_core::resolve_reasoning_effort(
+                        ReasoningResolveInput::new(
+                            level,
+                            provider,
+                            id,
+                            Some(&observation),
+                            row,
+                            ReasoningEffortDecidedBy::Request,
+                        ),
+                        &mut params,
+                        ReasoningResolveMode::Strict,
+                    ) {
+                        Ok(_) => accepted.push(level),
+                        Err(refusal) => {
+                            unknown |= refusal.reason
+                                == ReasoningEffortRefusalReason::SupportedLevelsUnknown;
+                        }
+                    }
+                }
+                if unknown {
+                    assert!(accepted.is_empty(), "{provider:?} '{id}'");
+                    assert!(
+                        listed.is_null(),
+                        "no source states the levels of {provider:?} '{id}': {listed}"
+                    );
+                } else {
+                    assert_eq!(
+                        listed,
+                        &serde_json::json!(accepted),
+                        "the catalog lists what the resolver accepts for {provider:?} '{id}'"
+                    );
+                    if !accepted.is_empty() {
+                        models_with_levels += 1;
+                    }
+                }
+            }
+        }
+        assert!(models_with_levels > 0, "some catalog model accepts a level");
+        assert!(
+            self_hosted_models > 0,
+            "the self-hosted model is in the catalog and lists no levels"
+        );
+    }
+
     #[test]
     fn build_models_catalog_response_exposes_stable_capability_bits() {
         let catalog = build_models_catalog_response(&Config::default()).expect("catalog response");

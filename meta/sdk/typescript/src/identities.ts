@@ -9,9 +9,9 @@
  * method.
  *
  * Writes: `create` (1 to 256 agents, all or nothing), `update`, `archive`,
- * `unarchive`, `remove`, `adopt`, `withdraw` and `changesHold`. Reads:
- * `list`, `get`, `operation`, `directory` and `plan`. A read never wakes an
- * agent.
+ * `unarchive`, `remove`, `adopt`, `settlePreparation`, `withdraw` and
+ * `changesHold`. Reads: `list`, `get`, `operation`, `directory` and `plan`. A
+ * read never wakes an agent.
  *
  * Requests are spelled once, here, as every surface writes them: a create
  * names `agents: [{name, profile, ...}]` ({@link AgentSpec}), a change of
@@ -26,7 +26,8 @@
  *   an error: nothing but the decision is written, and the same `requestId`
  *   and request return the same state. Read the operation later with
  *   `identities.operation({ operationId: outcome.operationId })`;
- * - `pending_preparation`: committed, not usable yet;
+ * - `pending_preparation`: committed, not usable until the host has prepared
+ *   the agent and settled it (`settlePreparation`);
  * - a refusal rejects with `IdentityRefusedError`, the one error of the
  *   family, with the typed `kind`, `field` and `detail`. Only `operation`
  *   resolves a refusal as a value (`refused`): the operation it read ended

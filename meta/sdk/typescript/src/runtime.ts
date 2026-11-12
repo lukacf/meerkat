@@ -771,7 +771,9 @@ export interface MonitorStartOptions {
  *
  * A change resolves `done`, `pending_decision` (a person must decide: a
  * normal answer, read it later with {@link IdentitiesHandle.operation}) or
- * `pending_preparation`. Every refusal of every call rejects with
+ * `pending_preparation` (the host prepares the agent, then
+ * {@link IdentitiesHandle.settlePreparation}). Every refusal of every call
+ * rejects with
  * {@link IdentityRefusedError}, with the typed `kind`, `field` and `detail`;
  * nothing of a refused change was written. Params the gateway cannot read
  * are that error too (`invalid_request`). A candidate launch refuses every
@@ -845,8 +847,11 @@ export class IdentitiesHandle {
 
   /**
    * Stop a long-term agent and keep it: its name, record, conversation and
-   * memory stay, messages to it are refused, and
-   * {@link IdentitiesHandle.unarchive} brings it back.
+   * memory stay (the agent's last conversation is harvested as for any agent
+   * that leaves), messages to it are refused, and
+   * {@link IdentitiesHandle.unarchive} brings it back. The schedules that
+   * target it are paused with it: the first answer's agent says which
+   * (`schedules`); a replay states none.
    */
   async archive(name: string, options: AgentChangeOptions): Promise<IdentityChangeResult> {
     return this.change("meta/identity/archive", agentRefParams({ ...options, name }));
@@ -855,7 +860,9 @@ export class IdentitiesHandle {
   /**
    * Bring an archived agent back, on its archived conversation and its
    * current instructions. Refused `not_archived` for an agent that is not
-   * archived.
+   * archived. The schedules its archive paused are resumed (the first
+   * answer's agent says which, `schedules`); a schedule somebody paused by
+   * name stays paused.
    */
   async unarchive(name: string, options: AgentChangeOptions): Promise<IdentityChangeResult> {
     return this.change("meta/identity/unarchive", agentRefParams({ ...options, name }));
@@ -863,8 +870,11 @@ export class IdentitiesHandle {
 
   /**
    * Remove a long-term agent for good. Its name can never be used again;
-   * its conversation and memory are kept and no other agent can reach them.
-   * Use {@link IdentitiesHandle.archive} when it may be needed later.
+   * its conversation and memory are kept (the agent's last conversation is
+   * harvested as for any agent that leaves) and no other agent can reach
+   * them. Every schedule that targets it is ended (the first answer's agent
+   * says which, `schedules`). Use {@link IdentitiesHandle.archive} when it
+   * may be needed later.
    */
   async remove(name: string, options: AgentChangeOptions): Promise<IdentityChangeResult> {
     return this.change("meta/identity/remove", agentRefParams({ ...options, name }));

@@ -7693,14 +7693,7 @@ fn insert_identity_status_extras(
     if let Some(member_id) = status.member_id.as_ref() {
         fields.insert("member_id".to_string(), Value::String(member_id.clone()));
     }
-    for (member, set) in [
-        ("archived", status.record.archived),
-        ("preparation_pending", status.record.preparation_pending),
-    ] {
-        if set {
-            fields.insert(member.to_string(), Value::Bool(true));
-        }
-    }
+    insert_identity_status_marks(fields, status);
     if let Some(convergence) = status.convergence.as_ref()
         && let Ok(value) = serde_json::to_value(convergence)
     {
@@ -7716,10 +7709,29 @@ fn insert_identity_status_extras(
     {
         fields.insert("replaced_session".to_string(), value);
     }
-    // Present only when set: the host's roster lists the name of an agent
-    // that is served from its record, so the roster's entry is not applied.
-    if status.roster_listing_superseded {
-        fields.insert("roster_listing_superseded".to_string(), Value::Bool(true));
+}
+
+/// The marks of an identity's status, each written only when true: why no
+/// member holds the identity (`archived`, or `preparation_pending` while it
+/// awaits its host's preparation), and `roster_listing_superseded` when the
+/// host's roster lists the name of an agent that is served from its record,
+/// so the roster's entry is not applied. The stdio gateway's status answer
+/// and the console's write them here, so the two answer them alike.
+pub(crate) fn insert_identity_status_marks(
+    fields: &mut serde_json::Map<String, Value>,
+    status: &crate::identity_first::IdentityStatus,
+) {
+    for (mark, set) in [
+        ("archived", status.record.archived),
+        ("preparation_pending", status.record.preparation_pending),
+        (
+            "roster_listing_superseded",
+            status.roster_listing_superseded,
+        ),
+    ] {
+        if set {
+            fields.insert(mark.to_string(), Value::Bool(true));
+        }
     }
 }
 

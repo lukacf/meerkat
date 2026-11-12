@@ -12214,6 +12214,12 @@ fn console_identity_status_json_from_identity_status(
     if let Some(member_id) = status.member_id.as_ref() {
         value["member_id"] = json!(member_id);
     }
+    // Why no member holds the identity, and that the host's roster also
+    // lists its name: each only when true, written by the one function the
+    // stdio gateway's status answer writes them with.
+    if let Value::Object(fields) = &mut value {
+        crate::rpc::insert_identity_status_marks(fields, status);
+    }
     value
 }
 

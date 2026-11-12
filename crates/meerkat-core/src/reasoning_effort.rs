@@ -87,14 +87,33 @@ impl ReasoningBackend {
             Self::SelfHosted(_) => false,
         }
     }
+
+    /// Whether `backend` is the provider-matrix string of a backend kind of
+    /// one of the four families: a string [`ReasoningBackend::as_str`] can
+    /// return.
+    fn names_a_backend_kind(backend: &str) -> bool {
+        OpenAiBackendKind::ALL
+            .iter()
+            .any(|kind| kind.as_str() == backend)
+            || AnthropicBackendKind::ALL
+                .iter()
+                .any(|kind| kind.as_str() == backend)
+            || GoogleBackendKind::ALL
+                .iter()
+                .any(|kind| kind.as_str() == backend)
+            || SelfHostedBackendKind::ALL
+                .iter()
+                .any(|kind| kind.as_str() == backend)
+    }
 }
 
 /// The route a request is served on, in its reported form:
 /// `{"backend": "<provider-matrix string>", "api": "<snake_case API>"}`.
 ///
-/// Built only by [`ReasoningRoute::new`] from a typed backend, so `backend`
-/// is always a provider-matrix backend string. Displays as `backend/api`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Built by [`ReasoningRoute::new`] from a typed backend, or read from that
+/// form, which refuses a backend that is not a provider-matrix backend
+/// string. Either way `backend` is always one. Displays as `backend/api`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[non_exhaustive]
 pub struct ReasoningRoute {
@@ -118,6 +137,33 @@ impl ReasoningRoute {
 impl fmt::Display for ReasoningRoute {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}/{}", self.backend, self.api)
+    }
+}
+
+/// Reads the reported form and holds it to what [`ReasoningRoute::new`]
+/// guarantees: a backend that names no provider-matrix backend kind is an
+/// error, never a route.
+impl<'de> Deserialize<'de> for ReasoningRoute {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        /// The two fields as written, before the backend is checked.
+        #[derive(Deserialize)]
+        #[serde(rename = "ReasoningRoute")]
+        struct Reported {
+            backend: String,
+            api: ModelApi,
+        }
+
+        let Reported { backend, api } = Reported::deserialize(deserializer)?;
+        if !ReasoningBackend::names_a_backend_kind(&backend) {
+            return Err(serde::de::Error::invalid_value(
+                serde::de::Unexpected::Str(&backend),
+                &"a provider-matrix backend string",
+            ));
+        }
+        Ok(Self { backend, api })
     }
 }
 

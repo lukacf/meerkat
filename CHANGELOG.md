@@ -93,7 +93,13 @@ them.
   of the level a request was sent with (`ReasoningEffortResolution`,
   `ReasoningEffortDecidedBy`, `ReasoningEffortSent`,
   `ReasoningEffortReport`). `ReasoningEffortRefusalReason` is a closed set
-  of eight reasons; adding one is a breaking change.
+  of eight reasons; adding one is a breaking change. A `ReasoningRoute`
+  read from JSON whose backend is not a provider-matrix backend string is
+  a deserialization error, also inside a refusal or a report. A wrapper
+  that sends its client's requests on unchanged reports that client's
+  route: the selected-target wrapper on every registry-built client,
+  `ModelFallbackClient` (its active candidate) and the Copilot account
+  capability gate.
   `AgentLlmClient::reasoning_route()` and `LlmClient::reasoning_route()`
   are a request-free accessor with a `None` default, so existing clients
   compile unchanged; `LlmClientAdapter` forwards its client's answer.

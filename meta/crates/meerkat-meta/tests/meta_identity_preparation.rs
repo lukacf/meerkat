@@ -35,7 +35,8 @@ use meerkat_core::Message;
 use meerkat_core::types::StopReason;
 use meerkat_meta::identity_creation::{
     ChangeRequester, GetAgent, IdentityChangeCall, IdentityChangeSpec, IdentityCreationPolicy,
-    IdentityFamilyOptions, IdentityRead, IdentityReadAnswer, OperationId, SettlePreparationCall,
+    IdentityFamilyOptions, IdentityRead, IdentityReadAnswer, ListAgents, OperationId,
+    SettlePreparationCall,
 };
 use meerkat_meta::identity_first::contracts::{AgentCustomizer, RosterProvider};
 use meerkat_meta::identity_first::{
@@ -1804,5 +1805,682 @@ async fn a_create_that_completed_reads_committed_after_its_agents_removal() {
     assert_eq!(agent["state"], json!("committed"), "{operation:#}");
     assert_eq!(agent["spec_digest"], digest, "{operation:#}");
     assert!(agent.get("seat").is_none(), "{operation:#}");
+    rig.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// What a status and a list say of an agent that waits
+// ---------------------------------------------------------------------------
+
+/// The members an identity status writes for a seated agent with nothing
+/// to report: the ones every release wrote, and no other.
+const SEATED_STATUS_MEMBERS: [&str; 12] = [
+    "addressability",
+    "agent_runtime_id",
+    "display_name",
+    "generation",
+    "identity",
+    "intent_managed",
+    "labels",
+    "member_id",
+    "profile",
+    "runtime_mode",
+    "session_id",
+    "state",
+];
+
+/// The members of the object `value`, in name order.
+fn members(value: &Value) -> Vec<&str> {
+    let mut members: Vec<&str> = value
+        .as_object()
+        .unwrap_or_else(|| panic!("an object: {value:#}"))
+        .keys()
+        .map(String::as_str)
+        .collect();
+    members.sort_unstable();
+    members
+}
+
+/// The rows' policy for agents nobody prepares: the host may create,
+/// archive and unarchive an agent of the profile `plain` at once, and a
+/// person decides a change of what such an agent is called.
+fn plain_policy() -> Value {
+    json!({
+        "enabled": true,
+        "approval": {"rules": [
+            {"change": ["create", "archive"], "requester": {"kind": "host"},
+             "target": {"profile": ["plain"]}, "outcome": {"kind": "allow"}},
+            {"change": ["descriptive"], "requester": {"kind": "host"},
+             "target": {"profile": ["plain"]},
+             "outcome": {"kind": "require_approval", "approver": {"id": APPROVERS}}},
+        ]},
+    })
+}
+
+impl Rig {
+    /// The status of `name`, as the identity runtime writes it.
+    async fn status(&self, name: &str) -> Value {
+        let status = self
+            .runtime
+            .identity_runtime()
+            .expect("identity runtime installed")
+            .status(&AgentIdentity::parse(name).unwrap())
+            .await
+            .unwrap_or_else(|error| panic!("the status of {name}: {error}"));
+        serde_json::to_value(&status).expect("the status is JSON")
+    }
+
+    /// The status of `name` among the statuses of every agent.
+    async fn status_among_all(&self, name: &str) -> Value {
+        let statuses = self
+            .runtime
+            .identity_runtime()
+            .expect("identity runtime installed")
+            .statuses()
+            .await
+            .expect("the statuses of every agent");
+        let status = statuses
+            .iter()
+            .find(|status| status.identity.as_str() == name)
+            .unwrap_or_else(|| panic!("the statuses name {name}"));
+        serde_json::to_value(status).expect("the status is JSON")
+    }
+
+    /// `name` as a list names it.
+    async fn listed(&self, name: &str) -> Value {
+        let listed = self.ok("meta/identity/list", json!({})).await;
+        listed["agents"]
+            .as_array()
+            .expect("a list names agents")
+            .iter()
+            .find(|agent| agent["name"] == json!(name))
+            .unwrap_or_else(|| panic!("the list names {name}: {listed:#}"))
+            .clone()
+    }
+
+    /// The open operations an agent caller is answered for `name`, by a
+    /// get and by a list.
+    async fn open_operations_read_by_an_agent(&self, name: &str) -> (Vec<String>, Vec<String>) {
+        let family = self.runtime.identity_family().expect("the family");
+        let mob = self.mob();
+        let agent = ChangeRequester::agent_recorded(HOST_A);
+        let texts = |operations: &[OperationId]| -> Vec<String> {
+            operations.iter().map(ToString::to_string).collect()
+        };
+        let got = match family
+            .read(&mob, &agent, IdentityRead::Get(GetAgent::new(name)))
+            .await
+        {
+            Ok(IdentityReadAnswer::Get(record)) => texts(&record.agent.open_operations),
+            other => panic!("an agent reads {name}: {other:?}"),
+        };
+        let listed = match family
+            .read(&mob, &agent, IdentityRead::List(ListAgents::default()))
+            .await
+        {
+            Ok(IdentityReadAnswer::List(page)) => page
+                .agents
+                .iter()
+                .find(|agent| agent.name == name)
+                .map(|agent| texts(&agent.open_operations))
+                .unwrap_or_else(|| panic!("an agent is listed {name}")),
+            other => panic!("an agent lists the mob's agents: {other:?}"),
+        };
+        (got, listed)
+    }
+
+    /// Wait until Core holds `name` as `standing` says.
+    async fn stands(&self, name: &str, standing: impl Fn(&EntryStanding) -> bool) {
+        let deadline = std::time::Instant::now() + TURN_BOUND;
+        loop {
+            let now = self.standing(name);
+            if now.as_ref().is_some_and(&standing) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{name} stands at {now:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+}
+
+/// The status of a seated agent with nothing to report is written as every
+/// release wrote it, for an agent created at run time as for a configured
+/// one: no member says anything of its record. The answer of
+/// `meta/status_identity` adds none either.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_seated_agents_status_is_written_as_before() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), plain_policy()).await;
+    let created = rig
+        .ok(
+            "meta/identity/create",
+            json!({"request_id": "create-1", "agents": [{"name": "walker", "profile": "plain"}]}),
+        )
+        .await;
+    assert_eq!(created["outcome"], json!("done"), "{created:#}");
+    for name in [HOST_A, "walker"] {
+        let status = rig.status(name).await;
+        assert_eq!(
+            members(&status),
+            SEATED_STATUS_MEMBERS,
+            "{name}: {status:#}"
+        );
+        let among_all = rig.status_among_all(name).await;
+        assert_eq!(among_all, status, "{name}");
+        let answered = rig
+            .ok("meta/status_identity", json!({"identity": name}))
+            .await;
+        for member in [
+            "archived",
+            "preparation_pending",
+            "spec_digest",
+            "spec_revision",
+            "provenance",
+            "open_operations",
+            "record",
+        ] {
+            assert!(
+                answered.get(member).is_none(),
+                "{name}: the answer carries no `{member}`: {answered:#}"
+            );
+        }
+    }
+    rig.shutdown().await;
+}
+
+/// The status of an agent that waits for its host says so
+/// (`preparation_pending: true`), on the read of one agent and on the read
+/// of all, and says it no longer once the host settled the agent: the
+/// settled agent's status is written as any seated agent's. The configured
+/// agent beside it never reads the member. No status read builds, wakes or
+/// seats anything.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_status_of_an_agent_that_waits_says_so_until_its_settle() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), prepared_policy()).await;
+    rig.create_pending("create-1", json!({"name": "scout", "profile": "worker"}))
+        .await;
+
+    let waiting = rig.status("scout").await;
+    assert_eq!(
+        waiting.get("preparation_pending"),
+        Some(&json!(true)),
+        "an agent that waits for its host says so: {waiting:#}"
+    );
+    assert!(waiting.get("archived").is_none(), "{waiting:#}");
+    assert_eq!(waiting["state"], json!("dormant"), "{waiting:#}");
+    assert_eq!(waiting["session_id"], json!(null), "{waiting:#}");
+    assert_eq!(rig.status_among_all("scout").await, waiting);
+    let answered = rig
+        .ok("meta/status_identity", json!({"identity": "scout"}))
+        .await;
+    assert_eq!(
+        answered.get("preparation_pending"),
+        Some(&json!(true)),
+        "{answered:#}"
+    );
+
+    // The configured agent beside it reads as before.
+    let configured = rig.status(HOST_A).await;
+    assert_eq!(
+        members(&configured),
+        SEATED_STATUS_MEMBERS,
+        "{configured:#}"
+    );
+
+    // The reads seated nothing and woke nobody.
+    assert!(rig.pending("scout"), "{:?}", rig.standing("scout"));
+    assert!(!rig.is_member("scout").await);
+    assert!(
+        rig.asked.lock().unwrap().is_empty(),
+        "a status read wakes nobody: {:?}",
+        rig.asked.lock().unwrap()
+    );
+
+    rig.ok(SETTLE, json!({"request_id": "s-1", "name": "scout"}))
+        .await;
+    let settled = rig.status("scout").await;
+    assert_eq!(
+        members(&settled),
+        SEATED_STATUS_MEMBERS,
+        "a settled agent's status is any seated agent's: {settled:#}"
+    );
+    assert_eq!(rig.status_among_all("scout").await, settled);
+    assert!(
+        rig.asked.lock().unwrap().is_empty(),
+        "neither the settle nor a status read wakes anybody: {:?}",
+        rig.asked.lock().unwrap()
+    );
+    rig.shutdown().await;
+}
+
+/// The status of an archived agent says so (`archived: true`) and says it
+/// no longer once the agent is unarchived. The configured agent beside it
+/// never reads the member, and no status read wakes anybody.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_status_of_an_archived_agent_says_so_until_its_unarchive() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), plain_policy()).await;
+    rig.ok(
+        "meta/identity/create",
+        json!({"request_id": "create-1", "agents": [{"name": "walker", "profile": "plain"}]}),
+    )
+    .await;
+    let digest = rig.get("walker").await["spec_digest"].clone();
+    let named = |request_id: &str| json!({"request_id": request_id, "name": "walker", "expected_spec_digest": digest});
+
+    rig.ok("meta/identity/archive", named("archive-1")).await;
+    rig.stands("walker", |standing| {
+        matches!(
+            standing,
+            EntryStanding::Unseated(meerkat_mob::UnseatedEntryCause::Archived)
+        )
+    })
+    .await;
+    let archived = rig.status("walker").await;
+    assert_eq!(
+        archived.get("archived"),
+        Some(&json!(true)),
+        "an archived agent says so: {archived:#}"
+    );
+    assert!(
+        archived.get("preparation_pending").is_none(),
+        "{archived:#}"
+    );
+    assert_eq!(archived["state"], json!("dormant"), "{archived:#}");
+    assert_eq!(rig.status_among_all("walker").await, archived);
+    let answered = rig
+        .ok("meta/status_identity", json!({"identity": "walker"}))
+        .await;
+    assert_eq!(answered.get("archived"), Some(&json!(true)), "{answered:#}");
+    let configured = rig.status(HOST_A).await;
+    assert_eq!(
+        members(&configured),
+        SEATED_STATUS_MEMBERS,
+        "{configured:#}"
+    );
+
+    rig.ok("meta/identity/unarchive", named("unarchive-1"))
+        .await;
+    rig.stands("walker", |standing| {
+        matches!(standing, EntryStanding::Seated(_))
+    })
+    .await;
+    let restored = rig.status("walker").await;
+    assert_eq!(
+        members(&restored),
+        SEATED_STATUS_MEMBERS,
+        "an unarchived agent's status is any seated agent's: {restored:#}"
+    );
+    assert!(
+        rig.asked.lock().unwrap().is_empty(),
+        "no archive, unarchive or status read wakes anybody: {:?}",
+        rig.asked.lock().unwrap()
+    );
+    rig.shutdown().await;
+}
+
+/// An agent that waits for its host lists the operation that is open for
+/// it: its create's, by the id the create answered, on a get and on a list,
+/// and that id reads the create back. An update of the waiting agent leaves
+/// it. Once the host settled the agent the member is absent again, not
+/// empty. The configured agent beside it never has the member, and an agent
+/// that reads the waiting agent is answered no operation id.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_that_waits_lists_its_creates_operation_until_its_settle() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), prepared_policy()).await;
+    let created = rig
+        .create_pending("create-1", json!({"name": "scout", "profile": "worker"}))
+        .await;
+    let operation = created["operation_id"].clone();
+    assert!(operation.is_string(), "{created:#}");
+
+    let scout = rig.get("scout").await;
+    assert_eq!(
+        scout["open_operations"],
+        json!([operation]),
+        "a waiting agent names its create's operation: {scout:#}"
+    );
+    let listed = rig.listed("scout").await;
+    assert_eq!(listed["open_operations"], json!([operation]), "{listed:#}");
+    let read_back = rig
+        .ok(
+            "meta/identity/operation",
+            json!({"operation_id": operation}),
+        )
+        .await;
+    assert_eq!(read_back, created, "the listed id reads the create back");
+
+    // The configured agent beside it, and what an agent reads.
+    for configured in [rig.get(HOST_A).await, rig.listed(HOST_A).await] {
+        assert!(
+            configured.get("open_operations").is_none(),
+            "{configured:#}"
+        );
+    }
+    assert_eq!(
+        rig.open_operations_read_by_an_agent("scout").await,
+        (Vec::new(), Vec::new()),
+        "an agent is answered no operation id"
+    );
+
+    // An update is not the operation the agent waits on.
+    let updated = rig
+        .ok(
+            "meta/identity/update",
+            json!({"request_id": "update-1", "name": "scout",
+                   "expected_spec_digest": scout["spec_digest"],
+                   "set": {"display_name": "Scout"}}),
+        )
+        .await;
+    assert_eq!(updated["outcome"], json!("done"), "{updated:#}");
+    assert_eq!(
+        rig.get("scout").await["open_operations"],
+        json!([operation]),
+        "an update leaves the create open"
+    );
+
+    rig.ok(SETTLE, json!({"request_id": "s-1", "name": "scout"}))
+        .await;
+    for settled in [rig.get("scout").await, rig.listed("scout").await] {
+        assert!(
+            settled.get("open_operations").is_none(),
+            "a settled agent has no open operation, and no empty list of them: {settled:#}"
+        );
+    }
+    assert!(
+        rig.asked.lock().unwrap().is_empty(),
+        "no read woke anybody: {:?}",
+        rig.asked.lock().unwrap()
+    );
+    rig.shutdown().await;
+}
+
+/// An agent a held change names lists that change's operation while the
+/// change is held: on a get and on a list, by the id the held change
+/// answered. The agents the change does not name, created or configured,
+/// have no such member, and an agent that reads the named agent is answered
+/// no operation id. Once the change was carried out, and once a held change
+/// was withdrawn, the member is absent again.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_a_held_change_names_lists_that_changes_operation_while_it_is_held() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), plain_policy()).await;
+    for (request_id, name) in [("create-1", "keeper"), ("create-2", "other")] {
+        let created = rig
+            .ok(
+                "meta/identity/create",
+                json!({"request_id": request_id, "agents": [{"name": name, "profile": "plain"}]}),
+            )
+            .await;
+        assert_eq!(created["outcome"], json!("done"), "{created:#}");
+    }
+    let digest = rig.get("keeper").await["spec_digest"].clone();
+    assert!(
+        rig.get("keeper").await.get("open_operations").is_none(),
+        "nothing is open for an agent no change is held for"
+    );
+
+    let held = rig
+        .ok(
+            "meta/identity/update",
+            json!({"request_id": "held-1", "name": "keeper", "expected_spec_digest": digest,
+                   "set": {"display_name": "Keeper"}}),
+        )
+        .await;
+    assert_eq!(held["outcome"], json!("pending_decision"), "{held:#}");
+    let operation = held["operation_id"].clone();
+    assert!(operation.is_string(), "{held:#}");
+    for keeper in [rig.get("keeper").await, rig.listed("keeper").await] {
+        assert_eq!(
+            keeper["open_operations"],
+            json!([operation]),
+            "the agent a held change names lists it: {keeper:#}"
+        );
+    }
+    for unnamed in [
+        rig.get("other").await,
+        rig.listed("other").await,
+        rig.get(HOST_A).await,
+        rig.listed(HOST_A).await,
+    ] {
+        assert!(unnamed.get("open_operations").is_none(), "{unnamed:#}");
+    }
+    assert_eq!(
+        rig.open_operations_read_by_an_agent("keeper").await,
+        (Vec::new(), Vec::new()),
+        "an agent is answered no operation id"
+    );
+
+    // Carried out: nothing is open any more.
+    rig.approve(held["decision_id"].as_str().expect("a decision id"))
+        .await;
+    let deadline = std::time::Instant::now() + TURN_BOUND;
+    let keeper = loop {
+        let keeper = rig.get("keeper").await;
+        if keeper["display_name"] == json!("Keeper") && keeper.get("open_operations").is_none() {
+            break keeper;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the approved change was not carried out, or stayed open: {keeper:#}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert!(
+        rig.listed("keeper").await.get("open_operations").is_none(),
+        "a change that was carried out is open for nobody"
+    );
+
+    // Withdrawn: nothing is open any more.
+    let held = rig
+        .ok(
+            "meta/identity/update",
+            json!({"request_id": "held-2", "name": "keeper",
+                   "expected_spec_digest": keeper["spec_digest"],
+                   "set": {"display_name": "Keeper Two"}}),
+        )
+        .await;
+    assert_eq!(held["outcome"], json!("pending_decision"), "{held:#}");
+    assert_eq!(
+        rig.get("keeper").await["open_operations"],
+        json!([held["operation_id"]]),
+        "the second held change is listed"
+    );
+    rig.ok("meta/identity/withdraw", json!({"request_id": "held-2"}))
+        .await;
+    for keeper in [rig.get("keeper").await, rig.listed("keeper").await] {
+        assert!(
+            keeper.get("open_operations").is_none(),
+            "a withdrawn change is open for nobody: {keeper:#}"
+        );
+    }
+    rig.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// A create's operation after a removal, and a move that is asked for
+// ---------------------------------------------------------------------------
+
+/// The operation of a create whose agent waited at its create reads the
+/// agent `removed` once the agent has been removed, whether or not it was
+/// settled in between: an agent that waited, was settled, took a delivery
+/// and was removed later reads the same as one removed while it waited.
+/// The create's operation says where the agent stands, and a removed name
+/// keeps nothing that tells the two apart.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_create_whose_agent_waited_reads_removed_after_its_removal_settled_or_not() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), prepared_policy()).await;
+    rig.create_pending("create-1", json!({"name": "scout", "profile": "worker"}))
+        .await;
+    let settled = rig
+        .ok(SETTLE, json!({"request_id": "s-1", "name": "scout"}))
+        .await;
+    assert_eq!(settled["agents"][0]["seat"], json!("seated"), "{settled:#}");
+    let sent = rig
+        .rpc(
+            "meta/send",
+            json!({"identity": "scout", "content": "FIRST-DELIVERY"}),
+        )
+        .await;
+    assert!(sent["error"].is_null(), "{sent:#}");
+    assert!(
+        rig.asked_within("FIRST-DELIVERY", TURN_BOUND).await,
+        "the settled agent ran"
+    );
+    let operation = rig.operation("create-1").await;
+    assert_eq!(
+        operation["agents"][0]["state"],
+        json!("committed"),
+        "{operation:#}"
+    );
+
+    let digest = rig.get("scout").await["spec_digest"].clone();
+    let removed = rig
+        .ok(
+            "meta/identity/remove",
+            json!({"request_id": "remove-1", "name": "scout", "expected_spec_digest": digest}),
+        )
+        .await;
+    assert!(
+        removed["agents"][0]["state"] == json!("retiring")
+            || removed["agents"][0]["state"] == json!("removed"),
+        "{removed:#}"
+    );
+    let deadline = std::time::Instant::now() + TURN_BOUND;
+    loop {
+        let read = rig.rpc("meta/identity/get", json!({"name": "scout"})).await;
+        if read["error"]["data"]["kind"] == json!("identity_unknown") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the agent was not removed: {read:#}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let operation = rig.operation("create-1").await;
+    assert_eq!(operation["outcome"], json!("done"), "{operation:#}");
+    let agent = &operation["agents"][0];
+    assert_eq!(
+        agent["state"],
+        json!("removed"),
+        "the create's operation reads where its agent stands: {operation:#}"
+    );
+    assert!(agent.get("seat").is_none(), "{operation:#}");
+    assert!(agent.get("spec_digest").is_none(), "{operation:#}");
+    rig.shutdown().await;
+}
+
+/// A move into a profile its host prepares is refused when it is asked, also
+/// under a rule that has a person decide a profile change: the refusal is
+/// the one a move is refused with when it is carried out (`unsupported`,
+/// `move_into_prepared_profile`, at `set.profile`), nothing is held, nobody
+/// is asked to decide, and a plan of the move answers the same refusal. A
+/// move out of a prepared profile under the same rule is held like any
+/// change a person decides.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_move_into_a_prepared_profile_is_refused_when_it_is_asked_and_nobody_is_asked() {
+    use meerkat_core::approval::decision::DecisionListFilter;
+
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(
+        temp.path(),
+        json!({
+            "enabled": true,
+            "preparation": {"worker": {"mode": "required"}},
+            "approval": {"rules": [
+                {"change": ["create"], "requester": {"kind": "host"},
+                 "target": {"profile": ["worker", "plain"]}, "outcome": {"kind": "allow"}},
+                {"change": ["profile"], "requester": {"kind": "host"},
+                 "target": {"profile": ["worker", "plain"]},
+                 "outcome": {"kind": "require_approval", "approver": {"id": APPROVERS}}},
+            ]},
+        }),
+    )
+    .await;
+    let held_decisions = || {
+        rig.runtime
+            .durable_decisions()
+            .owner()
+            .count(&DecisionListFilter::default())
+            .expect("the runtime's decisions are counted")
+    };
+    let created = rig
+        .ok(
+            "meta/identity/create",
+            json!({"request_id": "create-walker",
+                   "agents": [{"name": "walker", "profile": "plain"}]}),
+        )
+        .await;
+    assert_eq!(created["outcome"], json!("done"), "{created:#}");
+    let walker = rig.get("walker").await;
+    let move_in = |request_id: &str| {
+        json!({"request_id": request_id, "name": "walker",
+               "expected_spec_digest": walker["spec_digest"], "set": {"profile": "worker"}})
+    };
+
+    let refused = rig
+        .refused("meta/identity/update", move_in("move-in"))
+        .await;
+    assert_eq!(refused["kind"], json!("unsupported"), "{refused:#}");
+    assert_eq!(
+        refused["feature"],
+        json!("move_into_prepared_profile"),
+        "{refused:#}"
+    );
+    assert_eq!(refused["field"], json!("set.profile"), "{refused:#}");
+    assert!(
+        refused["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("Create the agent in that profile")),
+        "the refusal says what to do instead: {refused:#}"
+    );
+    assert_eq!(held_decisions(), 0, "nobody is asked to decide the move");
+    let operation = rig.operation("move-in").await;
+    assert_eq!(
+        operation["outcome"],
+        json!("unknown"),
+        "nothing is held for the move: {operation:#}"
+    );
+    let mut planned = move_in("plan-in");
+    planned["change"] = json!("update");
+    let plan = rig.refused("meta/identity/plan", planned).await;
+    assert_eq!(
+        (plan["kind"].clone(), plan["feature"].clone()),
+        (json!("unsupported"), json!("move_into_prepared_profile")),
+        "a plan of the move says so too: {plan:#}"
+    );
+    let after = rig.get("walker").await;
+    assert_eq!(after["profile"], json!("plain"), "{after:#}");
+    assert_eq!(after["spec_digest"], walker["spec_digest"], "{after:#}");
+
+    // A move out of the prepared profile is a change a person decides.
+    rig.create_pending(
+        "create-ranger",
+        json!({"name": "ranger", "profile": "worker"}),
+    )
+    .await;
+    rig.ok(
+        SETTLE,
+        json!({"request_id": "settle-ranger", "name": "ranger"}),
+    )
+    .await;
+    let digest = rig.get("ranger").await["spec_digest"].clone();
+    let held = rig
+        .ok(
+            "meta/identity/update",
+            json!({"request_id": "move-out", "name": "ranger",
+                   "expected_spec_digest": digest, "set": {"profile": "plain"}}),
+        )
+        .await;
+    assert_eq!(held["outcome"], json!("pending_decision"), "{held:#}");
+    assert_eq!(held_decisions(), 1, "the move out is held for a person");
     rig.shutdown().await;
 }

@@ -3937,6 +3937,104 @@ actions = ["agent.identity.create", "agent.view", "agent.identity.manage"]
     let _ = runtime.shutdown().await;
 }
 
+/// A Console caller reads the open operations it may read, and no other:
+/// the person who asked for an agent that waits for its host reads the
+/// create's operation on the agent, on a get and on a list; another person
+/// who may view the agent reads no operation of it (the member is absent,
+/// as for an agent nothing is open for); an administrator reads it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_console_caller_reads_the_open_operations_it_may_read() {
+    const ROOT: &str = "root@example.org";
+    const ANN: &str = "ann@example.org";
+    const BOB: &str = "bob@example.org";
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, app) = console_under(
+        temp.path(),
+        r#"
+enabled = true
+admins = ["root@example.org"]
+
+[[rules]]
+id = "works"
+actions = ["agent.identity.create", "agent.view", "agent.identity.manage"]
+"#,
+    )
+    .await;
+    let policy = IdentityCreationPolicy::parse(&json!({
+        "enabled": true,
+        "preparation": {"worker": {"mode": "required"}},
+        "approval": {"rules": [{
+            "change": ["create"],
+            "requester": {"kind": "human"},
+            "target": {"profile": ["worker"]},
+            "outcome": {"kind": "allow"},
+        }]},
+    }))
+    .expect("the policy parses")
+    .expect("the policy is enabled");
+    assert!(runtime.attach_identity_policy(Arc::new(policy), IdentityFamilyOptions::new()));
+
+    let made = console_rpc(
+        &app,
+        Some(ANN),
+        "meta/identity/create",
+        json!({"request_id": "ann-1", "agents": [{"name": "scout", "profile": "worker"}]}),
+    )
+    .await;
+    let made = console_ok(&made).clone();
+    assert_eq!(made["outcome"], json!("pending_preparation"), "{made:#}");
+    let operation = made["operation_id"].clone();
+    assert!(operation.is_string(), "{made:#}");
+
+    // What each caller reads of the waiting agent, by a get and by a list.
+    let read = |subject: &'static str| {
+        let app = app.clone();
+        async move {
+            let got = console_rpc(
+                &app,
+                Some(subject),
+                "meta/identity/get",
+                json!({"name": "scout"}),
+            )
+            .await;
+            let got = console_ok(&got).clone();
+            let listed = console_rpc(&app, Some(subject), "meta/identity/list", json!({})).await;
+            let listed = console_ok(&listed)["agents"]
+                .as_array()
+                .and_then(|agents| agents.iter().find(|agent| agent["name"] == json!("scout")))
+                .unwrap_or_else(|| panic!("{subject} is listed the agent: {listed:#}"))
+                .clone();
+            assert_eq!(
+                got["readiness"],
+                json!("preparation_pending"),
+                "{subject}: {got:#}"
+            );
+            [got, listed]
+        }
+    };
+    for agent in read(ANN).await {
+        assert_eq!(
+            agent["open_operations"],
+            json!([operation]),
+            "the person who asked reads their own operation: {agent:#}"
+        );
+    }
+    for agent in read(ROOT).await {
+        assert_eq!(
+            agent["open_operations"],
+            json!([operation]),
+            "an administrator reads any operation: {agent:#}"
+        );
+    }
+    for agent in read(BOB).await {
+        assert!(
+            agent.get("open_operations").is_none(),
+            "another person reads no operation they did not ask for: {agent:#}"
+        );
+    }
+    let _ = runtime.shutdown().await;
+}
+
 /// A Console caller that is no verified person withdraws nothing and holds
 /// nothing: on a Console that signs nobody in, a held change stays held
 /// when such a caller asks to withdraw it, and the mob's changes are not

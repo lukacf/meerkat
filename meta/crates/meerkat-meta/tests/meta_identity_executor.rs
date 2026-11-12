@@ -1509,3 +1509,77 @@ async fn a_launch_without_the_policy_changes_nothing_observable() {
     }
     rig.shutdown().await;
 }
+
+/// The seam refuses a move into a profile its host prepares whatever let
+/// the request through: an update that moves a seated agent into a profile
+/// the commit names a preparation for is refused `unsupported`
+/// (`move_into_prepared_profile`, at `set.profile`) before Core is asked,
+/// and the agent's record is unchanged. A change that was held under one
+/// launch and is carried out under another reaches the seam with no gate
+/// in between.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_seam_refuses_a_move_into_a_prepared_profile_whatever_let_it_through() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), &fresh_mob_id()).await;
+    let digest = rig.create(CREATED).await;
+    let policy = IdentityCreationPolicy::parse(&json!({
+        "enabled": true,
+        "preparation": {"prepared": {"mode": "required"}},
+        "approval": {"rules": [{"change": ["create", "profile"], "outcome": {"kind": "allow"}}]},
+    }))
+    .expect("the policy parses")
+    .expect("the policy is enabled");
+    let facts = RequesterFacts::host(SURFACE);
+    let profiles = BTreeSet::from(["worker".to_owned(), "prepared".to_owned()]);
+    let peers = BTreeMap::new();
+    let update: UpdateIdentitySpec = serde_json::from_value(json!({
+        "identity": CREATED,
+        "expected_spec_digest": digest.as_str(),
+        "set": {"profile": "prepared"},
+    }))
+    .expect("an update");
+    let moved = normalize_update(
+        &policy,
+        &RequestContext {
+            requester: &facts,
+            profiles: &profiles,
+            peers: &peers,
+        },
+        RequestEnvelope::default(),
+        &entry(CREATED, &digest),
+        &update,
+    )
+    .expect("the move is allowed by the rules");
+    let mob = rig.mob();
+    let requester = host();
+    let operation_id =
+        OperationId::for_request(&requester.recorded(), "move-in").expect("a request id");
+    let consent = consent_of_plan(&moved.plan).expect("the policy allows the change");
+    let committed = CoreChangeExecutor::new()
+        .commit(
+            ChangeCommit::new(&mob, &operation_id, &requester, consent, &moved.request)
+                .with_preparations(policy.preparations()),
+        )
+        .await
+        .expect("the seam answers a typed outcome");
+    assert_eq!(
+        committed.outcome.refusal().map(IdentityRefusal::to_data),
+        Some(
+            json!({"kind": "unsupported", "feature": "move_into_prepared_profile",
+                    "field": "set.profile"})
+        ),
+        "{committed:?}"
+    );
+    let record = match mob.identity_record(&id(CREATED)).await {
+        Ok(Some(meerkat_mob::CreatedIdentityObservation::Created(record))) => record,
+        other => panic!("the agent's record is read: {other:?}"),
+    };
+    assert_eq!(record.revision, 1, "nothing was written: {record:?}");
+    assert_eq!(
+        record.spec.as_ref().map(|spec| spec.profile.as_str()),
+        Some("worker"),
+        "{record:?}"
+    );
+    assert!(rig.seated(CREATED), "{:?}", rig.standing(CREATED));
+    rig.shutdown().await;
+}

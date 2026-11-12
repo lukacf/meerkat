@@ -1143,6 +1143,12 @@ class IdentityStatus:
     #: :attr:`session_id`; ``None`` when Core holds no binding for the
     #: identity.
     member_id: str | None = None
+    #: ``True`` when the host's roster lists this name while the agent is
+    #: served from its record (an adopted agent whose roster still lists
+    #: it, for one): the roster's entry for the name is not applied, and
+    #: a change of the agent is a change of its record. Written by the
+    #: gateway only when it is so.
+    roster_listing_superseded: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -1178,6 +1184,8 @@ class IdentityStatus:
             result["delivery_scope"] = self.delivery_scope.to_dict()
         if self.delivery_scope_unavailable is not None:
             result["delivery_scope_unavailable"] = dict(self.delivery_scope_unavailable)
+        if self.roster_listing_superseded:
+            result["roster_listing_superseded"] = True
         return result
 
     @classmethod
@@ -1221,6 +1229,7 @@ class IdentityStatus:
             replaced_session=_view_part(data, "replaced_session", ReplacedSession),
             delivery_scope=delivery_scope,
             delivery_scope_unavailable=delivery_scope_unavailable,
+            roster_listing_superseded=data.get("roster_listing_superseded") is True,
         )
 
 

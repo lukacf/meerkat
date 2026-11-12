@@ -9,9 +9,9 @@ declares, and every agent is read and changed through the same calls:
 method.
 
 Writes: ``create`` (1 to 256 agents, all or nothing), ``update``,
-``archive``, ``unarchive``, ``remove``, ``adopt``, ``withdraw`` and
-``changes_hold``. Reads: ``list``, ``get``, ``operation``, ``directory`` and
-``plan``. A read never wakes an agent.
+``archive``, ``unarchive``, ``remove``, ``adopt``, ``settle_preparation``,
+``withdraw`` and ``changes_hold``. Reads: ``list``, ``get``, ``operation``,
+``directory`` and ``plan``. A read never wakes an agent.
 
 Requests are spelled once, here, as every surface writes them: a create
 names ``agents: [{name, profile, ...}]`` (:class:`AgentSpec`), a change of
@@ -25,7 +25,8 @@ A change answers one typed outcome:
   answer, not an error: nothing but the decision is written, and the same
   ``request_id`` and request return the same state. Read the operation
   later with ``identities.operation(operation_id=outcome.operation_id)``;
-- :class:`IdentityPendingPreparation`: committed, not usable yet;
+- :class:`IdentityPendingPreparation`: committed, not usable until the
+  host has prepared the agent and settled it (``settle_preparation``);
 - a refusal raises :class:`~meerkat_meta.errors.IdentityRefusedError`, the
   one error of the family, with the typed ``kind``, ``field`` and
   ``detail``. Only ``operation`` answers a refusal as a value
@@ -40,8 +41,10 @@ change, and each set is checked against the gateway's own. A gateway newer
 than this SDK may still send one this SDK does not list: it reaches you as
 its token, never as an exception. Advisory values (an agent's ``readiness``,
 a change's ``state``, a provenance's ``entered`` and consent, a directory
-verdict, a plan's ``outcome`` and ``change``) are open: a value this SDK
-does not know is kept as the gateway sent it.
+verdict, a plan's ``outcome`` and ``change``, an agent's ``addressability``
+and ``runtime_mode_override`` as read back, the ``effect`` on an agent's
+schedules) are open: a value this SDK does not know is kept as the gateway
+sent it.
 """
 
 from __future__ import annotations
@@ -84,6 +87,8 @@ __all__ = [
     "IdentityRefused",
     "IdentityWithdrawn",
     "InstructionOutcome",
+    "ScheduleRef",
+    "SchedulesFollowed",
     "SourceEvidence",
     "UpdateAgent",
     "identity_outcome_from_dict",
@@ -184,7 +189,12 @@ class AgentSpec:
     ``instructions``, its standing brief; ``context``, descriptive and never
     authority; ``labels``; ``first_message``, its first turn, run once (text,
     or a list of content blocks); ``peers``, the agents it can message, by
-    name (agents of the mob, or other agents of the same create).
+    name (agents of the mob, or other agents of the same create);
+    ``addressability``, who reaches it (``addressable``, which leaving it
+    out means, or ``internal_only``); ``runtime_mode_override``, how it runs
+    (``autonomous_host`` or ``turn_driven``; left out, as its profile says).
+    The last two are the members and values of a roster row, with the same
+    meaning.
     """
 
     name: str
@@ -195,6 +205,8 @@ class AgentSpec:
     labels: Mapping[str, str] = dataclasses.field(default_factory=dict)
     first_message: str | Sequence[Mapping[str, Any]] | None = None
     peers: Sequence[str] = ()
+    addressability: str | None = None
+    runtime_mode_override: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         agent: dict[str, Any] = {"name": self.name, "profile": self.profile}
@@ -214,6 +226,10 @@ class AgentSpec:
             )
         if self.peers:
             agent["peers"] = list(self.peers)
+        if self.addressability is not None:
+            agent["addressability"] = self.addressability
+        if self.runtime_mode_override is not None:
+            agent["runtime_mode_override"] = self.runtime_mode_override
         return agent
 
 
@@ -247,7 +263,10 @@ class AgentSet:
     ``instructions`` and ``context`` are replaced whole. ``labels`` sets each
     key it names and keeps the agent's other labels; ``labels_remove`` names
     keys to remove. ``profile`` moves the agent to that profile's model and
-    tools, on the same conversation.
+    tools, on the same conversation. ``addressability`` and
+    ``runtime_mode_override`` take the values they take on a create
+    (:class:`AgentSpec`); an update sets a runtime mode and cannot return
+    the agent to its profile's.
     """
 
     display_name: str | None = None
@@ -256,6 +275,8 @@ class AgentSet:
     labels: Mapping[str, str] | None = None
     labels_remove: Sequence[str] = ()
     profile: str | None = None
+    addressability: str | None = None
+    runtime_mode_override: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         changes: dict[str, Any] = {}
@@ -271,6 +292,10 @@ class AgentSet:
             changes["labels_remove"] = list(self.labels_remove)
         if self.profile is not None:
             changes["profile"] = self.profile
+        if self.addressability is not None:
+            changes["addressability"] = self.addressability
+        if self.runtime_mode_override is not None:
+            changes["runtime_mode_override"] = self.runtime_mode_override
         return changes
 
 
@@ -371,6 +396,12 @@ def _plan_params(change: str, request: IdentityChangeRequest) -> dict[str, Any]:
     return params
 
 
+def _settle_preparation_params(name: str, request_id: str) -> dict[str, Any]:
+    """The params of a settle: the agent and the caller's id of the
+    operation, and nothing else (the gateway accepts no other member)."""
+    return {"name": name, "request_id": _request_id(request_id)}
+
+
 # ---------------------------------------------------------------------------
 # Answers
 # ---------------------------------------------------------------------------
@@ -402,6 +433,66 @@ def _strings(raw: Any) -> tuple[str, ...]:
     if not isinstance(raw, list):
         return ()
     return tuple(item for item in raw if isinstance(item, str))
+
+
+@dataclass(frozen=True)
+class ScheduleRef:
+    """One schedule, as an answer names it: its id, and its name when it
+    has one."""
+
+    schedule_id: str
+    name: str | None = None
+
+    @classmethod
+    def from_dict(cls, raw: Any) -> ScheduleRef:
+        what = "a schedule"
+        data = _object(raw, what)
+        return cls(
+            schedule_id=_required(data, "schedule_id", str, what),
+            name=_optional(data, "name", str),
+        )
+
+
+@dataclass(frozen=True)
+class SchedulesFollowed:
+    """The schedules a change of an agent took with it or, in a plan, would
+    take with it.
+
+    The schedules that target an agent follow three changes, so that no
+    schedule keeps firing at an agent that takes no delivery: an archive
+    pauses its Active schedules, an unarchive resumes exactly the schedules
+    that were paused that way (one somebody paused by name stays paused),
+    and a removal ends every one. ``effect`` says which (advisory; today
+    ``paused``, ``resumed``, ``ended``), ``count`` how many and
+    ``schedules`` which. ``incomplete`` is ``True`` when a schedule could
+    not be read or changed: the list is then what was done so far, and the
+    same request asked again follows the rest.
+    """
+
+    effect: str
+    count: int
+    schedules: tuple[ScheduleRef, ...] = ()
+    incomplete: bool = False
+
+    @classmethod
+    def from_dict(cls, raw: Any) -> SchedulesFollowed:
+        what = "an agent's schedules"
+        data = _object(raw, what)
+        schedules = data.get("schedules")
+        return cls(
+            effect=_required(data, "effect", str, what),
+            count=_required(data, "count", int, what),
+            schedules=tuple(
+                ScheduleRef.from_dict(schedule)
+                for schedule in (schedules if isinstance(schedules, list) else [])
+            ),
+            incomplete=data.get("incomplete") is True,
+        )
+
+
+def _schedules(data: Mapping[str, Any]) -> SchedulesFollowed | None:
+    schedules = data.get("schedules")
+    return SchedulesFollowed.from_dict(schedules) if schedules is not None else None
 
 
 @dataclass(frozen=True)
@@ -445,11 +536,18 @@ class AgentOutcome:
     :data:`AGENT_SEATS`: ``owed`` means the agent is committed and durable
     and its first message did not start; it is seated without a restart at
     its next delivery. ``instructions`` is on an update's outcome only.
+    ``schedules`` says what became of the schedules that target the agent
+    (:class:`SchedulesFollowed`): it is on the first answer of an archive,
+    an unarchive and a removal, on a launch whose host gives the family its
+    schedules (the stdio gateway does).
 
     ``seat`` and ``session_id`` say how the agent stands when the outcome is
     answered: a replay of the request, and a later ``operation`` read,
     answer today's session, and no ``seat`` once the agent is neither seated
-    nor owed its seat (it was archived or removed since).
+    nor owed its seat (it was archived or removed since). A replay and an
+    ``operation`` read state no ``schedules`` either, so do not compare a
+    retry's answer whole with the first one: the ``operation_id`` and each
+    agent's ``state`` and ``spec_digest`` are what stays.
     """
 
     name: str
@@ -459,6 +557,7 @@ class AgentOutcome:
     session_id: str | None = None
     seat: str | None = None
     instructions: InstructionOutcome | None = None
+    schedules: SchedulesFollowed | None = None
 
     @classmethod
     def from_dict(cls, raw: Any) -> AgentOutcome:
@@ -476,6 +575,7 @@ class AgentOutcome:
                 if instructions is not None
                 else None
             ),
+            schedules=_schedules(data),
         )
 
 
@@ -517,9 +617,16 @@ class IdentityPendingDecision:
 @dataclass(frozen=True)
 class IdentityPendingPreparation:
     """The change committed, and at least one of its agents is not usable
-    yet: something is still being prepared for it. No launch of this release
-    answers it: a policy that asks for host preparation is refused at
-    init."""
+    yet: the host prepares what the agent needs first.
+
+    A create answers it for an agent of a profile whose preparation the
+    launch's policy names ``required``. Such an agent reads
+    ``readiness`` ``preparation_pending``, takes no delivery (a retryable
+    refusal), runs nothing and wakes nothing. Prepare what it needs, then
+    call ``identities.settle_preparation(name, request_id=...)``: the agent
+    is seated dormant and its first message, if it has one, runs once. A
+    host that cannot prepare an agent leaves it pending, or removes it.
+    """
 
     operation_id: str
     agents: tuple[AgentOutcome, ...] = ()
@@ -653,6 +760,8 @@ def _summary_members(data: Mapping[str, Any], what: str) -> dict[str, Any]:
             AgentProvenance.from_dict(provenance) if provenance is not None else None
         ),
         "open_operations": _strings(data.get("open_operations")),
+        "addressability": _optional(data, "addressability", str),
+        "runtime_mode_override": _optional(data, "runtime_mode_override", str),
     }
 
 
@@ -665,7 +774,12 @@ class AgentSummary:
     ``readiness`` says where its member stands (advisory; today ``dormant``,
     ``live``, ``broken``, ``preparation_pending``, ``retiring``,
     ``unseated``). ``open_operations`` are the operations open for it: held
-    decisions and pending preparation.
+    decisions and pending preparation. ``addressability`` and
+    ``runtime_mode_override`` read back what a create or an update set,
+    each only when it is not the default: ``addressability`` is
+    ``internal_only`` or ``None`` (the agent is addressable), and
+    ``runtime_mode_override`` is ``None`` for an agent that runs as its
+    profile says.
     """
 
     name: str
@@ -677,6 +791,8 @@ class AgentSummary:
     spec_revision: int | None = None
     provenance: AgentProvenance | None = None
     open_operations: tuple[str, ...] = ()
+    addressability: str | None = None
+    runtime_mode_override: str | None = None
 
     @classmethod
     def from_dict(cls, raw: Any) -> AgentSummary:
@@ -822,7 +938,10 @@ class IdentityChangePlan:
     ``change`` is the change class whose rule decided (advisory).
     ``approver_id`` is who decides, when the outcome names one.
     ``subject_digest`` is the digest of ``rendering``, the text a decider
-    would be shown, whole: it is what a decision would bind.
+    would be shown, whole: it is what a decision would bind. ``schedules``
+    is on the plan of an archive, an unarchive and a removal: the schedules
+    the change would take with it (:class:`SchedulesFollowed`), as they are
+    when the plan is made; it is no part of the rendering.
     """
 
     outcome: str
@@ -832,6 +951,7 @@ class IdentityChangePlan:
     subject_digest: str
     rendering: str
     approver_id: str | None = None
+    schedules: SchedulesFollowed | None = None
 
     @classmethod
     def from_dict(cls, raw: Any) -> IdentityChangePlan:
@@ -845,6 +965,7 @@ class IdentityChangePlan:
             subject_digest=_required(data, "subject_digest", str, what),
             rendering=_required(data, "rendering", str, what),
             approver_id=_optional(data, "approver_id", str),
+            schedules=_schedules(data),
         )
 
 

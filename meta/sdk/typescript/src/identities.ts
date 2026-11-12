@@ -40,8 +40,10 @@
  * newer than this SDK may still send one this SDK does not list: it reaches
  * you as its token, never as a throw. Advisory values (an agent's
  * `readiness`, a change's `state`, a provenance's `entered` and consent, a
- * directory verdict, a plan's `outcome` and `change`) are open: a value this
- * SDK does not know is kept as the gateway sent it.
+ * directory verdict, a plan's `outcome` and `change`, an agent's
+ * `addressability` and `runtimeModeOverride` as read back, the `effect` on an
+ * agent's schedules) are open: a value this SDK does not know is kept as the
+ * gateway sent it.
  */
 // errors.ts imports nothing, so this runtime import adds no cycle.
 import { ContractMismatchError, parseIdentityRefusal, type IdentityRefusal } from "./errors.js";
@@ -77,6 +79,10 @@ export type InstructionNextSessionReason = (typeof INSTRUCTION_NEXT_SESSION_REAS
 /** Whether the agent a create committed is seated, a closed vocabulary. */
 export const AGENT_SEATS = ["seated", "owed"] as const;
 export type AgentSeat = (typeof AGENT_SEATS)[number];
+/** Who reaches an agent, as a create and an update set it. */
+export type AgentAddressability = "addressable" | "internal_only";
+/** How an agent runs, as a create and an update set it. */
+export type AgentRuntimeMode = "autonomous_host" | "turn_driven";
 /** The changes of the family, as `plan` names them. */
 export const IDENTITY_CHANGES = [
   "create",
@@ -123,7 +129,11 @@ export interface IdentityChangeOptions {
  * standing brief; `context`, descriptive and never authority; `labels`;
  * `firstMessage`, its first turn, run once (text, or a list of content
  * blocks); `peers`, the agents it can message, by name (agents of the mob,
- * or other agents of the same create).
+ * or other agents of the same create); `addressability`, who reaches it
+ * (`addressable`, which leaving it out means, or `internal_only`);
+ * `runtimeModeOverride`, how it runs (`autonomous_host` or `turn_driven`;
+ * left out, as its profile says). The last two are the members and values
+ * of a roster row, with the same meaning.
  */
 export interface AgentSpec {
   name: string;
@@ -134,6 +144,8 @@ export interface AgentSpec {
   labels?: Readonly<Record<string, string>>;
   firstMessage?: string | readonly Readonly<Record<string, unknown>>[];
   peers?: readonly string[];
+  addressability?: AgentAddressability;
+  runtimeModeOverride?: AgentRuntimeMode;
 }
 
 /** A create of 1 to 256 agents, all or nothing. They may name each other as peers. */
@@ -146,7 +158,9 @@ export interface CreateAgents extends IdentityChangeOptions {
  * `context` are replaced whole. `labels` sets each key it names and keeps
  * the agent's other labels; `labelsRemove` names keys to remove. `profile`
  * moves the agent to that profile's model and tools, on the same
- * conversation.
+ * conversation. `addressability` and `runtimeModeOverride` take the values
+ * they take on a create ({@link AgentSpec}); an update sets a runtime mode
+ * and cannot return the agent to its profile's.
  */
 export interface AgentSet {
   displayName?: string;
@@ -155,6 +169,8 @@ export interface AgentSet {
   labels?: Readonly<Record<string, string>>;
   labelsRemove?: readonly string[];
   profile?: string;
+  addressability?: AgentAddressability;
+  runtimeModeOverride?: AgentRuntimeMode;
 }
 
 /**
@@ -251,6 +267,10 @@ function agentSpecParams(agent: AgentSpec): Record<string, unknown> {
         : agent.firstMessage.map((block) => ({ ...block }));
   }
   if (agent.peers !== undefined && agent.peers.length > 0) params.peers = [...agent.peers];
+  if (agent.addressability !== undefined) params.addressability = agent.addressability;
+  if (agent.runtimeModeOverride !== undefined) {
+    params.runtime_mode_override = agent.runtimeModeOverride;
+  }
   return params;
 }
 
@@ -275,6 +295,10 @@ function agentSetParams(set: AgentSet): Record<string, unknown> {
     params.labels_remove = [...set.labelsRemove];
   }
   if (set.profile !== undefined) params.profile = set.profile;
+  if (set.addressability !== undefined) params.addressability = set.addressability;
+  if (set.runtimeModeOverride !== undefined) {
+    params.runtime_mode_override = set.runtimeModeOverride;
+  }
   return params;
 }
 
@@ -305,6 +329,18 @@ export function agentRefParams(request: AgentRef): Record<string, unknown> {
     },
     request,
   );
+}
+
+/**
+ * @internal The params of `meta/identity/settle_preparation`: the agent and
+ * the caller's id of the operation, and nothing else (the gateway accepts no
+ * other member).
+ */
+export function settlePreparationParams(
+  name: string,
+  options: { requestId: string },
+): Record<string, unknown> {
+  return { name, request_id: requestId(options.requestId) };
 }
 
 /** @internal The params that name one operation. */
@@ -373,6 +409,51 @@ function strings(raw: unknown): string[] {
   return Array.isArray(raw) ? raw.filter((item): item is string => typeof item === "string") : [];
 }
 
+/** One schedule, as an answer names it: its id, and its name when it has one. */
+export interface ScheduleRef {
+  readonly scheduleId: string;
+  readonly name: string | null;
+}
+
+/**
+ * The schedules a change of an agent took with it or, in a plan, would take
+ * with it.
+ *
+ * The schedules that target an agent follow three changes, so that no
+ * schedule keeps firing at an agent that takes no delivery: an archive
+ * pauses its Active schedules, an unarchive resumes exactly the schedules
+ * that were paused that way (one somebody paused by name stays paused), and
+ * a removal ends every one. `effect` says which (advisory; today `paused`,
+ * `resumed`, `ended`), `count` how many and `schedules` which. `incomplete`
+ * is `true` when a schedule could not be read or changed: the list is then
+ * what was done so far, and the same request asked again follows the rest.
+ */
+export interface SchedulesFollowed {
+  readonly effect: string;
+  readonly count: number;
+  readonly schedules: readonly ScheduleRef[];
+  readonly incomplete: boolean;
+}
+
+function parseSchedulesFollowed(data: Record<string, unknown>): SchedulesFollowed | null {
+  if (data.schedules === undefined || data.schedules === null) return null;
+  const what = "an agent's schedules";
+  const followed = object(data.schedules, what);
+  const schedules = Array.isArray(followed.schedules) ? followed.schedules : [];
+  return {
+    effect: text(followed, "effect", what),
+    count: integer(followed, "count", what),
+    schedules: schedules.map((entry) => {
+      const schedule = object(entry, "a schedule");
+      return {
+        scheduleId: text(schedule, "schedule_id", "a schedule"),
+        name: optionalText(schedule, "name"),
+      };
+    }),
+    incomplete: followed.incomplete === true,
+  };
+}
+
 /**
  * What became of an update's instructions change.
  *
@@ -402,12 +483,18 @@ export interface InstructionOutcome {
  * `seat` is on a create's outcome only, one of {@link AGENT_SEATS}: `owed`
  * means the agent is committed and durable and its first message did not
  * start; it is seated without a restart at its next delivery.
- * `instructions` is on an update's outcome only.
+ * `instructions` is on an update's outcome only. `schedules` says what
+ * became of the schedules that target the agent ({@link SchedulesFollowed}):
+ * it is on the first answer of an archive, an unarchive and a removal, on a
+ * launch whose host gives the family its schedules (the stdio gateway does).
  *
  * `seat` and `sessionId` say how the agent stands when the outcome is
  * answered: a replay of the request, and a later `operation` read, answer
  * today's session, and no `seat` once the agent is neither seated nor owed
- * its seat (it was archived or removed since).
+ * its seat (it was archived or removed since). A replay and an `operation`
+ * read state no `schedules` either, so do not compare a retry's answer whole
+ * with the first one: the `operationId` and each agent's `state` and
+ * `specDigest` are what stays.
  */
 export interface AgentOutcome {
   readonly name: string;
@@ -417,6 +504,7 @@ export interface AgentOutcome {
   readonly sessionId: string | null;
   readonly seat: AgentSeat | (string & {}) | null;
   readonly instructions: InstructionOutcome | null;
+  readonly schedules: SchedulesFollowed | null;
 }
 
 function parseAgentOutcome(raw: unknown): AgentOutcome {
@@ -438,6 +526,7 @@ function parseAgentOutcome(raw: unknown): AgentOutcome {
     sessionId: optionalText(data, "session_id"),
     seat: optionalText(data, "seat"),
     instructions,
+    schedules: parseSchedulesFollowed(data),
   };
 }
 
@@ -471,8 +560,15 @@ export interface IdentityPendingDecision {
 
 /**
  * The change committed, and at least one of its agents is not usable yet:
- * something is still being prepared for it. No launch of this release
- * answers it: a policy that asks for host preparation is refused at init.
+ * the host prepares what the agent needs first.
+ *
+ * A create answers it for an agent of a profile whose preparation the
+ * launch's policy names `required`. Such an agent reads `readiness`
+ * `preparation_pending`, takes no delivery (a retryable refusal), runs
+ * nothing and wakes nothing. Prepare what it needs, then call
+ * `identities.settlePreparation(name, { requestId })`: the agent is seated
+ * dormant and its first message, if it has one, runs once. A host that
+ * cannot prepare an agent leaves it pending, or removes it.
  */
 export interface IdentityPendingPreparation {
   readonly outcome: "pending_preparation";
@@ -617,6 +713,11 @@ function parseAgentProvenance(raw: unknown): AgentProvenance {
  * says where its member stands (advisory; today `dormant`, `live`, `broken`,
  * `preparation_pending`, `retiring`, `unseated`). `openOperations` are the
  * operations open for it: held decisions and pending preparation.
+ * `addressability` and `runtimeModeOverride` read back what a create or an
+ * update set, each only when it is not the default: `addressability` is
+ * `internal_only` or `null` (the agent is addressable), and
+ * `runtimeModeOverride` is `null` for an agent that runs as its profile
+ * says.
  */
 export interface AgentSummary {
   readonly name: string;
@@ -628,6 +729,8 @@ export interface AgentSummary {
   readonly specRevision: number | null;
   readonly provenance: AgentProvenance | null;
   readonly openOperations: readonly string[];
+  readonly addressability: AgentAddressability | (string & {}) | null;
+  readonly runtimeModeOverride: AgentRuntimeMode | (string & {}) | null;
 }
 
 function parseAgentSummaryOf(data: Record<string, unknown>, what: string): AgentSummary {
@@ -647,6 +750,8 @@ function parseAgentSummaryOf(data: Record<string, unknown>, what: string): Agent
         ? parseAgentProvenance(data.provenance)
         : null,
     openOperations: strings(data.open_operations),
+    addressability: optionalText(data, "addressability"),
+    runtimeModeOverride: optionalText(data, "runtime_mode_override"),
   };
 }
 
@@ -783,7 +888,10 @@ export function parseAgentDirectoryPage(raw: unknown): AgentDirectoryPage {
  * is the change class whose rule decided (advisory). `approverId` is who
  * decides, when the outcome names one. `subjectDigest` is the digest of
  * `rendering`, the text a decider would be shown, whole: it is what a
- * decision would bind.
+ * decision would bind. `schedules` is on the plan of an archive, an
+ * unarchive and a removal: the schedules the change would take with it
+ * ({@link SchedulesFollowed}), as they are when the plan is made; it is no
+ * part of the rendering.
  */
 export interface IdentityChangePlan {
   readonly outcome: string;
@@ -793,6 +901,7 @@ export interface IdentityChangePlan {
   readonly requestDigest: string;
   readonly subjectDigest: string;
   readonly rendering: string;
+  readonly schedules: SchedulesFollowed | null;
 }
 
 /** @internal */
@@ -807,6 +916,7 @@ export function parseIdentityChangePlan(raw: unknown): IdentityChangePlan {
     requestDigest: text(data, "request_digest", what),
     subjectDigest: text(data, "subject_digest", what),
     rendering: text(data, "rendering", what),
+    schedules: parseSchedulesFollowed(data),
   };
 }
 

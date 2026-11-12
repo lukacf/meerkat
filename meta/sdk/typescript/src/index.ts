@@ -96,6 +96,7 @@ export {
   parseIdentityOutcome,
 } from "./identities.js";
 export type {
+  AgentAddressability,
   AgentChangeOptions,
   AgentDirectoryPage,
   AgentOutcome,
@@ -103,6 +104,7 @@ export type {
   AgentProvenance,
   AgentRecord,
   AgentRef,
+  AgentRuntimeMode,
   AgentSeat,
   AgentSet,
   AgentSpec,
@@ -129,6 +131,8 @@ export type {
   InstructionOutcomeKind,
   ListAgentsOptions,
   OperationRef,
+  ScheduleRef,
+  SchedulesFollowed,
   SourceEvidence,
   UpdateAgent,
   UpdateAgentOptions,

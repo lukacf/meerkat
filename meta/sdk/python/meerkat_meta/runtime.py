@@ -114,6 +114,7 @@ from .identities import (
     UpdateAgent,
     _operation_ref,
     _plan_params,
+    _settle_preparation_params,
     identity_outcome_from_dict,
 )
 from .identity_first_models import (
@@ -735,7 +736,8 @@ class IdentitiesHandle:
     A change returns :class:`~meerkat_meta.identities.IdentityDone`,
     :class:`~meerkat_meta.identities.IdentityPendingDecision` (a person must
     decide: a normal answer, read it later with :meth:`operation`) or
-    :class:`~meerkat_meta.identities.IdentityPendingPreparation`. Every
+    :class:`~meerkat_meta.identities.IdentityPendingPreparation` (the host
+    prepares the agent, then :meth:`settle_preparation`). Every
     refusal of every call raises
     :class:`~meerkat_meta.errors.IdentityRefusedError` with the typed
     ``kind``, ``field`` and ``detail``; nothing of a refused change was
@@ -861,8 +863,11 @@ class IdentitiesHandle:
         source_evidence: SourceEvidence | None = None,
     ) -> IdentityChangeResult:
         """Stop a long-term agent and keep it: its name, record,
-        conversation and memory stay, messages to it are refused, and
-        :meth:`unarchive` brings it back."""
+        conversation and memory stay (the agent's last conversation is
+        harvested as for any agent that leaves), messages to it are
+        refused, and :meth:`unarchive` brings it back. The schedules that
+        target it are paused with it: the first answer's agent says which
+        (``schedules``); a replay states none."""
         return await self._change_one(
             "archive", name, expected_spec_digest, request_id, proposer, source_evidence
         )
@@ -878,7 +883,9 @@ class IdentitiesHandle:
     ) -> IdentityChangeResult:
         """Bring an archived agent back, on its archived conversation and
         its current instructions. Refused ``not_archived`` for an agent that
-        is not archived."""
+        is not archived. The schedules its archive paused are resumed (the
+        first answer's agent says which, ``schedules``); a schedule somebody
+        paused by name stays paused."""
         return await self._change_one(
             "unarchive", name, expected_spec_digest, request_id, proposer, source_evidence
         )
@@ -893,8 +900,11 @@ class IdentitiesHandle:
         source_evidence: SourceEvidence | None = None,
     ) -> IdentityChangeResult:
         """Remove a long-term agent for good. Its name can never be used
-        again; its conversation and memory are kept and no other agent can
-        reach them. Use :meth:`archive` when it may be needed later."""
+        again; its conversation and memory are kept (the agent's last
+        conversation is harvested as for any agent that leaves) and no
+        other agent can reach them. Every schedule that targets it is ended
+        (the first answer's agent says which, ``schedules``). Use
+        :meth:`archive` when it may be needed later."""
         return await self._change_one(
             "remove", name, expected_spec_digest, request_id, proposer, source_evidence
         )
@@ -923,6 +933,35 @@ class IdentitiesHandle:
         """
         return await self._change_one(
             "adopt", name, expected_spec_digest, request_id, proposer, source_evidence
+        )
+
+    async def settle_preparation(
+        self, name: str, *, request_id: str
+    ) -> IdentityChangeResult:
+        """Say that the host has prepared an agent that awaited it.
+
+        A create of an agent of a profile whose preparation the launch's
+        policy names ``required`` answers ``pending_preparation``: the
+        agent reads ``readiness`` ``preparation_pending``, takes no
+        delivery and runs nothing. Prepare what it needs, then settle it:
+        the agent is seated dormant and its first message, if it has one,
+        runs once. The outcome's agent carries its ``seat``: ``owed`` when
+        its seat did not start (it is seated without a restart when the
+        mob drives its owed seats again). The same ``request_id`` and
+        ``name`` answer the same result and write nothing.
+
+        Only the host's operator settles a preparation. Refused
+        ``preparation_not_pending`` for an agent that awaits none (seated,
+        archived, settled before), ``identity_unknown`` for a name no agent
+        holds, ``owner_read_only`` for an agent the host's configuration
+        declares with a preparation (its declaration settles it), and
+        ``change_denied`` on a launch without an enabled policy. A host
+        that cannot prepare an agent leaves it pending or removes it
+        (:meth:`remove`).
+        """
+        return await self._change(
+            "meta/identity/settle_preparation",
+            _settle_preparation_params(name, request_id),
         )
 
     async def withdraw(

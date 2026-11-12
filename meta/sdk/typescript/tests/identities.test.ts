@@ -436,6 +436,8 @@ describe("identity family: typed answers", () => {
         consentForm: "allowed",
       },
       openOperations: [OPERATION_ID],
+      addressability: null,
+      runtimeModeOverride: null,
       instructions: ["Find sources."],
       context: { team: "research" },
       labels: { area: "research" },
@@ -455,6 +457,8 @@ describe("identity family: typed answers", () => {
           specRevision: null,
           provenance: null,
           openOperations: [],
+          addressability: null,
+          runtimeModeOverride: null,
         },
         {
           name: "editor",
@@ -466,6 +470,8 @@ describe("identity family: typed answers", () => {
           specRevision: null,
           provenance: null,
           openOperations: [],
+          addressability: null,
+          runtimeModeOverride: null,
         },
       ],
       next: "editor",
@@ -487,6 +493,7 @@ describe("identity family: typed answers", () => {
           sessionId: "session-1",
           seat: null,
           instructions: null,
+          schedules: null,
         },
       ],
     });
@@ -738,6 +745,7 @@ describe("identity family: typed answers", () => {
         requestDigest: DIGEST,
         subjectDigest: NEXT_DIGEST,
         rendering: "adopt scout",
+        schedules: null,
       },
     );
   });

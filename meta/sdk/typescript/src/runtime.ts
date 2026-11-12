@@ -45,6 +45,7 @@ import {
   parseIdentityOutcome,
   parseIdentityWithdrawn,
   planParams,
+  settlePreparationParams,
   updateAgentParams,
   type AgentChangeOptions,
   type AgentDirectoryPage,
@@ -893,6 +894,36 @@ export class IdentitiesHandle {
    * `operationId` its outcome named: exactly one. Refused
    * `decision_not_found` when no decision is held for it.
    */
+  /**
+   * Say that the host has prepared an agent that awaited it.
+   *
+   * A create of an agent of a profile whose preparation the launch's policy
+   * names `required` answers `pending_preparation`: the agent reads
+   * `readiness` `preparation_pending`, takes no delivery and runs nothing.
+   * Prepare what it needs, then settle it: the agent is seated dormant and
+   * its first message, if it has one, runs once. The outcome's agent carries
+   * its `seat`: `owed` when its seat did not start (it is seated without a
+   * restart when the mob drives its owed seats again). The same `requestId`
+   * and `name` answer the same result and write nothing.
+   *
+   * Only the host's operator settles a preparation. Refused
+   * `preparation_not_pending` for an agent that awaits none (seated,
+   * archived, settled before), `identity_unknown` for a name no agent holds,
+   * `owner_read_only` for an agent the host's configuration declares with a
+   * preparation (its declaration settles it), and `change_denied` on a launch
+   * without an enabled policy. A host that cannot prepare an agent leaves it
+   * pending or removes it (`remove`).
+   */
+  async settlePreparation(
+    name: string,
+    options: { requestId: string },
+  ): Promise<IdentityChangeResult> {
+    return this.change(
+      "meta/identity/settle_preparation",
+      settlePreparationParams(name, options),
+    );
+  }
+
   async withdraw(operation: OperationRef): Promise<IdentityWithdrawn> {
     const params = operationRefParams(operation);
     return parseIdentityWithdrawn(await this.runtime._rpc("meta/identity/withdraw", params));

@@ -518,7 +518,7 @@ async fn mutate_member_unchecked(
         _ => None,
     };
     if let Some(peer_name) = &peer_name {
-        super::cross_mob_routes::drop_member_link(&handle.mob_id().to_string(), &member, peer_name);
+        super::cross_mob_routes::drop_member_link(handle.mob_id().as_ref(), &member, peer_name);
     }
     let unwired = handle
         .unwire(member.clone(), peer)

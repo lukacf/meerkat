@@ -97,7 +97,9 @@ them.
   tool audience hides from the caller, with manage scope too, as
   `member_status`, `retire_member` and `force_cancel_member` already
   answered such a member as one the mob does not hold. Through 0.9.14 a
-  list named it. Hosts with no audience see no change.
+  list named it. The wiring a listed member's row shows (`wired_to`, and
+  its external peers) names no member or external peer the audience hides
+  from the caller either. Hosts with no audience see no change.
 
 - Mob: the member tools that name another member keep to the host's member
   tool audience (`MobBuilder::with_member_tool_audience`) too. `council`

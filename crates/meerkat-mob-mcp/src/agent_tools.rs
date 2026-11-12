@@ -2351,13 +2351,9 @@ impl AgentMobToolSurface {
             members = owned;
         }
         // A member the mob's host hides from the caller's member tools is
-        // not in the list at all, with manage scope too.
-        let listed: Vec<AgentIdentity> = members
-            .iter()
-            .map(|member| member.agent_identity.clone())
-            .collect();
-        let hidden = handle.members_hidden_from(caller.as_ref(), &listed).await;
-        members.retain(|member| !hidden.contains(&member.agent_identity));
+        // not in the list at all, with manage scope too, and no listed
+        // member's wiring names it.
+        let members = handle.member_rows_shown_to(caller.as_ref(), members).await;
 
         Self::encode_result(call, json!({"members": members}))
     }

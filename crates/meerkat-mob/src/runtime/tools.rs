@@ -2440,17 +2440,13 @@ impl MobOperatorToolDispatcher {
                     members = owned;
                 }
                 // A member the host's audience hides from the caller is not
-                // in its list at all, with manage scope too: the same check
-                // the per-member tools answer by.
-                let listed: Vec<AgentIdentity> = members
-                    .iter()
-                    .map(|entry| entry.agent_identity.clone())
-                    .collect();
-                let hidden = self
+                // in its list at all, with manage scope too, and no listed
+                // member's wiring names it: the same check the per-member
+                // tools answer by.
+                let members = self
                     .handle
-                    .members_hidden_from(list_caller.as_ref(), &listed)
+                    .member_rows_shown_to(list_caller.as_ref(), members)
                     .await;
-                members.retain(|entry| !hidden.contains(&entry.agent_identity));
                 let mob_id = self.handle.definition().id.clone();
                 let members = members
                     .into_iter()

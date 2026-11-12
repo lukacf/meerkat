@@ -11465,6 +11465,45 @@ impl MobHandle {
             .find(|end| hidden.contains(end) || roster.get(end).is_none())
     }
 
+    /// For the member tools that list members: `rows` as `caller`'s tools
+    /// show them. The rows of the members the host's member tool audience
+    /// ([`Self::members_hidden_from`]) hides from `caller` are left out
+    /// whole, and the wiring of every row that stays (its `wired_to` and its
+    /// external peer descriptors) names no member or external peer the
+    /// audience hides from it. The audience is asked once, about the listed
+    /// members and every peer a row names.
+    #[doc(hidden)]
+    pub async fn member_rows_shown_to(
+        &self,
+        caller: Option<&AgentIdentity>,
+        mut rows: Vec<MobMemberListEntry>,
+    ) -> Vec<MobMemberListEntry> {
+        if self.member_tool_audience.is_none() {
+            return rows;
+        }
+        let named: BTreeSet<AgentIdentity> = rows
+            .iter()
+            .flat_map(|row| {
+                std::iter::once(&row.agent_identity)
+                    .chain(&row.wired_to)
+                    .chain(row.external_peer_specs.keys())
+            })
+            .cloned()
+            .collect();
+        let named: Vec<AgentIdentity> = named.into_iter().collect();
+        let hidden = self.members_hidden_from(caller, &named).await;
+        if hidden.is_empty() {
+            return rows;
+        }
+        rows.retain(|row| !hidden.contains(&row.agent_identity));
+        for row in &mut rows {
+            row.wired_to.retain(|peer| !hidden.contains(peer));
+            row.external_peer_specs
+                .retain(|peer, _| !hidden.contains(peer));
+        }
+        rows
+    }
+
     async fn resolve_peer_connectivity(
         &self,
         entry: &RosterEntry,

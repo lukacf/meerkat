@@ -128,7 +128,8 @@ timestamp_ms, payload}`; `payload.type` is the event type.
   `compaction_failed`, `budget_warning`, `retrying`,
   `model_fallback_skipped`, `model_fallback_staged`,
   `model_fallback_committed`, `model_fallback_target_failed`,
-  `request_reasoning_lowered`, `provider_cache_breakpoints_discarded`,
+  `request_reasoning_lowered`, `request_reasoning_effort_resolved`,
+  `provider_cache_breakpoints_discarded`,
   `turn_usage_accounting_unmeasured`,
   `turn_usage_accounting_identity_disputed`, `operation_observation_failed`,
   `tool_results_bounded_for_request` (a request carried the run's own tool
@@ -141,7 +142,18 @@ timestamp_ms, payload}`; `payload.type` is the event type.
   batch disposition (`{"disposition": "apply", "level": ...}`,
   `superseded_by_explicit`, `conflicting` or `mixed_with_unpreferred`);
   `request_reasoning_lowered {requested, baseline, outcome?}` reports what
-  each provider attempt sent.
+  each provider attempt sent. The preference is judged by the route of the
+  client that serves the request: on a GitHub Copilot route by the levels
+  the account's model list states for the model (`unsupported_level` where
+  the entry does not state the level, `unknown_supported_levels` where the
+  account states nothing or its list is not loaded), on a self-hosted route
+  by the operator's declared levels, otherwise by the model's catalog row.
+- Reasoning effort level: `request_reasoning_effort_resolved {turn_number?,
+  fallback_attempt?, resolution}` reports each provider request that was
+  sent with a session's provider-neutral `reasoning_effort` level, after the
+  request settled (it states what was sent; a request refused before it was
+  sent reports nothing); `run_started.reasoning_effort` (and `run_resumed`)
+  hold the resolution when the run starts.
 - Other: `skills_resolved`, `skill_resolution_failed`,
   `peer_content_ingested`, `boundary_append_applied`,
   `boundary_appends_discarded`, `background_job_completed`,

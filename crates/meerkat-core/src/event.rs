@@ -402,9 +402,11 @@ pub enum AgentErrorReason {
     // route (`AgentError::ReasoningEffortRefused`): at a build, at a
     // reconfiguration or before a provider request. A turn that failed for
     // it carries the refusal, so a surface answers the turn with the
-    // refusal it answers the session error with.
+    // refusal it answers the session error with. Boxed to keep the reason,
+    // and every error that carries one, small; the wire form is the
+    // refusal's own.
     ReasoningEffortRefused {
-        refusal: crate::ReasoningEffortRefusal,
+        refusal: Box<crate::ReasoningEffortRefusal>,
     },
 }
 
@@ -530,7 +532,7 @@ impl AgentErrorReason {
                 refusal: (**refusal).clone(),
             }),
             AgentError::ReasoningEffortRefused(refusal) => Some(Self::ReasoningEffortRefused {
-                refusal: (**refusal).clone(),
+                refusal: refusal.clone(),
             }),
             _ => None,
         }
@@ -5851,6 +5853,51 @@ mod tests {
         );
         let decoded: AgentErrorReason = serde_json::from_value(wire).expect("decode");
         assert_eq!(decoded, reason);
+    }
+
+    /// A refused reasoning effort level is a typed reason whose refusal is
+    /// boxed, so the reason and every error that carries one stay small. The
+    /// box changes nothing on the wire or in the schema: the reason
+    /// serializes as the refusal's own document under the
+    /// `reasoning_effort_refused` tag and reads back, and a boxed refusal has
+    /// the refusal's schema.
+    #[test]
+    fn refused_reasoning_effort_reason_is_boxed_and_unchanged_on_the_wire() {
+        let document = serde_json::json!({
+            "requested": "max", "provider": "anthropic", "model": "test-anthropic-default",
+            "route": {"backend": "anthropic_api", "api": "messages"},
+            "reason": "unsupported_level", "supported": ["low", "medium", "high"],
+            "facts": "catalog",
+        });
+        let refusal: crate::ReasoningEffortRefusal =
+            serde_json::from_value(document.clone()).expect("a refusal document reads");
+        let error = crate::error::AgentError::ReasoningEffortRefused(Box::new(refusal.clone()));
+        let reason = AgentErrorReason::ReasoningEffortRefused {
+            refusal: Box::new(refusal),
+        };
+        assert_eq!(
+            AgentErrorReason::from_agent_error(&error),
+            Some(reason.clone())
+        );
+
+        let wire = serde_json::to_value(&reason).expect("serialize");
+        assert_eq!(
+            wire,
+            serde_json::json!({"reason_type": "reasoning_effort_refused", "refusal": document})
+        );
+        let decoded: AgentErrorReason = serde_json::from_value(wire).expect("decode");
+        assert_eq!(decoded, reason);
+
+        #[cfg(feature = "schema")]
+        {
+            let boxed = schemars::schema_for!(Box<crate::ReasoningEffortRefusal>);
+            let plain = schemars::schema_for!(crate::ReasoningEffortRefusal);
+            assert_eq!(
+                serde_json::to_string(&boxed).expect("schema serializes"),
+                serde_json::to_string(&plain).expect("schema serializes"),
+                "a boxed refusal has the refusal's schema"
+            );
+        }
     }
 
     #[test]

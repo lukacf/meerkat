@@ -1004,6 +1004,9 @@ async fn console_gating_stream_handler(
     if let Some(runtime) = &runtime {
         prime_access_cache_from_runtime(runtime, &access).await;
     }
+    // Read again before a change is decided once this read is as old as a
+    // kept record's bound.
+    let mut prime_age = crate::http_sse::StreamPrimeAge::primed(Instant::now());
     let (mut receiver, mut cursor) = {
         let mut owner = owner.lock().await;
         let receiver = owner.subscribe_gating_changes();
@@ -1048,11 +1051,12 @@ async fn console_gating_stream_handler(
             let page = owner.lock().await.gating_audit_after(cursor.as_deref());
             if let Some(runtime) = &runtime {
                 let probe = access.view_for_caller(subject.as_deref(), private_owner_key.as_deref());
-                if page
-                    .entries
-                    .iter()
-                    .filter_map(gating_audit_entry_origin)
-                    .any(|identity| !probe.knows_agent(identity))
+                if (!page.entries.is_empty() && prime_age.due(Instant::now()))
+                    || page
+                        .entries
+                        .iter()
+                        .filter_map(gating_audit_entry_origin)
+                        .any(|identity| !probe.knows_agent(identity))
                 {
                     prime_access_cache_from_runtime(runtime, &access).await;
                 }
@@ -4683,6 +4687,9 @@ async fn console_timeline_stream_handler(
     });
     let reprime_access = live_view.as_ref().map(|live| live.view().controller());
     reprime_stream_access_cache(reprime_runtime.as_ref(), reprime_access.as_ref()).await;
+    // Read again before a frame is decided once this read is as old as a
+    // kept record's bound.
+    let mut prime_age = crate::http_sse::StreamPrimeAge::primed(Instant::now());
     let Some(aggregator) = &state.console_aggregator else {
         return console_json_error(
             StatusCode::NOT_FOUND,
@@ -4739,6 +4746,10 @@ async fn console_timeline_stream_handler(
                     .is_some_and(|view| !view.knows_agent(frame.identity.as_str()))
                     && priming.primes_for(&frame.identity)
                 {
+                    reprime_stream_access_cache(reprime_runtime.as_ref(), reprime_access.as_ref())
+                        .await;
+                }
+                if prime_age.due(Instant::now()) {
                     reprime_stream_access_cache(reprime_runtime.as_ref(), reprime_access.as_ref())
                         .await;
                 }
@@ -4830,7 +4841,8 @@ async fn console_timeline_stream_handler(
                 crate::http_sse::StreamWake::Item(Some(received)) => (false, Some(received)),
             };
             if let Some(live) = live_view.as_mut() {
-                let mut changed = policy_changed;
+                let mut changed = policy_changed
+                    || (received.is_some() && prime_age.due(Instant::now()));
                 while live.refresh() || changed {
                     changed = false;
                     reprime_stream_access_cache(reprime_runtime.as_ref(), reprime_access.as_ref())

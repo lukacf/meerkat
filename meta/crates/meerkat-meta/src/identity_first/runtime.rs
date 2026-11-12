@@ -66,6 +66,7 @@ mod core_views_tests;
 mod created;
 mod declare;
 mod identity_family;
+pub(crate) use identity_family::UNSEATED_RECORD_MAX_AGE;
 mod lifecycle_projection;
 mod records;
 #[cfg(test)]

@@ -116,33 +116,34 @@ them.
 
 ### Fixed
 
-- `meerkat-mob`: a member that is owed the mob's operator instruction
-  snapshot when a delivery wakes it has it recorded during the wake, after
-  its conversation is loaded and before it is Live. A record owed to a
-  member seated dormant on a conversation it already has is therefore in
-  effect at the first run after the seat when the member's session takes the
-  write then. A write that fails stays owed: the mob tries again at every
-  wake of the member and on its own retry, at most 30 seconds apart, and the
-  entry reaches the first run that starts after a write succeeded. A write
-  the session refuses because its target or a slot belongs to another owner
-  (`owned_by_session`, `owned_by_other_mob`, `slot_managed_by_activation`)
-  is blocked: the status shows it with its kind, and it is not tried again
-  until a write selects the member again, the member is seated again, or
-  the mob restarts. Before, the record reached the session whenever the
-  mob's delivery next landed, and where the store-only record could not
-  reach the conversation until the member's wake had loaded it, the run that
-  woke the member started without the record and the agent got it one run
-  late (0.9.9 to 0.9.14). The wake never holds the mob for the record: the
-  mob answers other commands meanwhile, and a session that does not answer
-  the write within 5 seconds leaves the member Live and owed. Limits: only
-  the wake a delivery causes orders the record before the member's run. A
-  member seated eagerly on a conversation (a spawn with a Resume launch) and
-  a member the mob materializes itself at a start or a lift are recorded by
-  the mob's own delivery, tried at once when the member is Live and not
-  ordered before a run of it; a member that stays Live between runs is not
-  tried at each run start. A member the mob brings up itself at a start or
-  a lift with work already queued may start that run before the write is
-  tried; the entry then reaches the first run that starts after the write.
+- `meerkat-mob`: a record owed to a local member seated dormant on a
+  conversation it already has is tried at every wake a delivery causes,
+  after the conversation is loaded and before the member is Live. When the
+  member's session takes the write then (it answers within 5 seconds, the
+  mob's journal answers the read of the member's own records within 5
+  seconds, and no other delivery to the member is in flight past 5
+  seconds), the record is in that conversation before the run that woke the
+  member starts, and that run carries the entry once. A write that fails or
+  is not answered in time leaves the member owed: the mob tries again at
+  once when the member is Live again and then on its own retry, at most 30
+  seconds after its previous attempt ended, and the entry reaches the first
+  run that starts after a write succeeded. A write an owner refuses, or a
+  session service that keeps no durable session document, blocks the
+  member: the record is not tried again until a write selects the member
+  again, the member is seated again, or the mob restarts. Before, the
+  record reached the session whenever the mob's delivery next landed, and
+  where the store-only record could not reach the conversation until the
+  member's wake had loaded it, the run that woke the member started without
+  the record and the agent got it one run late (0.9.9 to 0.9.14). The mob
+  answers other commands while a wake tries its record. Limits: a lift, a
+  start, a warm reload and a placed member do not pass the wake step. A
+  member seated eagerly on a conversation (a spawn with a Resume launch)
+  and a member the mob brings up itself are recorded by the mob's own
+  delivery, tried at once when the member is Live and not ordered before a
+  run of it. A member the mob brings up itself at a start or a lift with
+  work already queued may start that run before the write is tried; the
+  entry then reaches the first run that starts after the write. A member
+  that stays Live between runs is not tried at each run start.
 
 ### Upgrade notes
 

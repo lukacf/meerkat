@@ -83,7 +83,8 @@ use crate::identity_first::PublicIdentityRuntime;
 use super::approval::PlannedOutcome;
 use super::consequences::{ConsequenceLine, HookRefusal, HostConsequences};
 use super::executor::{
-    ChangeCommit, ChangeConsent, ChangeRequester, IdentityChangeExecutor, committed_outcome,
+    ChangeCommit, ChangeConsent, ChangeRequester, IdentityChangeExecutor, committed_as,
+    committed_outcome,
 };
 use super::family::{WithdrawRequest, Withdrawn};
 use super::operation::OperationId;
@@ -1205,9 +1206,9 @@ impl DecisionExecutor for IdentityDecisionExecutor {
             // deadline, ends the decision expired though the change stands.
             Err(error) => {
                 tracing::warn!(%error, "a held change of agents ended with no outcome");
-                match committed_outcome(&mob, &operation_id).await {
-                    Ok(Some(_)) => DecisionExecution::Committed,
-                    Ok(None) | Err(_) => DecisionExecution::Released,
+                match committed_as(&mob, &operation_id, &body.request).await {
+                    Ok(true) => DecisionExecution::Committed,
+                    Ok(false) | Err(_) => DecisionExecution::Released,
                 }
             }
         }
@@ -1217,7 +1218,7 @@ impl DecisionExecutor for IdentityDecisionExecutor {
         &self,
         decision: &StoredDecision,
     ) -> Result<bool, DecisionExecutorRecordUnavailable> {
-        let (_, operation_id, mob) = self
+        let (body, operation_id, mob) = self
             .held(decision)
             .map_err(DecisionExecutorRecordUnavailable)?;
         let Some(mob) = mob else {
@@ -1225,9 +1226,11 @@ impl DecisionExecutor for IdentityDecisionExecutor {
                 "this host does not run the mob of the held change now".to_owned(),
             ));
         };
-        committed_outcome(&mob, &operation_id)
+        // Only a receipt of the held request is this decision's commit:
+        // another request the requester asked under the same request id
+        // may have committed, and that is not the change a person approved.
+        committed_as(&mob, &operation_id, &body.request)
             .await
-            .map(|outcome| outcome.is_some())
             .map_err(|error| DecisionExecutorRecordUnavailable(error.to_string()))
     }
 

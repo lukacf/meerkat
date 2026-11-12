@@ -865,6 +865,23 @@ pub async fn committed_outcome(
     }
 }
 
+/// Whether `request` itself committed as `operation_id` in `mob`: Core
+/// holds a receipt under the operation id, and it is of this request. A
+/// receipt of another request under the id (the requester asked something
+/// else with the same request id, and that committed) is not this
+/// request's commit.
+pub(super) async fn committed_as(
+    mob: &MobHandle,
+    operation_id: &OperationId,
+    request: &IdentityRequest,
+) -> Result<bool, ExecutorError> {
+    let Some(receipt) = committed_receipt(mob, operation_id).await? else {
+        return Ok(false);
+    };
+    let digest = request.request_digest().map_err(ExecutorError::Request)?;
+    Ok(receipt.request_digest == digest.as_str())
+}
+
 /// Core's receipt of the change that committed as `operation_id` in `mob`,
 /// `None` when none did.
 pub(super) async fn committed_receipt(

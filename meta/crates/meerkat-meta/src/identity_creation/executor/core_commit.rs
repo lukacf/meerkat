@@ -181,7 +181,10 @@ fn at_request_field(commit: &ChangeCommit<'_>, refusal: IdentityRefusal) -> Iden
 /// the requester, so the two are one agent: a call attributed to another
 /// agent than its session's member is refused `invalid_request` before Core
 /// is asked for a grant (a defect of the surface, which names no field). A
-/// session no member of the mob holds is Core's to answer.
+/// session no member of the mob holds is Core's to answer. The check is
+/// [`ChangeRequester::refused_by_its_session`], which the family asks first,
+/// when it admits the change; here it guards a caller that reaches the seam
+/// another way.
 pub(super) async fn requester_input(
     commit: &ChangeCommit<'_>,
     operation: &IdentityOperation,
@@ -209,14 +212,9 @@ pub(super) async fn requester_input(
             };
             let admitted = match admission {
                 AgentAdmission::Session(session) => {
-                    if let Some((member, _)) = commit.mob.member_of_session(session).await
-                        && core_member_name(identity).as_ref() != Some(&member)
+                    if let Some(refusal) = commit.requester.refused_by_its_session(commit.mob).await
                     {
-                        return Ok(Err(IdentityRefusal::new(
-                            IdentityRefusalKind::InvalidRequest {
-                                problem: RequestProblem::Conflicting,
-                            },
-                        )));
+                        return Ok(Err(refusal));
                     }
                     commit
                         .mob

@@ -83,7 +83,8 @@ use crate::identity_first::PublicIdentityRuntime;
 use super::approval::PlannedOutcome;
 use super::consequences::{ConsequenceLine, HookRefusal, HostConsequences};
 use super::executor::{
-    ChangeCommit, ChangeConsent, ChangeRequester, IdentityChangeExecutor, committed_outcome,
+    ChangeCommit, ChangeConsent, ChangeRequester, IdentityChangeExecutor, committed_as,
+    committed_outcome,
 };
 use super::family::{WithdrawRequest, Withdrawn};
 use super::operation::OperationId;
@@ -269,7 +270,9 @@ impl IdentityDecisionNotice {
     }
 
     /// The notice as a requesting agent reads it: one sentence that says
-    /// what was decided, then the typed outcome.
+    /// what was decided, then the typed outcome. It names the decision and
+    /// no operation id: an operation id is the host's handle on a change,
+    /// and appears in nothing an agent reads.
     pub fn text(&self) -> String {
         let agents = self
             .agents
@@ -288,12 +291,14 @@ impl IdentityDecisionNotice {
             ),
             IdentityOutcome::PendingDecision { .. } => "is still held".to_owned(),
         };
+        let mut typed = self.to_json();
+        if let Some(members) = typed.as_object_mut() {
+            members.remove("operation_id");
+        }
         format!(
-            "The change you asked for ({} of {agents}, operation {}) {summary}\n\
-             Do not ask again for the same change unless this says it was not carried out.\n{}",
+            "The change you asked for ({} of {agents}) {summary}\n\
+             Do not ask again for the same change unless this says it was not carried out.\n{typed}",
             self.action,
-            self.operation_id,
-            self.to_json()
         )
     }
 }
@@ -1201,9 +1206,9 @@ impl DecisionExecutor for IdentityDecisionExecutor {
             // deadline, ends the decision expired though the change stands.
             Err(error) => {
                 tracing::warn!(%error, "a held change of agents ended with no outcome");
-                match committed_outcome(&mob, &operation_id).await {
-                    Ok(Some(_)) => DecisionExecution::Committed,
-                    Ok(None) | Err(_) => DecisionExecution::Released,
+                match committed_as(&mob, &operation_id, &body.request).await {
+                    Ok(true) => DecisionExecution::Committed,
+                    Ok(false) | Err(_) => DecisionExecution::Released,
                 }
             }
         }
@@ -1213,7 +1218,7 @@ impl DecisionExecutor for IdentityDecisionExecutor {
         &self,
         decision: &StoredDecision,
     ) -> Result<bool, DecisionExecutorRecordUnavailable> {
-        let (_, operation_id, mob) = self
+        let (body, operation_id, mob) = self
             .held(decision)
             .map_err(DecisionExecutorRecordUnavailable)?;
         let Some(mob) = mob else {
@@ -1221,9 +1226,11 @@ impl DecisionExecutor for IdentityDecisionExecutor {
                 "this host does not run the mob of the held change now".to_owned(),
             ));
         };
-        committed_outcome(&mob, &operation_id)
+        // Only a receipt of the held request is this decision's commit:
+        // another request the requester asked under the same request id
+        // may have committed, and that is not the change a person approved.
+        committed_as(&mob, &operation_id, &body.request)
             .await
-            .map(|outcome| outcome.is_some())
             .map_err(|error| DecisionExecutorRecordUnavailable(error.to_string()))
     }
 

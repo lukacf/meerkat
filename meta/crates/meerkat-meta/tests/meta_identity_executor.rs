@@ -1222,10 +1222,11 @@ async fn the_seam_refuses_a_private_member_and_a_configured_target_before_core()
 }
 
 /// An agent requester's change is admitted by its ordinary spawn grant,
-/// which the seam reads through Core: a session that holds no grant in the
-/// mob is refused `profile_not_allowed` by Core's admission, and an
-/// identity whose current grant admits no spawn is refused `grant_revoked`
-/// when it is admitted from its recorded identity. Nothing is created.
+/// which the seam reads through Core: an identity whose current grant
+/// admits no spawn is refused `grant_revoked` when it is admitted from its
+/// recorded identity. A call in a session no member of the mob holds
+/// stands for no agent and is refused `invalid_request` before Core is
+/// asked for a grant. Nothing is created.
 ///
 /// RED before the seam reached Core: both answered `unsupported`.
 #[tokio::test(flavor = "multi_thread")]
@@ -1243,8 +1244,8 @@ async fn an_agent_requester_is_admitted_by_cores_grant_admission() {
         )
         .await;
     assert_eq!(
-        by_session.outcome.refusal().map(IdentityRefusal::to_data),
-        Some(json!({"kind": "profile_not_allowed", "profile": "worker"})),
+        refused(&by_session),
+        ("invalid_request".to_owned(), None),
         "{by_session:?}"
     );
 

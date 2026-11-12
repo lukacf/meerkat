@@ -294,6 +294,15 @@ impl UpdateAgent {
         if labels.is_some() || !labels_remove.is_empty() {
             let mut next = current_labels.clone();
             for key in labels_remove {
+                // Meta's own label keys are never a request's to remove,
+                // as they are never a request's to set: what a caller is
+                // shown goes by one of them.
+                if super::policy::is_meta_label(key) {
+                    return Err(IdentityRefusal::new(IdentityRefusalKind::ReservedKey {
+                        key: key.clone(),
+                    })
+                    .at("set.labels_remove"));
+                }
                 if labels
                     .as_ref()
                     .is_some_and(|labels| labels.contains_key(key))

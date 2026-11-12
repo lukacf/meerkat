@@ -1919,12 +1919,14 @@ impl Rig {
             .read(&mob, &agent, IdentityRead::List(ListAgents::default()))
             .await
         {
-            Ok(IdentityReadAnswer::List(page)) => page
-                .agents
-                .iter()
-                .find(|agent| agent.name == name)
-                .map(|agent| texts(&agent.open_operations))
-                .unwrap_or_else(|| panic!("an agent is listed {name}")),
+            Ok(IdentityReadAnswer::List(page)) => {
+                let listed = page
+                    .agents
+                    .iter()
+                    .find(|agent| agent.name == name)
+                    .unwrap_or_else(|| panic!("an agent is listed {name}"));
+                texts(&listed.open_operations)
+            }
             other => panic!("an agent lists the mob's agents: {other:?}"),
         };
         (got, listed)

@@ -431,14 +431,16 @@ What to know:
   agent: when the gateway registers it, at its start for the agents its
   roster lists, and later for one listed again after it was dropped. For an
   agent created at run time: at the agent's first use after the start,
-  which is its first delivery through the gateway (a send or a dispatch)
+  which is its first delivery through the gateway (a send, a dispatch, or
+  the fire of a schedule that targets the agent)
   or its first change through `meta/identity/*`, before that delivery is
   submitted. A start reads no conversation on behalf of an agent created at
   run time, however many there are, and a read records nothing: until that
   first use `meta/instruction_status` shows the records written so far.
   One limit: a run the mob starts itself with no delivery through the
   gateway before it (a member it brings up at a start with work already
-  queued, work admitted through Meerkat's own handle) runs on the
+  queued, work admitted through Meerkat's own handle, the fire of a
+  schedule that targets the agent's session instead of the agent) runs on the
   instructions the agent's conversation holds; the change is recorded by
   the agent's first delivery or change after it. The gateway compares
   the agent's current text with its record, or, for an agent with no record

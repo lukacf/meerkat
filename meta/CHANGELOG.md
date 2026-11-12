@@ -581,7 +581,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A change of the instructions of an agent created at run time that was
   made while the gateway was down is recorded at the agent's first delivery
   through the gateway or first change after the start, not by the start: a
-  run the mob starts itself with no such delivery before it runs on the
+  run the mob starts itself with no such delivery before it (the fire of a
+  schedule that targets the agent's session instead of the agent is one;
+  the fire of a schedule that targets the agent is a delivery) runs on the
   instructions the agent's conversation holds.
 
 ## [0.9.14] - 2026-11-11

@@ -1386,6 +1386,56 @@ describe("identity family: who reaches an agent, its schedules, host preparation
     assert.equal((await identities.plan("adopt", request)).schedules, null);
   });
 
+  for (const [change, effect, state] of [
+    ["archive", "paused", "archived"],
+    ["unarchive", "resumed", "restored"],
+    ["remove", "ended", "removed"],
+  ] as const) {
+    // The list is the host's own caller's and a Console administrator's. Any
+    // other caller is answered the effect and the count, with no `schedules`
+    // member inside the object: it reads as an empty list, and the count is
+    // the answer's own, not the list's length.
+    it(`${change}: schedules told without their list keep the effect and the count`, async () => {
+      const told = { effect, count: 3 };
+      const { identities } = await scripted([
+        { result: done({ name: "scout", state, spec_digest: NEXT_DIGEST, schedules: told }) },
+        {
+          result: {
+            outcome: "allow",
+            change,
+            timeout_ms: 600_000,
+            request_digest: DIGEST,
+            subject_digest: NEXT_DIGEST,
+            rendering: `${change} scout`,
+            schedules: { ...told, incomplete: true },
+          },
+        },
+      ]);
+      const answer = await identities[change]("scout", {
+        expectedSpecDigest: DIGEST,
+        requestId: "req-1",
+      });
+      assert.ok(answer.outcome === "done");
+      assert.deepEqual(answer.agents[0].schedules, {
+        effect,
+        count: 3,
+        schedules: [],
+        incomplete: false,
+      });
+      const planned = await identities.plan(change, {
+        name: "scout",
+        expectedSpecDigest: DIGEST,
+        requestId: "req-1",
+      });
+      assert.deepEqual(planned.schedules, {
+        effect,
+        count: 3,
+        schedules: [],
+        incomplete: true,
+      });
+    });
+  }
+
   it("schedules that are no schedules are a contract mismatch", () => {
     const agent = (schedules: unknown) => done({ name: "scout", state: "archived", schedules });
     for (const broken of [

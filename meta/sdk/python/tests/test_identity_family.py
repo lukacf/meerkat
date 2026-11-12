@@ -1521,6 +1521,51 @@ async def test_a_plan_names_the_schedules_its_change_would_take_with_it():
     assert (await identities.plan("adopt", request)).schedules is None
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("change", "effect", "state"),
+    [("archive", "paused", "archived"), ("unarchive", "resumed", "restored"), ("remove", "ended", "removed")],
+)
+async def test_schedules_told_without_their_list_keep_the_effect_and_the_count(
+    change, effect, state
+):
+    """The list is the host's own caller's and a Console administrator's.
+    Any other caller is answered the effect and the count, with no
+    ``schedules`` member inside the object: it reads as an empty list, and
+    the count is the answer's own, not the list's length."""
+    from meerkat_meta import AgentRef, IdentityDone, SchedulesFollowed
+
+    told = {"effect": effect, "count": 3}
+    identities, transport = make_identities(
+        results={
+            f"meta/identity/{change}": done(
+                {"name": "scout", "state": state, "spec_digest": NEXT_DIGEST, "schedules": told}
+            ),
+            "meta/identity/plan": {
+                "outcome": "allow",
+                "change": change,
+                "timeout_ms": 600_000,
+                "request_digest": DIGEST,
+                "subject_digest": NEXT_DIGEST,
+                "rendering": f"{change} scout",
+                "schedules": dict(told, incomplete=True),
+            },
+        }
+    )
+    answer = await getattr(identities, change)(
+        "scout", expected_spec_digest=DIGEST, request_id="req-1"
+    )
+    assert isinstance(answer, IdentityDone)
+    assert answer.agents[0].schedules == SchedulesFollowed(
+        effect=effect, count=3, schedules=(), incomplete=False
+    )
+    request = AgentRef(name="scout", expected_spec_digest=DIGEST, request_id="req-1")
+    planned = await identities.plan(change, request)
+    assert planned.schedules == SchedulesFollowed(
+        effect=effect, count=3, schedules=(), incomplete=True
+    )
+
+
 def test_schedules_that_are_no_schedules_are_a_contract_mismatch():
     from meerkat_meta import SchedulesFollowed
 

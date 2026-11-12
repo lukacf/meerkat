@@ -10787,9 +10787,10 @@ impl AgentFactory {
             extra_sections.push(section.as_str());
         }
         // Append additional instructions after skills, before tool
-        // instructions. These are canonical build-state and must survive into
-        // persisted recovery / realtime reconstruction, so prompt assembly may
-        // read them but must not consume them.
+        // instructions. They are the session's build configuration: the
+        // build state records them below, and session recovery feeds the
+        // record into its next build, so prompt assembly reads them and
+        // must not consume them.
         let additional_instruction_storage: Vec<String> = build_config
             .additional_instructions
             .clone()
@@ -10929,20 +10930,26 @@ impl AgentFactory {
                 )
             })
             .unwrap_or_default();
-        // The instruction sections are session-owned too. A build that names
-        // sections records those (an empty list clears them). A build that
-        // names none keeps what the session records: a resume authors
-        // nothing, so it names none, and writing that absence would erase
-        // what the first build recorded. A first build that names none
-        // records an empty list, so an absent record only ever means that
-        // the sections are not known (a session built before this record
-        // was kept across resumes, or one whose record such a resume
-        // erased).
+        // The instruction sections are session-owned too: durable
+        // configuration of the session's build, kept in this record, not a
+        // lifecycle fact that a machine owns. A build that names sections
+        // records those (an empty list clears them), whether or not it
+        // writes a prompt: a resume that names sections and is given no
+        // prompt records them and writes no prompt row, so the record can
+        // name sections that no prompt row holds. A build that names none
+        // and writes a prompt (a first build, or a resume that is given an
+        // explicit prompt) wrote none into it, and records an empty list.
+        // A build that names none and writes no prompt keeps what the
+        // session records: such a resume authors nothing, and writing that
+        // absence would erase what the first build recorded. So an absent
+        // record only ever means that the sections are not known (a session
+        // built before this record was kept across resumes, or one whose
+        // record such a resume erased).
         let recorded_instruction_sections = build_config
             .additional_instructions
             .clone()
-            .or(recorded_instruction_sections)
-            .or_else(|| fresh_build.then(Vec::new));
+            .or_else(|| should_apply_system_prompt.then(Vec::new))
+            .or(recorded_instruction_sections);
         let persisted_build_state = meerkat_core::SessionBuildState {
             output_schema: build_config.output_schema.clone(),
             hooks_override: build_config.hooks_override.clone(),
@@ -17366,6 +17373,72 @@ mod tests {
             );
         }
 
+        /// A resume that is given an explicit system prompt writes a new
+        /// prompt row. The record states the sections that row was written
+        /// with: a build that names none writes none into it and records an
+        /// empty list, and a build that names sections writes and records
+        /// those. Only a resume that writes no prompt keeps the record.
+        #[tokio::test]
+        async fn a_resumed_build_that_writes_a_prompt_records_the_sections_it_wrote() {
+            const NEXT_PROMPT: &str = "You answer for another desk.";
+            let temp = tempfile::tempdir().expect("temp root");
+            let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+            let model = ("gpt-5.6-sol", Provider::OpenAI);
+
+            let first = first_build(&factory, Some(sections())).await;
+            let rewritten = built_session(
+                build_on(
+                    &factory,
+                    first,
+                    model,
+                    None,
+                    crate::SystemPromptOverride::Set(NEXT_PROMPT.to_string()),
+                )
+                .await,
+            )
+            .await;
+            let rows = system_rows(&rewritten);
+            let newest = rows.last().expect("a prompt row");
+            assert!(
+                rows.len() == 2 && newest.contains(NEXT_PROMPT) && !newest.contains(SECTION_ONE),
+                "the resume wrote a new prompt row with no sections: {rows:?}"
+            );
+            assert_eq!(
+                recorded(&rewritten),
+                Some(Vec::new()),
+                "the record states what the newest prompt row was written with: none"
+            );
+            let kept = resume(&factory, rewritten, None).await;
+            assert_eq!(
+                recorded(&kept),
+                Some(Vec::new()),
+                "a later resume that writes no prompt keeps that record"
+            );
+
+            let named = built_session(
+                build_on(
+                    &factory,
+                    kept,
+                    model,
+                    Some(vec![SECTION_TWO.to_string()]),
+                    crate::SystemPromptOverride::Set(BASE_PROMPT.to_string()),
+                )
+                .await,
+            )
+            .await;
+            let rows = system_rows(&named);
+            assert!(
+                rows.last()
+                    .is_some_and(|row| row.contains(BASE_PROMPT) && row.contains(SECTION_TWO)),
+                "a prompt written with sections holds them: {rows:?}"
+            );
+            assert_eq!(
+                recorded(&named),
+                Some(vec![SECTION_TWO.to_string()]),
+                "and the record states them"
+            );
+        }
+
         fn v0_9_4_session() -> Session {
             let document = std::fs::read_to_string(V0_9_4_SESSION).expect("the 0.9.4 fixture");
             serde_json::from_str(&document).expect("a 0.9.4 session document")
@@ -17431,6 +17504,174 @@ mod tests {
                 stored_build_state(&resumed),
                 before,
                 "a resume keeps the sections an earlier release stored"
+            );
+        }
+
+        /// One build over a session an earlier release wrote, on the model
+        /// that release built it with.
+        async fn build_on_v0_9_4(
+            factory: &AgentFactory,
+            session: Session,
+            sections: Option<Vec<String>>,
+            system_prompt: crate::SystemPromptOverride,
+        ) -> Session {
+            let agent = build_on(
+                factory,
+                session,
+                ("claude-sonnet-4-5", Provider::Anthropic),
+                sections,
+                system_prompt,
+            )
+            .await;
+            built_session(agent).await
+        }
+
+        /// A build that names sections records them whatever the session
+        /// recorded and whether or not the build writes a prompt. A session
+        /// whose record is absent (an earlier release wrote it), resumed
+        /// with sections and no prompt decision, records those sections and
+        /// gets no prompt row, so the record then names sections that no
+        /// prompt row holds. A later resume that names none keeps them.
+        #[tokio::test]
+        async fn a_resume_that_names_sections_over_an_absent_record_records_them_without_a_prompt()
+        {
+            let temp = tempfile::tempdir().expect("temp root");
+            let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+
+            let stored = v0_9_4_session();
+            assert_eq!(recorded(&stored), None, "the fixture records no sections");
+            let rows = system_rows(&stored);
+            let named = build_on_v0_9_4(
+                &factory,
+                stored,
+                Some(vec![SECTION_TWO.to_string()]),
+                crate::SystemPromptOverride::Inherit,
+            )
+            .await;
+            assert_eq!(
+                recorded(&named),
+                Some(vec![SECTION_TWO.to_string()]),
+                "a resume that names sections records them over an absent record"
+            );
+            assert_eq!(
+                system_rows(&named),
+                rows,
+                "a resume that is given no prompt writes no prompt row"
+            );
+            assert!(
+                rows.iter().all(|row| !row.contains(SECTION_TWO)),
+                "so no prompt row holds the recorded section: {rows:?}"
+            );
+            let kept =
+                build_on_v0_9_4(&factory, named, None, crate::SystemPromptOverride::Inherit).await;
+            assert_eq!(
+                recorded(&kept),
+                Some(vec![SECTION_TWO.to_string()]),
+                "the next resume that names none keeps them"
+            );
+        }
+
+        /// `SystemPromptOverride::Disable` is an explicit prompt decision,
+        /// as `Set` is: a resume given it writes a prompt row (of the
+        /// appended sections alone). One that names no sections records an
+        /// empty list over the recorded sections, and one that names
+        /// sections records those.
+        #[tokio::test]
+        async fn a_resume_that_disables_the_prompt_records_the_sections_it_names() {
+            let temp = tempfile::tempdir().expect("temp root");
+            let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+            let model = ("gpt-5.6-sol", Provider::OpenAI);
+
+            let first = first_build(&factory, Some(sections())).await;
+            let disabled = built_session(
+                build_on(
+                    &factory,
+                    first,
+                    model,
+                    None,
+                    crate::SystemPromptOverride::Disable,
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(
+                recorded(&disabled),
+                Some(Vec::new()),
+                "a resume that disables the prompt and names no sections records an empty list"
+            );
+            let rows = system_rows(&disabled);
+            assert!(
+                rows.len() == 2
+                    && rows
+                        .last()
+                        .is_some_and(|row| !row.contains(SECTION_ONE) && !row.contains(BASE_PROMPT)),
+                "it wrote a new prompt row with no base prompt and no sections: {rows:?}"
+            );
+            let kept = resume(&factory, disabled, None).await;
+            assert_eq!(
+                recorded(&kept),
+                Some(Vec::new()),
+                "a later resume that writes no prompt keeps that record"
+            );
+
+            let named = built_session(
+                build_on(
+                    &factory,
+                    kept,
+                    model,
+                    Some(vec![SECTION_TWO.to_string()]),
+                    crate::SystemPromptOverride::Disable,
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(
+                recorded(&named),
+                Some(vec![SECTION_TWO.to_string()]),
+                "a resume that disables the prompt and names sections records them"
+            );
+            let rows = system_rows(&named);
+            assert!(
+                rows.last()
+                    .is_some_and(|row| row.contains(SECTION_TWO) && !row.contains(BASE_PROMPT)),
+                "the prompt row it wrote holds the sections it names: {rows:?}"
+            );
+        }
+
+        /// A resume that is given an explicit system prompt and names no
+        /// sections records an empty list also when the session recorded
+        /// nothing before (an earlier release wrote it): the prompt row it
+        /// writes holds no sections, so the sections are known from then on.
+        #[tokio::test]
+        async fn a_resume_that_writes_a_prompt_over_an_absent_record_records_an_empty_list() {
+            const NEXT_PROMPT: &str = "You answer for another desk.";
+            let temp = tempfile::tempdir().expect("temp root");
+            let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+
+            let stored = v0_9_4_session();
+            assert_eq!(recorded(&stored), None, "the fixture records no sections");
+            let rewritten = build_on_v0_9_4(
+                &factory,
+                stored,
+                None,
+                crate::SystemPromptOverride::Set(NEXT_PROMPT.to_string()),
+            )
+            .await;
+            let rows = system_rows(&rewritten);
+            assert!(
+                rows.last().is_some_and(|row| row.contains(NEXT_PROMPT)),
+                "the resume wrote its prompt row: {rows:?}"
+            );
+            assert_eq!(
+                recorded(&rewritten),
+                Some(Vec::new()),
+                "a resume that writes a prompt and names no sections records an empty list \
+                 over an absent record"
+            );
+            assert_eq!(
+                stored_build_state(&rewritten)["additional_instructions"],
+                serde_json::json!([]),
+                "the stored document holds the empty list"
             );
         }
     }

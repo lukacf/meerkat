@@ -2438,24 +2438,61 @@ pub trait MobSessionService:
         )))
     }
 
-    /// The instruction sections the committed build state of `session_id`
-    /// records (`SessionBuildState::additional_instructions`): the sections
-    /// the session's builds were given. `Some(vec![])` is a session built
-    /// with none. `Ok(None)` when the service holds no committed session
-    /// under this id, or its build state does not say (a session built
-    /// before 0.9.14, or one whose record an earlier release's resume
-    /// erased). A corrupt record is a read fault (`Err`), never `Ok(None)`.
+    /// The instruction sections a session was built with: what the committed
+    /// build state of `session_id` records
+    /// (`SessionBuildState::additional_instructions`): the sections named
+    /// by the newest build that named any, or an empty list when a newer
+    /// build wrote a prompt and named none. This is the read a host uses to
+    /// compare the sections a member's session holds with the sections it
+    /// would build the member with now; a member's session id is
+    /// [`super::MobHandle::resolve_bridge_session_id`]. It is the one read
+    /// of the record for a host: the persistent service's
+    /// `load_authoritative_session_build_state` and the build state
+    /// decoders behind it are its plumbing.
     ///
-    /// [`super::MobHandle::member_build_instructions`] asks it for a member
-    /// whose session a build created. It never materializes the session.
+    /// - `Ok(Some(sections))`: the recorded sections, in order.
+    ///   `Some(vec![])` is a session built with none.
+    /// - `Ok(None)`: the sections are not known. The service holds no
+    ///   committed session under this id (a seat no build has created yet
+    ///   has none: its sections are still its seat's spec), or the build
+    ///   state does not say (a session built by 0.9.14 or an earlier
+    ///   release, or one whose record such a release's resume erased).
+    /// - `Err`: the store could not be read, or the record is corrupt. A
+    ///   corrupt record is never `Ok(None)`.
+    ///
+    /// A resume that names no sections and writes no prompt keeps the
+    /// record, so the answer is stable across restarts, wakes and rebuilds,
+    /// and a fork child answers its source's sections. A build that names
+    /// sections always records them: a resume that names sections and is
+    /// given no system prompt records them without writing a prompt, so
+    /// the record can name sections that no prompt row holds (no mob
+    /// rebuild names sections, and session recovery names the record
+    /// itself; a direct factory embedder can name any). A first build may
+    /// append the sections the host's spawn customizer adds, so a session
+    /// records its spec's sections followed by those. The record is durable
+    /// configuration of the session's build, not a lifecycle fact.
+    ///
+    /// The read never materializes the session, wakes no member and sends
+    /// the mob actor no command. It answers for this service's own
+    /// sessions: a session another host keeps is not committed here and
+    /// answers `Ok(None)`. It takes no caller principal: it returns
+    /// host-authored section text to a Rust host, and a surface that serves
+    /// it admits its caller first.
     ///
     /// Default: derives from [`Self::load_persisted_session_tolerating_tail`],
     /// so every service answers it, at the cost of loading the persisted
     /// session with its transcript; that read answers an archived session as
     /// absent. Persistent services override it with the metadata-only
-    /// authoritative read, which reads no transcript row and still answers
-    /// an archived session's record. A wrapper over such a service forwards
-    /// it to keep the read transcript-free.
+    /// authoritative read, which decodes no transcript row (the committed
+    /// head on a HeadCanonical store; on a WholeBlob store the committed
+    /// body is fetched and verified, and its rows are skipped) and still
+    /// answers an archived session's record. A wrapper over such a service
+    /// forwards it to keep the read from loading the transcript; a wrapper
+    /// that forwards neither this method nor the persisted load answers
+    /// `Ok(None)` for a session whose record exists. The facade's
+    /// `host_launch_sites` source test fails a `MobSessionService` impl of
+    /// Core or Connect that neither answers this read nor is listed there
+    /// as keeping no committed store.
     async fn recorded_build_instructions(
         &self,
         session_id: &SessionId,

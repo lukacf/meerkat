@@ -18653,6 +18653,21 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
         .await
     }
 
+    // The instruction sections a session's build state records. Forwarded:
+    // the persistent service answers from the committed metadata alone,
+    // where the trait default loads the persisted session with its
+    // transcript.
+    async fn recorded_build_instructions(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<Vec<String>>, meerkat_core::service::SessionError> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::recorded_build_instructions(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
     async fn session_known_to_archive_authority(
         &self,
         session_id: &SessionId,
@@ -41488,5 +41503,26 @@ mod owed_compaction_forward_guard {
                  the service it wraps"
             );
         }
+    }
+
+    /// The CLI wrapper over the persistent service forwards the read of the
+    /// instruction sections a session's build state records, which that
+    /// service answers from the committed metadata alone. The trait default
+    /// answers the same value by loading the persisted session with its
+    /// transcript, so a wrapper without the forward compiles and loads a
+    /// member's whole transcript on every read. (`RunMobSessionService`
+    /// wraps the ephemeral service, which keeps no persisted session.)
+    #[test]
+    fn the_persistent_cli_wrapper_forwards_the_recorded_build_instructions_read() {
+        let block = wrapper_impl(include_str!("main.rs"), "MobCliSessionService");
+        assert!(
+            block.is_some(),
+            "the MobSessionService impl for MobCliSessionService is in the CLI's source"
+        );
+        assert!(
+            block.is_some_and(|block| block.contains("::recorded_build_instructions(")),
+            "the MobSessionService impl for MobCliSessionService forwards the recorded build \
+             sections read to the service it wraps"
+        );
     }
 }

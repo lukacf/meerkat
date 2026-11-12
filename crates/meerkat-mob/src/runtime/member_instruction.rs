@@ -226,69 +226,6 @@ impl MobHandle {
             .await
             .map_err(MemberInstructionActivationError::from_session_error)
     }
-
-    /// The instruction sections `identity`'s current member session was
-    /// built with (its `additional_instructions`), from committed state.
-    ///
-    /// - `Ok(Some(sections))`: what the session's committed build state
-    ///   records, in order. `Some(vec![])` is a session built with none.
-    /// - `Ok(None)`: the sections are not known. The identity is not a
-    ///   member with a session binding, no committed session exists, or the
-    ///   session's record does not say (a session built before 0.9.14, or
-    ///   one whose record an earlier release's resume erased).
-    ///
-    /// A seat no build has created yet (an unborn session) answers the
-    /// sections it carries to its first build. That build may append the
-    /// sections the host's spawn customizer adds, so afterwards the session
-    /// records the seat's sections followed by those.
-    ///
-    /// A resume names no sections and keeps the recorded ones, so the answer
-    /// is stable across restarts, wakes and rebuilds; a fork child answers
-    /// its source's sections.
-    ///
-    /// Read from the machine state the actor last published and the roster,
-    /// then one read of the session service
-    /// ([`MobSessionService::recorded_build_instructions`](crate::MobSessionService::recorded_build_instructions)).
-    /// It sends no command to the actor and never wakes or materializes the
-    /// member. On a persistent session service it reads the session's
-    /// committed metadata alone, no transcript row; a wrapper that does not
-    /// forward that method answers the same from the persisted session.
-    ///
-    /// # Errors
-    ///
-    /// [`MobError::SessionError`] when the session service cannot read the
-    /// committed state or its record is corrupt.
-    pub async fn member_build_instructions(
-        &self,
-        identity: &AgentIdentity,
-    ) -> Result<Option<Vec<String>>, crate::error::MobError> {
-        let Some(session_id) = self.resolve_bridge_session_id(identity).await else {
-            return Ok(None);
-        };
-        if self.session_unborn(&session_id) {
-            let carried = self
-                .roster
-                .read()
-                .await
-                .next_build(identity)
-                .and_then(|build| build.inputs.additional_instructions.clone());
-            if let Some(sections) = carried {
-                return Ok(Some(sections));
-            }
-            // The seat names no sections. If its first build ran since the
-            // state above was published, the session's record answers.
-            return Ok(Some(
-                self.session_service
-                    .recorded_build_instructions(&session_id)
-                    .await?
-                    .unwrap_or_default(),
-            ));
-        }
-        Ok(self
-            .session_service
-            .recorded_build_instructions(&session_id)
-            .await?)
-    }
 }
 
 #[cfg(test)]

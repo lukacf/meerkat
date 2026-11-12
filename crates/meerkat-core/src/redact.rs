@@ -128,7 +128,10 @@ pub const MIN_REDACTED_CREDENTIAL_BYTES: usize = 8;
 /// a letter, a digit, `-`, `.`, `_` and `~` also as its JSON escape (`\/`,
 /// `\"`, `\\`, `\u00XX`) or percent-encoded (`%XX`), hex in either case,
 /// alone or mixed. A value shorter than [`MIN_REDACTED_CREDENTIAL_BYTES`]
-/// is not replaced by exact match.
+/// is not replaced by exact match. The values, and the header values
+/// without their scheme, are replaced longest first whatever the order
+/// they are given in, so a value that is part of a longer one leaves the
+/// longer one whole.
 ///
 /// The shape rules are the ones [`redact_secret_shapes`] applies, bounded
 /// for text a provider wrote for a reader: after `Bearer` or `Basic`, in an
@@ -161,24 +164,38 @@ pub const MIN_REDACTED_CREDENTIAL_BYTES: usize = 8;
 /// credentials the authorizer signed with, and a provider client that signs
 /// requests with a key of its own calls it with that key.
 pub fn redact_credentials(diagnostic: &mut String, credentials: impl FnOnce(&mut dyn FnMut(&str))) {
-    credentials(&mut |credential| redact_credential_value(diagnostic, credential));
+    // Every form to replace by exact match, held for this call only.
+    let mut forms: Vec<String> = Vec::new();
+    credentials(&mut |credential| named_forms(credential, &mut forms));
+    // Longest first: a form that is part of a longer one would otherwise
+    // take a piece out of the longer one's match and leave the rest of it
+    // beside the marker. The sort is stable, so equal lengths keep the
+    // visiting order.
+    forms.sort_by_key(|form| std::cmp::Reverse(form.len()));
+    for form in &forms {
+        replace_credential(diagnostic, form);
+    }
     let shaped = redact_shapes(diagnostic, ShapeRules::ResponseText);
     if shaped != *diagnostic {
         *diagnostic = shaped;
     }
 }
 
-/// Replace `credential` in `text` as sent and, when it is a header value
-/// with a scheme, without the scheme.
-fn redact_credential_value(text: &mut String, credential: &str) {
+/// Add the forms of `credential` to replace by exact match: as sent and,
+/// when it is a header value with a scheme, without the scheme.
+fn named_forms(credential: &str, forms: &mut Vec<String>) {
     let credential = credential.trim();
-    replace_credential(text, credential);
-    if let Some((scheme, value)) = credential.split_once(char::is_whitespace)
-        && !scheme.is_empty()
-        && scheme.bytes().all(is_credential_byte)
-    {
-        replace_credential(text, value.trim_start());
+    forms.push(credential.to_string());
+    if let Some(value) = without_scheme(credential) {
+        forms.push(value.to_string());
     }
+}
+
+/// The credential of a header value with a scheme (`Bearer <token>`,
+/// `Basic <pair>`), without the scheme.
+fn without_scheme(credential: &str) -> Option<&str> {
+    let (scheme, value) = credential.split_once(char::is_whitespace)?;
+    (!scheme.is_empty() && scheme.bytes().all(is_credential_byte)).then(|| value.trim_start())
 }
 
 fn replace_credential(text: &mut String, credential: &str) {

@@ -89,13 +89,15 @@ them.
     requests carry no catalog control tools until something can be
     deferred. The server gives every session a router so that a server can
     be added later (`mcp/add`), and that router now asks for the control
-    tools on demand. A session with no
+    tools on demand, as the tools a client registers do. A session with no
     server and a few small registered tools (`tools/register`,
     `external_tools`) sends neither control tool and no prompt line about
     them. When a later registration or a server added later takes the
     session over the byte budget, the next request carries both control
     tools, the tools that arrived wait behind the catalog, and the notice
-    that names them says how to load them.
+    that names them says how to load them. A mob member that runs on the
+    server follows the same rule for the tools its connection registers,
+    whether they were registered before or after the member was spawned.
   - Changed everywhere: once every deferred tool of a session is loaded,
     the control tools leave its requests (unless a source asks for them
     always), and a session whose only deferrable tools are WorkGraph's two
@@ -115,7 +117,8 @@ them.
     that forwards only the capabilities turns an inner `OnDemand` into
     `Always`. `McpRouterAdapter::with_control_plane_on_demand` (new,
     `meerkat-mcp`) makes a router ask on demand. The RPC callback dispatcher
-    and the WorkGraph tool surface no longer set the flag.
+    keeps the flag and asks on demand; the WorkGraph tool surface no longer
+    sets the flag.
     `CatalogControlDispatcher::should_announce_for` (new, `meerkat-tools`)
     says whether a session's system prompt explains the control tools.
 - `meerkat-core`: a session whose catalog starts to defer keeps the tools

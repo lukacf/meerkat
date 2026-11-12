@@ -1335,13 +1335,20 @@ impl AgentToolDispatcher for CallbackToolDispatcher {
     }
 
     fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
-        // Registered tools need no control tool while they are all in the
-        // request: the control tools are mounted with the first registered
-        // tool and shown only while one waits behind the catalog.
+        // A client can register tools at any time, so every session with
+        // this dispatcher has the control tools mounted: tools registered
+        // after it started can then wait behind the catalog.
         ToolCatalogCapabilities {
             exact_catalog: true,
-            may_require_catalog_control_plane: false,
+            may_require_catalog_control_plane: true,
         }
+    }
+
+    fn tool_catalog_control_plane(&self) -> meerkat_core::ToolCatalogControlPlane {
+        // Registered tools need no control tool while they are all in the
+        // request: the control tools are shown only while one of them waits
+        // behind the catalog.
+        meerkat_core::ToolCatalogControlPlane::OnDemand
     }
 
     fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {

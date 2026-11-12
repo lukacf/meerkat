@@ -258,9 +258,10 @@ waits behind the catalog, while a source is still pending, or when a source
 asks for them always (`ToolCatalogControlPlane::Always`, which a router asks
 unless its host says otherwise); otherwise they are left out and a call of
 one is refused with `access_denied`. The RPC server gives every session a
-router that asks for them on demand, so a session there with a few small
-tools sends neither, and gets both once a later registration or a server
-added with `mcp/add` takes it over the budget. A session with no such source
+router that asks for them on demand, and the tools a client registers ask
+the same way, so a session or mob member there with a few small tools sends
+neither, and gets both once a later registration or a server added with
+`mcp/add` takes it over the budget. A session with no such source
 and nothing to defer when it starts mounts no control tools and keeps tools
 that arrive later in every request for its lifetime.
 

@@ -31,7 +31,9 @@
 //!   the same call dispatched again (after a resume) names the same
 //!   operation and reads the same state. A call dispatched outside a run
 //!   has no such place and must give a `request_id`.
-//! - **Results.** [`IdentityOutcome::to_json`] verbatim for a change; the
+//! - **Results.** [`IdentityOutcome::to_json`] for a change, without the
+//!   operation id (the host's handle on a change: an agent names its
+//!   request with its own `request_id` and is shown no operation id); the
 //!   family's answer as it serializes for a read, without each agent's
 //!   provenance and open operations, which an agent is not shown; a refused
 //!   read as a refused outcome. Which agents an agent is shown is the
@@ -627,9 +629,18 @@ pub struct IdentityToolAnswer {
 }
 
 impl IdentityToolAnswer {
+    /// A change's outcome as the agent that asked reads it: the family's
+    /// typed outcome without the operation id. An operation id is the
+    /// host's handle on a change: no identity tool takes one, an agent
+    /// names its request with its own `request_id`, and the id appears in
+    /// nothing an agent reads. A held change keeps its decision's id.
     fn outcome(outcome: &IdentityOutcome) -> Self {
+        let mut content = outcome.to_json();
+        if let Some(members) = content.as_object_mut() {
+            members.remove("operation_id");
+        }
         Self {
-            content: outcome.to_json(),
+            content,
             refused: outcome.refusal().is_some(),
         }
     }

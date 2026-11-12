@@ -361,7 +361,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   first_message?, peers?}]` for a create; `name` and `expected_spec_digest`
   for a change of one agent) and answer the same typed outcome (`done`,
   `pending_decision`, `pending_preparation`, `refused` with `kind`, `field`,
-  `retryable` and `detail`). An agent created this way is an ordinary agent
+  `retryable` and `detail`), without its `operation_id`: an operation id is
+  the host's handle on a change, an agent names its request with its own
+  `request_id`, and neither a tool's answer nor the notice an agent gets of
+  a decided change names one. An agent created this way is an ordinary agent
   of its profile: the agent that asked is recorded and owns nothing. See
   [Agents that create agents](docs/guides/agents-create-agents.mdx).
   - Without a policy, or for an agent without mob tools, the tools are absent

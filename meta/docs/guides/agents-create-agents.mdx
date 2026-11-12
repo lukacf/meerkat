@@ -173,6 +173,13 @@ Every change answers one typed outcome, the same on every surface:
 
 A person cannot approve a request they made themselves.
 
+A tool's answer is this outcome without its `operation_id`. An operation id
+is the host's handle on a change (`meta/identity/operation` reads by it): an
+agent names its request with its own `request_id`, no tool takes an operation
+id, and nothing an agent reads of its own change names one, neither the
+tool's answer nor the notice of a decision. A held change's `decision_id` and
+`deadline_ms` are in the answer.
+
 A change is keyed by its operation. With a `request_id`, the same id and the
 same arguments read the same state and never commit twice, and the same id
 with other arguments is refused `operation_reused`. Without one, the operation

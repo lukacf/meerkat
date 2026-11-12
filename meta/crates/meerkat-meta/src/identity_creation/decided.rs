@@ -295,6 +295,10 @@ impl IdentityDecisionNotice {
         let mut typed = self.to_json();
         if let Some(members) = typed.as_object_mut() {
             members.remove("operation_id");
+            // The outcome of a change that was carried out names it too.
+            if let Some(result) = members.get_mut("result").and_then(Value::as_object_mut) {
+                result.remove("operation_id");
+            }
         }
         format!(
             "The change you asked for ({} of {agents}) {summary}\n\

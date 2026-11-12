@@ -937,7 +937,8 @@ async fn the_first_request_of_a_run_offers_the_identity_tools_after_a_wake_and_a
 
 /// Each tool, called by an agent's model in a real turn, reaches the family
 /// with the wire request its arguments spell, as the member whose session
-/// made the call, and answers the family's outcome verbatim.
+/// made the call, and answers the family's outcome, without the operation
+/// id the family names it under.
 #[tokio::test(flavor = "multi_thread")]
 async fn each_identity_tool_reaches_the_family_with_its_wire_request() {
     let state = tempfile::tempdir().unwrap();
@@ -1054,11 +1055,23 @@ async fn each_identity_tool_reaches_the_family_with_its_wire_request() {
             "{tool} asks as the member whose session made the call"
         );
         let names = names_of(&expected);
-        let operation = OperationId::from_recorded(operation_id).expect("an operation id");
+        assert!(
+            OperationId::from_recorded(operation_id).is_some(),
+            "{tool} hands the family an operation id: {operation_id}"
+        );
+        // The family's outcome, without its operation id: that is the
+        // host's handle on the change, and the agent that asked is not
+        // shown it (`an_agents_change_answer_names_no_operation_id`).
         assert_eq!(
             answer.content,
-            done(&operation, &names).to_json(),
-            "{tool} answers the family's outcome verbatim"
+            json!({
+                "outcome": "done",
+                "agents": names
+                    .iter()
+                    .map(|name| json!({"name": name, "state": "committed"}))
+                    .collect::<Vec<_>>(),
+            }),
+            "{tool} answers the family's outcome, without its operation id"
         );
         assert!(!answer.is_error, "a done outcome is no error result");
     }
@@ -1550,13 +1563,28 @@ async fn a_call_without_a_request_id_derives_its_operation_from_where_it_ran() {
     rig.shutdown().await;
 }
 
-/// The family's outcome is the tool's answer, verbatim: a held decision, a
+/// The family's typed outcome as every surface writes it, without its
+/// operation id: what the agent that asked reads of its own change.
+fn without_operation_id(outcome: &IdentityOutcome) -> Value {
+    let mut read = outcome.to_json();
+    assert!(
+        read.as_object_mut()
+            .expect("an outcome is an object")
+            .remove("operation_id")
+            .is_some(),
+        "the family's outcome carries the operation id: {outcome:?}"
+    );
+    read
+}
+
+/// The family's outcome is the tool's answer, member for member, without
+/// the operation id, which an agent is not shown: a held decision, a
 /// pending preparation, an update's instruction outcome and a refusal with
 /// its kind's details. Only a refusal is an error result. An agent that
 /// names itself reaches the family as requester and target alike, and the
 /// family's `self_change_refused` is what the tool answers.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_familys_outcome_is_the_tools_answer_verbatim() {
+async fn the_familys_outcome_is_the_tools_answer_without_its_operation_id() {
     let state = tempfile::tempdir().unwrap();
     let rig = boot_with_family(state.path(), &fresh_mob_id()).await;
     rig.send(LEAD, "seat-lead", "seat-lead").await;
@@ -1583,12 +1611,11 @@ async fn the_familys_outcome_is_the_tools_answer_verbatim() {
     };
     rig.family.answer(held.clone());
     let answer = call(&rig, IDENTITY_UPDATE, update.clone()).await;
-    assert_eq!(answer.content, held.to_json());
+    assert_eq!(answer.content, without_operation_id(&held));
     assert_eq!(
         answer.content,
         json!({
             "outcome": "pending_decision",
-            "operation_id": operation.as_str(),
             "decision_id": "decision-7",
             "deadline_ms": 1_800_000_000_000_u64,
         })
@@ -1604,7 +1631,7 @@ async fn the_familys_outcome_is_the_tools_answer_verbatim() {
     };
     rig.family.answer(preparing.clone());
     let answer = call(&rig, IDENTITY_UPDATE, update.clone()).await;
-    assert_eq!(answer.content, preparing.to_json());
+    assert_eq!(answer.content, without_operation_id(&preparing));
     assert_eq!(answer.content["outcome"], "pending_preparation");
     assert!(!answer.refused);
 
@@ -1618,7 +1645,7 @@ async fn the_familys_outcome_is_the_tools_answer_verbatim() {
     .with_instruction_outcome("scout", InstructionOutcome::AppliesAtNextRun);
     rig.family.answer(updated.clone());
     let answer = call(&rig, IDENTITY_UPDATE, update.clone()).await;
-    assert_eq!(answer.content, updated.to_json());
+    assert_eq!(answer.content, without_operation_id(&updated));
     assert_eq!(
         answer.content["agents"][0]["instructions"],
         json!({"kind": "applies_at_next_run"}),

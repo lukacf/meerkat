@@ -737,8 +737,22 @@ by how it came to exist.
   offers **Archive instead**. The confirmation of an archive and of a
   removal says that the agent's last conversation is harvested and
   distilled, as for any agent that leaves the team, and so does the result
-  of an archive, beside what the agent keeps. A confirmation takes focus on
-  **Cancel**, and Escape or a click outside cancels it.
+  of an archive, beside what the agent keeps. An archived agent left the
+  team at its archive: the confirmation of its removal says that its last
+  conversation was already harvested and distilled when it was archived,
+  and that it keeps what it has while it stays archived. A confirmation
+  takes focus on **Cancel**, and Escape or a click outside cancels it.
+- The confirmation of an archive, an unarchive and a removal says what the
+  change will do to the schedules that target the agent, before anything is
+  sent: how many will be paused, will run again or will be ended, and which
+  by name ("Its schedule Morning report will be paused until it is
+  unarchived."). The Console reads the agent's record when the confirmation
+  opens and asks the gateway what the change would take with it
+  (`meta/identity/plan`, which changes nothing); the change is then sent at
+  the record it read. Where the plan lists no schedule, is refused or
+  cannot be read, the confirmation says nothing of schedules and the change
+  is made all the same. An agent that waits for its host has no schedule,
+  and nothing is asked for it.
 - The result of an archive, an unarchive and a removal says what became of
   the schedules that target the agent, where the gateway's answer states it
   (`schedules`): how many were paused, run again or were ended, and which

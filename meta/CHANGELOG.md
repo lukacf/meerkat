@@ -427,7 +427,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     Escape or a click outside cancels it. The confirmation of an archive
     and of a removal says that the agent's last conversation is harvested
     and distilled, as for any agent that leaves the team, and the result
-    of an archive says it too, beside what the agent keeps.
+    of an archive says it too, beside what the agent keeps. The removal of
+    an agent that is archived already says instead that its last
+    conversation was harvested and distilled when it was archived, and
+    names no archive as a choice.
+  - The confirmation of an archive, an unarchive and a removal says what
+    the change will do to the schedules that target the agent: how many
+    will be paused, will run again or will be ended, and which by name,
+    with a schedule the plan counts and does not list counted as one more.
+    The dialog reads the agent's record when it opens, asks the plan of the
+    change (`meta/identity/plan`, its `schedules`) and sends the change at
+    the record it read. A plan that lists no schedule, is refused or cannot
+    be read leaves the confirmation without a word of schedules; the change
+    is made all the same.
   - The result of an archive, an unarchive and a removal says what became
     of the schedules that target the agent, where the answer states it
     (`schedules`): how many were paused, run again or were ended, and which

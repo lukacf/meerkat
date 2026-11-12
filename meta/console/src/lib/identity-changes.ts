@@ -769,7 +769,9 @@ export function outcomeWords(change: IdentityChangeKind, outcome: IdentityOutcom
       if (change === "create") {
         title = `${name} is created`;
         const seat = seatWords(agent?.seat);
-        lines.push(seat ?? "It starts with its first message.");
+        // What a new agent does at its start is its profile's: the console
+        // promises neither a turn nor idleness.
+        lines.push(seat ?? "It is a member of the team now.");
       } else {
         title = `${name} is updated`;
       }

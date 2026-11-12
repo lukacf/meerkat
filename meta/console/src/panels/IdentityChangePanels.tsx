@@ -541,7 +541,7 @@ export function NewAgentForm({ api, onClose }: { api: IdentityChangesApi; onClos
             <Field field="peers" label="Peers" hint="Optional. The agents it can message. Nothing else is connected to it." error={errors.peers}>
               {(ids) => <PeerPicker directory={directory} value={draft.peers} onChange={(peers) => set("peers", "peers", peers)} describedBy={ids.describedBy} />}
             </Field>
-            <Field field="first_message" label="First message" hint="Optional. Its first turn, run once. Without one it starts with the first message it receives." error={errors.first_message}>
+            <Field field="first_message" label="First message" hint="Optional. The agent is given it once, when it starts; what an agent does at its start is its profile's to decide." error={errors.first_message}>
               {(ids) => (
                 <textarea
                   className="cc-input"

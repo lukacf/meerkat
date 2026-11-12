@@ -1290,6 +1290,28 @@ describe("long-term agents in the console", () => {
     }
   }, 60_000);
 
+  it("new_agent_promises_nothing_of_what_an_agent_does_before_it_is_messaged", async () => {
+    // What a new agent does at its start is its profile's launch behaviour:
+    // one profile runs a turn at once, another waits. The console says
+    // what decides it and does not claim that the agent stays idle.
+    const idle = /starts with (the|its) first message|until it (is messaged|gets a message|receives)|stays idle|does nothing|waits for/i;
+    const family = createScriptedIdentityFamily();
+    const { view } = await openRoster(family);
+    const form = await openNewAgent(view);
+    const hint = form.querySelector("[data-field='first_message'] .identity-form__hint")?.textContent || "";
+    expect(hint).toMatch(/\S/);
+    expect(hint).toContain("profile");
+    expect(hint).not.toMatch(idle);
+    // Nor does the outcome of a create without a first message.
+    fireEvent.click(within(form).getByTestId("identity-profile:worker"));
+    setField(form, "identity-field:name", "scout");
+    fireEvent.submit(form);
+    const notice = await find(view, "identity-notice");
+    expect(noticeWords(notice)).toContain("scout is created");
+    expect(noticeWords(notice)).not.toMatch(idle);
+    view.unmount();
+  }, 60_000);
+
   it("a_retry_of_one_action_reuses_its_request_id", async () => {
     const family = createScriptedIdentityFamily();
     const { view } = await openRoster(family);

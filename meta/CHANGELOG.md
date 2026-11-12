@@ -393,7 +393,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   - Archived agents are listed under the roster with Unarchive and Remove.
     The same list ("Archived and waiting agents") shows an agent whose host
     still prepares it, which has no member and so no row of the roster: by
-    name, with the state "Waiting for its host" and no control. The list is
+    name, with the state "Waiting for its host". Such an agent can be given
+    up: where the launch offers removals the row has Remove, whose
+    confirmation says that the agent never started (nothing is harvested,
+    and an archive is no choice for it). It has no other control. The list is
     read when it is opened. Only the host settles an agent's preparation
     (`meta/identity/settle_preparation`, which the Console neither lists nor
     offers). A read that is refused because the team's open requests cannot

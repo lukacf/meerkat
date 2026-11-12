@@ -741,8 +741,12 @@ by how it came to exist.
 - **Archived and waiting agents**, under the roster, lists the agents that
   have no member and so no row of the roster: the archived agents, with
   **Unarchive** and **Remove**, and the agents whose host still prepares
-  them, each by name with the state "Waiting for its host" and no control
-  (such an agent joins the roster when its host is done). Only the host
+  them, each by name with the state "Waiting for its host"
+  (such an agent joins the roster when its host is done). An agent that
+  waits can be given up, for one whose host will not finish preparing it:
+  **Remove** on its row asks first and says that the agent never started,
+  so nothing is harvested and its name is spent all the same. It has no
+  other control. Only the host
   settles an agent's preparation: the Console shows the state and offers no
   settle. They are read when you open the list. If the team's open requests
   cannot be read just then, the list says that it could not be read and to

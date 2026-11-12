@@ -730,9 +730,15 @@ composition without the built-in identity and member store commits no change
   its last build in the process and its session's own context and
   instructions) and an explicit resume of a stopped mob (each member is
   rebuilt from its seat as the host's spawn customizer makes it, labels
-  included); neither of the last two asks the host for the seat. A host
-  whose build step is not ready to answer refuses retryably: until the
-  host's preparer is composed the seat is not built. A seat an earlier
+  included, and takes those labels into the rebuilt member without the
+  comparison: a known limit); neither of the last two asks the host for
+  the seat. Core asks the preparer the mob was built with from the mob's
+  start on and waits for no composition of the host's own: a host that
+  composes its preparer after the mob starts must refuse a fresh
+  store-owned seat, retryably, until it is composed, and must call
+  `MobHandle::seat_owed_store_owned_identities` once it is; until that
+  call or the mob's next start the identity stays owed its seat. A seat an
+  earlier
   release left with other labels than its row
   (`IdentityRecordCensus::seats_stale` above zero after an upgrade)
   carries no record of an owed restamp, so no start and no build moves its
@@ -771,7 +777,10 @@ composition without the built-in identity and member store commits no change
   The same holds when the member step fails (`Failed`) and for a member a
   same-session successor cannot serve (placed, wired to a placed member,
   or on a session service that keeps no durable sessions), whose update
-  answers `Kept`. The roster is not the journal: the member's last seat
+  answers `Kept`; its release is tried before the respawn that is then
+  refused (in these three cases it releases nothing; a member whose
+  session cannot be kept is released and then kept), and its restamp
+  stays owed. The roster is not the journal: the member's last seat
   row keeps the labels it was seated with until its restamp, and so do
   the binding journal's labels and `IdentityRecordCensus::seats_stale`,
   which read that row. The restamp stays owed, and the row records it

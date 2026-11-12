@@ -2086,6 +2086,9 @@ impl super::MobHandle {
     /// interrupted, and a member a same-session successor cannot serve (a
     /// placed one, one wired to a placed member, one on a service that
     /// keeps no durable sessions) is kept: both keep the restamp owed.
+    /// Such a member's release is tried first all the same (the respawn is
+    /// what is refused): in those three cases it releases nothing, and a
+    /// member whose session cannot be kept is released and then kept.
     async fn restamp_store_owned_seat_labels(
         &self,
         entry: &DeclaredEntry,

@@ -113,8 +113,13 @@ them.
   instructions, and asks its host for no seat; and an explicit resume of a
   stopped mob, which rebuilds each member from its seat as the host's
   spawn customizer makes it, labels included, and asks its host for no
-  seat either. A host whose build step is not ready to answer refuses
-  retryably: until the host's preparer is composed the seat is not built.
+  seat either (see Known limitations). Core asks the preparer the mob was
+  built with from the mob's start on, and waits for no composition of the
+  host's own. A host that composes its preparer after the mob starts must
+  therefore refuse a fresh store-owned seat, retryably, until it is
+  composed, and must call `MobHandle::seat_owed_store_owned_identities`
+  once it is: until that call or the mob's next start the identity stays
+  owed its seat.
   A refusal fails the build before anything is built: at a spawn the
   identity stays owed its seat and the mob's next start asks again; at a
   wake or a restore a retryable refusal leaves the member Dormant and its
@@ -138,7 +143,16 @@ them.
   seated member is restamped on its own session at the next generation
   (the same-session respawn a runtime-mode change makes, with
   `MemberRespawn::with_labels`), and the update answers
-  `DeclaredEntryOutcome::Restamped`. From 0.9.9 through 0.9.13 such an
+  `DeclaredEntryOutcome::Restamped`. What decides the restamp is the
+  comparison, in the commit of any update of a seated store-owned
+  identity, of its last seat row's labels with the updated row's (the
+  commit records a difference as an owed restamp, see below), not the
+  update's own label change: an update that moves no label restamps a seat that
+  carries other labels than the row, so a seat an earlier release left
+  stale is corrected by the identity's next update, and a label a
+  host-written spawn seated outside the row is dropped by it (for a member
+  a same-session successor can serve; see below). From 0.9.9 through
+  0.9.13 a label
   update kept the member with the labels it was seated with until its host
   respawned it (`IdentityRecordCensus::seats_stale` counted the seat).
   With the label rule above a build must carry exactly its seat's labels,
@@ -160,7 +174,11 @@ them.
   holds when the member step fails (`Failed`), and for a member a
   same-session successor cannot serve (a placed member, a member wired to
   a placed member, a member on a session service that keeps no durable
-  sessions), whose update answers `Kept` as before. The roster is not the
+  sessions), whose update answers `Kept` as before. Such a member is not left exactly
+  as it was: its release is tried before the respawn that is then refused
+  (in the three cases named it releases nothing; a member whose session
+  cannot be kept, lost or archived say, is released and then kept), and
+  its restamp stays owed. The roster is not the
   journal: the member's last seat row keeps the labels it was seated with
   until its restamp, and so do the readers of that row, the binding
   journal's labels and `seats_stale`. The restamp stays owed, and the row
@@ -251,6 +269,17 @@ them.
   respawn its member with the row's labels (`MobHandle::respawn_member`
   with `MemberRespawn::new().with_labels(..)`). A row that owes none
   carries no such key and reads on those releases as before.
+
+### Known limitations
+
+- Mob: an explicit resume of a stopped mob (`MobHandle::resume`) rebuilds
+  each member from its seat as the host's spawn customizer makes it and
+  takes the customizer's labels into the rebuilt member without comparing
+  them with the seat's: the host's seat composition
+  (`MemberBuildPreparer::prepare_store_owned_seat`) is not asked there, so
+  a label a customizer sets reaches a store-owned member on that path. A
+  reload or warm revival asks the host for no seat either, but rebuilds
+  the member with its seat's own labels.
 
 ## [0.9.13] - 2026-11-11
 

@@ -274,9 +274,16 @@ pub trait MemberBuildPreparer: Send + Sync {
     /// its seat's labels, the profile and tool overlay of its last build in
     /// the process and its session's own context and instructions; and an
     /// explicit resume of a stopped mob, which rebuilds each member from
-    /// its seat as the host's spawn customizer makes it, labels included.
-    /// A host whose build step is not ready to answer refuses retryably:
-    /// until the host's preparer is composed the seat is not built.
+    /// its seat as the host's spawn customizer makes it, labels included,
+    /// and takes those labels into the rebuilt member without this
+    /// comparison (a known limit).
+    ///
+    /// Core asks the preparer the mob was built with from the mob's start
+    /// on, and waits for no composition of the host's own. A host that
+    /// composes its preparer after the mob starts must therefore refuse a
+    /// fresh store-owned seat, retryably, until it is composed, and must
+    /// call `MobHandle::seat_owed_store_owned_identities` once it is: until
+    /// that call or the mob's next start the identity stays owed its seat.
     ///
     /// The host answers from the identity's row and its own state, the same
     /// for every build: no build relies on an earlier answer, so a restart

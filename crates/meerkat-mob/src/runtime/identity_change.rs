@@ -3800,7 +3800,10 @@ impl super::MobHandle {
     /// same-session successor cannot serve (a placed one, one wired to a
     /// placed member, one on a session service that keeps no durable
     /// sessions), whose update answers
-    /// [`super::DeclaredEntryOutcome::Kept`]. The roster is not the
+    /// [`super::DeclaredEntryOutcome::Kept`]; its release is tried before
+    /// the respawn that is then refused (in these three cases it releases
+    /// nothing; a member whose session cannot be kept is released and then
+    /// kept), and its restamp stays owed. The roster is not the
     /// journal: the member's last seat row keeps the labels it was seated
     /// with until its restamp, and so do the readers of that row, the
     /// binding journal's labels and `seats_stale`

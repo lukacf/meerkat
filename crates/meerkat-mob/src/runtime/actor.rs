@@ -42648,13 +42648,18 @@ impl MobActor {
             }
         };
 
-        // The endpoint is judged before the member's row is written: the
-        // membership step and the endpoint's registration are applied to a
-        // prepared authority that is then dropped, so MobMachine's own guards
-        // answer and nothing is committed. An endpoint MobMachine would
-        // refuse after the row (its transport key is another member's) is
-        // refused here instead, with the ladder's ordinary pre-commit unwind:
-        // no row, no membership, and the member's session rolled back.
+        // The endpoint is judged before the member's row is written, and held
+        // from the step that commits its membership: the membership step and
+        // the endpoint's registration are applied to one prepared authority,
+        // so MobMachine's own guards answer, and that authority is what the
+        // membership commit below commits. An endpoint MobMachine refuses
+        // (its transport key is another member's) is refused here, with the
+        // ladder's ordinary pre-commit unwind: no row, no membership, and the
+        // member's session rolled back. An endpoint it admits is the member's
+        // in MobMachine from the commit on, so a member admitted in the next
+        // actor turn is judged against it: two members of one key cannot
+        // both pass while the first one's activation is still running.
+        let mut prepared_membership_and_endpoint = None;
         if let Some(descriptor) = member_peer_endpoint.as_ref() {
             let peer_endpoint = mob_dsl::MemberPeerEndpoint::from(descriptor);
             let key_holder = super::builder::member_endpoint_key_holder(
@@ -42669,33 +42674,36 @@ impl MobActor {
                 fence_token: mob_dsl::FenceToken::from_domain(fence_token),
                 peer_endpoint,
             };
-            if let Err(error) = self.prepare_dsl_inputs(
+            match self.prepare_dsl_inputs(
                 &[commit_membership, register],
                 "finalize_spawn_admit_endpoint_admission",
             ) {
-                let error = match key_holder {
-                    Some(holder) => {
-                        MobError::WiringError(super::builder::member_endpoint_key_held_refusal(
-                            &self.definition.id,
-                            agent_identity,
-                            &holder,
-                            &descriptor.peer_id.to_string(),
-                        ))
+                Ok(prepared) => prepared_membership_and_endpoint = Some(prepared),
+                Err(error) => {
+                    let error = match key_holder {
+                        Some(holder) => {
+                            MobError::WiringError(super::builder::member_endpoint_key_held_refusal(
+                                &self.definition.id,
+                                agent_identity,
+                                &holder,
+                                &descriptor.peer_id.to_string(),
+                            ))
+                        }
+                        None => error,
+                    };
+                    let error = self.fold_spawn_exec_abort(
+                        &dsl_identity,
+                        agent_identity,
+                        error,
+                        "finalize_spawn_admit_endpoint_admission",
+                    );
+                    if let Err(rollback_error) = provision.rollback().await {
+                        return Err(MobError::Internal(format!(
+                            "spawn endpoint admission failed for '{agent_identity}': {error}; archive compensation failed: {rollback_error}"
+                        )));
                     }
-                    None => error,
-                };
-                let error = self.fold_spawn_exec_abort(
-                    &dsl_identity,
-                    agent_identity,
-                    error,
-                    "finalize_spawn_admit_endpoint_admission",
-                );
-                if let Err(rollback_error) = provision.rollback().await {
-                    return Err(MobError::Internal(format!(
-                        "spawn endpoint admission failed for '{agent_identity}': {error}; archive compensation failed: {rollback_error}"
-                    )));
+                    return Err(error);
                 }
-                return Err(error);
             }
         }
 
@@ -42882,7 +42890,22 @@ impl MobActor {
             agent_identity = %agent_identity,
             "MobActor::finalize_spawn_admit committing membership"
         );
-        if let Err(commit_error) = self.commit_prepared_dsl_transition(prepared_spawn) {
+        // A member with an endpoint commits the authority that judged it
+        // above: its membership and its endpoint, in one step. Its key's
+        // wake route is published by its activation, as before (see
+        // `hold_back_member_key_route`).
+        let committed = match prepared_membership_and_endpoint {
+            Some(prepared) => {
+                self.hold_back_member_key_route(&agent_runtime_id);
+                let committed = self.commit_prepared_dsl_input(prepared);
+                if committed.is_err() {
+                    self.release_member_key_route(&identity, &agent_runtime_id);
+                }
+                committed
+            }
+            None => self.commit_prepared_dsl_transition(prepared_spawn),
+        };
+        if let Err(commit_error) = committed {
             let commit_error = self.fold_spawn_exec_abort(
                 &dsl_identity,
                 agent_identity,

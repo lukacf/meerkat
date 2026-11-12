@@ -592,6 +592,9 @@ pub(in crate::runtime) struct SpawnActivationQuiescence {
     /// Compensations retained unsettled after a failed activation. They are
     /// not activation custody, but they block graph-scoped controls too.
     pub(in crate::runtime) retained_cleanups: usize,
+    /// Incarnations whose key route is still held back for their activation.
+    #[cfg(test)]
+    pub(in crate::runtime) key_routes_held_back: usize,
 }
 
 /// A compensation that could not be completed by the failing owner.
@@ -740,6 +743,8 @@ impl MobActor {
         let mut census = SpawnActivationQuiescence {
             total: self.pending_spawn_activations.len(),
             retained_cleanups: self.retained_spawn_activation_cleanups.len(),
+            #[cfg(test)]
+            key_routes_held_back: self.member_key_routes_held_back(),
             ..SpawnActivationQuiescence::default()
         };
         for pending in self.pending_spawn_activations.values() {
@@ -1536,6 +1541,9 @@ impl MobActor {
         let ticket = match self.next_spawn_activation_ticket.next() {
             Ok(ticket) => ticket,
             Err(error) => {
+                // No activation runs for this member: nothing else ends
+                // the hold on its key route.
+                self.release_member_key_route(&custody.agent_identity, &custody.agent_runtime_id);
                 self.settle_spawn_activation_route(route, Err(error)).await;
                 return;
             }
@@ -1961,6 +1969,10 @@ impl MobActor {
             ..
         } = pending;
         self.pending_spawn_activations.remove(&ticket);
+        // The activation ended, however it ended: a key route still held
+        // back for it (it never reached its membership step) is published
+        // as machine state names the member now.
+        self.release_member_key_route(&custody.agent_identity, &custody.agent_runtime_id);
         let outcome = match outcome {
             Err(error) => {
                 if let Some(entry) = self
@@ -2317,6 +2329,12 @@ impl MobActor {
         if state.remote.is_none()
             && let Some(descriptor) = state.member_peer_endpoint.as_ref()
         {
+            // MobMachine holds this endpoint from the membership commit of a
+            // local spawn (`finalize_spawn_admit` commits the membership
+            // step and this registration together), so this input is
+            // answered as already current. It stays: the activation states
+            // the endpoint it publishes, and MobMachine refuses a different
+            // one.
             self.apply_dsl_input(
                 mob_dsl::MobMachineInput::RegisterMemberPeer {
                     agent_identity: state.dsl_identity.clone(),
@@ -2327,6 +2345,9 @@ impl MobActor {
                 },
                 "finalize_spawn_register_member_peer",
             )?;
+            // The member's trusted peer is published: its key's wake route
+            // appears here, where the registration used to publish it.
+            self.release_member_key_route(&agent_identity, &state.agent_runtime_id);
         }
         {
             let mut roster = self.roster.write().await;

@@ -156,6 +156,11 @@ impl KeyMob {
     /// Park the actor: it takes no command and commits no off-actor result
     /// until the park is released.
     async fn park_actor(&self) -> ActorPark {
+        self.queue_actor_park().await.entered().await
+    }
+
+    /// Queue a park of the actor behind the commands already queued for it.
+    async fn queue_actor_park(&self) -> QueuedActorPark {
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
         let ended = self
@@ -167,11 +172,32 @@ impl KeyMob {
             })
             .await
             .expect("queue the park");
-        tokio::time::timeout(STEP, entered_rx)
+        QueuedActorPark {
+            entered_rx,
+            park: ActorPark { release_tx, ended },
+        }
+    }
+
+    /// The inproc namespace the mob publishes its members' wake routes in.
+    fn wake_namespace(&self) -> String {
+        meerkat_core::mob_realm_id(self.handle.mob_id().as_str())
+            .expect("the mob id is a realm identity")
+            .as_str()
+            .to_string()
+    }
+
+    /// How many incarnations have their key's wake route held back for a
+    /// spawn activation.
+    async fn key_routes_held_back(&self) -> usize {
+        self.handle
+            .enqueue_actor_command_for_test(|reply_tx| MobCommand::SpawnActivationCustodyProbe {
+                reply_tx,
+            })
             .await
-            .expect("the actor reaches the park")
-            .expect("the actor parks");
-        ActorPark { release_tx, ended }
+            .expect("queue the census")
+            .await
+            .expect("the census answers")
+            .key_routes_held_back
     }
 
     /// Whether MobMachine holds anything of `identity`: a member, a session
@@ -253,6 +279,23 @@ impl KeyMob {
             })
             .await
             .expect("append the row");
+    }
+}
+
+/// A park queued for the actor (see [`KeyMob::queue_actor_park`]).
+struct QueuedActorPark {
+    entered_rx: tokio::sync::oneshot::Receiver<()>,
+    park: ActorPark,
+}
+
+impl QueuedActorPark {
+    /// Wait until the actor reached the park.
+    async fn entered(self) -> ActorPark {
+        tokio::time::timeout(STEP, self.entered_rx)
+            .await
+            .expect("the actor reaches the park")
+            .expect("the actor parks");
+        self.park
     }
 }
 
@@ -513,6 +556,11 @@ async fn two_members_of_one_key_admitted_back_to_back_admit_one_and_refuse_the_o
         mob.service.test_is_session_archived(loser_session).await,
         "the refused member's session is rolled back"
     );
+    assert_eq!(
+        mob.key_routes_held_back().await,
+        0,
+        "no key route is held back after the two spawns"
+    );
 
     // A second start is clean: one member, not broken.
     mob.reconstruct(None).await.expect("the mob starts again");
@@ -521,6 +569,82 @@ async fn two_members_of_one_key_admitted_back_to_back_admit_one_and_refuse_the_o
         mob.listed().await,
         vec![(winner.to_string(), MobMemberStatus::Active, None)],
         "the second start lists the admitted member alone, with no error"
+    );
+}
+
+/// Inside a spawn's window (its membership is committed, its activation has
+/// not published its trusted peer yet) MobMachine holds the member's
+/// endpoint, and the key has no wake route: a peer send to the key is
+/// answered from the member's live route alone (its inbox while the route
+/// stands, peer not found when it does not), as it was when the activation
+/// itself registered the endpoint. The key's wake route appears once the
+/// activation published the trusted peer, and nothing is held back after the
+/// spawn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_spawning_members_key_has_no_wake_route_until_its_activation_publishes_its_peer() {
+    let mob = KeyMob::new("shared-key-window").await;
+    let alice = id("alice");
+    let session = SessionId::new();
+    mob.service
+        .set_comms_identity_seed(&session, SHARED_KEY)
+        .await;
+    mob.hold_comms_runtime_reads();
+    let spawn = {
+        let handle = mob.handle.clone();
+        let spec = spec_on(&alice, &session);
+        tokio::spawn(async move { handle.spawn_spec(spec).await.map(|_| ()) })
+    };
+    tokio::time::timeout(STEP, async {
+        while mob.spawn_phase(&alice) != Some(dsl::SpawnExecPhase::Opened) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the spawn opens its ladder while its endpoint is observed");
+    let before_admission = mob.park_actor().await;
+    assert_eq!(
+        mob.spawn_phase(&alice),
+        Some(dsl::SpawnExecPhase::Opened),
+        "the actor is parked before the member is admitted"
+    );
+    // Queued behind the first park and ahead of everything the admission
+    // dispatches: the actor reaches it right after the admission's turn,
+    // before the activation's first stage is committed.
+    let in_window = mob.queue_actor_park().await;
+    mob.release_comms_runtime_reads_and_wait().await;
+    before_admission.release().await;
+    let in_window = in_window.entered().await;
+
+    assert_eq!(
+        mob.spawn_phase(&alice),
+        Some(dsl::SpawnExecPhase::MembershipCommitted),
+        "the member is admitted and its activation has not ended"
+    );
+    let endpoint = mob
+        .recorded_endpoint(&alice)
+        .expect("MobMachine holds the member's endpoint from its membership commit");
+    let key = meerkat_comms::PubKey(endpoint.signing_key.0);
+    let namespace = mob.wake_namespace();
+    let registry = meerkat_comms::InprocRegistry::global();
+    assert!(
+        !registry.has_wake_route_in_namespace(&namespace, &key),
+        "the key has no wake route before the activation published the member's trusted peer"
+    );
+
+    in_window.release().await;
+    tokio::time::timeout(STEP, spawn)
+        .await
+        .expect("the spawn answers")
+        .expect("the spawn task ends")
+        .expect("the member spawns");
+    assert!(
+        registry.has_wake_route_in_namespace(&namespace, &key),
+        "the activation published the key's wake route"
+    );
+    assert_eq!(
+        mob.key_routes_held_back().await,
+        0,
+        "no key route is held back after the spawn"
     );
 }
 

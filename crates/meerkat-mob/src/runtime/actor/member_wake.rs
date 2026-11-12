@@ -471,6 +471,15 @@ pub(in crate::runtime) struct MemberWakes {
     /// its session-owner entry), so a retraction removes exactly what the
     /// projection holds.
     routes: BTreeMap<AgentIdentity, PublishedMemberRoutes>,
+    /// Incarnations whose spawn activation has not published its trusted
+    /// peer yet. MobMachine holds such a member's endpoint from its
+    /// membership commit, and its wake route carries its session alone
+    /// until the activation's membership step publishes the key, where the
+    /// key route always appeared. This times a projection and decides
+    /// nothing: which member holds a key is MobMachine's answer alone. An
+    /// entry leaves at that step and whenever the activation ends
+    /// ([`MobActor::release_member_key_route`]).
+    key_routes_held_back: BTreeSet<mob_dsl::AgentRuntimeId>,
     /// Callers waiting on each attempt, with the attempt's member.
     waiters: BTreeMap<MemberWakeAttempt, (AgentIdentity, Vec<MemberWakeReply>)>,
     /// Attempts this actor is resolving right now: their callers are
@@ -549,6 +558,7 @@ impl MemberWakes {
                 admission_closed,
             )),
             routes: BTreeMap::new(),
+            key_routes_held_back: BTreeSet::new(),
             waiters: BTreeMap::new(),
             resolving: BTreeSet::new(),
             closed: BTreeMap::new(),
@@ -841,7 +851,9 @@ impl MobActor {
     /// What `identity`'s routes are, read from machine state: a local
     /// session-bound member is routed by its session (session-owner
     /// registry), and by its durable endpoint's key once it has one
-    /// (inproc wake route).
+    /// (inproc wake route). The key of an incarnation whose spawn
+    /// activation has not published its trusted peer yet is left out until
+    /// it does ([`Self::hold_back_member_key_route`]).
     fn member_wake_route_source(&self, identity: &AgentIdentity) -> Option<PublishedMemberRoutes> {
         let state = self.dsl_authority.state();
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
@@ -854,12 +866,56 @@ impl MobActor {
             .member_session_bindings
             .get(&dsl_identity)
             .and_then(|session| SessionId::parse(&session.0).ok())?;
+        let key_held_back = state
+            .identity_to_runtime
+            .get(&dsl_identity)
+            .is_some_and(|runtime| self.member_wakes.key_routes_held_back.contains(runtime));
         let pubkey = state
             .member_peer_endpoints
             .get(&dsl_identity)
+            .filter(|_| !key_held_back)
             .map(|endpoint| meerkat_comms::PubKey(endpoint.signing_key.0))
             .filter(|pubkey| !pubkey.is_zero());
         Some(PublishedMemberRoutes { pubkey, session })
+    }
+
+    /// Keep the key of `agent_runtime_id`'s endpoint out of its wake route
+    /// until its spawn activation publishes its trusted peer. The spawn
+    /// ladder calls this right before the step that commits the member with
+    /// its endpoint, so a peer send to the key, while the activation runs,
+    /// is answered from the member's live route alone, as it was when the
+    /// endpoint was registered by the activation itself.
+    pub(in crate::runtime) fn hold_back_member_key_route(
+        &mut self,
+        agent_runtime_id: &crate::ids::AgentRuntimeId,
+    ) {
+        self.member_wakes
+            .key_routes_held_back
+            .insert(mob_dsl::AgentRuntimeId::from_domain(agent_runtime_id));
+    }
+
+    /// End [`Self::hold_back_member_key_route`] for `agent_runtime_id` and
+    /// publish `identity`'s routes as machine state names them now. Called
+    /// at the activation's membership step and at every end of the
+    /// activation; a second call does nothing.
+    pub(in crate::runtime) fn release_member_key_route(
+        &mut self,
+        identity: &AgentIdentity,
+        agent_runtime_id: &crate::ids::AgentRuntimeId,
+    ) {
+        if self
+            .member_wakes
+            .key_routes_held_back
+            .remove(&mob_dsl::AgentRuntimeId::from_domain(agent_runtime_id))
+        {
+            self.publish_member_wake_route(identity);
+        }
+    }
+
+    /// How many incarnations have their key route held back.
+    #[cfg(test)]
+    pub(in crate::runtime) fn member_key_routes_held_back(&self) -> usize {
+        self.member_wakes.key_routes_held_back.len()
     }
 
     /// Publish `identity`'s routes as machine state names them now: a key

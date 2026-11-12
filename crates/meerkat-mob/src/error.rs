@@ -384,7 +384,9 @@ pub enum MemberWakeRefusal {
     /// on its own, a busy session, unavailable runtime authority, a hosting
     /// claim another owner holds, an external write authority that could not
     /// be checked without waiting, a provider credential whose source or
-    /// store cannot answer now or whose lookup is in flight).
+    /// store cannot answer now or whose lookup is in flight), or the mob's
+    /// identity store could not serve the row of a store-owned member for
+    /// its build, or holds a row of it this build cannot read.
     ResumeGateUnavailable,
     /// The mob's wake bound (`MobBuilder::with_member_wake_timeout`) ended
     /// before the member was ready. The member is dormant again.

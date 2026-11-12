@@ -7711,6 +7711,20 @@ impl SpawnMemberSpec {
         self.created_custody = false;
     }
 
+    /// Whether the request is the fresh local spawn of a store-owned
+    /// identity's member, which Core seats from the identity's row (the
+    /// kickoff spawn of its create, and the spawn a start or a rotation
+    /// owes it): its host composes its seat before the spawn is sent, and
+    /// the labels it carries are compared with its seat's once the host's
+    /// spawn customizer ran. A placed or externally bound one is its host's
+    /// own spawn, whose spec its host wrote.
+    pub(crate) fn seats_store_owned_row(&self) -> bool {
+        self.created_custody
+            && matches!(self.launch_mode, crate::launch::MemberLaunchMode::Fresh)
+            && self.placement.is_none()
+            && matches!(self.binding, None | Some(crate::RuntimeBinding::Session))
+    }
+
     /// Attach exact runtime-proven parent ancestry to a child launch.
     pub fn with_creation_source(mut self, source: crate::MemberCreationSourceWitness) -> Self {
         self.creation_origin = crate::member_creation::MemberCreationOrigin::Source(source);
@@ -10283,6 +10297,8 @@ impl MobHandle {
     pub async fn rotate_member(&self, mut spec: SpawnMemberSpec) -> Result<SessionId, MobError> {
         use super::dormant_seat::DormantSeatCommitEntry;
 
+        let rotated = spec.identity.clone();
+
         if matches!(
             self.command_authority_kind(),
             crate::control_policy::CommandAuthorityKind::AgentLane
@@ -10363,7 +10379,12 @@ impl MobHandle {
         match outcome {
             super::DormantSeatOutcome::Seated { session_id, .. }
             | super::DormantSeatOutcome::AlreadySeated { session_id, .. }
-            | super::DormantSeatOutcome::Embodied { session_id, .. } => Ok(session_id),
+            | super::DormantSeatOutcome::Embodied { session_id, .. } => {
+                // A store-owned identity's row lets go of what this seat
+                // row settles (an owed label restamp, say).
+                self.settle_store_owned_seat_row(&rotated).await;
+                Ok(session_id)
+            }
             other => Err(other.into_unseated_error()),
         }
     }
@@ -11062,6 +11083,7 @@ impl MobHandle {
         census.archived = rows.archived;
         census.tombstones = rows.tombstones;
         census.unreadable = rows.unreadable;
+        census.label_restamps_owed = rows.label_restamps_owed;
         if !seats.is_empty() {
             let rows = self.last_spawn_rows().await?;
             census.seats_stale = seats
@@ -15223,10 +15245,7 @@ impl MobHandle {
         // its session, so it takes everything the host composed. A refusal
         // fails the spawn with the host's reason: nothing is sent, and the
         // identity stays owed its seat.
-        if spec.created_custody
-            && matches!(spec.launch_mode, crate::launch::MemberLaunchMode::Fresh)
-            && spec.placement.is_none()
-            && matches!(spec.binding, None | Some(crate::RuntimeBinding::Session))
+        if spec.seats_store_owned_row()
             && let Some(preparer) = self.member_build_preparer.as_ref()
         {
             let composed = Box::pin(super::member_build_preparer::compose_store_owned_seat(
@@ -15708,9 +15727,10 @@ impl MobHandle {
         identity: AgentIdentity,
         initial_message: Option<ContentInput>,
     ) -> Result<MemberRespawnReceipt, MobRespawnError> {
-        match self
+        let agent_identity = identity.clone();
+        let reply = match self
             .execute_machine_command(MobMachineCommand::Respawn {
-                agent_identity: identity,
+                agent_identity,
                 initial_message,
                 successor_spec: None,
             })
@@ -15720,7 +15740,15 @@ impl MobHandle {
             _ => Err(MobRespawnError::from(MobError::Internal(
                 "unexpected command result variant".into(),
             ))),
+        };
+        // The member of a store-owned identity is respawned on its own
+        // session with the labels its roster entry reads: its row lets go
+        // of an owed label restamp that seat row settles, as after
+        // `respawn_member`.
+        if reply.is_ok() {
+            self.settle_store_owned_seat_row(&identity).await;
         }
+        reply
     }
 
     /// Atomically retire a member and replace it from a fully lowered spawn spec.
@@ -15857,6 +15885,10 @@ impl MobHandle {
                 MobRespawnError::Mob(error) => error,
                 other => MobError::Internal(other.to_string()),
             })?;
+        // A store-owned identity's row lets go of what this seat row
+        // settles: a respawn with the row's labels is how a host carries
+        // out an owed label restamp itself.
+        self.settle_store_owned_seat_row(&identity).await;
         let mut receipt = receipt;
         if wake && let Err(error) = self.ensure_member_live(&identity).await {
             receipt.wake_error = Some(std::sync::Arc::new(error));

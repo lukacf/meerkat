@@ -1165,3 +1165,281 @@ describe("identity family: one agent model", () => {
     }
   });
 });
+
+describe("identity family: who reaches an agent, its schedules, host preparation", () => {
+  it("a create and an update set who reaches an agent and how it runs", async () => {
+    const { identities, sent } = await scripted([committed, committed]);
+    await identities.create(
+      [
+        {
+          name: "scout",
+          profile: "researcher",
+          addressability: "internal_only",
+          runtimeModeOverride: "turn_driven",
+        },
+        // An agent that names neither sends neither: it is addressable and
+        // runs as its profile says.
+        { name: "editor", profile: "writer" },
+      ],
+      { requestId: "req-create" },
+    );
+    await identities.update("scout", {
+      expectedSpecDigest: DIGEST,
+      requestId: "req-update",
+      set: { addressability: "addressable", runtimeModeOverride: "autonomous_host" },
+    });
+    assert.deepEqual(sent, [
+      {
+        method: "meta/identity/create",
+        params: {
+          request_id: "req-create",
+          agents: [
+            {
+              name: "scout",
+              profile: "researcher",
+              addressability: "internal_only",
+              runtime_mode_override: "turn_driven",
+            },
+            { name: "editor", profile: "writer" },
+          ],
+        },
+      },
+      {
+        method: "meta/identity/update",
+        params: {
+          request_id: "req-update",
+          name: "scout",
+          expected_spec_digest: DIGEST,
+          set: { addressability: "addressable", runtime_mode_override: "autonomous_host" },
+        },
+      },
+    ]);
+  });
+
+  it("get and list read back who reaches an agent and how it runs", async () => {
+    const { identities } = await scripted([
+      {
+        result: summary("scout", {
+          instructions: [],
+          labels: {},
+          peers: [],
+          addressability: "internal_only",
+          runtime_mode_override: "turn_driven",
+        }),
+      },
+      {
+        result: {
+          agents: [
+            summary("scout", {
+              addressability: "internal_only",
+              runtime_mode_override: "autonomous_host",
+            }),
+            // The default is left out: an addressable agent that runs as its
+            // profile says names neither.
+            summary("editor"),
+            // A value newer than this SDK is kept as the gateway sent it.
+            summary("clerk", { addressability: "by_invitation" }),
+          ],
+        },
+      },
+    ]);
+    const record = await identities.get("scout");
+    assert.deepEqual(
+      [record.addressability, record.runtimeModeOverride],
+      ["internal_only", "turn_driven"],
+    );
+    const [scout, editor, clerk] = (await identities.list()).agents;
+    assert.deepEqual(
+      [scout.addressability, scout.runtimeModeOverride],
+      ["internal_only", "autonomous_host"],
+    );
+    assert.deepEqual([editor.addressability, editor.runtimeModeOverride], [null, null]);
+    assert.deepEqual([clerk.addressability, clerk.runtimeModeOverride], ["by_invitation", null]);
+  });
+
+  for (const [change, effect, state] of [
+    ["archive", "paused", "archived"],
+    ["unarchive", "resumed", "restored"],
+    ["remove", "ended", "removed"],
+  ] as const) {
+    it(`${change}: the first answer says what became of the agent's schedules`, async () => {
+      const agent = { name: "scout", state, spec_digest: NEXT_DIGEST };
+      const { identities } = await scripted([
+        {
+          result: done({
+            ...agent,
+            schedules: {
+              effect,
+              count: 2,
+              schedules: [{ schedule_id: "sch-1", name: "nightly digest" }, { schedule_id: "sch-2" }],
+              incomplete: true,
+            },
+          }),
+        },
+        { result: done(agent) },
+        { result: done({ ...agent, schedules: { effect, count: 0, schedules: [] } }) },
+      ]);
+      const options = { expectedSpecDigest: DIGEST, requestId: "req-1" };
+      const first = await identities[change]("scout", options);
+      assert.ok(first.outcome === "done");
+      assert.deepEqual(first.agents[0].schedules, {
+        effect,
+        count: 2,
+        schedules: [
+          { scheduleId: "sch-1", name: "nightly digest" },
+          { scheduleId: "sch-2", name: null },
+        ],
+        incomplete: true,
+      });
+
+      // A replay of the request states none: it is the first answer without
+      // the schedules, so a retry is compared agent by agent, not whole.
+      const replay = await identities[change]("scout", options);
+      assert.ok(replay.outcome === "done");
+      assert.equal(replay.agents[0].schedules, null);
+      assert.notDeepEqual(replay, first);
+      assert.equal(replay.operationId, first.operationId);
+      assert.deepEqual(replay.agents[0], { ...first.agents[0], schedules: null });
+
+      // All of them were followed: `incomplete` is left out, and reads false.
+      const noneToFollow = await identities[change]("scout", {
+        expectedSpecDigest: DIGEST,
+        requestId: "req-2",
+      });
+      assert.ok(noneToFollow.outcome === "done");
+      assert.deepEqual(noneToFollow.agents[0].schedules, {
+        effect,
+        count: 0,
+        schedules: [],
+        incomplete: false,
+      });
+    });
+  }
+
+  it("a plan names the schedules its change would take with it", async () => {
+    const plan = {
+      outcome: "allow",
+      change: "archive",
+      timeout_ms: 600_000,
+      request_digest: DIGEST,
+      subject_digest: NEXT_DIGEST,
+      rendering: "archive scout",
+    };
+    const { identities } = await scripted([
+      {
+        result: {
+          ...plan,
+          schedules: {
+            effect: "paused",
+            count: 1,
+            schedules: [{ schedule_id: "sch-1", name: "nightly digest" }],
+          },
+        },
+      },
+      { result: { ...plan, change: "adopt" } },
+    ]);
+    const request = { name: "scout", expectedSpecDigest: DIGEST, requestId: "req-1" };
+    const planned = await identities.plan("archive", request);
+    assert.deepEqual(planned.schedules, {
+      effect: "paused",
+      count: 1,
+      schedules: [{ scheduleId: "sch-1", name: "nightly digest" }],
+      incomplete: false,
+    });
+    // A plan of a change that takes no schedule with it names none.
+    assert.equal((await identities.plan("adopt", request)).schedules, null);
+  });
+
+  it("schedules that are no schedules are a contract mismatch", () => {
+    const agent = (schedules: unknown) => done({ name: "scout", state: "archived", schedules });
+    for (const broken of [
+      { count: 1, schedules: [] },
+      { effect: "paused", schedules: [] },
+      { effect: "paused", count: 1, schedules: [{ name: "nightly digest" }] },
+    ]) {
+      assert.throws(() => parseIdentityOutcome(agent(broken)), ContractMismatchError);
+    }
+    // An effect newer than this SDK is kept as the gateway sent it.
+    const kept = parseIdentityOutcome(agent({ effect: "moved", count: 0, schedules: [] }));
+    assert.ok(kept.outcome === "done" && kept.agents[0].schedules?.effect === "moved");
+  });
+
+  it("settlePreparation names the agent and the request", async () => {
+    const { identities, sent } = await scripted([
+      {
+        result: done({
+          name: "scout",
+          state: "committed",
+          spec_digest: DIGEST,
+          spec_revision: 1,
+          session_id: "session-1",
+          seat: "seated",
+        }),
+      },
+    ]);
+    const settled = await identities.settlePreparation("scout", { requestId: "settle-scout" });
+    assert.deepEqual(sent, [
+      {
+        method: "meta/identity/settle_preparation",
+        params: { name: "scout", request_id: "settle-scout" },
+      },
+    ]);
+    assert.ok(settled.outcome === "done");
+    assert.equal(settled.operationId, OPERATION_ID);
+    const agent = settled.agents[0];
+    assert.deepEqual([agent.name, agent.state, agent.seat], ["scout", "committed", "seated"]);
+    assert.deepEqual(
+      [agent.specDigest, agent.specRevision, agent.sessionId],
+      [DIGEST, 1, "session-1"],
+    );
+    // Host code names each change: a blank or missing request id is not sent.
+    for (const requestId of ["", "  ", undefined]) {
+      const error = await rejection(
+        identities.settlePreparation("scout", { requestId: requestId as string }),
+      );
+      assert.ok(error instanceof TypeError, String(error));
+    }
+    assert.equal(sent.length, 1);
+  });
+
+  it("an agent that awaits no preparation refuses its settle typed", async () => {
+    const { identities } = await scripted([
+      refusal("preparation_not_pending", {
+        field: "name",
+        retryable: false,
+        detail: "The agent awaits no preparation.",
+      }),
+    ]);
+    const error = await rejection(
+      identities.settlePreparation("scout", { requestId: "settle-scout" }),
+    );
+    assert.ok(error instanceof IdentityRefusedError);
+    assert.equal(error.kind, "preparation_not_pending");
+    assert.equal(error.knownKind, true);
+    assert.equal(error.field, "name");
+    assert.equal(error.retryable, false);
+  });
+
+  it("a status says when the roster lists an agent served from its record", () => {
+    const wire = {
+      identity: "scout",
+      state: "dormant",
+      profile: "researcher",
+      addressability: "addressable",
+      labels: {},
+      intent_managed: false,
+    };
+    // Written only when it is so: an absent member reads false.
+    assert.equal(sdk.parseIdentityStatus(wire).rosterListingSuperseded, false);
+    assert.equal(
+      sdk.parseIdentityStatus({ ...wire, roster_listing_superseded: true }).rosterListingSuperseded,
+      true,
+    );
+    // Only the boolean true says so.
+    assert.equal(
+      sdk.parseIdentityStatus({ ...wire, roster_listing_superseded: "true" })
+        .rosterListingSuperseded,
+      false,
+    );
+  });
+});

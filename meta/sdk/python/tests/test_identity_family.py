@@ -1283,3 +1283,320 @@ def test_the_family_is_exported_from_the_package():
         assert name in meerkat_meta.__all__, name
     runtime = meerkat_meta.MetaRuntime(meerkat_meta.Meta.builder()._config)
     assert isinstance(runtime.identities, meerkat_meta.IdentitiesHandle)
+
+
+# ---------------------------------------------------------------------------
+# Who reaches an agent and how it runs; its schedules; host preparation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_create_and_an_update_set_who_reaches_an_agent_and_how_it_runs():
+    from meerkat_meta import AgentSet, AgentSpec
+
+    identities, transport = make_identities(
+        results={
+            "meta/identity/create": done({"name": "scout", "state": "committed"}),
+            "meta/identity/update": done({"name": "scout", "state": "committed"}),
+        }
+    )
+    await identities.create(
+        [
+            AgentSpec(
+                name="scout",
+                profile="researcher",
+                addressability="internal_only",
+                runtime_mode_override="turn_driven",
+            ),
+            # An agent that names neither sends neither: it is addressable
+            # and runs as its profile says.
+            AgentSpec(name="editor", profile="writer"),
+        ],
+        request_id="req-create",
+    )
+    await identities.update(
+        "scout",
+        expected_spec_digest=DIGEST,
+        request_id="req-update",
+        set=AgentSet(addressability="addressable", runtime_mode_override="autonomous_host"),
+    )
+    assert transport.calls == [
+        (
+            "meta/identity/create",
+            {
+                "request_id": "req-create",
+                "agents": [
+                    {
+                        "name": "scout",
+                        "profile": "researcher",
+                        "addressability": "internal_only",
+                        "runtime_mode_override": "turn_driven",
+                    },
+                    {"name": "editor", "profile": "writer"},
+                ],
+            },
+        ),
+        (
+            "meta/identity/update",
+            {
+                "request_id": "req-update",
+                "name": "scout",
+                "expected_spec_digest": DIGEST,
+                "set": {
+                    "addressability": "addressable",
+                    "runtime_mode_override": "autonomous_host",
+                },
+            },
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_get_and_list_read_back_who_reaches_an_agent_and_how_it_runs():
+    identities, _ = make_identities(
+        results={
+            "meta/identity/get": summary(
+                instructions=[],
+                labels={},
+                peers=[],
+                addressability="internal_only",
+                runtime_mode_override="turn_driven",
+            ),
+            "meta/identity/list": {
+                "agents": [
+                    summary(
+                        "scout",
+                        addressability="internal_only",
+                        runtime_mode_override="autonomous_host",
+                    ),
+                    # The default is left out: an addressable agent that runs
+                    # as its profile says names neither.
+                    summary("editor"),
+                    # A value newer than this SDK is kept as the gateway
+                    # sent it.
+                    summary("clerk", addressability="by_invitation"),
+                ]
+            },
+        }
+    )
+    record = await identities.get("scout")
+    assert (record.addressability, record.runtime_mode_override) == (
+        "internal_only",
+        "turn_driven",
+    )
+    scout, editor, clerk = (await identities.list()).agents
+    assert (scout.addressability, scout.runtime_mode_override) == (
+        "internal_only",
+        "autonomous_host",
+    )
+    assert (editor.addressability, editor.runtime_mode_override) == (None, None)
+    assert (clerk.addressability, clerk.runtime_mode_override) == ("by_invitation", None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("change", "effect", "state"),
+    [("archive", "paused", "archived"), ("unarchive", "resumed", "restored"), ("remove", "ended", "removed")],
+)
+async def test_a_change_that_stops_or_restores_an_agent_says_what_became_of_its_schedules(
+    change, effect, state
+):
+    from meerkat_meta import IdentityDone, ScheduleRef, SchedulesFollowed
+
+    method = f"meta/identity/{change}"
+    agent = {"name": "scout", "state": state, "spec_digest": NEXT_DIGEST}
+    first_answer = done(
+        dict(
+            agent,
+            schedules={
+                "effect": effect,
+                "count": 2,
+                "schedules": [
+                    {"schedule_id": "sch-1", "name": "nightly digest"},
+                    {"schedule_id": "sch-2"},
+                ],
+                "incomplete": True,
+            },
+        )
+    )
+    identities, transport = make_identities(results={method: first_answer})
+    first = await getattr(identities, change)(
+        "scout", expected_spec_digest=DIGEST, request_id="req-1"
+    )
+    assert isinstance(first, IdentityDone)
+    assert first.agents[0].schedules == SchedulesFollowed(
+        effect=effect,
+        count=2,
+        schedules=(
+            ScheduleRef(schedule_id="sch-1", name="nightly digest"),
+            ScheduleRef(schedule_id="sch-2"),
+        ),
+        incomplete=True,
+    )
+
+    # A replay of the request states none: it is the first answer without
+    # the schedules, so a retry is compared agent by agent, not whole.
+    transport._results[method] = done(agent)
+    replay = await getattr(identities, change)(
+        "scout", expected_spec_digest=DIGEST, request_id="req-1"
+    )
+    assert replay.agents[0].schedules is None
+    assert replay != first
+    assert replay.operation_id == first.operation_id
+    assert replay.agents[0] == dataclasses.replace(first.agents[0], schedules=None)
+
+    # All of them were followed: `incomplete` is left out, and reads False.
+    transport._results[method] = done(
+        dict(agent, schedules={"effect": effect, "count": 0, "schedules": []})
+    )
+    none_to_follow = await getattr(identities, change)(
+        "scout", expected_spec_digest=DIGEST, request_id="req-2"
+    )
+    assert none_to_follow.agents[0].schedules == SchedulesFollowed(
+        effect=effect, count=0, schedules=(), incomplete=False
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_plan_names_the_schedules_its_change_would_take_with_it():
+    from meerkat_meta import AgentRef, ScheduleRef, SchedulesFollowed
+
+    plan = {
+        "outcome": "allow",
+        "change": "archive",
+        "timeout_ms": 600_000,
+        "request_digest": DIGEST,
+        "subject_digest": NEXT_DIGEST,
+        "rendering": "archive scout",
+    }
+    request = AgentRef(name="scout", expected_spec_digest=DIGEST, request_id="req-1")
+    identities, transport = make_identities(
+        results={
+            "meta/identity/plan": dict(
+                plan,
+                schedules={
+                    "effect": "paused",
+                    "count": 1,
+                    "schedules": [{"schedule_id": "sch-1", "name": "nightly digest"}],
+                },
+            )
+        }
+    )
+    planned = await identities.plan("archive", request)
+    assert planned.schedules == SchedulesFollowed(
+        effect="paused",
+        count=1,
+        schedules=(ScheduleRef(schedule_id="sch-1", name="nightly digest"),),
+        incomplete=False,
+    )
+    # A plan of a change that takes no schedule with it names none.
+    transport._results["meta/identity/plan"] = dict(plan, change="adopt")
+    assert (await identities.plan("adopt", request)).schedules is None
+
+
+def test_schedules_that_are_no_schedules_are_a_contract_mismatch():
+    from meerkat_meta import SchedulesFollowed
+
+    with pytest.raises(ContractMismatchError):
+        SchedulesFollowed.from_dict({"count": 1, "schedules": []})
+    with pytest.raises(ContractMismatchError):
+        SchedulesFollowed.from_dict({"effect": "paused", "schedules": []})
+    with pytest.raises(ContractMismatchError):
+        SchedulesFollowed.from_dict(
+            {"effect": "paused", "count": 1, "schedules": [{"name": "nightly digest"}]}
+        )
+    # An effect newer than this SDK is kept as the gateway sent it.
+    assert SchedulesFollowed.from_dict(
+        {"effect": "moved", "count": 0, "schedules": []}
+    ).effect == "moved"
+
+
+@pytest.mark.asyncio
+async def test_settle_preparation_names_the_agent_and_the_request():
+    from meerkat_meta import IdentityDone
+
+    identities, transport = make_identities(
+        results={
+            "meta/identity/settle_preparation": done(
+                {
+                    "name": "scout",
+                    "state": "committed",
+                    "spec_digest": DIGEST,
+                    "spec_revision": 1,
+                    "session_id": "session-1",
+                    "seat": "seated",
+                }
+            )
+        }
+    )
+    settled = await identities.settle_preparation("scout", request_id="settle-scout")
+    assert transport.calls == [
+        (
+            "meta/identity/settle_preparation",
+            {"name": "scout", "request_id": "settle-scout"},
+        )
+    ]
+    assert isinstance(settled, IdentityDone)
+    assert settled.operation_id == OPERATION_ID
+    agent = settled.agents[0]
+    assert (agent.name, agent.state, agent.seat) == ("scout", "committed", "seated")
+    assert (agent.spec_digest, agent.spec_revision, agent.session_id) == (
+        DIGEST,
+        1,
+        "session-1",
+    )
+    # Host code names each change: a blank or missing request id is not sent.
+    for request_id in ("", "  ", None):
+        with pytest.raises(ValueError):
+            await identities.settle_preparation("scout", request_id=request_id)
+    assert len(transport.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_agent_that_awaits_no_preparation_refuses_its_settle_typed():
+    from meerkat_meta import IdentityRefusedError
+
+    identities, _ = make_identities(
+        errors={
+            "meta/identity/settle_preparation": refusal_error(
+                "preparation_not_pending",
+                field="name",
+                retryable=False,
+                detail="The agent awaits no preparation.",
+            )
+        }
+    )
+    with pytest.raises(IdentityRefusedError) as refused:
+        await identities.settle_preparation("scout", request_id="settle-scout")
+    assert refused.value.kind == "preparation_not_pending"
+    assert refused.value.known_kind is True
+    assert refused.value.field == "name"
+    assert refused.value.retryable is False
+
+
+def test_a_status_says_when_the_roster_lists_an_agent_served_from_its_record():
+    from meerkat_meta.identity_first_models import IdentityStatus
+
+    wire = {
+        "identity": "scout",
+        "state": "dormant",
+        "profile": "researcher",
+        "addressability": "addressable",
+        "labels": {},
+        "intent_managed": False,
+    }
+    # Written only when it is so: an absent member reads False.
+    plain = IdentityStatus.from_dict(wire)
+    assert plain.roster_listing_superseded is False
+    assert "roster_listing_superseded" not in plain.to_dict()
+
+    superseded = IdentityStatus.from_dict(dict(wire, roster_listing_superseded=True))
+    assert superseded.roster_listing_superseded is True
+    assert superseded.to_dict()["roster_listing_superseded"] is True
+    # Only the boolean true says so.
+    assert (
+        IdentityStatus.from_dict(
+            dict(wire, roster_listing_superseded="true")
+        ).roster_listing_superseded
+        is False
+    )

@@ -88,8 +88,10 @@ them.
   after the call and whether this call changed it. A schedule somebody
   paused by name keeps that pause through both calls. A pause or a resume by
   name of a schedule paused for its target takes it over: it is no longer
-  the target's. So does a revise that points it at another target: the
-  schedule stays paused until somebody resumes it. A call that has nothing
+  the target's. So does a revise that changes its target (whom it names,
+  or what it sends): the schedule stays paused until somebody resumes it.
+  One owner of a target's lifecycle sends the two calls for it: a second
+  sender's resume would end the first one's pause. A call that has nothing
   to do answers the schedule unchanged and writes nothing, for a deleted
   schedule too, so the owner of the target's lifecycle can make it again
   after a crash. The `ScheduleLifecycleMachine` owns the fact (state

@@ -1478,7 +1478,10 @@ update, an archive, an unarchive and a removal: change it in the
 configuration, or adopt it first.
 
 The schedules that target the agent follow these three changes, so that no
-schedule keeps firing at an agent that takes no delivery:
+schedule keeps firing at an agent that takes no delivery. A schedule targets
+the agent when it names it (a member target, or an identity target by the
+agent's name), when it names the agent's session, and when it is a Console
+schedule for it (`meta/schedule/*`):
 
 - an **archive** pauses the Active schedules that target the agent, for
   their target;
@@ -1487,14 +1490,19 @@ schedule keeps firing at an agent that takes no delivery:
   paused;
 - a **removal** ends every schedule that targets the agent.
 
-The agent's entry of the answer says what was done, on the first answer of
-the change: `schedules: {effect, count, schedules, incomplete?}`, where
-`effect` is `paused`, `resumed` or `ended` and each schedule is
-`{schedule_id, name?}`. `incomplete: true` is written when a schedule could
-not be read or changed; the same request asked again follows the rest. A
-plan of the change (`meta/identity/plan`) carries the same member with the
-schedules the change would take with it, as they are when the plan is
-made; it is no part of the rendering.
+The agent's entry of the answer says how the agent's schedules stand after
+the change, on the first answer of the change: `schedules: {effect, count,
+schedules, incomplete?}`, where `effect` is `paused`, `resumed` or `ended`
+and each schedule is `{schedule_id, name?}`. After an archive the list is
+the agent's schedules that are paused for it; after an unarchive it is the
+agent's schedules that are active after the call, one a person resumed by
+name while the agent was archived included; after a removal it is the ended
+ones. A schedule somebody paused by name is on neither of the first two
+lists. `incomplete: true` is written when a schedule could not be read or
+changed; the same request asked again follows the rest. A plan of the
+change (`meta/identity/plan`) carries the same member with the list the
+change would answer, as the schedules are when the plan is made; it is no
+part of the rendering.
 
 A schedule a person resumes by name while its agent is archived is theirs
 from then on: it stays Active, its fires end as delivery failures while the
@@ -1505,7 +1513,29 @@ unarchive does not resume it. A change asked again under the same
 the change (an archive while it is archived, an unarchive while it is not,
 a removal), which is how a caller that got no answer makes the schedules
 converge; a schedule taken over by name in between follows the agent
-again. A schedule created for an agent while it is archived is not paused.
+again.
+
+No schedule is pointed at an archived agent through Meta. An agent's
+`meerkat_schedule_create` or `meerkat_schedule_update` is refused as a
+policy denial with the code `identity_archived` when the schedule would
+target an archived agent after the call (the target the call writes, else
+the one the schedule holds; a member target or an identity target), and the
+Console's `meta/schedule/create` and `meta/schedule/update` answer `-32603`
+`identity_archived`, as a send to the agent does. Nothing is written. A
+pause, a resume and a delete by name stay, and so does an update that moves
+a schedule to another agent. A Console schedule whose create read the agent
+just before its archive is paused for the agent once it is written.
+
+Known limitations: Meerkat's own schedule methods (`schedule/create`,
+`schedule/update`, REST) do not judge the target, and neither does a
+schedule tool call for a target that names only a session, so such a
+schedule for an archived agent is active and each of its fires is refused
+at the delivery. An agent's schedule tool call that reads its target just
+before the target's archive and writes just after it can leave an active
+schedule the same way. A schedule that names only the session of a removed
+agent is not ended by the removal. A change of a paused schedule's target
+through Meerkat's own methods makes its pause a pause by name: the
+unarchive does not resume it.
 A launch whose host gives the family no schedules (an embedded Rust host
 that attaches the policy without them) changes no schedule and answers no
 such member; the stdio gateway gives them.
@@ -4374,6 +4404,7 @@ place (below).
 | `content` | `string` | The message it sends |
 | `trigger` | `object` | When it sends |
 | `phase` | `string` | `active` or `paused` |
+| `paused_for_target` | `boolean` | `true` on a paused schedule whose pause is its agent's: the agent is archived, and its unarchive resumes the schedule. Absent on an active schedule and on one somebody paused by name |
 | `revision` | `integer` | Its revision; every write moves it on |
 | `sender` | `string \| null` | The principal it sends as; `null` for an anonymous caller, and when withheld |
 | `sender_hidden` | `boolean` | `true` when `sender` is withheld: the caller may view the agent but not send to it |
@@ -4460,6 +4491,7 @@ console send.
 | `-32002` | `not_addressable` | A create, update or resume names an agent that takes no console sends |
 | `-32004` | `governed_target` | The agent's input is governed: a governed send needs its Console human present, and a fire has none. A capability refusal, unlike the `-32003` a live send to a governed agent answers, since no human can be present at a fire |
 | `-32004` | `schedule_host_unavailable` | No schedule firing host sends the gateway's schedules, or the schedule store is unavailable |
+| `-32603` | `identity_archived` | A create or an update names an archived agent (with `identity` and `remedy: "unarchive_identity"`); nothing changed. A pause, a resume and a delete of its schedules stay |
 | `-32009` | `schedule_revision_conflict` | An update or resume named an `expected_revision` the schedule moved past, or raced another change of the schedule (with `expected_revision` and `actual_revision`); nothing changed |
 | `-32009` | `sender_takeover_required` | An update or resume by another caller than the schedule's sender without `take_over_sender: true` (with `sender`, who it sends as now); nothing changed |
 | `-32602` | `unsupported_param` | A pause, a delete or a create that names `expected_revision` or `take_over_sender` (with `param`, the one it named); nothing changed |

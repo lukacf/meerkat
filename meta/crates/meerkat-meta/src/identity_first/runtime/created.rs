@@ -992,6 +992,27 @@ impl IdentityRuntime {
         entries.note_registration(identity);
     }
 
+    /// The refusal of a new or changed schedule for `identity` while Core
+    /// holds it archived ([`IdentityRuntimeError::IdentityArchived`], the
+    /// refusal of a delivery to it), read from Core's entry of its name.
+    /// `Ok(None)` for an identity of any other standing, and for a name Core
+    /// holds no entry of; `Err` when Core could not serve the read, never
+    /// read as "not archived".
+    pub(crate) async fn archived_refusal(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<Option<IdentityRuntimeError>, IdentityRuntimeError> {
+        let archived = matches!(
+            self.core_entry_of_name(identity).await?,
+            Some(entry)
+                if entry.member.is_none()
+                    && entry.unseated == Some(meerkat_mob::UnseatedEntryCause::Archived)
+        );
+        Ok(archived.then(|| IdentityRuntimeError::IdentityArchived {
+            identity: identity.clone(),
+        }))
+    }
+
     /// The refusal of a delivery, a wake or a grant to `identity` when Core
     /// holds no member of it, answered from Core's entry of its name:
     /// archived, a final refusal naming the archive

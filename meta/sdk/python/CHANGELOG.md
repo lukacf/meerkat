@@ -31,9 +31,9 @@ All notable changes to the Python SDK are documented here.
   `turn_driven`); `AgentSummary` and `AgentRecord` read both back, each
   `None` when it is the default.
 - `AgentOutcome.schedules` and `IdentityChangePlan.schedules`
-  (`SchedulesFollowed`, `ScheduleRef`): what became of the schedules that
-  target an agent at its archive, unarchive or removal, on the first
-  answer of the change, and what a planned change would do to them. A
+  (`SchedulesFollowed`, `ScheduleRef`): how the schedules that target an
+  agent stand after its archive, unarchive or removal, on the first
+  answer of the change, and the list a planned change would answer. A
   replay of the request and an `operation` read state none.
 - `IdentitiesHandle.settle_preparation(name, request_id=...)` calls
   `meta/identity/settle_preparation`: the host has prepared an agent whose

@@ -387,27 +387,41 @@ await identities.remove("editor", { expectedSpecDigest: digest, requestId: "remo
   `applies_at_next_run`, `applies_after_compaction`, `applies_at_next_session`
   (with a `reason`) or `unchanged`.
 - **Archive and unarchive.** An archived agent keeps its name, record,
-  conversation and memory (the agent's last conversation is harvested as
-  for any agent that leaves), and messages to it are refused. Unarchive
+  conversation and memory, and messages to it are refused. Like any agent
+  that leaves, it is owed the harvest and distillation of its last
+  conversation, an exit interview and the retirement hook (cause
+  `unlisted`); they start right after its member retired, and no order is
+  promised between them and the archive's answer. Unarchive
   brings it back on the same conversation. While it is archived the
   identity's status (`runtime.status(name)`) reads `archived` true; the
   member is left out otherwise.
 - **Remove.** Removal is permanent: the name is never available again
-  (`name_taken`). The agent's conversation and memory are kept (the agent's
-  last conversation is harvested as for any agent that leaves), and no
-  other agent can reach them. Archive an agent that may be needed later.
+  (`name_taken`). The agent's conversation and memory are kept, and no
+  other agent can reach them. A removal owes what an archive owes (the
+  harvest, the exit interview, the retirement hook); a removal of an
+  archived agent owes nothing more. Archive an agent that may be needed
+  later.
 - **Schedules.** The schedules that target an agent follow these three
   changes, so that none keeps firing at an agent that takes no delivery: an
   archive pauses its Active schedules, an unarchive resumes exactly the
   schedules paused that way (one somebody paused by name stays paused), and
-  a removal ends every one. The agent's entry of the first answer says what
-  was done: `schedules` with its `effect` (`paused`, `resumed`, `ended`),
+  a removal ends every one. A schedule is the agent's when it names the
+  agent or its session, or is a Console schedule for it. The agent's entry
+  of the first answer says how its schedules stand after the change:
+  `schedules` with its `effect` (`paused`, `resumed`, `ended`),
   `count`, the `schedules` (`schedule_id` and `name`) and `incomplete`,
   true when a schedule could not be read or changed (send the same request
-  again: it follows the rest). A replay of the request and a later
-  `operation` read state no `schedules`, so do not compare a retry's answer
-  whole with the first one. `plan` of those changes names the schedules the
-  change would take with it.
+  again: it follows the rest). After an archive the list is the schedules
+  paused for the agent; after an unarchive, the agent's schedules that are
+  active after the call, one somebody resumed by name while it was archived
+  included; after a removal, the ended ones. A schedule somebody paused by
+  name is on neither of the first two lists. A replay of the request and a
+  later `operation` read state no `schedules`, so do not compare a retry's
+  answer whole with the first one. `plan` of those changes carries the list
+  the change would answer. While an agent is archived no schedule is pointed
+  at it through Meta: the agents' schedule tools and the Console refuse a
+  create or an update that would (`identity_archived`); a pause, a resume
+  and a delete by name stay.
 - **Host preparation.** When your policy names a profile's preparation
   `required`, a create of an agent of that profile answers
   `pending_preparation`: the agent reads `readiness` `preparation_pending`,

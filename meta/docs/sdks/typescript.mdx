@@ -361,12 +361,15 @@ an update's `instructions` (`applies_at_next_run`,
 
 The first answer of an `archive`, an `unarchive` and a `remove` also carries
 the agent's `schedules` (`SchedulesFollowed`: `effect`, `count`,
-`schedules` of `{ scheduleId, name }`, `incomplete`): the schedules that
-target the agent were paused, resumed or ended with it; `null` otherwise. A
+`schedules` of `{ scheduleId, name }`, `incomplete`): how the agent's
+schedules stand after the change; `null` otherwise. After an archive the
+list is the schedules paused for the agent; after an unarchive, its
+schedules that are active after the call (one somebody resumed by name
+meanwhile included); after a removal, the ended ones. A
 replay of the request and an `operation` read state none, so compare a
 retry by `operationId` and each agent's `state` and `specDigest`, not
-whole. `IdentityChangePlan.schedules` names the schedules a planned change
-would take with it.
+whole. `IdentityChangePlan.schedules` carries the list a planned change
+would answer.
 
 `AgentSpec` and `AgentSet` take `addressability` (`addressable`,
 `internal_only`) and `runtimeModeOverride` (`autonomous_host`,

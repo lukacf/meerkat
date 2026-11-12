@@ -863,11 +863,16 @@ class IdentitiesHandle:
         source_evidence: SourceEvidence | None = None,
     ) -> IdentityChangeResult:
         """Stop a long-term agent and keep it: its name, record,
-        conversation and memory stay (the agent's last conversation is
-        harvested as for any agent that leaves), messages to it are
-        refused, and :meth:`unarchive` brings it back. The schedules that
-        target it are paused with it: the first answer's agent says which
-        (``schedules``); a replay states none."""
+        conversation and memory stay, messages to it are refused, and
+        :meth:`unarchive` brings it back. Like any agent that leaves, it is
+        owed the harvest and distillation of its last conversation, an exit
+        interview and the retirement hook (cause ``unlisted``); no order is
+        promised between them and this answer. The schedules that target it
+        are paused with it: the first answer's agent names the schedules
+        that are paused for it (``schedules``); a replay states none. While
+        it is archived no schedule is pointed at it through Meta: the
+        agents' schedule tools and the Console refuse a create or an update
+        that would (``identity_archived``)."""
         return await self._change_one(
             "archive", name, expected_spec_digest, request_id, proposer, source_evidence
         )
@@ -883,9 +888,11 @@ class IdentitiesHandle:
     ) -> IdentityChangeResult:
         """Bring an archived agent back, on its archived conversation and
         its current instructions. Refused ``not_archived`` for an agent that
-        is not archived. The schedules its archive paused are resumed (the
-        first answer's agent says which, ``schedules``); a schedule somebody
-        paused by name stays paused."""
+        is not archived. The schedules its archive paused are resumed, and
+        the first answer's agent names the agent's schedules that are
+        active after the call (``schedules``), one somebody resumed by name
+        while it was archived included; a schedule somebody paused by name
+        stays paused."""
         return await self._change_one(
             "unarchive", name, expected_spec_digest, request_id, proposer, source_evidence
         )
@@ -900,11 +907,13 @@ class IdentitiesHandle:
         source_evidence: SourceEvidence | None = None,
     ) -> IdentityChangeResult:
         """Remove a long-term agent for good. Its name can never be used
-        again; its conversation and memory are kept (the agent's last
-        conversation is harvested as for any agent that leaves) and no
-        other agent can reach them. Every schedule that targets it is ended
-        (the first answer's agent says which, ``schedules``). Use
-        :meth:`archive` when it may be needed later."""
+        again; its conversation and memory are kept and no other agent can
+        reach them. It is owed what an archive owes (the harvest and
+        distillation of its last conversation, an exit interview, the
+        retirement hook); a removal of an archived agent owes nothing more.
+        Every schedule that targets it is ended (the first answer's agent
+        says which, ``schedules``). Use :meth:`archive` when it may be
+        needed later."""
         return await self._change_one(
             "remove", name, expected_spec_digest, request_id, proposer, source_evidence
         )

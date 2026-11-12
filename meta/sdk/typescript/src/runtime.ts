@@ -847,11 +847,16 @@ export class IdentitiesHandle {
 
   /**
    * Stop a long-term agent and keep it: its name, record, conversation and
-   * memory stay (the agent's last conversation is harvested as for any agent
-   * that leaves), messages to it are refused, and
-   * {@link IdentitiesHandle.unarchive} brings it back. The schedules that
-   * target it are paused with it: the first answer's agent says which
-   * (`schedules`); a replay states none.
+   * memory stay, messages to it are refused, and
+   * {@link IdentitiesHandle.unarchive} brings it back. Like any agent that
+   * leaves, it is owed the harvest and distillation of its last
+   * conversation, an exit interview and the retirement hook (cause
+   * `unlisted`); no order is promised between them and this answer. The
+   * schedules that target it are paused with it: the first answer's agent
+   * names the schedules that are paused for it (`schedules`); a replay
+   * states none. While it is archived no schedule is pointed at it through
+   * Meta: the agents' schedule tools and the Console refuse a create or an
+   * update that would (`identity_archived`).
    */
   async archive(name: string, options: AgentChangeOptions): Promise<IdentityChangeResult> {
     return this.change("meta/identity/archive", agentRefParams({ ...options, name }));
@@ -860,9 +865,10 @@ export class IdentitiesHandle {
   /**
    * Bring an archived agent back, on its archived conversation and its
    * current instructions. Refused `not_archived` for an agent that is not
-   * archived. The schedules its archive paused are resumed (the first
-   * answer's agent says which, `schedules`); a schedule somebody paused by
-   * name stays paused.
+   * archived. The schedules its archive paused are resumed, and the first
+   * answer's agent names the agent's schedules that are active after the
+   * call (`schedules`), one somebody resumed by name while it was archived
+   * included; a schedule somebody paused by name stays paused.
    */
   async unarchive(name: string, options: AgentChangeOptions): Promise<IdentityChangeResult> {
     return this.change("meta/identity/unarchive", agentRefParams({ ...options, name }));
@@ -870,11 +876,12 @@ export class IdentitiesHandle {
 
   /**
    * Remove a long-term agent for good. Its name can never be used again;
-   * its conversation and memory are kept (the agent's last conversation is
-   * harvested as for any agent that leaves) and no other agent can reach
-   * them. Every schedule that targets it is ended (the first answer's agent
-   * says which, `schedules`). Use {@link IdentitiesHandle.archive} when it
-   * may be needed later.
+   * its conversation and memory are kept and no other agent can reach them.
+   * It is owed what an archive owes (the harvest and distillation of its
+   * last conversation, an exit interview, the retirement hook); a removal of
+   * an archived agent owes nothing more. Every schedule that targets it is
+   * ended (the first answer's agent says which, `schedules`). Use
+   * {@link IdentitiesHandle.archive} when it may be needed later.
    */
   async remove(name: string, options: AgentChangeOptions): Promise<IdentityChangeResult> {
     return this.change("meta/identity/remove", agentRefParams({ ...options, name }));

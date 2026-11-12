@@ -417,17 +417,21 @@ export interface ScheduleRef {
 }
 
 /**
- * The schedules a change of an agent took with it or, in a plan, would take
- * with it.
+ * An agent's schedules as a change of the agent leaves them or, in a plan,
+ * would leave them.
  *
  * The schedules that target an agent follow three changes, so that no
  * schedule keeps firing at an agent that takes no delivery: an archive
  * pauses its Active schedules, an unarchive resumes exactly the schedules
  * that were paused that way (one somebody paused by name stays paused), and
  * a removal ends every one. `effect` says which (advisory; today `paused`,
- * `resumed`, `ended`), `count` how many and `schedules` which. `incomplete`
- * is `true` when a schedule could not be read or changed: the list is then
- * what was done so far, and the same request asked again follows the rest.
+ * `resumed`, `ended`), `count` how many and `schedules` which, as they stand
+ * after the change: after an archive the schedules that are paused for the
+ * agent, after an unarchive the agent's schedules that are active (one
+ * somebody resumed by name while the agent was archived included), after a
+ * removal the ended ones. A schedule somebody paused by name is on neither
+ * of the first two lists. `incomplete` is `true` when a schedule could not
+ * be read or changed: the same request asked again follows the rest.
  */
 export interface SchedulesFollowed {
   readonly effect: string;
@@ -484,8 +488,8 @@ export interface InstructionOutcome {
  * `seat` is on a create's outcome only, one of {@link AGENT_SEATS}: `owed`
  * means the agent is committed and durable and its first message did not
  * start; it is seated without a restart at its next delivery.
- * `instructions` is on an update's outcome only. `schedules` says what
- * became of the schedules that target the agent ({@link SchedulesFollowed}):
+ * `instructions` is on an update's outcome only. `schedules` says how the
+ * agent's schedules stand after the change ({@link SchedulesFollowed}):
  * it is on the first answer of an archive, an unarchive and a removal, on a
  * launch whose host gives the family its schedules (the stdio gateway does).
  *

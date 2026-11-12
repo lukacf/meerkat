@@ -7036,8 +7036,8 @@ pub(crate) fn live_access_violation(
 /// member resolution ([`console_rpc_resolve_members`]) answered it as a
 /// member that does not exist before.
 ///
-/// A read or a plan of one long-term agent that names an agent the caller
-/// may not view is not judged here either
+/// A read, a plan or a change of one long-term agent that names an agent
+/// the caller may not view is not judged here either
 /// ([`crate::rpc::identity_methods::answers_an_unviewed_agent_itself`]):
 /// the family is handed the caller's view and answers such an agent
 /// exactly as a name no agent holds, at the same step of the same checks,

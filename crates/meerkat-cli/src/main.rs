@@ -5639,9 +5639,6 @@ async fn write_comms_binding_out(
         binding["bootstrap_token"] = serde_json::Value::String(bootstrap_token);
     }
 
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
     let bytes = serde_json::to_vec_pretty(&binding)?;
     write_private_file(path, &bytes).await.map_err(|error| {
         anyhow::Error::new(error).context("--comms-binding-out could not write the binding file")
@@ -5662,8 +5659,9 @@ enum PathEntry {
     Socket,
     #[cfg(unix)]
     Device,
-    /// A symbolic link's target that does not exist.
-    Nothing,
+    /// A path in `/dev` or `/proc`, whatever it holds.
+    #[cfg(unix)]
+    InDevOrProc,
     /// Not a regular file, and none of the kinds above.
     Other,
 }
@@ -5691,7 +5689,8 @@ impl std::fmt::Display for NotAFile {
             PathEntry::Socket => "a socket",
             #[cfg(unix)]
             PathEntry::Device => "a device",
-            PathEntry::Nothing => "nothing",
+            #[cfg(unix)]
+            PathEntry::InDevOrProc => "in /dev or /proc",
             PathEntry::Other => "something that is not a regular file",
         })
     }
@@ -5702,10 +5701,11 @@ impl std::fmt::Display for NotAFile {
 #[derive(Debug, thiserror::Error)]
 enum PrivateFileError {
     /// The path holds something the file cannot take the place of. Nothing
-    /// was removed and nothing was written.
+    /// was removed, created or written.
     #[error(
         "{} is {found}. The file is written as a new file in place of the one at its path, \
-         never into what is there: give a path that holds a regular file, or nothing yet",
+         never into what is there: give a path outside /dev and /proc that holds a regular \
+         file, or nothing yet",
         .path.display()
     )]
     NotReplaceable { path: PathBuf, found: NotAFile },
@@ -5713,8 +5713,34 @@ enum PrivateFileError {
     Io(#[from] std::io::Error),
 }
 
-/// What stands at `path`, when a new file may not take its place: anything
-/// but nothing, a regular file, or a symbolic link to a regular file.
+/// Whether `path` would be an entry of `/dev` or `/proc`: its directory,
+/// with every symbolic link resolved, is one of the two or lies under one.
+/// A directory that does not exist yet is judged by its nearest ancestor
+/// that does, since it would be created inside that one.
+#[cfg(all(unix, feature = "comms"))]
+async fn in_dev_or_proc(path: &Path) -> std::io::Result<bool> {
+    let directory = path.parent().unwrap_or(path);
+    for ancestor in directory.ancestors() {
+        let ancestor = if ancestor.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            ancestor
+        };
+        match tokio::fs::canonicalize(ancestor).await {
+            Ok(resolved) => {
+                return Ok(resolved.starts_with("/dev") || resolved.starts_with("/proc"));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(false)
+}
+
+/// What stands at `path`, when a new file may not take its place. Nothing,
+/// a regular file, and a symbolic link to a regular file or to nothing may
+/// be replaced (`None`). A named pipe, a socket, a device or a directory
+/// may not, and neither may a symbolic link to one of them.
 #[cfg(feature = "comms")]
 async fn not_replaceable(path: &Path) -> std::io::Result<Option<NotAFile>> {
     let absent = |error: &std::io::Error| error.kind() == std::io::ErrorKind::NotFound;
@@ -5727,12 +5753,9 @@ async fn not_replaceable(path: &Path) -> std::io::Result<Option<NotAFile>> {
     let target = if through_link {
         match tokio::fs::metadata(path).await {
             Ok(target) => target.file_type(),
-            Err(error) if absent(&error) => {
-                return Ok(Some(NotAFile {
-                    entry: PathEntry::Nothing,
-                    through_link,
-                }));
-            }
+            // A link to nothing: removing it loses nothing, and the new
+            // file is created at the path, not where the link pointed.
+            Err(error) if absent(&error) => return Ok(None),
             Err(error) => return Err(error),
         }
     } else {
@@ -5769,22 +5792,43 @@ async fn not_replaceable(path: &Path) -> std::io::Result<Option<NotAFile>> {
 
 /// Write `bytes` to a new file at `path` that only its owner can read on
 /// Unix (0600, given when the file is created, which the umask can only
-/// narrow). The new file takes the place of the one at `path`: a regular
-/// file there, or a symbolic link to one, is removed first (the link itself,
-/// never its target), so the bytes are never written into an older file
-/// with a wider mode or through a link.
+/// narrow), creating the path's directory when it is missing. The new file
+/// takes the place of what is at `path`, so the bytes are never written
+/// into an older file with a wider mode.
 ///
-/// Anything else at `path` is refused before it is touched
-/// ([`PrivateFileError::NotReplaceable`]): removing a named pipe a reader
-/// waits on, or a device such as `/dev/stdout`, would leave a regular file
-/// holding the bytes where none was asked for.
+/// The rule for what is at `path`: a regular file is removed. A symbolic
+/// link is never followed: a link to a regular file or to nothing is
+/// replaced by the new file (the link itself is removed, never its target),
+/// and a link to a named pipe, a socket, a device or a directory is
+/// refused, as those things themselves are. A path in `/dev` or `/proc` is
+/// refused whatever it holds: `/dev/stdout` is a symbolic link to a regular
+/// file when standard output is redirected to one, and a root process must
+/// never replace a link there.
+///
+/// A refusal ([`PrivateFileError::NotReplaceable`]) is decided before
+/// anything is removed or created: removing a named pipe a reader waits on,
+/// or a device, would leave a regular file holding the bytes where none was
+/// asked for.
 #[cfg(feature = "comms")]
 async fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), PrivateFileError> {
+    let refused = |found: NotAFile| PrivateFileError::NotReplaceable {
+        path: path.to_path_buf(),
+        found,
+    };
+    #[cfg(unix)]
+    {
+        if in_dev_or_proc(path).await? {
+            return Err(refused(NotAFile {
+                entry: PathEntry::InDevOrProc,
+                through_link: false,
+            }));
+        }
+    }
+    if let Some(directory) = path.parent() {
+        tokio::fs::create_dir_all(directory).await?;
+    }
     if let Some(found) = not_replaceable(path).await? {
-        return Err(PrivateFileError::NotReplaceable {
-            path: path.to_path_buf(),
-            found,
-        });
+        return Err(refused(found));
     }
     match tokio::fs::remove_file(path).await {
         Ok(()) => {}
@@ -30072,9 +30116,9 @@ default_model = "gemma"
     }
 
     /// `--comms-binding-out /dev/stdout` is refused by the rule, before
-    /// anything is unlinked: standard output is a pipe here, and
-    /// `/dev/stdout` (a symbolic link to it on Linux, a device elsewhere) is
-    /// not a file the binding file can replace. The scenario runs in a child
+    /// anything is unlinked: a path in `/dev` is never replaced, whatever it
+    /// holds (here a pipe: a symbolic link to it on Linux, a device
+    /// elsewhere). The scenario runs in a child
     /// process of this test binary, whose standard output is always a pipe.
     /// RED before: the write tried to unlink `/dev/stdout`; the refusal was
     /// only the operating system's permission error, and a root process
@@ -30125,9 +30169,15 @@ default_model = "gemma"
         assert!(
             matches!(
                 error.downcast_ref::<PrivateFileError>(),
-                Some(PrivateFileError::NotReplaceable { .. })
+                Some(PrivateFileError::NotReplaceable {
+                    found: NotAFile {
+                        entry: PathEntry::InDevOrProc,
+                        through_link: false
+                    },
+                    ..
+                })
             ),
-            "the typed refusal of the path: {error:#}"
+            "the typed refusal of a path in /dev: {error:#}"
         );
         assert_eq!(
             std::fs::symlink_metadata(stdout)
@@ -30213,9 +30263,15 @@ default_model = "gemma"
         assert!(
             matches!(
                 error.downcast_ref::<PrivateFileError>(),
-                Some(PrivateFileError::NotReplaceable { .. })
+                Some(PrivateFileError::NotReplaceable {
+                    found: NotAFile {
+                        entry: PathEntry::InDevOrProc,
+                        through_link: false
+                    },
+                    ..
+                })
             ),
-            "the typed refusal of the path, made before any unlink: {error:#}"
+            "the typed refusal of a path in /dev, made before any unlink: {error:#}"
         );
         assert_eq!(
             std::fs::symlink_metadata(stdout)
@@ -30225,6 +30281,62 @@ default_model = "gemma"
             "/dev/stdout is what it was"
         );
         eprintln!("{CHILD_DONE}");
+    }
+
+    /// The `/dev` and `/proc` rule looks at where the binding path's
+    /// directory really is: a path in `/proc`, a path whose directory is a
+    /// symbolic link into `/dev`, and a path whose directory does not exist
+    /// yet below such a link are all refused with the typed error, and
+    /// nothing is created or removed. Without the rule each of them ends in
+    /// whatever the operating system answers to an unlink or a create
+    /// there, which for a root process is success.
+    #[cfg(all(target_os = "linux", feature = "comms"))]
+    #[tokio::test]
+    async fn comms_binding_out_refuses_a_path_that_resolves_into_dev_or_proc() {
+        use std::os::unix::fs::FileTypeExt as _;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = TestCommsRuntime::new("binding-out-dev-proc");
+        let devices = temp.path().join("devices");
+        std::os::unix::fs::symlink("/dev", &devices).expect("a link to /dev");
+
+        for path in [
+            PathBuf::from("/proc/self/binding.json"),
+            devices.join("null"),
+            devices.join("binding-out-row-absent").join("binding.json"),
+        ] {
+            let error = write_comms_binding_out(&path, &runtime)
+                .await
+                .expect_err("a path in /dev or /proc is refused");
+            assert!(
+                matches!(
+                    error.downcast_ref::<PrivateFileError>(),
+                    Some(PrivateFileError::NotReplaceable {
+                        found: NotAFile {
+                            entry: PathEntry::InDevOrProc,
+                            through_link: false
+                        },
+                        ..
+                    })
+                ),
+                "{}: the typed refusal of a path in /dev or /proc: {error:#}",
+                path.display()
+            );
+        }
+        assert!(
+            std::fs::symlink_metadata("/dev/null")
+                .expect("/dev/null")
+                .file_type()
+                .is_char_device(),
+            "/dev/null is still the device"
+        );
+        assert!(
+            std::fs::symlink_metadata("/dev/binding-out-row-absent").is_err(),
+            "no directory was created in /dev"
+        );
+        assert!(
+            std::fs::symlink_metadata("/proc/self/binding.json").is_err(),
+            "nothing was created in /proc"
+        );
     }
 
     /// `rkat init` writes the project document only into a file it creates:

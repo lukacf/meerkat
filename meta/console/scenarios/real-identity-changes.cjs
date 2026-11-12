@@ -509,8 +509,9 @@ async function fullStory() {
  * An agent that waits for its host, against the real gateway: the fixture's
  * policy says the host prepares the agents of the profile `prepared`, so a
  * new one is committed and has no member until the host settles its
- * preparation. The console shows it by name, as waiting, with no control;
- * the settle is the host's operator's, which no console caller is.
+ * preparation. The console shows it by name, as waiting; a person can give
+ * it up (Remove, asked as for an agent that never started) and nothing
+ * else; the settle is the host's operator's, which no console caller is.
  */
 async function waitingAgent() {
   requirePrebuilt();
@@ -561,7 +562,7 @@ async function waitingAgent() {
     assert.equal(await agent("porter").count(), 0);
 
     // The list under the roster shows it: its name first, a plain state,
-    // no id and no control.
+    // no id, and Remove as its one control.
     await page.getByTestId("roster-archived-open").click();
     const waiting = page.getByTestId("roster-waiting:porter");
     await waiting.waitFor();
@@ -570,7 +571,8 @@ async function waitingAgent() {
     assert.match(row, /Waiting for its host/);
     assert.equal(row.includes(operation), false, "an operation id is no text of the row");
     assert.equal(/preparation_pending|principal:/.test(row), false);
-    assert.equal(await waiting.locator("button").count(), 0);
+    assert.equal(await waiting.locator("button").count(), 1);
+    await waiting.getByTestId("roster-waiting-action:porter:remove").waitFor();
     await page.getByTestId("roster-archived").getByText("Its host is still preparing it. It joins the roster when that ends.").waitFor();
     await page.screenshot({ path: path.join(evidence, "real-identity-waiting-listed.png"), fullPage: true });
 
@@ -584,6 +586,68 @@ async function waitingAgent() {
     assert.equal(refused.code, -32058);
     assert.equal(refused.data.kind, "change_denied");
     assert.equal((await call("meta/identity/get", { name: "porter" })).result.readiness, "preparation_pending");
+
+    // A host can give up on an agent it cannot prepare. A second agent
+    // waits, and a person removes it from the list: the question is the
+    // removal's for an agent that never started, and the create's
+    // operation ends with the agent removed.
+    await page.getByTestId("roster-new-agent").click();
+    await form.getByTestId("identity-profile:prepared").check();
+    await form.getByTestId("identity-field:name").fill("runner");
+    await form.getByTestId("identity-field:display_name").fill("The runner");
+    await form.getByTestId("identity-submit").click();
+    await notice.getByText("The runner is being prepared").waitFor({ timeout: 90_000 });
+    await page.getByTestId("identity-cancel").click();
+    const [runnerCreate] = (await call("meta/identity/get", { name: "runner" })).result.open_operations;
+    assert.equal(typeof runnerCreate, "string");
+    const listOpen = page.getByTestId("roster-archived-open");
+    const runnerRow = page.getByTestId("roster-waiting:runner");
+    // The list is read when it is opened: open it, and read it again until
+    // the new agent is in it.
+    for (let attempt = 0; (await runnerRow.count()) === 0; attempt += 1) {
+      assert(attempt < 40, "the second waiting agent is listed");
+      if ((await listOpen.getAttribute("aria-expanded")) !== "true") await listOpen.click();
+      try {
+        await runnerRow.waitFor({ timeout: 1_000 });
+      } catch {
+        await listOpen.click();
+      }
+    }
+    assert.equal(await runnerRow.locator("button").count(), 1, "Remove is its one control");
+    await runnerRow.getByTestId("roster-waiting-action:runner:remove").click();
+    const confirm = page.getByTestId("identity-confirm:runner:remove");
+    await confirm.getByText("Remove The runner for good?").waitFor();
+    await confirm.getByText(/It never started: its host has not finished preparing it/).waitFor();
+    await confirm.getByText(/Its name can never be used again, and this cannot be undone\./).waitFor();
+    assert.equal(/harvest|Archive is the reversible choice|schedule/i.test(await confirm.textContent()), false);
+    assert.equal(await confirm.getByTestId("identity-confirm-archive-instead").count(), 0);
+    assert.deepEqual(sent(fixture, "meta/identity/remove"), [], "nothing is sent before the person confirms");
+    await page.screenshot({ path: path.join(evidence, "real-identity-waiting-remove-asked.png"), fullPage: true });
+    await confirm.getByTestId("identity-confirm-yes").click();
+    await notice.getByText(/^The runner is (removed|stopping)$/).waitFor({ timeout: 90_000 });
+    assert.equal(/schedule/i.test((await notice.locator(".identity-notice__line").allTextContents()).join(" ")), false);
+    const removes = sent(fixture, "meta/identity/remove");
+    assert.deepEqual(removes.map(params => params.name), ["runner"]);
+    // It leaves the list, and the agent that still waits stays in it.
+    for (let attempt = 0; (await runnerRow.count()) > 0; attempt += 1) {
+      assert(attempt < 200, "the removed agent leaves the list");
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    await waiting.waitFor();
+    await page.getByTestId("identity-confirm-cancel").click();
+    // The operation of its create ends: done, with the agent removed.
+    let ended;
+    for (let attempt = 0; attempt < 300; attempt += 1) {
+      ended = (await call("meta/identity/operation", { operation_id: runnerCreate })).result;
+      if (ended.outcome === "done") break;
+      await new Promise(resolve => setTimeout(resolve, 200));
+    }
+    assert.equal(ended.outcome, "done");
+    assert.deepEqual(ended.agents.map(entry => [entry.name, entry.state]), [["runner", "removed"]]);
+    assert.equal(
+      (await call("meta/identity/list", { include_archived: true })).result.agents.some(entry => entry.name === "runner"),
+      false,
+    );
 
     // The host settles the preparation: the agent has a member, is in the
     // roster, and the list no longer shows it.

@@ -5123,11 +5123,13 @@ async function runIdentityChangesStoryProof() {
     await page.getByTestId("roster-archived-open").click();
     await page.getByTestId("roster-archived:scout").waitFor();
     // The agent that waits for its host is in the same list, by name, with
-    // its state in words and no control; the roster has no row for it.
+    // its state in words; the roster has no row for it. It can be given
+    // up: Remove is its one control.
     const waitingRow = page.getByTestId("roster-waiting:porter");
     await waitingRow.getByText("The porter").waitFor();
     await waitingRow.getByText("Waiting for its host").waitFor();
-    assert.equal(await waitingRow.locator("button").count(), 0);
+    assert.equal(await waitingRow.locator("button").count(), 1);
+    await waitingRow.getByTestId("roster-waiting-action:porter:remove").waitFor();
     assert.equal(await agent("porter").count(), 0);
     await page.screenshot({ path: path.join(evidenceDir, "identity-changes-archived.png"), fullPage: true });
     await page.getByTestId("roster-archived-action:scout:unarchive").click();

@@ -63,13 +63,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   agents' tools over them): an archive pauses the Active schedules that
   target the agent, an unarchive resumes exactly the ones that archive
   paused, and a removal ends every one. Before, such a schedule kept firing
-  and each fire ended as a delivery failure or a missing target. A schedule
+  and each fire ended as a delivery failure or a missing target. An archive
+  pauses the agent's Console schedules too, the schedules that name its
+  session, and the ones that name it by a name no member id spells as it
+  is. A schedule
   somebody paused by name stays paused through the unarchive, and a pause or
   a resume by name of a schedule the archive paused takes it over. The
-  agent's entry of the change's first answer says what was done
-  (`schedules: {effect, count, schedules, incomplete?}`, `effect` one of
-  `paused`, `resumed`, `ended`), and a plan of the change carries the same
-  member with what it would do. Whose pause a pause is, the schedule's own
+  agent's entry of the change's first answer says how the agent's schedules
+  stand after it (`schedules: {effect, count, schedules, incomplete?}`,
+  `effect` one of `paused`, `resumed`, `ended`: the schedules paused for the
+  agent, the agent's schedules that are active after an unarchive, the
+  ended ones), and a plan of the change carries the same member with what
+  the change would answer. Whose pause a pause is, the schedule's own
   lifecycle records (Core: `ScheduleService::pause_for_target`,
   `resume_for_target`). The stdio gateway gives the family its schedules; a
   Rust host does with `IdentityFamilyOptions::with_schedules`
@@ -77,6 +82,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   by `schedule_wiring::MobAgentSchedules`), and a launch that gives none
   changes no schedule. Rust: `identity_creation::AgentOutcome` and
   `ChangePlan` gain `schedules`.
+- No schedule is pointed at an archived agent through Meta: an agent's
+  `meerkat_schedule_create` or `meerkat_schedule_update` whose schedule
+  would target an archived agent (a member target or an identity target) is
+  refused as a policy denial with the code `identity_archived`, and the
+  Console's `meta/schedule/create` and `meta/schedule/update` answer
+  `-32603` `identity_archived`, as a send to the agent does. A pause, a
+  resume and a delete by name stay, and so does an update that moves a
+  schedule to another agent. A Console schedule whose create read the agent
+  just before its archive is paused for the agent once it is written. See
+  the known limitations under "Agent changes" in the RPC reference.
+- `meta/schedule/list` and every Console schedule write answer
+  `paused_for_target: true` on a schedule that is paused because its agent
+  is archived (absent otherwise), and the Console's schedule row and the
+  Schedules panel say so in words: "Paused because its agent is archived.
+  It resumes when the agent is unarchived."
 - `meta/identity/*`: host methods that change a mob's long-term agents while
   it runs, on the stdio gateway and on `POST /console/rpc`: `create` (1 to
   256 agents, all or nothing), `update`, `archive`, `unarchive`, `remove`,
@@ -651,9 +671,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   boundary for agent memory, and a retirement's hooks name the member.
   They were skipped, because the member carried no mark of an
   identity-first spawn.
+- The memory steward's mob context lists an agent created at run time
+  while it is a member of the mob (not archived, not removed), by its name
+  and its profile only; it listed none. Nothing else of such an agent
+  enters a steward prompt (its labels, display name, context, instructions
+  and first message), and the mob's purpose is read from the host's roster
+  only, never from a created agent's `purpose` or `mob_purpose` label.
+
+- An archive or a removal of an agent whose record is its row in the mob's
+  identity store (one created at run time) owes that agent what leaving the
+  roster owes a configured agent: the harvest of the compactions its last
+  session holds, that session's distillation, an exit interview and the
+  host's retirement hook, which hears the cause `unlisted`. They run from
+  Core's member lifecycle journal, as every lifecycle side effect does:
+  right after the member's retirement ended, at least once, and at the next
+  start when the gateway stopped before they ran (over a durable metadata
+  store). Before, such an agent's last conversation was kept and never
+  harvested or distilled, no exit interview was queued and the hook never
+  heard of it. A removal of an archived agent retires no member and owes
+  nothing more. No order is promised between these side effects and the
+  answer of the change that owes them.
+
+- An agent whose record is its row in the mob's identity store (one created
+  at run time) is a durable identity to every check and copy the gateway
+  keeps for its long-term agents, on any profile. With this release's Core,
+  such an agent's seat is recorded durable whether or not its profile
+  declares `durable = true`, so, as for a configured agent: the start's
+  check of a state directory counts the agent once its conversation exists
+  and refuses a start whose `runtime.sqlite` no longer holds any session;
+  the storage census of the members' comms identities names it when it is
+  restored without its key pair; the continuity mirror
+  (`UnifiedRuntimeBuilder::continuity_mirror`) carries its record and its
+  session; `storage-migrate-native` lists it among a directory's
+  identities; and the launch's WorkGraph resume gate is asked before an
+  interrupted run of it resumes. Before, each of these covered such an
+  agent only on a `durable = true` profile. An agent seated by an earlier
+  build, or adopted into the store from a plain member, gets them from its
+  next seat: a reset, an unarchive, a seat a start owes, or a respawn
+  (`meta/respawn`), which keeps its conversation.
 
 ### Known limitations
 
+- Schedules of an archived agent: Meta's own doors (the agents' schedule
+  tools, the Console) point no schedule at an archived agent. Meerkat's own
+  schedule methods (`schedule/create`, `schedule/update`, REST) do not judge
+  the target, and neither does a schedule tool call for a target that names
+  only a session: such a schedule for an archived agent is active and each
+  of its fires is refused at the delivery. An agent's schedule tool call
+  that reads its target just before the target's archive and writes just
+  after it can leave an active schedule the same way (the Console's create
+  closes that window). A change of a paused schedule's target through
+  Meerkat's own methods (its prompt, for one) makes its pause a pause by
+  name: the agent's unarchive does not resume it.
 - Before the identity runtime is composed, the host's customizer cannot
   run. A member of an identity whose record is its row that the mob's
   start spawns then (a seat the start owes it) is built from its row

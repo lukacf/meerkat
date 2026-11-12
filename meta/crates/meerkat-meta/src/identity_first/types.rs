@@ -1817,7 +1817,10 @@ impl IdentityLifecycleState {
 pub enum RetiredIdentityCause {
     /// A roster pass retired the member because the roster no longer lists
     /// the identity (an identity this runtime registered, or a live member
-    /// Meta spawned for an identity it never registered).
+    /// Meta spawned for an identity it never registered). Also the end of
+    /// the member of an agent whose record is its row in the mob's identity
+    /// store, by its archive or its removal: it leaves the mob's agents as
+    /// an identity that leaves the roster does, and is owed the same.
     Unlisted,
     /// An explicit retire of the identity: the member is released.
     Retire,

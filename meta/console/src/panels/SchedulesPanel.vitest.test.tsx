@@ -323,4 +323,41 @@ describe("SchedulesPanel", () => {
     expect(view.getByRole("heading", { level: 2 }).textContent).toBe("Schedules");
     expect(run.mock.calls.length).toBe(0);
   });
+
+  it("says in words when a schedule is paused because its agent is archived", async () => {
+    const row = (extra: Record<string, unknown>) => ({
+      identity: "support",
+      name: "Inbox sweep",
+      content: "Sweep the shared inbox.",
+      trigger: { type: "interval", start_at_utc: "2026-05-04T05:30:00Z", every_seconds: 7200 },
+      phase: "paused",
+      revision: 1,
+      sender: "console:shared",
+      next_due_at_utc: null,
+      ...extra,
+    });
+    const run = vi.fn(async (identity: string) => ({
+      identity,
+      schedules: identity === "support"
+        ? [row({ schedule_id: "sch_for_agent", paused_for_target: true }), row({ schedule_id: "sch_by_name" })]
+        : [],
+    }));
+    const view = render(panel({ run }));
+    await loaded(view);
+    fireEvent.click(view.getByTestId("schedules-view:list"));
+    await waitFor(() => expect(present(view, "schedules-row:sch_by_name")).toBe(true));
+
+    expect(view.getByTestId("schedules-phase:sch_for_agent").textContent).toBe("Paused");
+    expect(view.getByTestId("schedules-pause-reason:sch_for_agent").textContent?.includes("Paused because its agent is archived")).toBe(true);
+    expect(present(view, "schedules-pause-reason:sch_by_name")).toBe(false);
+
+    // Its detail says when it runs again.
+    fireEvent.click(within(view.getByTestId("schedules-row:sch_for_agent")).getByRole("button", { name: /^Inbox sweep, / }));
+    await waitFor(() => expect(present(view, "schedules-detail:sch_for_agent")).toBe(true));
+    expect(
+      view.getByTestId("schedules-detail:sch_for_agent").textContent?.includes(
+        "Paused because its agent is archived. It resumes when the agent is unarchived.",
+      ),
+    ).toBe(true);
+  });
 });

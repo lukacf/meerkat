@@ -7683,6 +7683,20 @@ impl SpawnMemberSpec {
         self.created_custody = false;
     }
 
+    /// Whether the request is the fresh local spawn of a store-owned
+    /// identity's member, which Core seats from the identity's row (the
+    /// kickoff spawn of its create, and the spawn a start or a rotation
+    /// owes it): its host composes its seat before the spawn is sent, and
+    /// the labels it carries are compared with its seat's once the host's
+    /// spawn customizer ran. A placed or externally bound one is its host's
+    /// own spawn, whose spec its host wrote.
+    pub(crate) fn seats_store_owned_row(&self) -> bool {
+        self.created_custody
+            && matches!(self.launch_mode, crate::launch::MemberLaunchMode::Fresh)
+            && self.placement.is_none()
+            && matches!(self.binding, None | Some(crate::RuntimeBinding::Session))
+    }
+
     /// Attach exact runtime-proven parent ancestry to a child launch.
     pub fn with_creation_source(mut self, source: crate::MemberCreationSourceWitness) -> Self {
         self.creation_origin = crate::member_creation::MemberCreationOrigin::Source(source);
@@ -15195,10 +15209,7 @@ impl MobHandle {
         // its session, so it takes everything the host composed. A refusal
         // fails the spawn with the host's reason: nothing is sent, and the
         // identity stays owed its seat.
-        if spec.created_custody
-            && matches!(spec.launch_mode, crate::launch::MemberLaunchMode::Fresh)
-            && spec.placement.is_none()
-            && matches!(spec.binding, None | Some(crate::RuntimeBinding::Session))
+        if spec.seats_store_owned_row()
             && let Some(preparer) = self.member_build_preparer.as_ref()
         {
             let composed = Box::pin(super::member_build_preparer::compose_store_owned_seat(

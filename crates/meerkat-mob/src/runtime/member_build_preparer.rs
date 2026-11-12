@@ -11,7 +11,9 @@
 //! identity's member (the kickoff spawn of its create, or the seat a start
 //! owes it) is such a build too: it is asked before that spawn's provision,
 //! about the session the spawn names, which no build has created yet, with
-//! no wired peers (the spawn wires them). A refusal there fails the spawn:
+//! the wired peers the mob's durable wiring records for the identity then
+//! (none for an identity no edge names yet; the spawn wires its peers after
+//! the build). A refusal there fails the spawn:
 //! the identity stays owed its seat, and no retry is recorded. With no
 //! preparer configured, nothing changes.
 //!
@@ -123,7 +125,22 @@ impl MemberBuildPreparationRefusal {
         answered: &std::collections::BTreeMap<String, String>,
     ) -> Option<Self> {
         let none = std::collections::BTreeMap::new();
-        let seated = seat.labels.as_ref().unwrap_or(&none);
+        Self::seat_labels_differ(
+            &seat.identity,
+            seat.labels.as_ref().unwrap_or(&none),
+            answered,
+        )
+    }
+
+    /// [`Self::store_owned_seat_labels`] over the seat's labels themselves:
+    /// `seated` are the labels of `identity`'s seat, `answered` the labels
+    /// its host gives the build (its composition's answer, or the labels
+    /// the build carries once its spawn customizer ran).
+    pub(crate) fn seat_labels_differ(
+        identity: &AgentIdentity,
+        seated: &std::collections::BTreeMap<String, String>,
+        answered: &std::collections::BTreeMap<String, String>,
+    ) -> Option<Self> {
         let keys = |keys: Vec<&str>, how: &str| {
             (!keys.is_empty()).then(|| format!("{how} [{}]", keys.join(", ")))
         };
@@ -159,7 +176,7 @@ impl MemberBuildPreparationRefusal {
                  (label keys {}). A store-owned identity's member carries its row's labels and \
                  no others: put a label the host requires in the identity's row, at its create \
                  or by an update, and seat its member again",
-                seat.identity,
+                identity,
                 differences.join("; ")
             ),
         })
@@ -229,17 +246,33 @@ pub trait MemberBuildPreparer: Send + Sync {
     /// seat's identity, role, launch mode or custody is refused: the build
     /// fails as a [`MemberBuildPreparationRefusal::Final`] refusal does.
     ///
-    /// The seat's labels are its row's, and the answer may not differ from
-    /// them: what decides on a member's labels reads its seat, so a member
-    /// is never seated without a label its host requires, nor with one its
-    /// row does not carry. An answer whose labels are not exactly the
-    /// seat's (a key added, a key dropped, a key given another value) is
-    /// refused for good, and the member is not built
+    /// The seat's labels are the labels its member is seated with: its
+    /// row's labels at a fresh spawn, and the member's own seat labels at a
+    /// wake or a restore (a label update of the row seats them at once, so
+    /// they are the row's unless that restamp is still owed). The answer
+    /// must leave them as given: what decides on a member's labels reads
+    /// its seat. An answer whose labels are not exactly the seat's (a key
+    /// added, a key dropped, a key given another value) is refused for
+    /// good, and the member is not built
     /// ([`MemberBuildPreparationRefusal::store_owned_seat_labels`]: the
-    /// reason names the label keys, never a value). A host that labels its
-    /// members in its build step puts those labels in the identity's row,
-    /// at its create or by an update; a seated member takes its row's
-    /// labels when it is seated again or respawned with them.
+    /// reason names the label keys, never a value). Core makes the same
+    /// comparison again on the labels the build carries once the host's
+    /// spawn customizer ran, whether or not a preparer is configured, so a
+    /// label a customizer sets on a store-owned member is refused too. A
+    /// host that labels its members in its build step puts those labels in
+    /// the identity's row, at its create or by an update.
+    ///
+    /// Where Core composes no build of the seat, this is not called and
+    /// the labels are not compared: a spawn its host wrote itself under
+    /// created custody (a placed or externally bound member, a held spawn,
+    /// an owner-bound spawn); a live actor that is kept, which builds
+    /// nothing; a reload or warm revival, which rebuilds the member with
+    /// its seat's labels, the profile and tool overlay of its last build in
+    /// the process and its session's own context and instructions; and an
+    /// explicit resume of a stopped mob, which rebuilds each member from
+    /// its seat as the host's spawn customizer makes it, labels included.
+    /// A host whose build step is not ready to answer refuses retryably:
+    /// until the host's preparer is composed the seat is not built.
     ///
     /// The host answers from the identity's row and its own state, the same
     /// for every build: no build relies on an earlier answer, so a restart
@@ -251,11 +284,13 @@ pub trait MemberBuildPreparer: Send + Sync {
     /// A refusal fails the build before anything is built. At a spawn the
     /// identity stays owed its seat, and the mob's next start asks again. At
     /// a wake or a boot restore it is the refusal
-    /// [`Self::prepare_member_build`] would give: the member stays Dormant
-    /// (its session unborn if no build created it), and its next wake asks
-    /// again once the retry is due
-    /// ([`MemberBuildPreparationRefusal::Retryable`]), or the member is
-    /// recorded broken ([`MemberBuildPreparationRefusal::Final`]).
+    /// [`Self::prepare_member_build`] would give: a retryable one
+    /// ([`MemberBuildPreparationRefusal::Retryable`]) leaves the member
+    /// Dormant (its session unborn if no build created it), and its next
+    /// wake asks again once the retry is due; one for good
+    /// ([`MemberBuildPreparationRefusal::Final`], as every label refusal
+    /// is) records the member broken, and nothing asks again until it is
+    /// respawned or reset.
     ///
     /// The default changes nothing: the member is built from its row alone.
     async fn prepare_store_owned_seat(
@@ -348,7 +383,10 @@ fn refused_seat_change(seat: &SpawnMemberSpec, composed: &SpawnMemberSpec) -> Op
 /// not exactly the seat's (each refused as
 /// [`MemberBuildPreparationRefusal::Final`], naming what changed) leave
 /// `seat` untouched. Both of Core's sites compose through here, so no
-/// answer reaches a store-owned seat past these checks.
+/// answer reaches a store-owned seat past these checks. The host's spawn
+/// customizer runs after the composition: each site compares the labels the
+/// build then carries with the seat's again
+/// ([`MemberBuildPreparationRefusal::seat_labels_differ`]).
 pub(crate) async fn compose_store_owned_seat(
     preparer: &dyn MemberBuildPreparer,
     handle: MobReadHandle,

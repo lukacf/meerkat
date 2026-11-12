@@ -13356,11 +13356,12 @@ pub(super) async fn restore_resumed_member(
     // provision (`prepare_member_build_before_provision`), with the request
     // left as it was. A live actor that is kept builds nothing and asks
     // nothing.
-    let mut seat_refusal = None;
-    if !keeps_live_actor
+    let store_owned_seat = !keeps_live_actor
         && entry.fork_source.is_none()
+        && super::created_identity::host_composes_seat(base.state(), &entry.agent_identity);
+    let mut seat_refusal = None;
+    if store_owned_seat
         && let Some(preparer) = ctx.member_build_preparer
-        && super::created_identity::host_composes_seat(base.state(), &entry.agent_identity)
         && let Err(refusal) = Box::pin(super::member_build_preparer::compose_store_owned_seat(
             preparer.as_ref(),
             ctx.host_read_handle.clone(),
@@ -13395,6 +13396,18 @@ pub(super) async fn restore_resumed_member(
             "spawn customizer cannot change resume restore identity from '{}' to '{}'",
             entry.agent_identity, restore_spec.identity
         )));
+    }
+    // A store-owned member carries its seat's labels and no others: the
+    // labels this build carries are compared with them here, once the
+    // host's spawn customizer ran, so a label the customizer set, dropped
+    // or changed is refused as one its composition answered is, for good,
+    // whether or not a build preparer is configured.
+    if store_owned_seat && seat_refusal.is_none() {
+        seat_refusal = super::MemberBuildPreparationRefusal::seat_labels_differ(
+            &entry.agent_identity,
+            &entry.labels,
+            restore_spec.labels.as_ref().unwrap_or(&entry.labels),
+        );
     }
     if restore_spec.role_name != entry.role {
         return Err(MobError::Internal(format!(

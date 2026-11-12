@@ -1595,25 +1595,36 @@ fn seeded_member_endpoint_refused_reason(
     refused: &TrustedPeerDescriptor,
     detail: &str,
 ) -> String {
+    seeded_member_endpoint_key_held_reason(state, mob_id, &entry.agent_identity, refused)
+        .unwrap_or_else(|| member_endpoint_broken_reason(&entry.agent_identity, detail))
+}
+
+/// The restore failure of `agent_identity` when another member holds the
+/// transport key of `refused`, the endpoint MobMachine refused to register
+/// for it at a start, with that holder named in the log; `None` when no
+/// other member holds the key. A start breaks such a member alone; without
+/// a holder the refusal is not this case, and the caller keeps its own
+/// answer.
+fn seeded_member_endpoint_key_held_reason(
+    state: &crate::machines::mob_machine::MobMachineState,
+    mob_id: &MobId,
+    agent_identity: &AgentIdentity,
+    refused: &TrustedPeerDescriptor,
+) -> Option<String> {
     let endpoint = crate::machines::mob_machine::MemberPeerEndpoint::from(refused);
     let holder = member_endpoint_key_holder(
         state,
-        &crate::machines::mob_machine::AgentIdentity::from_domain(&entry.agent_identity),
+        &crate::machines::mob_machine::AgentIdentity::from_domain(agent_identity),
         &endpoint,
+    )?;
+    warn_member_endpoint_key_held(
+        mob_id,
+        agent_identity,
+        &holder,
+        &endpoint.peer_id.0,
+        "its live endpoint is not registered; the member is listed broken until it is retired",
     );
-    match holder {
-        Some(holder) => {
-            warn_member_endpoint_key_held(
-                mob_id,
-                &entry.agent_identity,
-                &holder,
-                &endpoint.peer_id.0,
-                "its live endpoint is not registered; the member is listed broken until it is retired",
-            );
-            member_endpoint_key_held_reason(&entry.agent_identity)
-        }
-        None => member_endpoint_broken_reason(&entry.agent_identity, detail),
-    }
+    Some(member_endpoint_key_held_reason(agent_identity))
 }
 
 /// Cold-boot twin of explicit Resume's per-member endpoint isolation: record
@@ -4602,6 +4613,14 @@ fn seed_mob_authority_sync_from_events_reporting(
                         // and recorded a restore failure, so it is listed
                         // broken and is never woken; the key's holder keeps
                         // its endpoint. Every other refusal fails the replay.
+                        // Which of two such members keeps the key is the
+                        // journal's order: on a journal written before the
+                        // endpoint was judged ahead of the row, the member
+                        // the replay keeps is the one whose row comes first.
+                        // The replay asks who holds the key, not why
+                        // MobMachine refused: a row refused for a second
+                        // reason too is recorded the same failure while a
+                        // holder exists.
                         let Some(holder) = member_endpoint_key_holder(
                             authority.state(),
                             &dsl_identity,
@@ -11193,16 +11212,43 @@ impl MobBuilder {
                                 entry.agent_identity
                             ))
                         })?;
-                    let recovered_event = append_recovered_session_binding(
+                    // MobMachine may refuse the endpoint the member's session
+                    // came up with. While another member holds its transport
+                    // key, that breaks this member alone, as a refused
+                    // registration below does; every other refusal fails
+                    // the start, as before.
+                    let recovered_event = match append_recovered_session_binding(
                         dsl_authority,
                         &tool_handle.events,
                         &definition.id,
                         entry,
                         bridge_session_id,
-                        Some(spec),
+                        Some(spec.clone()),
                         "resume_upgrade_recovered_member_peer_endpoint",
                     )
-                    .await?;
+                    .await
+                    {
+                        Ok(event) => event,
+                        Err(error) => {
+                            let Some(reason) = seeded_member_endpoint_key_held_reason(
+                                dsl_authority.state(),
+                                &definition.id,
+                                &entry.agent_identity,
+                                &spec,
+                            ) else {
+                                return Err(error);
+                            };
+                            record_seeded_member_endpoint_broken(
+                                dsl_authority,
+                                roster,
+                                &tool_handle.restore_diagnostics,
+                                entry,
+                                reason,
+                            )
+                            .await?;
+                            continue;
+                        }
+                    };
                     roster.apply(&recovered_event);
                     tool_handle
                         .roster
@@ -14782,16 +14828,43 @@ async fn restore_member_on_successor(
         None
     };
     let recovered_endpoint_missing = recovered_endpoint.is_none();
-    let recovered_event = append_recovered_session_binding(
+    // A live successor the member keeps brings its endpoint with it, and
+    // MobMachine may refuse that endpoint. While another member holds its
+    // transport key, that breaks this member alone and nothing is repointed;
+    // every other refusal fails the restore, as before.
+    let recovered_event = match append_recovered_session_binding(
         commit.authority,
         &commit.tool_handle.events,
         &definition.id,
         entry,
         &replacement_session_id,
-        recovered_endpoint,
+        recovered_endpoint.clone(),
         "resume_repoint_missing_member_session_binding",
     )
-    .await?;
+    .await
+    {
+        Ok(event) => event,
+        Err(error) => {
+            let key_held = recovered_endpoint.as_ref().and_then(|refused| {
+                seeded_member_endpoint_key_held_reason(
+                    commit.authority.state(),
+                    &definition.id,
+                    &entry.agent_identity,
+                    refused,
+                )
+            });
+            let Some(reason) = key_held else {
+                return Err(error);
+            };
+            record_member_restore_failure(
+                commit.tool_handle,
+                entry,
+                member_restore_failure(&replacement_session_id, reason),
+            )
+            .await;
+            return Ok(None);
+        }
+    };
     commit.roster.apply(&recovered_event);
     commit
         .tool_handle
@@ -19256,6 +19329,51 @@ mod tests {
                 "{label}: MobMachine's refusal (at a replay, at a spawn) and the lookup's holder ({holder:?}) agree"
             );
         }
+    }
+
+    /// The rule by which a start breaks one member instead of failing: a
+    /// live endpoint MobMachine refused is the key-held case only while
+    /// another member holds its transport key. Then the reason names the
+    /// refused member alone; with no holder, or for the member's own key,
+    /// there is no such reason and the start keeps its own answer.
+    #[test]
+    fn a_start_reads_a_refused_live_endpoint_as_key_held_only_while_another_member_holds_its_key() {
+        let definition = MobDefinition::explicit("test-live-endpoint-key-held-mob");
+        let (holder, second) = (AgentIdentity::from("alice"), AgentIdentity::from("carol"));
+        let (held_key, own_key, free_key) = ([7u8; 32], [8u8; 32], [9u8; 32]);
+        let events = vec![
+            member_spawned_row_with_key(&definition, 1, &holder, held_key),
+            member_spawned_row_with_key(&definition, 2, &second, own_key),
+        ];
+        let mut authority = seed_mob_authority();
+        seed_mob_authority_sync_from_events(
+            &mut authority,
+            &events,
+            &definition,
+            false,
+            &BTreeSet::new(),
+        )
+        .expect("the journal replays");
+        let key_held = |key: [u8; 32]| {
+            seeded_member_endpoint_key_held_reason(
+                authority.state(),
+                &definition.id,
+                &second,
+                &member_endpoint_with_key(&definition, &second, key),
+            )
+        };
+
+        let reason = key_held(held_key).expect("another member holds the key");
+        assert_eq!(reason, member_endpoint_key_held_reason(&second));
+        let peer_id = meerkat_comms::PubKey::new(held_key)
+            .to_peer_id()
+            .to_string();
+        assert!(
+            reason.contains("carol") && !reason.contains("alice") && !reason.contains(&peer_id),
+            "the reason names the refused member alone, without the holder or the peer id: {reason}"
+        );
+        assert_eq!(key_held(free_key), None, "no member holds the key");
+        assert_eq!(key_held(own_key), None, "the key is the member's own");
     }
 
     #[test]

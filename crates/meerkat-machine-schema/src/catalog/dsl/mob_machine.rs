@@ -38725,20 +38725,22 @@ macro_rules! mob_catalog_machine_dsl {
 
         // The record of a fork-derived member's lineage root for operator
         // instructions (member_instruction_lineage). A fork seat applies it
-        // in the same actor command as its seat commit, and the replay of a
-        // spawn row that carries the root applies it after the row seated
-        // the member. root_identity is the member it was forked from or
-        // that member's own root: the machine records the root either way,
-        // so a fork of a fork names the first member. A root is a name, as
-        // a member target is: an entry outlives its root's identity, and
-        // when the name the member descends from is the member's own (the
-        // name lives again as a fork of one of its earlier forks) no entry
-        // is written, since the records for that name select the member
-        // already. From then on the records written for the root and its
-        // forks select the member, so it is owed the mob's snapshot when
-        // the mob has recorded a generation. A member whose session already
-        // recorded a snapshot under this seat is refused: that snapshot was
-        // built without the lineage, and a generation is recorded once.
+        // in the same synchronous actor step as its seat commit, before any
+        // delivery can be prepared for that seat, and the replay of a spawn
+        // row that carries the root applies it directly after the row
+        // seated the member. The entry is the root as given: the shell reads
+        // it from this state at the fork's admission (its source's entry,
+        // or the source itself when it holds none), so a fork of a fork
+        // names the first member, the same input writes the same entry at
+        // any time, and a row's replay is idempotent. A root is a name, as
+        // a member target is: an entry outlives its root's identity. From
+        // then on the records written for the root and its forks select the
+        // member, so it is owed the mob's snapshot when the mob has recorded
+        // a generation. A member whose session already recorded a snapshot
+        // under this seat is refused: that snapshot was built without the
+        // lineage, and a generation is recorded once. The machine does not
+        // see a delivery that is prepared and not yet recorded, which is
+        // why the record belongs to the seat's own step.
         transition RecordMemberInstructionLineage {
             per_phase [Running, Stopped]
             on input RecordMemberInstructionLineage { agent_identity, root_identity }
@@ -38746,13 +38748,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "root_is_another_member" { agent_identity != root_identity }
             guard "no_snapshot_recorded" { self.member_instruction_recorded.contains_key(agent_identity) == false }
             update {
-                if self.member_instruction_lineage.contains_key(root_identity) == true {
-                    if self.member_instruction_lineage.get_cloned(root_identity) != Some(agent_identity) {
-                        self.member_instruction_lineage.insert(agent_identity, self.member_instruction_lineage.get_cloned(root_identity).get("value"));
-                    }
-                } else {
-                    self.member_instruction_lineage.insert(agent_identity, root_identity);
-                }
+                self.member_instruction_lineage.insert(agent_identity, root_identity);
                 if self.operator_instruction_generation != 0 {
                     self.member_instruction_owed.insert(agent_identity, self.operator_instruction_generation);
                     self.member_instruction_blocked.remove(agent_identity);

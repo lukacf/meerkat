@@ -6065,6 +6065,21 @@ class MobHandle:
         A member of a stopped mob still accepts a message through a wire;
         it is handed the message when its mob resumes.
 
+        **What a wire survives.** Between two gateways, a wire survives a
+        gateway restart on persistent state only when each wired member's
+        ``dialable_address`` is the same after the restart. A member whose
+        address changed is restored ``broken``, and its wires are dead. To
+        recover:
+
+        1. ``respawn_member`` the broken member. It comes back active with
+           its new address, and on a fresh conversation: a respawn starts
+           the member on a new session.
+        2. ``unwire_local`` on the other gateway, with the respawned
+           member's current ``peer_info``.
+        3. ``unwire_local`` on the restarted gateway, with the other
+           member's current ``peer_info``.
+        4. ``wire_cross_mob`` again.
+
         Args:
             local_member_id: Member on this mob to wire.
             remote_member_id: Member on the remote mob to wire.

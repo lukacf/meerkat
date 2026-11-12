@@ -30,6 +30,15 @@ All notable changes to the Python SDK are documented here.
   on both sides, each with the other member's current `peer_info`, then
   wire again.
 
+- Limits, now in the `wire_cross_mob` and `member_comms_tcp` docstrings: a
+  wire between two gateways survives a gateway restart on persistent state
+  only when each wired member's `dialable_address` is the same after the
+  restart (the default port `0` is for a mob that does not outlive its
+  process); the way to wire such a member again (`respawn_member`,
+  `unwire_local` on both sides with current `peer_info`,
+  `wire_cross_mob`); with member socket endpoints, one member per gateway
+  today.
+
 ## 0.9.14
 
 No SDK API changes; released with Meta 0.9.14.

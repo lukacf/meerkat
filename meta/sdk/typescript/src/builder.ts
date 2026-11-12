@@ -657,6 +657,13 @@ export class MetaBuilder {
    * External members run in another process and cannot reply to the default
    * in-process endpoints. Each local member binds an ephemeral TCP port. Pass
    * a concrete externally reachable interface address for cross-host peers.
+   *
+   * The default address (port `0`) is for a mob that does not outlive its
+   * process: on persistent state a restarted member binds another port, is
+   * restored broken, and its wires to members of other gateways are dead
+   * (`MobHandle.wireCrossMob` says how to wire them again). Give a mob with
+   * persistent state a fixed address, a port of your choice. With member
+   * socket endpoints, run one member per gateway today.
    */
   memberCommsTcp(address = "127.0.0.1:0"): this {
     if (!address.trim()) {

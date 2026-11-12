@@ -21,6 +21,14 @@
   sides, each with the other member's current `peerInfo`, then wire
   again.
 
+- Limits, now in the `wireCrossMob` and `memberCommsTcp` doc comments: a
+  wire between two gateways survives a gateway restart on persistent state
+  only when each wired member's `dialable_address` is the same after the
+  restart (the default port `0` is for a mob that does not outlive its
+  process); the way to wire such a member again (`respawnMember`,
+  `unwireLocal` on both sides with current `peerInfo`, `wireCrossMob`);
+  with member socket endpoints, one member per gateway today.
+
 ## 0.9.14
 
 No SDK API changes; released with Meta 0.9.14.

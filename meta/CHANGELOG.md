@@ -147,6 +147,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   only. The two new `peer_info` fields are answered on the stdio RPC;
   the Console's `peer_info` is unchanged.
 
+### Known limitations
+
+- A wire between members of two gateways survives a gateway restart on
+  persistent state only when each wired member's `dialable_address` is the
+  same after the restart. With the default member address (port `0`, a
+  port the system picks at each start: `member_comms_tcp()`,
+  `memberCommsTcp()`) a restarted member binds another port, is restored
+  `broken`, and its wires are dead; give a mob with persistent state a
+  fixed member address. To wire such a member again: `respawn_member` it
+  (it comes back active with its new address, on a fresh session),
+  `unwire_local` on both gateways, each with the other member's current
+  `peer_info`, then `wire_cross_mob` again.
+- With member socket endpoints, run one member per gateway today.
+
 ## [0.9.14] - 2026-11-11
 
 Meta 0.9.14 is part of Meerkat 0.9.14 (Core 0.9.14, Meta 0.9.14 and Connect

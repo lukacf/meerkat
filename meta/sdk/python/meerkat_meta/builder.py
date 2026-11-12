@@ -311,6 +311,14 @@ class MetaBuilder:
         what ``MobHandle.wire_cross_mob`` wires two gateways by. Pass a
         concrete externally reachable interface address for peers on another
         host. Emitted as ``runtime_options.member_comms_address``.
+
+        The default address (port ``0``) is for a mob that does not outlive
+        its process: on persistent state a restarted member binds another
+        port, is restored broken, and its wires to members of other
+        gateways are dead (``MobHandle.wire_cross_mob`` says how to wire
+        them again). Give a mob with persistent state a fixed address, a
+        port of your choice. With member socket endpoints, run one member
+        per gateway today.
         """
         if not address.strip():
             raise ValueError("member_comms_tcp address must not be empty")

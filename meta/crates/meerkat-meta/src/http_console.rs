@@ -10017,6 +10017,23 @@ fn console_request_auth_context(
     )
 }
 
+/// Whether this console can identify a person: it requires sign-in, or it
+/// has an access controller, for which it resolves the token a caller
+/// volunteers, and a trusted OIDC snapshot a token can verify against
+/// ([`crate::runtime::validate_trusted_oidc_runtime_config`]). Only on such
+/// a console can a member be private to a person. A console that can
+/// identify nobody has one anonymous operator and nobody to keep apart.
+/// Computed here and nowhere else, from the console's own configuration.
+fn console_identifies_people(
+    decisions: &RuntimeDecisionState,
+    access: Option<&AccessController>,
+) -> bool {
+    decisions.console.require_app_auth
+        || (access.is_some()
+            && crate::runtime::validate_trusted_oidc_runtime_config(&decisions.trusted_oidc)
+                .is_ok())
+}
+
 /// The Console's request authentication, shared by the Console's own routes
 /// and [`ConsoleViewerResolver`]. A token is checked against the Console's
 /// session fence record `fences` as it is now.
@@ -10029,13 +10046,22 @@ pub(crate) fn console_request_auth_context_for(
 ) -> Option<ConsoleHttpAuthContext> {
     if !decisions.console.require_app_auth {
         // Open console: identify callers that volunteered a valid token so
-        // per-user ABAC grants still apply; everyone else is anonymous.
-        let caller = access.and_then(|_| {
-            let token = console_request_token(headers, uri)?;
-            crate::runtime::resolve_authorized_console_caller_from_token(decisions, fences, &token)
-        });
+        // per-user ABAC grants still apply; everyone else is anonymous. A
+        // token is resolved only where the console can identify a person,
+        // and there the caller it did not identify is told apart from its
+        // people all the same: the audience states the console's fact, not
+        // the caller's.
+        let identifies_people = console_identifies_people(decisions, access);
+        let caller = identifies_people
+            .then(|| {
+                let token = console_request_token(headers, uri)?;
+                crate::runtime::resolve_authorized_console_caller_from_token(
+                    decisions, fences, &token,
+                )
+            })
+            .flatten();
         let Some(caller) = caller else {
-            let audience = console_audience_view(access, None, None);
+            let audience = console_audience_view(access, None, None).on_console(identifies_people);
             return Some(ConsoleHttpAuthContext {
                 access_view: access.map(|_| audience.clone()),
                 audience,
@@ -11176,10 +11202,11 @@ enum SessionAttachDecision {
 /// Whether or not access is enforced, a session the caller may not know of
 /// is answered as a session that does not exist: one a member hidden from
 /// the caller owns ([`AccessView::hides_agent`]), one whose stored member
-/// labels name a private owner other than the caller, and, on a console with
-/// sign-in, for a caller who is not an admin, one whose owner the console
-/// does not know ([`AccessView::withholds_unknown_member`]) or that has no
-/// owner at all.
+/// labels name a private owner other than the caller, and, on a console
+/// that can identify a person, for a caller who is not an admin
+/// ([`AccessView::kept_apart_from_other_people`]), one whose owner the
+/// console does not know ([`AccessView::withholds_unknown_member`]) or that
+/// has no owner at all.
 async fn attached_session_decision(
     view: Option<&AccessView>,
     runtime: &MobRuntime,
@@ -11217,7 +11244,9 @@ async fn attached_session_decision(
                 })),
             });
         }
-        return if view.subject().is_some() {
+        // A console that can identify a person keeps what it cannot
+        // attribute from every caller who is not an admin, signed in or not.
+        return if view.kept_apart_from_other_people() {
             SessionAttachDecision::Absent
         } else {
             SessionAttachDecision::Allowed
@@ -33363,6 +33392,195 @@ mod console_viewer_resolver_tests {
                 issuer: ISSUER.to_string(),
             }
         );
+    }
+
+    /// The audience the console builds for a request that carries
+    /// `subject`'s token, or no token.
+    fn audience(
+        decisions: &RuntimeDecisionState,
+        access: Option<&AccessController>,
+        subject: Option<&str>,
+    ) -> AccessView {
+        console_request_auth_context_for(
+            decisions,
+            &crate::auth::session_fence::ConsoleSessionFences::detached(),
+            access,
+            &subject.map(bearer).unwrap_or_default(),
+            &Uri::from_static("/console/timeline"),
+        )
+        .expect("the console admits the request")
+        .audience
+    }
+
+    /// `decisions` with a trusted key set that holds no key: no token
+    /// verifies against it.
+    fn with_no_key(mut decisions: RuntimeDecisionState) -> RuntimeDecisionState {
+        decisions.trusted_oidc.jwks_json = r#"{"keys":[]}"#.to_string();
+        decisions
+    }
+
+    /// Rules that are off, with Carol the one administrator: every caller
+    /// may reach every agent.
+    fn rules_off() -> AccessControlConfig {
+        AccessControlConfig {
+            enabled: false,
+            admins: vec![CAROL.to_string()],
+            ..AccessControlConfig::default()
+        }
+    }
+
+    /// The access configurations that grant a caller who sends no token:
+    /// an allow rule that names no subject and no group, and rules that are
+    /// off. Carol is the one administrator of both.
+    fn configurations_that_grant_a_caller_with_no_token() -> [AccessControlConfig; 2] {
+        [
+            AccessControlConfig {
+                enabled: true,
+                admins: vec![CAROL.to_string()],
+                rules: vec![AccessRule {
+                    id: "every-caller-reads-every-agent".to_string(),
+                    actions: vec!["agent.*".to_string()],
+                    agents: vec!["*".to_string()],
+                    ..AccessRule::default()
+                }],
+                ..AccessControlConfig::default()
+            },
+            rules_off(),
+        ]
+    }
+
+    /// Whether a read of `member`'s memory scope reaches that member for
+    /// `view`, or is answered as a read of a member that does not exist.
+    fn reads_memory_scope_of(view: &AccessView, member: &str) -> bool {
+        let mut params = json!({ "identity": member });
+        console_rpc_resolve_members(Some(view), "meta/agent_memory/manifest", &mut params)
+            .expect("a member a method reads is never refused");
+        params["identity"] == json!(member)
+    }
+
+    /// A console where sign-in is optional and a token is verified can
+    /// identify a person, so a member can be private to one there. A caller
+    /// who sends no token is then one more caller who is not an
+    /// administrator: refused a record with no captured member attributes,
+    /// under a name a shared member holds and under a name no member ever
+    /// held, and the memory scope of a member the console does not know. A
+    /// console that can identify nobody (no key to verify a token with, or
+    /// no access controller to resolve one for) serves its one operator as
+    /// before. A console that requires sign-in tells its people apart with
+    /// or without an access configuration.
+    #[test]
+    fn a_console_that_can_identify_a_person_exempts_no_caller_with_no_token() {
+        const SHARED: &str = "alpha";
+        const UNSEATED: &str = "ghost-x";
+        let open = decisions(false);
+        for config in configurations_that_grant_a_caller_with_no_token() {
+            let enabled = config.enabled;
+            let controller = AccessController::new(config).expect("controller");
+            controller.record_agent_attributes(crate::access::AgentResourceAttributes {
+                identity: SHARED.to_string(),
+                agent_id: None,
+                role: Some("worker".to_string()),
+                labels: Default::default(),
+            });
+            let nobody = audience(&open, Some(&controller), None);
+            let bob = audience(&open, Some(&controller), Some(BOB));
+            let admin = audience(&open, Some(&controller), Some(CAROL));
+            assert!(admin.is_admin() && !bob.is_admin() && nobody.subject().is_none());
+            for name in [SHARED, UNSEATED] {
+                assert!(
+                    !nobody.can_view_uncaptured_member(name),
+                    "rules on {enabled}: a caller with no token reads no record with no \
+                     captured attributes under {name}"
+                );
+                assert!(!bob.can_view_uncaptured_member(name), "{name}");
+                assert!(admin.can_view_uncaptured_member(name), "{name}");
+            }
+            assert!(
+                !reads_memory_scope_of(&nobody, UNSEATED),
+                "rules on {enabled}: a caller with no token is shown no memory scope of a \
+                 member the console does not know"
+            );
+            assert!(!reads_memory_scope_of(&bob, UNSEATED));
+            assert!(reads_memory_scope_of(&admin, UNSEATED));
+            assert!(
+                reads_memory_scope_of(&nobody, SHARED),
+                "a member the console knows is withheld from nobody"
+            );
+
+            // The same controller on a console with no key: nobody can be
+            // identified, so nobody can be an administrator either.
+            let operator = audience(&with_no_key(open.clone()), Some(&controller), None);
+            for name in [SHARED, UNSEATED] {
+                assert!(
+                    operator.can_view_uncaptured_member(name),
+                    "rules on {enabled}: the one operator of a console that verifies no \
+                     token reads the record under {name} as before"
+                );
+            }
+            assert!(reads_memory_scope_of(&operator, UNSEATED));
+        }
+
+        // No access controller: a token is never resolved, with a key or
+        // without one.
+        for console in [open.clone(), with_no_key(open)] {
+            let operator = audience(&console, None, None);
+            assert!(operator.can_view_uncaptured_member(UNSEATED));
+            assert!(reads_memory_scope_of(&operator, UNSEATED));
+        }
+
+        // Sign-in required and no access configuration: every caller is a
+        // person, and none is an administrator.
+        let person = audience(&decisions(true), None, Some(BOB));
+        assert!(!person.can_view_uncaptured_member(UNSEATED));
+        assert!(!reads_memory_scope_of(&person, UNSEATED));
+    }
+
+    /// A session that no member owns is answered as a session that does not
+    /// exist to every caller of a console that can identify a person, except
+    /// its administrator, whether the caller sent a token or not. A console
+    /// that can identify nobody attaches it for its one operator as before.
+    #[tokio::test]
+    async fn a_session_with_no_established_owner_is_absent_on_a_console_that_can_identify_a_person()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        async fn attach(view: &AccessView, runtime: &MobRuntime) -> &'static str {
+            let session_id = meerkat_core::types::SessionId::new();
+            match attached_session_decision(Some(view), runtime, None, &session_id).await {
+                SessionAttachDecision::Allowed => "allowed",
+                SessionAttachDecision::Absent => "absent",
+                SessionAttachDecision::Denied(_) => "denied",
+            }
+        }
+        let (_temp_dir, runtime) =
+            super::tests::build_empty_console_test_runtime("attach-unowned-open-console").await?;
+        let controller = AccessController::new(rules_off())?;
+        let open = decisions(false);
+        let nobody = audience(&open, Some(&controller), None);
+        assert_eq!(
+            attach(&nobody, &runtime).await,
+            "absent",
+            "a caller with no token on a console that can identify a person"
+        );
+        assert_eq!(
+            attach(&audience(&open, Some(&controller), Some(BOB)), &runtime).await,
+            "absent"
+        );
+        assert_eq!(
+            attach(&audience(&open, Some(&controller), Some(CAROL)), &runtime).await,
+            "allowed",
+            "the administrator"
+        );
+        let no_key = with_no_key(open.clone());
+        assert_eq!(
+            attach(&audience(&no_key, Some(&controller), None), &runtime).await,
+            "allowed",
+            "the one operator of a console that verifies no token"
+        );
+        assert_eq!(
+            attach(&audience(&open, None, None), &runtime).await,
+            "allowed",
+            "the one operator of a console with no access controller"
+        );
+        Ok(())
     }
 }
 

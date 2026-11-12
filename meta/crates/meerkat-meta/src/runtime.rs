@@ -1829,9 +1829,10 @@ pub fn run_meerkat_baseline_verification_once(
 /// a JWKS with at least one key.
 ///
 /// [`build_runtime_decision_state`] runs this only when
-/// `console.require_app_auth` is true. An open console never consults the
-/// snapshot unless an ABAC access controller is installed and a caller
-/// volunteers a token; a broken snapshot then degrades that caller to
+/// `console.require_app_auth` is true. An open console consults the snapshot
+/// only when an ABAC access controller is installed: it can identify a
+/// person, and resolves the token a caller volunteers, only while the
+/// snapshot passes this check; a broken snapshot then leaves every caller
 /// anonymous instead of refusing at startup. A host that wants the startup
 /// refusal on an open console calls this itself.
 pub fn validate_trusted_oidc_runtime_config(

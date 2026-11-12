@@ -631,13 +631,20 @@ impl AccessController {
     /// for an open/unauthenticated console). The view owns no private
     /// member: an agent private to a person ([`super::PRIVATE_TO_LABEL`]) is
     /// hidden from it unless the subject is an admin.
+    ///
+    /// A view taken for no subject states that its console identifies
+    /// nobody. The console's request authentication does not take one that
+    /// way for a caller it did not identify on a console that can identify
+    /// a person: it states that fact on the view itself.
     pub fn view_for_subject(&self, subject: Option<&str>) -> AccessView {
         self.view_and_revision(subject).0
     }
 
     /// [`Self::view_for_subject`] for a caller who owns the agents private
     /// to `private_owner_key` ([`super::PRIVATE_TO_LABEL`]): a signed-in
-    /// person's console caller scope, `None` for every other caller.
+    /// person's console caller scope, `None` for every other caller. As
+    /// there, a view taken for no subject states that its console
+    /// identifies nobody, unless the console that takes it states otherwise.
     pub fn view_for_caller(
         &self,
         subject: Option<&str>,
@@ -672,6 +679,11 @@ impl AccessController {
         AccessView {
             inner: Arc::clone(&self.inner),
             config,
+            // Whatever took a view for a subject identified a person. A view
+            // taken for no subject is of a console that identifies nobody,
+            // until the console that takes it states otherwise
+            // ([`AccessView::on_console`]).
+            console_identifies_people: principal.subject.is_some(),
             principal,
             is_admin,
             private_owner_key: private_owner_key
@@ -964,12 +976,29 @@ pub struct AccessView {
     config: Arc<AccessControlConfig>,
     principal: AccessPrincipal,
     is_admin: bool,
+    /// Whether the console this view was taken for can identify a person
+    /// ([`Self::on_console`]): a fact about the console, the same for every
+    /// caller of it.
+    console_identifies_people: bool,
     /// The private-owner key this caller owns private agents under
     /// ([`super::PRIVATE_TO_LABEL`]); `None` for a caller who owns none.
     private_owner_key: Option<String>,
 }
 
 impl AccessView {
+    /// This view, taken for a caller of a console that can identify a
+    /// person (`identifies_people`) or cannot. A console can when it
+    /// requires sign-in, or resolves the token a caller volunteers: a member
+    /// can then be private to one of its people, and a caller it did not
+    /// identify is kept apart from them like every caller who is not an
+    /// admin ([`Self::kept_apart_from_other_people`]). The console's request
+    /// authentication states it, from its own configuration, for the caller
+    /// it did not identify.
+    pub(crate) fn on_console(mut self, identifies_people: bool) -> Self {
+        self.console_identifies_people = identifies_people;
+        self
+    }
+
     /// True when this view actually enforces anything.
     pub fn enforced(&self) -> bool {
         self.config.enabled
@@ -1503,8 +1532,8 @@ impl AccessView {
     /// attributes of whoever holds the name now belong to another
     /// incarnation, so they never decide it. Every caller a console keeps
     /// apart from other people ([`Self::kept_apart_from_other_people`]) is
-    /// refused, whatever the rules say; an admin reads it. The one anonymous
-    /// caller of a console without sign-in is decided as before: any
+    /// refused, whatever the rules say; an admin reads it. The one operator
+    /// of a console that identifies nobody is decided as before: any
     /// applicable deny the bare identity cannot decide refuses it, otherwise
     /// the identity decides.
     pub(crate) fn can_view_uncaptured_member(&self, identity: &str) -> bool {
@@ -1566,28 +1595,32 @@ impl AccessView {
                 .any(|attributes| attributes.agent_id.as_deref() == Some(identity))
     }
 
-    /// Whether a console with sign-in withholds from this caller the member
-    /// `identity` names because the attribute cache does not know it: a
-    /// member that ended before this process read who it was private to may
-    /// have been private, so a signed-in caller who is not an admin is shown
-    /// no memory scope of it and attaches no session of it. An anonymous
-    /// caller of a console without sign-in, and an admin, are withheld
-    /// nothing for it.
+    /// Whether a console that can identify a person withholds from this
+    /// caller the member `identity` names because the attribute cache does
+    /// not know it: a member that ended before this process read who it was
+    /// private to may have been private, so a caller who is not an admin,
+    /// signed in or not, is shown no memory scope of it and attaches no
+    /// session of it. The one operator of a console that identifies nobody,
+    /// and an admin, are withheld nothing for it.
     pub(crate) fn withholds_unknown_member(&self, identity: &str) -> bool {
         self.kept_apart_from_other_people() && !self.knows_agent(identity)
     }
 
     /// Whether the console keeps this caller apart from other people: the
-    /// caller is signed in and is not an admin. A console with sign-in tells
-    /// its people apart and holds members private to one of them, so what it
-    /// cannot attribute it shows to none of them. The anonymous caller of a
-    /// console without sign-in is its one operator, with no other person to
-    /// be kept apart from, and an admin reads everything. The unknown member
-    /// rule ([`Self::withholds_unknown_member`]) and the rule for a record
-    /// with no captured member attributes
-    /// ([`Self::can_view_uncaptured_member`]) both decide by it.
-    fn kept_apart_from_other_people(&self) -> bool {
-        self.principal.subject.is_some() && !self.is_admin
+    /// console can identify a person ([`Self::on_console`]) and the caller
+    /// is not an admin. Such a console tells its people apart and holds
+    /// members private to one of them, so what it cannot attribute it shows
+    /// to none of them, and a caller it did not identify (one who sent no
+    /// token where sign-in is optional) is one of them all the same: the
+    /// decision reads the console, never whether this caller signed in. The
+    /// one operator of a console that identifies nobody has no other person
+    /// to be kept apart from, and an admin reads everything. The unknown
+    /// member rule ([`Self::withholds_unknown_member`]), the rule for a
+    /// record with no captured member attributes
+    /// ([`Self::can_view_uncaptured_member`]) and the console's rule for a
+    /// session with no established owner all decide by it.
+    pub(crate) fn kept_apart_from_other_people(&self) -> bool {
+        self.console_identifies_people && !self.is_admin
     }
 
     /// Can this principal read and edit the access configuration?
@@ -1615,6 +1648,7 @@ impl std::fmt::Debug for AccessView {
             .field("subject", &self.principal.subject)
             .field("groups", &self.principal.groups)
             .field("is_admin", &self.is_admin)
+            .field("console_identifies_people", &self.console_identifies_people)
             .field("enforced", &self.config.enabled)
             .field("owns_private_agents", &self.private_owner_key.is_some())
             .finish()
@@ -1631,10 +1665,12 @@ fn private_owner_denial(identity: &str) -> AccessDecision {
 }
 
 impl AccessView {
-    /// This principal's view under the configuration committed now.
+    /// This principal's view under the configuration committed now, of the
+    /// same console.
     pub(crate) fn refreshed(&self) -> AccessView {
         self.controller()
             .view_for_caller(self.subject(), self.private_owner_key())
+            .on_console(self.console_identifies_people)
     }
 }
 
@@ -2663,10 +2699,11 @@ mod tests {
         ]));
     }
 
-    /// A record without captured attributes is refused to every signed-in
-    /// caller who is not an admin, whatever the rules say, with an access
-    /// configuration or without one; an admin reads it. The anonymous caller
-    /// of a console without sign-in keeps the identity decision.
+    /// A record without captured attributes is refused to every caller of a
+    /// console that can identify a person, except an admin, whatever the
+    /// rules say, with an access configuration or without one, signed in or
+    /// not. The one operator of a console that identifies nobody keeps the
+    /// identity decision.
     #[test]
     fn a_record_with_no_captured_attributes_is_read_by_an_admin_only() {
         let controller = secret_label_deny_controller();
@@ -2697,7 +2734,23 @@ mod tests {
             unconfigured
                 .view_for_subject(None)
                 .can_view_uncaptured_member("anyone"),
-            "the anonymous caller of a console without sign-in reads it as before"
+            "the one operator of a console that identifies nobody reads it as before"
+        );
+        // The decision reads the console, never whether the caller signed
+        // in: a caller a console that can identify a person did not identify
+        // is refused, and stays refused when the view is taken again.
+        let unidentified = unconfigured.view_for_subject(None).on_console(true);
+        assert!(!unidentified.can_view_uncaptured_member("anyone"));
+        assert!(unidentified.withholds_unknown_member("anyone"));
+        assert!(
+            !unidentified
+                .refreshed()
+                .can_view_uncaptured_member("anyone")
+        );
+        assert!(
+            !unconfigured
+                .view_for_subject(None)
+                .withholds_unknown_member("anyone")
         );
         assert!(
             !allow_only

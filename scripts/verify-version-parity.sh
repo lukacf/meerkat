@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Verify version parity across Rust workspace, Python SDK, TypeScript SDK,
-# Web SDK, contract version, and generated schema artifacts.
+# Web SDK, contract version, and generated schema artifacts, and that no
+# in-repo product pins another below its version in this tree.
 #
 # Exit 0 if everything is in sync, exit 1 with diagnostics on any mismatch.
 
@@ -277,6 +278,28 @@ if "$ROOT/scripts/stamp-docs-contract-version.sh" --check "$CARGO_VER"; then
 else
     red "FAIL: docs version projections are stale"
     red "  Run: ./scripts/stamp-docs-contract-version.sh"
+    FAIL=1
+fi
+
+# ── 8. In-repo product pins ────────────────────────────────────────────────
+# Every product of this repository (Core, Meta, Connect, Forge and the SDKs)
+# consumes the others at the version this tree builds: in development and CI
+# the build of the same commit, in a release the same release's artifacts.
+# A pin of an in-repo package anywhere in the tree (manifests, locks,
+# requirements, release inputs, documented install commands, version
+# constants) is a same-commit reference or names that package's version here;
+# ci/inrepo-version-pins.json allows upgrade fixtures and recorded history,
+# each with its reason. The sections above check Core's own projections;
+# this one covers the products' pins on each other, meta/ and connect/
+# included.
+
+echo ""
+echo "In-repo product pins:"
+if python3 "$ROOT/scripts/check_inrepo_version_pins.py" --root "$ROOT"; then
+    green "  In-repo product pins: OK"
+else
+    red "FAIL: an in-repo package is pinned below its version in this tree"
+    red "  Run: python3 scripts/check_inrepo_version_pins.py --write (moves the plain-text pins)"
     FAIL=1
 fi
 

@@ -284,11 +284,13 @@ describe("identity family on a real gateway", () => {
       assert.equal(record.specDigest, outcome.agents[0].specDigest);
 
       // A name is taken once: by an agent of the mob, or by another agent
-      // of the same create, which names the agent of the request.
+      // of the same create. Either way the refusal names the agent of the
+      // request whose name it is.
       const taken = await refusedBy(
         identities.create([{ name: "editor", profile: "writer" }], { requestId: "create-again" }),
       );
       assert.equal(taken.kind, "name_taken");
+      assert.equal(taken.field, "agents[0].name");
       assert.equal(taken.details.by, "identity");
       const twins = await refusedBy(
         identities.create(
@@ -386,6 +388,7 @@ describe("identity family on a real gateway", () => {
         identities.create([{ name: "editor", profile: "writer" }], { requestId: "create-reuse" }),
       );
       assert.equal(reuse.kind, "name_taken");
+      assert.equal(reuse.field, "agents[0].name");
       assert.equal(reuse.details.by, "removed");
     });
   });

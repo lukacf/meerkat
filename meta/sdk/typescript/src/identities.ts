@@ -403,6 +403,11 @@ export interface InstructionOutcome {
  * means the agent is committed and durable and its first message did not
  * start; it is seated without a restart at its next delivery.
  * `instructions` is on an update's outcome only.
+ *
+ * `seat` and `sessionId` say how the agent stands when the outcome is
+ * answered: a replay of the request, and a later `operation` read, answer
+ * today's session, and no `seat` once the agent is neither seated nor owed
+ * its seat (it was archived or removed since).
  */
 export interface AgentOutcome {
   readonly name: string;

@@ -314,12 +314,14 @@ async def test_create_commits_a_dormant_agent(tmp_path):
         assert record.spec_digest == outcome.agents[0].spec_digest
 
         # A name is taken once: by an agent of the mob, or by another agent
-        # of the same create, which names the agent of the request.
+        # of the same create. Either way the refusal names the agent of the
+        # request whose name it is.
         with pytest.raises(IdentityRefusedError) as refused:
             await identities.create(
                 [AgentSpec(name="editor", profile="writer")], request_id="create-again"
             )
         assert refused.value.kind == "name_taken"
+        assert refused.value.field == "agents[0].name"
         assert refused.value.details.get("by") == "identity"
         with pytest.raises(IdentityRefusedError) as refused:
             await identities.create(
@@ -414,6 +416,7 @@ async def test_remove_retires_the_name_for_good(tmp_path):
                 [AgentSpec(name="editor", profile="writer")], request_id="create-reuse"
             )
         assert refused.value.kind == "name_taken"
+        assert refused.value.field == "agents[0].name"
         assert refused.value.details.get("by") == "removed"
 
 

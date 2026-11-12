@@ -2320,3 +2320,187 @@ async fn an_edge_wired_by_a_caller_who_is_no_admin_behaves_the_same_after_a_rest
     left.stop().await;
     right.stop().await;
 }
+
+// ---------------------------------------------------------------------------
+// The bilateral same-process wire (`wire_cross_mob`, the topology
+// coordinator's path) writes the same rows as `wire_local`: its edges are
+// links from the moment they are committed, and stop being links the moment
+// they are removed.
+// ---------------------------------------------------------------------------
+
+/// Each runtime knows the other mob as an in-process contact, as a host that
+/// composes two mobs in one process sets them up for the bilateral wire.
+async fn know_each_other(left: &mut Mob, right: &mut Mob) {
+    let directory = meerkat_meta::contact_directory::ContactDirectory::from_toml(&format!(
+        "[mobs]\n\"{}\" = \"inproc\"\n\"{}\" = \"inproc\"",
+        left.mob_id, right.mob_id
+    ))
+    .expect("contact directory");
+    left.runtime.set_contact_directory(directory.clone());
+    right.runtime.set_contact_directory(directory);
+    left.runtime.register_peer_runtime(&right.runtime).await;
+    right.runtime.register_peer_runtime(&left.runtime).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_edge_of_the_bilateral_wire_wakes_a_member_that_is_not_built() {
+    let root = tempfile::tempdir().expect("root");
+    let mut left = Mob::start_persistent(root.path(), "wake-bilateral-a", "alice", true).await;
+    let mut right = Mob::start_persistent(root.path(), "wake-bilateral-b", "bob", true).await;
+    let bob = right.peer_info().await;
+    know_each_other(&mut left, &mut right).await;
+    Box::pin(
+        left.runtime
+            .wire_cross_mob("alice", "bob", "wake-bilateral-b"),
+    )
+    .await
+    .expect("the bilateral wire");
+    assert_delivers(&mut left, &mut right, "wake-bilateral before a-to-b").await;
+
+    // Bob's runtime alone is stopped and built again: bob is not built.
+    // Alice's runtime was never restarted, so what it holds for the edge is
+    // what the bilateral wire itself recorded.
+    let mut right = right.built_again(root.path()).await;
+    assert_eq!(right.routed_names(), Vec::<String>::new());
+    assert_delivers(&mut left, &mut right, "wake-bilateral after a-to-b").await;
+    assert_eq!(right.route_to(&bob.comms_name), Some(bob.peer_id.clone()));
+    assert_delivers(&mut right, &mut left, "wake-bilateral after b-to-a").await;
+
+    left.stop().await;
+    right.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn after_a_bilateral_unwire_a_one_sided_wire_wakes_nobody() {
+    let root = tempfile::tempdir().expect("root");
+    let mut left = Mob::start_persistent(root.path(), "wake-unlinked-a", "alice", true).await;
+    let mut right = Mob::start_persistent(root.path(), "wake-unlinked-b", "bob", true).await;
+    let bob = keyed(&right.peer_info().await);
+    know_each_other(&mut left, &mut right).await;
+    Box::pin(
+        left.runtime
+            .wire_cross_mob("alice", "bob", "wake-unlinked-b"),
+    )
+    .await
+    .expect("the bilateral wire");
+    assert_eq!(left.trusts().await, vec![bob.comms_name.clone()]);
+    assert_eq!(right.trusts().await.len(), 1);
+
+    // Both runtimes are built again: each reads the edge from its rows.
+    let left = left.built_again(root.path()).await;
+    let right = right.built_again(root.path()).await;
+    let (mut left, mut right) = (left, right);
+    know_each_other(&mut left, &mut right).await;
+
+    // The bilateral unwire removes the edge from both mobs' rows.
+    Box::pin(
+        left.runtime
+            .unwire_cross_mob("alice", "bob", "wake-unlinked-b"),
+    )
+    .await
+    .expect("the bilateral unwire");
+    assert!(left.trusts().await.is_empty());
+    assert!(right.trusts().await.is_empty());
+    assert_eq!(
+        right.routed_names(),
+        Vec::<String>::new(),
+        "the unwire built nobody"
+    );
+
+    // Alice's side alone is wired again. Bob's mob holds no edge to alice:
+    // nobody is woken, and alice's send is refused as a peer that is not
+    // found.
+    left.wire_local(&bob).await.expect("alice's side alone");
+    assert_wakes_nobody(&mut left, &mut right, &bob, "wake-unlinked a-to-b").await;
+
+    left.stop().await;
+    right.stop().await;
+}
+
+/// A third runtime that starts and stops in the process leaves the route
+/// between two others where it is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_third_runtime_starting_and_stopping_leaves_the_route_between_two_others() {
+    let root = tempfile::tempdir().expect("root");
+    let mut left = Mob::start_persistent(root.path(), "wake-third-a", "alice", true).await;
+    let mut right = Mob::start_persistent(root.path(), "wake-third-b", "bob", true).await;
+    let alice = left.peer_info().await;
+    let bob = right.peer_info().await;
+    sdk_wire_cross_mob(&left, &right)
+        .await
+        .expect("the helper's call sequence");
+    assert_eq!(left.route_to(&bob.comms_name), Some(bob.peer_id.clone()));
+    assert_eq!(
+        right.route_to(&alice.comms_name),
+        Some(alice.peer_id.clone())
+    );
+
+    let third = Mob::start_persistent(root.path(), "wake-third-c", "carol", true).await;
+    assert_eq!(left.route_to(&bob.comms_name), Some(bob.peer_id.clone()));
+    assert_eq!(
+        right.route_to(&alice.comms_name),
+        Some(alice.peer_id.clone())
+    );
+    assert_delivers(&mut left, &mut right, "wake-third a-to-b").await;
+    third.stop().await;
+    assert_eq!(left.route_to(&bob.comms_name), Some(bob.peer_id.clone()));
+    assert_eq!(
+        right.route_to(&alice.comms_name),
+        Some(alice.peer_id.clone())
+    );
+    assert_delivers(&mut right, &mut left, "wake-third b-to-a").await;
+
+    left.stop().await;
+    right.stop().await;
+}
+
+/// A route that is already there may lead to an inbox that is gone. The
+/// identical wire again points it at the member's inbox of now.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_identical_wire_again_re_points_a_route_that_led_to_an_inbox_that_is_gone() {
+    let root = tempfile::tempdir().expect("root");
+    let mut left = Mob::start(root.path(), "wire-repoint-a", "alice").await;
+    let mut right = Mob::start(root.path(), "wire-repoint-b", "bob").await;
+    let bob = right.peer_info().await;
+    sdk_wire_cross_mob(&left, &right)
+        .await
+        .expect("the helper's call sequence");
+    assert_delivers(&mut left, &mut right, "repoint before a-to-b").await;
+
+    // Alice's mob still routes bob's name and key, to an inbox that takes
+    // nothing (as the inbox of an earlier build of bob would be).
+    let key = meerkat_comms::PubKey::new(right.registered_key(&bob.comms_name));
+    let registry = InprocRegistry::global();
+    assert!(registry.unregister_in_namespace(&left.namespace(), &key));
+    let (_gone, gone_sender) = meerkat_comms::Inbox::new_transport_only();
+    assert!(
+        !registry
+            .register_with_meta_in_namespace(
+                &left.namespace(),
+                bob.comms_name.clone(),
+                key,
+                gone_sender,
+                meerkat_comms::PeerMeta::default(),
+            )
+            .is_rejected()
+    );
+    let dropped = left.send(&bob.peer_id, "repoint gone a-to-b").await;
+    assert!(
+        dropped.contains("classification_rejected"),
+        "the planted route leads nowhere: {dropped}"
+    );
+    assert!(
+        !right
+            .receives("repoint gone a-to-b", NO_DELIVERY_WAIT)
+            .await
+    );
+
+    // The identical wire again is accepted and re-points the route.
+    sdk_wire_cross_mob(&left, &right)
+        .await
+        .expect("the identical edge is accepted again");
+    assert_delivers(&mut left, &mut right, "repoint after a-to-b").await;
+
+    left.stop().await;
+    right.stop().await;
+}

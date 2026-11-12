@@ -11,8 +11,9 @@
 //! `meta/cross_mob/unwire_local` on the first side when the second refuses.
 //!
 //! Every request goes through `handle_unified_rpc_json`, the stdio gateway's
-//! dispatcher. No test here writes the in-process registry: the routes a send
-//! needs are the ones the wire calls themselves leave behind.
+//! dispatcher. No test here writes a route a send needs: those are the ones
+//! the wire calls themselves leave behind. (One row puts a stale route into
+//! the registry on purpose, as the thing a wire must replace.)
 //!
 //! The sending member is driven by a scripted model that calls the agent
 //! `send_message` tool with the other member's canonical peer id. A delivery
@@ -210,8 +211,21 @@ impl Mob {
 
     async fn start_with(root: &Path, mob_id: &str, member: &str, config: Config) -> Self {
         let session_path = root.join(format!("{mob_id}-sessions"));
-        std::fs::create_dir_all(&session_path).expect("session path");
-        let factory = AgentFactory::new(&session_path).comms(true);
+        Self::start_at(root, &session_path, mob_id, member, config).await
+    }
+
+    /// A mob whose sessions live under `session_path`. Socket member comms
+    /// keep their transport key there, so two mobs started on one path have
+    /// members with the same key.
+    async fn start_at(
+        root: &Path,
+        session_path: &Path,
+        mob_id: &str,
+        member: &str,
+        config: Config,
+    ) -> Self {
+        std::fs::create_dir_all(session_path).expect("session path");
+        let factory = AgentFactory::new(session_path).comms(true);
         let session_service = Arc::new(build_ephemeral_service(factory, config, 8));
         let definition = MobDefinition::from_toml(&format!(
             r#"
@@ -453,16 +467,21 @@ comms = true
 }
 
 /// The Python SDK helper `MobHandle.wire_cross_mob`, call for call, from the
-/// two `peer_info` answers on.
+/// two `peer_info` answers on: one read of the local member (is it wired to
+/// that peer already), `wire_local` on each side, and the undo of the first
+/// side when the second refuses, unless the first side was wired before.
 async fn sdk_wire_with(
     local: &Mob,
     local_info: &PeerInfo,
     remote: &Mob,
     remote_info: &PeerInfo,
 ) -> Result<(), String> {
+    let wired_before = local.trusts().await.contains(&remote_info.comms_name);
     local.wire_local(remote_info).await?;
     if let Err(error) = remote.wire_local(local_info).await {
-        let _ = local.unwire_local(remote_info).await;
+        if !wired_before {
+            let _ = local.unwire_local(remote_info).await;
+        }
         return Err(error);
     }
     Ok(())
@@ -619,17 +638,35 @@ async fn wire_local_refuses_a_peer_id_the_named_live_member_does_not_have() {
     let root = tempfile::tempdir().expect("root");
     let mut left = Mob::start(root.path(), "wire-bound-a", "alice").await;
     let mut right = Mob::start(root.path(), "wire-bound-b", "bob").await;
-    sdk_wire_cross_mob(&left, &right)
-        .await
-        .expect("the helper's call sequence");
     let bob = right.peer_info().await;
-
     // Same comms name, another peer id: the name is a live member of this
     // process, and it is not that peer.
     let impostor = PeerInfo {
         peer_id: "00000000-0000-4000-8000-0000000000aa".to_string(),
         ..bob.clone()
     };
+
+    // As a FIRST wire: refused before anything is installed.
+    let refusal = left
+        .wire_local(&impostor)
+        .await
+        .expect_err("a peer id the named live member does not have must be refused");
+    assert!(
+        refusal.contains("under another peer id or key"),
+        "the refusal must come from the key binding check: {refusal}"
+    );
+    assert_eq!(
+        left.route_to(&bob.comms_name),
+        None,
+        "a refused first wire left a route"
+    );
+    assert!(left.trusts().await.is_empty());
+
+    sdk_wire_cross_mob(&left, &right)
+        .await
+        .expect("the helper's call sequence");
+
+    // And over an existing wiring.
     let refusal = left
         .wire_local(&impostor)
         .await
@@ -835,6 +872,823 @@ async fn a_failed_wire_local_takes_back_the_route_it_installed() {
         "a failed wire left its route behind"
     );
     assert!(left.trusts().await.is_empty());
+
+    left.stop().await;
+    right.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// A wire is never replaced, and a wire that is already there is left alone.
+// ---------------------------------------------------------------------------
+
+impl Mob {
+    /// A second member of this mob, on the same profile.
+    async fn spawn_second_member(&self, member: &str) {
+        self.runtime
+            .spawn(SpawnMemberSpec::from_wire(
+                "worker".to_string(),
+                MeerkatId::from(member).to_string(),
+                None,
+                Some(MobRuntimeMode::TurnDriven),
+                None,
+            ))
+            .await
+            .expect("spawn a second local member");
+    }
+
+    /// The wire parameters of `member`, a member of this mob other than the
+    /// one the fixture drives.
+    fn wire_params_of(&self, member: &str, remote: &PeerInfo) -> Value {
+        let mut params = self.wire_params(remote);
+        params["local_member_id"] = json!(member);
+        params
+    }
+
+    /// The comms names `member` trusts.
+    async fn trusts_of(&self, member: &str) -> Vec<String> {
+        self.runtime
+            .mob_handle()
+            .get_member(&MeerkatId::from(member))
+            .await
+            .expect("member lookup")
+            .expect("member")
+            .wired_to
+            .iter()
+            .map(|peer| peer.as_str().to_string())
+            .collect()
+    }
+}
+
+/// The refusal of a wire that would replace an edge: plain words that name
+/// the remedy, never the mob machine's text.
+fn assert_refused_as_already_wired(refusal: &str) {
+    assert!(
+        refusal.contains("already wired") && refusal.contains("unwire"),
+        "the refusal must say the pair is wired with another endpoint and to unwire first: {refusal}"
+    );
+    assert!(
+        !refusal.contains("Running -> Running") && !refusal.contains("invalid state transition"),
+        "the mob machine's text must not reach the caller: {refusal}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_second_wire_of_the_same_edge_changes_nothing() {
+    let root = tempfile::tempdir().expect("root");
+    let mut left = Mob::start(root.path(), "wire-twice-a", "alice").await;
+    let mut right = Mob::start(root.path(), "wire-twice-b", "bob").await;
+    let alice = left.peer_info().await;
+    let bob = right.peer_info().await;
+    sdk_wire_cross_mob(&left, &right)
+        .await
+        .expect("the helper's call sequence");
+    let route_to_bob = left.route_to(&bob.comms_name);
+    let route_to_alice = right.route_to(&alice.comms_name);
+
+    // The helper again, and one side alone again: accepted, nothing added.
+    sdk_wire_cross_mob(&left, &right)
+        .await
+        .expect("the identical edge is accepted again");
+    left.wire_local(&bob).await.expect("one side again");
+    assert_eq!(left.trusts().await, vec![bob.comms_name.clone()]);
+    assert_eq!(right.trusts().await, vec![alice.comms_name.clone()]);
+    assert_eq!(left.route_to(&bob.comms_name), route_to_bob);
+    assert_eq!(right.route_to(&alice.comms_name), route_to_alice);
+    assert_delivers(&mut left, &mut right, "twice a-to-b").await;
+    assert_delivers(&mut right, &mut left, "twice b-to-a").await;
+
+    // One edge was stored, not three: one unwire removes trust and route.
+    left.unwire_local(&bob)
+        .await
+        .expect("unwire alice from bob");
+    assert!(left.trusts().await.is_empty());
+    assert_eq!(left.route_to(&bob.comms_name), None);
+
+    left.stop().await;
+    right.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_wire_under_another_endpoint_is_refused_in_plain_words_and_changes_nothing() {
+    let root = tempfile::tempdir().expect("root");
+    let mut left = Mob::start(root.path(), "wire-moved-a", "alice").await;
+    let mut right = Mob::start(root.path(), "wire-moved-b", "bob").await;
+    let alice = left.peer_info().await;
+    let bob = right.peer_info().await;
+    sdk_wire_cross_mob(&left, &right)
+        .await
+        .expect("the helper's call sequence");
+    let route_to_bob = left.route_to(&bob.comms_name);
+
+    // The same member at another address: what a peer that came back on a
+    // new port presents.
+    let moved = PeerInfo {
+        address: "tcp://127.0.0.1:45999".to_string(),
+        key: bob.pubkey_b64.clone(),
+        ..bob.clone()
+    };
+    let refusal = left
+        .wire_local(&moved)
+        .await
+        .expect_err("a wire is never replaced");
+    assert_refused_as_already_wired(&refusal);
+    // The refusal names the endpoint the member is wired to now.
+    assert!(
+        refusal.contains(&bob.address),
+        "the refusal names the wired endpoint: {refusal}"
+    );
+
+    // Another peer id under the name (a key the caller made up).
+    let other_key = PeerInfo {
+        peer_id: meerkat_core::comms::PeerId::from_ed25519_pubkey(&[42_u8; 32]).to_string(),
+        // Standard base64 of the 32-byte key [42; 32] that peer id derives from.
+        key: Some("KioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKio=".to_string()),
+        ..bob.clone()
+    };
+    let refusal = left
+        .wire_local(&other_key)
+        .await
+        .expect_err("a wire is never replaced");
+    assert_refused_as_already_wired(&refusal);
+
+    // Nothing changed on either side, and the edge still works.
+    assert_eq!(left.trusts().await, vec![bob.comms_name.clone()]);
+    assert_eq!(right.trusts().await, vec![alice.comms_name.clone()]);
+    assert_eq!(left.route_to(&bob.comms_name), route_to_bob);
+    assert_delivers(&mut left, &mut right, "moved a-to-b").await;
+    assert_delivers(&mut right, &mut left, "moved b-to-a").await;
+
+    left.stop().await;
+    right.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_helper_keeps_a_side_that_was_wired_before_it_ran() {
+    let root = tempfile::tempdir().expect("root");
+    let left = Mob::start(root.path(), "wire-kept-a", "alice").await;
+    let right = Mob::start(root.path(), "wire-kept-b", "bob").await;
+    let alice = left.peer_info().await;
+    let bob = right.peer_info().await;
+
+    // The first side is wired before the helper runs.
+    left.wire_local(&bob).await.expect("first side");
+    // The helper's sequence with a second side that refuses.
+    let stale_alice = PeerInfo {
+        peer_id: "00000000-0000-4000-8000-0000000000cc".to_string(),
+        ..alice.clone()
+    };
+    sdk_wire_with(&left, &stale_alice, &right, &bob)
+        .await
+        .expect_err("the second side must refuse");
+
+    // The helper undoes only a wire it made: the earlier edge and its route
+    // are still there.
+    assert_eq!(left.trusts().await, vec![bob.comms_name.clone()]);
+    assert_eq!(left.route_to(&bob.comms_name), Some(bob.peer_id.clone()));
+    assert!(right.trusts().await.is_empty());
+
+    left.stop().await;
+    right.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// Properties the route relies on.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_local_members_wired_to_one_peer_share_the_route_until_the_last_unwire() {
+    let root = tempfile::tempdir().expect("root");
+    let left = Mob::start(root.path(), "wire-shared-a", "alice").await;
+    let right = Mob::start(root.path(), "wire-shared-b", "bob").await;
+    left.spawn_second_member("alma").await;
+    let bob = right.peer_info().await;
+    let route = Some(bob.peer_id.clone());
+
+    left.wire_local(&bob).await.expect("alice to bob");
+    left.rpc(
+        "meta/cross_mob/wire_local",
+        left.wire_params_of("alma", &bob),
+    )
+    .await
+    .expect("alma to bob");
+    assert_eq!(left.route_to(&bob.comms_name), route);
+
+    // A failed wire of a third caller leaves the route the others use.
+    left.rpc(
+        "meta/cross_mob/wire_local",
+        left.wire_params_of("nobody", &bob),
+    )
+    .await
+    .expect_err("a member this mob does not have");
+    assert_eq!(left.route_to(&bob.comms_name), route);
+
+    // The first unwire keeps the route for the member still wired.
+    left.unwire_local(&bob).await.expect("unwire alice");
+    assert!(left.trusts().await.is_empty());
+    assert_eq!(left.trusts_of("alma").await, vec![bob.comms_name.clone()]);
+    assert_eq!(
+        left.route_to(&bob.comms_name),
+        route,
+        "the route went with the first of two unwires"
+    );
+
+    // The last unwire removes it.
+    left.rpc(
+        "meta/cross_mob/unwire_local",
+        left.wire_params_of("alma", &bob),
+    )
+    .await
+    .expect("unwire alma");
+    assert!(left.trusts_of("alma").await.is_empty());
+    assert_eq!(left.route_to(&bob.comms_name), None);
+
+    left.stop().await;
+    right.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_send_after_a_one_sided_wire_is_dropped_by_the_receiver() {
+    let root = tempfile::tempdir().expect("root");
+    let mut left = Mob::start(root.path(), "wire-one-a", "alice").await;
+    let mut right = Mob::start(root.path(), "wire-one-b", "bob").await;
+    let bob = right.peer_info().await;
+
+    // Only alice's side: alice trusts bob and her mob routes to him. Bob
+    // has not wired alice.
+    left.wire_local(&bob).await.expect("first side");
+    assert_eq!(left.route_to(&bob.comms_name), Some(bob.peer_id.clone()));
+    assert!(right.trusts().await.is_empty());
+
+    let result = left.send(&bob.peer_id, "one-sided a-to-b").await;
+    assert!(
+        result.contains("untrusted_sender"),
+        "a route alone must not be heard: the receiver drops a sender it has not wired: {result}"
+    );
+    assert!(
+        !right.receives("one-sided a-to-b", NO_DELIVERY_WAIT).await,
+        "a member was handed a message from a peer it never wired"
+    );
+
+    left.stop().await;
+    right.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_keyless_wire_to_a_member_of_the_same_mob_is_refused_in_plain_words() {
+    let root = tempfile::tempdir().expect("root");
+    let left = Mob::start(root.path(), "wire-same-a", "alice").await;
+    left.spawn_second_member("alma").await;
+    let alma = left
+        .rpc("meta/cross_mob/peer_info", json!({"member_id": "alma"}))
+        .await
+        .expect("peer_info of the second member");
+
+    let refusal = left
+        .rpc(
+            "meta/cross_mob/wire_local",
+            json!({
+                "local_member_id": "alice",
+                "remote_comms_name": alma["comms_name"],
+                "remote_peer_id": alma["peer_id"],
+                "remote_address": alma["address"],
+            }),
+        )
+        .await
+        .expect_err("wire_local wires a member to a peer of another mob");
+    assert!(
+        refusal.contains("is a member of this mob"),
+        "the refusal must say what is wrong: {refusal}"
+    );
+    assert!(
+        !refusal.contains("must be non-zero"),
+        "the raw descriptor text must not reach the caller: {refusal}"
+    );
+    assert!(left.trusts().await.is_empty());
+
+    left.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_respawned_peer_is_wired_again_after_both_sides_unwire() {
+    let root = tempfile::tempdir().expect("root");
+    let mut left = Mob::start(root.path(), "wire-respawn-a", "alice").await;
+    let mut right = Mob::start(root.path(), "wire-respawn-b", "bob").await;
+    let alice = left.peer_info().await;
+    let bob = right.peer_info().await;
+    sdk_wire_cross_mob(&left, &right)
+        .await
+        .expect("the helper's call sequence");
+
+    right
+        .rpc("meta/respawn_member", json!({"member_id": "bob"}))
+        .await
+        .expect("respawn bob");
+    let new_bob = right.peer_info().await;
+    assert_ne!(
+        new_bob.peer_id, bob.peer_id,
+        "fixture: a respawned member has a new key"
+    );
+
+    // The helper again: alice is wired to bob's old key, and a wire is
+    // never replaced. The refusal leaves trust and routes exactly as they
+    // were, on both sides.
+    let refusal = sdk_wire_cross_mob(&left, &right)
+        .await
+        .expect_err("a wire is never replaced");
+    assert_refused_as_already_wired(&refusal);
+    assert_eq!(left.trusts().await, vec![bob.comms_name.clone()]);
+    assert_eq!(
+        left.route_to(&bob.comms_name),
+        Some(bob.peer_id.clone()),
+        "a refused wire changed the route"
+    );
+    assert_eq!(right.trusts().await, vec![alice.comms_name.clone()]);
+    assert_eq!(
+        right.route_to(&alice.comms_name),
+        Some(alice.peer_id.clone())
+    );
+
+    // The way back: unwire both sides, each with the other member's CURRENT
+    // peer info, then wire again.
+    left.unwire_local(&new_bob).await.expect("unwire alice");
+    right.unwire_local(&alice).await.expect("unwire bob");
+    assert!(left.trusts().await.is_empty());
+    assert!(right.trusts().await.is_empty());
+    assert_eq!(
+        left.route_to(&bob.comms_name),
+        None,
+        "the unwire left the route to the old key"
+    );
+    assert_eq!(right.route_to(&alice.comms_name), None);
+
+    sdk_wire_cross_mob(&left, &right)
+        .await
+        .expect("the helper's call sequence after both sides unwired");
+    assert_eq!(
+        left.route_to(&bob.comms_name),
+        Some(new_bob.peer_id.clone())
+    );
+    assert_delivers(&mut left, &mut right, "respawn a-to-b").await;
+    assert_delivers(&mut right, &mut left, "respawn b-to-a").await;
+
+    left.stop().await;
+    right.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stale_route_under_the_members_name_is_replaced_by_the_route_to_its_current_key() {
+    let root = tempfile::tempdir().expect("root");
+    let mut left = Mob::start(root.path(), "wire-stale-a", "alice").await;
+    let mut right = Mob::start(root.path(), "wire-stale-b", "bob").await;
+    let third = Mob::start(root.path(), "wire-stale-c", "carol").await;
+    let bob = right.peer_info().await;
+    let carol = third.peer_info().await;
+
+    // What an earlier incarnation of bob leaves behind when nobody unwires:
+    // an entry under bob's name in alice's namespace, under a key bob no
+    // longer has. Only a route to that member can sit under that name (a
+    // member's name carries its mob), and only code inside the process can
+    // put one there; here another inbox stands in for the old one.
+    let registry = InprocRegistry::global();
+    let old_key = meerkat_comms::PubKey::new(third.registered_key(&carol.comms_name));
+    let old_inbox = registry
+        .get_by_pubkey_in_namespace(&third.namespace(), &old_key)
+        .expect("an inbox to stand in for the old incarnation");
+    let stale = registry.register_with_meta_in_namespace(
+        &left.namespace(),
+        bob.comms_name.clone(),
+        old_key,
+        old_inbox,
+        meerkat_core::PeerMeta::default(),
+    );
+    assert!(!stale.is_rejected(), "fixture: {stale:?}");
+    assert_eq!(left.route_to(&bob.comms_name), Some(carol.peer_id.clone()));
+
+    // The wire replaces it with the route to bob's current key.
+    sdk_wire_cross_mob(&left, &right)
+        .await
+        .expect("the helper's call sequence over a stale route");
+    assert_eq!(left.route_to(&bob.comms_name), Some(bob.peer_id.clone()));
+    assert_delivers(&mut left, &mut right, "stale a-to-b").await;
+    assert_delivers(&mut right, &mut left, "stale b-to-a").await;
+
+    left.stop().await;
+    right.stop().await;
+    third.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_wire_is_refused_when_the_local_mob_already_holds_that_key() {
+    let root = tempfile::tempdir().expect("root");
+    // Two mobs whose members have one transport key.
+    let shared = root.path().join("shared-sessions");
+    let left = Mob::start_at(
+        root.path(),
+        &shared,
+        "wire-key-a",
+        "alice",
+        socket_member_comms(),
+    )
+    .await;
+    let right = Mob::start_at(
+        root.path(),
+        &shared,
+        "wire-key-b",
+        "bob",
+        socket_member_comms(),
+    )
+    .await;
+    let alice = left.peer_info().await;
+    let bob = right.peer_info().await;
+    assert_eq!(alice.peer_id, bob.peer_id, "fixture: one key for both");
+
+    let refusal = left
+        .wire_local(&bob)
+        .await
+        .expect_err("the local mob already holds that key");
+    assert!(
+        refusal.contains("already holds that key"),
+        "the refusal must say what is wrong: {refusal}"
+    );
+    // Nothing changed: the local member keeps its own registration, no
+    // route to the peer appeared, no trust was stored.
+    assert_eq!(
+        left.route_to(&alice.comms_name),
+        Some(alice.peer_id.clone()),
+        "the local member lost its own registration"
+    );
+    assert_eq!(left.route_to(&bob.comms_name), None);
+    assert!(left.trusts().await.is_empty());
+
+    left.stop().await;
+    right.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// Persistent state: a runtime is stopped and built again over its state.
+// ---------------------------------------------------------------------------
+
+impl Mob {
+    /// A mob over persistent state under `root`. The first call for a mob
+    /// spawns its member (`spawn`); a later call over the same `root` finds
+    /// the member in the state, with the key it had.
+    async fn start_persistent(root: &Path, mob_id: &str, member: &str, spawn: bool) -> Self {
+        let definition = MobDefinition::from_toml(&format!(
+            r#"
+[mob]
+id = "{mob_id}"
+
+[profiles.worker]
+model = "gpt-5.5"
+external_addressable = true
+
+[profiles.worker.tools]
+comms = true
+"#
+        ))
+        .expect("definition");
+        let (observations, received) = tokio::sync::mpsc::unbounded_channel();
+        let client: Arc<dyn LlmClient> = Arc::new(PeerScriptClient {
+            sent: Mutex::new(HashSet::new()),
+            observations,
+        });
+        let runtime = meerkat_meta::UnifiedRuntimeBuilder::default()
+            .definition(definition)
+            .persistent_state(root.join(format!("{mob_id}-state")))
+            .session_identity_config_root(root.join("keys"))
+            .comms(true)
+            .default_llm_client(client)
+            .build()
+            .await
+            .expect("build a runtime over persistent state");
+        if spawn {
+            runtime
+                .spawn(SpawnMemberSpec::from_wire(
+                    "worker".to_string(),
+                    MeerkatId::from(member).to_string(),
+                    None,
+                    Some(MobRuntimeMode::TurnDriven),
+                    None,
+                ))
+                .await
+                .expect("spawn member");
+        }
+        Self {
+            runtime,
+            mob_id: mob_id.to_string(),
+            member: member.to_string(),
+            received,
+            unmatched: Vec::new(),
+        }
+    }
+
+    /// A host message to the member, which builds it when it is not built
+    /// yet; returns once its model has answered.
+    async fn wake(&mut self, body: &str) {
+        self.runtime
+            .mob_handle()
+            .member(&MeerkatId::from(self.member.as_str()))
+            .await
+            .expect("member handle")
+            .send(body.to_string(), HandlingMode::Queue)
+            .await
+            .expect("host message");
+        assert!(
+            self.receives(body, DELIVERY_WAIT).await,
+            "{}: the member did not run a turn on the host message",
+            self.mob_id
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_identical_wire_again_reaches_a_member_that_was_built_again() {
+    let root = tempfile::tempdir().expect("root");
+    let mut left = Mob::start_persistent(root.path(), "wire-rebuilt-a", "alice", true).await;
+    let mut right = Mob::start_persistent(root.path(), "wire-rebuilt-b", "bob", true).await;
+    let bob = right.peer_info().await;
+    sdk_wire_cross_mob(&left, &right)
+        .await
+        .expect("the helper's call sequence");
+    assert_delivers(&mut left, &mut right, "rebuilt before a-to-b").await;
+
+    // Bob's runtime is stopped and built again over its state; bob is built
+    // again by a host message. Same name, same key, a new inbox.
+    right.stop().await;
+    let mut right = Mob::start_persistent(root.path(), "wire-rebuilt-b", "bob", false).await;
+    right.wake("rebuilt host message").await;
+    assert_eq!(right.peer_info().await.peer_id, bob.peer_id);
+
+    // The identical wire again is accepted, and its route is the member's
+    // inbox of now, not the one that is gone.
+    sdk_wire_cross_mob(&left, &right)
+        .await
+        .expect("the identical edge is accepted again");
+    assert_delivers(&mut left, &mut right, "rebuilt after a-to-b").await;
+    assert_delivers(&mut right, &mut left, "rebuilt after b-to-a").await;
+
+    left.stop().await;
+    right.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// The Console's wire_local / unwire_local (its own handler over the same
+// route calls).
+// ---------------------------------------------------------------------------
+
+fn console_decisions() -> meerkat_meta::RuntimeDecisionState {
+    meerkat_meta::build_runtime_decision_state(meerkat_meta::RuntimeDecisionInputs {
+        bigquery: meerkat_meta::BigQueryNaming {
+            dataset: "wire_local_dataset".to_string(),
+            table: "wire_local_table".to_string(),
+        },
+        trusted_meta_toml: "[[modules]]\nid = \"router\"\ncommand = \"router-bin\"\nargs = []\nrestart_policy = \"always\"\n"
+            .to_string(),
+        auth: meerkat_meta::AuthPolicy {
+            default_provider: meerkat_meta::AuthProvider::GoogleOAuth,
+            email_allowlist: vec!["root@example.test".to_string()],
+        },
+        trusted_oidc: meerkat_meta::TrustedOidcRuntimeConfig {
+            discovery_json:
+                r#"{"issuer":"https://trusted.meta.localhost","jwks_uri":"https://trusted.meta.localhost/.well-known/jwks.json"}"#
+                    .to_string(),
+            jwks_json: r#"{"keys":[{"kid":"kid-current","kty":"oct","alg":"HS256","k":"cGhhc2U3LXRydXN0ZWQtY3VycmVudC1zZWNyZXQ"}]}"#
+                .to_string(),
+            audience: "meerkat-console".to_string(),
+            require_verified_email: false,
+            shared_account_tokens: false,
+        },
+        console: meerkat_meta::ConsolePolicy {
+            require_app_auth: false,
+            ..meerkat_meta::ConsolePolicy::default()
+        },
+        ops: meerkat_meta::RuntimeOpsPolicy::default(),
+        release_metadata_json: include_str!("../assets/release-targets.json").to_string(),
+    })
+    .expect("decision state")
+}
+
+/// A signed-in person's console token.
+fn console_token(subject: &str) -> String {
+    let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
+    header.kid = Some("kid-current".to_string());
+    jsonwebtoken::encode(
+        &header,
+        &json!({
+            "iss": "https://trusted.meta.localhost",
+            "aud": "meerkat-console",
+            "sub": subject,
+            "email": subject,
+            "provider": "google_oauth",
+            "exp": chrono::Utc::now().timestamp() + 300,
+        }),
+        &jsonwebtoken::EncodingKey::from_secret(b"phase7-trusted-current-secret"),
+    )
+    .expect("signed fixture token")
+}
+
+/// One Console RPC: the result, or the error message.
+async fn console_rpc(
+    app: &axum::Router,
+    bearer: Option<&str>,
+    method: &str,
+    params: Value,
+) -> Result<Value, String> {
+    use tower::ServiceExt;
+    let payload = json!({"jsonrpc": "2.0", "id": "test", "method": method, "params": params});
+    let mut request = axum::http::Request::builder()
+        .method("POST")
+        .uri("/console/rpc")
+        .header(axum::http::header::CONTENT_TYPE, "application/json");
+    if let Some(bearer) = bearer {
+        request = request.header(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {bearer}"),
+        );
+    }
+    let response = app
+        .clone()
+        .oneshot(
+            request
+                .body(axum::body::Body::from(payload.to_string()))
+                .expect("rpc request"),
+        )
+        .await
+        .expect("rpc response");
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("rpc body");
+    let response: Value = serde_json::from_slice(&body).expect("rpc json");
+    match response.get("error") {
+        Some(error) if !error.is_null() => Err(error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()),
+        _ => Ok(response.get("result").cloned().unwrap_or(Value::Null)),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn console_wire_local_installs_the_route_and_its_unwire_removes_it() {
+    let root = tempfile::tempdir().expect("root");
+    let mut left = Mob::start(root.path(), "wire-console-a", "alice").await;
+    let mut right = Mob::start(root.path(), "wire-console-b", "bob").await;
+    let alice = left.peer_info().await;
+    let bob = right.peer_info().await;
+    // A Console with no access configuration: every caller is its operator.
+    let console = left.runtime.build_reference_app_router(console_decisions());
+
+    console_rpc(
+        &console,
+        None,
+        "meta/cross_mob/wire_local",
+        left.wire_params(&bob),
+    )
+    .await
+    .expect("the Console wires alice to bob");
+    assert_eq!(left.trusts().await, vec![bob.comms_name.clone()]);
+    assert_eq!(
+        left.route_to(&bob.comms_name),
+        Some(bob.peer_id.clone()),
+        "the Console's wire_local left trust without a route"
+    );
+    right.wire_local(&alice).await.expect("bob's side");
+    assert_delivers(&mut left, &mut right, "console a-to-b").await;
+    assert_delivers(&mut right, &mut left, "console b-to-a").await;
+
+    // A wire under another endpoint is refused there in the same plain words.
+    let moved = PeerInfo {
+        address: "tcp://127.0.0.1:45999".to_string(),
+        key: bob.pubkey_b64.clone(),
+        ..bob.clone()
+    };
+    let refusal = console_rpc(
+        &console,
+        None,
+        "meta/cross_mob/wire_local",
+        left.wire_params(&moved),
+    )
+    .await
+    .expect_err("a wire is never replaced");
+    assert_refused_as_already_wired(&refusal);
+    assert_eq!(left.route_to(&bob.comms_name), Some(bob.peer_id.clone()));
+
+    console_rpc(
+        &console,
+        None,
+        "meta/cross_mob/unwire_local",
+        left.wire_params(&bob),
+    )
+    .await
+    .expect("the Console unwires alice from bob");
+    assert!(left.trusts().await.is_empty());
+    assert_eq!(left.route_to(&bob.comms_name), None);
+
+    left.stop().await;
+    right.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn console_wire_local_tells_a_caller_who_is_no_admin_nothing_about_another_mob() {
+    let root = tempfile::tempdir().expect("root");
+    let mut left = Mob::start(root.path(), "wire-oracle-a", "alice").await;
+    let right = Mob::start(root.path(), "wire-oracle-b", "bob").await;
+    let bob = right.peer_info().await;
+    // Access is enforced: one named admin, and everyone (signed in or not)
+    // may operate the runtime's wiring and see its members.
+    left.runtime.set_access_controller(
+        meerkat_meta::AccessController::new(meerkat_meta::AccessControlConfig {
+            approvers: Default::default(),
+            enabled: true,
+            admins: vec!["root@example.test".to_string()],
+            groups: Default::default(),
+            rules: vec![meerkat_meta::AccessRule {
+                id: "everyone-operates-wiring".to_string(),
+                actions: vec!["runtime.admin".to_string(), "agent.view".to_string()],
+                ..meerkat_meta::AccessRule::default()
+            }],
+        })
+        .expect("controller"),
+    );
+    let console = left.runtime.build_reference_app_router(console_decisions());
+
+    // A name no mob of this process has, shaped like bob's.
+    let absent_name = "wire-oracle-b/worker/nobody".to_string();
+    let absent = PeerInfo {
+        comms_name: absent_name.clone(),
+        address: format!("inproc://{absent_name}"),
+        ..bob.clone()
+    };
+    let keyed = |info: &PeerInfo| PeerInfo {
+        key: bob.pubkey_b64.clone(),
+        ..info.clone()
+    };
+
+    // No key: the answer for the live member of the other mob is the answer
+    // for the name no mob has, word for word, and nothing is installed.
+    let for_live = console_rpc(
+        &console,
+        None,
+        "meta/cross_mob/wire_local",
+        left.wire_params(&bob),
+    )
+    .await
+    .expect_err("a caller who is no admin learns nothing about another mob");
+    let for_absent = console_rpc(
+        &console,
+        None,
+        "meta/cross_mob/wire_local",
+        left.wire_params(&absent),
+    )
+    .await
+    .expect_err("a name no mob has");
+    assert_eq!(
+        for_live.replace(&bob.comms_name, "<name>"),
+        for_absent.replace(&absent_name, "<name>"),
+        "the two answers differ"
+    );
+    assert_eq!(left.route_to(&bob.comms_name), None);
+    assert!(left.trusts().await.is_empty());
+
+    // With the member's key: trust alone, as for the name no mob has. No
+    // route into the other mob appears.
+    for info in [keyed(&bob), keyed(&absent)] {
+        console_rpc(
+            &console,
+            None,
+            "meta/cross_mob/wire_local",
+            left.wire_params(&info),
+        )
+        .await
+        .expect("a keyed in-process wire is trust alone");
+        assert_eq!(
+            left.route_to(&info.comms_name),
+            None,
+            "a caller who is no admin installed a route into another mob"
+        );
+        console_rpc(
+            &console,
+            None,
+            "meta/cross_mob/unwire_local",
+            left.wire_params(&info),
+        )
+        .await
+        .expect("unwire");
+    }
+    assert!(left.trusts().await.is_empty());
+
+    // The admin's wire is the operator's: the route is installed.
+    let admin = console_token("root@example.test");
+    console_rpc(
+        &console,
+        Some(&admin),
+        "meta/cross_mob/wire_local",
+        left.wire_params(&bob),
+    )
+    .await
+    .expect("the admin wires alice to bob");
+    assert_eq!(left.route_to(&bob.comms_name), Some(bob.peer_id.clone()));
 
     left.stop().await;
     right.stop().await;

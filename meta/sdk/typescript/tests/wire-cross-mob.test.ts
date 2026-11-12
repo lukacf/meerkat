@@ -1,12 +1,14 @@
 /**
  * `MobHandle.wireCrossMob`: the calls it makes, in order.
  *
- * `peerInfo` on both sides, then `wireLocal` on each side with the other
+ * `peerInfo` on both sides, one read of the local member (is it wired to
+ * that peer already), then `wireLocal` on each side with the other
  * side's answer: by the dialable address and the member's key when BOTH
  * answers report a dialable address (two gateways, two processes), and by the
  * in-process address with no key otherwise (the gateway resolves a member of
  * its own process, and refuses any other in plain words). A refused second
- * `wireLocal` undoes the first side with the parameters it was wired with.
+ * `wireLocal` undoes the first side with the parameters it was wired with,
+ * unless that side was wired to the peer before the call.
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -40,6 +42,7 @@ function peer(
 function mockHandle(
   info: Record<string, string>,
   refuse: string[] = [],
+  wiredTo: string[] = [],
 ): { handle: any; calls: RpcCall[] } {
   const rt = new MetaRuntime(runtimeConfig());
   (rt as any)._running = true;
@@ -48,6 +51,9 @@ function mockHandle(
     calls.push({ method, params });
     if (refuse.includes(method)) {
       throw new Error(`${method} refused`);
+    }
+    if (method === "meta/get_member") {
+      return { agent_identity: info.member_id, role: "worker", state: "active", wired_to: wiredTo };
     }
     return method === "meta/cross_mob/peer_info" ? info : {};
   };
@@ -87,6 +93,7 @@ describe("MobHandle.wireCrossMob", () => {
 
     assert.deepEqual(local.calls, [
       { method: "meta/cross_mob/peer_info", params: { member_id: "alice" } },
+      { method: "meta/get_member", params: { member_id: "alice" } },
       { method: "meta/cross_mob/wire_local", params: socketWire("alice", bob) },
     ]);
     assert.deepEqual(remote.calls, [
@@ -103,7 +110,7 @@ describe("MobHandle.wireCrossMob", () => {
 
     await local.handle.wireCrossMob("alice", "bob", remote.handle);
 
-    assert.deepEqual(local.calls[1], {
+    assert.deepEqual(local.calls[2], {
       method: "meta/cross_mob/wire_local",
       params: inProcessWire("alice", bob),
     });
@@ -121,7 +128,7 @@ describe("MobHandle.wireCrossMob", () => {
 
     await local.handle.wireCrossMob("alice", "bob", remote.handle);
 
-    assert.deepEqual(local.calls[1].params, inProcessWire("alice", bob));
+    assert.deepEqual(local.calls[2].params, inProcessWire("alice", bob));
     assert.deepEqual(remote.calls[1].params, inProcessWire("bob", alice));
   });
 
@@ -136,7 +143,7 @@ describe("MobHandle.wireCrossMob", () => {
 
     assert.deepEqual(
       local.calls.map((call) => call.method),
-      ["meta/cross_mob/peer_info", "meta/cross_mob/wire_local"],
+      ["meta/cross_mob/peer_info", "meta/get_member", "meta/cross_mob/wire_local"],
     );
     assert.deepEqual(
       remote.calls.map((call) => call.method),
@@ -157,6 +164,7 @@ describe("MobHandle.wireCrossMob", () => {
 
     assert.deepEqual(local.calls, [
       { method: "meta/cross_mob/peer_info", params: { member_id: "alice" } },
+      { method: "meta/get_member", params: { member_id: "alice" } },
       { method: "meta/cross_mob/wire_local", params: socketWire("alice", bob) },
       { method: "meta/cross_mob/unwire_local", params: socketWire("alice", bob) },
     ]);
@@ -164,5 +172,25 @@ describe("MobHandle.wireCrossMob", () => {
       remote.calls.map((call) => call.method),
       ["meta/cross_mob/peer_info", "meta/cross_mob/wire_local"],
     );
+  });
+
+  it("a refused second wire leaves a first side that was wired before the call", async () => {
+    const alice = peer("mob-a", "alice", ALICE_ID, { address: "tcp://127.0.0.1:4101" });
+    const bob = peer("mob-b", "bob", BOB_ID, { address: "tcp://127.0.0.1:4102" });
+    // alice is wired to bob already when the helper runs.
+    const local = mockHandle(alice, [], [bob.comms_name]);
+    const remote = mockHandle(bob, ["meta/cross_mob/wire_local"]);
+
+    await assert.rejects(
+      local.handle.wireCrossMob("alice", "bob", remote.handle),
+      /wire_local refused/,
+    );
+
+    // The helper undoes only a wire it made: no unwire_local is sent.
+    assert.deepEqual(local.calls, [
+      { method: "meta/cross_mob/peer_info", params: { member_id: "alice" } },
+      { method: "meta/get_member", params: { member_id: "alice" } },
+      { method: "meta/cross_mob/wire_local", params: socketWire("alice", bob) },
+    ]);
   });
 });

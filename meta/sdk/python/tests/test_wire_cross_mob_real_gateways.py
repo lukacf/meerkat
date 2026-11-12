@@ -16,6 +16,7 @@ import asyncio
 import json
 import os
 import re
+import socket
 import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -23,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from meerkat_meta import Meta
+from meerkat_meta import MEMBER_STATE_ACTIVE, MEMBER_STATE_BROKEN, Meta
 from meerkat_meta.errors import RpcError
 
 
@@ -216,9 +217,39 @@ class _FakeModel:
             )
 
 
-async def _gateway(tmp_path: Path, mob_id: str, base_url: str, *, socket_endpoints: bool):
+    def sender_result(self, token: str) -> str | None:
+        """What the sending member's model was handed after its
+        ``send_message`` call for ``token``: the rest of the request that
+        follows the trigger (the tool call and its result)."""
+        with self._lock:
+            for text in reversed(self.requests):
+                if f"body={token}" in text:
+                    return text.rsplit(f"body={token}", 1)[-1]
+        return None
+
+
+def _free_loopback_address() -> str:
+    """A loopback address with a port that is free now: a FIXED member
+    address a gateway can bind again after a restart."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return f"127.0.0.1:{probe.getsockname()[1]}"
+
+
+async def _gateway(
+    tmp_path: Path,
+    mob_id: str,
+    base_url: str,
+    *,
+    socket_endpoints: bool,
+    address: str | None = None,
+    persistent: bool = False,
+):
+    """Start a gateway for ``mob_id``. With ``persistent`` its state lives
+    under the mob's directory, so a second call for the same ``mob_id`` is a
+    restart on that state."""
     root = tmp_path / mob_id
-    root.mkdir()
+    root.mkdir(exist_ok=True)
     (root / "mob.toml").write_text(_mob_toml(mob_id))
     (root / "config.toml").write_text(_config_toml(base_url))
     builder = (
@@ -228,7 +259,13 @@ async def _gateway(tmp_path: Path, mob_id: str, base_url: str, *, socket_endpoin
         .meerkat_config(root / "config.toml")
     )
     if socket_endpoints:
-        builder = builder.member_comms_tcp()
+        builder = (
+            builder.member_comms_tcp(address)
+            if address is not None
+            else builder.member_comms_tcp()
+        )
+    if persistent:
+        builder = builder.persistent_state(str(root / "state"))
     return await builder.build()
 
 
@@ -318,6 +355,197 @@ async def test_wire_cross_mob_between_two_gateways_without_endpoints_is_refused_
         # Nothing was wired on either side.
         assert (await a.get_member("alice")).wired_to == []
         assert (await b.get_member("bob")).wired_to == []
+    finally:
+        for runtime in (left, right):
+            if runtime is not None:
+                await runtime.shutdown()
+        fake.close()
+
+
+async def _exchange(fake: _FakeModel, sender, member: str, peer_id: str, token: str) -> bool:
+    """``member`` calls ``send_message`` to ``peer_id``; whether the other
+    gateway's member was handed ``token``."""
+    await sender.send(member, f"SCRIPTED-SEND peer_id={peer_id} body={token}")
+    return await _delivered(fake, token)
+
+
+async def _sender_result(fake: _FakeModel, token: str, seconds: float = 45.0) -> str:
+    """The tool result the sending member's model was handed for ``token``."""
+    deadline = asyncio.get_running_loop().time() + seconds
+    while asyncio.get_running_loop().time() < deadline:
+        result = fake.sender_result(token)
+        if result is not None:
+            return result
+        await asyncio.sleep(0.2)
+    raise AssertionError(f"the sender's model was never handed a result for {token}")
+
+
+@pytest.mark.asyncio
+async def test_a_wire_between_gateways_with_fixed_member_addresses_survives_a_restart(
+    tmp_path,
+):
+    """Persistent state, one member per gateway, each on a FIXED member
+    address: one gateway is shut down and started again on its state, and
+    the wire still delivers both ways with no second wire."""
+    fake = _FakeModel()
+    left = right = None
+    right_address = _free_loopback_address()
+
+    async def start_right():
+        return await _gateway(
+            tmp_path,
+            "xgw-fixed-b",
+            fake.base_url,
+            socket_endpoints=True,
+            address=right_address,
+            persistent=True,
+        )
+
+    try:
+        left = await _gateway(
+            tmp_path,
+            "xgw-fixed-a",
+            fake.base_url,
+            socket_endpoints=True,
+            address=_free_loopback_address(),
+            persistent=True,
+        )
+        right = await start_right()
+        a, b = left.mob_handle(), right.mob_handle()
+        await a.ensure_member("alice", "worker")
+        await b.ensure_member("bob", "worker")
+        alice = await a.peer_info("alice")
+        bob = await b.peer_info("bob")
+        assert bob["dialable_address"] == f"tcp://{right_address}", bob
+
+        await a.wire_cross_mob("alice", "bob", b)
+        assert await _exchange(fake, a, "alice", bob["peer_id"], "xgw-fixed-before-a-to-b")
+        assert await _exchange(fake, b, "bob", alice["peer_id"], "xgw-fixed-before-b-to-a")
+
+        await right.shutdown()
+        right = None
+        right = await start_right()
+        b = right.mob_handle()
+
+        # The restarted member is the member the other side wired: same
+        # endpoint, same key, still active, the edge still there.
+        restarted = await b.get_member("bob")
+        assert restarted.state == MEMBER_STATE_ACTIVE, restarted
+        assert alice["comms_name"] in restarted.wired_to, restarted
+        other = await a.get_member("alice")
+        assert other.state == MEMBER_STATE_ACTIVE, other
+        assert bob["comms_name"] in other.wired_to, other
+        assert await b.peer_info("bob") == bob
+
+        # No second wire: both directions deliver.
+        assert await _exchange(fake, a, "alice", bob["peer_id"], "xgw-fixed-after-a-to-b")
+        assert await _exchange(fake, b, "bob", alice["peer_id"], "xgw-fixed-after-b-to-a")
+
+        # The helper again finds the pair wired as it is and changes nothing.
+        await a.wire_cross_mob("alice", "bob", b)
+        assert (await a.get_member("alice")).wired_to == [bob["comms_name"]]
+        assert (await b.get_member("bob")).wired_to == [alice["comms_name"]]
+        assert await _exchange(fake, a, "alice", bob["peer_id"], "xgw-fixed-again-a-to-b")
+        assert await _exchange(fake, b, "bob", alice["peer_id"], "xgw-fixed-again-b-to-a")
+    finally:
+        for runtime in (left, right):
+            if runtime is not None:
+                await runtime.shutdown()
+        fake.close()
+
+
+@pytest.mark.asyncio
+async def test_a_wire_between_gateways_with_kernel_picked_ports_is_lost_at_a_restart_and_recovered(
+    tmp_path,
+):
+    """A pinned limit. Persistent state with ``member_comms_tcp()``'s default
+    address (a port the kernel picks): after a restart the member binds
+    another port, is restored broken, and the wire is dead. The way back,
+    with nothing but what each gateway answers after the restart: respawn
+    the member, unwire both sides, wire again."""
+    fake = _FakeModel()
+    left = right = None
+
+    async def start_right():
+        return await _gateway(
+            tmp_path, "xgw-moved-b", fake.base_url, socket_endpoints=True, persistent=True
+        )
+
+    try:
+        left = await _gateway(
+            tmp_path, "xgw-moved-a", fake.base_url, socket_endpoints=True, persistent=True
+        )
+        right = await start_right()
+        a, b = left.mob_handle(), right.mob_handle()
+        await a.ensure_member("alice", "worker")
+        await b.ensure_member("bob", "worker")
+        alice = await a.peer_info("alice")
+        bob = await b.peer_info("bob")
+        await a.wire_cross_mob("alice", "bob", b)
+        assert await _exchange(fake, a, "alice", bob["peer_id"], "xgw-moved-before-a-to-b")
+
+        await right.shutdown()
+        right = None
+        right = await start_right()
+        b = right.mob_handle()
+
+        # The member is broken, not only the edge: its new port is not the
+        # endpoint its mob recorded.
+        broken = await b.get_member("bob")
+        assert broken.state == MEMBER_STATE_BROKEN, broken
+        status = await b.member_status("bob")
+        assert "respawn the member" in (status.error or ""), status
+        with pytest.raises(RpcError):
+            await b.peer_info("bob")
+        # The other side still holds the edge and sends to the old port.
+        assert bob["comms_name"] in (await a.get_member("alice")).wired_to
+        await a.send(
+            "alice", f"SCRIPTED-SEND peer_id={bob['peer_id']} body=xgw-moved-dead-a-to-b"
+        )
+        dead = await _sender_result(fake, "xgw-moved-dead-a-to-b")
+        assert "peer_message_sent" not in dead, dead[-600:]
+        assert not fake.delivered("xgw-moved-dead-a-to-b")
+
+        # 1. Respawn the broken member: active again on a new port. (A
+        # respawn starts the member on a fresh session.)
+        await b.respawn_member("bob")
+        assert (await b.get_member("bob")).state == MEMBER_STATE_ACTIVE
+        moved = await b.peer_info("bob")
+        assert moved["dialable_address"] != bob["dialable_address"], moved
+
+        # 2. The helper alone does not replace the edge: the other side is
+        # wired to the old endpoint, and a wire is never replaced. The
+        # refusal says so in plain words, and nothing changes.
+        with pytest.raises(RpcError) as refusal:
+            await a.wire_cross_mob("alice", "bob", b)
+        message = str(refusal.value)
+        assert "already wired" in message and "unwire" in message, message
+        assert "Running -> Running" not in message, message
+        assert (await a.get_member("alice")).wired_to == [bob["comms_name"]]
+        assert (await b.get_member("bob")).wired_to == [alice["comms_name"]]
+
+        # 3. Unwire both sides, each by the other member's CURRENT peer info.
+        await a.unwire_local(
+            "alice",
+            moved["comms_name"],
+            moved["peer_id"],
+            moved["dialable_address"],
+            remote_pubkey_b64=moved["pubkey_b64"],
+        )
+        await b.unwire_local(
+            "bob",
+            alice["comms_name"],
+            alice["peer_id"],
+            alice["dialable_address"],
+            remote_pubkey_b64=alice["pubkey_b64"],
+        )
+        assert (await a.get_member("alice")).wired_to == []
+        assert (await b.get_member("bob")).wired_to == []
+
+        # 4. Wire again: both directions deliver.
+        await a.wire_cross_mob("alice", "bob", b)
+        assert await _exchange(fake, a, "alice", moved["peer_id"], "xgw-moved-after-a-to-b")
+        assert await _exchange(fake, b, "bob", alice["peer_id"], "xgw-moved-after-b-to-a")
     finally:
         for runtime in (left, right):
             if runtime is not None:

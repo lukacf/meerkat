@@ -102,6 +102,68 @@ impl MemberBuildPreparationRefusal {
             Self::Retryable { reason } | Self::Final { reason } => reason,
         }
     }
+
+    /// The refusal of a composition of a store-owned identity's seat
+    /// ([`MemberBuildPreparer::prepare_store_owned_seat`]) whose labels
+    /// differ from the seat's: `answered` are the labels the host's build
+    /// step gives the member of `seat`, the seat Core lowered. `None` when
+    /// they are exactly the seat's.
+    ///
+    /// A store-owned member carries its row's labels and no others, and
+    /// what decides on a member's labels (an access rule, an audience)
+    /// reads its seat. So a label the host requires must be in the
+    /// identity's row: a key the seat lacks, a key of the seat the answer
+    /// lacks and a key the answer gives another value each refuse, for good
+    /// ([`Self::Final`]), and the member is not built. The reason names the
+    /// keys, never a value, and the remedy. Core refuses such an answer
+    /// itself; a host calls this to refuse first, with the same reason, and
+    /// to show it where its operators read it.
+    pub fn store_owned_seat_labels(
+        seat: &SpawnMemberSpec,
+        answered: &std::collections::BTreeMap<String, String>,
+    ) -> Option<Self> {
+        let none = std::collections::BTreeMap::new();
+        let seated = seat.labels.as_ref().unwrap_or(&none);
+        let keys = |keys: Vec<&str>, how: &str| {
+            (!keys.is_empty()).then(|| format!("{how} [{}]", keys.join(", ")))
+        };
+        let added = answered
+            .keys()
+            .filter(|key| !seated.contains_key(*key))
+            .map(String::as_str)
+            .collect();
+        let dropped = seated
+            .keys()
+            .filter(|key| !answered.contains_key(*key))
+            .map(String::as_str)
+            .collect();
+        let changed = seated
+            .iter()
+            .filter(|(key, value)| answered.get(*key).is_some_and(|other| other != *value))
+            .map(|(key, _)| key.as_str())
+            .collect();
+        let differences = [
+            keys(added, "added"),
+            keys(dropped, "dropped"),
+            keys(changed, "changed"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+        if differences.is_empty() {
+            return None;
+        }
+        Some(Self::Final {
+            reason: format!(
+                "the labels the host answered for the seat of '{}' differ from the seat's \
+                 (label keys {}). A store-owned identity's member carries its row's labels and \
+                 no others: put a label the host requires in the identity's row, at its create \
+                 or by an update, and seat its member again",
+                seat.identity,
+                differences.join("; ")
+            ),
+        })
+    }
 }
 
 /// What Core reports once a member it built is live.
@@ -161,12 +223,23 @@ pub trait MemberBuildPreparer: Send + Sync {
     ///   later build keeps what its session was first built with:
     ///   instructions are never rewritten after the fact.
     ///
-    /// Nothing else of the answer is taken. The seat's labels, runtime
-    /// mode, backend, binding, placement, first message, tool category
-    /// overrides and wiring stay as Core lowered them. An answer that
-    /// changed the seat's identity, role, launch mode or custody is
-    /// refused: the build fails as a
-    /// [`MemberBuildPreparationRefusal::Final`] refusal does.
+    /// Nothing else of the answer is taken. The seat's runtime mode,
+    /// backend, binding, placement, first message, tool category overrides
+    /// and wiring stay as Core lowered them. An answer that changed the
+    /// seat's identity, role, launch mode or custody is refused: the build
+    /// fails as a [`MemberBuildPreparationRefusal::Final`] refusal does.
+    ///
+    /// The seat's labels are its row's, and the answer may not differ from
+    /// them: what decides on a member's labels reads its seat, so a member
+    /// is never seated without a label its host requires, nor with one its
+    /// row does not carry. An answer whose labels are not exactly the
+    /// seat's (a key added, a key dropped, a key given another value) is
+    /// refused for good, and the member is not built
+    /// ([`MemberBuildPreparationRefusal::store_owned_seat_labels`]: the
+    /// reason names the label keys, never a value). A host that labels its
+    /// members in its build step puts those labels in the identity's row,
+    /// at its create or by an update; a seated member takes its row's
+    /// labels when it is seated again or respawned with them.
     ///
     /// The host answers from the identity's row and its own state, the same
     /// for every build: no build relies on an earlier answer, so a restart
@@ -268,12 +341,14 @@ fn refused_seat_change(seat: &SpawnMemberSpec, composed: &SpawnMemberSpec) -> Op
 /// that build takes from the answer: the profile and model overrides at
 /// every build, and at the first build of the member's session
 /// (`first_build`) the build inputs that author it. Everything else of
-/// `seat` stays as Core lowered it, its labels included.
+/// `seat` stays as Core lowered it.
 ///
-/// The host composes a copy: a refusal, and an answer that changed the
-/// seat's identity, role, launch mode or custody (refused as
-/// [`MemberBuildPreparationRefusal::Final`], naming what changed), leave
-/// `seat` untouched.
+/// The host composes a copy: a refusal, an answer that changed the seat's
+/// identity, role, launch mode or custody, and an answer whose labels are
+/// not exactly the seat's (each refused as
+/// [`MemberBuildPreparationRefusal::Final`], naming what changed) leave
+/// `seat` untouched. Both of Core's sites compose through here, so no
+/// answer reaches a store-owned seat past these checks.
 pub(crate) async fn compose_store_owned_seat(
     preparer: &dyn MemberBuildPreparer,
     handle: MobReadHandle,
@@ -291,6 +366,16 @@ pub(crate) async fn compose_store_owned_seat(
                 seat.identity
             ),
         });
+    }
+    // The seat's labels are its row's: an answer with other labels is
+    // refused, never dropped, so the member is not seated without a label
+    // its host requires.
+    let unlabelled = std::collections::BTreeMap::new();
+    if let Some(refusal) = MemberBuildPreparationRefusal::store_owned_seat_labels(
+        seat,
+        composed.labels.as_ref().unwrap_or(&unlabelled),
+    ) {
+        return Err(refusal);
     }
     seat.override_profile = composed.override_profile;
     seat.model_override = composed.model_override;

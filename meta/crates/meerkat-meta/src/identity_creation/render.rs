@@ -354,7 +354,7 @@ fn render(
     text.field(labels::REQUESTER, &requester_value(&request.requester));
     text.field(
         labels::PROPOSER,
-        &optional_quoted(request.proposer.as_deref()),
+        &optional_quoted(request.proposer.as_deref().map(person_name).as_deref()),
     );
     match &request.source_evidence {
         Some(evidence) => {
@@ -450,7 +450,24 @@ fn requester_value(requester: &Requester) -> String {
     match requester {
         Requester::Agent { identity } => format!("agent {}", quoted(identity)),
         Requester::Host { surface } => format!("host {}", quoted(surface)),
-        Requester::Human { principal } => format!("human {}", quoted(principal)),
+        Requester::Human { principal } => format!("human {}", quoted(&person_name(principal))),
+    }
+}
+
+/// The name `text` names a person by, when it is a person's principal key
+/// (`principal:["human", trust domain, id]`): the id, as an agent's record
+/// names who asked for it. Any other text names itself. A rendering shows
+/// who asked and never the key; the request digest binds the key.
+fn person_name(text: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    let Some(parts) = text.strip_prefix("principal:") else {
+        return Cow::Borrowed(text);
+    };
+    // The key is the canonical JSON array of three strings; a person's
+    // starts with the kind `human` and ends with the id.
+    match serde_json::from_str::<[String; 3]>(parts) {
+        Ok([kind, _, id]) if kind == "human" && !id.is_empty() => Cow::Owned(id),
+        _ => Cow::Borrowed(text),
     }
 }
 

@@ -432,6 +432,12 @@ impl IdentityBuildPreparer {
                     seat.launch_mode,
                     meerkat_mob::launch::MemberLaunchMode::Fresh
                 ) {
+                    tracing::warn!(
+                        member = %seat.identity,
+                        "the member is spawned before the identity runtime is composed: it is \
+                         built from its row alone, and its host's customizer is not asked \
+                         about its build inputs or its labels"
+                    );
                     return Ok(());
                 }
                 return Err(MemberBuildPreparationRefusal::Retryable {
@@ -444,20 +450,25 @@ impl IdentityBuildPreparer {
         ) else {
             return Ok(());
         };
-        // An identity no roster pass or door registered yet is registered
-        // from its row, as its build's preparation registers it; a row that
-        // could not be read refuses the build, retryable.
-        if !runtime.contains(&identity).await
-            && !runtime
-                .register_created_member_for_build(&identity)
-                .await
-                .map_err(|reason| MemberBuildPreparationRefusal::Retryable { reason })?
-        {
+        // The identity's row is read now, so the customizer composes from
+        // the row as it stands (one Core changed since the registration
+        // included), and an identity no roster pass or door registered yet
+        // is registered from it, as its build's preparation registers it. A
+        // row that could not be read refuses the build, retryable. A bridge
+        // that reads no rows composes a registered identity from its
+        // registration.
+        let row = runtime
+            .created_member_row_for_build(&identity)
+            .await
+            .map_err(|reason| MemberBuildPreparationRefusal::Retryable { reason })?;
+        if row.is_none() && !runtime.contains(&identity).await {
             return Ok(());
         }
         // Held behind a box: the customizer's future and the lowering stay
         // out of the frame of Core's build.
-        if let Some(answer) = Box::pin(runtime.compose_store_owned_seat(&identity, seat)).await? {
+        if let Some(answer) =
+            Box::pin(runtime.compose_store_owned_seat(&identity, row, seat)).await?
+        {
             self.lock_state()
                 .seat_composed
                 .insert(seat.identity.clone(), answer);

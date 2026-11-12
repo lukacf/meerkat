@@ -89,7 +89,7 @@ A rule is `{change, requester, target, outcome}`.
 |-------|------------|
 | `create` | A new agent |
 | `descriptive` | An update of the display name, the instructions, the context or the labels that are no authority field |
-| `capability` | An update of how the agent runs and who reaches it. No method of this release sets either, so no request touches the class yet |
+| `capability` | An update of who reaches the agent and how it runs: its `addressability` and its `runtime_mode_override` |
 | `peers` | Peers added or removed |
 | `authority` | An authority field set. A rule that lets it through without a human decision is refused at init |
 | `profile` | A move to another profile: the agent then has that profile's model, tools and skills, on the same conversation |

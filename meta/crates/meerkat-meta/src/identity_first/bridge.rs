@@ -6166,8 +6166,10 @@ pub trait SessionBridge: Send + Sync {
     /// context, instruction sections, model, provider parameters, system
     /// prompt, tool overlay and compaction curator, through the lowering a
     /// configured identity's seat is composed with, so the same draft gives
-    /// both the same build inputs. The seat's labels stay its row's, and it
-    /// gets none of a roster spawn's marks. Core decides what each build
+    /// both the same build inputs. The seat takes the draft's labels with
+    /// none of a roster spawn's marks: Core refuses a seat whose answered
+    /// labels are not exactly its own, its row's, so a label the draft adds
+    /// is refused there and never dropped. Core decides what each build
     /// takes of the result. No read of Core, no actor command, no wake.
     ///
     /// The default lowers with no definition profile to resolve: a draft
@@ -9403,9 +9405,12 @@ enum DraftLabels {
     /// `agent_identity` and `profile_name` labels): the seat of an identity
     /// whose record is its host's roster.
     RosterMarked,
-    /// The seat's labels are left as they are: the seat of an identity
-    /// whose record is its row, whose labels are its row's.
-    SeatKept,
+    /// The seat takes the draft's labels as they are, with none of a roster
+    /// spawn's marks: the seat of an identity whose record is its row. Core
+    /// refuses an answer whose labels are not exactly the seat's (its
+    /// row's), so a label the draft adds reaches Core, and is refused
+    /// there, instead of being dropped here.
+    Unmarked,
 }
 
 /// Lower `draft`, the host's build draft of `spec`, onto `spawn_spec`: the
@@ -9421,13 +9426,13 @@ fn lower_build_draft(
     spec: &DurableAgentSpec,
     draft: &AgentBuildDraft,
     base_profile: Option<&meerkat_mob::Profile>,
-    labels: DraftLabels,
+    marks: DraftLabels,
 ) -> Result<(), BridgeError> {
     if let Some(ref ctx) = draft.app_context {
         spawn_spec.context = Some(ctx.clone());
     }
-    if labels == DraftLabels::RosterMarked {
-        let mut labels = draft.labels.clone();
+    let mut labels = draft.labels.clone();
+    if marks == DraftLabels::RosterMarked {
         labels.insert(
             "agent_identity".to_string(),
             spec.identity.as_str().to_string(),
@@ -9436,8 +9441,8 @@ fn lower_build_draft(
             "profile_name".to_string(),
             spec.profile.as_str().to_string(),
         );
-        spawn_spec.labels = Some(labels);
     }
+    spawn_spec.labels = Some(labels);
     if !draft.additional_instructions.is_empty() {
         spawn_spec.additional_instructions = Some(draft.additional_instructions.clone());
     }
@@ -9495,8 +9500,10 @@ fn lower_build_draft(
 /// perform ([`SessionBridge::lower_store_owned_seat_build`]). The draft is
 /// the one source of the seat's build inputs: it started from the row's
 /// context and instructions, and no override is kept from an earlier build,
-/// so what the seat carried of them is set aside first. The seat's labels
-/// stay its row's, with none of a roster spawn's marks.
+/// so what the seat carried of them is set aside first. The seat takes the
+/// draft's labels with none of a roster spawn's marks: they are the row's
+/// unless the customizer changed them, and Core refuses a seat whose
+/// answered labels are not exactly its own.
 fn lower_store_owned_seat_draft(
     seat: &mut SpawnMemberSpec,
     spec: &DurableAgentSpec,
@@ -9508,7 +9515,7 @@ fn lower_store_owned_seat_draft(
     seat.system_prompt_override = None;
     seat.override_profile = None;
     seat.model_override = None;
-    lower_build_draft(seat, spec, draft, base_profile, DraftLabels::SeatKept)
+    lower_build_draft(seat, spec, draft, base_profile, DraftLabels::Unmarked)
 }
 
 /// Build the spawn spec for a RESUME of `session_id`.
@@ -13273,6 +13280,35 @@ mod tests {
             "probe timeout must defer to the wiring fallback"
         );
         assert_eq!(peer_reachable_count_from_connectivity(None), None);
+    }
+
+    /// The seat of an identity whose record is its row takes the draft's
+    /// labels as they are, with none of a roster spawn's marks, and its
+    /// model override anew: Core compares the labels with the seat's own,
+    /// so a label the draft adds must reach it.
+    #[test]
+    fn a_store_owned_seat_takes_the_drafts_labels_unmarked() {
+        let mut draft = draft_with_provider_params(None);
+        draft.model = Some("gpt-test".to_string());
+        draft
+            .labels
+            .insert("host_tier".to_string(), "gold".to_string());
+        let mut seat = SpawnMemberSpec::host_root("worker", "keeper");
+        seat.labels = Some(std::collections::BTreeMap::from([(
+            "custody".to_string(),
+            "store".to_string(),
+        )]));
+        seat.model_override = Some("an-earlier-build".to_string());
+
+        lower_store_owned_seat_draft(&mut seat, &durable_spec(), &draft, None)
+            .expect("the draft lowers onto the seat");
+
+        assert_eq!(
+            seat.labels,
+            Some(draft.labels.clone()),
+            "the draft's labels, with no roster mark"
+        );
+        assert_eq!(seat.model_override.as_deref(), Some("gpt-test"));
     }
 
     #[test]

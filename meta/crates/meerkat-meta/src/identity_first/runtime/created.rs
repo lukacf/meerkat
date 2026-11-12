@@ -765,15 +765,31 @@ impl IdentityRuntime {
         &self,
         identity: &AgentIdentity,
     ) -> Result<bool, String> {
+        self.created_member_row_for_build(identity)
+            .await
+            .map(|row| row.is_some())
+    }
+
+    /// [`Self::register_created_member_for_build`], answering the spec the
+    /// identity's row holds now: what the seat of its member is composed
+    /// from, so the composition follows a row Core changed since the
+    /// identity was registered (one store read, no lifecycle lock; the
+    /// registration itself is left to the doors). `Ok(None)` when Core holds
+    /// no such entry of it, its row carries no spec, or the bridge cannot
+    /// read rows.
+    pub(crate) async fn created_member_row_for_build(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<Option<DurableAgentSpec>, String> {
         let Some(bridge) = self.bridge.as_ref() else {
-            return Ok(false);
+            return Ok(None);
         };
         match bridge.created_identity(identity).await {
             Ok(Some(spec)) => {
-                self.register_created_if_absent(spec).await;
-                Ok(true)
+                self.register_created_if_absent(spec.clone()).await;
+                Ok(Some(spec))
             }
-            Ok(None) | Err(BridgeError::Unsupported { .. }) => Ok(false),
+            Ok(None) | Err(BridgeError::Unsupported { .. }) => Ok(None),
             Err(error) => Err(format!(
                 "the identity's row in the mob's identity store could not be read: {error}"
             )),

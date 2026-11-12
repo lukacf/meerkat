@@ -584,11 +584,11 @@ before 0.9.11 is blocked `member_host_unsupported` until the host runs
 whose snapshot record would not fit the bridge frame (about 1 MiB; nothing
 is sent). A
 governed runtime refuses every write `prepared_authorization_required`. Since
-0.9.14 the limits (64 records, 1 MiB of Active bodies) bound one member's
+0.9.15 the limits (64 records, 1 MiB of Active bodies) bound one member's
 snapshot, the shared records plus the member-targeted records that name the
 member, so a mob holds a member-targeted record for each of any number of
 members, and a member's session and status row name only the shared records
-and its own. A release before 0.9.14 cannot serve a mob that holds more
+and its own. A release before 0.9.15 cannot serve a mob that holds more
 than 64 records or more than 1 MiB of Active bodies in total
 (`rkat storage doctor`: `operator-instruction-mob-totals`). The limits count
 a member-targeted record under the member it names, seated or not.

@@ -196,17 +196,17 @@ pub const FINDING_OPERATOR_INSTRUCTION_ENVELOPE: &str = "operator-instruction-en
 /// The census reads the per-mob databases on disk (`mobs/<name>.db`).
 pub const FINDING_OPERATOR_INSTRUCTION_MOB_EVENTS: &str = "operator-instruction-mob-events";
 /// Mob journals whose operator instruction records are past what a release
-/// before 0.9.14 serves: more than 64 records, or more than 1 MiB of Active
-/// bodies, in the mob as a whole. Since 0.9.14 a mob's limits bound one
+/// before 0.9.15 serves: more than 64 records, or more than 1 MiB of Active
+/// bodies, in the mob as a whole. Since 0.9.15 a mob's limits bound one
 /// member's snapshot (the shared records plus the member's own), so a mob
 /// holds a member-targeted record for each of any number of members. A
-/// release before 0.9.14 bounds the mob as a whole and puts every record in
+/// release before 0.9.15 bounds the mob as a whole and puts every record in
 /// every member's snapshot. Its release build replays such a journal
 /// without a refusal and then cannot serve the mob: every step that
 /// validates the mob's recovered state is refused (every spawn, every flow
 /// run), and past 64 records every member's delivery is refused by its
 /// session and a member that needs a new session fails to build. Before a
-/// downgrade an operator keeps each listed mob on 0.9.14 or later, resets
+/// downgrade an operator keeps each listed mob on 0.9.15 or later, resets
 /// it, or destroys it. Informational, with the two totals. The census reads
 /// the per-mob databases on disk (`mobs/<name>.db`).
 pub const FINDING_OPERATOR_INSTRUCTION_MOB_TOTALS: &str = "operator-instruction-mob-totals";
@@ -2006,16 +2006,16 @@ fn census_operator_instruction_mob_events(
     );
 }
 
-/// The most operator instruction records of one mob a release before 0.9.14
+/// The most operator instruction records of one mob a release before 0.9.15
 /// serves: such a release bounds the mob as a whole at this many, and puts
 /// every record of the mob in every member's snapshot, which a member
 /// session bounds at this many too.
-const OPERATOR_INSTRUCTION_RECORDS_BEFORE_0_9_14: u64 = 64;
+const OPERATOR_INSTRUCTION_RECORDS_BEFORE_0_9_15: u64 = 64;
 
 /// The most bytes of Active operator instruction bodies of one mob a
-/// release before 0.9.14 serves: such a release bounds the mob as a whole
+/// release before 0.9.15 serves: such a release bounds the mob as a whole
 /// at this many.
-const OPERATOR_INSTRUCTION_ACTIVE_BYTES_BEFORE_0_9_14: u64 = 1024 * 1024;
+const OPERATOR_INSTRUCTION_ACTIVE_BYTES_BEFORE_0_9_15: u64 = 1024 * 1024;
 
 /// Stored mob event lens: its kind's type tag and, for an operator
 /// instruction record, its slot, its effect and the bytes of its body.
@@ -2097,9 +2097,9 @@ pub fn operator_instruction_mob_totals(
 }
 
 /// Census of one mob database's operator instruction records: a mob whose
-/// records are past [`OPERATOR_INSTRUCTION_RECORDS_BEFORE_0_9_14`] or whose
-/// Active bodies are past [`OPERATOR_INSTRUCTION_ACTIVE_BYTES_BEFORE_0_9_14`]
-/// in total (possible since 0.9.14, whose limits bound one member's
+/// records are past [`OPERATOR_INSTRUCTION_RECORDS_BEFORE_0_9_15`] or whose
+/// Active bodies are past [`OPERATOR_INSTRUCTION_ACTIVE_BYTES_BEFORE_0_9_15`]
+/// in total (possible since 0.9.15, whose limits bound one member's
 /// snapshot) cannot be served by an earlier release.
 fn census_operator_instruction_mob_totals(
     db_path: &Path,
@@ -2129,8 +2129,8 @@ fn census_operator_instruction_mob_totals(
         records,
         active_bytes,
     } = totals;
-    let past_records = records > OPERATOR_INSTRUCTION_RECORDS_BEFORE_0_9_14;
-    if !past_records && active_bytes <= OPERATOR_INSTRUCTION_ACTIVE_BYTES_BEFORE_0_9_14 {
+    let past_records = records > OPERATOR_INSTRUCTION_RECORDS_BEFORE_0_9_15;
+    if !past_records && active_bytes <= OPERATOR_INSTRUCTION_ACTIVE_BYTES_BEFORE_0_9_15 {
         return;
     }
     let deliveries = if past_records {
@@ -2145,11 +2145,11 @@ fn census_operator_instruction_mob_totals(
             FINDING_OPERATOR_INSTRUCTION_MOB_TOTALS,
             format!(
                 "the mob holds {records} operator instruction records with {active_bytes} bytes \
-                 of Active bodies, past the {OPERATOR_INSTRUCTION_RECORDS_BEFORE_0_9_14} records \
-                 or {OPERATOR_INSTRUCTION_ACTIVE_BYTES_BEFORE_0_9_14} bytes a release before \
-                 0.9.14 serves in one mob: such a release starts the mob without a refusal, and \
+                 of Active bodies, past the {OPERATOR_INSTRUCTION_RECORDS_BEFORE_0_9_15} records \
+                 or {OPERATOR_INSTRUCTION_ACTIVE_BYTES_BEFORE_0_9_15} bytes a release before \
+                 0.9.15 serves in one mob: such a release starts the mob without a refusal, and \
                  then every spawn and every flow run of the mob is refused{deliveries}; before \
-                 a downgrade keep this mob on 0.9.14 or later, reset it and write records \
+                 a downgrade keep this mob on 0.9.15 or later, reset it and write records \
                  within those totals again, or destroy it (a revoke keeps the record's slot)"
             ),
         )
@@ -5480,7 +5480,7 @@ mod tests {
     }
 
     /// A mob journal whose operator instruction records are past what a
-    /// release before 0.9.14 serves in one mob is listed with its totals:
+    /// release before 0.9.15 serves in one mob is listed with its totals:
     /// more than 64 records, or more than 1 MiB of Active bodies over all
     /// of them. A revoked record keeps its slot and holds no bytes, a new
     /// revision of a slot counts once at its last bytes, a reset clears the
@@ -5559,7 +5559,7 @@ mod tests {
             assert_eq!(finding.severity, FindingSeverity::Info);
             assert_eq!(finding.realm.as_deref(), Some("mob-records"));
             assert!(
-                finding.message.contains("a release before 0.9.14")
+                finding.message.contains("a release before 0.9.15")
                     && finding.message.contains("every spawn and every flow run")
                     && finding.message.contains("before a downgrade"),
                 "the finding names the releases, what they refuse and the step before a \

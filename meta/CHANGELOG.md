@@ -51,8 +51,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   nobody. A council's mob is known from the council's own record; a stored
   frame whose mob id has a council mob's form (`council--...`) and names no
   mob the runtime holds is treated the same, so those frames stay unserved
-  on a host that does not keep council records across a restart. Other
-  nested members are listed and served as before. Frames a console stored
+  on a host that does not keep council records across a restart. Limits: an
+  ordinary mob whose id has that form is treated as a council's where the
+  console cannot tell the two apart, so with no runtime registered its
+  stored frames are not served, under the id of a council that settled a
+  member named like one of that council's seats is listed while its stored
+  frames are not served, and under the id of a council that still owes
+  cleanup its members stay unlisted and their frames unserved until the
+  council settles. Other nested members are listed and served as before.
+  Frames a console stored
   for participants before this release stay in its console store, unserved.
   Affected: 0.8.27 through 0.9.13.
 

@@ -100,7 +100,12 @@ them.
   journal row and is read when its member's snapshot is built (the mob held
   every Active body in memory), and a member's snapshot skips other
   members' records without parsing them. The members a write owes are
-  the same as before.
+  the same as before. Limit: a record write still grows with the number of
+  records the mob holds (measured with one member-targeted record per
+  agent: 2.1 ms at 1,000 records, 39 ms at 10,000), because the mob shell
+  copies the whole machine state on each step; a member's run start does
+  not grow with other members' records, and a mob load pays a constant per
+  record.
 
 ### Upgrade notes
 

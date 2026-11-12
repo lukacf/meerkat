@@ -5807,6 +5807,8 @@ async fn retain_visible_member_rows(
     let registered = runtime.console_identity_labels().await;
     // Keyed by the side chat's public alias.
     let side_chats = listed_side_chat_lineages(runtime, entries).await;
+    let handle = runtime.handle();
+    let no_labels = std::collections::BTreeMap::new();
     rows.retain(|row| {
         let labels: Option<std::collections::BTreeMap<String, String>> = row
             .get("labels")
@@ -5816,9 +5818,14 @@ async fn retain_visible_member_rows(
             .or_else(|| row.get("member_id"))
             .or_else(|| row.get("agent_id"))
             .and_then(Value::as_str);
-        let identity = labels
-            .as_ref()
-            .and_then(crate::member_comms_id::durable_identity_label)
+        // A row names its member in either spelling.
+        let resolved = crate::member_comms_id::resolve_member_identity(
+            &handle,
+            &crate::member_comms_id::roster_member_id_for_supplied_id(agent_id.unwrap_or_default()),
+            labels.as_ref().unwrap_or(&no_labels),
+        );
+        let identity = resolved
+            .as_deref()
             .or_else(|| row.get("identity").and_then(Value::as_str))
             .or(agent_id);
         let role = row
@@ -11145,7 +11152,7 @@ async fn session_member_owners(
             .as_ref()
             == Some(session_id)
         {
-            owners.push(durable_identity_for_member(&member));
+            owners.push(durable_identity_for_member(handle, &member));
         }
     }
     Some(owners)
@@ -11296,9 +11303,12 @@ fn restore_absent_session(answer: Value, absent: Option<&(String, String)>) -> V
     serde_json::from_str(&answer.to_string().replace(fresh.as_str(), named)).unwrap_or(answer)
 }
 
-fn durable_identity_for_member(member: &meerkat_mob::runtime::MobMemberListEntry) -> String {
-    crate::member_comms_id::durable_identity_label(&member.labels)
-        .map(str::to_owned)
+fn durable_identity_for_member(
+    handle: &MobHandle,
+    member: &meerkat_mob::runtime::MobMemberListEntry,
+) -> String {
+    crate::member_comms_id::resolve_member_identity(handle, &member.agent_identity, &member.labels)
+        .map(std::borrow::Cow::into_owned)
         // Fallback surfaces the public alias, not the comms-safe roster id.
         .unwrap_or_else(|| {
             crate::member_comms_id::runtime_alias_str(member.agent_identity.as_str()).into_owned()
@@ -11363,8 +11373,12 @@ async fn lookup_member_alias_candidates_with_session(
     let label_matches = entries
         .iter()
         .filter(|entry| {
-            crate::member_comms_id::durable_identity_label(&entry.labels)
-                .is_some_and(|identity| identity == requested_identity)
+            crate::member_comms_id::resolve_member_identity(
+                handle,
+                &entry.agent_identity,
+                &entry.labels,
+            )
+            .is_some_and(|identity| identity == requested_identity)
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -11376,7 +11390,7 @@ async fn lookup_member_alias_candidates_with_session(
     for member in matches {
         let runtime_member_id =
             crate::member_comms_id::runtime_alias_str(member.agent_identity.as_str()).into_owned();
-        let identity = durable_identity_for_member(&member);
+        let identity = durable_identity_for_member(handle, &member);
         let session_id = handle
             .resolve_bridge_session_id_observation(&member.agent_identity)
             .await
@@ -17907,8 +17921,12 @@ async fn console_member_peer_info(
                 .await
                 .into_iter()
                 .filter(|entry| {
-                    crate::member_comms_id::durable_identity_label(&entry.labels)
-                        .is_some_and(|identity| identity == member_alias)
+                    crate::member_comms_id::resolve_member_identity(
+                        &handle,
+                        &entry.agent_identity,
+                        &entry.labels,
+                    )
+                    .is_some_and(|identity| identity == member_alias)
                 })
                 .map(|entry| {
                     crate::member_comms_id::runtime_alias_str(entry.agent_identity.as_str())
@@ -18610,6 +18628,8 @@ async fn reset_all_live_console_agents(
     let mut visible_runtime_member_ids = BTreeSet::new();
     let mut duplicate_live_identities = BTreeSet::new();
     let mut delegate_members = BTreeSet::new();
+    // A member with no `source_mob_id` is the primary mob's.
+    let primary = runtime.handle();
     for member in snapshot.members {
         if member.state == MEMBER_STATE_RETIRING {
             continue;
@@ -18617,17 +18637,18 @@ async fn reset_all_live_console_agents(
         if let Some(source_mob_id) = member.labels.get("source_mob_id").cloned() {
             delegate_members.insert((source_mob_id, member.agent_identity));
         } else {
-            let identity = crate::member_comms_id::durable_identity_label(&member.labels)
-                .map(str::to_owned)
-                .or_else(|| {
-                    identity_by_runtime_member_id
-                        .get(
-                            crate::member_comms_id::runtime_alias_str(&member.agent_identity)
-                                .as_ref(),
-                        )
-                        .cloned()
-                })
-                .unwrap_or_else(|| member.agent_identity.clone());
+            let identity = crate::member_comms_id::resolve_member_identity(
+                &primary,
+                &crate::member_comms_id::mob_member_id(&member.agent_identity),
+                &member.labels,
+            )
+            .map(std::borrow::Cow::into_owned)
+            .or_else(|| {
+                identity_by_runtime_member_id
+                    .get(crate::member_comms_id::runtime_alias_str(&member.agent_identity).as_ref())
+                    .cloned()
+            })
+            .unwrap_or_else(|| member.agent_identity.clone());
             if let Some(existing) = runtime_member_id_by_identity.get(&identity)
                 && existing != &member.agent_identity
             {
@@ -18662,14 +18683,18 @@ async fn reset_all_live_console_agents(
         if member.state == MEMBER_STATE_RETIRING || member.labels.contains_key("source_mob_id") {
             continue;
         }
-        let identity = crate::member_comms_id::durable_identity_label(&member.labels)
-            .map(str::to_owned)
-            .or_else(|| {
-                identity_by_runtime_member_id
-                    .get(crate::member_comms_id::runtime_alias_str(&member.agent_identity).as_ref())
-                    .cloned()
-            })
-            .unwrap_or_else(|| member.agent_identity.clone());
+        let identity = crate::member_comms_id::resolve_member_identity(
+            &primary,
+            &crate::member_comms_id::mob_member_id(&member.agent_identity),
+            &member.labels,
+        )
+        .map(std::borrow::Cow::into_owned)
+        .or_else(|| {
+            identity_by_runtime_member_id
+                .get(crate::member_comms_id::runtime_alias_str(&member.agent_identity).as_ref())
+                .cloned()
+        })
+        .unwrap_or_else(|| member.agent_identity.clone());
         raw_runtime_member_ids_by_identity
             .entry(identity.clone())
             .or_default()
@@ -19599,9 +19624,14 @@ async fn live_member_access_attributes(
     for entry in &entries {
         let alias = crate::member_comms_id::runtime_alias_str(entry.agent_identity.as_str());
         roster_identities.insert(
-            crate::member_comms_id::durable_identity_label(&entry.labels)
-                .unwrap_or(alias.as_ref())
-                .to_string(),
+            crate::member_comms_id::resolve_member_identity(
+                handle,
+                &entry.agent_identity,
+                &entry.labels,
+            )
+            .as_deref()
+            .unwrap_or(alias.as_ref())
+            .to_string(),
         );
     }
     // A side chat names its source as this roster records its fork; the
@@ -19609,6 +19639,7 @@ async fn live_member_access_attributes(
     let side_chats =
         if crate::side_chat::any_side_chat_marker(entries.iter().map(|entry| &entry.labels)) {
             crate::side_chat::side_chat_lineages(
+                handle,
                 &entries
                     .iter()
                     .map(|entry| crate::side_chat::SideChatRosterRow {
@@ -19654,6 +19685,7 @@ async fn live_member_access_attributes(
             let alias = crate::member_comms_id::runtime_alias_str(entry.agent_identity.as_str())
                 .into_owned();
             let labels = projected_console_member_labels(
+                handle,
                 &entry.labels,
                 &alias,
                 host_identity,
@@ -19771,6 +19803,7 @@ async fn delegate_mobs_with_hosts(runtime: &MobRuntime) -> Vec<(String, MobHandl
 /// priming use this projection, so all of them record one value per
 /// identity.
 fn projected_console_member_labels(
+    handle: &MobHandle,
     roster_labels: &BTreeMap<String, String>,
     alias: &str,
     host_identity: Option<&str>,
@@ -19780,8 +19813,12 @@ fn projected_console_member_labels(
 ) -> BTreeMap<String, String> {
     let mut labels = roster_labels.clone();
     crate::console_spawn::sanitize_unverified_lineage_labels(&mut labels);
-    let console_identity_key =
-        crate::member_comms_id::durable_identity_label(roster_labels).unwrap_or(alias);
+    let console_identity = crate::member_comms_id::resolve_member_identity(
+        handle,
+        &crate::member_comms_id::mob_member_id(alias),
+        roster_labels,
+    );
+    let console_identity_key = console_identity.as_deref().unwrap_or(alias);
     if let Some(spawn_labels) = registered_labels.get(console_identity_key) {
         crate::console_spawn::merge_registered_labels(&mut labels, spawn_labels);
     }
@@ -19848,6 +19885,7 @@ async fn project_console_members_from_handle(
         // chat, Meerkat's fork record) may assert (this projection feeds the
         // experience-path ABAC attribute rebuild).
         let labels = projected_console_member_labels(
+            handle,
             &entry.labels,
             &identity,
             host_identity,

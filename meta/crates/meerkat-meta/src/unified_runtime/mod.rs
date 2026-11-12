@@ -3302,32 +3302,6 @@ fn mob_is_stopping_or_stopped(handle: &MobHandle) -> bool {
         )
 }
 
-fn durable_identity_label(labels: &BTreeMap<String, String>) -> Option<String> {
-    labels.get("agent_identity").cloned()
-}
-
-/// The identity a member's events belong to: the one its `agent_identity`
-/// label names, or, for a member Core holds as an identity entry, the
-/// identity its member id decodes to. An identity whose record is its row in
-/// the mob's identity store is seated with its row's labels, which carry no
-/// such label, and its events are its identity's all the same.
-fn tracked_identity(
-    handle: &MobHandle,
-    entry: &meerkat_mob::runtime::MobMemberListEntry,
-) -> Option<String> {
-    durable_identity_label(&entry.labels).or_else(|| {
-        matches!(
-            handle.identity_entry(&entry.agent_identity),
-            Ok(meerkat_mob::IdentityEntryRead::Entry(_))
-        )
-        .then(|| {
-            crate::member_comms_id::durable_identity_for_roster_member(
-                entry.agent_identity.as_str(),
-            )
-        })
-    })
-}
-
 async fn identity_member_registered(
     primary_mob_id: &str,
     mob_id: &str,
@@ -3837,7 +3811,12 @@ async fn reconcile_agent_event_streams(
             let Some((runtime_id, fence_token)) = entry.binding_atoms() else {
                 continue;
             };
-            let durable_identity = tracked_identity(handle, &entry);
+            let durable_identity = crate::member_comms_id::resolve_member_identity(
+                handle,
+                &entry.agent_identity,
+                &entry.labels,
+            )
+            .map(std::borrow::Cow::into_owned);
             let identity_registered = identity_member_registered(
                 &primary_mob_id,
                 &mob_id,
@@ -3892,7 +3871,12 @@ async fn reconcile_agent_event_streams(
             let Some((runtime_id, fence_token)) = entry.binding_atoms() else {
                 continue;
             };
-            let durable_identity = tracked_identity(handle, &entry);
+            let durable_identity = crate::member_comms_id::resolve_member_identity(
+                handle,
+                &entry.agent_identity,
+                &entry.labels,
+            )
+            .map(std::borrow::Cow::into_owned);
             let identity_registered = identity_member_registered(
                 &primary_mob_id,
                 &mob_id,
@@ -4805,6 +4789,12 @@ mod tests {
 
     use super::*;
     use meerkat_mob::ids::Generation;
+
+    /// The identity a test member's stream is keyed by, read from its
+    /// label: the members these tests seat all carry it.
+    fn durable_identity_label(labels: &BTreeMap<String, String>) -> Option<String> {
+        crate::member_comms_id::durable_identity_label(labels).map(str::to_owned)
+    }
 
     /// The memory sink keeps `_system` for identity-less memory events and
     /// never writes a member's memory event under a runtime-plane identity.

@@ -7374,12 +7374,15 @@ async fn stale_rpc_member_ids_for_identity_with_handle(
             if !rpc_live_identity_alias_member_visible(member) {
                 return false;
             }
-            let matches_identity =
-                rpc_member_id_matches_durable_identity(
-                    member.agent_identity.as_str(),
-                    durable_identity,
-                ) || crate::member_comms_id::durable_identity_label(&member.labels)
-                    .is_some_and(|identity| identity == durable_identity);
+            let matches_identity = rpc_member_id_matches_durable_identity(
+                member.agent_identity.as_str(),
+                durable_identity,
+            ) || crate::member_comms_id::resolve_member_identity(
+                handle,
+                &member.agent_identity,
+                &member.labels,
+            )
+            .is_some_and(|identity| identity == durable_identity);
             let public_alias =
                 crate::member_comms_id::runtime_alias_str(member.agent_identity.as_str());
             matches_identity
@@ -8254,8 +8257,12 @@ async fn resolve_live_member_alias(
                 .await
                 .into_iter()
                 .filter(|entry| {
-                    crate::member_comms_id::durable_identity_label(&entry.labels)
-                        .is_some_and(|identity| identity == raw)
+                    crate::member_comms_id::resolve_member_identity(
+                        handle,
+                        &entry.agent_identity,
+                        &entry.labels,
+                    )
+                    .is_some_and(|identity| identity == raw)
                 })
                 .map(|entry| {
                     crate::member_comms_id::runtime_alias_str(entry.agent_identity.as_str())

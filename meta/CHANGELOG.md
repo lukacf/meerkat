@@ -116,6 +116,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   preparer publishes the host customizer's tools into it. Through 0.9.13
   such a build offered none of them until the member's next build.
 
+- A member of an identity whose record is its row is resolved to its
+  identity wherever Meta asks which identity a member is. Meta read the
+  `agent_identity` spawn label for that, which Core does not put on the
+  seat of such an identity (its seat carries its row's labels), so several
+  reads missed it: its deliveries ran but its completion cursor never
+  moved (`meta/wait_for_completion` ended `timed_out`), the console did not
+  attribute its member's records to it, and a side chat or a control
+  target on it resolved through the member alias only. One resolver now
+  answers all of them: the label when the member has one, else, for a
+  member Core holds as an identity entry, the identity its member id
+  encodes. A member with the label resolves exactly as before, and a plain
+  worker still resolves to no identity.
+
 - A member of an identity whose record is its row acts as that identity
   for the extension state (the `extension-state` feature): its session
   resolves the agent principal of its name, as a configured identity's

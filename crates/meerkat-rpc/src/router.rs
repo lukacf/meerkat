@@ -22710,6 +22710,146 @@ mod tests {
         );
         let data = error.data.as_ref().expect("typed turn error data");
         assert_eq!(data["error"]["kind"], "llm_failure", "{data}");
+        assert_eq!(data["error"]["provider"], "anthropic", "{data}");
+        assert_eq!(data["error"]["retryable"], false, "{data}");
+        assert_eq!(
+            data["error"]["reason"]["reason_type"], "llm_provider_error",
+            "{data}"
+        );
+        assert_eq!(
+            data["error"]["reason"]["provider_error_kind"], "invalid_request",
+            "{data}"
+        );
+    }
+
+    /// Answers the first provider call and fails every later one with a
+    /// 503, counting the calls.
+    struct OverloadedAfterFirstLlmClient {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl LlmClient for OverloadedAfterFirstLlmClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a meerkat_client::LlmRequest,
+        ) -> Pin<
+            Box<dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>> + Send + 'a>,
+        > {
+            if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0 {
+                return Box::pin(stream::iter(vec![Err(LlmError::ServerOverloaded)]));
+            }
+            Box::pin(stream::iter(vec![
+                Ok(meerkat_client::LlmEvent::TextDelta {
+                    delta: "first turn succeeds".to_string(),
+                    meta: None,
+                }),
+                Ok(meerkat_client::LlmEvent::UsageUpdate {
+                    usage: meerkat_core::TurnUsage::host_declared(
+                        meerkat_core::Provider::Anthropic,
+                        &request.model,
+                        meerkat_core::Usage::default(),
+                    ),
+                }),
+                Ok(meerkat_client::LlmEvent::Done {
+                    outcome: meerkat_client::LlmDoneOutcome::success(StopReason::EndTurn),
+                }),
+            ]))
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Anthropic
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    /// A turn whose provider answers 503 until the retries run out reports
+    /// the provider-error code with the typed turn error in `data.error`:
+    /// `retry_exhausted` with the provider, the typed reason of the last
+    /// failed attempt and `retryable: true`. The provider is called once
+    /// plus the configured retries, no more.
+    #[tokio::test]
+    async fn turn_start_retry_exhaustion_reports_the_provider_facts() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut config = anthropic_test_config();
+        config.retry.max_retries = 1;
+        config.retry.initial_delay = std::time::Duration::from_millis(1);
+        config.retry.max_delay = std::time::Duration::from_millis(1);
+        let (router, _notif_rx) = test_router_with_llm_for_config(
+            config,
+            Arc::new(OverloadedAfterFirstLlmClient {
+                calls: Arc::clone(&calls),
+            }),
+        )
+        .await;
+        let created = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({ "prompt": "the first turn succeeds" }),
+            ))
+            .await
+            .unwrap();
+        let session_id = result_value(&created)["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let failed = router
+            .dispatch(make_request(
+                "turn/start",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "prompt": "this turn's provider answers 503 every time"
+                }),
+            ))
+            .await
+            .unwrap();
+        let error = failed
+            .error
+            .as_ref()
+            .expect("an exhausted retry budget fails the turn");
+        assert_eq!(
+            error.code,
+            error::PROVIDER_ERROR,
+            "retry exhaustion reports PROVIDER_ERROR: {error:?}"
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "the failed turn makes one call and one retry"
+        );
+        let data = error.data.as_ref().expect("typed turn error data");
+        assert_eq!(
+            data,
+            &serde_json::json!({
+                "error": {
+                    "kind": "retry_exhausted",
+                    "terminal": true,
+                    "outcome": "failed",
+                    "detail": "Terminal failure: Failed (RetryExhausted): retry exhausted: \
+                               LLM error (anthropic): Server overloaded (503)",
+                    "provider": "anthropic",
+                    "retryable": true,
+                    "reason": {
+                        "reason_type": "llm_provider_error",
+                        "provider_error_kind": "server_overloaded",
+                        "provider_error_retryability": "retryable",
+                        "provider_error": { "message": "Server overloaded (503)" },
+                    },
+                },
+            })
+        );
     }
 
     /// Holds every provider call until the test releases it, and records the

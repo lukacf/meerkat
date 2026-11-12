@@ -17873,6 +17873,23 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
         // failures now exhaust the bounded retry policy before terminalizing.
         assert_eq!(payload["details"]["error"]["kind"], "retry_exhausted");
         assert_eq!(payload["details"]["error"]["terminal"], true);
+        // The exhausted retry keeps the facts of its last failed attempt in
+        // the fields a non-retryable provider failure fills.
+        let turn_error = &payload["details"]["error"];
+        assert_eq!(turn_error["provider"], "openai", "{payload}");
+        assert_eq!(turn_error["retryable"], true, "{payload}");
+        assert_eq!(
+            turn_error["reason"]["reason_type"], "llm_provider_error",
+            "{payload}"
+        );
+        assert_eq!(
+            turn_error["reason"]["provider_error_kind"], "unknown",
+            "{payload}"
+        );
+        assert_eq!(
+            turn_error["reason"]["provider_error_retryability"], "retryable",
+            "{payload}"
+        );
     }
 
     #[test]

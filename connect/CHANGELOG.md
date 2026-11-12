@@ -5,6 +5,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.9.14] - 2026-11-11
+
+Meerkat Connect 0.9.14 is part of Meerkat 0.9.14 (Core 0.9.14, Meta 0.9.14
+and Connect 0.9.14, released together): GitHub release `connect-v0.9.14`, a
+full release that is never the repository's latest.
+
+`@rkat/toolkit` accepts its optional peers `@rkat/sdk` and `@rkat/meta-sdk`
+from 0.9.14, and its source builds and tests run against the SDKs of the
+same commit. See Changed.
+
 ### Changed
 
 - `@rkat/toolkit` accepts its optional peers `@rkat/sdk` and `@rkat/meta-sdk`

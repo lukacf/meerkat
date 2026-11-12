@@ -137,6 +137,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   trusted for them by convention. They are not reachable from any wire door
   other than `meta/send` on the host route.
 
+## [0.9.14] - 2026-11-11
+
+Meta 0.9.14 is part of Meerkat 0.9.14 (Core 0.9.14, Meta 0.9.14 and Connect
+0.9.14, released together) and pins Core `=0.9.14`.
+
+A mob that a member private to a person creates itself stays private to
+that person after a restart. See Security.
+
 ### Security
 
 - A mob that a member private to a person creates with its own `mob_create`
@@ -159,6 +167,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   restart cannot read who it is private to, so a spawn into it is refused
   from then on, and the members already seated in it keep the owner their
   own spawn gave them.
+
+### Known limitations
+
+- `rustix` 1.1.5 in Cargo.lock is named by RUSTSEC-2026-0486, as in 0.9.12
+  and 0.9.13: the `getxattr` and `listxattr` functions of `rustix::fs` (with
+  their `l` and `f` forms) mark bytes they never wrote as initialized when
+  they are given a zero-length buffer. `meerkat-meta` depends on `rustix`
+  directly, and it is also taken through Meerkat Core, `tempfile`, and
+  `xattr` through `tar`. No Meta crate calls those functions. Of the crates
+  Meta builds with only `xattr` does, and `tar`, the one crate that uses
+  `xattr`, calls it only to set attributes while unpacking, so Meta's own
+  use is not known to be affected. `rustix` 1.1.6 has the fix; this release
+  still builds with 1.1.5.
 
 ## [0.9.13] - 2026-11-11
 
@@ -2358,7 +2379,6 @@ approvals read-only to a caller it cannot name as a signed-in person.
   resolves its credentials through the realm. Their session service keeps
   no retained session metadata, which is where `delegate` reads the
   current identity (Meerkat's known limitation for `EphemeralSessionService`).
-
 
 - Meta does not register identities created at runtime yet (Core's created
   entries, whose records the mob's identity store owns): no roster pass

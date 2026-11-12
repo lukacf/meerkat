@@ -20146,9 +20146,9 @@ impl MobHandle {
     /// recorded in its committed session
     /// ([`Self::record_fork_member_instruction_birth`]): the shared records
     /// and, through the fork lineage root the seat then records, the
-    /// records written for that root and its forks. So the child's first
-    /// run has them, whoever starts it. A snapshot that cannot be recorded
-    /// fails the fork: the committed child stays unseated.
+    /// records written for that root and its forks. So the snapshot is
+    /// recorded before the seat, whoever starts the child. A snapshot that
+    /// cannot be recorded fails the fork: the committed child stays unseated.
     async fn seat_forked_member(
         &self,
         source_identity: &AgentIdentity,

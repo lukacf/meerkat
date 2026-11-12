@@ -1738,7 +1738,7 @@ write's `matched_members` counts the seated ones. A durable
 fork (`fork_off`, `MobHandle::fork_member` and its bounded and detached
 forms, `mob/fork_member`, a
 live delegation's fork) has its snapshot recorded in its committed session
-before it is seated, so its first run applies the record, and a helper fork
+before it is seated, and a helper fork
 (a spawn with a fork launch mode) is born with it. A seated fork then
 follows the record like any member it selects: a higher revision and the
 revoke reach it as entries appended at its next fresh run start, and nothing
@@ -1752,9 +1752,10 @@ source's earlier entry
 rows, each as a header without a body
 (`[meerkat-inherited-operator-instructions-v1]`,
 `status=not_active_in_child`): those are history, and the fork's own entry
-after them is what applies. The same recording gives every durable fork the
-shared records (targeted at every member or at its profile) in its first
-run; before, a fork that started its own turn could run it without them. A
+after them is what applies. The same recording puts the shared records
+(targeted at every member or at its profile) in every durable fork's
+snapshot before its seat; before, a fork that started its own turn could
+run it without them. A
 fork whose snapshot cannot be recorded is not seated
 (`fork_member_provision_failed`): once the mob has recorded its first
 operator instruction, a durable fork fails over a child session that refuses

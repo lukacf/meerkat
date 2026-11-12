@@ -1460,11 +1460,21 @@ such member.
 | `proposer`, `source_evidence` | | no | Recorded, never authority |
 
 - **archive** stops the agent and keeps it: its name, record, conversation
-  and memory stay, and a message to it is refused until its unarchive.
+  and memory stay, and a message to it is refused until its unarchive. An
+  archive owes the agent what leaving the roster owes a configured agent:
+  the compactions its last session holds are harvested, that session is
+  distilled, an exit interview is queued and the host's retirement hook
+  hears the cause `unlisted`. These run right after the member's
+  retirement ended, at least once, and at the next start when the gateway
+  stopped before they ran; no order is promised between them and the
+  archive's answer.
 - **unarchive** brings it back on the session it was archived on.
 - **remove** is permanent: the agent's member retires, its name is never
   available again, and the peers it listed are unwired. Its conversation
-  and memory are kept and no other agent can reach them. What follows a
+  and memory are kept and no other agent can reach them; after the
+  retirement's end the removal owes the same harvest, distillation, exit
+  interview and hook as an archive (a removal of an archived agent
+  retires no member and owes nothing more). What follows a
   removal (the instructions kept for the agent end with it) is settled at
   the removal and settled again at the gateway's next start; a retry of a
   committed removal answers its outcome and repeats nothing.

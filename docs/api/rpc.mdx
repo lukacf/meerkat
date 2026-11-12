@@ -1494,7 +1494,8 @@ as a member target is: its forks keep following the records written for
 that name after the root is removed, so a record written with
 `include_forks` for a new member seated under that name also reaches the
 earlier member's forks. A
-selected fork's first run has the record, a higher revision and the revoke
+selected durable fork's snapshot, with the record, is recorded before its
+seat (a helper fork is born with it), a higher revision and the revoke
 reach a seated fork as entries appended at its next fresh run start, and
 the fork's row of `mob/instruction_status` lists the record (each member's
 row lists the records of its snapshot; the write's `matched_members` counts

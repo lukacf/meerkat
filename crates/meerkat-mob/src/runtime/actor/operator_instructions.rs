@@ -139,7 +139,7 @@ impl MobActor {
     /// has recorded a generation, the child's whole snapshot at that
     /// generation for `fork_session_id`, the committed session the child is
     /// about to be seated on. The fork records the snapshot there before
-    /// the seat, so the child's first run applies it, and carries the root
+    /// the seat, and carries the root
     /// to the seat, which records exactly that root: the snapshot and
     /// MobMachine's selection of the child agree from its first recorded
     /// generation. The child's profile is the one its seat names.

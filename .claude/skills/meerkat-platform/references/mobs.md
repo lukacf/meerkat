@@ -595,7 +595,8 @@ include_forks }`, `{"kind":"member","agent_identity":...,"include_forks":true}`;
 false by default and left out when false): the record then also selects the
 forks of the member's fork family, forks of forks included, when it is
 written for the family's first member, and that member only when it is
-written for a fork; a fork's first run has it, and later revisions and the
+written for a fork; a durable fork's snapshot, with the record, is recorded
+before its seat (a helper fork is born with it), and later revisions and the
 revoke reach a seated fork as appended entries. Such a record counts in
 every other name's snapshot too, so a member that holds 64 records of its
 own blocks every `include_forks` write for another member. Council

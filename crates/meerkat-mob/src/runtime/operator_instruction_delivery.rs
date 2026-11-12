@@ -1027,7 +1027,7 @@ pub(crate) struct ForkMemberInstructionBirth {
     pub(crate) root: Option<AgentIdentity>,
     /// The child's whole snapshot at the mob's generation for its committed
     /// session, when the mob has recorded a generation: the fork records it
-    /// there before the seat, so the child's first run applies it.
+    /// there before the seat.
     pub(crate) delivery: Option<MemberInstructionDelivery>,
 }
 
@@ -2212,7 +2212,7 @@ impl MobHandle {
     /// a generation, the child's whole snapshot under that root (the shared
     /// records, and the records written for the root and its forks). The
     /// committed child has no live actor, so the session service records
-    /// the snapshot store-only; the child's first run then applies it, and
+    /// the snapshot store-only, before the seat, and
     /// the delivery MobMachine owes the child at its seat answers "already
     /// recorded". A mob that never recorded a generation writes nothing.
     pub(crate) async fn record_fork_member_instruction_birth(

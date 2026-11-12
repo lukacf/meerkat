@@ -364,8 +364,8 @@ them.
   and a fork runs without it, as before. A durable fork (`fork_off`,
   `MobHandle::fork_member` and its bounded and detached forms,
   `mob/fork_member`, a live delegation's fork) has its snapshot recorded in
-  its committed session before it is seated, so its first run applies the
-  record; a helper fork is born with it. A seated fork follows
+  its committed session before it is seated; a helper fork is born with
+  it. A seated fork follows
   the record like any member it selects: a higher revision and the revoke
   reach it as entries appended at its next fresh run start, and nothing in
   the source's or the fork's conversation is rewritten. MobMachine owns the
@@ -508,7 +508,7 @@ them.
   No released surface held a decision of these kinds.
 
 - `meerkat-mob`: a durable fork child has its operator instruction snapshot
-  before its first run. The mob records the child's snapshot (the shared
+  recorded before its seat. The mob records the child's snapshot (the shared
   records, and the records written for the first member of its fork family
   and its forks, see Added) in the child's committed session before it
   seats the child. Before, a child was seated

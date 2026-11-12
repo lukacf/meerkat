@@ -101,11 +101,11 @@ discriminant moves.
 No action is needed to upgrade: a member-targeted record stays its member's
 alone unless it is written with `include_forks`, and a fork then runs under
 the records written for the first member of its fork family and its forks
-from its first run (see
+(see
 [Operator instructions](/guides/mobs#operator-instructions)). One behaviour
 changes without the field: a durable fork child has its operator instruction
-snapshot recorded before it is seated, so its first run has the records the
-mob targets at every member or at its profile, and a fork whose snapshot
+snapshot, with the records the mob targets at every member or at its
+profile, recorded before it is seated, and a fork whose snapshot
 cannot be recorded is refused `fork_member_provision_failed`.
 
 Rust code: `meerkat_mob::OperatorInstructionTarget::Member` and

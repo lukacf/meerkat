@@ -7718,17 +7718,19 @@ async fn process_inputs_of_last_build(
     )
 }
 
-/// Every build of a store-owned identity's member takes the inputs that are
-/// objects of its host's process from the host again: the compaction
-/// curator, the tool dispatch admission and the shell environment. A
-/// process keeps none of them for a member it did not build, so a build
-/// after a restart has them only if the host is asked and its answer is
-/// taken, as a member a host declares at each start gets them from that
-/// declaration.
+/// Every build of a store-owned identity's member takes the overlays that
+/// are objects of its host's process from the host again: the compaction
+/// curator and the tool dispatch admission (and the external tools, which
+/// ride the same rule). A process keeps none of them for a member it did
+/// not build, so a build after a restart has them only if the host is
+/// asked and its answer is taken, as a member a host declares at each start
+/// gets them from that declaration. The shell environment is launch
+/// authority of the session's first build: the first build takes it, and a
+/// rebuild on the durable session takes none, as for every member.
 ///
-/// RED before a later build took them: the first build carried all three,
-/// and the build after the restart carried none, so the member compacted
-/// with the default summary step from then on.
+/// RED before a later build took them: the first build carried the curator
+/// and the admission, and the build after the restart carried neither, so
+/// the member compacted with the default summary step from then on.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_later_build_takes_the_hosts_process_inputs_again() {
     let preparer = ScriptedPreparer::new();
@@ -7772,7 +7774,8 @@ async fn a_later_build_takes_the_hosts_process_inputs_again() {
     );
     assert_eq!(
         process_inputs_of_last_build(&mob, &session).await,
-        (true, true, Some(process_shell_env())),
-        "the build after the restart takes the host's process inputs again"
+        (true, true, None),
+        "the build after the restart takes the host's curator and dispatch admission again, \
+         and no shell environment: no member's rebuild on its durable session takes one"
     );
 }

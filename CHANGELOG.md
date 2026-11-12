@@ -68,10 +68,17 @@ them.
   first message), of a start's owed seat and of a rotation, and at every
   wake and boot restore. A seat Core holds Dormant asks nothing until it is
   built. Every build takes the profile and model overrides of the answer
-  (the model and the provider parameters); the first build of the member's
+  (the model and the provider parameters) and the overlays that are
+  objects of the host's process: the external tools, the compaction
+  curator and the tool dispatch admission. No journal holds those and a
+  process keeps them only for a member it built, so a build after a
+  restart has them only from this answer. The first build of the member's
   session also takes the context, the additional instructions, the system
-  prompt override and the other first-build inputs. A later build keeps
-  what its session was first built with. No build relies on an earlier
+  prompt override and the other inputs of a first build (the tool
+  policies, the budget limits, the auth binding and the shell
+  environment, which no member's rebuild on its durable session takes). A
+  later build keeps what its session was first built with. No build
+  relies on an earlier
   answer, so the host answers the same from the row and its own
   state each time, and may be asked more than once for one seat. The seat's
   labels, runtime mode, binding, placement and first message stay as Core

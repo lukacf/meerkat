@@ -4756,6 +4756,146 @@ async fn an_agent_call_in_a_session_no_member_holds_is_never_held() {
     rig.shutdown().await;
 }
 
+/// A withdrawal is admitted as a change is. A call attributed to the
+/// agent whose change is held, made in another agent's session, withdraws
+/// nothing (`invalid_request`); a member private to a person withdraws
+/// nothing (`private_requester`); and of the host only its operator
+/// withdraws: a host surface that is not the operator is answered
+/// `decision_not_found` by the family itself. The change stays held until
+/// the agent that asked for it, in its own session, withdraws it; the
+/// host's operator withdraws any.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_withdrawal_is_admitted_as_a_change_is() {
+    use meerkat_meta::identity_creation::{WithdrawRequest, core_member_name};
+
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, asked, fail_next_session) =
+        launch_with(temp.path(), &fresh_mob_id(), false, true).await;
+    let approval = json!({"kind": "require_approval", "approver": {"id": APPROVERS}});
+    let policy = IdentityCreationPolicy::parse(&json!({
+        "enabled": true,
+        "approval": {"rules": [
+            {"change": ["create"], "requester": {"kind": "host"},
+             "target": {"profile": ["worker", "planner"]}, "outcome": {"kind": "allow"}},
+            {"change": ["create"],
+             "requester": {"kind": "agent", "profile": ["worker", "planner"]},
+             "target": {"profile": ["worker"]}, "outcome": approval},
+        ]},
+    }))
+    .expect("the policy parses")
+    .expect("the policy is enabled");
+    assert!(runtime.attach_identity_policy(Arc::new(policy), IdentityFamilyOptions::new()));
+    let mut rig = Rig {
+        runtime,
+        asked,
+        step: Arc::new(RecordingStep::default()),
+        fail_next_session,
+    };
+    let host = ChangeRequester::host("ops");
+    let created = rig
+        .change(
+            &host,
+            "create-1",
+            create_of(json!([
+                {"name": "chief", "profile": "planner", "first_message": "Begin the day."},
+                {"name": "second", "profile": "planner", "first_message": "Begin the night."},
+            ])),
+        )
+        .await;
+    assert_eq!(created.token(), "done", "{created:?}");
+    assert!(rig.asked("Begin the day.").await, "the chief runs");
+    assert!(rig.asked("Begin the night.").await, "the second runs");
+    let mob = rig.runtime.mob_handle();
+    let session_of = |name: &str| {
+        let member = core_member_name(name).expect("a member name");
+        match mob.identity_entry(&member) {
+            Ok(meerkat_mob::IdentityEntryRead::Entry(view)) => match view.standing {
+                meerkat_mob::EntryStanding::Seated(seated) => {
+                    seated.session_id.expect("the agent has a session")
+                }
+                _ => panic!("{name} is seated"),
+            },
+            _ => panic!("{name} is an entry of the mob"),
+        }
+    };
+    let family = rig.family();
+    let own = ChangeRequester::agent_session("chief", session_of("chief"));
+    let held = rig
+        .change(
+            &own,
+            "r-1",
+            create_of(json!([{"name": "third", "profile": "worker"}])),
+        )
+        .await;
+    assert_eq!(held.token(), "pending_decision", "{held:?}");
+    let operation = OperationId::for_request(&own.recorded(), "r-1").expect("a request id");
+    let withdraw = |requester: ChangeRequester, operation: OperationId| {
+        let family = Arc::clone(&family);
+        let mob = mob.clone();
+        async move {
+            family
+                .withdraw(&mob, &requester, WithdrawRequest::new(operation))
+                .await
+        }
+    };
+
+    // Attributed to the chief, in the second agent's session.
+    let crossed = ChangeRequester::agent_session("chief", session_of("second"));
+    let refused = withdraw(crossed, operation.clone())
+        .await
+        .expect_err("a call in another agent's session withdraws nothing");
+    assert_eq!(
+        (refused.kind_token(), &refused.field),
+        ("invalid_request", &None),
+        "{refused}"
+    );
+    // A member private to a person.
+    let private = ChangeRequester::agent_recorded("chief").private_to_a_person(true);
+    let refused = withdraw(private, operation.clone())
+        .await
+        .expect_err("a private member withdraws nothing");
+    assert_eq!(refused.kind_token(), "private_requester", "{refused}");
+    // A host surface that is not the host's operator.
+    let refused = withdraw(ChangeRequester::host("console"), operation.clone())
+        .await
+        .expect_err("a host surface that is no operator withdraws nothing");
+    assert_eq!(refused.kind_token(), "decision_not_found", "{refused}");
+    let still = family
+        .read(&mob, &host, IdentityRead::Operation(operation.clone()))
+        .await;
+    assert!(
+        matches!(
+            &still,
+            Ok(IdentityReadAnswer::Operation(OperationState::Outcome(outcome)))
+                if outcome.token() == "pending_decision"
+        ),
+        "the change is still held: {still:?}"
+    );
+
+    // The agent that asked, in its own session, withdraws it.
+    withdraw(own.clone(), operation)
+        .await
+        .expect("the requester withdraws its own held change");
+    // The host's operator withdraws any held change.
+    let held = rig
+        .change(
+            &own,
+            "r-2",
+            create_of(json!([{"name": "fourth", "profile": "worker"}])),
+        )
+        .await;
+    assert_eq!(held.token(), "pending_decision", "{held:?}");
+    withdraw(
+        ChangeRequester::host_operator("rpc"),
+        OperationId::for_request(&own.recorded(), "r-2").expect("a request id"),
+    )
+    .await
+    .expect("the host's operator withdraws a held change");
+    assert!(rig.agent("third").await.is_none(), "nothing was created");
+    assert!(rig.agent("fourth").await.is_none(), "nothing was created");
+    rig.shutdown().await;
+}
+
 /// The label by which a host says an agent is private to a person.
 const PRIVATE_TO: &str = "console.private_to";
 

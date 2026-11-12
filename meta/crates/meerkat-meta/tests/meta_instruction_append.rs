@@ -1123,7 +1123,7 @@ async fn a_restart_with_no_change_writes_nothing() {
 }
 
 /// A text that changed while the gateway was down, for an agent the mob
-/// holds a record of: the start check writes the record's next revision,
+/// holds a record of: the start writes the record's next revision,
 /// wakes nothing, and the agent's next run carries the text.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_change_made_while_the_gateway_was_down_is_recorded_at_start() {
@@ -1147,9 +1147,9 @@ async fn a_change_made_while_the_gateway_was_down_is_recorded_at_start() {
     assert_eq!(
         record["revision"],
         json!(2),
-        "the start check wrote the changed text: {record:#?}"
+        "the start wrote the changed text: {record:#?}"
     );
-    assert!(rig.dormant(CONFIGURED), "the start check woke nothing");
+    assert!(rig.dormant(CONFIGURED), "the start woke nothing");
     rig.recorded(CONFIGURED).await;
     rig.turn(CONFIGURED, "THIRD-TURN").await;
     let request = entries(&rig.request_messages("THIRD-TURN"));
@@ -1163,15 +1163,16 @@ async fn a_change_made_while_the_gateway_was_down_is_recorded_at_start() {
 }
 
 /// A text that changed while the gateway was down, for an agent the mob
-/// holds no record of yet: the start check compares the text with the
-/// sections the agent's session was built with, records the change, and
-/// wakes nothing. The session's record of its build sections holds through
-/// a restart and a resumed run, so the comparison is the same after them.
+/// holds no record of yet: at the agent's first registration after the
+/// start the text is compared with the sections its session was built
+/// with, the change is recorded, and nothing is woken. The session's record
+/// of its build sections holds through a restart and a resumed run, so the
+/// comparison is the same after them.
 ///
-/// RED before a session's recorded build sections could be read
-/// (`MobHandle::member_build_instructions`, and a resumed build that keeps
-/// them): nothing said such a session was built with another text, and
-/// nothing was written.
+/// RED before a session's recorded build sections could be read (the
+/// session service's `recorded_build_instructions`, and a resumed build
+/// that keeps them): nothing said such a session was built with another
+/// text, and nothing was written.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_first_change_made_while_the_gateway_was_down_is_recorded_at_start() {
     let temp = tempfile::tempdir().unwrap();
@@ -1196,9 +1197,9 @@ async fn a_first_change_made_while_the_gateway_was_down_is_recorded_at_start() {
     assert_eq!(
         record.as_ref().map(|record| record["revision"].clone()),
         Some(json!(1)),
-        "the start check recorded the first change: {record:#?}"
+        "the start recorded the first change: {record:#?}"
     );
-    assert!(rig.dormant(CONFIGURED), "the start check woke nothing");
+    assert!(rig.dormant(CONFIGURED), "the start woke nothing");
     rig.recorded(CONFIGURED).await;
     rig.turn(CONFIGURED, "SECOND-TURN").await;
     let request = entries(&rig.request_messages("SECOND-TURN"));

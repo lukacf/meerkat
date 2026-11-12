@@ -136,6 +136,16 @@ them.
   or a respawn of its member (`MobHandle::respawn_member`), which keeps
   the conversation.
 
+### Upgrade notes
+
+- Mob: a store-owned identity's seat that was recorded ephemeral (by a
+  release from 0.9.9 on before this one, for an identity on a profile
+  without `durable = true`, or kept by an adoption from a plain worker) is
+  not converted at a start or at the adoption: the identity joins the
+  durable resume gate and Core's lists of durable identities at its next
+  seat or at a respawn of its member (`MobHandle::respawn_member`), which
+  keeps its conversation.
+
 ## [0.9.13] - 2026-11-11
 
 ### Changed

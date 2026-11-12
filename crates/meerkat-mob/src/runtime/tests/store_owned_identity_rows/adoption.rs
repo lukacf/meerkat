@@ -732,3 +732,69 @@ async fn a_respawn_seats_a_store_owned_identity_recorded_ephemeral_as_a_durable_
         "Core lists the store-owned identity among its durable identities: {durable:?}"
     );
 }
+
+/// A store-owned identity's seat that was recorded ephemeral stays as it
+/// was recorded until the identity's next seat or its member's respawn:
+/// neither the adoption that made a plain worker a store-owned identity nor
+/// a start rewrites its spawn row. Until then the identity is not among
+/// Core's durable identities and its member is built with no resume gate,
+/// after a restart as before it. A respawn then makes it a durable
+/// identity (the respawn row above).
+///
+/// Pin of what an upgrade leaves as it is: a start that rewrote such a
+/// seat, or an adoption that marked it, would fail here.
+#[tokio::test]
+async fn an_adopted_workers_seat_stays_as_recorded_across_a_start_until_its_next_seat() {
+    let gate: Arc<dyn crate::DurableResumeGate> = Arc::new(ContinueResumeGate);
+    let mut mob = StoreOwnedMob::build(
+        store_owned_definition("adopted-seat-as-recorded"),
+        MobStorage::in_memory(),
+        |builder| builder.with_durable_resume_gate(Arc::clone(&gate)),
+    )
+    .await;
+    let session = mob.spawn_worker("helper", None, &[]).await;
+    let generation = mob.member("helper").await.generation;
+    committed(
+        mob.adopt("adopt-helper", "helper", AdoptionSource::worker(generation))
+            .await,
+    );
+    let recorded = mob.spawn_row("helper").await;
+    assert_eq!(
+        recorded.continuity_intent,
+        crate::runtime::SpawnContinuityIntent::Ephemeral,
+        "the adoption keeps the worker's seat as it was recorded"
+    );
+
+    mob.restart_configured(MobCompositionAuthority::Authoritative, |builder| {
+        builder.with_durable_resume_gate(Arc::clone(&gate))
+    })
+    .await;
+    let machine = mob.service.enable_runtime_adapter();
+    assert!(mob.store_owned("helper"));
+    assert_eq!(mob.session("helper").await, session, "the same session");
+    assert_eq!(
+        mob.spawn_row("helper").await,
+        recorded,
+        "the start writes no new seat row for the identity"
+    );
+    tokio::time::timeout(STEP, mob.handle.ensure_member_live(&id("helper")))
+        .await
+        .expect("the wake answers")
+        .expect("the member wakes after the restart");
+    assert!(
+        !member_registration_holds_resume_admission(&mob.handle, &machine, &id("helper")).await,
+        "a seat recorded ephemeral is built with no resume gate until its next seat"
+    );
+    let durable: Vec<AgentIdentity> = mob
+        .handle
+        .durable_identity_members()
+        .await
+        .expect("Core's durable identity members")
+        .into_iter()
+        .map(|binding| binding.identity().clone())
+        .collect();
+    assert!(
+        !durable.contains(&id("helper")),
+        "the identity is not among Core's durable identities until its next seat: {durable:?}"
+    );
+}

@@ -39,6 +39,7 @@ import {
   parseIdentityDirectory,
   parseIdentityOutcome,
   planWords,
+  plannedSchedulesWords,
   reachWords,
   readAllPages,
   readRefusalSentence,
@@ -844,6 +845,137 @@ describe("what a change did to an agent's schedules", () => {
     const plain = createScriptedIdentityFamily();
     const warden = plain.handle("meta/identity/get", { name: "warden" }).result.spec_digest;
     expect("schedules" in plain.handle("meta/identity/archive", { request_id: "a-2", name: "warden", expected_spec_digest: warden }).result.agents[0]).toBe(false);
+  });
+});
+
+describe("what a change would do to an agent's schedules", () => {
+  const morning = { schedule_id: "sched-01", name: "Morning report" };
+  const weekly = { schedule_id: "sched-02", name: "Weekly digest" };
+  const unnamed = { schedule_id: "sched-03" };
+  const planned = (effect: string, schedules: Array<{ schedule_id: string; name?: string }> | undefined, extra: Record<string, unknown> = {}) =>
+    parseChangePlan({ outcome: "allow", schedules: { effect, ...(schedules ? { count: schedules.length, schedules } : {}), ...extra } })?.schedules;
+
+  it("reads from a plan the schedules its change would take with it", () => {
+    // The plan of an archive, an unarchive and a removal carries the
+    // schedules the change would take with it, in the member a change's
+    // first answer carries them in.
+    expect(parseChangePlan({ outcome: "allow", change: "archive", schedules: { effect: "paused", count: 2, schedules: [morning, unnamed] } })).toEqual({
+      outcome: "allow",
+      schedules: {
+        effect: "paused",
+        count: 2,
+        schedules: [{ scheduleId: "sched-01", name: "Morning report" }, { scheduleId: "sched-03" }],
+        incomplete: false,
+      },
+    });
+    // A plan that says nothing of schedules, or nothing this console can
+    // read, reads none: the member is absent, never empty.
+    for (const plain of [{ outcome: "allow" }, { outcome: "allow", schedules: "none" }, { outcome: "allow", schedules: { count: 2 } }]) {
+      const read = parseChangePlan(plain);
+      expect(read).toEqual({ outcome: "allow" });
+      expect(read !== null && "schedules" in read).toBe(false);
+    }
+  });
+
+  it("says before a change what it will do to the agent's schedules", () => {
+    // The words of the result, in the question's tense: the count, what
+    // will be done, and which by name.
+    expect(plannedSchedulesWords(planned("paused", [morning]))).toBe("Its schedule Morning report will be paused until it is unarchived.");
+    expect(plannedSchedulesWords(planned("paused", [morning, weekly])))
+      .toBe("Its 2 schedules will be paused until it is unarchived: Morning report, Weekly digest.");
+    expect(plannedSchedulesWords(planned("resumed", [morning]))).toBe("Its schedule Morning report will run again.");
+    expect(plannedSchedulesWords(planned("resumed", [morning, weekly]))).toBe("Its 2 schedules will run again: Morning report, Weekly digest.");
+    expect(plannedSchedulesWords(planned("ended", [morning]))).toBe("Its schedule Morning report will be ended.");
+    expect(plannedSchedulesWords(planned("ended", [morning, weekly]))).toBe("Its 2 schedules will be ended: Morning report, Weekly digest.");
+    // A schedule without a name is counted, never shown by its id.
+    expect(plannedSchedulesWords(planned("ended", [morning, unnamed, weekly])))
+      .toBe("Its 3 schedules will be ended: Morning report, Weekly digest and 1 without a name.");
+    expect(plannedSchedulesWords(planned("paused", [unnamed]))).toBe("Its schedule will be paused until it is unarchived.");
+    expect(plannedSchedulesWords(planned("resumed", [unnamed, { schedule_id: "sched-04" }]))).toBe("Its 2 schedules will run again.");
+    // A plan that counts schedules it does not list (the list withheld,
+    // whole or in part): the count, the listed ones by name, the others as
+    // so many more.
+    expect(plannedSchedulesWords(planned("paused", undefined, { count: 3 }))).toBe("Its 3 schedules will be paused until it is unarchived.");
+    expect(plannedSchedulesWords(planned("resumed", undefined, { count: 1 }))).toBe("Its schedule will run again.");
+    expect(plannedSchedulesWords(planned("ended", [morning], { count: 3 }))).toBe("Its 3 schedules will be ended: Morning report and 2 more.");
+    expect(plannedSchedulesWords(planned("ended", [morning, unnamed], { count: 4 })))
+      .toBe("Its 4 schedules will be ended: Morning report, 1 without a name and 2 more.");
+    for (const effect of ["paused", "resumed", "ended"]) {
+      expect(plannedSchedulesWords(planned(effect, [morning, unnamed]))).not.toMatch(/sched-0\d|_/);
+    }
+    // A plan without the member, one that would take no schedule, one whose
+    // schedules could not be listed, and an effect this console does not
+    // know say nothing.
+    expect(plannedSchedulesWords(undefined)).toBeNull();
+    expect(plannedSchedulesWords(planned("paused", []))).toBeNull();
+    expect(plannedSchedulesWords(planned("ended", [], { incomplete: true }))).toBeNull();
+    expect(plannedSchedulesWords(planned("rescheduled", [morning]))).toBeNull();
+    // A question never offers to try again: only what the plan lists is said.
+    expect(plannedSchedulesWords(planned("paused", [morning], { incomplete: true }))).toBe("Its schedule Morning report will be paused until it is unarchived.");
+    // The result's own words are as they were.
+    const done = parseIdentityOutcome({
+      outcome: "done", operation_id: "x", agents: [{ name: "scout", state: "archived", schedules: { effect: "paused", count: 3, schedules: [morning] } }],
+    });
+    expect(schedulesWords(done && done.outcome === "done" ? done.agents[0]!.schedules : undefined))
+      .toEqual(["Its 3 schedules are paused until it is unarchived: Morning report and 2 more."]);
+  });
+
+  it("follows the scripted family: a plan says what the change would take with it and changes no schedule", () => {
+    const family = createScriptedIdentityFamily();
+    family.seed({ name: "scout", profile: "worker" });
+    family.setSchedules("scout", [
+      { schedule_id: "sched-01", name: "Morning report" },
+      { schedule_id: "sched-02", name: "Weekly digest", state: "paused_by_name" },
+      { schedule_id: "sched-03" },
+    ]);
+    const digest = () => family.handle("meta/identity/get", { name: "scout" }).result.spec_digest;
+    const states = () => family.schedulesOf("scout").map((schedule: { state: string }) => schedule.state);
+    let asked = 0;
+    const ask = (change: string, expected: string = digest()) => {
+      asked += 1;
+      return family.handle("meta/identity/plan", { change, request_id: `plan-${asked}`, name: "scout", expected_spec_digest: expected });
+    };
+    // An archive would pause the schedules that run; one somebody paused by
+    // name would be left as it is. A removal would end every one.
+    const archive = ask("archive").result;
+    expect(archive.outcome).toBe("allow");
+    expect(archive.schedules).toEqual({
+      effect: "paused", count: 2, schedules: [{ schedule_id: "sched-01", name: "Morning report" }, { schedule_id: "sched-03" }],
+    });
+    expect(ask("remove").result.schedules).toEqual({
+      effect: "ended",
+      count: 3,
+      schedules: [{ schedule_id: "sched-01", name: "Morning report" }, { schedule_id: "sched-02", name: "Weekly digest" }, { schedule_id: "sched-03" }],
+    });
+    // A plan is judged as its change would be: an agent that is not
+    // archived has nothing to unarchive, and another digest is stale.
+    expect(ask("unarchive").error.data.kind).toBe("not_archived");
+    expect(ask("archive", "sha256:other").error.data.kind).toBe("stale_spec");
+    // Asking changed nothing: no schedule, not the agent, and no pass over
+    // the schedules was used up.
+    family.failSchedulesAfter("scout", 1);
+    expect(ask("archive").result.schedules.count).toBe(2);
+    expect(states()).toEqual(["active", "paused_by_name", "active"]);
+    expect(family.agents.get("scout").archived).toBe(false);
+    expect(family.calls.filter((call: { method: string }) => call.method === "meta/identity/archive")).toEqual([]);
+    const archived = family.handle("meta/identity/archive", { request_id: "a-1", name: "scout", expected_spec_digest: digest() }).result;
+    expect(archived.agents[0].schedules).toMatchObject({ effect: "paused", count: 1, incomplete: true });
+    family.handle("meta/identity/archive", { request_id: "a-1", name: "scout", expected_spec_digest: digest() });
+    expect(states()).toEqual(["paused_for_target", "paused_by_name", "paused_for_target"]);
+    // An unarchive would resume exactly the schedules the archive paused.
+    expect(ask("unarchive").result.schedules).toEqual({
+      effect: "resumed", count: 2, schedules: [{ schedule_id: "sched-01", name: "Morning report" }, { schedule_id: "sched-03" }],
+    });
+    expect(states()).toEqual(["paused_for_target", "paused_by_name", "paused_for_target"]);
+    // A family that is given no schedules plans none, and the plan of an
+    // update says nothing of schedules either way.
+    const plain = createScriptedIdentityFamily();
+    const warden = plain.handle("meta/identity/get", { name: "warden" }).result.spec_digest;
+    const plainPlan = plain.handle("meta/identity/plan", { change: "archive", request_id: "p-1", name: "warden", expected_spec_digest: warden }).result;
+    expect(plainPlan.outcome).toBe("allow");
+    expect("schedules" in plainPlan).toBe(false);
+    const update = family.handle("meta/identity/plan", { change: "update", request_id: "p-2", name: "scout", expected_spec_digest: digest(), set: { display_name: "Scout" } }).result;
+    expect("schedules" in update).toBe(false);
   });
 });
 

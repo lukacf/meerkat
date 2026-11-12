@@ -790,8 +790,8 @@ describe("long-term agents in the console", () => {
     expect(archives).toHaveLength(1);
     expect(archives[0].expected_spec_digest).toBe(read);
     expect(family.agents.get("warden").archived).toBe(false);
-    // Read it again brings the question back; confirming reads the record
-    // and sends another request.
+    // Read it again reads the record and brings the question back;
+    // confirming sends another request, at the digest read then.
     const readsBefore = reads();
     fireEvent.click(within(notice).getByTestId("identity-reload"));
     await gone(view, "identity-notice");
@@ -1376,12 +1376,13 @@ describe("long-term agents in the console", () => {
     fireEvent.click(view.getByTestId("identity-cancel"));
 
     // A removal whose answer is lost: trying again sends the request that
-    // was read once, and the agent, gone by then, is not read again.
+    // was read once, when the question opened, and the agent, gone by then,
+    // is not read again.
+    const readsBefore = calls(family, "meta/identity/get").filter((params) => params.name === "sentry").length;
     await selectAgent(view, "sentry");
     fireEvent.click(view.getByTestId("roster-action:sentry:remove"));
     const confirm = await find(view, "identity-confirm:sentry:remove");
     family.scriptNext("meta/identity/remove", { fail: "after" });
-    const readsBefore = calls(family, "meta/identity/get").filter((params) => params.name === "sentry").length;
     fireEvent.click(within(confirm).getByTestId("identity-confirm-yes"));
     notice = await find(view, "identity-notice");
     expect(notice.querySelector("[data-outcome='failed']")).not.toBeNull();
@@ -1599,6 +1600,281 @@ describe("long-term agents in the console", () => {
     expect(removed).toHaveLength(2);
     expect(removed[1]).toEqual(removed[0]);
     expect(states()).toEqual([]);
+    view.unmount();
+  }, 60_000);
+
+  it("the_question_of_an_archive_an_unarchive_and_a_removal_says_what_it_will_do_to_the_agents_schedules", async () => {
+    const family = createScriptedIdentityFamily();
+    family.seed({ name: "scout", display_name: "Scout", profile: "worker" });
+    family.setSchedules("scout", [
+      { schedule_id: "sched-0001", name: "Morning report" },
+      { schedule_id: "sched-0002", name: "Weekly digest" },
+      { schedule_id: "sched-0003" },
+    ]);
+    const { view } = await openRoster(family);
+    const states = () => family.schedulesOf("scout").map((schedule: { state: string }) => schedule.state);
+    const reads = () => calls(family, "meta/identity/get").filter((params) => params.name === "scout").length;
+    const plans = () => calls(family, "meta/identity/plan");
+    // The sentence about the schedules in an open question, once the plan
+    // the dialog asked when it opened is in.
+    const said = async (confirm: HTMLElement): Promise<string> =>
+      (await within(confirm).findByTestId("identity-confirm-schedules", undefined, { timeout: 5_000 })).textContent || "";
+    // What the dialog is described by: the consequence of the change.
+    const described = (confirm: HTMLElement): string => document.getElementById(confirm.getAttribute("aria-describedby") || "")?.textContent || "";
+
+    // Archive: the question says which schedules will be paused, by name,
+    // before anything is sent.
+    let digest = family.handle("meta/identity/get", { name: "scout" }).result.spec_digest;
+    let readsBefore = reads();
+    await selectAgent(view, "scout");
+    fireEvent.click(view.getByTestId("roster-action:scout:archive"));
+    let confirm = await find(view, "identity-confirm:scout:archive");
+    const paused = "Its 3 schedules will be paused until it is unarchived: Morning report, Weekly digest and 1 without a name.";
+    expect(await said(confirm)).toBe(paused);
+    // It is part of what the dialog is described by, after what the archive
+    // does to the agent itself; a schedule's id is no part of it.
+    expect(described(confirm)).toContain("Messages to it are refused until you unarchive it.");
+    expect(described(confirm)).toContain(paused);
+    expect(confirm.textContent).not.toContain("sched-000");
+    // The dialog read the agent's record once and asked one plan, of this
+    // agent at the digest it read. Asking changed nothing and sent nothing.
+    expect(reads()).toBe(readsBefore + 1);
+    expect(plans()).toEqual([{ change: "archive", request_id: expect.stringMatching(/\S/), name: "scout", expected_spec_digest: digest }]);
+    expect(states()).toEqual(["active", "active", "active"]);
+    expect(calls(family, "meta/identity/archive")).toEqual([]);
+    // Confirm sends one request, at the digest read when the dialog opened:
+    // the record is not read again. The plan was a request of its own.
+    fireEvent.click(within(confirm).getByTestId("identity-confirm-yes"));
+    let notice = await find(view, "identity-notice");
+    expect(noticeWords(notice)).toContain("Its 3 schedules are paused until it is unarchived: Morning report, Weekly digest and 1 without a name.");
+    expect(within(confirm).queryByTestId("identity-confirm-schedules")).toBeNull();
+    const archives = calls(family, "meta/identity/archive");
+    expect(archives).toEqual([{ request_id: expect.stringMatching(/\S/), name: "scout", expected_spec_digest: digest }]);
+    expect(archives[0].request_id).not.toBe(plans()[0].request_id);
+    expect(reads()).toBe(readsBefore + 1);
+    expect(plans()).toHaveLength(1);
+    fireEvent.click(view.getByTestId("identity-confirm-cancel"));
+
+    // Unarchive: the schedules its archive paused will run again.
+    digest = family.handle("meta/identity/get", { name: "scout" }).result.spec_digest;
+    await openArchived(view);
+    fireEvent.click(await find(view, "roster-archived-action:scout:unarchive"));
+    confirm = await find(view, "identity-confirm:scout:unarchive");
+    expect(await said(confirm)).toBe("Its 3 schedules will run again: Morning report, Weekly digest and 1 without a name.");
+    expect(described(confirm)).toContain("It comes back on the conversation it had and takes messages again.");
+    expect(described(confirm)).toContain("Its 3 schedules will run again");
+    expect(plans()[1]).toEqual({ change: "unarchive", request_id: expect.stringMatching(/\S/), name: "scout", expected_spec_digest: digest });
+    expect(states()).toEqual(["paused_for_target", "paused_for_target", "paused_for_target"]);
+    fireEvent.click(within(confirm).getByTestId("identity-confirm-yes"));
+    notice = await find(view, "identity-notice");
+    expect(noticeWords(notice)).toContain("Its 3 schedules run again: Morning report, Weekly digest and 1 without a name.");
+    await find(view, "roster-row:scout");
+    fireEvent.click(view.getByTestId("identity-confirm-cancel"));
+
+    // Remove: every schedule will be ended. Cancelling ends none.
+    await selectAgent(view, "scout");
+    fireEvent.click(view.getByTestId("roster-action:scout:remove"));
+    confirm = await find(view, "identity-confirm:scout:remove");
+    expect(await said(confirm)).toBe("Its 3 schedules will be ended: Morning report, Weekly digest and 1 without a name.");
+    expect(described(confirm)).toContain("Its name can never be used again, and this cannot be undone.");
+    expect(described(confirm)).toContain("Its 3 schedules will be ended");
+    expect(plans()[2]).toMatchObject({ change: "remove", name: "scout" });
+    // Archive instead is another question, with its own plan.
+    fireEvent.click(within(confirm).getByTestId("identity-confirm-archive-instead"));
+    confirm = await find(view, "identity-confirm:scout:archive");
+    expect(await said(confirm)).toBe(paused);
+    expect(plans()[3]).toMatchObject({ change: "archive", name: "scout" });
+    fireEvent.click(within(confirm).getByTestId("identity-confirm-cancel"));
+    await gone(view, "identity-confirm:scout:archive");
+    expect(states()).toEqual(["active", "active", "active"]);
+    expect(calls(family, "meta/identity/remove")).toEqual([]);
+    expect(family.agents.has("scout")).toBe(true);
+
+    // One schedule: named without a count. An agent no schedule targets, on
+    // a team that is given its schedules: the plan counts none, and the
+    // question says nothing of schedules.
+    family.setSchedules("scout", [{ schedule_id: "sched-0009", name: "Night watch" }]);
+    await selectAgent(view, "scout");
+    fireEvent.click(view.getByTestId("roster-action:scout:remove"));
+    confirm = await find(view, "identity-confirm:scout:remove");
+    expect(await said(confirm)).toBe("Its schedule Night watch will be ended.");
+    fireEvent.click(within(confirm).getByTestId("identity-confirm-cancel"));
+    await selectAgent(view, "warden");
+    fireEvent.click(view.getByTestId("roster-action:warden:archive"));
+    confirm = await find(view, "identity-confirm:warden:archive");
+    await waitFor(() => expect(plans().at(-1)).toMatchObject({ change: "archive", name: "warden" }), { timeout: 5_000 });
+    await settle(50);
+    expect(within(confirm).queryByTestId("identity-confirm-schedules")).toBeNull();
+    expect(confirm.textContent || "").not.toMatch(/schedule/i);
+    fireEvent.click(within(confirm).getByTestId("identity-confirm-cancel"));
+    view.unmount();
+    cleanup();
+
+    // A team whose host gives the family no schedules: the plan says
+    // nothing of them, and neither does the question. The change is made.
+    window.localStorage.clear();
+    const plain = createScriptedIdentityFamily();
+    const second = await openRoster(plain);
+    await selectAgent(second.view, "warden");
+    fireEvent.click(second.view.getByTestId("roster-action:warden:archive"));
+    confirm = await find(second.view, "identity-confirm:warden:archive");
+    await waitFor(() => expect(calls(plain, "meta/identity/plan")).toHaveLength(1), { timeout: 5_000 });
+    await settle(50);
+    expect(within(confirm).queryByTestId("identity-confirm-schedules")).toBeNull();
+    expect(confirm.textContent || "").not.toMatch(/schedule/i);
+    fireEvent.click(within(confirm).getByTestId("identity-confirm-yes"));
+    await waitFor(() => expect(noticeWords(second.view.getByTestId("identity-notice"))).toContain("The warden is archived"), { timeout: 5_000 });
+    second.view.unmount();
+  }, 60_000);
+
+  it("a_question_that_cannot_read_the_plan_or_the_record_says_nothing_of_schedules_and_the_change_is_still_made", async () => {
+    const family = createScriptedIdentityFamily();
+    family.seed({ name: "scout", display_name: "Scout", profile: "worker" });
+    family.seed({ name: "porter", display_name: "The porter", profile: "worker", readiness: "preparation_pending" });
+    family.setSchedules("scout", [{ schedule_id: "sched-0001", name: "Morning report" }]);
+    const { view } = await openRoster(family);
+    const reads = (name = "scout") => calls(family, "meta/identity/get").filter((params) => params.name === name).length;
+    const plans = () => calls(family, "meta/identity/plan");
+    const digestNow = () => family.handle("meta/identity/get", { name: "scout" }).result.spec_digest as string;
+    const silent = (confirm: HTMLElement) => {
+      expect(within(confirm).queryByTestId("identity-confirm-schedules")).toBeNull();
+      expect(confirm.textContent || "").not.toMatch(/schedule/i);
+      // Nothing is said of the read that failed: no notice, no alert.
+      expect(within(confirm).queryByTestId("identity-notice")).toBeNull();
+      expect(confirm.querySelector("[role='alert']")).toBeNull();
+    };
+
+    // The plan is not answered: the question says nothing of schedules,
+    // shows no error, and the archive is made as asked.
+    family.scriptNext("meta/identity/plan", { fail: "before" });
+    await selectAgent(view, "scout");
+    fireEvent.click(view.getByTestId("roster-action:scout:archive"));
+    let confirm = await find(view, "identity-confirm:scout:archive");
+    await waitFor(() => expect(plans()).toHaveLength(1), { timeout: 5_000 });
+    await settle(50);
+    silent(confirm);
+    expect(confirm.textContent).toContain("Archive Scout?");
+    fireEvent.click(within(confirm).getByTestId("identity-confirm-yes"));
+    let notice = await find(view, "identity-notice");
+    expect(noticeWords(notice)).toContain("Scout is archived");
+    // The result says what became of the schedule, as it always did.
+    expect(noticeWords(notice)).toContain("Its schedule Morning report is paused until it is unarchived.");
+    expect(calls(family, "meta/identity/archive")).toHaveLength(1);
+    fireEvent.click(view.getByTestId("identity-confirm-cancel"));
+
+    // The plan is refused (the host holds changes for now): the same. The
+    // change is judged when it is sent, and no refusal is shown before.
+    family.scriptNext("meta/identity/plan", { refuse: { kind: "changes_held" } });
+    await openArchived(view);
+    fireEvent.click(await find(view, "roster-archived-action:scout:unarchive"));
+    confirm = await find(view, "identity-confirm:scout:unarchive");
+    await waitFor(() => expect(plans()).toHaveLength(2), { timeout: 5_000 });
+    await settle(50);
+    silent(confirm);
+    fireEvent.click(within(confirm).getByTestId("identity-confirm-yes"));
+    await waitFor(() => expect(noticeWords(view.getByTestId("identity-notice"))).toContain("Scout is back"), { timeout: 5_000 });
+    await find(view, "roster-row:scout");
+    fireEvent.click(view.getByTestId("identity-confirm-cancel"));
+
+    // The record cannot be read when the dialog opens: no plan is asked,
+    // nothing is said of it, and Confirm reads the record itself.
+    let readsBefore = reads();
+    family.scriptNext("meta/identity/get", { fail: "before" });
+    await selectAgent(view, "scout");
+    fireEvent.click(view.getByTestId("roster-action:scout:archive"));
+    confirm = await find(view, "identity-confirm:scout:archive");
+    await waitFor(() => expect(reads()).toBe(readsBefore + 1), { timeout: 5_000 });
+    await settle(50);
+    silent(confirm);
+    expect(plans()).toHaveLength(2);
+    let digest = digestNow();
+    readsBefore = reads();
+    fireEvent.click(within(confirm).getByTestId("identity-confirm-yes"));
+    await waitFor(() => expect(noticeWords(view.getByTestId("identity-notice"))).toContain("Scout is archived"), { timeout: 5_000 });
+    expect(reads()).toBe(readsBefore + 1);
+    expect(calls(family, "meta/identity/archive").at(-1)).toEqual({ request_id: expect.stringMatching(/\S/), name: "scout", expected_spec_digest: digest });
+    fireEvent.click(view.getByTestId("identity-confirm-cancel"));
+
+    // The agent changes between the dialog's read and its change: Read it
+    // again reads the record and asks the plan again, so the question says
+    // what the change will do now, and Confirm sends the digest read then.
+    await openArchived(view);
+    fireEvent.click(await find(view, "roster-archived-action:scout:unarchive"));
+    confirm = await find(view, "identity-confirm:scout:unarchive");
+    expect((await within(confirm).findByTestId("identity-confirm-schedules", undefined, { timeout: 5_000 })).textContent)
+      .toBe("Its schedule Morning report will run again.");
+    const opened = digestNow();
+    family.agents.get("scout").labels = { team: "vault" };
+    family.setSchedules("scout", [
+      { schedule_id: "sched-0001", name: "Morning report", state: "paused_for_target" },
+      { schedule_id: "sched-0002", name: "Weekly digest", state: "paused_for_target" },
+    ]);
+    const moved = digestNow();
+    expect(moved).not.toBe(opened);
+    fireEvent.click(within(confirm).getByTestId("identity-confirm-yes"));
+    notice = await find(view, "identity-notice");
+    expect(notice.querySelector("[data-outcome='refused']")?.textContent)
+      .toBe("This agent changed since you opened it. Read it again, then make your change.");
+    expect(calls(family, "meta/identity/unarchive").at(-1)).toMatchObject({ expected_spec_digest: opened });
+    readsBefore = reads();
+    const plansBefore = plans().length;
+    fireEvent.click(within(notice).getByTestId("identity-reload"));
+    await gone(view, "identity-notice");
+    await waitFor(() => expect(within(confirm).queryByTestId("identity-confirm-schedules")?.textContent)
+      .toBe("Its 2 schedules will run again: Morning report, Weekly digest."), { timeout: 5_000 });
+    expect(reads()).toBe(readsBefore + 1);
+    expect(plans()).toHaveLength(plansBefore + 1);
+    expect(plans().at(-1)).toMatchObject({ change: "unarchive", name: "scout", expected_spec_digest: moved });
+    const unarchives = calls(family, "meta/identity/unarchive").length;
+    fireEvent.click(within(confirm).getByTestId("identity-confirm-yes"));
+    await waitFor(() => expect(noticeWords(view.getByTestId("identity-notice"))).toContain("Scout is back"), { timeout: 5_000 });
+    expect(reads()).toBe(readsBefore + 1);
+    expect(calls(family, "meta/identity/unarchive")).toHaveLength(unarchives + 1);
+    expect(calls(family, "meta/identity/unarchive").at(-1)).toMatchObject({ expected_spec_digest: moved });
+    await find(view, "roster-row:scout");
+    fireEvent.click(view.getByTestId("identity-confirm-cancel"));
+
+    // Read it again whose read is not answered: the request read before is
+    // not kept. Nothing is said of schedules, and Confirm reads the record
+    // itself and sends what it read.
+    await selectAgent(view, "scout");
+    fireEvent.click(view.getByTestId("roster-action:scout:archive"));
+    confirm = await find(view, "identity-confirm:scout:archive");
+    await within(confirm).findByTestId("identity-confirm-schedules", undefined, { timeout: 5_000 });
+    const stale = digestNow();
+    family.agents.get("scout").labels = { team: "archive" };
+    digest = digestNow();
+    fireEvent.click(within(confirm).getByTestId("identity-confirm-yes"));
+    notice = await find(view, "identity-notice");
+    expect(notice.querySelector("[data-outcome='refused']")).not.toBeNull();
+    expect(calls(family, "meta/identity/archive").at(-1)).toMatchObject({ expected_spec_digest: stale });
+    readsBefore = reads();
+    family.scriptNext("meta/identity/get", { fail: "before" });
+    fireEvent.click(within(notice).getByTestId("identity-reload"));
+    await gone(view, "identity-notice");
+    await waitFor(() => expect(reads()).toBe(readsBefore + 1), { timeout: 5_000 });
+    await settle(50);
+    silent(confirm);
+    fireEvent.click(within(confirm).getByTestId("identity-confirm-yes"));
+    await waitFor(() => expect(noticeWords(view.getByTestId("identity-notice"))).toContain("Scout is archived"), { timeout: 5_000 });
+    expect(reads()).toBe(readsBefore + 2);
+    expect(calls(family, "meta/identity/archive").at(-1)).toMatchObject({ expected_spec_digest: digest });
+    fireEvent.click(view.getByTestId("identity-confirm-cancel"));
+
+    // An agent that waits for its host never started and has no schedule:
+    // its removal asks no plan and reads nothing before Confirm.
+    const askedBefore = plans().length;
+    await openArchived(view);
+    fireEvent.click(await find(view, "roster-waiting-action:porter:remove"));
+    confirm = await find(view, "identity-confirm:porter:remove");
+    await settle(100);
+    expect(plans()).toHaveLength(askedBefore);
+    expect(reads("porter")).toBe(0);
+    expect(within(confirm).queryByTestId("identity-confirm-schedules")).toBeNull();
+    fireEvent.click(within(confirm).getByTestId("identity-confirm-yes"));
+    await waitFor(() => expect(noticeWords(view.getByTestId("identity-notice"))).toContain("The porter is removed"), { timeout: 5_000 });
+    expect(reads("porter")).toBe(1);
+    expect(plans()).toHaveLength(askedBefore);
     view.unmount();
   }, 60_000);
 

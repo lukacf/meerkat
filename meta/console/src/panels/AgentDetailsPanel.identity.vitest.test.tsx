@@ -33,6 +33,7 @@ describe("an agent's details and the changes of its record", () => {
       name, profile: "worker", specDigest: `sha256:${name}`, archived: false, readiness: "dormant", openOperations: [], instructions: [], labels: {}, peers: [],
     }));
     const change = vi.fn(async () => ({ kind: "failed", message: "no answer" }));
+    const plan = vi.fn(async () => ({ kind: "unknown" }));
     const api = {
       flags: { available: true, canCreate: true, canChange: true, canRemove: true },
       revision: 0,
@@ -40,6 +41,7 @@ describe("an agent's details and the changes of its record", () => {
       mintRequestId: () => "request-1",
       loadRecord,
       change,
+      plan,
     } as unknown as IdentityChangesApi;
     const identityChanges = { api, controls: { edit: true, archive: true, remove: true } };
     const pane = (identity: string, displayName: string) => (
@@ -50,21 +52,27 @@ describe("an agent's details and the changes of its record", () => {
     fireEvent.click(view.getByTestId("inspect-action:warden:remove"));
     expect(view.getByTestId("identity-confirm:warden:remove").textContent).toContain("Remove The warden for good?");
 
-    // The same pane is shown the courier: the warden's question is gone,
-    // and nothing was read or sent.
+    // The same pane is shown the courier: the warden's question is gone.
+    // The question read the warden's record when it opened; nothing was
+    // read of the courier, and nothing was sent.
     view.rerender(pane("courier", "The courier"));
     expect(view.container.querySelectorAll("[data-testid^='identity-confirm:']").length).toBe(0);
-    expect(loadRecord).not.toHaveBeenCalled();
+    expect(loadRecord.mock.calls).toEqual([["warden"]]);
     expect(change).not.toHaveBeenCalled();
 
-    // A removal opened for the courier names the courier and acts on it.
+    // A removal opened for the courier names the courier and acts on it:
+    // its record is read once, when the question opens, and Confirm sends
+    // the request of that read.
     fireEvent.click(view.getByTestId("inspect-menu:courier"));
     fireEvent.click(view.getByTestId("inspect-action:courier:remove"));
     const confirm = view.getByTestId("identity-confirm:courier:remove");
     expect(confirm.textContent).toContain("Remove The courier for good?");
     fireEvent.click(within(confirm).getByTestId("identity-confirm-yes"));
     await waitFor(() => expect(change).toHaveBeenCalledTimes(1));
-    expect(loadRecord.mock.calls).toEqual([["courier"]]);
+    expect(loadRecord.mock.calls).toEqual([["warden"], ["courier"]]);
     expect(change.mock.calls[0].slice(0, 2)).toEqual(["remove", { name: "courier", expected_spec_digest: "sha256:courier" }]);
+    // The courier's question asked what its removal would take with it, of
+    // the courier at the digest it read.
+    await waitFor(() => expect(plan.mock.calls.at(-1)).toEqual(["remove", { name: "courier", expected_spec_digest: "sha256:courier" }]));
   });
 });

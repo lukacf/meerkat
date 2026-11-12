@@ -863,6 +863,16 @@ impl IdentityRuntime {
             .await
             .ok()
     }
+
+    /// This runtime as the instruction step of its own launch
+    /// ([`InstructionStep`]): what the launch's executor calls after an
+    /// update that changed an agent's instructions and after a removal,
+    /// unless the launch gives a step of its own.
+    pub(crate) fn instruction_step(
+        self: &std::sync::Arc<Self>,
+    ) -> std::sync::Arc<dyn InstructionStep> {
+        std::sync::Arc::new(OwnInstructionStep(std::sync::Arc::downgrade(self)))
+    }
 }
 
 /// The step the identity change interface calls after its commits: the
@@ -879,6 +889,35 @@ impl InstructionStep for IdentityRuntime {
 
     async fn after_removal(&self, mob: &MobHandle, identity: &str) {
         IdentityRuntime::after_removal(self, mob, identity).await;
+    }
+}
+
+/// The identity runtime as the instruction step of its own launch's
+/// executor. The runtime keeps the family that commits through that
+/// executor, so the step holds the runtime weakly. A runtime that is gone
+/// has stopped serving its mob: the change is committed, and the next
+/// process records it at the agent's first delivery or change.
+struct OwnInstructionStep(std::sync::Weak<IdentityRuntime>);
+
+#[async_trait::async_trait]
+impl InstructionStep for OwnInstructionStep {
+    async fn after_update(
+        &self,
+        mob: &MobHandle,
+        change: &InstructionsChanged,
+    ) -> InstructionOutcome {
+        match self.0.upgrade() {
+            Some(identities) => IdentityRuntime::after_update(&identities, mob, change).await,
+            None => InstructionOutcome::AppliesAtNextSession {
+                reason: InstructionNextSessionReason::RecordUnavailable,
+            },
+        }
+    }
+
+    async fn after_removal(&self, mob: &MobHandle, identity: &str) {
+        if let Some(identities) = self.0.upgrade() {
+            IdentityRuntime::after_removal(&identities, mob, identity).await;
+        }
     }
 }
 

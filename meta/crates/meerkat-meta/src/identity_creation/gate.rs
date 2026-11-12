@@ -1883,9 +1883,11 @@ impl IdentityFamily for IdentityGate {
 pub struct IdentityFamilyOptions {
     /// The host's own check of each request, and its consequence lines.
     pub hooks: Option<Arc<dyn IdentityHostHooks>>,
-    /// What follows an update of an agent's instructions and a removal.
-    /// Without it nothing follows them here: an update answers no
-    /// instruction outcome.
+    /// What follows an update of an agent's instructions and a removal, in
+    /// place of the launch's own step. Without it the identity runtime's
+    /// step follows them: it records the changed instructions for the
+    /// agent, answers when they apply, and revokes a removed agent's
+    /// record.
     pub instruction_step: Option<Arc<dyn InstructionStep>>,
     /// Where the notice of a decision that ended goes: without it no
     /// requester is told, and each reads its operation's state.
@@ -2010,11 +2012,13 @@ pub(crate) fn change_executor(
         policy: policy.cloned(),
         identities: Arc::downgrade(identities),
     }));
+    // What follows an update of an agent's instructions and a removal: the
+    // step the launch's host gave, else the identity runtime's own, which
+    // records the changed text for the agent and revokes a removed agent's
+    // record.
+    let step = instruction_step.unwrap_or_else(|| identities.instruction_step());
     Arc::new(LaunchExecutor {
-        core: match instruction_step {
-            Some(step) => core.with_instruction_step(step),
-            None => core,
-        },
+        core: core.with_instruction_step(step),
         identities: Arc::downgrade(identities),
     })
 }

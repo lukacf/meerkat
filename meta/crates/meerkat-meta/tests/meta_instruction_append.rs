@@ -3207,6 +3207,9 @@ fn one_function_owns_the_instruction_records() {
             ".revoke_instruction_record_for_fresh_life(",
             &[("identity_first/runtime.rs", 1)],
         ),
+        // A launch's executor takes the identity runtime's own step in one
+        // place, when its host gives none.
+        (".instruction_step()", &[("identity_creation/gate.rs", 1)]),
         (
             ".set_operator_instruction(",
             &[("rpc/operator_methods.rs", 1)],

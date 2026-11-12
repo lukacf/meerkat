@@ -1785,7 +1785,8 @@ while its member is idle, before the host adopts either, since no start
 and no build moves its labels and a host that answers such a seat from its
 row is refused the member's build. Releases 0.9.9 through 0.9.14 read a row
 that records an owed restamp as unreadable, for that identity alone:
-settle the owed restamps before a rollback to one of them.
+settle the owed restamps before a rollback to one of them (the store-level
+row counts below report `label_restamps_owed` with no running mob).
 The count names the seat rows a downgrade would read: step 3 of the
 downgrade cycle brings them up to date.
 Change receipts are rows of the identity store's receipts table under keys
@@ -1794,7 +1795,8 @@ Change receipts are rows of the identity store's receipts table under keys
 From 0.9.10 the rows are also counted with no running mob, by the same
 rule, read-only. `MobStorage::read_identity_record_rows` counts a store
 file's rows per mob (`IdentityRecordRows`: `created_rows`, `archived`,
-`tombstones`, `unreadable`), and `MobStorage::identity_record_rows` counts a
+`tombstones`, `unreadable`, and from 0.9.15 `label_restamps_owed`, the rows
+that record an owed label restamp), and `MobStorage::identity_record_rows` counts a
 storage's mob, a host store's included. `rkat storage doctor` reports them
 for each mob database that holds any, and Meta's storage doctor for a Meta
 state directory, as the Info finding `identity-store-rows` with the counts

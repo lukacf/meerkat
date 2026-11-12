@@ -9687,6 +9687,7 @@ async fn the_store_level_row_readers_count_what_the_census_counts() {
         archived: census.archived,
         tombstones: census.tombstones,
         unreadable: census.unreadable,
+        label_restamps_owed: census.label_restamps_owed,
     };
     assert_eq!(
         counted,
@@ -9695,6 +9696,7 @@ async fn the_store_level_row_readers_count_what_the_census_counts() {
             archived: 1,
             tombstones: 1,
             unreadable: 0,
+            label_restamps_owed: 0,
         },
         "{census:?}"
     );
@@ -9712,6 +9714,85 @@ async fn the_store_level_row_readers_count_what_the_census_counts() {
             .expect("read the storage"),
         expected
     );
+}
+
+/// Row: with no running mob, the store-level readers count the rows that
+/// record an owed label restamp, as the census of the mob over the store
+/// counts them, so an operator reads the count before a rollback without
+/// starting the mob. Over a persistent store, `owed`'s label update
+/// committed while its seat row carried other labels: the census, the path
+/// reader of the store file (read read-only beside the live mob) and the
+/// storage reader each count 2 rows, 1 of them owed its label restamp. Once
+/// a respawn seats the row's labels and the row lets the restamp go, each
+/// counts none owed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_store_level_row_readers_count_the_owed_label_restamps() {
+    let dir = tempfile::tempdir().expect("a store directory");
+    let path = dir.path().join("mob.db");
+    let mob = StoreOwnedMob::build(
+        store_owned_definition("census-readers-owed"),
+        MobStorage::persistent(&path).expect("open the store"),
+        |builder| builder,
+    )
+    .await;
+    committed(
+        mob.create(host_create("create-desks", &["kept", "owed"]), ALLOW)
+            .await,
+    );
+    mob.commit_update_transaction(
+        "relabel-owed",
+        spec("owed", "worker").with_labels(moved_team("owed")),
+    )
+    .await;
+    assert!(label_restamp_owed(&mob, "owed").await);
+
+    for owed in [1, 0] {
+        let census = mob
+            .handle
+            .identity_record_census()
+            .await
+            .expect("the census answers");
+        assert_eq!(census.label_restamps_owed, owed, "{census:?}");
+        let counted = crate::runtime::IdentityRecordRows {
+            created_rows: 2,
+            archived: 0,
+            tombstones: 0,
+            unreadable: 0,
+            label_restamps_owed: owed,
+        };
+        let expected = BTreeMap::from([(mob.mob_id(), counted)]);
+        assert_eq!(
+            MobStorage::read_identity_record_rows(&path)
+                .await
+                .expect("read the live mob's store"),
+            expected,
+            "the path reader, {owed} owed"
+        );
+        assert_eq!(
+            mob.storage
+                .identity_record_rows()
+                .await
+                .expect("read the storage"),
+            expected,
+            "the storage reader, {owed} owed"
+        );
+        if owed == 1 {
+            tokio::time::timeout(
+                STEP,
+                mob.handle.respawn_member(
+                    id("owed"),
+                    crate::runtime::MemberRespawn::new().with_labels(moved_team("owed")),
+                ),
+            )
+            .await
+            .expect("the respawn answers")
+            .expect("the respawn with the row's labels commits");
+            assert!(
+                !label_restamp_owed(&mob, "owed").await,
+                "a seat row carries the row's labels: nothing is owed"
+            );
+        }
+    }
 }
 
 /// Row (RED): the storage reader counts the rows of a mob storage kept in a
@@ -9766,6 +9847,7 @@ async fn the_storage_row_reader_counts_a_host_store_storage() {
         archived: census.archived,
         tombstones: census.tombstones,
         unreadable: census.unreadable,
+        label_restamps_owed: census.label_restamps_owed,
     };
     assert_eq!(
         counted,
@@ -9774,6 +9856,7 @@ async fn the_storage_row_reader_counts_a_host_store_storage() {
             archived: 0,
             tombstones: 1,
             unreadable: 0,
+            label_restamps_owed: 0,
         },
         "{census:?}"
     );

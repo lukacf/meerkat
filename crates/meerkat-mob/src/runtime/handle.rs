@@ -11037,16 +11037,10 @@ impl MobHandle {
         // labels and profile are kept, against their member's last seat row
         // below.
         let mut seats = Vec::new();
-        let mut label_restamps_owed = 0;
         let rows = super::IdentityRecordRows::scan(
             store.as_ref(),
             self.mob_id(),
             |identity, observation| {
-                if let crate::identity::CreatedIdentityObservation::Created(record) = observation
-                    && record.label_restamp_owed
-                {
-                    label_restamps_owed += 1;
-                }
                 if let crate::identity::CreatedIdentityObservation::Created(record) = observation
                     && record.presence == crate::identity::CreatedIdentityPresence::Present
                     && seated.contains(identity)
@@ -11061,7 +11055,7 @@ impl MobHandle {
         census.archived = rows.archived;
         census.tombstones = rows.tombstones;
         census.unreadable = rows.unreadable;
-        census.label_restamps_owed = label_restamps_owed;
+        census.label_restamps_owed = rows.label_restamps_owed;
         if !seats.is_empty() {
             let rows = self.last_spawn_rows().await?;
             census.seats_stale = seats

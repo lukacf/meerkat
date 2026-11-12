@@ -567,7 +567,8 @@ pub struct IdentityRecordCensus {
 /// of a store file ([`crate::MobStorage::read_identity_record_rows`]) or of a
 /// storage ([`crate::MobStorage::identity_record_rows`]), by the rule
 /// [`super::MobHandle::identity_record_census`] counts a running mob's rows
-/// by. It carries the row counts only: the census's other counts
+/// by. It carries the row counts only (the owed label restamps are a fact of
+/// the rows): the census's other counts
 /// (`preparations_open`, `constructions_held`, `seats_stale`) read a running
 /// mob's machine state and journal, which a store read does not, so they are
 /// not reported as zeros nothing read.
@@ -586,13 +587,20 @@ pub struct IdentityRecordRows {
     pub tombstones: usize,
     /// Rows this build cannot read.
     pub unreadable: usize,
+    /// Rows that record their seat is owed a label restamp
+    /// (see [`IdentityRecordCensus::label_restamps_owed`]): a release before
+    /// 0.9.15 reads such a row as unreadable, for its identity alone, so
+    /// they are settled before a rollback. A row this build cannot read is
+    /// counted in `unreadable` only.
+    pub label_restamps_owed: usize,
 }
 
 impl IdentityRecordRows {
     /// Count one row of the created identity scan, as the census counts it:
     /// every row counts in `created_rows`; a removed name's row is also a
-    /// tombstone, an archived identity's row also archived, and a row this
-    /// build cannot read also unreadable.
+    /// tombstone, an archived identity's row also archived, a row that
+    /// records an owed label restamp also among those, and a row this build
+    /// cannot read also unreadable.
     pub(crate) fn count_row(&mut self, observation: &crate::identity::CreatedIdentityObservation) {
         self.created_rows += 1;
         match observation {
@@ -602,6 +610,9 @@ impl IdentityRecordRows {
                     crate::identity::CreatedIdentityPresence::Archived { .. } => self.archived += 1,
                     crate::identity::CreatedIdentityPresence::Present
                     | crate::identity::CreatedIdentityPresence::PendingPreparation { .. } => {}
+                }
+                if record.label_restamp_owed {
+                    self.label_restamps_owed += 1;
                 }
             }
             crate::identity::CreatedIdentityObservation::Unreadable { .. } => {
@@ -655,6 +666,7 @@ impl std::ops::AddAssign for IdentityRecordRows {
         self.archived += other.archived;
         self.tombstones += other.tombstones;
         self.unreadable += other.unreadable;
+        self.label_restamps_owed += other.label_restamps_owed;
     }
 }
 

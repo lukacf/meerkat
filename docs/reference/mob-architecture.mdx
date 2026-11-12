@@ -396,7 +396,8 @@ read `ControlScope::SubscribeEvents`. The census's row counts are also read
 with no running mob, by the same rule and read-only:
 `MobStorage::read_identity_record_rows(path)` counts a store file's rows per
 mob, and `MobStorage::identity_record_rows()` a storage's mob, a host store's
-included (`IdentityRecordRows`). An entry read whose machine facts are
+included (`IdentityRecordRows`, which also counts the rows that record an
+owed label restamp, `label_restamps_owed`). An entry read whose machine facts are
 incomplete answers `MobError::Internal` rather than a default. An entry's
 fields are internal to the stored event codec, so an older release reads an
 entry's rows as an ordinary member's.

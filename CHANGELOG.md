@@ -59,7 +59,10 @@ them.
 
 - Mob: a store-owned identity's row records a label restamp its seat is
   owed (`CreatedIdentityRecord::label_restamp_owed`), and
-  `IdentityRecordCensus::label_restamps_owed` counts the rows that do. An
+  `IdentityRecordCensus::label_restamps_owed` counts the rows that do; so
+  does `IdentityRecordRows::label_restamps_owed`, with no running mob
+  (`MobStorage::read_identity_record_rows`,
+  `MobStorage::identity_record_rows`). An
   update's commit writes it, in the update's own transaction, when a
   member holds the identity and its last seat row carries other labels
   than the updated row; the row lets it go once a seat row carries the
@@ -67,7 +70,7 @@ them.
   restamp, a respawn with the row's labels, a rotation, a seat), and an
   archive or a removal drops it. A row that owes none carries no such key
   and is byte for byte what 0.9.14 writes. See Changed for what reads it,
-  and Upgrade notes for a rollback. Additive: both types are
+  and Upgrade notes for a rollback. Additive: the three types are
   non-exhaustive.
 
 - Mob: `MemberBuildPreparer::prepare_store_owned_seat` lets a host compose
@@ -270,7 +273,9 @@ them.
 - Mob, rollback: releases 0.9.9 through 0.9.14 read a row that carries
   `label_restamp_owed` as unreadable, for that one identity (its name is
   reserved, and nothing acts on it), until the owed restamp is settled.
-  Before a rollback, read `MobHandle::identity_record_census()` and settle
+  Before a rollback, read `MobHandle::identity_record_census()` (or, with
+  no running mob, `MobStorage::read_identity_record_rows` or
+  `MobStorage::identity_record_rows`) and settle
   every owed restamp while `label_restamps_owed` is above zero: retry the
   update, or update the identity again, while its agent is idle, or
   respawn its member with the row's labels (`MobHandle::respawn_member`

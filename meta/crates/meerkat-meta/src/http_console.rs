@@ -7270,15 +7270,23 @@ impl<'a> MemoryPanelCaller<'a> {
 
     /// Whether the caller may not know of the agent `identity` names, as the
     /// console names it ([`AccessView::hides_agent`]): it is private to
-    /// another person. Holds with access enforced or not. On a console with
-    /// sign-in, a caller who is not an admin is also shown nothing of an
-    /// agent the console does not know
+    /// another person. Holds with access enforced or not. On a console that
+    /// can identify a person, a caller who is not an admin is also shown
+    /// nothing of an agent the console does not know
     /// ([`AccessView::withholds_unknown_member`]): it ended before this
     /// process read who its members belong to, and may have been private.
     fn hides_identity(self, identity: &str) -> bool {
+        self.hides_private_identity(identity)
+            || self.view.is_some_and(|view| {
+                view.withholds_unknown_member(&namespace_console_identity(identity, self.namespace))
+            })
+    }
+
+    /// The private-owner half of [`Self::hides_identity`]: the agent
+    /// `identity` names is private to another person.
+    fn hides_private_identity(self, identity: &str) -> bool {
         self.view.is_some_and(|view| {
-            let identity = namespace_console_identity(identity, self.namespace);
-            view.hides_agent(&identity) || view.withholds_unknown_member(&identity)
+            view.hides_agent(&namespace_console_identity(identity, self.namespace))
         })
     }
 }
@@ -7372,9 +7380,13 @@ fn memory_panel_scope_visible(
 /// deny of that kind applies to either action (fails closed). An agent
 /// private to another person is withheld, enforced access or not.
 fn memory_panel_identity_visible(caller: MemoryPanelCaller<'_>, identity: &str) -> bool {
-    if caller.hides_identity(identity) {
-        return false;
-    }
+    !caller.hides_identity(identity) && memory_panel_identity_allowed(caller, identity)
+}
+
+/// The access rules' half of [`memory_panel_identity_visible`]: whether the
+/// rules allow the caller the memory scope of `identity`, judged on its
+/// name.
+fn memory_panel_identity_allowed(caller: MemoryPanelCaller<'_>, identity: &str) -> bool {
     let Some(view) = caller.enforced() else {
         return true;
     };
@@ -7516,10 +7528,16 @@ async fn memory_panel_retain_readable_promotion_sources(
 /// store deletes none of those rows, so every scope a run read before named
 /// is then among the realm's scopes, and quarantine evidence stays. Without
 /// enforced access every scope is readable. The identity scope of an agent
-/// hidden from the caller ([`MemoryPanelCaller::hides_identity`]) is left out
-/// of the count: no dream covers a member private to a person, so its runs
-/// name nothing of it, and counting it would withhold every run from
-/// everyone else and tell them private memory exists.
+/// private to another person ([`MemoryPanelCaller::hides_private_identity`])
+/// is left out of the count: no dream covers a member private to a person,
+/// so its runs name nothing of it, and counting it would withhold every run
+/// from everyone else and tell them private memory exists. The scope of an
+/// agent the console withholds from the caller only because it does not
+/// know it ([`AccessView::withholds_unknown_member`]) stays in the count,
+/// judged by the access rules on its name
+/// ([`memory_panel_identity_allowed`]) as for a caller the console keeps
+/// apart from nobody: a dream can cover such an agent's harvest, so a deny
+/// that names it, or no rule that allows it, withholds the runs.
 async fn memory_panel_realm_fully_readable(
     store: &dyn crate::memory::capabilities::MemoryPanelStore,
     caller: MemoryPanelCaller<'_>,
@@ -7536,10 +7554,15 @@ async fn memory_panel_realm_fully_readable(
             !matches!(
                 scope,
                 crate::memory::records::MemoryScope::Identity { identity, .. }
-                    if caller.hides_identity(identity)
+                    if caller.hides_private_identity(identity)
             )
         })
-        .all(|scope| memory_panel_scope_visible(caller, scope));
+        .all(|scope| match scope {
+            crate::memory::records::MemoryScope::Identity { identity, .. } => {
+                memory_panel_identity_allowed(caller, identity)
+            }
+            scope => memory_panel_scope_visible(caller, scope),
+        });
     if !every_scope {
         return Ok(false);
     }

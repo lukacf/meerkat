@@ -255,7 +255,10 @@ or a routing-repair CLI.
 `member_comms_address` puts the gateway's members on socket comms: a member
 gets a signed TCP endpoint that peers in other processes can dial, and the
 members load one comms key, the gateway's. A mob admits a comms key for one
-member, so a gateway with this option serves one member. The same holds for
+member, and every mob a gateway hosts (its own mob and the child mobs its
+members create) loads that one key, so the gateway itself refuses every
+member but one across all of them: a gateway with this option serves one
+member. The same holds for
 a gateway whose members' configuration sets `[comms]` `mode = "tcp"` or
 `"uds"` itself (see
 [How the host config reaches each surface](#how-the-host-config-reaches-each-surface)).
@@ -292,8 +295,15 @@ are not limited.
   `meta/retire_member` alone is not enough, because the next roster pass
   seats a declared member again.
 - A member that was built in an earlier start and is refused at its restore
-  keeps its session and history. It runs again at the next start where it
-  can, and a retire of it takes effect at the next start.
+  keeps its session and history, and runs again at the next start where it
+  can. Retiring it before then answers an error: the member shows `retiring`
+  and its name stays taken (a second retire answers the same error, and
+  `meta/ensure_member` under the name answers that the member is not found)
+  until the gateway restarts; the restart completes the retirement and frees
+  the name. The same holds for a member that a start lists `broken` because
+  the gateway's records hold it on a comms key another member holds: a
+  gateway lifts its mob at every start, and a retire of such a member after
+  a lift ends this way. So retire the member, then restart the gateway.
 - Turning the option on or off over members that already have a recorded
   endpoint breaks them (`... disagrees with its durable generation endpoint
   ...; respawn the member to mint a new endpoint`) until the option is put

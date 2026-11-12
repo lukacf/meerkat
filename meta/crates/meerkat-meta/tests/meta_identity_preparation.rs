@@ -2484,3 +2484,39 @@ async fn a_move_into_a_prepared_profile_is_refused_when_it_is_asked_and_nobody_i
     assert_eq!(held_decisions(), 1, "the move out is held for a person");
     rig.shutdown().await;
 }
+
+/// A move of an agent its host configures stays its owner's to make: it is
+/// answered `owner_read_only`, as every run-time change of a configured
+/// agent is, also when the move would be into a profile the host prepares.
+/// The refusal of a move into a prepared profile is for an agent a run-time
+/// change may write.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_configured_agents_move_into_a_prepared_profile_is_its_owners_to_make() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(
+        temp.path(),
+        json!({
+            "enabled": true,
+            "preparation": {"plain": {"mode": "required"}},
+            "approval": {"rules": [{
+                "change": ["create", "profile"], "requester": {"kind": "host"},
+                "target": {"profile": ["worker", "plain"]}, "outcome": {"kind": "allow"},
+            }]},
+        }),
+    )
+    .await;
+    let configured = rig.get(HOST_A).await;
+    assert_eq!(configured["profile"], json!("worker"), "{configured:#}");
+    let refused = rig
+        .refused(
+            "meta/identity/update",
+            json!({"request_id": "move-configured", "name": HOST_A,
+                   "expected_spec_digest": configured["spec_digest"],
+                   "set": {"profile": "plain"}}),
+        )
+        .await;
+    assert_eq!(refused["kind"], json!("owner_read_only"), "{refused:#}");
+    assert_eq!(refused["field"], json!("name"), "{refused:#}");
+    assert_eq!(rig.get(HOST_A).await["profile"], json!("worker"));
+    rig.shutdown().await;
+}

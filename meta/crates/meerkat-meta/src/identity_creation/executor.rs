@@ -634,6 +634,21 @@ fn refused_before_core(commit: &ChangeCommit<'_>) -> Option<IdentityRefusal> {
 /// profile whose agents the launch's policy says the host prepares.
 pub const MOVE_INTO_PREPARED_PROFILE: &str = "move_into_prepared_profile";
 
+/// The refusal of an update that would move an agent into a profile its
+/// host prepares: one refusal, wherever the move is refused (when it is
+/// asked, and again when it is carried out).
+pub(crate) fn move_into_prepared_profile() -> IdentityRefusal {
+    IdentityRefusal::new(IdentityRefusalKind::Unsupported {
+        feature: MOVE_INTO_PREPARED_PROFILE.to_owned(),
+    })
+    .at("set.profile")
+    .with_detail(
+        "An agent is not moved into a profile its host prepares: the host prepares an agent of \
+         that profile before its first use, and this agent was not. Create the agent in that \
+         profile instead. Nothing was changed.",
+    )
+}
+
 /// The feature an adoption, and an update of labels, answer through an
 /// executor that was given nothing to read the mob's agents with
 /// ([`CoreChangeExecutor::with_agent_specs`]).
@@ -705,22 +720,15 @@ async fn commit_update(
         // The host prepares an agent of a prepared profile before its first
         // use, which a move cannot give an agent that exists already: it
         // would run on the profile unprepared. A move out of such a
-        // profile, and every other update, asks for no preparation.
+        // profile, and every other update, asks for no preparation. The
+        // family refuses such a move when it is asked; this is the same
+        // refusal for a change that reaches the seam any other way (one
+        // held under a launch whose policy prepared nothing, say).
         if profile.to != current.profile
             && core_commit::preparation_of(commit, profile.to.as_str())
                 != meerkat_mob::IdentityPreparationMode::None
         {
-            return refused(
-                IdentityRefusal::new(IdentityRefusalKind::Unsupported {
-                    feature: MOVE_INTO_PREPARED_PROFILE.to_owned(),
-                })
-                .at("set.profile")
-                .with_detail(
-                    "An agent is not moved into a profile its host prepares: the host prepares \
-                     an agent of that profile before its first use, and this agent was not. \
-                     Create the agent in that profile instead. Nothing was changed.",
-                ),
-            );
+            return refused(move_into_prepared_profile());
         }
         spec.profile = profile.to.clone();
     }

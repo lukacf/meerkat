@@ -88,7 +88,7 @@ use crate::durable_decisions::DecisionExecutorDriver;
 use crate::identity_first::{AgentIdentity, DurableAgentSpec, IdentityRuntime};
 
 use super::approval::{PlanRequest, PlanTarget, PlannedOutcome, plan_approval};
-use super::config::{ChangeClass, RequesterKind};
+use super::config::{ChangeClass, PreparationMode, RequesterKind};
 use super::consequences::{ConsequenceHook, ConsequenceLine, HookRefusal, host_consequences_of};
 use super::decided::{
     HeldChangeHost, HeldIdentityChange, HeldTarget, IdentityDecisionNotices, IdentityDecisions,
@@ -97,8 +97,8 @@ use super::digest::Sha256Digest;
 use super::executor::PreparationSettle;
 use super::executor::{
     AgentSpecs, ChangeCommit, ChangeCommitted, ChangeRequester, CoreChangeExecutor, ExecutorError,
-    IdentityChangeExecutor, InstructionStep, committed_outcome, consent_of_plan, refusal_of_error,
-    row_spec,
+    IdentityChangeExecutor, InstructionStep, committed_outcome, consent_of_plan,
+    move_into_prepared_profile, refusal_of_error, row_spec,
 };
 use super::family::SettlePreparationCall;
 use super::family::{
@@ -106,7 +106,7 @@ use super::family::{
     ChangePlan, ChangesHold, ChangesHoldRequest, ConsentSummary, DirectoryPage, DirectoryPeer,
     DirectoryProfile, DirectoryVerdict, GetAgent, IdentityChangeCall, IdentityChangeSpec,
     IdentityFamily, IdentityRead, IdentityReadAnswer, ListAgents, OperationState, ReadDirectory,
-    WithdrawRequest, Withdrawn,
+    UpdateAgent, WithdrawRequest, Withdrawn,
 };
 use super::operation::OperationId;
 use super::outcome::IdentityOutcome;
@@ -1146,6 +1146,34 @@ impl IdentityGate {
         }
     }
 
+    /// A move into a profile its host prepares is refused when it is asked:
+    /// the host prepares an agent of such a profile before its first use,
+    /// which a move cannot give an agent that exists already. The request
+    /// was normalized first, so what its rules deny, and a spec that moved,
+    /// are refused as such; this refusal then comes before anything is
+    /// held, so nobody is asked to decide a move that could only be
+    /// refused, and a plan of the move answers it too. An agent its host
+    /// configures is answered `owner_read_only` further on, as every
+    /// run-time change of it is. The seam refuses the same move again when
+    /// a change is carried out.
+    fn refuse_move_into_prepared_profile(
+        policy: &IdentityCreationPolicy,
+        target: &AgentFacts,
+        update: &UpdateAgent,
+    ) -> Result<(), IdentityRefusal> {
+        let Some(profile) = update.set.profile.as_deref() else {
+            return Ok(());
+        };
+        let prepared = policy
+            .preparations()
+            .get(profile)
+            .is_some_and(|rule| rule.mode() != PreparationMode::None);
+        if prepared && !target.configured && profile != target.spec.profile.as_str() {
+            return Err(move_into_prepared_profile());
+        }
+        Ok(())
+    }
+
     /// `proposer` and `source_evidence` are the host plane's: what a host
     /// attests of a request it relays. A person and an agent state
     /// neither; a request of theirs that carries one is refused at the
@@ -1230,6 +1258,7 @@ impl IdentityGate {
                     &target.entry(policy),
                     &spec,
                 )?;
+                Self::refuse_move_into_prepared_profile(policy, &target, update)?;
                 Ok(Judged::of(normalized, &target))
             }
             IdentityChangeSpec::Archive(agent) => {

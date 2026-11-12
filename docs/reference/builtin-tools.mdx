@@ -268,8 +268,11 @@ that arrive later in every request for its lifetime.
 A session that grows past the budget, or whose source starts connecting,
 keeps the tools its model already had: they stay in the request and are
 called with no load. Only tools that arrive with or after that change wait
-behind the catalog. A resumed session starts in the mode its tools select
-at that moment.
+behind the catalog. A tool kept this way stays in the request for the rest
+of the session, so what a session keeps is bounded by its catalog, not by
+the budget: a session whose tool sources leave and return can end up sending
+more than the budget in every request. A resumed session starts in the mode
+its tools select at that moment.
 
 A Rust host can read this projection for a live session without a model
 request: `EphemeralSessionService::tool_catalog_view` and

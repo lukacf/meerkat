@@ -65,8 +65,10 @@ them.
   names, descriptions and schemas of those tools together reach 8,192 bytes.
   Until now two such tools, or one of 160 bytes, were enough. The budget
   counts every deferrable tool whatever its source: MCP server tools, tools
-  a client registered over RPC (`tools/register`, `external_tools`) and a
-  host's own deferred-eligible tools.
+  a client registered over RPC with `tools/register` and a host's own
+  deferred-eligible tools. The `external_tools` of an RPC session are not
+  deferrable: they are in every request whatever their size, as before, and
+  the budget does not count them.
   - Who changes: a session whose deferrable tools are under the budget (a
     few small MCP or registered tools) now gets them in every request and
     calls them directly, where before the model had to search and load them
@@ -83,6 +85,7 @@ them.
   - Why: the mode adds about 1.2 KB to every request and two model requests
     to a tool's first use, so below the budget it cost more than it saved.
   - The number is a constant, not a setting.
+
 - `meerkat-core`, `meerkat-tools`, `meerkat-mcp`, `meerkat-rpc`,
   `meerkat-workgraph`: the catalog control tools are in a model request
   only when they are useful.
@@ -134,6 +137,7 @@ them.
     sets the flag.
     `CatalogControlDispatcher::should_announce_for` (new, `meerkat-tools`)
     says whether a session's system prompt explains the control tools.
+
 - `meerkat-core`: a session whose catalog starts to defer keeps the tools
   its model already had. When registered or MCP tools take a running session
   over the byte budget, or a tool source starts connecting, the tools that
@@ -321,8 +325,10 @@ them.
     moment. If its deferrable tools are over the budget then, a tool its
     earlier turns called directly and never loaded waits behind the
     catalog: its first request names the deferred tools in a notice, and a
-    call before a load returns `access_denied`, once. Within a running
-    session this does not happen: the tools it had stay.
+    call before a load returns `access_denied`, once. The same happens,
+    whatever the size of its tools, when one of its tool sources is still
+    connecting at that moment. Within a running session this does not
+    happen: the tools it had stay.
   - Rust code that names `DEFERRED_CATALOG_TOOL_COUNT_THRESHOLD` no longer
     compiles; there is no replacement, the count rule is gone.
   - Rust tool sources and wrappers: a wrapper around another dispatcher

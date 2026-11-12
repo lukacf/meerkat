@@ -364,7 +364,10 @@ pub enum ToolCatalogVisibility {
     /// load.
     Deferred,
     /// The model does not see the tool: the session's tool filters hide it,
-    /// its audience is not the model, or it is not currently callable.
+    /// its audience is not the model, it is not currently callable, or it is
+    /// a catalog control tool with nothing to search or load (no tool waits
+    /// behind the catalog, no source is connecting and no source asks for
+    /// the control tools always).
     Hidden,
 }
 

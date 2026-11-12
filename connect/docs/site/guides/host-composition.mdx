@@ -1002,7 +1002,10 @@ For deferred operations, the original session needs its own explicitly authorize
 `tool_catalog_search` and `tool_catalog_load` scope. A service `Invoke` grant alone
 does not expose a hidden tool. Select `tool_policy.catalog` for a reviewed grant
 when needed. Leaving it `null` can remain valid when the session already has the
-required catalog authority or the host exposes the operation eagerly.
+required catalog authority, the host exposes the operation eagerly, or the
+session's deferred-eligible tools stay under Meerkat's deferred catalog budget
+(8,192 bytes of names, descriptions and schemas): the approved operations are
+then offered directly.
 
 See [live-session attachment](/guides/native-mcp#add-tools-to-a-live-session)
 for the supported mapping and example. `persisted=False` attaches the configuration to the live session. Inspect its connection state after the next turn boundary.

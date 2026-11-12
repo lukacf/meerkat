@@ -64,10 +64,14 @@ contains the prepared `.rkat/mcp.toml`; the explicit roots must also expose the
 host's intended model configuration. A clean configuration root does not
 automatically inherit an existing model login from another root.
 
-MCP operations are deferred by default. The agent uses
-`tool_catalog_search` and `tool_catalog_load` to inspect the native catalog and
-load its selected operation schemas. The business tool becomes available at a
-supported boundary. Budget for search and load as well as the operation itself.
+MCP operations are deferred while their server is still connecting, and when
+the session's deferred-eligible tools together reach Meerkat's deferred
+catalog budget (8,192 bytes of names, descriptions and schemas). The agent then
+uses `tool_catalog_search` and `tool_catalog_load` to inspect the native
+catalog and load its selected operation schemas. The business tool becomes
+available at a supported boundary. Budget for search and load as well as the
+operation itself. Below the budget the operations are offered directly, with
+no search or load.
 These calls discover already connected tools; they do not find or install a
 new integration.
 

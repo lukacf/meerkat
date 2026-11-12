@@ -524,18 +524,15 @@ pub struct CustomizerToolsSpawnCustomizer {
     /// ([`SessionBridge::holds_identity_entry`]). Weak: the bridge holds the
     /// mob this customizer is installed on. Unset until the identity runtime
     /// is bound: a build Core starts before that attaches by registration or
-    /// label only. Held behind `AssertUnwindSafe` so this public type keeps
-    /// the `UnwindSafe` and `RefUnwindSafe` auto traits it had before the
-    /// field (a `dyn SessionBridge` has neither): the slot is written once
-    /// and only read afterwards, so a panic leaves nothing half-written.
-    entries: std::panic::AssertUnwindSafe<std::sync::OnceLock<std::sync::Weak<dyn SessionBridge>>>,
+    /// label only.
+    entries: std::sync::OnceLock<std::sync::Weak<dyn SessionBridge>>,
 }
 
 impl CustomizerToolsSpawnCustomizer {
     pub fn new(registry: Arc<CustomizerToolRegistry>) -> Self {
         Self {
             registry: std::sync::OnceLock::from(registry),
-            entries: std::panic::AssertUnwindSafe(std::sync::OnceLock::new()),
+            entries: std::sync::OnceLock::new(),
         }
     }
 
@@ -545,7 +542,7 @@ impl CustomizerToolsSpawnCustomizer {
     pub(crate) fn deferred() -> Self {
         Self {
             registry: std::sync::OnceLock::new(),
-            entries: std::panic::AssertUnwindSafe(std::sync::OnceLock::new()),
+            entries: std::sync::OnceLock::new(),
         }
     }
 

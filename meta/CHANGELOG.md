@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Breaking
+
+- Rust, source only: `CustomizerToolsSpawnCustomizer` no longer implements
+  the auto traits `UnwindSafe` and `RefUnwindSafe`. It now holds a
+  late-bound reference to the session bridge, through which it asks whether
+  Core holds a member as an identity entry, and a session bridge has
+  neither trait. No Meerkat code relied on them.
+
 ### Changed
 
 - Meta serves an identity whose record is its row in the mob's identity

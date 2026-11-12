@@ -76,6 +76,13 @@ In a multi-runtime Console, member rows and the identity list calls (`GET /conso
 
 The participants of a temporary council (the `council` tool) are not Console members. A participant is a fork of its source member, seated in the council's own temporary mob: its history begins with a copy of the source's earlier turns, and no lineage links it to its source, so no rule on the source would reach it. On every visibility policy the Console lists no participant, answers every member action by a participant's name (send, inspect, retire, blobs, timeline) as for an agent that does not exist, reads none of its history, and serves no timeline frame recorded for one. The council's outcome reaches its convener as the tool's result.
 
+A council's mob is known from the council's own record, and where the Console cannot tell an ordinary mob from a council's it treats the mob as a council's. That reaches only an ordinary mob whose id has a council mob's form (`council--...`):
+
+- with no runtime registered, its stored frames are not served;
+- under the id of a council that still owes cleanup, its members are not listed and their frames are not served until the council settles;
+- under the id of a council that settled, a member named like one of that council's seats is listed while its stored frames are not served;
+- under the id of a council that settled, every frame stored up to the time the council settled stays unserved, whoever wrote it. That includes the frames of a later mob created under the id before the settling was recorded, and its frames dated before the settling or without a real time.
+
 ### Side chats
 
 A Console **side chat** (`meta/fork_member`) is decided as the agent it was forked from: its `side_chat_of` label names that agent, and agent checks evaluate the side chat, then the agent and the agent's own ancestors. Every decision on a side chat is the agent's:

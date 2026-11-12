@@ -56,12 +56,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   console cannot tell the two apart, so with no runtime registered its
   stored frames are not served, under the id of a council that settled a
   member named like one of that council's seats is listed while its stored
-  frames are not served, and under the id of a council that still owes
-  cleanup its members stay unlisted and their frames unserved until the
-  council settles. Other nested members are listed and served as before.
+  frames are not served, under that id every frame stored up to the time
+  the council settled stays unserved, whoever wrote it (the frames of a
+  later mob created under the id before the settling was recorded, and its
+  frames dated before the settling or without a real time, included), and
+  under the id of a council that still owes cleanup its members stay
+  unlisted and their frames unserved until the council settles. Other
+  nested members are listed and served as before.
   Frames a console stored
   for participants before this release stay in its console store, unserved.
-  Affected: 0.8.27 through 0.9.13.
+  Affected: 0.8.27 through 0.9.14.
 
 ### Fixed
 

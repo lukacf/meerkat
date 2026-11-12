@@ -557,6 +557,18 @@ the public `ErrorCode`, `category` its group, `message` the text of stderr's
 | A check made by the CLI itself, and a typed error without a public code | `INTERNAL_ERROR` | None | 1 |
 | An argument the parser refuses, and a host that cannot start | No document | | 2 |
 
+The typed data of an error before the turn is the data the other surfaces
+report for the same error. A refused or not-ready input (`INPUT_REFUSED`,
+`INPUT_NOT_READY`) carries its admission detail,
+`{"type": "refused", "kind": ...}` or
+`{"type": "not_ready", "reason": {"kind": ...}}` (see the
+[error code reference](/reference/api-reference#error-code-reference)). A
+session another runtime owner hosts, one whose hosting claim is unavailable
+and one whose runtime teardown is still running carry their `kind`
+(`session_served_elsewhere`, `session_hosting_unavailable`,
+`runtime_teardown_in_progress`), and a help session that cannot be resumed
+carries `kind` `help_session_not_resumable`.
+
 The exit status of a failed turn stays 1 and is not the exit status of the
 document's code. One turn's code differs from JSON-RPC: a turn abandoned
 because its session's build refused a scoped tool grant gate is a failed turn

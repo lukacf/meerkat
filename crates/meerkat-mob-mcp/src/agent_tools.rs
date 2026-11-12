@@ -673,15 +673,25 @@ impl AgentMobToolSurface {
                 "tool '{tool_name}' member admission failed: {error}"
             ))
         })?;
+        // A member the mob's host hides from the caller's member tools is
+        // answered as a name the mob does not hold, whatever the caller's
+        // scope and before its ownership of the target is looked at:
+        // nothing is read from the member or done to it.
+        let caller = self.caller_identity_in(&handle).await;
+        if !handle
+            .members_hidden_from(caller.as_ref(), std::slice::from_ref(target))
+            .await
+            .is_empty()
+        {
+            return Err(
+                meerkat_mob::MemberTargetAbsence::NotFound.to_tool_error(tool_name, mob_id, target)
+            );
+        }
         let can_manage_mob = self
             .authority_over(mob_id, &handle)
             .await
             .can_manage_mob(mob_id.as_str(), handle.incarnation());
-        let caller = if can_manage_mob {
-            None
-        } else {
-            self.caller_identity_in(&handle).await
-        };
+        let caller = if can_manage_mob { None } else { caller };
         match handle
             .resolve_owned_member_target_admission(can_manage_mob, caller.as_ref(), target)
             .await

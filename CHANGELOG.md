@@ -113,6 +113,15 @@ them.
   hidden one, and could tell a hidden member's name from a name the mob
   does not hold. Hosts with no audience see no change.
 
+- Mob: the mob tools' `mob_check_member` and `mob_retire_member` ask the
+  host's member tool audience themselves, before the caller's scope or
+  ownership is looked at, and answer a member it hides from the caller
+  exactly as a name the mob does not hold. Through 0.9.14 they did not
+  ask: with a host that had not wrapped the two tools, a member with
+  manage scope over the mob could read the status and output preview of a
+  member hidden from it and retire it, and a member without manage scope
+  could tell a hidden member's name from a name the mob does not hold.
+
 - Mob: Core asks the host's member build preparer
   (`MobBuilder::with_member_build_preparer`) before the spawn of a
   store-owned identity's member, as it asks before a wake and a boot

@@ -20104,6 +20104,111 @@ mod tests {
         assert_eq!(identities[0].auth_binding, Some(secondary));
     }
 
+    /// A session's reasoning effort level is a session setting, not part of
+    /// a chain entry: each chain target is built with the level and with
+    /// nothing else of the session's params, so the identity a fallback
+    /// commits and its request policy keep the level. A session without a
+    /// level builds the chain targets it always built: no params, whatever
+    /// its own params are.
+    #[test]
+    fn model_fallback_chain_targets_carry_the_sessions_reasoning_effort_level() {
+        use meerkat_core::lifecycle::run_primitive::ProviderParamsOverride;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let factory = AgentFactory::new(std::env::temp_dir().join("meerkat-test-sessions"));
+        let mut config = Config::default();
+        let primary = configured_auth_binding("dev", "primary_openai");
+        let secondary = configured_auth_binding("dev", "secondary_openai");
+        config.realm.insert(
+            "dev".to_string(),
+            openai_realm_with_bindings(&[
+                ("primary_openai", "sk-primary"),
+                ("secondary_openai", "sk-secondary"),
+            ]),
+        );
+        config.model_fallback.enabled = Some(true);
+        config.model_fallback.chain = vec![ModelFallbackTarget {
+            model: "gpt-5.5".to_string(),
+            provider: Some(Provider::OpenAI),
+            auth_binding: Some(secondary.clone()),
+        }];
+        let registry = factory.model_registry(&config).expect("model registry");
+        let session = |provider_params: Option<ProviderParamsOverride>| SessionLlmIdentity {
+            model: "gpt-5.5".to_string(),
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params,
+            auth_binding: Some(primary.clone()),
+        };
+        let chain_target = |provider_params: Option<ProviderParamsOverride>| SessionLlmIdentity {
+            model: "gpt-5.5".to_string(),
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params,
+            auth_binding: Some(secondary.clone()),
+        };
+        let targets_of = |current: &SessionLlmIdentity| {
+            let (identities, skipped) = factory
+                .model_fallback_identities(&config, &registry, current)
+                .expect("fallback identities");
+            assert!(skipped.is_empty());
+            identities
+        };
+        let policy_params = |identity: &SessionLlmIdentity| {
+            factory
+                .request_policy_for_session_llm_identity(
+                    &config,
+                    identity,
+                    ToolCategoryOverride::Inherit,
+                    &meerkat_core::SessionId::new(),
+                )
+                .expect("the target's request policy")
+                .provider_params
+        };
+
+        // No level: the chain target of today, for a session with no params
+        // and for one with params of its own.
+        let without_level = [
+            session(None),
+            session(Some(ProviderParamsOverride {
+                temperature: Some(0.2),
+                ..Default::default()
+            })),
+        ];
+        for current in &without_level {
+            let identities = targets_of(current);
+            assert_eq!(identities, vec![chain_target(None)]);
+            assert_eq!(policy_params(&identities[0]), None);
+        }
+
+        // A level: the chain target carries it, alone.
+        let level_only = Some(ProviderParamsOverride {
+            reasoning_effort: Some(EffortLevel::High),
+            ..Default::default()
+        });
+        let with_level = [
+            session(level_only.clone()),
+            session(Some(ProviderParamsOverride {
+                temperature: Some(0.2),
+                reasoning_effort: Some(EffortLevel::High),
+                ..Default::default()
+            })),
+        ];
+        for current in &with_level {
+            let identities = targets_of(current);
+            assert_eq!(
+                identities,
+                vec![chain_target(level_only.clone())],
+                "the chain target carries the session's level and nothing else"
+            );
+            assert_eq!(
+                policy_params(&identities[0]),
+                level_only,
+                "and so does its request policy"
+            );
+        }
+    }
+
     #[test]
     fn default_model_fallback_never_constructs_catalog_targets() {
         let factory = AgentFactory::new(std::env::temp_dir().join("meerkat-test-sessions"));

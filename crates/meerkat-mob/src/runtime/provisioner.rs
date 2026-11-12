@@ -13903,7 +13903,7 @@ fn member_reconfigure_apply_failure(
     CoreExecutorError::apply_failed(match error {
         meerkat_runtime::RuntimeDriverError::ReasoningEffortRefused(refusal) => cause.with_reason(
             meerkat_core::event::AgentErrorReason::ReasoningEffortRefused {
-                refusal: (**refusal).clone(),
+                refusal: refusal.clone(),
             },
         ),
         _ => cause,
@@ -22618,7 +22618,7 @@ mod turn_reasoning_effort_reconfigure_tests {
                 cause.reason(),
                 Some(
                     &meerkat_core::event::AgentErrorReason::ReasoningEffortRefused {
-                        refusal: refusal.clone(),
+                        refusal: Box::new(refusal.clone()),
                     }
                 )
             );

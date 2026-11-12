@@ -9153,7 +9153,7 @@ fn reasoning_effort_refused_turn_api_error(
         return None;
     };
     let answer = reasoning_effort_refused_api_error(&SessionError::Agent(
-        meerkat_core::error::AgentError::ReasoningEffortRefused(Box::new(refusal.clone())),
+        meerkat_core::error::AgentError::ReasoningEffortRefused(refusal.clone()),
     ))?;
     if !session_created {
         return Some(answer);
@@ -18439,7 +18439,7 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
         refusal: &meerkat_core::ReasoningEffortRefusal,
     ) -> [meerkat_core::TurnErrorMetadata; 2] {
         let reason = meerkat_core::event::AgentErrorReason::ReasoningEffortRefused {
-            refusal: refusal.clone(),
+            refusal: Box::new(refusal.clone()),
         };
         let detail = format!("agent error: {refusal}");
         let mut apply_failure =

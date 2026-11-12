@@ -16479,7 +16479,7 @@ fn abandoned_turn_rpc_error(
         &turn_error.reason
     {
         return session_error_to_rpc(SessionError::Agent(
-            meerkat_core::AgentError::ReasoningEffortRefused(Box::new(refusal.clone())),
+            meerkat_core::AgentError::ReasoningEffortRefused(refusal.clone()),
         ));
     }
     RpcError {
@@ -42779,7 +42779,7 @@ mod tests {
             let build_bytes = serde_json::to_string(&build_answer).expect("serialize");
 
             let reason = meerkat_core::event::AgentErrorReason::ReasoningEffortRefused {
-                refusal: refusal.clone(),
+                refusal: Box::new(refusal.clone()),
             };
             let detail = format!("agent error: {refusal}");
             // The turn's build was refused: an apply failure with the reason.

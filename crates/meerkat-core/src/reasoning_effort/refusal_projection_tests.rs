@@ -138,7 +138,7 @@ fn a_refused_level_is_a_typed_run_failure_reason_on_the_wire() {
         let refusal = refusal_of(&document);
         let error = refused(&refusal);
         let reason = AgentErrorReason::ReasoningEffortRefused {
-            refusal: refusal.clone(),
+            refusal: Box::new(refusal.clone()),
         };
         let report = AgentErrorReport::from_agent_error(&error);
         assert_eq!(report.class, AgentErrorClass::Config);
@@ -229,11 +229,13 @@ fn a_refused_level_keeps_its_typed_reason_at_the_executor_boundary() {
     assert_eq!(
         cause.reason(),
         Some(&AgentErrorReason::ReasoningEffortRefused {
-            refusal: refusal.clone(),
+            refusal: Box::new(refusal.clone()),
         })
     );
     assert_eq!(
         CoreApplyFailureCause::from_agent_error(&refused(&refusal)).reason(),
-        Some(&AgentErrorReason::ReasoningEffortRefused { refusal })
+        Some(&AgentErrorReason::ReasoningEffortRefused {
+            refusal: Box::new(refusal),
+        })
     );
 }

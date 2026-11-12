@@ -871,7 +871,7 @@ mod typed_context_append_tests {
                     cause.reason(),
                     Some(
                         &meerkat_core::event::AgentErrorReason::ReasoningEffortRefused {
-                            refusal: refusal.clone(),
+                            refusal: Box::new(refusal.clone()),
                         }
                     )
                 );
@@ -1012,8 +1012,11 @@ pub(crate) fn core_executor_error_from_rpc(err: RpcError) -> CoreExecutorError {
         None => cause,
     };
     let cause = match effort_refusal {
-        Some(refusal) => cause
-            .with_reason(meerkat_core::event::AgentErrorReason::ReasoningEffortRefused { refusal }),
+        Some(refusal) => cause.with_reason(
+            meerkat_core::event::AgentErrorReason::ReasoningEffortRefused {
+                refusal: Box::new(refusal),
+            },
+        ),
         None => cause,
     };
     CoreExecutorError::apply_failed(cause)

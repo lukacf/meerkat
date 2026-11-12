@@ -516,10 +516,11 @@ fn create_near(peer: &str, tag: &str) -> Value {
 /// agents that carry a label, holds for an agent no member was ever seated
 /// for: an agent whose first message did not start is committed and owed
 /// its seat, and it is decided on its own record, as a seated agent is on
-/// its seat. The denied person's get, plan and every change of it answer
-/// exactly as for a name no agent holds, it is not in their list, and it
-/// is no peer of a create of theirs. A person the rules allow reads it, and
-/// the denied person reads an agent owed its seat that no deny names.
+/// its seat. The denied person's get, plan and every change of it are
+/// refused as those of a seated agent the deny names are, it is not in
+/// their list, and it is no peer of a create of theirs. A person the rules
+/// allow reads it, and the denied person reads an agent owed its seat that
+/// no deny names.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_deny_by_role_or_by_label_holds_for_an_agent_owed_its_seat() {
     let temp = tempfile::tempdir().unwrap();
@@ -554,13 +555,6 @@ async fn a_deny_by_role_or_by_label_holds_for_an_agent_owed_its_seat() {
         "{plain:#}"
     );
 
-    let absent = console_get(&app, BOB, "nobody").await;
-    let absent = console_refused(&absent).clone();
-    assert_eq!(
-        absent["data"]["kind"],
-        json!("identity_unknown"),
-        "{absent:#}"
-    );
     for name in ["rev-owed", "sealed-owed"] {
         // A person the rules allow reads it.
         let allowed = console_get(&app, ANN, name).await;
@@ -571,25 +565,22 @@ async fn a_deny_by_role_or_by_label_holds_for_an_agent_owed_its_seat() {
             "{allowed:#}"
         );
 
-        // The denied person's get answers as for a name no agent holds.
+        // The denied person's get is refused as their get of a seated
+        // agent the deny names is.
         let got = console_get(&app, BOB, name).await;
         assert_eq!(
-            console_refused(&got),
-            &absent,
-            "{name}: a get of it answers as for a name no agent holds"
+            console_refused(&got)["data"]["kind"],
+            json!("access_denied"),
+            "{name}: {got:#}"
         );
 
-        // So do a plan and every change of it.
-        for ((method, hidden), (_, unheld)) in changes_of(name, &digest, name)
-            .into_iter()
-            .zip(changes_of("nobody", &digest, &format!("{name}-absent")))
-        {
-            let refused = console_rpc(&app, BOB, method, hidden).await;
-            let unheld = console_rpc(&app, BOB, method, unheld).await;
+        // So are a plan and every change of it.
+        for (method, params) in changes_of(name, &digest, name) {
+            let refused = console_rpc(&app, BOB, method, params).await;
             assert_eq!(
-                console_refused(&refused),
-                console_refused(&unheld),
-                "{name}: {method} answers as for a name no agent holds"
+                console_refused(&refused)["data"]["kind"],
+                json!("access_denied"),
+                "{name}: {method}: {refused:#}"
             );
         }
         let still = console_get(&app, ROOT, name).await;
@@ -903,5 +894,473 @@ async fn an_update_keeps_a_reserved_label_it_does_not_touch() {
         ("reserved_key".to_owned(), Some("set.labels".to_owned())),
         "{added:?}"
     );
+    rig.shutdown().await;
+}
+
+/// The Console's methods that name one member by `identity` and read it.
+const MEMBER_READS: [&str; 3] = [
+    "meta/console/inspect_identity",
+    "meta/identity/resolved_tools",
+    "meta/identity/routing_status",
+];
+
+/// One of the Console's member reads of the agent `name`, asked by
+/// `subject`.
+async fn member_read(app: &axum::Router, subject: &str, method: &str, name: &str) -> Value {
+    console_rpc(app, subject, method, json!({ "identity": name })).await
+}
+
+/// Every member read of the agent `name` refuses `subject` `access_denied`,
+/// as it refuses them a seated agent a deny names.
+async fn assert_member_reads_denied(app: &axum::Router, subject: &str, name: &str) {
+    for method in MEMBER_READS {
+        let answer = member_read(app, subject, method, name).await;
+        assert_eq!(
+            console_refused(&answer)["data"]["kind"],
+            json!("access_denied"),
+            "{method} of {name} by {subject}: {answer:#}"
+        );
+    }
+}
+
+/// Every member read of the agent `name` answers `subject` exactly as it
+/// answers them for a name no agent holds.
+async fn assert_member_reads_as_absent(app: &axum::Router, subject: &str, name: &str) {
+    for method in MEMBER_READS {
+        let answer = member_read(app, subject, method, name).await;
+        let absent = member_read(app, subject, method, "nobody").await;
+        assert_eq!(
+            renamed(&answer, name, "nobody"),
+            absent,
+            "{method} of {name} by {subject} answers as for a name no agent holds"
+        );
+    }
+}
+
+/// Make the record of the agent `name` one no build can read, in the mob's
+/// identity store under `state`, beside the running mob.
+fn spoil_record(state: &Path, name: &str) {
+    let member = meerkat_meta::member_comms_id::roster_member_id_for_identity(name);
+    let mut spoiled = 0;
+    let mut pending = vec![state.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).expect("read the state directory") {
+            let path = entry.expect("an entry of the state directory").path();
+            if path.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            let Ok(connection) = rusqlite::Connection::open_with_flags(
+                &path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+            ) else {
+                continue;
+            };
+            if connection.busy_timeout(Duration::from_secs(10)).is_err() {
+                continue;
+            }
+            // A file that is no store of identity records refuses the
+            // statement and is passed over.
+            if let Ok(rows) = connection.execute(
+                "UPDATE mob_identity_intents SET record_json = ?1 WHERE agent_identity = ?2",
+                rusqlite::params![br#"{"schema_version":2}"#.to_vec(), member.as_str()],
+            ) {
+                spoiled += rows;
+            }
+        }
+    }
+    assert_eq!(spoiled, 1, "the one record of {name} is spoiled");
+}
+
+/// The Console's member reads (the inspection of an agent, its resolved
+/// tools, its routing status) decide an agent owed its seat on its own
+/// record, as they decide a seated agent on its seat: a person a deny by
+/// role or by label names is refused, a person the rules allow and an
+/// access administrator are answered, and the denied person is answered for
+/// an agent no deny names. An agent whose record cannot be read is answered
+/// to an access administrator only: every other person is answered as for a
+/// name no agent holds.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_console_s_member_reads_decide_an_agent_owed_its_seat_on_its_record() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), Vec::new(), Some(SCOPED_DENIES)).await;
+    let app = rig.console();
+    // No session starts in this row: every agent stays owed its seat.
+    rig.fail_sessions.failing.store(true, Ordering::SeqCst);
+    let made = console_rpc(
+        &app,
+        ROOT,
+        "meta/identity/create",
+        json!({"request_id": "make-1", "agents": [
+            {"name": "rev-owed", "profile": "reviewer", "first_message": "Begin the watch."},
+            {"name": "sealed-owed", "profile": "worker", "labels": {"tier": "sealed"},
+             "first_message": "Begin the watch."},
+            {"name": "plain-owed", "profile": "worker", "first_message": "Begin the watch."},
+            {"name": "dim-owed", "profile": "worker", "first_message": "Begin the watch."},
+        ]}),
+    )
+    .await;
+    let made = console_ok(&made).clone();
+    assert_eq!(made["outcome"], json!("done"), "{made:#}");
+    for agent in made["agents"].as_array().expect("the created agents") {
+        assert_eq!(agent["seat"], json!("owed"), "{made:#}");
+    }
+    // The record of one agent cannot be read from here on.
+    spoil_record(temp.path(), "dim-owed");
+
+    for name in ["rev-owed", "sealed-owed"] {
+        assert_member_reads_denied(&app, BOB, name).await;
+        // A person the rules allow and an access administrator are
+        // answered the inspection, and one answer for the other reads.
+        for subject in [ANN, ROOT] {
+            let inspected = member_read(&app, subject, MEMBER_READS[0], name).await;
+            assert_eq!(
+                console_ok(&inspected)["identity"]["identity"],
+                json!(name),
+                "{subject}: {inspected:#}"
+            );
+        }
+        for method in &MEMBER_READS[1..] {
+            let allowed = member_read(&app, ANN, method, name).await;
+            assert_ne!(
+                allowed["error"]["data"]["kind"],
+                json!("access_denied"),
+                "{method} of {name}: {allowed:#}"
+            );
+            assert_eq!(
+                allowed,
+                member_read(&app, ROOT, method, name).await,
+                "{method} of {name} answers a person the rules allow as an administrator"
+            );
+        }
+    }
+
+    // The twin: the denied person is answered for an agent no deny names.
+    let plain = member_read(&app, BOB, MEMBER_READS[0], "plain-owed").await;
+    assert_eq!(
+        console_ok(&plain)["identity"]["identity"],
+        json!("plain-owed"),
+        "{plain:#}"
+    );
+
+    // The agent whose record cannot be read.
+    for subject in [BOB, ANN] {
+        assert_member_reads_as_absent(&app, subject, "dim-owed").await;
+    }
+    let administered = member_read(&app, ROOT, MEMBER_READS[0], "dim-owed").await;
+    assert_ne!(
+        renamed(&administered, "dim-owed", "nobody"),
+        member_read(&app, ROOT, MEMBER_READS[0], "nobody").await,
+        "an access administrator is not answered as for a name no agent holds"
+    );
+    rig.shutdown().await;
+}
+
+/// The Console's member reads decide an archived agent whose member has
+/// left the roster on its own record, the first time the Console is asked:
+/// a person a deny by role or by label names is refused; an archived agent
+/// private to a person is answered to that person and to an access
+/// administrator, and every other person is answered exactly as for a name
+/// no agent holds; the denied person is answered for an archived agent no
+/// rule names, until its record gets a label a deny names: a change of the
+/// record decides the next read.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_console_s_member_reads_decide_an_archived_agent_on_its_record() {
+    let temp = tempfile::tempdir().unwrap();
+    let owner = meerkat_meta::private_owner_key(ISSUER, ANN);
+    let archived = [
+        "confidant",
+        "rev-archived",
+        "sealed-archived",
+        "plain-archived",
+    ];
+    let rig = boot(
+        temp.path(),
+        vec![
+            roster_spec(
+                "confidant",
+                "worker",
+                &[("console.private_to", owner.as_str())],
+            ),
+            roster_spec("rev-archived", "reviewer", &[]),
+            roster_spec("sealed-archived", "worker", &[("tier", "sealed")]),
+            roster_spec("plain-archived", "worker", &[]),
+        ],
+        Some(SCOPED_DENIES),
+    )
+    .await;
+    let app = rig.console();
+    // The host adopts and archives each agent before the Console is asked
+    // anything.
+    let host = ChangeRequester::host_operator("rpc");
+    for name in archived {
+        let digest = rig.agent(name).await.agent.spec_digest;
+        let adopted = rig
+            .change(
+                &host,
+                &format!("adopt-{name}"),
+                IdentityChangeSpec::Adopt(agent_ref(name, &digest)),
+            )
+            .await;
+        assert_eq!(adopted.token(), "done", "{adopted:?}");
+        let digest = rig.agent(name).await.agent.spec_digest;
+        let archive = rig
+            .change(
+                &host,
+                &format!("archive-{name}"),
+                IdentityChangeSpec::Archive(agent_ref(name, &digest)),
+            )
+            .await;
+        assert_eq!(archive.token(), "done", "{archive:?}");
+    }
+    // The archived agents' members retire: the row asks once the roster
+    // holds no row of theirs.
+    let mob = rig.runtime.mob_handle();
+    for name in archived {
+        let member = meerkat_mob::AgentIdentity::from(
+            meerkat_meta::member_comms_id::roster_member_id_for_identity(name).as_str(),
+        );
+        tokio::time::timeout(CALL_BOUND, async {
+            while mob
+                .get_member(&member)
+                .await
+                .expect("a roster read")
+                .is_some()
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("the member of {name} leaves the roster"));
+    }
+
+    // A deny by role or by label.
+    for name in ["rev-archived", "sealed-archived"] {
+        assert_member_reads_denied(&app, BOB, name).await;
+    }
+    // The agent private to a person: every other person is answered as for
+    // a name no agent holds.
+    assert_member_reads_as_absent(&app, BOB, "confidant").await;
+    // Its person and an access administrator are answered it.
+    for subject in [ANN, ROOT] {
+        let inspected = member_read(&app, subject, MEMBER_READS[0], "confidant").await;
+        assert_eq!(
+            console_ok(&inspected)["identity"]["identity"],
+            json!("confidant"),
+            "{subject}: {inspected:#}"
+        );
+        let tools = member_read(&app, subject, MEMBER_READS[1], "confidant").await;
+        assert_eq!(
+            console_ok(&tools)["identity"],
+            json!("confidant"),
+            "{subject}: {tools:#}"
+        );
+    }
+    // The twin: the denied person is answered for an archived agent no rule
+    // names.
+    let plain = member_read(&app, BOB, MEMBER_READS[0], "plain-archived").await;
+    assert_eq!(
+        console_ok(&plain)["identity"]["identity"],
+        json!("plain-archived"),
+        "{plain:#}"
+    );
+    // Its record gets a label a deny names: the next read is decided on
+    // the record as it is now.
+    let digest = rig.agent("plain-archived").await.agent.spec_digest;
+    let sealed = rig
+        .change(
+            &host,
+            "seal-plain-archived",
+            update_of(
+                "plain-archived",
+                &digest,
+                json!({"labels": {"tier": "sealed"}}),
+            ),
+        )
+        .await;
+    assert_eq!(sealed.token(), "done", "{sealed:?}");
+    assert_member_reads_denied(&app, BOB, "plain-archived").await;
+    rig.shutdown().await;
+}
+
+/// [`boot`], with `compose` applied to the builder before it builds: what
+/// one row's composition sets beside the rows' own.
+async fn boot_with(
+    state: &Path,
+    roster: Vec<DurableAgentSpec>,
+    access: Option<&str>,
+    compose: impl FnOnce(UnifiedRuntimeBuilder) -> UnifiedRuntimeBuilder,
+) -> Rig {
+    let fail_sessions = Arc::new(FailSessions::default());
+    let mut builder = UnifiedRuntimeBuilder::default()
+        .definition(definition(&fresh_mob_id()))
+        .persistent_state(state)
+        .continuity_from_state_dir(state)
+        .await
+        .expect("open the state-dir identity substrate")
+        .roster_provider(Arc::new(Listed(roster)))
+        .identity_runtime_instance_id("meta-identity-visibility")
+        .session_hook(Arc::clone(&fail_sessions) as Arc<dyn SessionHook>)
+        .default_llm_client(Arc::new(QuietClient));
+    if let Some(access) = access {
+        let config: meerkat_meta::AccessControlConfig =
+            toml::from_str(access).expect("access TOML");
+        builder = builder
+            .access_controller(meerkat_meta::AccessController::new(config).expect("controller"));
+    }
+    let runtime = Box::pin(compose(builder).build())
+        .await
+        .expect("build the gateway-shaped UnifiedRuntime");
+    assert!(
+        runtime.attach_identity_policy(policy(), IdentityFamilyOptions::new()),
+        "the runtime serves identities and takes the policy"
+    );
+    Rig {
+        runtime,
+        fail_sessions,
+    }
+}
+
+/// `spec`, placed on a member host that no process of the row serves: that
+/// host creates the agent's member at the agent's first use.
+fn placed(mut spec: DurableAgentSpec) -> DurableAgentSpec {
+    spec.placement = Some(meerkat_contracts::WireHostRef("member-host-1".to_owned()));
+    spec
+}
+
+/// The agent `name` stands as the row needs it: no member holds it (the
+/// roster holds no row of its name), the mob holds its name for its host's
+/// first use of it, the identity runtime has registered it and binds it to
+/// no session, and the host reads it with no seat.
+async fn assert_registered_with_no_member(rig: &Rig, name: &str) {
+    let member = meerkat_meta::member_comms_id::roster_member_id_for_identity(name);
+    let mob = rig.runtime.mob_handle();
+    assert!(
+        mob.get_member(&member)
+            .await
+            .expect("a roster read")
+            .is_none(),
+        "no member holds {name}"
+    );
+    assert!(
+        mob.list_all_members()
+            .await
+            .iter()
+            .all(|row| row.agent_identity != member),
+        "the roster holds no row of {name}"
+    );
+    let hosted_on_first_use =
+        meerkat_mob::EntryStanding::Unseated(meerkat_mob::UnseatedEntryCause::HostedOnFirstUse);
+    match mob.identity_entry(&member).expect("the mob's entry") {
+        meerkat_mob::IdentityEntryRead::Entry(entry) => {
+            assert_eq!(entry.standing, hosted_on_first_use, "{name}: {entry:?}");
+        }
+        other => panic!("the mob holds {name} as an entry: {other:?}"),
+    }
+    let status = rig
+        .runtime
+        .identity_runtime()
+        .expect("the identity runtime")
+        .status(&AgentIdentity::parse(name).unwrap())
+        .await
+        .unwrap_or_else(|error| panic!("{name} is not registered: {error}"));
+    assert_eq!(
+        status.state,
+        meerkat_meta::identity_first::IdentityLifecycleState::Dormant,
+        "{name}: {status:?}"
+    );
+    assert!(
+        status.session_id.is_none() && status.member_id.is_none(),
+        "{name} is bound to no session: {status:?}"
+    );
+    assert_eq!(
+        rig.agent(name).await.agent.readiness,
+        meerkat_meta::identity_creation::AgentReadiness::Unseated,
+        "the host reads {name} with no seat"
+    );
+}
+
+/// The Console's member reads decide an agent its host configures, for
+/// which no member was ever created, on what the host configures for it, as
+/// they decide a seated agent on its seat. The row's agents are placed on a
+/// member host, which creates the member of each at the agent's first use,
+/// and the start leaves them for it: the identity runtime has registered
+/// each, the mob holds its name with no member, and no read of the row uses
+/// one. Such an agent that is private to a person is answered to that
+/// person and to an access administrator, and every other person is
+/// answered exactly as for a name no agent holds. A person a deny by role
+/// names is refused such an agent of that role, which a person the rules
+/// allow is answered, and the denied person is answered such an agent no
+/// rule names.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_console_s_member_reads_decide_a_placed_agent_no_member_was_created_for() {
+    const PRIVATE: &str = "confidant-placed";
+    const REVIEWER: &str = "rev-placed";
+    const PLAIN: &str = "plain-placed";
+    let temp = tempfile::tempdir().unwrap();
+    let owner = meerkat_meta::private_owner_key(ISSUER, ANN);
+    let private_to_ann = [("console.private_to", owner.as_str())];
+    let rig = boot_with(
+        temp.path(),
+        vec![
+            placed(roster_spec(PRIVATE, "worker", &private_to_ann)),
+            placed(roster_spec(REVIEWER, "reviewer", &[])),
+            placed(roster_spec(PLAIN, "worker", &[])),
+        ],
+        Some(SCOPED_DENIES),
+        // A placed agent the mob holds no member of is left for its first
+        // use: the start creates no member of it.
+        |builder| {
+            builder.identity_bootstrap_mode(meerkat_meta::IdentityBootstrapMode::LazyMaterialize)
+        },
+    )
+    .await;
+    let app = rig.console();
+
+    // The state the row is about, before the Console is asked anything.
+    for name in [PRIVATE, REVIEWER, PLAIN] {
+        assert_registered_with_no_member(&rig, name).await;
+    }
+    assert_eq!(
+        rig.agent(PRIVATE).await.labels.get("console.private_to"),
+        Some(&owner),
+        "the registered agent carries its person"
+    );
+
+    // The agent private to a person: every other person is answered as for
+    // a name no agent holds.
+    assert_member_reads_as_absent(&app, BOB, PRIVATE).await;
+    // Its person and an access administrator are answered it.
+    for subject in [ANN, ROOT] {
+        let inspected = member_read(&app, subject, MEMBER_READS[0], PRIVATE).await;
+        assert_eq!(
+            console_ok(&inspected)["identity"]["identity"],
+            json!(PRIVATE),
+            "{subject}: {inspected:#}"
+        );
+    }
+
+    // A deny by role: the person it names is refused, and a person the
+    // rules allow is answered.
+    assert_member_reads_denied(&app, BOB, REVIEWER).await;
+    let allowed = member_read(&app, ANN, MEMBER_READS[0], REVIEWER).await;
+    assert_eq!(
+        console_ok(&allowed)["identity"]["identity"],
+        json!(REVIEWER),
+        "{allowed:#}"
+    );
+
+    // The twin: the denied person is answered for an agent no rule names.
+    let plain = member_read(&app, BOB, MEMBER_READS[0], PLAIN).await;
+    assert_eq!(
+        console_ok(&plain)["identity"]["identity"],
+        json!(PLAIN),
+        "{plain:#}"
+    );
+
+    // No read used an agent: each stands as it stood.
+    for name in [PRIVATE, REVIEWER, PLAIN] {
+        assert_registered_with_no_member(&rig, name).await;
+    }
     rig.shutdown().await;
 }

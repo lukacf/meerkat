@@ -31098,6 +31098,75 @@ mod tests {
         assert_eq!(witness.retryable, Some(false));
     }
 
+    /// A runtime turn that fails inside the run for a refused reasoning
+    /// effort level keeps the typed refusal as the reason of its terminal
+    /// witness: the session runtime hands this witness to the surface as the
+    /// failed turn's error, and a surface reads the refusal from its reason
+    /// to answer the turn as it answers a refused build. The terminal cause
+    /// and outcome stay the machine's, and the detail is the error's text.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn runtime_reasoning_effort_refusal_witness_keeps_the_typed_reason() {
+        struct RefusingLlmClient(crate::ReasoningEffortRefusal);
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl AgentLlmClient for RefusingLlmClient {
+            async fn stream_response(
+                &self,
+                _messages: &[Message],
+                _tools: &[Arc<ToolDef>],
+                _max_tokens: u32,
+                _temperature: Option<f32>,
+                _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+            ) -> Result<super::LlmStreamResult, AgentError> {
+                Err(AgentError::ReasoningEffortRefused(Box::new(self.0.clone())))
+            }
+
+            fn provider(&self) -> crate::provider::Provider {
+                crate::provider::Provider::Other
+            }
+
+            fn model(&self) -> &'static str {
+                "mock-model"
+            }
+        }
+
+        let refusal: crate::ReasoningEffortRefusal = serde_json::from_value(serde_json::json!({
+            "requested": "max", "provider": "anthropic", "model": "test-anthropic-default",
+            "route": {"backend": "anthropic_api", "api": "messages"},
+            "reason": "unsupported_level", "supported": ["low", "medium", "high"],
+            "facts": "catalog",
+        }))
+        .expect("a refusal document reads");
+        let mut agent = build_agent(Arc::new(RefusingLlmClient(refusal.clone()))).await;
+        agent.config.max_turns = Some(1);
+        agent.set_runtime_execution_kind(Some(crate::lifecycle::RuntimeExecutionKind::ContentTurn));
+
+        let error = agent
+            .run("runtime prompt".to_string().into())
+            .await
+            .expect_err("a refused level fails the runtime turn");
+        let witness = agent
+            .take_runtime_terminal_failure_witness()
+            .expect("runtime witness projection should succeed")
+            .expect("the failed runtime turn carries an exact witness");
+        assert!(witness.terminal);
+        assert_eq!(witness.outcome, Some(crate::TurnTerminalOutcome::Failed));
+        assert_eq!(witness.detail, Some(error.to_string()));
+        assert!(
+            error.to_string().contains(&refusal.to_string()),
+            "the failure's text is the refusal's: {error}"
+        );
+        assert_eq!(
+            witness.reason,
+            Some(crate::event::AgentErrorReason::ReasoningEffortRefused {
+                refusal: Box::new(refusal),
+            }),
+            "the failed turn's error keeps the typed refusal"
+        );
+    }
+
     #[cfg(feature = "workspace-tests")]
     #[tokio::test]
     async fn runtime_preflight_failure_cannot_reuse_prior_terminal_witness() {

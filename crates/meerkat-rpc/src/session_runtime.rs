@@ -41859,7 +41859,7 @@ mod tests {
     /// and the turn's request is sent with the route's own effort field. The
     /// level is sticky: the next turn, with no override, is sent with it
     /// too. Once no source states the route's levels, the next turn is
-    /// refused before any provider request with the typed refusal, and the
+    /// refused before any provider request with the refusal's text, and the
     /// level stays on the session until a turn clears it.
     #[tokio::test]
     async fn turn_reasoning_effort_hot_swaps_a_live_session_and_sends_a_stated_level() {
@@ -41946,22 +41946,15 @@ mod tests {
 
         // No source states the route's levels any more: the next turn's
         // request is refused before it reaches the provider, and the level
-        // stays on the session.
+        // stays on the session. This entry answers with the failed run's
+        // own error; the typed answer a caller of `turn/start` gets comes
+        // through the runtime and is the next row's.
         client.states_levels.store(false, AtomicOrdering::SeqCst);
         let refused = turn(None)
             .await
             .expect_err("a level no source states for the route is refused");
-        assert_eq!(refused.code, error::INVALID_PARAMS, "{refused:?}");
         assert!(
             refused.message.contains(REASONING_EFFORT_LEVELS_UNKNOWN),
-            "{refused:?}"
-        );
-        assert_eq!(
-            refused
-                .data
-                .as_ref()
-                .map(|data| data["reasoning_effort_refusal"]["reason"].clone()),
-            Some(serde_json::json!("supported_levels_unknown")),
             "{refused:?}"
         );
         assert_eq!(

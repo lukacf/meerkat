@@ -265,6 +265,17 @@ pub trait AgentLlmClient: Send + Sync {
         None
     }
 
+    /// The provider tag this client applies to a request that carries none:
+    /// its own default fields, which a request's own tag replaces as a
+    /// whole. The agent writes a resolved `reasoning_effort` level into
+    /// this tag when a request copy has no tag of its own, so the client's
+    /// default fields are still sent and are judged with the level. No I/O.
+    /// `None` for a client with no default tag. A wrapper reports the tag
+    /// of the client it delegates to.
+    fn default_provider_tag(&self) -> Option<crate::lifecycle::run_primitive::ProviderTag> {
+        None
+    }
+
     /// Prepare an existing controller credential without sending a model request.
     /// Native admission authenticates the caller before invoking this cold path
     /// and rechecks current authority afterward. This is not an operation permit

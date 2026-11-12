@@ -687,6 +687,12 @@ impl AgentLlmClient for LlmClientAdapter {
         self.client.reasoning_route()
     }
 
+    /// The tag this adapter was configured with: it is applied to every
+    /// request that carries no tag of its own.
+    fn default_provider_tag(&self) -> Option<ProviderTag> {
+        self.provider_params.clone()
+    }
+
     fn pin_controller(self: Arc<Self>) -> Option<meerkat_core::ControllerModelClient> {
         let selection = self.controller_model_selection()?;
         Some(meerkat_core::ControllerModelClient::new(selection, self))
@@ -1066,6 +1072,31 @@ mod tests {
             "test-model".to_string(),
         );
         assert_eq!(AgentLlmClient::reasoning_route(&adapter), Some(observation));
+    }
+
+    /// The adapter's default tag is the tag it was configured with, which it
+    /// applies to a request that carries none; an adapter configured with
+    /// none reports none.
+    #[test]
+    fn the_adapter_reports_the_tag_it_was_configured_with_as_its_default() {
+        use meerkat_core::lifecycle::run_primitive::{OpenAiProviderTag, ProviderTag};
+
+        let plain = LlmClientAdapter::new(
+            Arc::new(ScriptedClient { events: Vec::new() }),
+            "test-model".to_string(),
+        );
+        assert_eq!(AgentLlmClient::default_provider_tag(&plain), None);
+
+        let tag = ProviderTag::OpenAi(OpenAiProviderTag {
+            seed: Some(7),
+            ..Default::default()
+        });
+        let configured = LlmClientAdapter::new(
+            Arc::new(ScriptedClient { events: Vec::new() }),
+            "test-model".to_string(),
+        )
+        .with_provider_params(Some(tag.clone()));
+        assert_eq!(AgentLlmClient::default_provider_tag(&configured), Some(tag));
     }
 
     #[tokio::test]

@@ -471,6 +471,16 @@ impl LlmClient for GeminiCopilotChatClient {
         self.inner.prepare_controller_credential().await
     }
 
+    /// This client answers for its route itself, for a projection as for
+    /// [`Self::reasoning_route`]: its route does not change between two
+    /// requests, and the Chat Completions client it wraps does not know it.
+    fn reasoning_route_of(
+        &self,
+        _projection: &meerkat_llm_core::LlmReplayProjection,
+    ) -> Option<meerkat_core::ReasoningRouteObservation> {
+        self.reasoning_route()
+    }
+
     /// Chat Completions on the Copilot backend of the Gemini family. This
     /// client answers for itself: the Chat Completions client it wraps is
     /// built for another family and does not know this route. The GitHub
@@ -2450,6 +2460,25 @@ mod tests {
                 account: meerkat_core::AccountLevelStatement::NotApplicable,
                 operator_levels: None,
             })
+        );
+    }
+
+    /// The Gemini family's Copilot client serves one route and answers for
+    /// it itself, for a projection as without one: the route of a
+    /// projection is the route it reports.
+    #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
+    #[test]
+    fn the_route_of_a_projection_is_the_route_the_client_reports() {
+        let client = GeminiCopilotChatClient {
+            inner: Arc::new(CapturingCopilotChatClient {
+                seen_provider_params: Arc::new(Mutex::new(None)),
+            }),
+        };
+        let projection = meerkat_llm_core::LlmReplayProjection::new(Vec::new());
+        assert!(client.reasoning_route().is_some());
+        assert_eq!(
+            client.reasoning_route_of(&projection),
+            client.reasoning_route()
         );
     }
 

@@ -130,6 +130,15 @@ impl OpenAiRealtimeTextAdapter {
 
 #[async_trait]
 impl LlmClient for OpenAiRealtimeTextAdapter {
+    /// The adapter lowers its requests itself and serves one route: the
+    /// route of a projection is the route it reports.
+    fn reasoning_route_of(
+        &self,
+        _projection: &meerkat_llm_core::LlmReplayProjection,
+    ) -> Option<meerkat_core::ReasoningRouteObservation> {
+        self.reasoning_route()
+    }
+
     /// The realtime API of the OpenAI API backend: the adapter connects
     /// with an API key to the public realtime endpoint and is built for no
     /// other backend.
@@ -841,6 +850,19 @@ mod tests {
                 account: meerkat_core::AccountLevelStatement::NotApplicable,
                 operator_levels: None,
             })
+        );
+    }
+
+    /// The realtime text adapter lowers its requests itself and serves one
+    /// route: the route of a projection is the route it reports.
+    #[test]
+    fn the_route_of_a_projection_is_the_route_the_adapter_reports() {
+        let adapter = OpenAiRealtimeTextAdapter::new("test-key");
+        let projection = meerkat_llm_core::LlmReplayProjection::new(Vec::new());
+        assert!(adapter.reasoning_route().is_some());
+        assert_eq!(
+            adapter.reasoning_route_of(&projection),
+            adapter.reasoning_route()
         );
     }
     use meerkat_core::{

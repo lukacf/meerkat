@@ -1488,9 +1488,22 @@ fn an_archive_keeps_an_agent_an_unarchive_restores_it_and_a_removal_retires_its_
         json!("identity_archived"),
         "a message to an archived agent is refused: {refused_send:#}"
     );
+    // A retry replays the outcome. What became of the agent's schedules is
+    // said on the first answer only: this launch has no schedule that
+    // targets the agent, and says so there.
+    assert_eq!(
+        archived["agents"][0]["schedules"],
+        json!({"effect": "paused", "count": 0, "schedules": []}),
+        "{archived:#}"
+    );
+    let mut first = archived.clone();
+    first["agents"][0]
+        .as_object_mut()
+        .expect("an agent")
+        .remove("schedules");
     assert_eq!(
         gateway.ok("meta/identity/archive", named_scout("archive-1")),
-        archived,
+        first,
         "a retry replays"
     );
 
@@ -3710,7 +3723,7 @@ agents = ["beta"]
     );
     assert_eq!(
         hidden["error"]["data"]["kind"],
-        json!("access_denied"),
+        json!("identity_unknown"),
         "{hidden:#}"
     );
 
@@ -3842,6 +3855,266 @@ agents = ["beta"]
         console_ok(&released),
         &json!({"held": false}),
         "{released:#}"
+    );
+    let _ = runtime.shutdown().await;
+}
+
+/// On the Console a read and a plan of one agent answer an agent the caller
+/// may not view exactly as a name no agent holds: the same error, whole.
+/// An agent the caller may view and may not change is still refused as
+/// access denied, which tells the caller nothing it may not know.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_console_answers_an_agent_its_caller_may_not_view_as_a_name_no_agent_holds() {
+    const ROOT: &str = "root@example.org";
+    const ANN: &str = "ann@example.org";
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, app) = console_under(
+        temp.path(),
+        r#"
+enabled = true
+admins = ["root@example.org"]
+
+[[rules]]
+id = "works"
+actions = ["agent.identity.create", "agent.view", "agent.identity.manage", "agent.identity.remove"]
+
+[[rules]]
+id = "not-beta"
+effect = "deny"
+actions = ["agent.view", "agent.identity.manage", "agent.identity.remove"]
+agents = ["beta"]
+
+[[rules]]
+id = "reads-gamma-only"
+effect = "deny"
+actions = ["agent.identity.manage", "agent.identity.remove"]
+agents = ["gamma"]
+"#,
+    )
+    .await;
+    let policy = IdentityCreationPolicy::parse(&json!({
+        "enabled": true,
+        "approval": {"rules": [{
+            "change": ["create", "descriptive", "archive", "remove"],
+            "requester": {"kind": "human"},
+            "target": {"profile": ["worker"]},
+            "outcome": {"kind": "allow"},
+        }]},
+    }))
+    .expect("the policy parses")
+    .expect("the policy is enabled");
+    assert!(runtime.attach_identity_policy(Arc::new(policy), IdentityFamilyOptions::new()));
+    let made = console_rpc(
+        &app,
+        Some(ROOT),
+        "meta/identity/create",
+        json!({"request_id": "root-1", "agents": [
+            {"name": "beta", "profile": "worker"},
+            {"name": "gamma", "profile": "worker"},
+        ]}),
+    )
+    .await;
+    assert_eq!(console_ok(&made)["outcome"], json!("done"), "{made:#}");
+    let digest_of = |name: &'static str| {
+        let app = app.clone();
+        async move {
+            let read =
+                console_rpc(&app, Some(ROOT), "meta/identity/get", json!({"name": name})).await;
+            console_ok(&read)["spec_digest"].clone()
+        }
+    };
+    let beta = digest_of("beta").await;
+    let gamma = digest_of("gamma").await;
+
+    // A read of one agent.
+    let get = |name: &'static str| {
+        let app = app.clone();
+        async move { console_rpc(&app, Some(ANN), "meta/identity/get", json!({"name": name})).await }
+    };
+    let nobody = get("nobody").await;
+    assert_eq!(
+        nobody["error"]["data"]["kind"],
+        json!("identity_unknown"),
+        "a name no agent holds: {nobody:#}"
+    );
+    assert_eq!(
+        nobody["error"]["data"]["field"],
+        json!("name"),
+        "{nobody:#}"
+    );
+    let unviewed = get("beta").await;
+    assert!(unviewed["result"].is_null(), "{unviewed:#}");
+    assert_eq!(
+        unviewed["error"], nobody["error"],
+        "a read of an agent the caller may not view answers as a name no agent holds"
+    );
+
+    // A plan of each change of one agent, with the same members for both
+    // names.
+    for (change, more) in [
+        (
+            "update",
+            json!({"expected_spec_digest": beta.clone(), "set": {"display_name": "Other"}}),
+        ),
+        ("archive", json!({"expected_spec_digest": beta.clone()})),
+        ("remove", json!({"expected_spec_digest": beta.clone()})),
+    ] {
+        let plan = |name: &'static str| {
+            let app = app.clone();
+            let mut params = json!({"change": change, "request_id": "plan-1", "name": name});
+            for (member, value) in more.as_object().expect("an object") {
+                params[member.as_str()] = value.clone();
+            }
+            async move { console_rpc(&app, Some(ANN), "meta/identity/plan", params).await }
+        };
+        let nobody = plan("nobody").await;
+        assert_eq!(
+            nobody["error"]["data"]["kind"],
+            json!("identity_unknown"),
+            "a plan of {change} for a name no agent holds: {nobody:#}"
+        );
+        let unviewed = plan("beta").await;
+        assert!(unviewed["result"].is_null(), "{unviewed:#}");
+        assert_eq!(
+            unviewed["error"], nobody["error"],
+            "a plan of {change} for an agent the caller may not view answers as a name no \
+             agent holds"
+        );
+    }
+
+    // An agent the caller may view and may not change: the read answers
+    // it, and a plan of its change is refused as access denied.
+    let viewed = get("gamma").await;
+    assert_eq!(console_ok(&viewed)["name"], json!("gamma"), "{viewed:#}");
+    let denied = console_rpc(
+        &app,
+        Some(ANN),
+        "meta/identity/plan",
+        json!({"change": "update", "request_id": "plan-2", "name": "gamma",
+               "expected_spec_digest": gamma, "set": {"display_name": "Other"}}),
+    )
+    .await;
+    assert_eq!(
+        denied["error"]["data"]["kind"],
+        json!("access_denied"),
+        "{denied:#}"
+    );
+    let _ = runtime.shutdown().await;
+}
+
+/// On the Console a change of one agent answers an agent the caller may
+/// not view exactly as a name no agent holds: the same error, whole, for
+/// an update, an archive, an unarchive, a removal and an adoption. Nothing
+/// is changed. An agent the caller may view and may not change is refused
+/// as access denied.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_console_answers_a_change_of_an_agent_its_caller_may_not_view_as_a_name_no_agent_holds()
+{
+    const ROOT: &str = "root@example.org";
+    const ANN: &str = "ann@example.org";
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, app) = console_under(
+        temp.path(),
+        r#"
+enabled = true
+admins = ["root@example.org"]
+
+[[rules]]
+id = "works"
+actions = ["agent.identity.create", "agent.view", "agent.identity.manage", "agent.identity.remove"]
+
+[[rules]]
+id = "not-beta"
+effect = "deny"
+actions = ["agent.view", "agent.identity.manage", "agent.identity.remove"]
+agents = ["beta"]
+
+[[rules]]
+id = "reads-gamma-only"
+effect = "deny"
+actions = ["agent.identity.manage", "agent.identity.remove"]
+agents = ["gamma"]
+"#,
+    )
+    .await;
+    let policy = IdentityCreationPolicy::parse(&json!({
+        "enabled": true,
+        "approval": {"rules": [{
+            "change": ["create", "descriptive", "archive", "remove", "adopt"],
+            "requester": {"kind": "human"},
+            "target": {"profile": ["worker"]},
+            "outcome": {"kind": "allow"},
+        }]},
+    }))
+    .expect("the policy parses")
+    .expect("the policy is enabled");
+    assert!(runtime.attach_identity_policy(Arc::new(policy), IdentityFamilyOptions::new()));
+    let made = console_rpc(
+        &app,
+        Some(ROOT),
+        "meta/identity/create",
+        json!({"request_id": "root-1", "agents": [
+            {"name": "beta", "profile": "worker"},
+            {"name": "gamma", "profile": "worker"},
+        ]}),
+    )
+    .await;
+    assert_eq!(console_ok(&made)["outcome"], json!("done"), "{made:#}");
+    let read = |name: &'static str| {
+        let app = app.clone();
+        async move {
+            let read =
+                console_rpc(&app, Some(ROOT), "meta/identity/get", json!({"name": name})).await;
+            console_ok(&read).clone()
+        }
+    };
+    let beta = read("beta").await;
+    let digest = beta["spec_digest"].clone();
+
+    let changes = [
+        (
+            "meta/identity/update",
+            json!({"set": {"display_name": "Other"}}),
+        ),
+        ("meta/identity/archive", json!({})),
+        ("meta/identity/unarchive", json!({})),
+        ("meta/identity/remove", json!({})),
+        ("meta/identity/adopt", json!({})),
+    ];
+    for (index, (method, more)) in changes.iter().enumerate() {
+        let ask = |name: &'static str| {
+            let app = app.clone();
+            let mut params = json!({"request_id": format!("ann-{index}-{name}"), "name": name,
+                                    "expected_spec_digest": digest.clone()});
+            for (member, value) in more.as_object().expect("an object") {
+                params[member.as_str()] = value.clone();
+            }
+            async move { console_rpc(&app, Some(ANN), method, params).await }
+        };
+        let nobody = ask("nobody").await;
+        assert_eq!(
+            nobody["error"]["data"]["kind"],
+            json!("identity_unknown"),
+            "{method} of a name no agent holds: {nobody:#}"
+        );
+        let unviewed = ask("beta").await;
+        assert!(unviewed["result"].is_null(), "{method}: {unviewed:#}");
+        assert_eq!(
+            unviewed["error"], nobody["error"],
+            "{method} of an agent the caller may not view answers as a name no agent holds"
+        );
+        // An agent the caller may view and may not change.
+        let denied = ask("gamma").await;
+        assert_eq!(
+            denied["error"]["data"]["kind"],
+            json!("access_denied"),
+            "{method}: {denied:#}"
+        );
+    }
+    assert_eq!(
+        read("beta").await,
+        beta,
+        "nothing of the unviewed agent changed"
     );
     let _ = runtime.shutdown().await;
 }
@@ -4009,6 +4282,503 @@ async fn after_an_adoption_the_identity_runtime_serves_the_agent_from_its_record
         served(&runtime).await.as_deref(),
         Some("Renamed"),
         "and after a restart, although the roster still lists the name without it"
+    );
+    let _ = runtime.shutdown().await;
+}
+
+/// A create and an update set who reaches an agent and how it runs, with
+/// the members and the values of a roster row (`addressability`,
+/// `runtime_mode_override`): the agent's registered row carries them as a
+/// configured agent's does, an agent that names neither has a roster row's
+/// defaults, and a value no roster row takes is no value of the member. An
+/// update that sets either is of the change class `capability`: a policy
+/// with no rule for that class denies it and nothing is applied.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_create_and_an_update_set_addressability_and_runtime_mode_as_a_roster_row_does() {
+    use meerkat_meta::identity_creation::UpdateAgent;
+    use meerkat_mob::MobRuntimeMode;
+
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), false, None).await;
+    let host = ChangeRequester::host("ops");
+    let created = rig
+        .change(
+            &host,
+            "r-1",
+            create_of(json!([
+                {"name": "clerk", "profile": "worker", "addressability": "internal_only",
+                 "runtime_mode_override": "turn_driven"},
+                {"name": "scout", "profile": "worker"},
+            ])),
+        )
+        .await;
+    assert_eq!(created.token(), "done", "{created:?}");
+    let registered = |name: &'static str| {
+        let identities = rig
+            .runtime
+            .identity_runtime()
+            .expect("the identity runtime")
+            .clone();
+        async move {
+            identities
+                .registered_spec(&AgentIdentity::parse(name).unwrap())
+                .await
+                .unwrap_or_else(|error| panic!("{name} is registered: {error}"))
+                .spec
+        }
+    };
+    let clerk = registered("clerk").await;
+    assert_eq!(clerk.addressability, AgentAddressability::InternalOnly);
+    assert_eq!(
+        clerk.runtime_mode_override,
+        Some(MobRuntimeMode::TurnDriven)
+    );
+    // An agent that names neither has what a roster row that names neither
+    // has, as the configured agent beside it.
+    let scout = registered("scout").await;
+    let configured = registered(HOST_A).await;
+    assert_eq!(scout.addressability, configured.addressability);
+    assert_eq!(scout.addressability, AgentAddressability::Addressable);
+    assert_eq!(scout.runtime_mode_override, None);
+
+    // What a caller sets, it reads back: a get and a list entry say both
+    // members, each only when it is not the default.
+    let shown = |name: &'static str| {
+        let family = rig.family();
+        let mob = rig.runtime.mob_handle();
+        let host = host.clone();
+        async move {
+            let got = match family
+                .read(&mob, &host, IdentityRead::Get(GetAgent::new(name)))
+                .await
+            {
+                Ok(IdentityReadAnswer::Get(record)) => {
+                    serde_json::to_value(*record).expect("a get as a surface writes it")
+                }
+                other => panic!("a get answers one agent: {other:?}"),
+            };
+            let list: ListAgents =
+                serde_json::from_value(json!({})).expect("a list as a surface writes it");
+            let listed = match family.read(&mob, &host, IdentityRead::List(list)).await {
+                Ok(IdentityReadAnswer::List(page)) => page
+                    .agents
+                    .into_iter()
+                    .find(|agent| agent.name == name)
+                    .map(|agent| serde_json::to_value(agent).expect("a list entry"))
+                    .unwrap_or_else(|| panic!("{name} is listed")),
+                other => panic!("a list answers a page: {other:?}"),
+            };
+            let members = |entry: &Value| {
+                (
+                    entry.get("addressability").cloned(),
+                    entry.get("runtime_mode_override").cloned(),
+                )
+            };
+            assert_eq!(members(&got), members(&listed), "{name}: a get and a list");
+            members(&got)
+        }
+    };
+    assert_eq!(
+        shown("clerk").await,
+        (Some(json!("internal_only")), Some(json!("turn_driven")))
+    );
+    assert_eq!(
+        shown("scout").await,
+        (None, None),
+        "the defaults are unsaid"
+    );
+    assert_eq!(
+        shown(HOST_A).await,
+        (None, None),
+        "a configured agent reads the same way"
+    );
+
+    let before = rig.digest("scout").await;
+    let update = |set: Value| -> UpdateAgent {
+        serde_json::from_value(
+            json!({"name": "scout", "expected_spec_digest": before.as_str(),
+                                      "set": set}),
+        )
+        .expect("an update as a surface writes it")
+    };
+    let updated = rig
+        .change(
+            &host,
+            "r-2",
+            IdentityChangeSpec::Update(update(json!({
+                "addressability": "internal_only",
+                "runtime_mode_override": "turn_driven",
+            }))),
+        )
+        .await;
+    assert_eq!(updated.token(), "done", "{updated:?}");
+    let scout = registered("scout").await;
+    assert_eq!(scout.addressability, AgentAddressability::InternalOnly);
+    assert_eq!(
+        scout.runtime_mode_override,
+        Some(MobRuntimeMode::TurnDriven)
+    );
+    assert_ne!(rig.digest("scout").await, before, "the spec changed");
+    assert_eq!(
+        shown("scout").await,
+        (Some(json!("internal_only")), Some(json!("turn_driven"))),
+        "the update reads back"
+    );
+
+    // A value no roster row takes is no value of the member.
+    for agent in [
+        json!({"name": "other", "profile": "worker", "addressability": "public"}),
+        json!({"name": "other", "profile": "worker", "runtime_mode_override": "batch"}),
+    ] {
+        assert!(
+            serde_json::from_value::<CreateAgents>(json!({"agents": [agent]})).is_err(),
+            "{agent}"
+        );
+    }
+    for set in [
+        json!({"addressability": "public"}),
+        json!({"runtime_mode_override": "batch"}),
+    ] {
+        assert!(
+            serde_json::from_value::<UpdateAgent>(
+                json!({"name": "scout", "expected_spec_digest": before.as_str(), "set": set})
+            )
+            .is_err(),
+            "{set}"
+        );
+    }
+    let _ = rig.runtime.shutdown().await;
+
+    // Under a policy with no rule for the class `capability` the update is
+    // denied as that class, and nothing is applied.
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, _asked, _fail_next_session) = launch(temp.path(), false).await;
+    let policy = IdentityCreationPolicy::parse(&json!({
+        "enabled": true,
+        "approval": {"rules": [{
+            "change": ["create", "descriptive"],
+            "requester": {"kind": "host"},
+            "target": {"profile": ["worker"]},
+            "outcome": {"kind": "allow"},
+        }]},
+    }))
+    .expect("the policy parses")
+    .expect("the policy is enabled");
+    assert!(runtime.attach_identity_policy(Arc::new(policy), IdentityFamilyOptions::new()));
+    let family = runtime.identity_family().expect("the family");
+    let mob = runtime.mob_handle();
+    let ask = |request: &'static str, change: IdentityChangeSpec| {
+        let (family, mob, host) = (Arc::clone(&family), mob.clone(), host.clone());
+        async move {
+            let operation =
+                OperationId::for_request(&host.recorded(), request).expect("a request id");
+            family
+                .change(&mob, &host, IdentityChangeCall::new(operation, change))
+                .await
+        }
+    };
+    let made = ask(
+        "r-1",
+        create_of(json!([{"name": "scout", "profile": "worker"}])),
+    )
+    .await;
+    assert_eq!(made.token(), "done", "{made:?}");
+    let digest = made.agents()[0].spec_digest.clone().expect("a spec digest");
+    let denied = ask(
+        "r-2",
+        IdentityChangeSpec::Update(
+            serde_json::from_value(json!({"name": "scout",
+                "expected_spec_digest": digest.as_str(),
+                "set": {"addressability": "internal_only"}}))
+            .expect("an update as a surface writes it"),
+        ),
+    )
+    .await;
+    let data = denied
+        .refusal()
+        .unwrap_or_else(|| panic!("the update is refused: {denied:?}"))
+        .to_data();
+    assert_eq!(data["kind"], json!("change_denied"), "{data:#}");
+    assert_eq!(data["change"], json!("capability"), "{data:#}");
+    let unchanged = runtime
+        .identity_runtime()
+        .expect("the identity runtime")
+        .registered_spec(&AgentIdentity::parse("scout").unwrap())
+        .await
+        .expect("scout is registered")
+        .spec;
+    assert_eq!(unchanged.addressability, AgentAddressability::Addressable);
+    let _ = runtime.shutdown().await;
+}
+
+/// The schedules that target an agent follow its archive, its unarchive
+/// and its removal, and the change says which. An archive pauses the Active
+/// schedules that target the agent and leaves one somebody paused by name
+/// as theirs; the same archive asked again changes nothing; a resume by
+/// name takes a schedule over; the unarchive resumes exactly the schedules
+/// still paused for their target; a removal ends every one. A plan of each
+/// change lists what it would do. Another agent's schedule is never
+/// touched.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_schedules_that_target_an_agent_follow_its_archive_unarchive_and_removal() {
+    use meerkat::SchedulePhase::{Active, Deleted, Paused};
+    use meerkat_meta::schedule_wiring::{MobAgentSchedules, ScheduleMobTargetRegistry};
+
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, _asked, _fail_next_session) = launch(temp.path(), false).await;
+    let schedules = meerkat::ScheduleService::new(Arc::new(meerkat::MemoryScheduleStore::new()));
+    let options = IdentityFamilyOptions::new().with_schedules(Arc::new(MobAgentSchedules::new(
+        schedules.clone(),
+        ScheduleMobTargetRegistry::default(),
+    )));
+    assert!(runtime.attach_identity_policy(in_process_policy(), options));
+    let family = runtime.identity_family().expect("the family");
+    let mob = runtime.mob_handle();
+    let host = ChangeRequester::host("ops");
+    let ask = |request: &'static str, change: IdentityChangeSpec| {
+        let (family, mob, host) = (Arc::clone(&family), mob.clone(), host.clone());
+        async move {
+            let operation =
+                OperationId::for_request(&host.recorded(), request).expect("a request id");
+            family
+                .change(&mob, &host, IdentityChangeCall::new(operation, change))
+                .await
+        }
+    };
+    let plan = |change: IdentityChangeSpec| {
+        let (family, mob, host) = (Arc::clone(&family), mob.clone(), host.clone());
+        async move {
+            let operation =
+                OperationId::for_request(&host.recorded(), "plan").expect("a request id");
+            match family
+                .read(
+                    &mob,
+                    &host,
+                    IdentityRead::Plan(Box::new(IdentityChangeCall::new(operation, change))),
+                )
+                .await
+            {
+                Ok(IdentityReadAnswer::Plan(plan)) => {
+                    serde_json::to_value(*plan).expect("a plan as a surface writes it")
+                }
+                other => panic!("a plan answers one: {other:?}"),
+            }
+        }
+    };
+    let made = ask(
+        "r-1",
+        create_of(json!([
+            {"name": "scout", "profile": "worker"},
+            {"name": "ledger", "profile": "worker"},
+        ])),
+    )
+    .await;
+    assert_eq!(made.token(), "done", "{made:?}");
+    let digest = |name: &'static str| {
+        let (family, mob, host) = (Arc::clone(&family), mob.clone(), host.clone());
+        async move {
+            match family
+                .read(&mob, &host, IdentityRead::Get(GetAgent::new(name)))
+                .await
+            {
+                Ok(IdentityReadAnswer::Get(record)) => record.agent.spec_digest,
+                other => panic!("a get answers one agent: {other:?}"),
+            }
+        }
+    };
+
+    // Four schedules: three that target scout (one of them paused by name)
+    // and one that targets another agent.
+    let schedule = |name: &'static str, agent: &'static str| {
+        let schedules = schedules.clone();
+        async move {
+            schedules
+                .create(meerkat::CreateScheduleRequest {
+                    name: Some(name.to_owned()),
+                    description: None,
+                    trigger: meerkat::TriggerSpec::Once {
+                        due_at_utc: chrono::Utc::now() + chrono::Duration::days(1),
+                    },
+                    target: meerkat::TargetBinding::identity(
+                        meerkat::IdentityTargetBinding::resumable(
+                            agent,
+                            meerkat::ScheduledSessionAction::Prompt {
+                                prompt: meerkat_core::ContentInput::Text("Check in.".into()),
+                                system_prompt: None,
+                                render_metadata: None,
+                                skill_refs: Vec::new(),
+                                additional_instructions: Vec::new(),
+                            },
+                        ),
+                    ),
+                    misfire_policy: meerkat::MisfirePolicy::default(),
+                    overlap_policy: meerkat::OverlapPolicy::default(),
+                    missing_target_policy: meerkat::MissingTargetPolicy::default(),
+                    labels: std::collections::BTreeMap::new(),
+                    planning_horizon_days: Some(1),
+                    planning_horizon_occurrences: Some(1),
+                })
+                .await
+                .unwrap_or_else(|error| panic!("the schedule {name} is created: {error}"))
+                .schedule_id
+        }
+    };
+    let daily = schedule("daily", "scout").await;
+    let weekly = schedule("weekly", "scout").await;
+    let held = schedule("held", "scout").await;
+    let other = schedule("other", "ledger").await;
+    schedules.pause(&held).await.expect("a pause by name");
+    let state = |id: &meerkat::ScheduleId| {
+        let (schedules, id) = (schedules.clone(), id.clone());
+        async move {
+            let schedule = schedules.get(&id).await.expect("the schedule is read");
+            (schedule.phase, schedule.paused_for_target())
+        }
+    };
+    // The names a `schedules` member lists, with its effect and count.
+    let said = |schedules: &Value| -> (String, u64, Vec<String>) {
+        let mut names: Vec<String> = schedules["schedules"]
+            .as_array()
+            .unwrap_or_else(|| panic!("a list of schedules: {schedules:#}"))
+            .iter()
+            .map(|schedule| {
+                assert!(schedule["schedule_id"].is_string(), "{schedule:#}");
+                schedule["name"].as_str().expect("a name").to_owned()
+            })
+            .collect();
+        names.sort_unstable();
+        assert!(schedules.get("incomplete").is_none(), "{schedules:#}");
+        (
+            schedules["effect"].as_str().expect("an effect").to_owned(),
+            schedules["count"].as_u64().expect("a count"),
+            names,
+        )
+    };
+    let names = |names: &[&str]| names.iter().map(ToString::to_string).collect::<Vec<_>>();
+
+    // An archive: the plan lists what it would pause, and the answer what
+    // it paused.
+    let scout = digest("scout").await;
+    let at_archive = scout.clone();
+    let planned = plan(IdentityChangeSpec::Archive(agent_ref("scout", &scout))).await;
+    assert_eq!(
+        said(&planned["schedules"]),
+        ("paused".to_owned(), 2, names(&["daily", "weekly"])),
+        "{planned:#}"
+    );
+    assert_eq!(
+        state(&daily).await,
+        (Active, false),
+        "a plan writes nothing"
+    );
+    let archived = ask(
+        "r-2",
+        IdentityChangeSpec::Archive(agent_ref("scout", &scout)),
+    )
+    .await;
+    assert_eq!(archived.token(), "done", "{archived:?}");
+    assert_eq!(
+        said(&archived.to_json()["agents"][0]["schedules"]),
+        ("paused".to_owned(), 2, names(&["daily", "weekly"])),
+        "{archived:?}"
+    );
+    assert_eq!(state(&daily).await, (Paused, true));
+    assert_eq!(state(&weekly).await, (Paused, true));
+    assert_eq!(state(&held).await, (Paused, false), "a pause by name stays");
+    assert_eq!(state(&other).await, (Active, false), "another agent's");
+
+    // The same archive asked again: its outcome again, no schedules said,
+    // nothing changed.
+    let again = ask(
+        "r-2",
+        IdentityChangeSpec::Archive(agent_ref("scout", &scout)),
+    )
+    .await;
+    assert_eq!(again.token(), "done", "{again:?}");
+    assert!(
+        again.to_json()["agents"][0].get("schedules").is_none(),
+        "{again:?}"
+    );
+    assert_eq!(state(&daily).await, (Paused, true));
+    assert_eq!(state(&held).await, (Paused, false));
+
+    // A resume by name while the agent is archived takes the schedule over.
+    schedules.resume(&weekly).await.expect("a resume by name");
+    assert_eq!(state(&weekly).await, (Active, false));
+
+    // The unarchive resumes exactly the schedule still paused for its
+    // target.
+    let scout = digest("scout").await;
+    let planned = plan(IdentityChangeSpec::Unarchive(agent_ref("scout", &scout))).await;
+    assert_eq!(
+        said(&planned["schedules"]),
+        ("resumed".to_owned(), 1, names(&["daily"])),
+        "{planned:#}"
+    );
+    let restored = ask(
+        "r-3",
+        IdentityChangeSpec::Unarchive(agent_ref("scout", &scout)),
+    )
+    .await;
+    assert_eq!(restored.token(), "done", "{restored:?}");
+    assert_eq!(
+        said(&restored.to_json()["agents"][0]["schedules"]),
+        ("resumed".to_owned(), 1, names(&["daily"])),
+        "{restored:?}"
+    );
+    assert_eq!(state(&daily).await, (Active, false));
+    assert_eq!(state(&weekly).await, (Active, false));
+    assert_eq!(state(&held).await, (Paused, false), "a pause by name stays");
+
+    // The archive asked again after the unarchive undid it moves nothing.
+    let stale = ask(
+        "r-2",
+        IdentityChangeSpec::Archive(agent_ref("scout", &at_archive)),
+    )
+    .await;
+    assert_eq!(stale.token(), "done", "{stale:?}");
+    assert_eq!(state(&daily).await, (Active, false));
+
+    // A removal ends every schedule that targets the agent.
+    let scout = digest("scout").await;
+    let planned = plan(IdentityChangeSpec::Remove(agent_ref("scout", &scout))).await;
+    assert_eq!(
+        said(&planned["schedules"]),
+        ("ended".to_owned(), 3, names(&["daily", "held", "weekly"])),
+        "{planned:#}"
+    );
+    let removed = ask(
+        "r-4",
+        IdentityChangeSpec::Remove(agent_ref("scout", &scout)),
+    )
+    .await;
+    assert_eq!(removed.token(), "done", "{removed:?}");
+    assert_eq!(
+        said(&removed.to_json()["agents"][0]["schedules"]),
+        ("ended".to_owned(), 3, names(&["daily", "held", "weekly"])),
+        "{removed:?}"
+    );
+    for ended in [&daily, &weekly, &held] {
+        assert_eq!(state(ended).await.0, Deleted);
+    }
+    assert_eq!(state(&other).await, (Active, false), "another agent's");
+
+    // A change that stops nobody says nothing of schedules.
+    let ledger = digest("ledger").await;
+    let updated = ask(
+        "r-5",
+        IdentityChangeSpec::Update(
+            serde_json::from_value(json!({"name": "ledger",
+                "expected_spec_digest": ledger.as_str(),
+                "set": {"display_name": "The ledger"}}))
+            .expect("an update as a surface writes it"),
+        ),
+    )
+    .await;
+    assert_eq!(updated.token(), "done", "{updated:?}");
+    assert!(
+        updated.to_json()["agents"][0].get("schedules").is_none(),
+        "{updated:?}"
     );
     let _ = runtime.shutdown().await;
 }

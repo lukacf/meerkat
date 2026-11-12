@@ -405,6 +405,27 @@ Schedule phase is intentionally small:
 - `paused`
 - `deleted`
 
+A paused schedule remembers whose pause it is. A host that owns the
+lifecycle of a schedule's target can pause the schedule for that target
+while the target takes no deliveries (`ScheduleService::pause_for_target`)
+and resume it when the target takes them again
+(`ScheduleService::resume_for_target`); only a schedule paused that way is
+resumed that way. A schedule paused by name (`schedule/pause`, the pause
+tool) stays paused, and a pause or a resume by name of a schedule paused
+for its target takes it over. The phase a read shows is `paused` either
+way. A revise that points a schedule paused for its target at another
+target ends that pause too: the schedule stays paused, as a pause by name,
+until somebody resumes it.
+
+A pause for the target supersedes nothing, like a pause by name: a fire
+that was claimed and not yet dispatched is released, and a delivery already
+dispatched completes. Occurrences that came due during the pause are still
+pending at the resume and are resolved by the misfire policy at the first
+claim: `skip` marks them misfired, `catch_up_within` fires the ones inside
+its window. A resume by name is accepted while the target still takes no
+delivery: the schedule is active again and each fire ends as the delivery
+says.
+
 Occurrence phase is more detailed:
 
 - `pending`

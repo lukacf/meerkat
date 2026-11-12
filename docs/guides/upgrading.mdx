@@ -55,6 +55,26 @@ Meerkat is pre-1.0, and patch releases can carry declared breaking changes.
 - `rkat storage doctor` reports no new problems.
 - An SDK `connect()` succeeds.
 
+## Upgrading to 0.9.15
+
+### Schedules paused for their target, and a rollback
+
+A schedule can be paused for its target (`ScheduleService::pause_for_target`):
+it is stored as a paused schedule whose machine state carries
+`paused_for_target: true`, and only such a schedule is resumed when its
+target takes deliveries again. Nothing changes for a schedule that is not
+paused that way, and the upgrade needs no step.
+
+**Rolling back:** an earlier release reads such a schedule as paused and
+never resumes it on its own. It ignores the mark, and drops it when it
+writes the schedule while it is paused (an update, a pause by name, a
+target snapshot sync, a late supersession acknowledgement); a schedule it
+does not write keeps the mark. After returning to 0.9.15, a schedule whose
+mark was dropped stays paused when its target comes back: resume by name
+the schedules of the targets that take deliveries again and are still
+paused. The loss is on the safe side: such a schedule never fires at a
+target that takes no delivery.
+
 ## Upgrading to 0.9.12
 
 This section is for systems running 0.9.11. The full list of changes is in

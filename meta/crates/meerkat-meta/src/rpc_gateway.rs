@@ -20437,6 +20437,18 @@ external_addressable = true
             if let Some(host) = host {
                 options = options.with_host_hooks(Arc::new(HostIdentityHooks(Arc::clone(host))));
             }
+            // The launch's schedules follow an agent's archive, unarchive
+            // and removal. The registry is the one the schedule host adopts
+            // the mob's members into further on.
+            if let Some((schedule_service, mob_target_registry, ..)) = schedule_host_inputs.as_ref()
+            {
+                options = options.with_schedules(Arc::new(
+                    crate::schedule_wiring::MobAgentSchedules::new(
+                        schedule_service.clone(),
+                        mob_target_registry.clone(),
+                    ),
+                ));
+            }
             if let Some(db) = identity_realm_profiles_db.as_deref() {
                 match meerkat_mob::store::SqliteRealmProfileStore::open(db) {
                     Ok(store) => options = options.with_realm_profiles(Arc::new(store)),

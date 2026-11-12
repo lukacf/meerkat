@@ -82,9 +82,20 @@ them.
   what its session was first built with. No build relies on an earlier
   answer, so the host answers the same from the row and its own
   state each time, and may be asked more than once for one seat. The seat's
-  labels, runtime mode, binding, placement and first message stay as Core
+  runtime mode, binding, placement and first message stay as Core
   lowered them, and an answer that changed the seat's identity, role,
-  launch mode or custody is refused. A refusal fails the build before
+  launch mode or custody is refused. The seat's labels are its row's, and
+  the answer's labels must be exactly the seat's: what decides on a
+  member's labels (an access rule, an audience) reads its seat, so a member
+  is never seated without a label its host requires, nor with one its row
+  does not carry. An answer that adds a label key, drops one or gives one
+  another value is refused for good and the member is not built;
+  `MemberBuildPreparationRefusal::store_owned_seat_labels` is that refusal
+  (its reason names the label keys, never a value, and the remedy: the
+  label belongs in the identity's row, at its create or by an update, and
+  a seated member takes its row's labels when it is seated again or
+  respawned), public so that a host can refuse first with the same reason.
+  A refusal fails the build before
   anything is built: at a spawn the identity stays owed its seat and the
   mob's next start asks again; at a wake or a restore the member stays
   Dormant (`BuildPreparationRetry`) or is recorded broken, as for a refused

@@ -69,12 +69,14 @@ fn management(
 }
 
 /// A host customizer that counts its builds, records the context of each,
-/// and fails when `refuse` is set.
+/// sets `label` on the draft when it has one, and fails when `refuse` is
+/// set.
 #[derive(Default)]
 struct CountingCustomizer {
     builds: AtomicUsize,
     contexts: Mutex<Vec<AgentBuildContext>>,
     refuse: Option<fn() -> CustomizerError>,
+    label: Option<(&'static str, &'static str)>,
 }
 
 #[async_trait::async_trait]
@@ -83,9 +85,12 @@ impl AgentCustomizer for CountingCustomizer {
         &self,
         context: &AgentBuildContext,
         _spec: &DurableAgentSpec,
-        _draft: &mut AgentBuildDraft,
+        draft: &mut AgentBuildDraft,
     ) -> Result<(), CustomizerError> {
         self.builds.fetch_add(1, Ordering::SeqCst);
+        if let Some((key, value)) = self.label {
+            draft.labels.insert(key.to_string(), value.to_string());
+        }
         self.contexts
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -396,9 +401,12 @@ async fn r109_after_the_composition_a_registered_identity_is_prepared_inline_and
 /// composed. Before that a fresh spawn's seat is left as Core lowered it
 /// and a wake's is refused retryable, and the customizer does not run.
 /// After it the customizer runs once, the draft is lowered onto the seat
-/// (its context and instructions; the seat's labels stay as they were), and
-/// the build's preparation that follows answers without running the
-/// customizer again. A failed customizer refuses the seat retryable.
+/// (its context and instructions; its labels, which are the seat's own),
+/// and the build's preparation that follows answers without running the
+/// customizer again. A failed customizer refuses the seat retryable. A
+/// customizer that sets a label the seat does not carry refuses it for
+/// good: the refusal names the label key and the remedy, never the value,
+/// and the identity's status holds the reason.
 #[tokio::test]
 async fn a_store_owned_seat_is_composed_once_per_build_once_the_runtime_is_composed() -> TestResult
 {
@@ -448,6 +456,7 @@ async fn a_store_owned_seat_is_composed_once_per_build_once_the_runtime_is_compo
 
     runtime
         .register(DurableAgentSpec {
+            labels: BTreeMap::from([("custody".to_string(), "store".to_string())]),
             context: Some(serde_json::json!({"host": "context"})),
             additional_instructions: vec!["Answer for the desk.".to_string()],
             ..spec(&alice)
@@ -471,7 +480,7 @@ async fn a_store_owned_seat_is_composed_once_per_build_once_the_runtime_is_compo
     assert_eq!(
         seat.labels,
         lowered().labels,
-        "the seat's labels stay as Core lowered them"
+        "the draft's labels are the seat's own"
     );
     let prepared = preparer
         .prepare_identity_member(
@@ -513,6 +522,49 @@ async fn a_store_owned_seat_is_composed_once_per_build_once_the_runtime_is_compo
         return Err(format!("expected a retryable refusal, got {refused:?}").into());
     };
     assert!(reason.contains("the host is down"), "{reason}");
+
+    // A customizer that sets a label the seat does not carry refuses the
+    // seat for good, and the seat is left as Core lowered it.
+    let labelling = Arc::new(CountingCustomizer {
+        label: Some(("host_tier", "host-secret-gold")),
+        ..CountingCustomizer::default()
+    });
+    runtime
+        .set_agent_customizer(Some(Arc::clone(&labelling) as Arc<dyn AgentCustomizer>))
+        .await;
+    let mut seat = resumed();
+    let refused = preparer.compose_store_owned_seat(&mut seat).await;
+    let Err(MemberBuildPreparationRefusal::Final { reason }) = refused else {
+        return Err(format!("expected a refusal for good, got {refused:?}").into());
+    };
+    assert!(
+        reason.contains("added [host_tier]")
+            && reason.contains("row")
+            && !reason.contains("host-secret-gold"),
+        "the refusal names the label key and the remedy, never the value: {reason}"
+    );
+    assert_eq!(labelling.builds.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        runtime
+            .customizer_tools_pending_for(&alice)?
+            .map(|pending| pending.reason),
+        Some(reason),
+        "the identity's status holds the refusal's reason"
+    );
+    let prepared = preparer
+        .prepare_identity_member(
+            &member_of(&alice),
+            alice.clone(),
+            Some(Arc::clone(&runtime)),
+            management(MemberIdentityManagement::CommandDriven),
+        )
+        .await;
+    assert_eq!(prepared, Ok(MemberBuildPrepared::Prepared));
+    assert_eq!(
+        labelling.builds.load(Ordering::SeqCst),
+        2,
+        "a refused composition leaves no answer for a later preparation to take"
+    );
     Ok(())
 }
 

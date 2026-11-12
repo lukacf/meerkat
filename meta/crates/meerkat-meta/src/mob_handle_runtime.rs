@@ -2390,6 +2390,27 @@ pub(crate) fn agent_mob_tool_wrapper_as_member_for_test(
     runtime: &MobRuntime,
     session: meerkat_core::types::SessionId,
 ) -> Arc<dyn meerkat_core::AgentToolDispatcher> {
+    agent_mob_tool_wrapper_as_member_with_owners_for_test(
+        inner,
+        overrides,
+        runtime,
+        session,
+        runtime.private_owners().clone(),
+    )
+}
+
+/// [`agent_mob_tool_wrapper_as_member_for_test`] with `private_owners` as
+/// the process's record of whom its built members are private to: an empty
+/// one is a process that built none of the mob's members and has not read
+/// its event log yet.
+#[cfg(test)]
+pub(crate) fn agent_mob_tool_wrapper_as_member_with_owners_for_test(
+    inner: Arc<dyn meerkat_core::AgentToolDispatcher>,
+    overrides: ImplicitDelegateRetirementOverrides,
+    runtime: &MobRuntime,
+    session: meerkat_core::types::SessionId,
+    private_owners: crate::private_owners::PrivateOwners,
+) -> Arc<dyn meerkat_core::AgentToolDispatcher> {
     Arc::new(AutoWireParentMobToolDispatcher {
         inner,
         implicit_delegate_retirement_overrides: overrides,
@@ -2402,7 +2423,7 @@ pub(crate) fn agent_mob_tool_wrapper_as_member_for_test(
         realm_profiles: None,
         caller: Some(MobToolCaller {
             session_id: session,
-            private_owners: runtime.private_owners().clone(),
+            private_owners,
             state: runtime
                 .agent_mob_mcp_state()
                 .as_ref()

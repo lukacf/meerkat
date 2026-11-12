@@ -1470,6 +1470,53 @@ async fn a_stored_session_that_does_not_carry_its_members_labels_establishes_no_
     Ok(())
 }
 
+/// A stated limit: a runtime taken from a bare handle has no session service
+/// and cannot read who an ended session was private to. Its console answers
+/// every session no member holds as a session that does not exist to a
+/// caller who is not an administrator, the one operator of a console that
+/// can identify nobody included, also once it has read who its members are
+/// private to. An administrator attaches such a session.
+#[tokio::test]
+async fn a_runtime_taken_from_a_bare_handle_attaches_an_ended_session_for_an_administrator_only()
+-> TestResult {
+    const MOB: &str = "kept-apart-attach-bare-handle";
+    let left = state_after_a_console_with_sign_in(MOB).await?;
+    let restarted = persistent_gateway_runtime_in(left.state.path(), MOB, "", "").await?;
+    let runtime = MobRuntime::from_handle(restarted.handle());
+    assert!(
+        runtime.session_service().is_none(),
+        "a runtime taken from a bare handle has no session service"
+    );
+    let handle = runtime.handle();
+    assert!(runtime.private_owners().seeded(&handle).await.landed());
+    let operator = primed_operator(&runtime).await;
+    let administrator = AccessController::new(AccessControlConfig {
+        enabled: false,
+        admins: vec![ROOT.to_string()],
+        ..AccessControlConfig::default()
+    })
+    .expect("access controller")
+    .view_for_caller(Some(ROOT), None);
+    let never_ran = meerkat_core::types::SessionId::new();
+    for (session, whose) in [
+        (&left.beta_session, "an ordinary ended member's session"),
+        (&left.side_chat_session, "an ended private member's session"),
+        (&never_ran, "a session nobody ran on"),
+    ] {
+        assert_eq!(
+            attach_decision(&operator, &runtime, session).await,
+            "absent",
+            "the operator of a console that identifies nobody: {whose}"
+        );
+        assert_eq!(
+            attach_decision(&administrator, &runtime, session).await,
+            "allowed",
+            "the administrator: {whose}"
+        );
+    }
+    Ok(())
+}
+
 /// The record of who the members of `mob` are private to, read through a
 /// gate: every read waits until the gate opens, then reads the mob's event
 /// log. Counts the reads that start (a read starts at the log's beginning).

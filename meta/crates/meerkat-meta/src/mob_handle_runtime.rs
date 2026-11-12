@@ -11408,6 +11408,11 @@ impl MobRuntime {
     /// last to its spawn customizers. Meta's creation surfaces check every
     /// name either way, and the console drops a member's events under those
     /// identities.
+    ///
+    /// A runtime built this way has no session service
+    /// ([`Self::session_service`]), so its Console answers an ended session
+    /// that no member holds as absent to every caller who is not an
+    /// administrator.
     pub fn from_handle(handle: MobHandle) -> Self {
         let workgraph_admission = Arc::new(crate::workgraph_admission::WorkGraphAdmission::new(
             handle.observer(),

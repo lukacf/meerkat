@@ -120,6 +120,10 @@ Security, Upgrade and Changed.
   their record names its session or the console send it belongs to. The
   kinds listed under Changed are still stored without attributes and stay
   administrator-only.
+- A host that builds its runtime from a bare mob handle
+  (`MobRuntime::from_handle`): the Console of such a runtime answers an
+  ended session that no agent holds as a session that does not exist to
+  every caller who is not an administrator.
 
 ### Changed
 

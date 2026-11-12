@@ -332,6 +332,53 @@ pub(crate) fn domain_member_is_unmaterialized(
     )
 }
 
+/// Where endpoint resolution reads a seated local member's peer endpoint
+/// from, as MobMachine's residency facts decide it. Every place that
+/// resolves an endpoint takes this one answer, so no caller decides it from
+/// what the session service or the provisioner happen to hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MemberEndpointSource {
+    /// MobMachine's recorded endpoint, with no comms runtime lookup: a
+    /// Dormant member, and a Waking member whose wake has not bound it
+    /// (`member_wake_bound`: its plan is not applied) and whose endpoint is
+    /// recorded. A wake builds the member's comms runtime before it binds
+    /// its operation record; until its plan is applied that runtime is not
+    /// the mob's to wire through. The member's own side is realized by its
+    /// wake's topology step, which plans from MobMachine's edges after the
+    /// wake is Bound.
+    Recorded,
+    /// The member's comms runtime, and MobMachine's recorded endpoint when
+    /// it has none: a Waking member whose wake is Bound (its topology step
+    /// may already have planned its edges, so both sides are wired now), or
+    /// one with no recorded endpoint yet (its wake registers it).
+    RuntimeThenRecorded,
+    /// The member's comms runtime only: a Live member, or one MobMachine
+    /// holds no residency phase for.
+    Runtime,
+}
+
+/// [`MemberEndpointSource`] of `identity`, read from MobMachine's residency
+/// phase, its Bound mark and its recorded endpoint.
+pub(crate) fn domain_member_endpoint_source(
+    state: &mob_dsl::MobMachineState,
+    identity: &AgentIdentity,
+) -> MemberEndpointSource {
+    let identity = mob_dsl::AgentIdentity::from_domain(identity);
+    match member_materialization_phase(state, &identity) {
+        Some(mob_dsl::MemberMaterializationPhase::Dormant) => MemberEndpointSource::Recorded,
+        Some(mob_dsl::MemberMaterializationPhase::Waking)
+            if !state.member_wake_bound.contains(&identity)
+                && state.member_peer_endpoints.contains_key(&identity) =>
+        {
+            MemberEndpointSource::Recorded
+        }
+        Some(mob_dsl::MemberMaterializationPhase::Waking) => {
+            MemberEndpointSource::RuntimeThenRecorded
+        }
+        Some(mob_dsl::MemberMaterializationPhase::Live) | None => MemberEndpointSource::Runtime,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The runtime obligation scan, mapped onto the seated members
 // ---------------------------------------------------------------------------
@@ -1181,6 +1228,70 @@ pub(crate) fn apply_verified_member_verdict(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    /// Where a member's endpoint is read from follows MobMachine's residency
+    /// phase, its Bound mark and its recorded endpoint, and nothing else.
+    #[test]
+    fn a_members_endpoint_source_follows_its_residency_its_bind_and_its_recorded_endpoint() {
+        let identity = AgentIdentity::from("endpoint-source-member");
+        let key = mob_dsl::AgentIdentity::from_domain(&identity);
+        let mut state = mob_dsl::MobMachineState::default();
+        let source =
+            |state: &mob_dsl::MobMachineState| domain_member_endpoint_source(state, &identity);
+
+        assert_eq!(
+            source(&state),
+            MemberEndpointSource::Runtime,
+            "no residency phase"
+        );
+
+        state
+            .member_materialization
+            .insert(key.clone(), mob_dsl::MemberMaterializationPhase::Dormant);
+        assert_eq!(source(&state), MemberEndpointSource::Recorded, "Dormant");
+
+        state
+            .member_materialization
+            .insert(key.clone(), mob_dsl::MemberMaterializationPhase::Waking);
+        state
+            .member_peer_endpoints
+            .insert(key.clone(), mob_dsl::MemberPeerEndpoint::default());
+        assert_eq!(
+            source(&state),
+            MemberEndpointSource::Recorded,
+            "Waking, its wake has not bound it, its endpoint is recorded"
+        );
+
+        state.member_wake_bound.insert(key.clone());
+        assert_eq!(
+            source(&state),
+            MemberEndpointSource::RuntimeThenRecorded,
+            "Waking and Bound: its comms runtime is wired through"
+        );
+
+        state
+            .member_materialization
+            .insert(key.clone(), mob_dsl::MemberMaterializationPhase::Live);
+        state.member_wake_bound.remove(&key);
+        assert_eq!(source(&state), MemberEndpointSource::Runtime, "Live");
+    }
+
+    /// A Waking member whose wake has not bound it and whose endpoint is not
+    /// recorded yet (its wake registers it) keeps the lookup of its comms
+    /// runtime: there is no recorded endpoint to wire it from.
+    #[test]
+    fn a_waking_unbound_member_without_a_recorded_endpoint_keeps_the_runtime_lookup() {
+        let identity = AgentIdentity::from("endpoint-source-unrecorded");
+        let key = mob_dsl::AgentIdentity::from_domain(&identity);
+        let mut state = mob_dsl::MobMachineState::default();
+        state
+            .member_materialization
+            .insert(key, mob_dsl::MemberMaterializationPhase::Waking);
+        assert_eq!(
+            domain_member_endpoint_source(&state, &identity),
+            MemberEndpointSource::RuntimeThenRecorded
+        );
+    }
 
     #[test]
     fn member_restore_policy_defaults_to_on_demand() {

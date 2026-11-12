@@ -385,6 +385,10 @@ enum RetirementEndpointPlan {
         entry: RosterEntry,
         member_ref: MemberRef,
         comms_name: String,
+        /// MobMachine's recorded endpoint of a Waking member whose comms
+        /// runtime is read first (`MemberEndpointSource::RuntimeThenRecorded`):
+        /// the endpoint it is observed from when it has no comms runtime.
+        recorded: Option<TrustedPeerDescriptor>,
     },
     Refused(MobError),
 }
@@ -1762,13 +1766,20 @@ impl MobActor {
                         spec,
                     }));
                 }
-                // A member that is not materialized is observed from its
-                // durable endpoint: no comms runtime of it is looked up.
-                if crate::runtime::boot_plan::domain_member_is_dormant(
+                // MobMachine decides where the member's endpoint is read
+                // from, as for every wiring verb: a member that is not
+                // materialized, or whose wake has not bound it, is observed
+                // from its durable endpoint, and no comms runtime of it is
+                // looked up.
+                let endpoint_source = crate::runtime::boot_plan::domain_member_endpoint_source(
                     self.dsl_authority.state(),
                     &identity,
-                ) && let Some(spec) =
-                    self.machine_member_peer_spec_for(&identity, "retirement endpoint observation")?
+                );
+                if endpoint_source == crate::runtime::boot_plan::MemberEndpointSource::Recorded
+                    && let Some(spec) = self.machine_member_peer_spec_for(
+                        &identity,
+                        "retirement endpoint observation",
+                    )?
                 {
                     return Ok(RetirementEndpointPlan::Ready(
                         WiringEndpoint::LocalDormant {
@@ -1777,10 +1788,18 @@ impl MobActor {
                         },
                     ));
                 }
+                let recorded = if endpoint_source
+                    == crate::runtime::boot_plan::MemberEndpointSource::RuntimeThenRecorded
+                {
+                    self.machine_member_peer_spec_for(&identity, "retirement endpoint observation")?
+                } else {
+                    None
+                };
                 Ok(RetirementEndpointPlan::Local {
                     entry: entry.clone(),
                     member_ref,
                     comms_name,
+                    recorded,
                 })
             })()
             .unwrap_or_else(RetirementEndpointPlan::Refused);
@@ -1816,7 +1835,7 @@ impl MobActor {
                 let endpoint = match plan {
                     RetirementEndpointPlan::Ready(endpoint) => Ok(endpoint),
                     RetirementEndpointPlan::Refused(error) => Err(error),
-                    RetirementEndpointPlan::Local { entry, member_ref, comms_name } => async {
+                    RetirementEndpointPlan::Local { entry, member_ref, comms_name, recorded } => async {
                         if let Some(comms) = provisioner.comms_runtime(&member_ref).await {
                             let public_key = comms.public_key().ok_or_else(|| MobError::WiringError(format!(
                                 "retirement endpoint requires public key for '{}'", entry.agent_identity,
@@ -1827,6 +1846,11 @@ impl MobActor {
                                     .map_err(|error| MobError::WiringError(error.to_string()))?;
                             }
                             return Ok(WiringEndpoint::Local { entry: Box::new(entry), comms, spec, comms_name });
+                        }
+                        // A Waking member with no comms runtime to read: its
+                        // recorded endpoint, as every wiring verb answers.
+                        if let Some(spec) = recorded {
+                            return Ok(WiringEndpoint::LocalDormant { entry: Box::new(entry), spec });
                         }
                         let binding = Self::runtime_binding_for_member_ref(&member_ref).ok_or_else(|| {
                             MobError::WiringError(format!("retirement requires comms runtime for '{}'", entry.agent_identity))

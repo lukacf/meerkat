@@ -304,6 +304,28 @@ them.
   cancel a pending peer message. A kickoff notice still wakes a peer that is
   not live.
 
+- `meerkat-mob`: a member that was being woken could not be wired, messaged
+  or notified for a short span of its wake (0.9.7 through 0.9.14: since
+  members are woken on demand). A wake creates the member's session, and
+  with it its comms runtime, before it binds the member's operation record.
+  To find a member's peer endpoint the mob read its recorded endpoint first
+  for a member that is not materialized, but for a member that is being woken
+  only after a lookup of its comms runtime had found nothing. In that span
+  the lookup found the runtime, and the call was refused with `missing
+  generated owner operation binding`. A spawn wired to the member by the
+  definition's wiring rules was refused; when the refused spawn's rollback
+  met the same member, the spawn answered `rollback remains owned for retry`
+  and the new member stayed seated with part of its edges until the
+  rollback's next attempt, seconds later. A kickoff notice owed to the member
+  was dropped with a log record. A host peer message to it was refused. A
+  member woken at the same time recorded its edge to it as owing a repair.
+  The mob now reads the recorded endpoint, without looking the comms runtime
+  up, for a member that is not materialized and for one whose wake has not
+  yet applied its plan, wherever it resolves an endpoint, the rollback of a
+  refused spawn included. Such a member takes the edge on its own side when
+  its wake restores its wiring. A member whose wake has applied its plan is
+  wired through its comms runtime, as before.
+
 ### Known limitations
 
 - The issuer of OpenAI-family continuity material is the service (a kind of

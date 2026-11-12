@@ -6181,13 +6181,15 @@ pub(super) enum WiringEndpoint {
         host: mob_dsl::HostId,
         spec: TrustedPeerDescriptor,
     },
-    /// A seated local member that is not materialized in this process
-    /// (Dormant, or Waking before its comms runtime exists). Its peer
-    /// material is MobMachine's durable endpoint (`member_peer_endpoints`):
-    /// a live peer's trust toward it is installed from that endpoint. It has
-    /// no comms runtime, so nothing is installed or removed on its own side
-    /// and it sends no notice: its wake's topology step realizes its trust
-    /// from machine state. No wiring verb wakes it.
+    /// A seated local member that is not materialized for wiring in this
+    /// process (Dormant, or Waking before its wake has bound it, whether or
+    /// not that wake has built its comms runtime yet; see
+    /// `boot_plan::MemberEndpointSource`). Its peer material is
+    /// MobMachine's durable endpoint (`member_peer_endpoints`): a live
+    /// peer's trust toward it is installed from that endpoint. It has no
+    /// comms runtime the mob may wire through, so nothing is installed or
+    /// removed on its own side and it sends no notice: its wake's topology
+    /// step realizes its trust from machine state. No wiring verb wakes it.
     LocalDormant {
         entry: Box<RosterEntry>,
         spec: TrustedPeerDescriptor,
@@ -66645,12 +66647,17 @@ impl MobActor {
             });
         }
 
-        // A Dormant member is wired from its durable endpoint: no comms
-        // runtime of it is looked up (there is none), and nothing wakes it.
-        if super::boot_plan::domain_member_is_dormant(
+        // MobMachine decides where the member's endpoint is read from. A
+        // Dormant member, and a Waking one whose wake has not bound it, are
+        // wired from the recorded endpoint: no comms runtime of it is looked
+        // up (a Dormant member has none; a wake builds one before it binds
+        // the member's operation record, and it is not the mob's to wire
+        // through until the wake's plan is applied), and nothing wakes it.
+        let endpoint_source = super::boot_plan::domain_member_endpoint_source(
             self.dsl_authority.state(),
             &entry.agent_identity,
-        ) {
+        );
+        if endpoint_source == super::boot_plan::MemberEndpointSource::Recorded {
             return self.local_dormant_wiring_endpoint(entry, context);
         }
 
@@ -66684,13 +66691,12 @@ impl MobActor {
                 let spec = Self::peer_only_spec_for_binding(&binding, context)?;
                 Ok(WiringEndpoint::PeerOnly { spec, binding })
             }
-            // A Waking member whose comms runtime does not exist yet: its
+            // A Waking member with no comms runtime to read (the same
+            // answer of MobMachine as above): its recorded endpoint, and its
             // wake's topology step realizes the edge from machine state.
             MemberRef::Session { .. }
-                if super::boot_plan::domain_member_is_unmaterialized(
-                    self.dsl_authority.state(),
-                    &entry.agent_identity,
-                ) =>
+                if endpoint_source
+                    == super::boot_plan::MemberEndpointSource::RuntimeThenRecorded =>
             {
                 self.local_dormant_wiring_endpoint(entry, context)
             }

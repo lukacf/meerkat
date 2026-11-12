@@ -37,6 +37,18 @@ them.
 
 ### Breaking
 
+- `meerkat-core`: `service::StartTurnRuntimeSemantics` gains the public field
+  `requester_origin: Option<RequesterOrigin>` (how the host's ingress attested
+  `requester`). A struct literal that names every field adds it (`None` keeps
+  today's behaviour).
+- `meerkat-runtime`: `InputHeader` gains the public field
+  `requester_origin: Option<meerkat_core::RequesterOrigin>` (serde default,
+  omitted when absent, so stored inputs read back unchanged). A struct literal
+  that names every field adds it.
+- `meerkat-meta`: `identity_first::BridgeDelivery` gains the public field
+  `requester_origin: Option<meerkat_core::RequesterOrigin>`. A bridge that
+  builds one with a struct literal adds it; `BridgeDelivery::new` sets `None`.
+
 - Behaviour-only (not measured by the gate): `meerkat-core`:
   `ReplayPlan::build` with an OpenAI-wire `ReplayTarget`, and
   `ReplayWireFamily::OpenAi.strip_foreign_metadata`, no longer keep
@@ -47,6 +59,42 @@ them.
   targets are unchanged.
 
 ### Added
+
+- `meta/send` takes an optional `requester`: a person the host attests, under
+  its own host authority, as the original requester of the content it relays
+  (`{"kind": "person", "id": "<opaque host-scoped stable id>"}`; one kind for
+  now, unknown kinds and fields are refused). The member's admitted input and
+  the turn's rows record that person as the turn's direct requester, with
+  origin `host_attested` and typed-text authorship (`TranscriptTurnInput::
+  TypedText`). Absent, the send is today's, byte for byte. It is accepted only
+  on the host route (the gateway's stdin RPC): the Console does not serve
+  `meta/send`, a Console send that passes a `requester` is refused, and no
+  agent tool, peer or comms delivery, schedule, flow or fork can set one. It
+  does not combine with `idempotency_key` (a keyed send is a member
+  continuation, which carries no requester). `meta/capabilities` advertises it
+  as the feature capability `send_host_attested_requester`; the Meta Python
+  SDK (`send(..., requester=...)`) and TypeScript SDK (`send(..., {
+  requester })`) refuse it, typed, on a gateway that does not.
+- `meerkat-core`: `RequesterOrigin` (`ConsoleSignedIn`, `HostAttested`) and
+  `TurnRequester::{with_origin, origin}`: the turn's requester records how its
+  ingress attested it. Core carries the value and never interprets it. Rows
+  written before it read back with no origin. A Console signed-in send now
+  records origin `console_signed_in`.
+- `meerkat-mob`: `WorkSpec::{with_host_attested_requester,
+  with_requester_origin, requester_origin}`. Ordinary (not host-human) work
+  carries a requester only when it is host-attested; an origin that does not
+  match the work's authorship, or an origin without a requester, is refused
+  before admission.
+
+### Known limitations
+
+- The supervisor bridge is not widened: a member it reaches does not carry
+  the requester, and its rows name none. A delivery path that cannot carry
+  the requester onto an admitted runtime input (a placed member, or one
+  without a runtime-backed session) refuses the send typed instead of delivering it without
+  one.
+- The requester has no display name yet: the sender label rides only the
+  Console's host-human lane.
 
 - `meerkat-core`: `OpenAiContinuityIssuer` (a kind of service,
   `OpenAiContinuityService`, at an endpoint: `at_base_url`,

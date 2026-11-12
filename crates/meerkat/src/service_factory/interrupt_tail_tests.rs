@@ -2386,6 +2386,7 @@ fn peer_message(body: &str) -> Input {
             supersession_key: None,
             correlation_id: None,
             requester: None,
+            requester_origin: None,
         },
         convention: Some(PeerConvention::Message),
         content: body.into(),

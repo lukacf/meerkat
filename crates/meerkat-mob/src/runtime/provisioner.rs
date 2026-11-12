@@ -7135,6 +7135,7 @@ impl SessionBackend {
                 supersession_key: None,
                 correlation_id,
                 requester: req.runtime.requester.clone(),
+                requester_origin: req.runtime.requester_origin,
             },
             content: prompt,
             typed_turn_appends: req.runtime.typed_turn_appends.clone(),

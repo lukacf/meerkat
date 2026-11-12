@@ -2811,6 +2811,18 @@ pub(crate) fn console_sends_name_requesters(decisions: &RuntimeDecisionState) ->
     decisions.console.require_app_auth
 }
 
+/// A Console send never names its requester: the Console stamps its own
+/// signed-in person (origin `console_signed_in`). A `requester` passed here,
+/// the host-attested parameter of the host route's `meta/send`, is refused
+/// rather than ignored.
+pub(crate) fn console_send_requester_refusal(params: &Value) -> Option<String> {
+    params.get("requester").map(|_| {
+        "requester is not accepted on a console send: the console records its signed-in person \
+         itself"
+            .to_string()
+    })
+}
+
 /// Why a console send over HTTP may not claim its declared `origin_kind`: the
 /// kinds of Meerkat's own internal emitters (a schedule, a connector, a flow,
 /// a policy, the host) are theirs alone, so a client's send that names one is
@@ -4067,8 +4079,10 @@ async fn console_send_identity_first_governed(
     // agent's run (a governed send's requester is its association's) and the
     // sender label its model reads. A redispatch carries what the send's own
     // frame recorded instead (below).
-    let mut attribution =
-        crate::console_aggregator::ConsoleHumanAttribution::of_sender(governance.sender.as_ref());
+    let mut attribution = crate::console_aggregator::ConsoleHumanAttribution::of_send(
+        governance.sender.as_ref(),
+        request.origin_kind,
+    );
     if governed.is_some() && !request.skill_refs.is_empty() {
         return Err(ConsoleSendError::InvalidRequest(
             "a governed Console send carries no skill selection".to_string(),
@@ -4186,10 +4200,10 @@ async fn console_send_identity_first_governed(
                     // when it was accepted, as the member lane's redispatch
                     // reads them: never the live caller's, whose console may
                     // name a requester the send never had, or none.
-                    attribution = crate::console_aggregator::ConsoleHumanAttribution::of_sender(
-                        crate::console_aggregator::ConsoleSender::of_frame_payload(&frame.payload)
-                            .as_ref(),
-                    );
+                    attribution =
+                        crate::console_aggregator::ConsoleHumanAttribution::of_frame_payload(
+                            &frame.payload,
+                        );
                     (accepted, Some(claim), false)
                 }
                 // A governed send that submitted nothing (see
@@ -4224,10 +4238,10 @@ async fn console_send_identity_first_governed(
                     }
                     // As above: what the send's frame recorded, never the
                     // live caller's.
-                    attribution = crate::console_aggregator::ConsoleHumanAttribution::of_sender(
-                        crate::console_aggregator::ConsoleSender::of_frame_payload(&frame.payload)
-                            .as_ref(),
-                    );
+                    attribution =
+                        crate::console_aggregator::ConsoleHumanAttribution::of_frame_payload(
+                            &frame.payload,
+                        );
                     (accepted, Some(claim), true)
                 }
                 NativeSendObservation::Absent | NativeSendObservation::Unknown { .. } => {
@@ -9733,6 +9747,9 @@ async fn console_rpc_multipart_answer(
                     );
                 }
             };
+            if let Some(refusal) = console_send_requester_refusal(&parsed_request.params) {
+                return (StatusCode::OK, invalid_params(response_id, refusal));
+            }
             let Some(identity) = parsed_request
                 .params
                 .get("identity")
@@ -12611,6 +12628,9 @@ async fn handle_console_aggregator_rpc(
                         return invalid_params(response_id, format!("invalid send params: {err}"));
                     }
                 };
+            if let Some(refusal) = console_send_requester_refusal(&request.params) {
+                return invalid_params(response_id, refusal);
+            }
             if let Some(refusal) = reserved_origin_kind_refusal(&send_request) {
                 return invalid_params(response_id, refusal);
             }
@@ -14054,6 +14074,9 @@ async fn handle_console_runtime_rpc_with_visibility(
                         return invalid_params(response_id, format!("invalid send params: {err}"));
                     }
                 };
+            if let Some(refusal) = console_send_requester_refusal(&request.params) {
+                return invalid_params(response_id, refusal);
+            }
             if let Some(refusal) = reserved_origin_kind_refusal(&send_request) {
                 return invalid_params(response_id, refusal);
             }

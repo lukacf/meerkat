@@ -53,6 +53,7 @@ fn make_progress_input(label: &str) -> Input {
             supersession_key: None,
             correlation_id: None,
             requester: None,
+            requester_origin: None,
         },
         convention: Some(PeerConvention::ResponseProgress {
             request_id: format!("req-{label}"),

@@ -448,10 +448,15 @@ impl RequesterConsensus {
             (Self::Agreed(Some(current)), Some(candidate))
                 if current.principal() == candidate.principal() =>
             {
+                // One attestation for the batch only when every input names
+                // the same one; inputs that disagree leave it unnamed.
+                let origin = (current.origin() == candidate.origin())
+                    .then(|| current.origin())
+                    .flatten();
                 Self::Agreed(Some(if current.is_carried() || candidate.is_carried() {
-                    TurnRequester::carried(current.principal().clone())
+                    TurnRequester::carried(current.principal().clone()).with_origin(origin)
                 } else {
-                    current
+                    current.with_origin(origin)
                 }))
             }
             _ => Self::Conflicted,
@@ -11863,6 +11868,7 @@ mod tests {
                 supersession_key: None,
                 correlation_id: None,
                 requester: None,
+                requester_origin: None,
             },
             content: text.into(),
             typed_turn_appends: Vec::new(),
@@ -11901,6 +11907,7 @@ mod tests {
                 supersession_key: None,
                 correlation_id: None,
                 requester: None,
+                requester_origin: None,
             },
             convention: None,
             content: "peer message".into(),
@@ -11936,6 +11943,7 @@ mod tests {
                 supersession_key: None,
                 correlation_id: None,
                 requester: None,
+                requester_origin: None,
             },
             convention: Some(crate::input::PeerConvention::Message),
             content: "plain body payload".into(),
@@ -11972,6 +11980,7 @@ mod tests {
                 supersession_key: None,
                 correlation_id: None,
                 requester: None,
+                requester_origin: None,
             },
             convention: Some(crate::input::PeerConvention::Request {
                 request_id: "req-123".into(),
@@ -12019,6 +12028,7 @@ mod tests {
                 supersession_key: None,
                 correlation_id: None,
                 requester: None,
+                requester_origin: None,
             },
             convention: Some(crate::input::PeerConvention::ResponseTerminal {
                 request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".into(),
@@ -12079,6 +12089,7 @@ mod tests {
                 supersession_key: None,
                 correlation_id: None,
                 requester: None,
+                requester_origin: None,
             },
             convention: Some(crate::input::PeerConvention::ResponseTerminal {
                 request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".into(),
@@ -12310,6 +12321,7 @@ mod tests {
                 supersession_key: None,
                 correlation_id: None,
                 requester: None,
+                requester_origin: None,
             },
             convention: Some(crate::input::PeerConvention::ResponseTerminal {
                 request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".into(),
@@ -12388,6 +12400,7 @@ mod tests {
                 supersession_key: None,
                 correlation_id: None,
                 requester: None,
+                requester_origin: None,
             },
             convention: Some(crate::input::PeerConvention::ResponseTerminal {
                 request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".into(),
@@ -12450,6 +12463,7 @@ mod tests {
                 supersession_key: None,
                 correlation_id: None,
                 requester: None,
+                requester_origin: None,
             },
             convention: Some(crate::input::PeerConvention::ResponseTerminal {
                 request_id: TEST_PEER_RESPONSE_REQUEST_ID.into(),
@@ -12508,6 +12522,7 @@ mod tests {
                 supersession_key: None,
                 correlation_id: None,
                 requester: None,
+                requester_origin: None,
             },
             convention: Some(crate::input::PeerConvention::ResponseTerminal {
                 request_id: TEST_PEER_RESPONSE_REQUEST_ID.into(),
@@ -12581,6 +12596,7 @@ mod tests {
                 supersession_key: None,
                 correlation_id: None,
                 requester: None,
+                requester_origin: None,
             },
             convention: Some(crate::input::PeerConvention::ResponseTerminal {
                 request_id: TEST_PEER_RESPONSE_REQUEST_ID.into(),
@@ -12659,6 +12675,7 @@ mod tests {
                 supersession_key: None,
                 correlation_id: None,
                 requester: None,
+                requester_origin: None,
             },
             convention: Some(PeerConvention::Message),
             content: body.into(),
@@ -13329,6 +13346,75 @@ mod tests {
         }
     }
 
+    /// How the host's ingress attested the input's requester is stamped with
+    /// it on the turn: a host-attested person stays a direct requester and
+    /// names its origin, and the origin survives the row's serde round trip
+    /// (the stored row a restarted runtime reads back). An input without an
+    /// origin stamps none.
+    #[test]
+    fn an_input_s_requester_origin_is_stamped_with_its_requester() {
+        use meerkat_core::RequesterOrigin;
+        use meerkat_core::types::TurnRequester;
+        for origin in [
+            None,
+            Some(RequesterOrigin::HostAttested),
+            Some(RequesterOrigin::ConsoleSignedIn),
+        ] {
+            let mut input = make_prompt("a person's typed text");
+            input.header_mut().requester = Some(requester_principal("person-7"));
+            input.header_mut().requester_origin = origin;
+            let stamped = for_input(&input, admission_semantics(&input));
+            let requester = stamped
+                .transcript_identity
+                .requester
+                .clone()
+                .expect("the turn names its requester");
+            assert_eq!(
+                requester,
+                TurnRequester::direct(requester_principal("person-7")).with_origin(origin)
+            );
+            assert_eq!(requester.origin(), origin);
+            assert!(requester.direct_principal().is_some(), "still direct");
+            let row: TurnRequester =
+                serde_json::from_str(&serde_json::to_string(&requester).expect("serialize"))
+                    .expect("deserialize");
+            assert_eq!(row.origin(), origin, "the origin survives the stored row");
+        }
+        // A row written before the field existed reads back with no origin.
+        let legacy: TurnRequester = serde_json::from_value(serde_json::json!({
+            "principal": requester_principal("person-7"),
+        }))
+        .expect("legacy row");
+        assert_eq!(legacy.origin(), None);
+    }
+
+    /// Inputs of one batch that name the same requester under different
+    /// origins leave the batch's origin unnamed; the same origin is kept.
+    #[test]
+    fn a_batch_keeps_a_requester_origin_only_when_its_inputs_agree() {
+        use meerkat_core::RequesterOrigin;
+        use meerkat_core::types::TurnRequester;
+        let principal = requester_principal("p");
+        let host = TurnRequester::direct(principal.clone())
+            .with_origin(Some(RequesterOrigin::HostAttested));
+        let console = TurnRequester::direct(principal.clone())
+            .with_origin(Some(RequesterOrigin::ConsoleSignedIn));
+        for (batch, expected) in [
+            (
+                [host.clone(), host.clone()],
+                Some(RequesterOrigin::HostAttested),
+            ),
+            ([host.clone(), console.clone()], None),
+        ] {
+            let mut consensus = RequesterConsensus::default();
+            for requester in &batch {
+                consensus.observe(Some(requester));
+            }
+            let folded = consensus.finish().expect("one principal").expect("named");
+            assert_eq!(folded.origin(), expected);
+        }
+    }
+
     /// One principal, carried across a hop by one input of a batch and
     /// brought directly by another, is carried for the batch, in either
     /// order: a run is direct only when every one of its inputs is. Two
@@ -13619,6 +13705,7 @@ mod tests {
                 supersession_key: None,
                 correlation_id: None,
                 requester: None,
+                requester_origin: None,
             },
             convention: Some(PeerConvention::ResponseTerminal {
                 request_id: request_id.into(),
@@ -15273,6 +15360,7 @@ mod tests {
                 supersession_key: None,
                 correlation_id: None,
                 requester: None,
+                requester_origin: None,
             },
             convention: Some(crate::input::PeerConvention::Message),
             content: meerkat_core::types::ContentInput::Blocks(blocks.clone()),
@@ -15342,6 +15430,7 @@ mod tests {
                 supersession_key: None,
                 correlation_id: None,
                 requester: None,
+                requester_origin: None,
             },
             convention: Some(crate::input::PeerConvention::Message),
             content: meerkat_core::types::ContentInput::Blocks(blocks.clone()),
@@ -15405,6 +15494,7 @@ mod tests {
                 supersession_key: None,
                 correlation_id: None,
                 requester: None,
+                requester_origin: None,
             },
             convention: Some(crate::input::PeerConvention::Message),
             content: meerkat_core::types::ContentInput::Blocks(blocks.clone()),
@@ -15467,6 +15557,7 @@ mod tests {
                 supersession_key: None,
                 correlation_id: None,
                 requester: None,
+                requester_origin: None,
             },
             convention: Some(crate::input::PeerConvention::Message),
             content: meerkat_core::types::ContentInput::Blocks(blocks.clone()),
@@ -15529,6 +15620,7 @@ mod tests {
                 supersession_key: None,
                 correlation_id: None,
                 requester: None,
+                requester_origin: None,
             },
             step_id: "step-1".into(),
             content: meerkat_core::types::ContentInput::Blocks(blocks),
@@ -15587,6 +15679,7 @@ mod tests {
                 supersession_key: None,
                 correlation_id: None,
                 requester: None,
+                requester_origin: None,
             },
             event_type: "webhook".into(),
             payload: serde_json::json!({"body": "see this event"}),
@@ -15640,6 +15733,7 @@ mod tests {
                 supersession_key: None,
                 correlation_id: None,
                 requester: None,
+                requester_origin: None,
             },
             event_type: "webhook".into(),
             payload: serde_json::json!({"body": "see attached screenshot"}),
@@ -15687,6 +15781,7 @@ mod tests {
                 supersession_key: None,
                 correlation_id: None,
                 requester: None,
+                requester_origin: None,
             },
             event_type: "invoice.created".into(),
             payload: serde_json::json!({"invoice_id": "inv_123"}),
@@ -15756,6 +15851,7 @@ mod tests {
                 supersession_key: None,
                 correlation_id: None,
                 requester: None,
+                requester_origin: None,
             },
             event_type: "webhook".into(),
             payload: serde_json::json!({"body": "build failed"}),
@@ -15795,6 +15891,7 @@ mod tests {
                 supersession_key: None,
                 correlation_id: None,
                 requester: None,
+                requester_origin: None,
             },
             event_type: "webhook".into(),
             payload: serde_json::json!({"body": "urgent"}),
@@ -17333,6 +17430,7 @@ mod tests {
                 supersession_key: None,
                 correlation_id: None,
                 requester: None,
+                requester_origin: None,
             },
             convention: Some(PeerConvention::ResponseTerminal {
                 request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".into(),
@@ -17383,6 +17481,7 @@ mod tests {
                 supersession_key: None,
                 correlation_id: None,
                 requester: None,
+                requester_origin: None,
             },
             convention: Some(PeerConvention::Message),
             content: "msg".into(),

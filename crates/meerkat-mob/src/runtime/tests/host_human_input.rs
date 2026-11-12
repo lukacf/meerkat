@@ -943,6 +943,144 @@ async fn host_human_requester_reaches_the_member_input_and_its_turn() {
     fixture.finish().await;
 }
 
+/// A person the host attests under its own host authority rides ordinary
+/// (not host-human) work: the member's admitted input names that person as
+/// its requester, and the turn's row records it as a direct requester with
+/// origin `host_attested` and typed-text authorship. An origin that does not
+/// match the work is refused before any admission: a console-signed-in
+/// origin on ordinary work, a host-attested one on host human input, and an
+/// origin with no requester.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_host_attested_requester_reaches_ordinary_work_and_its_typed_turn() {
+    use meerkat_core::RequesterOrigin;
+    const RELAYED: &str = "text a person typed that the host relays";
+    let fixture = Fixture::new().await;
+    let before = fixture.durable().await;
+    let requester = person("relayed");
+    let key = delivery("host-attested");
+    fixture
+        .submit_generic(
+            WorkSpec::new(RELAYED, WorkOrigin::External)
+                .with_host_attested_requester(requester.clone()),
+            key.clone(),
+        )
+        .await;
+    let observed = fixture.input_for_delivery(&key).await;
+    assert_eq!(observed.state().state.requester(), Some(&requester));
+    let row = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let durable = fixture.durable().await;
+            if let Some(row) = durable.messages()[before.messages().len()..]
+                .iter()
+                .find_map(|message| match message {
+                    Message::User(user) if user.text_content().contains(RELAYED) => {
+                        Some(user.clone())
+                    }
+                    _ => None,
+                })
+            {
+                break row;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("the relayed row commits");
+    assert_eq!(
+        row.identity.requester,
+        Some(
+            meerkat_core::TurnRequester::direct(requester.clone())
+                .with_origin(Some(RequesterOrigin::HostAttested))
+        ),
+        "the row names the attested person as its direct requester"
+    );
+    assert_eq!(
+        row.identity.turn_input,
+        Some(meerkat_core::types::TranscriptTurnInput::TypedText),
+        "the relayed text is typed text"
+    );
+
+    let rows_before = fixture.input_count().await;
+    let scope = fixture
+        .handle
+        .capture_member_delivery_scope(&fixture.entry.agent_identity)
+        .await
+        .expect("capture the member's delivery scope");
+    let console_origin_on_work = fixture
+        .handle
+        .submit_work_with_mode_and_delivery_identity_bounded(
+            &scope,
+            WorkSpec::new("generic work", WorkOrigin::External)
+                .with_requester(requester.clone())
+                .with_requester_origin(Some(RequesterOrigin::ConsoleSignedIn)),
+            HandlingMode::Queue,
+            delivery("console-origin-on-work"),
+            deadline(),
+        )
+        .await;
+    assert!(
+        matches!(
+            &console_origin_on_work,
+            Err(MobError::UnsupportedForMode { reason, .. })
+                if reason == "a requester rides only host human input"
+        ),
+        "{:?}",
+        console_origin_on_work.as_ref().map(|_| ())
+    );
+    let host_attested_on_human = fixture
+        .start(
+            WorkSpec::new(HUMAN, WorkOrigin::External)
+                .with_host_attested_requester(requester.clone()),
+            HandlingMode::Queue,
+            delivery("host-attested-on-human"),
+        )
+        .await;
+    assert!(
+        matches!(
+            &host_attested_on_human,
+            Err(MobError::UnsupportedForMode { reason, .. })
+                if reason == "host human input carries its own requester, not a host-attested one"
+        ),
+        "{:?}",
+        host_attested_on_human.as_ref().map(|_| ())
+    );
+    let origin_without_requester = fixture
+        .handle
+        .submit_work_with_mode_and_delivery_identity_bounded(
+            &scope,
+            WorkSpec::new("generic work", WorkOrigin::External)
+                .with_requester_origin(Some(RequesterOrigin::HostAttested)),
+            HandlingMode::Queue,
+            delivery("origin-without-requester"),
+            deadline(),
+        )
+        .await;
+    assert!(
+        origin_without_requester.is_err(),
+        "an origin needs a requester"
+    );
+    let typed_without_requester = fixture
+        .handle
+        .submit_work_with_mode_and_delivery_identity_bounded(
+            &scope,
+            WorkSpec::new("generic work", WorkOrigin::External).with_person_typed_text(),
+            HandlingMode::Queue,
+            delivery("typed-without-requester"),
+            deadline(),
+        )
+        .await;
+    assert!(
+        typed_without_requester.is_err(),
+        "typed-text authorship needs the person who typed it"
+    );
+    assert_eq!(
+        fixture.input_count().await,
+        rows_before,
+        "the refused work admitted nothing"
+    );
+    fixture.finish().await;
+}
+
 const SECTION: &str = "Operator records: prefers terse status notes";
 
 fn section(text: &str) -> TurnRequestContext {
@@ -4331,6 +4469,7 @@ async fn requeue_shutdown_does_not_keep_a_queued_event_or_a_directed_step() {
             supersession_key: None,
             correlation_id: None,
             requester: None,
+            requester_origin: None,
         },
         event_type: "build".into(),
         payload: serde_json::json!({ "status": KEPT_OUT_EVENT }),

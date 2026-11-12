@@ -2845,6 +2845,7 @@ impl MobActor {
                 supersession_key: None,
                 correlation_id: None,
                 requester: None,
+                requester_origin: None,
             },
             content: state.prompt.clone(),
             typed_turn_appends: Vec::new(),
@@ -3001,6 +3002,7 @@ impl MobActor {
                     content_attribution: crate::mob_machine::WorkContentAttribution::Conversational,
                     // Mob-internal kickoff has no original requester.
                     requester: None,
+                    requester_origin: None,
                     operation_id: Some(operation_id.clone()),
                     placed_completion_obligation: None,
                     placed_completion_context: None,

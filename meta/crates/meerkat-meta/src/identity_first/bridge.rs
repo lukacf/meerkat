@@ -2638,6 +2638,8 @@ struct InternalBridgeWork<'a> {
     /// The original requester of the explicit human lane's turn, carried to
     /// the member's admitted input. Absent on every other lane.
     requester: Option<&'a meerkat_core::PrincipalRef>,
+    /// How the host attested `requester` (see [`BridgeDelivery::requester_origin`]).
+    requester_origin: Option<meerkat_core::RequesterOrigin>,
     /// The request-only context of the explicit human lane's turn (its
     /// requester's operator memory), carried to the member's admitted input.
     /// Absent on every other lane.
@@ -2796,7 +2798,21 @@ async fn submit_internal_bridge_work(
     // human lane (refused on every other lane before this), onto the
     // member's admitted input.
     if let Some(requester) = work.requester {
-        spec = spec.with_requester(requester.clone());
+        spec = match work.requester_origin {
+            // A person the host relays and attests under its own authority:
+            // ordinary work carrying the requester and typed-text authorship.
+            Some(meerkat_core::RequesterOrigin::HostAttested) => {
+                spec.with_host_attested_requester(requester.clone())
+            }
+            // A signed-in person who typed this turn's text on the console.
+            Some(meerkat_core::RequesterOrigin::ConsoleSignedIn) => spec
+                .with_requester(requester.clone())
+                .with_requester_origin(Some(meerkat_core::RequesterOrigin::ConsoleSignedIn))
+                .with_person_typed_text(),
+            origin => spec
+                .with_requester(requester.clone())
+                .with_requester_origin(origin),
+        };
     }
     if let Some(label) = work.sender_label {
         spec = spec.with_sender_label(label.clone());
@@ -4130,6 +4146,12 @@ pub struct BridgeDelivery {
     /// the member's admitted input; every other lane refuses one typed
     /// instead of delivering the turn without it.
     pub requester: Option<meerkat_core::PrincipalRef>,
+    /// How the host attested [`Self::requester`]. The local host-human lane
+    /// names [`meerkat_core::RequesterOrigin::ConsoleSignedIn`]; the only
+    /// other lane that carries a requester is a host send that names
+    /// [`meerkat_core::RequesterOrigin::HostAttested`] (`meta/send` with a
+    /// `requester`, host authority only).
+    pub requester_origin: Option<meerkat_core::RequesterOrigin>,
     /// Request-only context of this turn
     /// ([`meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata::request_only_context`]):
     /// the operator memory of the turn's requester. Every model request of
@@ -4156,6 +4178,7 @@ impl BridgeDelivery {
             delivery_identity: None,
             skill_references: Vec::new(),
             requester: None,
+            requester_origin: None,
             request_only_context: None,
             sender_label: None,
         }
@@ -11451,9 +11474,17 @@ impl MobSessionBridge {
             ));
         }
         let requester = delivery.requester.as_ref();
-        if requester.is_some() && host_human_session.is_none() {
+        let requester_origin = delivery.requester_origin;
+        let host_attested = requester_origin == Some(meerkat_core::RequesterOrigin::HostAttested);
+        if requester.is_some() && host_human_session.is_none() && !host_attested {
             return Err(BridgeAdmissionError::InvalidInput(
-                "a requester is carried only on the local host-human lane".to_string(),
+                "a requester is carried only on the local host-human lane or a host-attested send"
+                    .to_string(),
+            ));
+        }
+        if host_attested && (requester.is_none() || host_human_session.is_some()) {
+            return Err(BridgeAdmissionError::InvalidInput(
+                "a host-attested requester rides only a host send that names one".to_string(),
             ));
         }
         let request_only_context = delivery.request_only_context.as_ref();
@@ -11518,6 +11549,7 @@ impl MobSessionBridge {
                 host_human_session,
                 skill_references,
                 requester,
+                requester_origin,
                 request_only_context,
                 sender_label,
             },
@@ -12281,6 +12313,7 @@ mod tests {
             supersession_key: None,
             correlation_id: None,
             requester: None,
+            requester_origin: None,
         }
     }
 

@@ -1576,6 +1576,26 @@ async fn turn_requester(
                 .expect("history read");
             if let Some(requester) = page.messages.iter().find_map(|message| match message {
                 meerkat_core::Message::User(user) if user.text_content() == content => {
+                    // TR-S1b, kept as a regression (R2): a schedule's fire
+                    // names the schedule's person as requester but is no
+                    // person's typed input. Its conversational row carries no
+                    // typed-text stamp and no attestation origin.
+                    assert!(
+                        user.transcript_role.is_conversational(),
+                        "TR-S1b: the fired row is conversational"
+                    );
+                    assert_eq!(
+                        user.identity.turn_input, None,
+                        "TR-S1b: a scheduled fire carries no typed-text stamp"
+                    );
+                    assert_eq!(
+                        user.identity
+                            .requester
+                            .as_ref()
+                            .and_then(meerkat_core::TurnRequester::origin),
+                        None,
+                        "TR-S1b: a scheduled fire names no attestation origin"
+                    );
                     Some(user.identity.requester.clone())
                 }
                 _ => None,

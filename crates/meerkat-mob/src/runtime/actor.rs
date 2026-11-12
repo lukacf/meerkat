@@ -3373,6 +3373,7 @@ struct AutonomousDispatchMaterial {
     /// runtime turn. The inbox event carries none, so inbox delivery refuses
     /// one.
     requester: Option<meerkat_core::PrincipalRef>,
+    requester_origin: Option<meerkat_core::RequesterOrigin>,
 }
 
 /// One member turn admission owned by that member's admission lane.
@@ -4113,11 +4114,15 @@ impl DetachedMemberReadinessContext {
             ack_mode,
             content_attribution,
             requester,
+            requester_origin,
         } = material;
         let render_metadata = turn_metadata
             .as_ref()
             .and_then(|metadata| metadata.render_metadata.clone());
+        // A host-attested requester rides only an admitted runtime input (the
+        // inbox event carries none), so its work takes the runtime turn.
         if content_attribution == crate::mob_machine::WorkContentAttribution::HostHuman
+            || requester_origin == Some(meerkat_core::RequesterOrigin::HostAttested)
             || self
                 .autonomous_steer_requires_admission_barrier(
                     agent_identity,
@@ -4137,6 +4142,7 @@ impl DetachedMemberReadinessContext {
                     turn_metadata,
                     external_delivery_identity.as_ref(),
                     requester,
+                    requester_origin,
                 ),
             };
             lower_work_content_attribution(&mut req, content_attribution);
@@ -4496,6 +4502,7 @@ struct SubmitWorkDispatchRequest {
     /// The original requester of host human input (validated before
     /// admission), stamped onto the member runtime's admitted input.
     requester: Option<meerkat_core::PrincipalRef>,
+    requester_origin: Option<meerkat_core::RequesterOrigin>,
     operation_id: Option<meerkat_core::ops::OperationId>,
     /// Present only for a placed TurnCompleted dispatch. Its durable Record
     /// already exists; dispatch may realize but must never mint custody.
@@ -4522,6 +4529,10 @@ fn submit_work_turn_metadata(
     objective_id: Option<meerkat_core::interaction::ObjectiveId>,
 ) -> Result<Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>, MobError> {
     let mut merged = turn_metadata.unwrap_or_default();
+    // The typed-text authorship a host-attested or signed-in person's send
+    // stamps is no identity field to reconcile: carried across the merge of
+    // the work's interaction identity, never conflicting with it.
+    let turn_input = merged.transcript_identity.turn_input.take();
     if interaction_id.is_some() || objective_id.is_some() {
         merged
             .merge(
@@ -4544,6 +4555,9 @@ fn submit_work_turn_metadata(
                 ))
             })?;
     }
+    if turn_input.is_some() {
+        merged.transcript_identity.turn_input = turn_input;
+    }
     Ok((!merged.is_empty()).then_some(merged))
 }
 
@@ -4552,6 +4566,7 @@ fn submit_work_runtime_semantics(
     turn_metadata: Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
     external_delivery_identity: Option<&crate::store::MobExternalDeliveryIdentity>,
     requester: Option<meerkat_core::PrincipalRef>,
+    requester_origin: Option<meerkat_core::RequesterOrigin>,
 ) -> meerkat_core::service::StartTurnRuntimeSemantics {
     let semantics =
         meerkat_core::service::StartTurnRuntimeSemantics::new(handling_mode, None, turn_metadata);
@@ -4559,7 +4574,9 @@ fn submit_work_runtime_semantics(
     // runtime input refuses it (the provisioner's placed and direct-session
     // paths); none drops it.
     let semantics = match requester {
-        Some(requester) => semantics.with_requester(requester),
+        Some(requester) => semantics
+            .with_requester(requester)
+            .with_requester_origin(requester_origin),
         None => semantics,
     };
     match external_delivery_identity {
@@ -4965,6 +4982,7 @@ fn kept_kickoff_reattach_input(agent_runtime_id: &AgentRuntimeId) -> meerkat_run
             supersession_key: None,
             correlation_id: None,
             requester: None,
+            requester_origin: None,
         },
         content: ContentInput::Text("re-attach the kept kickoff".to_string()),
         typed_turn_appends: Vec::new(),
@@ -62404,6 +62422,7 @@ impl MobActor {
             mut ack_mode,
             content_attribution,
             requester,
+            requester_origin,
             sender_label,
             governed_input,
         } = *payload;
@@ -62550,6 +62569,7 @@ impl MobActor {
                             ack_mode,
                             content_attribution,
                             requester,
+                            requester_origin,
                             sender_label,
                             governed_input,
                         }),
@@ -62706,10 +62726,26 @@ impl MobActor {
         // MobMachine emits an ingress effect, rather than delivered without
         // it.
         if let Some(requester) = requester.as_ref() {
-            if content_attribution != crate::mob_machine::WorkContentAttribution::HostHuman {
+            // Host human input carries its own requester; any other work
+            // carries one only when the host attested it under its own host
+            // authority (a person whose text the host relays).
+            let host_attested =
+                requester_origin == Some(meerkat_core::RequesterOrigin::HostAttested);
+            if content_attribution != crate::mob_machine::WorkContentAttribution::HostHuman
+                && !host_attested
+            {
                 return Err(MobError::UnsupportedForMode {
                     mode: entry.runtime_mode,
                     reason: "a requester rides only host human input".to_string(),
+                });
+            }
+            if content_attribution == crate::mob_machine::WorkContentAttribution::HostHuman
+                && host_attested
+            {
+                return Err(MobError::UnsupportedForMode {
+                    mode: entry.runtime_mode,
+                    reason: "host human input carries its own requester, not a host-attested one"
+                        .to_string(),
                 });
             }
             if requester.validate_qualified().is_err() {
@@ -62718,6 +62754,11 @@ impl MobActor {
                     reason: "a requester must be a qualified principal".to_string(),
                 });
             }
+        }
+        if requester.is_none() && requester_origin.is_some() {
+            return Err(MobError::Internal(
+                "a requester origin without a requester".to_string(),
+            ));
         }
         // The sender label names the person who sent a message, so only host
         // human input carries one; any other work (an agent's, a schedule's,
@@ -63038,6 +63079,7 @@ impl MobActor {
                     ack_mode,
                     content_attribution,
                     requester,
+                    requester_origin,
                     operation_id: None,
                     placed_completion_obligation: placed_completion_obligation.clone(),
                     placed_completion_context,
@@ -63639,6 +63681,7 @@ impl MobActor {
             ack_mode,
             content_attribution,
             requester,
+            requester_origin,
             operation_id,
             placed_completion_obligation,
             placed_completion_context,
@@ -63832,6 +63875,7 @@ impl MobActor {
                     turn_metadata,
                     external_delivery_identity.as_ref(),
                     requester,
+                    requester_origin,
                 ),
             };
             lower_work_content_attribution(&mut req, content_attribution);
@@ -63912,6 +63956,7 @@ impl MobActor {
                     ack_mode,
                     content_attribution,
                     requester,
+                    requester_origin,
                 }),
             })
         } else {
@@ -63966,6 +64011,7 @@ impl MobActor {
                     turn_metadata,
                     external_delivery_identity.as_ref(),
                     requester,
+                    requester_origin,
                 ),
             };
             lower_work_content_attribution(&mut req, content_attribution);
@@ -69693,6 +69739,7 @@ mod routed_effect_containment_tests {
                 ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
                 content_attribution: crate::mob_machine::WorkContentAttribution::Conversational,
                 requester: None,
+                requester_origin: None,
                 sender_label: None,
                 governed_input: None,
                 expected_session_id: None,

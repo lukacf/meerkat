@@ -63,6 +63,7 @@ async fn submit(
         ack_mode: crate::mob_machine::SubmitWorkAckMode::TurnCompleted,
         content_attribution: crate::mob_machine::WorkContentAttribution::Conversational,
         requester: None,
+        requester_origin: None,
         sender_label: None,
         governed_input: None,
         expected_session_id: None,

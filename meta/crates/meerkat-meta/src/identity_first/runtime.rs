@@ -319,6 +319,11 @@ struct SendRequest<'a> {
     /// the input's origin: checked current again under this identity's
     /// lifecycle lock, just before delivery.
     sender: Option<&'a MemberAliasLifecycleTarget>,
+    /// A person the host attests under its own host authority as this send's
+    /// original requester (`meta/send` `requester`). Never set by a member,
+    /// a model, a schedule or a flow: only [`IdentityRuntime::send_host_attested`]
+    /// sets it. Absent, the send is byte for byte the unattested one.
+    host_requester: Option<&'a meerkat_core::PrincipalRef>,
 }
 
 /// Budget for ONE managed-topology wiring call to the session bridge (a wire,
@@ -456,6 +461,9 @@ struct ConsoleHumanSend<'a> {
     /// The sender label the agent's model reads right before the message
     /// (only on the local host-human lane).
     sender_label: Option<&'a meerkat_mob::SenderLabel>,
+    /// Whether a signed-in person typed this turn's text (a live operator
+    /// send, never a scheduled fire or a probe).
+    typed_text: bool,
 }
 
 enum DeliveryPreparation<'a> {
@@ -10389,6 +10397,7 @@ impl IdentityRuntime {
                 console_human: None,
                 expected_spec_digest: None,
                 sender: None,
+                host_requester: None,
             },
         )
         .await
@@ -10422,6 +10431,7 @@ impl IdentityRuntime {
                 console_human: None,
                 expected_spec_digest: None,
                 sender: None,
+                host_requester: None,
             },
         )
         .await
@@ -10794,6 +10804,7 @@ impl IdentityRuntime {
                         console_human: None,
                         expected_spec_digest: None,
                         sender: None,
+                        host_requester: None,
                     },
                 )
                 .await?;
@@ -10804,6 +10815,63 @@ impl IdentityRuntime {
                 },
                 turn: outcome.turn.unwrap_or_else(untracked_delivery),
             })
+        })
+        .await
+    }
+
+    /// A host send (`meta/send` with a `requester`) whose host attests, under
+    /// its own host authority, the person whose typed text it relays. The
+    /// member's admitted input records that person as the turn's direct
+    /// requester with origin [`meerkat_core::RequesterOrigin::HostAttested`]
+    /// and typed-text authorship. Otherwise it is [`Self::send_with_turn_ticket`]
+    /// (`track_turn`) or [`Self::send_admission_tracked`], with the registered
+    /// row check of [`Self::send_expecting_registered_spec`] when
+    /// `expected_spec_digest` is given. Only the host route reaches this; no
+    /// member, model, schedule, flow or fork door can name a requester.
+    pub async fn send_host_attested(
+        self: &Arc<Self>,
+        identity: &AgentIdentity,
+        expected_alias: Option<&str>,
+        content: &meerkat_core::ContentInput,
+        requester: &meerkat_core::PrincipalRef,
+        track_turn: bool,
+        expected_spec_digest: Option<&str>,
+    ) -> Result<(SendAdmission, Option<TurnTracking>), IdentityRuntimeError> {
+        let runtime = Arc::clone(self);
+        let identity = identity.clone();
+        let expected_alias = expected_alias.map(ToString::to_string);
+        let content = content.clone();
+        let requester = requester.clone();
+        let expected_spec_digest = expected_spec_digest.map(ToString::to_string);
+        self.run_tracked_foreground(async move {
+            let outcome = runtime
+                .send_core(
+                    &identity,
+                    SendRequest {
+                        expected_alias: expected_alias.as_deref(),
+                        content: &content,
+                        system_prompt: None,
+                        handling_mode: HandlingMode::Queue,
+                        interaction_id: None,
+                        commit_mode: if track_turn {
+                            SendCommitMode::TrackTurn
+                        } else {
+                            SendCommitMode::Ingress
+                        },
+                        console_human: None,
+                        expected_spec_digest: expected_spec_digest.as_deref(),
+                        sender: None,
+                        host_requester: Some(&requester),
+                    },
+                )
+                .await?;
+            Ok((
+                SendAdmission {
+                    fencing_token: outcome.token,
+                    completion_baseline: outcome.completion_baseline,
+                },
+                track_turn.then(|| outcome.turn.unwrap_or_else(untracked_delivery)),
+            ))
         })
         .await
     }
@@ -10856,6 +10924,7 @@ impl IdentityRuntime {
                         console_human: None,
                         expected_spec_digest: Some(&expected_spec_digest),
                         sender: None,
+                        host_requester: None,
                     },
                 )
                 .await?;
@@ -11655,6 +11724,7 @@ impl IdentityRuntime {
                         console_human: None,
                         expected_spec_digest: None,
                         sender: Some(&sender),
+                        host_requester: None,
                     },
                 )
                 .await
@@ -11806,9 +11876,11 @@ impl IdentityRuntime {
                             skill_references: &skill_references,
                             requester: attribution.requester.as_ref(),
                             sender_label: attribution.sender_label.as_ref(),
+                            typed_text: attribution.typed_text,
                         }),
                         expected_spec_digest: None,
                         sender: None,
+                        host_requester: None,
                     },
                 )
                 .await
@@ -11932,6 +12004,7 @@ impl IdentityRuntime {
                 console_human: None,
                 expected_spec_digest: None,
                 sender: None,
+                host_requester: None,
             },
         )
         .await
@@ -11978,6 +12051,7 @@ impl IdentityRuntime {
             console_human,
             expected_spec_digest,
             sender,
+            host_requester,
         } = request;
         self.refuse_unless_addressable(identity).await?;
         // A target Core does not hold yet (or whose first-boot row is still
@@ -12152,6 +12226,13 @@ impl IdentityRuntime {
             // runtime_mode changed without a respawn) can still take the
             // ingress lane. Nothing was delivered by the refused attempt, so
             // the send is still delivered exactly once.
+            if host_requester.is_some() && matches!(lane, DeliveryLane::AwaitCommit) {
+                // The await-commit lane carries no requester; no host send
+                // that names one takes it.
+                return Err(IdentityRuntimeError::Internal(
+                    "a host-attested requester rides the ingress or ticketed lane only".to_string(),
+                ));
+            }
             let step = match lane {
                 DeliveryLane::Ingress => DeliveryStep::Ingress,
                 DeliveryLane::AwaitCommit => DeliveryStep::AwaitCommit,
@@ -12163,6 +12244,11 @@ impl IdentityRuntime {
                     delivery.system_prompt = system_prompt.map(ToString::to_string);
                     delivery.injected_context = injected_context.clone();
                     delivery.interaction_id = bridge_interaction_id.map(ToString::to_string);
+                    if let Some(requester) = host_requester {
+                        delivery.requester = Some(requester.clone());
+                        delivery.requester_origin =
+                            Some(meerkat_core::RequesterOrigin::HostAttested);
+                    }
                     // One automatic non-destructive reload on a typed
                     // reload-required refusal, then the typed failure (same
                     // rule as the other lanes); and the door's one retry of a
@@ -12258,6 +12344,14 @@ impl IdentityRuntime {
                             delivery.requester = console_human
                                 .as_ref()
                                 .and_then(|human| human.requester.cloned());
+                            // A signed-in person who typed this turn's text:
+                            // recorded with the requester (and, through it,
+                            // typed-text authorship). A scheduled fire or a
+                            // probe names the person but no origin.
+                            delivery.requester_origin = console_human
+                                .as_ref()
+                                .is_some_and(|human| human.typed_text && human.requester.is_some())
+                                .then_some(meerkat_core::RequesterOrigin::ConsoleSignedIn);
                             delivery.request_only_context = request_only_context.clone();
                             delivery.sender_label = console_human
                                 .as_ref()
@@ -12265,6 +12359,23 @@ impl IdentityRuntime {
                             bridge
                                 .deliver_host_human_input(rid, session, delivery)
                                 .await
+                        } else if let Some(requester) = host_requester {
+                            // A host send whose host attests the person it
+                            // relays: the same external delivery, carrying
+                            // that requester (typed-text authorship) onto the
+                            // member's admitted input.
+                            let mut delivery = super::bridge::BridgeDelivery::new(
+                                content_to_deliver.clone(),
+                                handling_mode,
+                            );
+                            delivery.system_prompt = system_prompt.map(ToString::to_string);
+                            delivery.injected_context = injected_context.clone();
+                            delivery.interaction_id =
+                                bridge_interaction_id.map(ToString::to_string);
+                            delivery.requester = Some(requester.clone());
+                            delivery.requester_origin =
+                                Some(meerkat_core::RequesterOrigin::HostAttested);
+                            bridge.deliver_admitted(rid, delivery).await
                         } else {
                             // External delivery keeps its established wire semantics.
                             // It is not a claim of local canonical human authorship.
@@ -23416,6 +23527,28 @@ impl super::PublicIdentityRuntime {
         content: &meerkat_core::ContentInput,
     ) -> Result<FencingToken, IdentityRuntimeError> {
         self.runtime.send_tracked(identity, content).await
+    }
+
+    /// See [`IdentityRuntime::send_host_attested`].
+    pub async fn send_host_attested(
+        &self,
+        identity: &AgentIdentity,
+        expected_alias: Option<&str>,
+        content: &meerkat_core::ContentInput,
+        requester: &meerkat_core::PrincipalRef,
+        track_turn: bool,
+        expected_spec_digest: Option<&str>,
+    ) -> Result<(SendAdmission, Option<TurnTracking>), IdentityRuntimeError> {
+        self.runtime
+            .send_host_attested(
+                identity,
+                expected_alias,
+                content,
+                requester,
+                track_turn,
+                expected_spec_digest,
+            )
+            .await
     }
 
     pub async fn send_admission_tracked(

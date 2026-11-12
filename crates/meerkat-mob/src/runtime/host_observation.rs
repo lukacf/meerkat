@@ -4579,6 +4579,7 @@ mod tests {
                     stable,
                 )),
                 requester: None,
+                requester_origin: None,
             },
             convention: Some(meerkat_runtime::input::PeerConvention::Message),
             content: meerkat_core::types::ContentInput::Blocks(vec![

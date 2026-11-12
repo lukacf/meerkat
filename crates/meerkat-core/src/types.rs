@@ -72,6 +72,28 @@ pub struct TurnRequester {
     /// own ingress admitted every input.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     carried: bool,
+    /// How the host's ingress attested this requester, when it said so:
+    /// recorded with the requester so a policy can say which attestations
+    /// count. Absent for requesters whose ingress names no attestation (and
+    /// for every row written before the field existed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    origin: Option<RequesterOrigin>,
+}
+
+/// How a turn's requester was attested at the ingress that admitted it.
+///
+/// Core carries the value and never interprets it: it names which host door
+/// vouched for the principal, not who the principal is or what it may do.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RequesterOrigin {
+    /// A person signed in to the host's console sent the input themselves.
+    ConsoleSignedIn,
+    /// The host relayed the input under its own host authority and attested
+    /// the person it acts for.
+    HostAttested,
 }
 
 impl TurnRequester {
@@ -81,6 +103,7 @@ impl TurnRequester {
         Self {
             principal,
             carried: false,
+            origin: None,
         }
     }
 
@@ -90,7 +113,21 @@ impl TurnRequester {
         Self {
             principal,
             carried: true,
+            origin: None,
         }
+    }
+
+    /// The same requester, recording how its ingress attested it.
+    #[must_use]
+    pub fn with_origin(mut self, origin: Option<RequesterOrigin>) -> Self {
+        self.origin = origin;
+        self
+    }
+
+    /// How the requester's ingress attested it, when it said so.
+    #[must_use]
+    pub fn origin(&self) -> Option<RequesterOrigin> {
+        self.origin
     }
 
     /// The requester's principal, whether direct or carried.

@@ -392,6 +392,7 @@ import {
   supportsFlowRoleTargets,
   FLOW_RUN_IDEMPOTENCY_KEY,
   supportsFlowRunIdempotencyKey,
+  type HostAttestedRequester,
 } from "./types.js";
 
 // -- Request ID counter ---------------------------------------------------
@@ -413,6 +414,8 @@ const JSONRPC_METHOD_NOT_FOUND = -32601;
 
 /** The feature capability of a keyed `meta/send` that takes `handling_mode`. */
 const KEYED_SEND_HANDLING_MODE = "keyed_send_handling_mode";
+/** The feature capability of a `meta/send` that takes `requester`. */
+const SEND_HOST_ATTESTED_REQUESTER = "send_host_attested_requester";
 
 /**
  * The mob announcement methods a Meta without sources serves. Any other
@@ -1767,6 +1770,16 @@ export class MetaRuntime {
       idempotencyKey?: undefined;
       /** An unkeyed send queues: `"queue"` is the default; a steer needs a key. */
       handlingMode?: "queue";
+      /**
+       * The person this host attests, under its own host authority, as the
+       * original requester of `content` (text that person typed). The
+       * member's turn records that person as its direct requester with
+       * origin `host_attested`. Only the host route accepts it. A gateway
+       * that does not advertise the `send_host_attested_requester` feature
+       * capability would ignore it, so it is refused with
+       * {@link CapabilityUnavailableError} before anything is sent.
+       */
+      requester?: HostAttestedRequester;
     },
   ): Promise<SendResult>;
   /**
@@ -1799,6 +1812,7 @@ export class MetaRuntime {
       handlingMode?: "queue" | "steer";
       trackTurn?: false;
       expectedSpecDigest?: undefined;
+      requester?: undefined;
     },
   ): Promise<KeyedSendResult>;
   async send(
@@ -1809,14 +1823,34 @@ export class MetaRuntime {
       expectedSpecDigest?: string;
       idempotencyKey?: string;
       handlingMode?: "queue" | "steer";
+      requester?: HostAttestedRequester;
     } = {},
   ): Promise<SendResult | KeyedSendResult> {
     if (
       options.idempotencyKey !== undefined &&
-      (options.trackTurn || options.expectedSpecDigest !== undefined)
+      (options.trackTurn ||
+        options.expectedSpecDigest !== undefined ||
+        options.requester !== undefined)
     ) {
-      const combined = options.trackTurn ? "trackTurn" : "expectedSpecDigest";
+      const combined = options.trackTurn
+        ? "trackTurn"
+        : options.expectedSpecDigest !== undefined
+          ? "expectedSpecDigest"
+          : "requester";
       throw new TypeError(`idempotencyKey does not combine with ${combined}`);
+    }
+    if (options.requester !== undefined) {
+      const requester = options.requester as unknown;
+      const valid =
+        typeof requester === "object" &&
+        requester !== null &&
+        Object.keys(requester).sort().join(",") === "id,kind" &&
+        (requester as Record<string, unknown>).kind === "person" &&
+        typeof (requester as Record<string, unknown>).id === "string" &&
+        (requester as Record<string, unknown>).id !== "";
+      if (!valid) {
+        throw new TypeError('requester must be { kind: "person", id: "<non-empty id>" }');
+      }
     }
     if (options.handlingMode !== undefined) {
       if (options.handlingMode !== "queue" && options.handlingMode !== "steer") {
@@ -1844,7 +1878,31 @@ export class MetaRuntime {
     if (options.expectedSpecDigest !== undefined) {
       params.expected_spec_digest = options.expectedSpecDigest;
     }
+    if (options.requester !== undefined) {
+      await this.requireHostAttestedRequester();
+      params.requester = { kind: "person", id: options.requester.id };
+    }
     return parseSendResult(await this._rpc("meta/send", params));
+  }
+
+  /**
+   * Refuse a `requester`, typed, on a gateway that does not serve it: such a
+   * gateway ignores the field and sends without a requester.
+   */
+  private async requireHostAttestedRequester(): Promise<void> {
+    const raw = await this._rpc("meta/capabilities");
+    const features =
+      typeof raw === "object" && raw !== null
+        ? (raw as Record<string, unknown>).feature_capabilities
+        : undefined;
+    if (!Array.isArray(features) || !features.includes(SEND_HOST_ATTESTED_REQUESTER)) {
+      throw new CapabilityUnavailableError(
+        "this gateway does not serve a host-attested requester: it would ignore requester and send without one",
+        "",
+        "meta/send",
+        { capability: SEND_HOST_ATTESTED_REQUESTER },
+      );
+    }
   }
 
   /**

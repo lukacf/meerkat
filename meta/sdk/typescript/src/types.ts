@@ -6143,3 +6143,13 @@ export function supportsFlowRunIdempotencyKey(
     : (capabilities as CapabilitiesResult).featureCapabilities;
   return features.includes(FLOW_RUN_IDEMPOTENCY_KEY);
 }
+
+/**
+ * A person a host attests, under its own host authority, as the original
+ * requester of a `meta/send` (`requester`): one kind, `person`, with the
+ * host's opaque, stable id for that person.
+ */
+export interface HostAttestedRequester {
+  kind: "person";
+  id: string;
+}

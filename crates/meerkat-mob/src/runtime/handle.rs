@@ -4044,6 +4044,19 @@ fn submit_work_payload(
             .get_or_insert_with(Default::default)
             .request_reasoning = Some(preference);
     }
+    // Text a host-attested requester typed is stamped as typed text on the
+    // turn's rows, as a host-submitted prompt turn is.
+    if spec.typed_text && spec.requester.is_none() {
+        return Err(MobError::Internal(
+            "typed-text authorship needs the person who typed it as requester".to_string(),
+        ));
+    }
+    if spec.typed_text {
+        turn_metadata
+            .get_or_insert_with(Default::default)
+            .transcript_identity
+            .turn_input = Some(meerkat_core::types::TranscriptTurnInput::TypedText);
+    }
     // Request-only context rides the typed carrier in this process only;
     // the member delivery path refuses it where it cannot ride.
     if let Some(context) = spec.request_only_context {
@@ -4077,6 +4090,7 @@ fn submit_work_payload(
         ack_mode,
         content_attribution,
         requester: spec.requester,
+        requester_origin: spec.requester_origin,
         sender_label: spec.sender_label,
         governed_input: None,
     }))
@@ -13884,6 +13898,7 @@ impl MobHandle {
             // A governed input's requester is its own association's; the
             // member's native admission alone reads it.
             requester: None,
+            requester_origin: None,
             sender_label: None,
             // Governed input is bound to the session read above: the
             // admission refuses it if the member's binding moved since.

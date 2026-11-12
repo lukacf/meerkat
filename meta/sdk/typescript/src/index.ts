@@ -690,6 +690,7 @@ export type {
   WorkGraphGoalConfirmOptions,
   WorkGraphGoalRequestCloseOptions,
   WorkGraphAttentionPauseOptions,
+  HostAttestedRequester,
 } from "./types.js";
 
 // -- Typed events ---------------------------------------------------------

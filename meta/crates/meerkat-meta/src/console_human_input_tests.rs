@@ -356,7 +356,12 @@ comms = true
             .with_injected_context(injected_context)
             .with_interaction_id(meerkat_core::interaction::InteractionId(interaction));
         if let Some(requester) = requester {
-            spec = spec.with_requester(requester.clone());
+            // The same work the console's person send committed: the
+            // signed-in person who typed it, so the replay is that send's.
+            spec = spec
+                .with_requester(requester.clone())
+                .with_requester_origin(Some(meerkat_core::RequesterOrigin::ConsoleSignedIn))
+                .with_person_typed_text();
         }
         let turn = handle
             .start_host_human_input_bounded(
@@ -1626,8 +1631,29 @@ async fn console_human_redispatch_carries_the_requester_its_frame_recorded() {
     };
     assert_eq!(
         row.identity.requester,
-        Some(meerkat_core::TurnRequester::direct(alice)),
-        "the redispatched turn names the requester the frame recorded"
+        Some(
+            meerkat_core::TurnRequester::direct(alice)
+                .with_origin(Some(meerkat_core::RequesterOrigin::ConsoleSignedIn))
+        ),
+        "the redispatched turn names the requester the frame recorded, as the \
+         signed-in person who typed it"
+    );
+    // TR-S1, inverted (the reader's finding, fixed): a signed-in person's
+    // console send is conversational, names that person as its direct
+    // requester and is stamped as typed text, so the distiller's rule 3 can
+    // hold for it.
+    assert!(
+        row.identity
+            .requester
+            .as_ref()
+            .and_then(meerkat_core::TurnRequester::direct_principal)
+            .is_some_and(|principal| principal.kind == meerkat_core::PrincipalKind::Human),
+        "TR-S1: the row has a direct person requester"
+    );
+    assert_eq!(
+        row.identity.turn_input,
+        Some(meerkat_core::types::TranscriptTurnInput::TypedText),
+        "TR-S1: a console person's typed send carries the typed-text stamp"
     );
     let label = position
         .checked_sub(1)

@@ -91,6 +91,7 @@ pub fn classified_interaction_to_runtime_input(
                 supersession_key: None,
                 correlation_id: Some(CorrelationId::from_uuid(interaction.id.0)),
                 requester: None,
+                requester_origin: None,
             },
             event_type: source_name.to_string(),
             payload: external_event_payload(interaction),
@@ -179,6 +180,7 @@ fn peer_input_from_ingress_fact(
             supersession_key: None,
             correlation_id: Some(CorrelationId::from_uuid(transcript_correlation_id.0)),
             requester: None,
+            requester_origin: None,
         },
         convention: Some(convention),
         content: match peer_blocks(interaction) {

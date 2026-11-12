@@ -10017,6 +10017,23 @@ fn console_request_auth_context(
     )
 }
 
+/// Whether this console can identify a person: it requires sign-in, or it
+/// has an access controller, for which it resolves the token a caller
+/// volunteers, and a trusted OIDC snapshot a token can verify against
+/// ([`crate::runtime::validate_trusted_oidc_runtime_config`]). Only on such
+/// a console can a member be private to a person. A console that can
+/// identify nobody has one anonymous operator and nobody to keep apart.
+/// Computed here and nowhere else, from the console's own configuration.
+fn console_identifies_people(
+    decisions: &RuntimeDecisionState,
+    access: Option<&AccessController>,
+) -> bool {
+    decisions.console.require_app_auth
+        || (access.is_some()
+            && crate::runtime::validate_trusted_oidc_runtime_config(&decisions.trusted_oidc)
+                .is_ok())
+}
+
 /// The Console's request authentication, shared by the Console's own routes
 /// and [`ConsoleViewerResolver`]. A token is checked against the Console's
 /// session fence record `fences` as it is now.
@@ -10029,13 +10046,22 @@ pub(crate) fn console_request_auth_context_for(
 ) -> Option<ConsoleHttpAuthContext> {
     if !decisions.console.require_app_auth {
         // Open console: identify callers that volunteered a valid token so
-        // per-user ABAC grants still apply; everyone else is anonymous.
-        let caller = access.and_then(|_| {
-            let token = console_request_token(headers, uri)?;
-            crate::runtime::resolve_authorized_console_caller_from_token(decisions, fences, &token)
-        });
+        // per-user ABAC grants still apply; everyone else is anonymous. A
+        // token is resolved only where the console can identify a person,
+        // and there the caller it did not identify is told apart from its
+        // people all the same: the audience states the console's fact, not
+        // the caller's.
+        let identifies_people = console_identifies_people(decisions, access);
+        let caller = identifies_people
+            .then(|| {
+                let token = console_request_token(headers, uri)?;
+                crate::runtime::resolve_authorized_console_caller_from_token(
+                    decisions, fences, &token,
+                )
+            })
+            .flatten();
         let Some(caller) = caller else {
-            let audience = console_audience_view(access, None, None);
+            let audience = console_audience_view(access, None, None).on_console(identifies_people);
             return Some(ConsoleHttpAuthContext {
                 access_view: access.map(|_| audience.clone()),
                 audience,
@@ -11176,10 +11202,11 @@ enum SessionAttachDecision {
 /// Whether or not access is enforced, a session the caller may not know of
 /// is answered as a session that does not exist: one a member hidden from
 /// the caller owns ([`AccessView::hides_agent`]), one whose stored member
-/// labels name a private owner other than the caller, and, on a console with
-/// sign-in, for a caller who is not an admin, one whose owner the console
-/// does not know ([`AccessView::withholds_unknown_member`]) or that has no
-/// owner at all.
+/// labels name a private owner other than the caller, and, on a console
+/// that can identify a person, for a caller who is not an admin
+/// ([`AccessView::kept_apart_from_other_people`]), one whose owner the
+/// console does not know ([`AccessView::withholds_unknown_member`]) or that
+/// has no owner at all.
 async fn attached_session_decision(
     view: Option<&AccessView>,
     runtime: &MobRuntime,
@@ -11217,7 +11244,9 @@ async fn attached_session_decision(
                 })),
             });
         }
-        return if view.subject().is_some() {
+        // A console that can identify a person keeps what it cannot
+        // attribute from every caller who is not an admin, signed in or not.
+        return if view.kept_apart_from_other_people() {
             SessionAttachDecision::Absent
         } else {
             SessionAttachDecision::Allowed

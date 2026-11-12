@@ -56,7 +56,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   console cannot tell the two apart, so with no runtime registered its
   stored frames are not served, under the id of a council that settled a
   member named like one of that council's seats is listed while its stored
-  frames are not served, under that id every frame stored up to the time
+  frames are not served, under that id every frame dated up to the time
   the council settled stays unserved, whoever wrote it (the frames of a
   later mob created under the id before the settling was recorded, and its
   frames dated before the settling or without a real time, included), and

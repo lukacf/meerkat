@@ -57,9 +57,21 @@ them.
   `ScheduleLifecycleMachineState` or the kernel `State` literally must set
   the field, and a serialized kernel `State` without the field no longer
   deserializes.
+- Rust API of `meerkat-mob`: `DiagnosticCode` gains the variant
+  `ProfileHeldByIdentity` (wire `profile_held_by_identity`), appended last,
+  so no existing variant's implicit discriminant moves. `DiagnosticCode` is
+  a closed enum: an exhaustive match on it must add an arm. See Changed.
 
 ### Upgrade notes
 
+- A definition update that drops a profile agents were created on. Before
+  the update, keep the profile, or update those agents to another profile
+  or remove them: `MobStorage::update_definition` now refuses the update
+  with the diagnostic `profile_held_by_identity` and writes nothing (see
+  Changed). The stored definition stays as it was, so a start that carries
+  no update starts as before. A consumer that reads diagnostic codes as
+  text meets a code it did not know; one that matches `DiagnosticCode`
+  exhaustively adds an arm.
 - Schedules paused for their target, and a rollback. A schedule paused for
   its target (see Added) is stored as a paused schedule whose machine state
   carries `paused_for_target: true`. An earlier release reads it as paused,
@@ -130,6 +142,17 @@ them.
   (`DECIDED_BY_PEOPLE_ONLY`): a hold of one that names a reviewer is refused
   `ReviewStageNotAllowed`, so an agent never approves a change of an agent.
   No released surface held a decision of these kinds.
+- `MobStorage::update_definition` refuses an update that drops a profile a
+  created agent's row names (a rename drops the old name): the agent could
+  not be seated, or unarchived, on a profile the definition no longer has,
+  and failed each restore with a profile-not-found reason. The refusal is
+  `MobError::DefinitionError` with one diagnostic per such profile, code
+  `profile_held_by_identity`, `location` `profiles.<name>`; its message
+  names the agents on the profile (the first five, the rest counted) and
+  says what an operator can do: keep the profile, or update or remove those
+  agents first. An archived agent holds its profile; a removed one does
+  not. Nothing is written, and the check reads the mob's stored rows only.
+  It accepted such an update before.
 
 ### Fixed
 

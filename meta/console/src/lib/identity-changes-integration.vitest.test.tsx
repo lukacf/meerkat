@@ -1636,5 +1636,34 @@ describe("long-term agents in the console", () => {
       view.unmount();
       cleanup();
     }
+
+    // The gateway's other form of the details answer keeps the agent's
+    // facts in its `identity` member, beside `addressable`: the note is
+    // read there the same way.
+    const nested = (extra: Record<string, unknown> = {}) => ({
+      identity: {
+        identity: "warden",
+        display_name: "The warden",
+        runtime_key: "default",
+        runtime_member_id: "rt:warden:0",
+        visibility: "addressable",
+        addressable: true,
+        health: "ready",
+        labels: {},
+        ...extra,
+      },
+      peers: [],
+    });
+    view = await open(nested({ roster_listing_superseded: true }));
+    expect((await find(view, "inspect-roster-superseded:warden")).textContent).toContain("That entry is not applied");
+    view.unmount();
+    cleanup();
+    for (const answer of [nested(), nested({ roster_listing_superseded: "true" })]) {
+      view = await open(answer);
+      await settle(50);
+      expect(present(view, "inspect-roster-superseded:warden")).toBe(false);
+      view.unmount();
+      cleanup();
+    }
   }, 60_000);
 });

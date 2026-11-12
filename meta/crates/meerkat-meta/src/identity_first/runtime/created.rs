@@ -48,6 +48,7 @@ use std::collections::BTreeSet;
 use tokio::sync::broadcast;
 
 use super::super::bridge::{BridgeError, MemberRuntimeBinding};
+use super::super::first_boot_manifest::{FirstBootRow, FirstBootRowState};
 use super::super::types::{AgentIdentity, DurableAgentSpec};
 use super::{
     IDENTITY_EVENT_CHANNEL_CAPACITY, IdentityEntry, IdentityRuntime, IdentityRuntimeError,
@@ -70,9 +71,11 @@ pub(super) enum SuccessorCause {
     Respawn,
     /// A reload over a bridge that has no registration reload.
     Reload,
-    /// A maintenance rebuild that changes the member's compaction floor,
-    /// which only a build this runtime lowers carries.
-    CompactionFloor,
+    /// A maintenance rebuild that changes the member's compaction floor to
+    /// the one it names (`None` removes it): the roster's declaration lowers
+    /// it into the build it seats, and Core's same-session successor is
+    /// seated with it.
+    CompactionFloor(Option<std::num::NonZeroU64>),
 }
 
 /// Whether `binding` is the member of an identity whose record is its row in
@@ -256,29 +259,26 @@ impl IdentityRuntime {
     ///   replaces the incarnation by its successor in one step
     ///   ([`super::super::bridge::SessionBridge::respawn_member_on_own_session`]),
     ///   seated with the row's current profile, runtime mode and labels, and
-    ///   the identity is never without a member. A compaction floor is carried only by a build
-    ///   this runtime lowers, which that step has none of: the rebuild is
-    ///   refused, typed ([`IdentityRuntimeError::IdentityStoreOwned`]), and
-    ///   nothing is retired.
+    ///   with the compaction floor a maintenance rebuild names; the identity
+    ///   is never without a member.
     ///
     /// Either way what the retirement owes is recorded before Core is asked,
     /// as a reload's: a successor on the same session owes no side effect.
-    /// `step` names the caller's step in a failure.
+    /// `step` names the caller's step in a failure. `Ok(true)` when Core
+    /// seated the successor already (the row's identity): the caller hands
+    /// that to its wake (`EmbodimentOverrides::successor_seated`), which
+    /// announces the successor as the wake that seats a roster identity's
+    /// does.
     pub(super) async fn end_incarnation_for_successor_locked(
         &self,
         identity: &AgentIdentity,
         live: &MemberRuntimeBinding,
         cause: SuccessorCause,
         step: &'static str,
-    ) -> Result<(), IdentityRuntimeError> {
+    ) -> Result<bool, IdentityRuntimeError> {
         let record = self.spec_record(identity).await?;
         let row_spec = match record {
             SpecRecord::Roster => None,
-            SpecRecord::Store if cause == SuccessorCause::CompactionFloor => {
-                return Err(IdentityRuntimeError::IdentityStoreOwned {
-                    identity: identity.clone(),
-                });
-            }
             SpecRecord::Store => Some(self.adopt_row_spec_locked(identity).await?),
         };
         let prepared = self
@@ -291,7 +291,17 @@ impl IdentityRuntime {
         let bridge = self.core_bridge(identity)?;
         let ended = match row_spec.as_ref() {
             None => bridge.retire_member(&live.agent_runtime_id).await,
-            Some(spec) => bridge.respawn_member_on_own_session(identity, spec).await,
+            Some(spec) => {
+                // The compaction floor change the successor's seat carries,
+                // when the cause is one.
+                let floor_change = match cause {
+                    SuccessorCause::CompactionFloor(floor) => Some(floor),
+                    SuccessorCause::Respawn | SuccessorCause::Reload => None,
+                };
+                bridge
+                    .respawn_member_on_own_session(identity, spec, floor_change)
+                    .await
+            }
         };
         if let Err(error) = ended {
             // A step Core refused before any of it started retired nothing:
@@ -314,24 +324,9 @@ impl IdentityRuntime {
             )));
         }
         self.settle_lifecycle_retirement(prepared).await;
-        if row_spec.is_some() {
-            // The successor is seated already: the wake that materializes it
-            // announces it, as the wake that seats a roster identity's does.
-            self.seated_successors
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(identity.clone());
-        }
-        Ok(())
-    }
-
-    /// Whether Core seated `identity`'s successor in its previous
-    /// incarnation's place and no wake announced it yet; the answer is taken.
-    pub(super) fn take_seated_successor(&self, identity: &AgentIdentity) -> bool {
-        self.seated_successors
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(identity)
+        // Seated already (the row's identity), or seated by the caller's
+        // wake (the roster's): the caller tells its wake which.
+        Ok(row_spec.is_some())
     }
 
     /// The roster pass's step for the identities whose record is their row:
@@ -349,50 +344,62 @@ impl IdentityRuntime {
     /// registered.
     ///
     /// Answers the specs of the identities this runtime serves from their
-    /// rows that `roster` does not list: the pass tracks them beside the
-    /// roster's.
-    pub(super) async fn register_created_identities(
-        &self,
-        roster: &[DurableAgentSpec],
-    ) -> Vec<DurableAgentSpec> {
-        let listed = roster
-            .iter()
-            .map(|spec| &spec.identity)
-            .collect::<BTreeSet<_>>();
+    /// rows: the pass tracks them beside the roster's. A row is its
+    /// identity's one owner, also while the host's roster still lists its
+    /// name (a host adopted it into the store): such a name is registered
+    /// from its row, replacing a registration the roster made.
+    pub(super) async fn register_created_identities(&self) -> Vec<DurableAgentSpec> {
         if let Some(bridge) = self.bridge.clone() {
             match bridge.created_identity_names().await {
                 Ok(names) => {
                     let held = names.iter().cloned().collect::<BTreeSet<_>>();
-                    for name in names {
-                        // The roster's own listing of an identity its row
-                        // holds (one a host adopted into the store that its
-                        // roster still lists) keeps the roster's
-                        // registration.
-                        if listed.contains(&name) {
-                            continue;
-                        }
-                        let from_row = self
-                            .entries
-                            .read()
-                            .await
-                            .get(&name)
-                            .is_some_and(|entry| entry.created);
-                        if from_row {
-                            continue;
-                        }
-                        match bridge.created_identity(&name).await {
-                            Ok(Some(spec)) => {
-                                let lifecycle_lock = self.lifecycle_lock_for(&name).await;
-                                let _lifecycle_guard = lifecycle_lock.lock().await;
-                                self.register_created_locked(spec).await;
+                    // The names not registered from their rows yet, each
+                    // with whether the roster registered it.
+                    let unregistered = {
+                        let entries = self.entries.read().await;
+                        names
+                            .into_iter()
+                            .filter_map(|name| {
+                                match entries.get(&name).map(|entry| entry.created) {
+                                    Some(true) => None,
+                                    registered => Some((name, registered.is_some())),
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                    };
+                    if !unregistered.is_empty() {
+                        let asked = unregistered
+                            .iter()
+                            .map(|(name, _)| name.clone())
+                            .collect::<Vec<_>>();
+                        // Their rows in one read, in pages: a cold start
+                        // makes no store read per identity.
+                        match bridge.created_identities_of(&asked).await {
+                            Ok(mut rows) => {
+                                for (name, registered_by_roster) in unregistered {
+                                    let Some(spec) = rows.remove(&name) else {
+                                        continue;
+                                    };
+                                    if registered_by_roster {
+                                        // The roster's registration of a
+                                        // name a row holds gives way to the
+                                        // row's.
+                                        let lifecycle_lock = self.lifecycle_lock_for(&name).await;
+                                        let _lifecycle_guard = lifecycle_lock.lock().await;
+                                        self.register_created_locked(spec).await;
+                                    } else {
+                                        // A name not registered yet waits on
+                                        // no lock: nothing is replaced.
+                                        self.register_created_if_absent(spec).await;
+                                    }
+                                }
                             }
-                            Ok(None) | Err(BridgeError::Unsupported { .. }) => {}
+                            Err(BridgeError::Unsupported { .. }) => {}
                             Err(error) => tracing::warn!(
-                                identity = %name,
                                 %error,
-                                "the roster pass could not read an identity's row in the mob's \
-                                 identity store; the next pass, or a door that names it, \
-                                 registers it"
+                                "the roster pass could not read the rows of the identities it \
+                                 has not registered yet; the next pass, or a door that names \
+                                 one, registers it"
                             ),
                         }
                     }
@@ -401,9 +408,7 @@ impl IdentityRuntime {
                         .read()
                         .await
                         .iter()
-                        .filter(|(identity, entry)| {
-                            entry.created && !held.contains(*identity) && !listed.contains(identity)
-                        })
+                        .filter(|(identity, entry)| entry.created && !held.contains(*identity))
                         .map(|(identity, _)| identity.clone())
                         .collect::<Vec<_>>();
                     for identity in stale {
@@ -418,25 +423,38 @@ impl IdentityRuntime {
                 ),
             }
         }
-        self.row_registered_specs(roster).await
+        self.row_registered_specs().await
     }
 
-    /// The specs of the identities this runtime serves from their rows that
-    /// `roster` does not list, as registered: no read of Core or of a row.
-    pub(super) async fn row_registered_specs(
-        &self,
-        roster: &[DurableAgentSpec],
-    ) -> Vec<DurableAgentSpec> {
-        let listed = roster
-            .iter()
-            .map(|spec| &spec.identity)
-            .collect::<BTreeSet<_>>();
+    /// The specs of the identities this runtime serves from their rows, as
+    /// registered: no read of Core or of a row.
+    pub(super) async fn row_registered_specs(&self) -> Vec<DurableAgentSpec> {
         self.entries
             .read()
             .await
+            .values()
+            .filter(|entry| entry.created)
+            .map(|entry| entry.spec.clone())
+            .collect()
+    }
+
+    /// `roster` without the identities this runtime serves from their rows:
+    /// a row is its identity's one owner, also while the host's roster
+    /// still lists its name, so a pass neither registers nor declares the
+    /// roster's listing of it. No read of Core or of a row.
+    pub(super) async fn roster_without_row_identities(
+        &self,
+        roster: &[DurableAgentSpec],
+    ) -> Vec<DurableAgentSpec> {
+        let entries = self.entries.read().await;
+        roster
             .iter()
-            .filter(|(identity, entry)| entry.created && !listed.contains(identity))
-            .map(|(_, entry)| entry.spec.clone())
+            .filter(|spec| {
+                !entries
+                    .get(&spec.identity)
+                    .is_some_and(|entry| entry.created)
+            })
+            .cloned()
             .collect()
     }
 
@@ -445,12 +463,9 @@ impl IdentityRuntime {
     /// row but an archived one, which keeps no member until its unarchive
     /// (read from Core's entry of its name: the machine state its actor
     /// published).
-    pub(super) async fn tracked_row_identities(
-        &self,
-        roster: &[DurableAgentSpec],
-    ) -> Vec<DurableAgentSpec> {
+    pub(super) async fn tracked_row_identities(&self) -> Vec<DurableAgentSpec> {
         let mut tracked = Vec::new();
-        for spec in self.register_created_identities(roster).await {
+        for spec in self.register_created_identities().await {
             let archived = matches!(
                 self.core_entry_of_name(&spec.identity).await,
                 Ok(Some(entry))
@@ -461,7 +476,99 @@ impl IdentityRuntime {
                 tracked.push(spec);
             }
         }
+        Box::pin(self.carry_out_fresh_rows(&tracked)).await;
         tracked
+    }
+
+    /// The roster pass's carry-out of the `Fresh` rows the offline identity
+    /// reset left for the identities whose record is their row (`tracked`,
+    /// registered a moment ago): the roster's declaration carries such a row
+    /// out for an identity the roster lists, and no roster lists these. Each
+    /// is carried out under its identity's lifecycle lock
+    /// ([`Self::carry_out_fresh_row_locked`]); one that fails keeps its row
+    /// for the next pass or the identity's next door, and is logged. The
+    /// manifest is rewritten once, after the locks are released.
+    async fn carry_out_fresh_rows(&self, tracked: &[DurableAgentSpec]) {
+        if tracked.is_empty() || self.load_first_boot_manifest().await.is_err() {
+            // An unreadable manifest refuses the roster's declaration, typed.
+            return;
+        }
+        let rows = self.pending_first_boot_rows_snapshot();
+        let mut settled = false;
+        for spec in tracked {
+            let identity = &spec.identity;
+            if !rows.contains_key(identity) {
+                continue;
+            }
+            let lifecycle_lock = self.lifecycle_lock_for(identity).await;
+            let _lifecycle_guard = lifecycle_lock.lock().await;
+            match self.carry_out_fresh_row_locked(identity).await {
+                Ok(carried_out) => settled |= carried_out,
+                Err(error) => tracing::warn!(
+                    %identity,
+                    %error,
+                    "the fresh life an offline reset left owed was not started; its row stays \
+                     for the next roster pass or the identity's next delivery"
+                ),
+            }
+        }
+        if settled {
+            self.finish_declaration(&[], true).await;
+        }
+    }
+
+    /// Carry out the `Fresh` row the offline identity reset left pending for
+    /// `identity`, whose record is its row in the mob's identity store,
+    /// while the caller holds the identity's lifecycle lock: the fresh life
+    /// the running gateway's reset gives it. Core rotates its member onto a
+    /// fresh session, seated from its row's current spec; nothing is built
+    /// or woken, and its name and row stay. A row Core's history shows
+    /// carried out already (the process ended before the manifest was
+    /// rewritten) is settled. `Ok(true)` when the row is settled in memory:
+    /// the caller rewrites the manifest. An identity the roster holds, a row
+    /// of another kind, a row Core's history contradicts and a candidate
+    /// launch are left to the roster's declaration, which answers them.
+    pub(super) async fn carry_out_fresh_row_locked(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<bool, IdentityRuntimeError> {
+        let Some(row) = self.pending_first_boot_rows_snapshot().remove(identity) else {
+            return Ok(false);
+        };
+        if !matches!(row, FirstBootRow::Fresh { .. })
+            || self.is_candidate_launch()
+            || self.spec_record(identity).await? != SpecRecord::Store
+        {
+            return Ok(false);
+        }
+        let history = self
+            .core_bridge(identity)?
+            .member_binding_history()
+            .await
+            .map_err(|error| IdentityRuntimeError::MemberHistoryUnavailable {
+                detail: format!(
+                    "reading Core's member history to carry out a first-boot row: {error}"
+                ),
+            })?;
+        match row.state_in(&history) {
+            FirstBootRowState::Contradicted { .. } => return Ok(false),
+            FirstBootRowState::Done => {}
+            FirstBootRowState::ToDo => {
+                self.adopt_current_spec_locked(identity).await?;
+                let last = self.core_last_binding(identity).await?;
+                // The fresh life's future is held behind a pointer: the pass
+                // and the doors that reach this step nest it no deeper.
+                Box::pin(self.start_fresh_life_locked(
+                    identity,
+                    &mut self.foreground_cancel.subscribe(),
+                    super::FreshLife::Reset,
+                    last,
+                ))
+                .await?;
+            }
+        }
+        self.settle_first_boot_row_in_memory(identity);
+        Ok(true)
     }
 
     /// The registration follows `name`'s row after a change of it committed
@@ -469,18 +576,39 @@ impl IdentityRuntime {
     /// store, an archive, a removal): a row this runtime has not registered
     /// is registered now, with its customizer tool dispatcher, so the
     /// member's next build carries the host customizer's tools; a row that
-    /// changed is registered again; and the registration of a row Core no
+    /// changed is registered again; a name the host's roster registered
+    /// that a row holds now (an adoption) is registered from its row, which
+    /// is its one owner from then on; and the registration of a row Core no
     /// longer holds is forgotten. `Ok(true)` when the runtime serves the
-    /// name afterwards. It reads one row, sends Core no command and wakes
-    /// nothing. The change path calls it once the change committed.
-    // The seam of the identity change executor, which is not in this crate
-    // yet: until it calls this, only the rows do.
-    #[allow(dead_code)]
+    /// name afterwards, `Ok(false)` when it does not (the change removed the
+    /// identity, or Core holds the name for no identity). It reads one row,
+    /// sends Core no command and wakes nothing. The change path calls it
+    /// once the change committed.
+    ///
+    /// The caller must NOT hold the identity's lifecycle lock: a row that
+    /// changed or left is registered or forgotten under that lock, which is
+    /// not reentrant.
     pub(crate) async fn register_from_row(
         &self,
         name: &AgentIdentity,
     ) -> Result<bool, IdentityRuntimeError> {
-        self.admit_at_delivery_door(name).await
+        let registered_by_roster = self
+            .entries
+            .read()
+            .await
+            .get(name)
+            .is_some_and(|entry| !entry.created);
+        let followed = if registered_by_roster && self.row_holds_name(name).await? {
+            self.refresh_created_registration(name).await
+        } else {
+            self.admit_at_delivery_door(name).await
+        };
+        match followed {
+            // Core holds the name for no identity this runtime serves (the
+            // change removed it): the registration is gone, as asked.
+            Err(IdentityRuntimeError::UnknownIdentity(_)) => Ok(false),
+            followed => followed,
+        }
     }
 
     /// Whether a door to `name` is the door of an identity this runtime
@@ -554,23 +682,15 @@ impl IdentityRuntime {
                     .await
                     .get(name)
                     .map(|entry| (entry.created, entry.spec == spec));
-                // Registered from this very row, or by the host's roster
-                // meanwhile: nothing to change.
-                if matches!(current, Some((true, true) | (false, _))) {
+                // Registered from this very row: nothing to change.
+                if matches!(current, Some((true, true))) {
                     return Ok(true);
                 }
+                // The row is the identity's one owner: its spec replaces
+                // what was registered, a roster's registration included.
                 let lifecycle_lock = self.lifecycle_lock_for(name).await;
                 let _lifecycle_guard = lifecycle_lock.lock().await;
-                // A registration the host's roster made meanwhile stands.
-                let roster_registered = self
-                    .entries
-                    .read()
-                    .await
-                    .get(name)
-                    .is_some_and(|entry| !entry.created);
-                if !roster_registered {
-                    self.register_created_locked(spec).await;
-                }
+                self.register_created_locked(spec).await;
                 Ok(true)
             }
             Ok(None) => {

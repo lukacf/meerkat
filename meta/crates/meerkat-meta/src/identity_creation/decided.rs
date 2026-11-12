@@ -11,24 +11,34 @@
 //!   `{mob id}/{operation id}`. Its body is the normalized request, its
 //!   request digest the request's own ([`IdentityRequest::request_digest`]),
 //!   and its rendering the canonical text of the request
-//!   ([`render_held_v1`]): the host's consequence lines and the declared tool
-//!   configuration of every profile an agent of the request runs on, ahead
-//!   of anything the requester wrote. Nothing else is written: no agent is
+//!   ([`render_held_v1`]): the host's consequence lines and what the mob
+//!   declares for every profile an agent of the request runs on (its model,
+//!   auth binding, skills and tool configuration, under one digest of the
+//!   whole declaration), ahead of anything the requester wrote. A profile
+//!   bound to a realm profile is read from the realm through the family's
+//!   implementation, and refused when it cannot be. Nothing else is written: no agent is
 //!   created, built or woken, and no other agent's record is read. The
 //!   answer is `pending_decision`; the same operation asked again answers
-//!   the decision as it stands. One decision covers the whole request: a
-//!   create of N agents is one decision.
+//!   the decision as it stands, and any other request under its id, of the
+//!   same action or another, is refused `operation_reused`: one operation
+//!   id names one change. One decision covers the whole request: a create
+//!   of N agents is one decision.
 //! - **Decide.** A person decides through the decisions surface that exists
 //!   (`meta/decisions/decide`), with attested evidence: the stdio operator,
-//!   or a person an application attests from its own channel. The requester
-//!   never decides its own request.
+//!   or a person an application attests from its own channel. A person
+//!   never decides a request the decision records as theirs: a request a
+//!   signed-in person asked, and a request a host surface asked that names
+//!   the person as its `proposer` by their principal key. A request a host
+//!   asks with no such proposer is the host's, whoever the application
+//!   carried it for, and any approver may decide it.
 //! - **Carry out.** One [`DecisionExecutor`] per kind runs in Core's
 //!   [`DecisionExecutorLoop`], which alone authorizes, settles and releases.
 //!   The executor renders the request again from what stands now and
 //!   compares the rendering's digest with the one the person was shown: a
-//!   profile whose declared tool configuration changed, or host lines that
-//!   differ, refuse the change `subject_widened` and close the decision
-//!   refused. Otherwise it commits through the executor seam
+//!   profile whose declaration changed in any part (model, auth binding,
+//!   skills, wiring rules, tools), an agent that moved to another profile,
+//!   or host lines that differ, refuse the change `subject_widened` and
+//!   close the decision refused. Otherwise it commits through the executor seam
 //!   ([`IdentityChangeExecutor`]) under the decision's permit, as the
 //!   recorded requester. An agent that changed since the request was made
 //!   is Core's to refuse: the request names the spec digest its requester
@@ -134,8 +144,14 @@ impl HeldIdentityChange {
                 decision.decision_id, descriptor.kind
             ));
         }
-        let body: Self = serde_json::from_str(descriptor.request.get())
-            .map_err(|error| format!("decision {}: {error}", decision.decision_id))?;
+        // The reason names the decision and never quotes its body: it is
+        // logged, and kept as the failure reason of a notice.
+        let body: Self = serde_json::from_str(descriptor.request.get()).map_err(|_| {
+            format!(
+                "decision {} holds a body this version does not read",
+                decision.decision_id
+            )
+        })?;
         if body.format != HELD_CHANGE_FORMAT {
             return Err(format!(
                 "decision {} holds the body {}",
@@ -150,10 +166,12 @@ impl HeldIdentityChange {
                 body.request.decision_kind()
             ));
         }
-        let digest = body
-            .request
-            .request_digest()
-            .map_err(|error| format!("decision {}: {error}", decision.decision_id))?;
+        let digest = body.request.request_digest().map_err(|_| {
+            format!(
+                "decision {} holds a request that has no digest",
+                decision.decision_id
+            )
+        })?;
         if digest.as_str() != descriptor.request_digest.as_str() {
             return Err(format!(
                 "decision {} holds a request other than the one it binds",
@@ -199,6 +217,20 @@ pub trait HeldChangeHost: Send + Sync {
         mob: &MobHandle,
         identity: &str,
     ) -> Result<Option<HeldTarget>, IdentityRefusal>;
+
+    /// The realm profile `name`, which a profile of `mob` is bound to by
+    /// reference, as the realm holds it now. `Ok(None)` when this host
+    /// cannot read it: a change whose agent runs on such a profile is
+    /// refused `unsupported`, and is neither held nor carried out for a
+    /// profile nobody can show. The default reads none.
+    async fn realm_profile(
+        &self,
+        mob: &MobHandle,
+        name: &str,
+    ) -> Result<Option<meerkat_mob::Profile>, IdentityRefusal> {
+        let _ = (mob, name);
+        Ok(None)
+    }
 }
 
 /// The notice a decision that ended owes its requester.
@@ -467,7 +499,32 @@ impl Binding {
     }
 }
 
-/// The principal a decision names as the requester `requester` of a change
+/// The person `text` names, when it is a person's principal key
+/// (`principal:["human", trust domain, id]`); `None` for any other text,
+/// and for the key of a principal that is no person.
+fn person_key(text: &str) -> Option<DecisionPrincipalKey> {
+    let key = DecisionPrincipalKey::new(text).ok()?;
+    text.starts_with("principal:[\"human\",").then_some(key)
+}
+
+/// The principal the decision of `request` in `mob_id` records as its
+/// requester: who a decide is compared with. A request a host surface asks
+/// and names a person as the proposer of, by that person's principal key,
+/// is that person's: they cannot approve it. A proposer that is any other
+/// text is recorded and compared with nobody, and a request with no
+/// proposer is the host's.
+fn decision_requester(
+    mob_id: &str,
+    request: &IdentityRequest,
+) -> Result<DecisionPrincipalKey, IdentityRefusal> {
+    let proposed_by = request.proposer.as_deref().and_then(person_key);
+    match (&request.requester, proposed_by) {
+        (Requester::Host { .. }, Some(person)) => Ok(person),
+        (requester, _) => requester_key(mob_id, requester),
+    }
+}
+
+/// The principal a decision names for the requester `requester` of a change
 /// in `mob_id`. An agent and a host surface are named in the mob's own
 /// domain; a person is named by the principal key the transport carries for
 /// them, which is the key a decide by the same person carries, so that a
@@ -486,14 +543,12 @@ fn requester_key(
     match requester {
         Requester::Agent { identity } => in_mob(PrincipalKind::SharedAgent, identity),
         Requester::Host { surface } => in_mob(PrincipalKind::RuntimeHost, surface),
-        Requester::Human { principal } => {
-            DecisionPrincipalKey::new(principal.clone()).map_err(|_| {
-                malformed("requester").with_detail(
-                    "A person who asks for a change is named by their principal key: \
-                     `principal:[\"human\", trust domain, id]`.",
-                )
-            })
-        }
+        Requester::Human { principal } => person_key(principal).ok_or_else(|| {
+            malformed("requester").with_detail(
+                "A person who asks for a change is named by their principal key: \
+                 `principal:[\"human\", trust domain, id]`.",
+            )
+        }),
     }
 }
 
@@ -748,7 +803,14 @@ impl IdentityDecisions {
                     profile: agent.profile().to_owned(),
                 }));
             };
-            let declared = ProfileTools::declared(binding).map_err(|_| malformed("request"))?;
+            let realm = match binding {
+                meerkat_mob::ProfileBinding::RealmRef { realm_profile } => {
+                    self.host.realm_profile(mob, realm_profile).await?
+                }
+                meerkat_mob::ProfileBinding::Inline(_) => None,
+            };
+            let declared =
+                ProfileTools::declared(agent.profile(), binding, definition, realm.as_ref())?;
             profiles.insert(agent.profile().to_owned(), declared);
         }
         let tools = ToolConfigurations::of_request(request, agents, profiles)?;
@@ -825,12 +887,15 @@ impl IdentityDecisions {
         }
         let request = &normalized.request;
         let binding = Binding::of(mob, operation_id, request)?;
-        if let Some(row) = self.read(&binding.decision_id)? {
+        // One operation id names one change: a decision that holds it, of
+        // whichever kind, answers it, and another request under it is
+        // refused.
+        if let Some(row) = self.find(mob, operation_id)? {
             return self.replayed(mob, operation_id, &binding, &row).await;
         }
         let rendering = self.render(mob, request).await?;
         let mob_id = mob.mob_id().as_str().to_owned();
-        let requester = requester_key(&mob_id, &request.requester)?;
+        let requester = decision_requester(&mob_id, request)?;
         let body = serde_json::to_value(HeldIdentityChange {
             format: HELD_CHANGE_FORMAT.to_owned(),
             mob_id,
@@ -1128,7 +1193,12 @@ impl DecisionExecutor for IdentityDecisionExecutor {
                 IdentityOutcome::PendingDecision { .. } => DecisionExecution::Released,
             },
             // The commit ended with no outcome: Core's receipt says
-            // whether it landed.
+            // whether it landed. With no receipt the permit is released,
+            // and the next pass asks the same operation again, which Core
+            // commits at most once. A known limit: Core's loop has no
+            // answer that leaves a permit outstanding, so a commit that
+            // landed while its receipt could not be read, at the decision's
+            // deadline, ends the decision expired though the change stands.
             Err(error) => {
                 tracing::warn!(%error, "a held change of agents ended with no outcome");
                 match committed_outcome(&mob, &operation_id).await {

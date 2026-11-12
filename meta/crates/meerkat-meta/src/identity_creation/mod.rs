@@ -148,8 +148,9 @@ pub use refusal::{
     PolicyRefusalKind, RequestProblem, ValidationRefusal,
 };
 pub use render::{
-    AgentTools, HOST_CONSEQUENCE_MAX_BYTES, HOST_CONSEQUENCES_MAX_BYTES, ProfileTools, RENDERER,
-    RENDERING_MAX_BYTES, Rendering, ToolConfigurations, labels, render_held_v1, render_v1,
+    AgentTools, HOST_CONSEQUENCE_MAX_BYTES, HOST_CONSEQUENCES_MAX_BYTES, ProfileTools,
+    REALM_PROFILE_UNREADABLE, RENDERER, RENDERING_MAX_BYTES, Rendering, ToolConfigurations, labels,
+    render_held_v1, render_v1,
 };
 pub use request::{
     AdoptIdentitySpec, ArchiveIdentitySpec, CONSOLE_SURFACE, Consequence, ConsequenceEffect,

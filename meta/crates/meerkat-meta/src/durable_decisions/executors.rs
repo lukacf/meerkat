@@ -12,9 +12,12 @@
 //! owes its notice next), and one per tick while a pass may find work that
 //! nothing announces: a decision of its kinds is open or approved (its
 //! deadline passes without an event), or the last pass left something it
-//! could not do then. A pass reads decision records: it loads no session
-//! and wakes no member. A runtime with no decision of the driver's kinds
-//! makes its first pass and no other.
+//! could not do then. A pass with nothing owed reads decision records
+//! only: it loads no session and wakes no member. A pass that carries a
+//! decision out or delivers its notice does what that work does (a create
+//! with a first message starts that agent's first turn; a notice to an
+//! agent starts a turn of an idle agent). A runtime with no decision of the
+//! driver's kinds makes its first pass and no other.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};

@@ -26,9 +26,13 @@
 //! source of who may decide for an approver id: Console subjects and groups,
 //! the people a declared ingress attests (`ingress_subjects`), the stdio
 //! operator (`{ ingress = "operator" }`), and people whose identities span
-//! ingresses (`people`). A person never decides their own request: a decide
-//! by the decision's requester, or by an identity the map links with the
-//! requester in one person, is refused `self_approval`.
+//! ingresses (`people`). A person never decides a request its decision
+//! records as theirs: a decide by the decision's requester, or by an
+//! identity the map links with the requester in one person, is refused
+//! `self_approval`. A decision records a person where its holder was given
+//! one (a signed-in Console person; for a change of an agent, also a person
+//! a host names as the request's proposer by their principal key); a
+//! request a host carries for somebody without naming them is the host's.
 
 mod approvers;
 pub(crate) mod console;

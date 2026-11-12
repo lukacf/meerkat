@@ -10935,6 +10935,35 @@ impl MobHandle {
             .await?)
     }
 
+    /// [`Self::identity_record`] for many identities at once: each named
+    /// identity's row in the mob's identity store, absent from the answer
+    /// when the store holds no row of the name. The names are read in pages
+    /// of at most [`super::IDENTITY_ENTRY_PAGE_MAX`], one store read per
+    /// page, so the number of store reads does not grow with the number of
+    /// names beyond pages: a host that serves many store-owned identities
+    /// reads their rows at a start without one read per identity. Under the
+    /// [`crate::ControlScope::List`] scope: no actor command, and it never
+    /// wakes a member.
+    pub async fn identity_records(
+        &self,
+        identities: &[AgentIdentity],
+    ) -> Result<BTreeMap<AgentIdentity, crate::identity::CreatedIdentityObservation>, MobError>
+    {
+        self.read_published_machine_state(crate::ControlScope::List, |_| ())?;
+        let mut rows = BTreeMap::new();
+        let Some(store) = self.identity_member.as_ref() else {
+            return Ok(rows);
+        };
+        for page in identities.chunks(super::IDENTITY_ENTRY_PAGE_MAX) {
+            rows.extend(
+                store
+                    .observe_created_identities(self.mob_id(), page)
+                    .await?,
+            );
+        }
+        Ok(rows)
+    }
+
     /// The counts of the mob's records in its identity store and of what a
     /// downgrade cycle settles first ([`super::IdentityRecordCensus`]): the
     /// store's rows, read page by page, the published machine state, and,

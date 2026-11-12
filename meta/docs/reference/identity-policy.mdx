@@ -214,14 +214,24 @@ An agent never changes itself (`self_change_refused`), and a member that is
 private to one person (a Console side chat, for example) asks for no change
 at all (`private_requester`).
 
+## What a caller is shown
+
+Every read of the family and every peer a change names goes through one
+rule. A caller is shown the agents its view of the mob shows it: on the
+Console the agents the caller's access rules let it view (`agent.view`),
+on the stdio gateway every agent. An agent is shown no agent that is
+private to one person (one whose labels carry `console.private_to`),
+whatever it asks: its `list` and its `directory` leave such an agent out,
+and a `get`, a `plan` or a change of it answers `identity_unknown`,
+exactly as a name no agent holds.
+
 ## Peers a caller may name
 
-A change names as peers only agents its caller may see. On the Console
-that is the agents the caller's access rules let it view (`agent.view`);
-a member private to one person is seen by nobody here. A peer the caller
-may not see is answered `peer_unknown`, exactly as a name no agent holds,
-and never `peer_not_allowed`: a peer rule speaks only to a caller that
-sees the peer.
+A change names as peers only agents its caller is shown, and an agent
+private to one person is nobody's peer. A peer the caller may not name is
+answered `peer_unknown`, exactly as a name no agent holds, and never
+`peer_not_allowed`: a peer rule speaks only to a caller that sees the
+peer.
 
 ## Adopting configured agents
 

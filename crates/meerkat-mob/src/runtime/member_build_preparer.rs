@@ -7,8 +7,13 @@
 //! composes for the member's identity. Core asks the host's
 //! [`MemberBuildPreparer`] once per build, off the actor, before the member's
 //! provision, on every wake and every boot-set restore, so a member never runs
-//! with a surface its host has not prepared. With no preparer configured,
-//! nothing changes.
+//! with a surface its host has not prepared. The spawn of a store-owned
+//! identity's member (the kickoff spawn of its create, or the seat a start
+//! owes it) is such a build too: it is asked before that spawn's provision,
+//! about the session the spawn names, which no build has created yet, with
+//! no wired peers (the spawn wires them). A refusal there fails the spawn:
+//! the identity stays owed its seat, and no retry is recorded. With no
+//! preparer configured, nothing changes.
 //!
 //! The preparer receives a read-only [`MobReadHandle`]: it is called inside a
 //! wake and inside a boot restore before the mob's actor runs, so it must not
@@ -111,7 +116,8 @@ pub trait MemberBuildPreparer: Send + Sync {
     /// successful local build, off the actor: a wake's or a boot restore's
     /// (which Core prepared through this preparer), and a spawn's once its
     /// activation committed (a fresh or embodied spawn, a held create once
-    /// activated, a respawn), which Core does not prepare. A build that
+    /// activated, a respawn), which Core does not prepare, except the spawn
+    /// of a store-owned identity's member, which it does. A build that
     /// failed, or a wake that was refused or abandoned, is never reported.
     /// The default ignores it.
     async fn member_built(&self, report: MemberBuildReport) {
@@ -138,6 +144,47 @@ pub(crate) fn member_build_wired_peers(
             }
         })
         .collect()
+}
+
+/// Ask the host's build preparer about the spawn of a store-owned
+/// identity's member (the kickoff spawn of its create, or the seat a start
+/// owes it) before its provision, off the actor, as a wake asks it. `Ok` is
+/// whether a hold the host asked for was staged on the member's next
+/// registration: the caller removes it again when the spawn fails. A
+/// refusal, for now or for good, fails the spawn with the host's reason:
+/// the identity stays owed its seat, and the mob's next start asks again.
+/// No retry is recorded for it, since no member exists yet to refuse a wake
+/// of.
+#[cfg(feature = "runtime-adapter")]
+pub(crate) async fn prepare_spawn_member_build(
+    preparer: &dyn MemberBuildPreparer,
+    provisioner: &dyn crate::runtime::provisioner::MobProvisioner,
+    request: MemberBuildPreparation,
+) -> Result<bool, crate::error::MobError> {
+    let agent_identity = request.agent_identity.clone();
+    let session_id = request.session_id.clone();
+    match preparer.prepare_member_build(request).await {
+        Ok(MemberBuildPrepared::Prepared) => Ok(false),
+        Ok(MemberBuildPrepared::HoldUntilReleased) => {
+            provisioner
+                .stage_member_registration_run_start_hold_only(
+                    &crate::event::MemberRef::from_bridge_session_id(session_id),
+                    meerkat_runtime::RunStartHoldReason::ToolsNotPublished,
+                )
+                .await?;
+            Ok(true)
+        }
+        Err(MemberBuildPreparationRefusal::Retryable { reason }) => {
+            Err(crate::error::MobError::Internal(format!(
+                "the host asked to retry the build preparation of '{agent_identity}': {reason}"
+            )))
+        }
+        Err(MemberBuildPreparationRefusal::Final { reason }) => {
+            Err(crate::error::MobError::Internal(format!(
+                "the host refused to prepare the build of '{agent_identity}': {reason}"
+            )))
+        }
+    }
 }
 
 /// Report a built member to the host's preparer, if one is configured: read

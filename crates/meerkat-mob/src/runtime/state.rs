@@ -1529,6 +1529,16 @@ pub(super) enum MobCommand {
         agent_identity: AgentIdentity,
         reply_tx: oneshot::Sender<Result<bool, MobError>>,
     },
+    /// Test-only: realize one kickoff notice of `agent_identity`, as the
+    /// actor does for MobMachine's `EmitKickoffLifecycleNotice`. It stands
+    /// in for kickoff phases a row's fixture cannot reach (a callback
+    /// pending, a failure).
+    #[cfg(test)]
+    EmitKickoffNoticeForTest {
+        agent_identity: AgentIdentity,
+        intent: &'static str,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
     #[cfg(test)]
     ParkActorForObservationTest {
         entered_tx: oneshot::Sender<()>,
@@ -2500,6 +2510,8 @@ impl MobCommand {
             #[cfg(test)]
             Self::OwedMemberWakeRetryArmedForTest { .. } => ShutdownAnswerClass::CallerRequest,
             #[cfg(test)]
+            Self::EmitKickoffNoticeForTest { .. } => ShutdownAnswerClass::CallerRequest,
+            #[cfg(test)]
             Self::InjectUnreadableNameAtLadderOpenForTest { .. } => {
                 ShutdownAnswerClass::CallerRequest
             }
@@ -2748,6 +2760,8 @@ impl MobCommand {
             Self::ParkActorForObservationTest { .. } => "ParkActorForObservationTest",
             #[cfg(test)]
             Self::OwedMemberWakeRetryArmedForTest { .. } => "OwedMemberWakeRetryArmedForTest",
+            #[cfg(test)]
+            Self::EmitKickoffNoticeForTest { .. } => "EmitKickoffNoticeForTest",
             #[cfg(test)]
             Self::InjectUnreadableNameAtLadderOpenForTest { .. } => {
                 "InjectUnreadableNameAtLadderOpenForTest"

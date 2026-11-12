@@ -87,9 +87,10 @@ impl MobActor {
         let to = notice.to.clone();
         #[cfg(all(test, not(target_arch = "wasm32")))]
         let notice = KickoffNoticeDelivery {
-            sender_comms: sender_held_for_test(
+            sender_comms: sender_seam_for_test(
                 &mob_id,
                 notice.intent,
+                &notice.to,
                 Arc::clone(&notice.sender_comms),
             ),
             ..notice
@@ -218,72 +219,226 @@ pub(in crate::runtime) fn set_kickoff_notice_pending_limit_for_test(mob_id: &Mob
     }
 }
 
-/// Test seam: the kickoff notices of one kind whose send waits until the
-/// test releases it, per mob. The wait is inside the delivery's own send, so
-/// it comes after the wait for the notice before it and ends with a
-/// cancellation.
+/// Test seam: what a test armed for the sends of a mob's kickoff notices.
+/// A seam is inside the delivery's own send, so it comes after the wait for
+/// the notice before it and ends with a cancellation.
 #[cfg(all(test, not(target_arch = "wasm32")))]
-static KICKOFF_NOTICE_SEND_HOLDS_FOR_TEST: std::sync::Mutex<
-    Vec<(MobId, &'static str, tokio::sync::watch::Receiver<bool>)>,
-> = std::sync::Mutex::new(Vec::new());
+static KICKOFF_NOTICE_SEND_SEAMS_FOR_TEST: std::sync::Mutex<Vec<KickoffNoticeSendSeamForTest>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// One armed seam: the sends of `mob_id`'s kickoff notices of kind `intent`
+/// (every kind when `None`) to `to` (every recipient when `None`).
+#[cfg(all(test, not(target_arch = "wasm32")))]
+struct KickoffNoticeSendSeamForTest {
+    mob_id: MobId,
+    intent: Option<&'static str>,
+    to: Option<AgentIdentity>,
+    /// The send waits until this holds `true`; `None` fails the send.
+    released: Option<tokio::sync::watch::Receiver<bool>>,
+    arrived: Arc<std::sync::atomic::AtomicUsize>,
+    passed: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+/// A test's end of a held send (see [`hold_kickoff_notice_send_for_test`]).
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(in crate::runtime) struct KickoffNoticeSendHoldForTest {
+    released: tokio::sync::watch::Sender<bool>,
+    arrived: Arc<std::sync::atomic::AtomicUsize>,
+    passed: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+impl KickoffNoticeSendHoldForTest {
+    /// Let the held sends go.
+    pub(in crate::runtime) fn release(&self) {
+        self.released.send_replace(true);
+    }
+
+    /// How many sends reached the hold: their delivery's turn had come.
+    pub(in crate::runtime) fn arrived(&self) -> usize {
+        self.arrived.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// How many sends went on to the member's own comms runtime.
+    pub(in crate::runtime) fn passed(&self) -> usize {
+        self.passed.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
 
 /// Hold the send of every kickoff notice of kind `intent` in `mob_id` until
-/// the returned sender sends `true`.
+/// the returned hold is released.
 #[cfg(all(test, not(target_arch = "wasm32")))]
 pub(in crate::runtime) fn hold_kickoff_notice_send_for_test(
     mob_id: &MobId,
     intent: &'static str,
-) -> tokio::sync::watch::Sender<bool> {
-    let (released_tx, released_rx) = tokio::sync::watch::channel(false);
-    KICKOFF_NOTICE_SEND_HOLDS_FOR_TEST
+) -> KickoffNoticeSendHoldForTest {
+    let (released, released_rx) = tokio::sync::watch::channel(false);
+    let hold = KickoffNoticeSendHoldForTest {
+        released,
+        arrived: Arc::default(),
+        passed: Arc::default(),
+    };
+    KICKOFF_NOTICE_SEND_SEAMS_FOR_TEST
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .push((mob_id.clone(), intent, released_rx));
-    released_tx
+        .push(KickoffNoticeSendSeamForTest {
+            mob_id: mob_id.clone(),
+            intent: Some(intent),
+            to: None,
+            released: Some(released_rx),
+            arrived: Arc::clone(&hold.arrived),
+            passed: Arc::clone(&hold.passed),
+        });
+    hold
 }
 
-/// `sender`, or `sender` behind the hold armed for `mob_id` and `intent`.
+/// Fail the send of every kickoff notice to `to` in `mob_id` (the peer is
+/// reported offline), as a send to a live recipient can fail.
 #[cfg(all(test, not(target_arch = "wasm32")))]
-fn sender_held_for_test(
-    mob_id: &MobId,
-    intent: &str,
-    sender: Arc<dyn CoreCommsRuntime>,
-) -> Arc<dyn CoreCommsRuntime> {
-    let held = KICKOFF_NOTICE_SEND_HOLDS_FOR_TEST
+pub(in crate::runtime) fn fail_kickoff_notice_send_for_test(mob_id: &MobId, to: &AgentIdentity) {
+    KICKOFF_NOTICE_SEND_SEAMS_FOR_TEST
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .iter()
-        .find(|(armed_mob, armed_intent, _)| armed_mob == mob_id && *armed_intent == intent)
-        .map(|(_, _, released)| released.clone());
-    match held {
-        Some(released) => Arc::new(HeldSenderForTest { sender, released }),
+        .push(KickoffNoticeSendSeamForTest {
+            mob_id: mob_id.clone(),
+            intent: None,
+            to: Some(to.clone()),
+            released: None,
+            arrived: Arc::default(),
+            passed: Arc::default(),
+        });
+}
+
+/// `sender`, or `sender` behind the seam armed for `mob_id`, `intent` and
+/// `to`.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+fn sender_seam_for_test(
+    mob_id: &MobId,
+    intent: &str,
+    to: &AgentIdentity,
+    sender: Arc<dyn CoreCommsRuntime>,
+) -> Arc<dyn CoreCommsRuntime> {
+    let seams = KICKOFF_NOTICE_SEND_SEAMS_FOR_TEST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let armed = seams.iter().find(|seam| {
+        &seam.mob_id == mob_id
+            && seam.intent.is_none_or(|armed| armed == intent)
+            && seam.to.as_ref().is_none_or(|armed| armed == to)
+    });
+    match armed {
+        Some(seam) => Arc::new(SeamedSenderForTest {
+            sender,
+            released: seam.released.clone(),
+            arrived: Arc::clone(&seam.arrived),
+            passed: Arc::clone(&seam.passed),
+        }),
         None => sender,
     }
 }
 
-/// A sender whose sends wait for the test's release.
+/// A sender whose sends wait for the test's release, or fail.
 #[cfg(all(test, not(target_arch = "wasm32")))]
-struct HeldSenderForTest {
+struct SeamedSenderForTest {
     sender: Arc<dyn CoreCommsRuntime>,
-    released: tokio::sync::watch::Receiver<bool>,
+    released: Option<tokio::sync::watch::Receiver<bool>>,
+    arrived: Arc<std::sync::atomic::AtomicUsize>,
+    passed: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[async_trait::async_trait]
-impl CoreCommsRuntime for HeldSenderForTest {
+impl CoreCommsRuntime for SeamedSenderForTest {
     fn inbox_notify(&self) -> Arc<tokio::sync::Notify> {
         self.sender.inbox_notify()
     }
 
     async fn send(&self, cmd: CommsCommand) -> Result<meerkat_core::comms::SendReceipt, SendError> {
-        let mut released = self.released.clone();
+        self.arrived
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let Some(mut released) = self.released.clone() else {
+            return Err(SendError::PeerOffline);
+        };
         while !*released.borrow_and_update() {
             if released.changed().await.is_err() {
                 break;
             }
         }
+        self.passed
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.sender.send(cmd).await
     }
+}
+
+/// Test seam: the recipients whose kickoff notices fail their preparation on
+/// the actor, per mob.
+#[cfg(test)]
+static KICKOFF_NOTICE_PREPARATION_FAULTS_FOR_TEST: std::sync::Mutex<Vec<(MobId, AgentIdentity)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Fail the preparation of every kickoff notice to `to` in `mob_id` where
+/// its endpoint is resolved.
+#[cfg(test)]
+pub(in crate::runtime) fn fail_kickoff_notice_preparation_for_test(
+    mob_id: &MobId,
+    to: &AgentIdentity,
+) {
+    KICKOFF_NOTICE_PREPARATION_FAULTS_FOR_TEST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push((mob_id.clone(), to.clone()));
+}
+
+/// The fault armed for the preparation of a kickoff notice to `to` in
+/// `mob_id`, if any.
+#[cfg(test)]
+pub(super) fn kickoff_notice_preparation_fault_for_test(
+    mob_id: &MobId,
+    to: &AgentIdentity,
+) -> Result<(), MobError> {
+    let armed = KICKOFF_NOTICE_PREPARATION_FAULTS_FOR_TEST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .any(|(armed_mob, armed_to)| armed_mob == mob_id && armed_to == to);
+    if armed {
+        return Err(MobError::WiringError(format!(
+            "fault-injected endpoint resolution failure for kickoff notice recipient '{to}'"
+        )));
+    }
+    Ok(())
+}
+
+/// Test seam: the members whose spawn fails where it prepares its kickoff
+/// input, after its starting notice was handed to the lane.
+#[cfg(test)]
+static AUTONOMOUS_KICKOFF_START_FAULTS_FOR_TEST: std::sync::Mutex<Vec<AgentIdentity>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Fail the spawn of `member` where it prepares its kickoff input.
+#[cfg(test)]
+pub(in crate::runtime) fn fail_autonomous_kickoff_start_for_test(member: &AgentIdentity) {
+    AUTONOMOUS_KICKOFF_START_FAULTS_FOR_TEST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(member.clone());
+}
+
+/// The fault armed for `member`'s kickoff start, if any.
+#[cfg(test)]
+pub(super) fn autonomous_kickoff_start_fault_for_test(
+    member: &AgentIdentity,
+) -> Result<(), MobError> {
+    let armed = AUTONOMOUS_KICKOFF_START_FAULTS_FOR_TEST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(member);
+    if armed {
+        return Err(MobError::Internal(format!(
+            "fault-injected kickoff start failure for '{member}'"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]

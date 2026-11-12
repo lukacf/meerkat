@@ -32256,6 +32256,15 @@ impl MobActor {
                     let _ = reply_tx.send(Ok(self.owed_member_wake_retry_armed(&agent_identity)));
                 }
                 #[cfg(test)]
+                MobCommand::EmitKickoffNoticeForTest {
+                    agent_identity,
+                    intent,
+                    reply_tx,
+                } => {
+                    let emitted = self.notify_kickoff_event(&agent_identity, intent).await;
+                    let _ = reply_tx.send(emitted);
+                }
+                #[cfg(test)]
                 MobCommand::ParkActorForObservationTest {
                     entered_tx,
                     release_rx,
@@ -67072,6 +67081,11 @@ impl MobActor {
             )? {
                 continue;
             }
+            #[cfg(test)]
+            kickoff_notice::kickoff_notice_preparation_fault_for_test(
+                &self.definition.id,
+                &recipient_entry.agent_identity,
+            )?;
             let (recipient_spec, dormant_endpoint) = match self
                 .resolve_wiring_endpoint(&recipient_entry, "notify_kickoff_event")
                 .await?

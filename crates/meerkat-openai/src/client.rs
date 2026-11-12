@@ -6253,6 +6253,15 @@ mod tests {
         Url,
         /// HTTP 200 stream whose `error` event names the header as sent.
         StreamError,
+        /// HTTP 200 stream that fails with a code of its own and names the
+        /// header as sent in its message. `code` is the code the event
+        /// carries; `None` makes the code itself repeat the credential,
+        /// after a fixed word. The failure arrives as an `error` event, or
+        /// as a `response.failed` event when `failed_response` is set.
+        StreamCodedError {
+            code: Option<&'static str>,
+            failed_response: bool,
+        },
     }
 
     /// The message an upstream that received the credential header `name`
@@ -6260,7 +6269,9 @@ mod tests {
     fn credential_echo_message(echo: CredentialEcho, name: &str, value: &str) -> String {
         let bare = value.strip_prefix("Bearer ").unwrap_or(value);
         match echo {
-            CredentialEcho::HeaderLine | CredentialEcho::StreamError => {
+            CredentialEcho::HeaderLine
+            | CredentialEcho::StreamError
+            | CredentialEcho::StreamCodedError { .. } => {
                 format!("upstream echo: rejected request with header {name}: {value}")
             }
             CredentialEcho::Bare => format!("upstream echo: credential {bare} was refused"),
@@ -6291,6 +6302,33 @@ mod tests {
                         "code": "server_error",
                         "message": message,
                     });
+                    (
+                        [("content-type", "text/event-stream")],
+                        format!("data: {event}\n\n"),
+                    )
+                        .into_response()
+                }
+                CredentialEcho::StreamCodedError {
+                    code,
+                    failed_response,
+                } => {
+                    let bare = value.strip_prefix("Bearer ").unwrap_or(&value);
+                    let code = code.map_or_else(
+                        || format!("rejected_credential:{bare}"),
+                        ToString::to_string,
+                    );
+                    let event = if failed_response {
+                        serde_json::json!({
+                            "type": "response.failed",
+                            "response": {
+                                "id": "resp_echo",
+                                "status": "failed",
+                                "error": {"code": code, "message": message},
+                            },
+                        })
+                    } else {
+                        serde_json::json!({"type": "error", "code": code, "message": message})
+                    };
                     (
                         [("content-type", "text/event-stream")],
                         format!("data: {event}\n\n"),
@@ -6475,6 +6513,103 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A stream that fails with more than a server error's message: a model
+    /// the service does not know (the message becomes the error's `model`),
+    /// a refused request (the code goes in front of the message), and a
+    /// code that itself repeats the credential (the code is a log field and
+    /// part of the error), as an `error` event and as a `response.failed`
+    /// event. None of them puts the credential in the error the Responses
+    /// client returns, in what the agent loop derives from it and publishes,
+    /// or in a field the client logs, whoever signed the request; each keeps
+    /// its class.
+    #[tokio::test]
+    async fn echoed_credential_stays_out_of_coded_stream_errors_and_their_log_fields() {
+        let log = LogCapture::default();
+        let capture = CaptureSubscriber::dispatch(log.clone());
+        // A second registered dispatcher makes callsite interest come from
+        // every dispatcher, so a callsite first reached under no subscriber
+        // still reaches this one.
+        let _anchor = CaptureSubscriber::dispatch(LogCapture::default());
+        let _guard = tracing::dispatcher::set_default(&capture);
+
+        let credential = format!("responses-{}", "madeupcredential".repeat(3));
+        for signer in [
+            CredentialSigner::ClientApiKey,
+            CredentialSigner::ClientAzureApiKey,
+            CredentialSigner::StaticBearerAuthorizer,
+        ] {
+            for (code, failed_response) in [
+                (Some("model_not_found"), false),
+                (Some("invalid_request_body"), true),
+                (None, false),
+                (None, true),
+            ] {
+                let echo = CredentialEcho::StreamCodedError {
+                    code,
+                    failed_response,
+                };
+                let (base_url, server) = spawn_credential_echo_server(echo).await;
+                let client = credential_signed_client(signer, base_url, &credential);
+                let request =
+                    LlmRequest::new("gpt-5.4", vec![Message::User(UserMessage::text("hello"))]);
+                let events = client.stream(&request).collect::<Vec<_>>().await;
+                let error = events
+                    .into_iter()
+                    .find_map(|event| match event {
+                        Err(error)
+                        | Ok(LlmEvent::Done {
+                            outcome: LlmDoneOutcome::Error { error },
+                        }) => Some(error),
+                        Ok(_) => None,
+                    })
+                    .unwrap_or_else(|| panic!("{signer:?} {echo:?}: the stream ends in an error"));
+                let rendered = format!(
+                    "{error} {error:?} {}",
+                    serde_json::to_string(&error).expect("error JSON")
+                );
+                let agent_forms = agent_failure_forms(Arc::new(client)).await;
+                server.abort();
+                for (surface, text) in [("client error", &rendered), ("agent", &agent_forms)] {
+                    assert!(
+                        !text.contains(&credential),
+                        "{signer:?} {echo:?}: the {surface} leaked the credential: {text}"
+                    );
+                    assert!(
+                        text.contains("upstream echo"),
+                        "{signer:?} {echo:?}: the server's answer reached the {surface}: {text}"
+                    );
+                }
+                match (code, &error) {
+                    (Some("model_not_found"), LlmError::ModelNotFound { model }) => assert!(
+                        model.starts_with("upstream echo: rejected request with header "),
+                        "{signer:?} {echo:?}: the message is the model: {model}"
+                    ),
+                    (Some(code), LlmError::InvalidRequest { message }) => assert!(
+                        message.starts_with(&format!(
+                            "{code}: upstream echo: rejected request with header "
+                        )),
+                        "{signer:?} {echo:?}: the code stands in front of the message: {message}"
+                    ),
+                    (None, LlmError::Unknown { message }) => assert!(
+                        message.starts_with("rejected_credential:[REDACTED]: upstream echo: "),
+                        "{signer:?} {echo:?}: the code keeps its word and loses the credential: {message}"
+                    ),
+                    _ => panic!("{signer:?} {echo:?}: the failure keeps its class: {error:?}"),
+                }
+            }
+        }
+
+        let logged = log.text();
+        assert!(
+            logged.contains("upstream echo") && logged.contains("rejected_credential:"),
+            "the capture saw the client's error log fields, the code included: {logged}"
+        );
+        assert!(
+            !logged.contains(&credential),
+            "a log field leaked the credential: {logged}"
+        );
     }
 
     /// An image request the provider refuses with a body that repeats the

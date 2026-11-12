@@ -545,7 +545,7 @@ committed state, without waking the member or decoding its transcript:
 | --- | --- |
 | `Some(sections)` | The sections the session's build was given, in order. |
 | `Some(vec![])` | The session was built with no sections. |
-| `None` | Not known: the service holds no committed session under that id, or the session's record does not say (it was built before 0.9.14, or an earlier release's resume erased the record). |
+| `None` | Not known: the service holds no committed session under that id, or the session's record does not say (it was built by 0.9.14 or an earlier release, or such a release's resume erased the record). |
 
 A seat no build has created yet has no session, so the read answers `None`
 for it: its sections are still its seat's spec. Its first build may append

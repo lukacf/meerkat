@@ -2451,8 +2451,8 @@ pub trait MobSessionService:
     /// - `Ok(None)`: the sections are not known. The service holds no
     ///   committed session under this id (a seat no build has created yet
     ///   has none: its sections are still its seat's spec), or the build
-    ///   state does not say (a session built before 0.9.14, or one whose
-    ///   record an earlier release's resume erased).
+    ///   state does not say (a session built by 0.9.14 or an earlier
+    ///   release, or one whose record such a release's resume erased).
     /// - `Err`: the store could not be read, or the record is corrupt. A
     ///   corrupt record is never `Ok(None)`.
     ///

@@ -4473,8 +4473,8 @@ pub struct SessionBuildState {
     /// given an explicit system prompt) records `Some(vec![])`. A build
     /// that names none and writes no prompt keeps what is recorded, so a
     /// resume never erases them. `None` means the sections are not known: a
-    /// session built before 0.9.14, or one whose record an earlier
-    /// release's resume erased.
+    /// session built by 0.9.14 or an earlier release, or one whose record
+    /// such a release's resume erased.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_instructions: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

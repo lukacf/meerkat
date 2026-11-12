@@ -48,8 +48,9 @@ them.
   is a session built with none. `Ok(None)` means the sections are not known:
   the service holds no committed session under that id (a seat no build has
   created yet has none, and a session another host keeps is not committed
-  here), or the session's record does not say (a session built before
-  0.9.14, or one whose record an earlier release erased, see Fixed). A first
+  here), or the session's record does not say (a session built by 0.9.14 or
+  an earlier release, or one whose record such a release erased, see Fixed).
+  A first
   build may append the host's spawn customizer's sections, so a session
   records its spec's sections followed by those. The read takes no caller
   principal: a surface that serves it admits its caller first.
@@ -68,7 +69,7 @@ them.
 
 ### Fixed
 
-- `meerkat`, `meerkat-mob` (0.5.1 through 0.9.13): a session keeps the
+- `meerkat`, `meerkat-mob` (0.5.1 through 0.9.14): a session keeps the
   instruction sections it was built with. A session's durable build state
   records the `additional_instructions` of its build, and every build wrote
   that record from its own request, so a build that resumed the session and

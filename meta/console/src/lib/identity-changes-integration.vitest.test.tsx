@@ -1594,6 +1594,45 @@ describe("long-term agents in the console", () => {
     view.unmount();
   }, 60_000);
 
+  it("a_change_that_waits_is_said_in_the_record_and_its_ids_are_technical_details", async () => {
+    // What is open for an agent (a change held for a person's decision, a
+    // create that waits for its host) is on its record: `open_operations`,
+    // an array of operation ids, absent when nothing is open.
+    const family = createScriptedIdentityFamily();
+    family.seed({
+      name: "courier", display_name: "The courier", profile: "worker",
+      open_operations: ["human.0123abcd.request-1", "human.0123abcd.request-2"],
+    });
+    const record = async (name: string): Promise<{ facts: string; technical: string; view: View }> => {
+      window.localStorage.clear();
+      seedDock({ id: `inspect:${name}`, kind: "identity-inspect", title: `${name} details`, identity: name, memberId: name });
+      const view = render(<ConsoleApp baseUrl="" transport={transport(family)} />);
+      const section = await view.findByTestId(`inspect-record:${name}`, undefined, { timeout: 5_000 });
+      return {
+        facts: section.querySelector(".cc-kv")?.textContent || "",
+        technical: section.querySelector(".cc-tech")?.textContent || "",
+        view,
+      };
+    };
+    // The record says how many wait, in words; the ids are no primary text
+    // and are among the technical details.
+    const courier = await record("courier");
+    expect(courier.facts).toContain("Open requests");
+    expect(courier.facts).toContain("2 waiting");
+    expect(courier.facts).not.toContain("human.0123abcd");
+    expect(courier.technical).toContain("human.0123abcd.request-1");
+    expect(courier.technical).toContain("human.0123abcd.request-2");
+    courier.view.unmount();
+    cleanup();
+    // An agent with nothing open: the member is absent, and the record
+    // says nothing of it.
+    expect("open_operations" in family.handle("meta/identity/get", { name: "warden" }).result).toBe(false);
+    const warden = await record("warden");
+    expect(warden.facts).not.toContain("Open requests");
+    expect(warden.technical).not.toMatch(/Open operation/);
+    warden.view.unmount();
+  }, 60_000);
+
   it("an_agent_its_hosts_configuration_also_lists_says_so_at_its_status", async () => {
     const family = createScriptedIdentityFamily();
     const status = (extra: Record<string, unknown> = {}) => ({

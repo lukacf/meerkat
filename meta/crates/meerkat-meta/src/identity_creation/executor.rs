@@ -175,14 +175,17 @@ impl ChangeRequester {
     }
 
     /// The refusal of an agent's call that its surface attributed to
-    /// another agent than the member of the session the call ran in:
-    /// `invalid_request`, naming no field (a defect of the surface). The
-    /// policy judges the attributed identity, and Core reads the grant of
-    /// the session's member and records that member as the requester, so
-    /// the two are one agent. `None` for a call that is its session's
-    /// member's, for a session no member of `mob` holds (Core's to
-    /// answer), for an agent admitted by its recorded identity, and for
-    /// the host and a human. The family asks it when it admits a change,
+    /// another agent than the member of the session the call ran in, or
+    /// that ran in a session no member of `mob` holds: `invalid_request`,
+    /// naming no field (a defect of the surface). The policy judges the
+    /// attributed identity, and Core reads the grant of the session's
+    /// member and records that member as the requester, so the two are
+    /// one agent; a session no member holds stands for no agent at all,
+    /// and a change held for a person would later be carried out by the
+    /// attributed identity's recorded grant, which reads no session.
+    /// `None` for a call that is its session's member's, for an agent
+    /// admitted by its recorded identity, and for the host and a human.
+    /// The family asks it when it admits a change, a plan or a withdrawal,
     /// before anything is held, and the seam asks it again before Core is
     /// asked for a grant.
     pub(crate) async fn refused_by_its_session(&self, mob: &MobHandle) -> Option<IdentityRefusal> {
@@ -194,12 +197,12 @@ impl ChangeRequester {
         else {
             return None;
         };
-        let (member, _) = mob.member_of_session(session).await?;
-        (core_member_name(identity).as_ref() != Some(&member)).then(|| {
-            IdentityRefusal::new(IdentityRefusalKind::InvalidRequest {
+        match mob.member_of_session(session).await {
+            Some((member, _)) if core_member_name(identity).as_ref() == Some(&member) => None,
+            _ => Some(IdentityRefusal::new(IdentityRefusalKind::InvalidRequest {
                 problem: RequestProblem::Conflicting,
-            })
-        })
+            })),
+        }
     }
 
     /// This requester, marked a member private to a person when `private`

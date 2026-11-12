@@ -155,7 +155,8 @@ async function readsAndRefusals() {
 
 /**
  * The whole story against the real gateway: a person creates an agent,
- * edits it, archives it, brings it back and removes it, and a request that
+ * edits it, sets who reaches another and how it runs, archives the first,
+ * brings it back and removes it, and a request that
  * a person must decide waits and is withdrawn. The fixture keeps its
  * decisions in a state directory, as a host that can hold a change does.
  */
@@ -304,12 +305,81 @@ async function fullStory() {
     await page.getByTestId("sidebar-agent:scout").getByText("Chief scout").first().waitFor();
     await page.getByTestId("identity-cancel").click();
 
+    // Who reaches an agent and how it runs, against the gateway. A new
+    // agent can receive messages and runs as its profile says unless the
+    // person chooses otherwise; one created internal only and turn by turn
+    // reads both back, in its record and in its entry of the list.
+    await page.getByTestId("roster-new-agent").click();
+    await form.getByTestId("identity-profile:lead").check();
+    await form.getByTestId("identity-field:name").fill("clerk");
+    await form.getByTestId("identity-field:display_name").fill("Clerk");
+    assert.equal(await form.getByTestId("identity-addressability:addressable").isChecked(), true);
+    assert.equal(await form.getByTestId("identity-runtime-mode:profile").isChecked(), true);
+    await form.getByTestId("identity-addressability:internal_only").check();
+    await form.getByTestId("identity-runtime-mode:turn_driven").check();
+    await form.getByTestId("identity-submit").click();
+    await outcome("Clerk is created");
+    await agent("clerk").waitFor();
+    assert.deepEqual(creates().at(-1).agents, [{
+      name: "clerk", profile: "lead", display_name: "Clerk", addressability: "internal_only", runtime_mode_override: "turn_driven",
+    }]);
+    let clerk = (await call("meta/identity/get", { name: "clerk" })).result;
+    assert.equal(clerk.addressability, "internal_only");
+    assert.equal(clerk.runtime_mode_override, "turn_driven");
+    const listedAgents = (await call("meta/identity/list", {})).result.agents;
+    const listedClerk = listedAgents.find(entry => entry.name === "clerk");
+    assert.equal(listedClerk.addressability, "internal_only");
+    assert.equal(listedClerk.runtime_mode_override, "turn_driven");
+    // An agent whose record says neither reads neither.
+    for (const entry of [record, listedAgents.find(listed => listed.name === "scout")]) {
+      assert.equal(Object.hasOwn(entry, "addressability"), false, "an agent that can be messaged says nothing");
+      assert.equal(Object.hasOwn(entry, "runtime_mode_override"), false, "an agent that runs as its profile says says nothing");
+    }
+    await page.getByTestId("identity-cancel").click();
+    // Edit opens on what the record says. A record that names a way of
+    // running is not offered "As its profile says": an update cannot hand
+    // that back. The update sends the two members that changed and nothing
+    // else, and the record reads them back.
+    await openAgent("clerk");
+    await page.getByTestId("roster-action:clerk:edit").click();
+    const settings = page.getByTestId("identity-edit:clerk");
+    await settings.getByTestId("identity-field:display_name").waitFor();
+    assert.equal(await settings.getByTestId("identity-addressability:internal_only").isChecked(), true);
+    assert.equal(await settings.getByTestId("identity-runtime-mode:turn_driven").isChecked(), true);
+    assert.equal(await settings.getByTestId("identity-runtime-mode:profile").count(), 0);
+    await settings.getByTestId("identity-addressability:addressable").check();
+    await settings.getByTestId("identity-runtime-mode:autonomous_host").check();
+    await page.screenshot({ path: path.join(evidence, "real-identity-story-settings.png"), fullPage: true });
+    await settings.getByTestId("identity-submit").click();
+    await outcome(/is updated$/);
+    const settingsUpdates = sent(fixture, "meta/identity/update");
+    assert.equal(settingsUpdates.length, 2);
+    assert.equal(settingsUpdates[1].expected_spec_digest, clerk.spec_digest);
+    assert.deepEqual(settingsUpdates[1].set, { addressability: "addressable", runtime_mode_override: "autonomous_host" });
+    clerk = (await call("meta/identity/get", { name: "clerk" })).result;
+    assert.equal(Object.hasOwn(clerk, "addressability"), false, "an agent that can be messaged says nothing");
+    assert.equal(clerk.runtime_mode_override, "autonomous_host");
+    await page.getByTestId("identity-cancel").click();
+    // Its Record says how it runs, in words.
+    await openAgent("clerk");
+    await page.getByTestId("roster-detail:clerk").getByRole("button", { name: "Details", exact: true }).click();
+    const clerkRecord = page.getByTestId("inspect-record:clerk");
+    await clerkRecord.waitFor();
+    assert.match(await clerkRecord.locator(".cc-kv").first().textContent(), /How it runs\s*On its own/);
+    await page.locator('[data-testid^="pane:"]').filter({ has: page.getByTestId("inspect-panel:clerk") })
+      .locator('[data-testid^="pane-close:"]').click();
+    await gone(page.getByTestId("inspect-panel:clerk"), "the closed details");
+    await page.getByTestId("roster-panel").waitFor();
+
     // Archive: the agent leaves the roster and is among the archived agents.
     await openAgent("scout");
     await page.getByTestId("roster-action:scout:archive").click();
     await page.getByTestId("identity-confirm:scout:archive").getByText(/Its last conversation is harvested/).waitFor();
     await page.getByTestId("identity-confirm:scout:archive").getByTestId("identity-confirm-yes").click();
     await outcome(/is stopping$|is archived$/);
+    // This gateway's host gives the family no schedules, so the answer
+    // states none and the notice says nothing of them.
+    assert.equal(/schedule/i.test(await notice.textContent()), false);
     assert.equal(sent(fixture, "meta/identity/archive")[0].expected_spec_digest, record.spec_digest);
     await gone(agent("scout"), "the archived agent in the roster");
     await page.getByTestId("identity-confirm-cancel").click();
@@ -397,7 +467,7 @@ async function fullStory() {
     // Each change the browser sent names a request id of its own.
     const ids = ["create", "update", "archive", "unarchive", "remove"]
       .flatMap(change => sent(fixture, `meta/identity/${change}`).map(params => params.request_id));
-    assert.equal(ids.length, 9);
+    assert.equal(ids.length, 11);
     assert.equal(ids.every(id => typeof id === "string" && id.length > 0), true);
     assert.equal(new Set(ids).size, ids.length);
     assert.deepEqual(errors, []);

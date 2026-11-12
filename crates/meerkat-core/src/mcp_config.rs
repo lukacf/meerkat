@@ -2031,13 +2031,32 @@ async fn write_mcp_document_atomic(
             .and_then(|ext| ext.to_str())
             .unwrap_or("toml")
     ));
-    tokio::fs::write(&tmp_path, &contents)
-        .await
-        .map_err(|err| McpConfigError::Io(err.to_string()))?;
-    tokio::fs::rename(&tmp_path, path)
-        .await
-        .map_err(|err| McpConfigError::Io(err.to_string()))?;
+    replace_mcp_file(path, &tmp_path, &contents).await?;
     Ok(contents)
+}
+
+/// Replace the `mcp.toml` at `path` with `bytes` through the temporary file
+/// `temporary` beside it, under the config lock. A server's literal
+/// arguments, environment and headers can hold a token, so the file is
+/// created with a config document's mode ([`crate::document_file`]). A
+/// leftover of a crashed or older write would keep its own mode and bytes
+/// if it were reused, so it is removed first and the write creates its own
+/// file, which it removes again when the write fails.
+#[cfg(not(target_arch = "wasm32"))]
+async fn replace_mcp_file(
+    path: &Path,
+    temporary: &Path,
+    bytes: &[u8],
+) -> Result<(), McpConfigError> {
+    let failed = |err: std::io::Error| McpConfigError::Io(err.to_string());
+    match tokio::fs::remove_file(temporary).await {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(failed(err)),
+    }
+    crate::document_file::replace(temporary, path, bytes)
+        .await
+        .map_err(failed)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2055,12 +2074,7 @@ async fn restore_mcp_file(path: &Path, previous: Option<&[u8]>) -> Result<(), Mc
                     .and_then(|ext| ext.to_str())
                     .unwrap_or("toml")
             ));
-            tokio::fs::write(&tmp_path, bytes)
-                .await
-                .map_err(|err| McpConfigError::Io(err.to_string()))?;
-            tokio::fs::rename(&tmp_path, path)
-                .await
-                .map_err(|err| McpConfigError::Io(err.to_string()))?;
+            replace_mcp_file(path, &tmp_path, bytes).await?;
         }
         None => {
             if tokio::fs::try_exists(path)
@@ -4697,5 +4711,200 @@ command = "remove-cmd"
             "nothing was written"
         );
         assert_eq!(entry.listed_at_release(), None, "nothing was entered");
+    }
+
+    /// The mode of `mcp.toml`, on Unix. A server's literal arguments,
+    /// environment and headers can hold a token, so the file is written
+    /// owner-only whatever the process umask; in a directory whose setgid
+    /// bit says it is shared through its group, also readable by that group.
+    #[cfg(unix)]
+    mod document_modes {
+        use super::*;
+        use crate::process_isolation_tests::{
+            create_setgid_directory, mode_bits, set_mode, under_each_umask,
+        };
+        use std::os::unix::fs::MetadataExt as _;
+
+        const ONE_SERVER: &str = "[[servers]]\nname = \"kept\"\ncommand = \"kept-cmd\"\n";
+
+        fn server(name: &str) -> McpServerConfig {
+            McpServerConfig::stdio(name, "echo", vec![], HashMap::new())
+        }
+
+        /// A file an earlier release or an operator left at `path` with
+        /// `mode`, whatever this process's umask.
+        fn existing(path: &Path, content: &str, mode: u32) {
+            std::fs::write(path, content).unwrap();
+            set_mode(path, mode);
+        }
+
+        fn names(path: &Path) -> Vec<String> {
+            let document: McpConfig =
+                toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            document
+                .servers
+                .into_iter()
+                .map(|server| server.name)
+                .collect()
+        }
+
+        /// An `mcp.toml` the engine creates is 0600 under any umask, in a
+        /// directory that keeps the umask's mode; a rewrite of one an
+        /// earlier release left readable by group and others ends 0600,
+        /// for an addition, a removal and a rollback's restore. RED before:
+        /// each write gave the file the umask's mode (0644 under 022).
+        #[test]
+        fn an_mcp_document_is_owner_only_under_any_umask() {
+            under_each_umask(
+                module_path!(),
+                "an_mcp_document_is_owner_only_under_any_umask",
+                |umask| async move {
+                    let temp = TempDir::new().unwrap();
+                    let authority =
+                        McpConfigMutationAuthority::project(Some(temp.path().to_path_buf()), None);
+                    let directory = temp.path().join(".rkat");
+                    let path = directory.join("mcp.toml");
+
+                    McpConfig::persist_add_with_rollback(&authority, server("first"))
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        mode_bits(&directory) & 0o777,
+                        0o777 & !umask,
+                        "the directory keeps the umask's mode"
+                    );
+                    assert_eq!(mode_bits(&path), 0o600, "a new mcp.toml");
+
+                    existing(&path, ONE_SERVER, 0o644);
+                    let added = McpConfig::persist_add_with_rollback(&authority, server("second"))
+                        .await
+                        .unwrap();
+                    assert_eq!(names(&path), ["kept", "second"]);
+                    assert_eq!(mode_bits(&path), 0o600, "after an addition");
+
+                    set_mode(&path, 0o644);
+                    added.rollback().await.unwrap();
+                    assert_eq!(names(&path), ["kept"]);
+                    assert_eq!(mode_bits(&path), 0o600, "after a rollback's restore");
+
+                    set_mode(&path, 0o644);
+                    McpConfig::persist_add_with_rollback(&authority, server("third"))
+                        .await
+                        .unwrap();
+                    set_mode(&path, 0o644);
+                    McpConfig::persist_remove_with_rollback(&authority, "third")
+                        .await
+                        .unwrap();
+                    assert_eq!(names(&path), ["kept"]);
+                    assert_eq!(mode_bits(&path), 0o600, "after a removal");
+                },
+            );
+        }
+
+        /// A temporary file a crashed or older write left behind never
+        /// gives the document its mode or its bytes: the write creates its
+        /// own, new and owner-only. RED before: the write reused the
+        /// leftover file, so a 0644 leftover became a 0644 `mcp.toml` under
+        /// every umask.
+        #[test]
+        fn a_leftover_temporary_file_never_gives_an_mcp_document_its_mode_under_any_umask() {
+            under_each_umask(
+                module_path!(),
+                "a_leftover_temporary_file_never_gives_an_mcp_document_its_mode_under_any_umask",
+                |_umask| async move {
+                    let temp = TempDir::new().unwrap();
+                    let authority =
+                        McpConfigMutationAuthority::project(Some(temp.path().to_path_buf()), None);
+                    let directory = temp.path().join(".rkat");
+                    std::fs::create_dir(&directory).unwrap();
+                    let path = directory.join("mcp.toml");
+                    let write_leftover = directory.join("mcp.toml.tmp");
+                    let restore_leftover = directory.join("mcp.toml.rollback.tmp");
+                    existing(&path, ONE_SERVER, 0o600);
+                    existing(&write_leftover, "left behind\n", 0o644);
+                    existing(&restore_leftover, "left behind\n", 0o644);
+
+                    let added = McpConfig::persist_add_with_rollback(&authority, server("second"))
+                        .await
+                        .unwrap();
+                    assert_eq!(names(&path), ["kept", "second"]);
+                    assert_eq!(mode_bits(&path), 0o600, "after an addition");
+                    assert!(!write_leftover.exists(), "the temporary file was published");
+
+                    added.rollback().await.unwrap();
+                    assert_eq!(names(&path), ["kept"]);
+                    assert_eq!(mode_bits(&path), 0o600, "after a rollback's restore");
+                    assert!(
+                        !restore_leftover.exists(),
+                        "the temporary file was published"
+                    );
+                },
+            );
+        }
+
+        /// A rewrite never loosens a mode: an `mcp.toml` its owner made
+        /// read-only (0400) stays 0400. RED before: the rewrite gave it the
+        /// umask's mode.
+        #[test]
+        fn an_mcp_rewrite_never_loosens_a_stricter_mode_under_any_umask() {
+            under_each_umask(
+                module_path!(),
+                "an_mcp_rewrite_never_loosens_a_stricter_mode_under_any_umask",
+                |_umask| async move {
+                    let temp = TempDir::new().unwrap();
+                    let authority =
+                        McpConfigMutationAuthority::project(Some(temp.path().to_path_buf()), None);
+                    let directory = temp.path().join(".rkat");
+                    std::fs::create_dir(&directory).unwrap();
+                    let path = directory.join("mcp.toml");
+                    existing(&path, ONE_SERVER, 0o400);
+
+                    McpConfig::persist_add_with_rollback(&authority, server("second"))
+                        .await
+                        .unwrap();
+                    assert_eq!(names(&path), ["kept", "second"]);
+                    assert_eq!(mode_bits(&path), 0o400, "the document keeps 0400");
+                },
+            );
+        }
+
+        /// In a directory with the setgid bit, shared through its group on
+        /// purpose, `mcp.toml` is 0640 under any umask and belongs to the
+        /// directory's group; the same directory without the bit gets 0600.
+        /// The row asserts the mode and the group; it does not read the
+        /// file as a second user of that group, which the test user cannot
+        /// become.
+        #[test]
+        fn a_setgid_directory_shares_an_mcp_document_with_its_group_under_any_umask() {
+            under_each_umask(
+                module_path!(),
+                "a_setgid_directory_shares_an_mcp_document_with_its_group_under_any_umask",
+                |_umask| async move {
+                    let temp = TempDir::new().unwrap();
+                    let authority =
+                        McpConfigMutationAuthority::project(Some(temp.path().to_path_buf()), None);
+                    let directory = temp.path().join(".rkat");
+                    let group = create_setgid_directory(&directory);
+                    let path = directory.join("mcp.toml");
+
+                    McpConfig::persist_add_with_rollback(&authority, server("first"))
+                        .await
+                        .unwrap();
+                    assert_eq!(mode_bits(&path), 0o640, "group-readable, nothing more");
+                    assert_eq!(
+                        std::fs::metadata(&path).unwrap().gid(),
+                        group,
+                        "the file belongs to the directory's group"
+                    );
+
+                    set_mode(&directory, 0o770);
+                    std::fs::remove_file(&path).unwrap();
+                    McpConfig::persist_add_with_rollback(&authority, server("first"))
+                        .await
+                        .unwrap();
+                    assert_eq!(mode_bits(&path), 0o600, "no setgid bit, no group read");
+                },
+            );
+        }
     }
 }

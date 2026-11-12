@@ -91,6 +91,11 @@ them.
   Code that builds it with a struct literal sets the new field; `None` keeps
   the earlier behaviour.
 
+- `meerkat-core`: `model_fallback::ModelFallbackSkipReason` gains the variant
+  `ReasoningEffortUnsupported` (wire value `reasoning_effort_unsupported`;
+  see Added). A match over the enum without a wildcard arm handles the new
+  variant.
+
 ### Added
 
 - `meerkat-core`, `meerkat-llm-core`: the vocabulary of a provider-neutral
@@ -332,6 +337,26 @@ them.
   unchanged. The LayerDecision schema that adaptive mob packs bundle does
   not carry the level, so the schema stays the released one.
 
+- `meerkat`, `meerkat-core`: a model fallback keeps a session's
+  `reasoning_effort` level. Each chain target carries the level, and before
+  any switch the target is checked against its own route, as its client
+  observes it at that moment, and its model's catalog row. A target whose
+  route does not accept the level (the level is unsupported, the supported
+  levels are unknown or cannot be read, or the level conflicts with the
+  target's own params) is skipped with the reason
+  `reasoning_effort_unsupported` in `model_fallback_skipped` and in the
+  `model_fallback` notice's `skipped_targets`; when every target is skipped
+  the original failure stands. A target that accepts the level keeps it: the
+  fallback attempt and every later turn resolve it for the target's route
+  (`request_reasoning_effort_resolved` carries `fallback_attempt` for the
+  attempt, and the run result lists the origin and the target as separate
+  `sent` rows), and the identity the session commits to holds the level,
+  through recovery and resume too. A refused level never starts a fallback.
+  A session without a level falls back exactly as before. A turn's reasoning
+  preference on a fallback attempt is judged on the direct route of the
+  target's provider (`request_reasoning_lowered`); the per-request
+  resolution event is the record of what was sent.
+
 ### Fixed
 
 - `meerkat-copilot` (GitHub Copilot device sign-in): an account no longer
@@ -352,13 +377,16 @@ them.
 
 ### Upgrade notes
 
-- Before rolling back to 0.9.13 or earlier, clear the reasoning effort level
+- Before rolling back to 0.9.14 or earlier, clear the reasoning effort level
   from every session that set it, and let accepted turns that carry it
   finish. Two kinds of stored record carry `reasoning_effort`, and a release
   without the field refuses both, because those records refuse unknown
   fields. The first is a session whose stored provider params hold the
   level: any session that set `reasoning_effort` (or
-  `provider_params.reasoning_effort`) and has not cleared it since. An
+  `provider_params.reasoning_effort`) and has not cleared it since. This
+  includes a session that fell back to a model fallback target while it held
+  a level: its fallback identity and its fallback record carry the level
+  until it is cleared. An
   older release fails to read it with ``unknown field `reasoning_effort`,
   expected one of `temperature`, `top_p`, `max_output_tokens`, `reasoning`,
   `thinking_budget_tokens`, `provider_tag` ``, and the session cannot be

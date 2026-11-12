@@ -2834,7 +2834,7 @@ def macos_check_official_install(work, chrome=None):
         (directory / leaf).mkdir(parents=True)
     result = work / "cli-qualification/official-playwright.json"
     chrome = Path(MACOS_CHROME) if chrome is None else chrome
-    common = {"schema_version": 1, "kind": "meerkat_connect_official_install_check",
+    common = {"schema_version": 1, "kind": "meerkat_connect_official_install_check", "route": "official-playwright",
               "scope": "official_playwright_install_through_the_library_installer"}
     if not (chrome.is_absolute() and chrome.is_file() and not chrome.is_symlink() and os.access(chrome, os.X_OK)):
         reason = "no Chrome executable at " + str(chrome) + ": the installer pins the host's Chrome by digest"
@@ -2860,17 +2860,29 @@ def macos_check_official_install(work, chrome=None):
     environment = {"HOME": str(directory / "hm"), "TMPDIR": str(directory / "tmp"), "PATH": "/usr/bin:/bin",
                    "LC_ALL": "en_US.UTF-8"}
     record = context["record"]
-    execution, log = record.run("official-playwright-install", argv, cwd=directory, env=environment,
-                                inherit=False, seconds=1800)
-    receipt = read_json(destination / "ready/installed.json")
-    require(receipt.get("scope") == "observed_software_installation_only"
-            and receipt.get("family") == "official-playwright" and (destination / "ready/mcp.json").is_file(),
-            "the official Playwright install left no installation receipt")
+
+    def observed_npm():
+        said = destination / "npm-runtime.stdout"  # the installer's own log of `npm --version`
+        return said.read_text(errors="replace").strip()[:64] if said.is_file() else None
+
+    try:
+        execution, log = record.run("official-playwright-install", argv, cwd=directory, env=environment,
+                                    inherit=False, seconds=1800)
+        receipt = read_json(destination / "ready/installed.json")
+        require(receipt.get("scope") == "observed_software_installation_only"
+                and receipt.get("family") == "official-playwright" and (destination / "ready/mcp.json").is_file(),
+                "the install left no installation receipt")
+    except (ValueError, OSError) as failure:
+        # The first run of this route with the closure's npm: say which route failed and what npm it saw.
+        write_new(result.with_name("official-playwright.refused.json"), {**common, "status": "refused",
+            "reason": str(failure), "npm_version": observed_npm(),
+            "installer_logs": sorted(path.name for path in destination.glob("*.std*")) if destination.is_dir() else []})
+        raise ValueError("the official-playwright install route failed: " + str(failure)) from failure
     evidence = [binding(record.records / "official-playwright-install.json"), binding(log),
                 binding(destination / "ready/installed.json"), binding(destination / "ready/mcp.json"),
                 binding(configuration), binding(profile)]
     evidence += [binding(path) for path in sorted(destination.glob("*.stdout")) + sorted(destination.glob("*.stderr"))]
-    write_new(result, {**common, "status": "passed", "execution": execution,
+    write_new(result, {**common, "status": "passed", "execution": execution, "npm_version": observed_npm(),
         "installer": binding(installer), "official_contents_sha256": digest(official / "CONTENTS.json"),
         "runtime": {"python": binding(python), "node": binding(node), "npm_cli": binding(npm)},
         "evidence": evidence,

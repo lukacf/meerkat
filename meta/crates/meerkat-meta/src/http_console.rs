@@ -33609,8 +33609,16 @@ mod console_viewer_resolver_tests {
                 SessionAttachDecision::Denied(_) => "denied",
             }
         }
-        let (_temp_dir, runtime) =
-            super::tests::build_empty_console_test_runtime("attach-unowned-open-console").await?;
+        // A runtime that keeps its sessions in a durable store, where the
+        // console reads that no session of this id was ever stored.
+        let state_dir = tempfile::tempdir()?;
+        let runtime = super::console_side_chat_tests::persistent_gateway_runtime_in(
+            state_dir.path(),
+            "attach-unowned-open-console",
+            "",
+            "",
+        )
+        .await?;
         let controller = AccessController::new(rules_off())?;
         let open = decisions(false);
         let nobody = audience(&open, Some(&controller), None);

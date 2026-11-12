@@ -71,6 +71,8 @@ pub const IDENTITY_REMOVE: &str = "identity_remove";
 pub const IDENTITY_LIST: &str = "identity_list";
 /// List what the caller may name in a create or an update.
 pub const IDENTITY_DIRECTORY: &str = "identity_directory";
+/// Read one long-term agent's record by name.
+pub const IDENTITY_GET: &str = "identity_get";
 
 /// The identity tools, in the order a catalog lists them.
 pub const IDENTITY_TOOLS: [&str; 7] = [

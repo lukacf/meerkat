@@ -33,10 +33,11 @@ use meerkat_core::types::{ContentInput, HandlingMode, StopReason, text_content};
 use meerkat_meta::UnifiedRuntimeBuilder;
 use meerkat_meta::identity_creation::{
     AgentChangeState, AgentEntered, AgentOutcome, AgentPage, AgentProvenance, AgentReadiness,
-    AgentRef, AgentSet, AgentSpec, AgentSummary, ChangeRequester, ChangesHold, ChangesHoldRequest,
-    ConsentSummary, CreateAgents, DirectoryPage, DirectoryPeer, DirectoryProfile, DirectoryVerdict,
-    IDENTITY_ARCHIVE, IDENTITY_CREATE, IDENTITY_DIRECTORY, IDENTITY_LIST, IDENTITY_REMOVE,
-    IDENTITY_TOOLS, IDENTITY_UNARCHIVE, IDENTITY_UPDATE, IdentityAgentTools, IdentityChangeCall,
+    AgentRecord, AgentRef, AgentSet, AgentSpec, AgentSummary, ChangeRequester, ChangesHold,
+    ChangesHoldRequest, ConsentSummary, CreateAgents, DirectoryPage, DirectoryPeer,
+    DirectoryProfile, DirectoryVerdict, GetAgent, IDENTITY_ARCHIVE, IDENTITY_CREATE,
+    IDENTITY_DIRECTORY, IDENTITY_GET, IDENTITY_LIST, IDENTITY_REMOVE, IDENTITY_TOOLS,
+    IDENTITY_UNARCHIVE, IDENTITY_UPDATE, IdentityAgentTools, IdentityChangeCall,
     IdentityChangeSpec, IdentityCreationPolicy, IdentityFamily, IdentityFamilyOptions,
     IdentityOutcome, IdentityRead, IdentityReadAnswer, IdentityRefusal, IdentityRefusalKind,
     IdentityToolAnswer, IdentityToolCallSite, IdentityToolCaller, InstructionOutcome, ListAgents,
@@ -426,33 +427,19 @@ impl IdentityFamily for ScriptedFamily {
             // The host's own read of the mob's agents: one agent another
             // agent asked for, with its provenance.
             IdentityRead::List(_) => {
-                let mut agent =
-                    AgentSummary::new("scout", WORKER, sha("scout"), AgentReadiness::Unseated);
-                agent.display_name = Some("Scout".to_owned());
-                agent.spec_revision = Some(3);
-                agent.archived = true;
-                agent.provenance = Some(AgentProvenance::new(
-                    AgentEntered::Created,
-                    RequesterKind::Agent,
-                    "another-agent",
-                    1_700_000_000_000,
-                    ConsentSummary::Decided,
-                ));
-                // An operation another agent holds open for it: its id
-                // tells who asked.
-                agent.open_operations = vec![
-                    OperationId::for_request(
-                        &Requester::Agent {
-                            identity: "another-agent".to_owned(),
-                        },
-                        "held-request-1",
-                    )
-                    .expect("a request id"),
-                ];
                 let mut page = AgentPage::default();
-                page.agents = vec![agent];
+                page.agents = vec![hosts_view_of_scout()];
                 page.next = Some("next-agent".to_owned());
                 Ok(IdentityReadAnswer::List(page))
+            }
+            // The host's own read of that agent in full.
+            IdentityRead::Get(_) => {
+                let mut record = AgentRecord::new(hosts_view_of_scout());
+                record.instructions = vec!["Find the open questions.".to_owned()];
+                record.context = Some(json!({"desk": "north"}));
+                record.labels = BTreeMap::from([("team".to_owned(), "research".to_owned())]);
+                record.peers = vec![PLAIN.to_owned()];
+                Ok(IdentityReadAnswer::Get(Box::new(record)))
             }
             _ => {
                 let mut page = DirectoryPage::default();
@@ -477,6 +464,33 @@ impl IdentityFamily for ScriptedFamily {
             }
         }
     }
+}
+
+/// One agent as the scripted family's host read shows it: another agent
+/// asked for it, so it carries its provenance and an operation that agent
+/// holds open for it, whose id tells who asked.
+fn hosts_view_of_scout() -> AgentSummary {
+    let mut agent = AgentSummary::new("scout", WORKER, sha("scout"), AgentReadiness::Unseated);
+    agent.display_name = Some("Scout".to_owned());
+    agent.spec_revision = Some(3);
+    agent.archived = true;
+    agent.provenance = Some(AgentProvenance::new(
+        AgentEntered::Created,
+        RequesterKind::Agent,
+        "another-agent",
+        1_700_000_000_000,
+        ConsentSummary::Decided,
+    ));
+    agent.open_operations = vec![
+        OperationId::for_request(
+            &Requester::Agent {
+                identity: "another-agent".to_owned(),
+            },
+            "held-request-1",
+        )
+        .expect("a request id"),
+    ];
+    agent
 }
 
 /// One booted gateway runtime, its members' model and the scripted family.
@@ -2639,5 +2653,267 @@ async fn an_agent_changes_no_agent_the_hosts_configuration_declares() {
         .tool(LEAD, "declared-after", IDENTITY_LIST, json!({}))
         .await;
     assert_eq!(digest_of(&after), digest, "the declared agent is unchanged");
+    rig.shutdown().await;
+}
+
+/// What a read of an agent's list or record must never carry: who asked for
+/// the agent, when, under which consent, or an operation another requester
+/// holds open for it.
+const NEVER_SHOWN_TO_AN_AGENT: [&str; 8] = [
+    "provenance",
+    "another-agent",
+    "requester",
+    "consent",
+    "at_ms",
+    "decided",
+    "open_operations",
+    "held-request-1",
+];
+
+/// `identity_get` is one of the identity tools: listed with the others, with
+/// a closed schema that takes the agent's name and nothing else (the wire
+/// read's own members), and a description that says what it shows, what it
+/// does not, and what a name the caller is shown no agent under answers.
+#[test]
+fn identity_get_is_one_of_the_identity_tools() {
+    assert!(
+        IDENTITY_TOOLS.contains(&IDENTITY_GET),
+        "the identity tools: {IDENTITY_TOOLS:?}"
+    );
+    assert!(is_identity_tool(IDENTITY_GET));
+    let schema = schema_of(IDENTITY_GET);
+    assert_eq!(
+        property_names(&schema),
+        member_names(&GetAgent::new("scout")),
+        "the schema's members are the wire read's"
+    );
+    assert_eq!(schema["required"], json!(["name"]));
+    assert_eq!(schema["additionalProperties"], json!(false));
+    let text = identity_tool_defs()
+        .iter()
+        .find(|def| def.name == IDENTITY_GET)
+        .expect("identity_get is defined")
+        .description
+        .clone();
+    for sentence in [
+        "it never wakes an agent",
+        "`instructions`, `context`, `labels` and `peers`",
+        "You are not shown who asked for the agent",
+        "A `name` that no agent holds, and an agent you are not shown (one private to a \
+         person), both answer `identity_unknown`.",
+    ] {
+        assert!(text.contains(sentence), "identity_get says: {sentence}");
+    }
+}
+
+/// `identity_get` hands the family its wire read as the calling member and
+/// answers the agent's record without what only the host's read shows: who
+/// asked for the agent, when, under which consent, and the operations
+/// another requester holds open for it. Its arguments are closed: who asks
+/// is no argument, and nothing but the name is one.
+#[tokio::test(flavor = "multi_thread")]
+async fn identity_get_hands_the_family_its_read_and_shows_an_agent_no_provenance() {
+    let state = tempfile::tempdir().unwrap();
+    let rig = boot_with_family(state.path(), &fresh_mob_id()).await;
+    rig.send(LEAD, "seat-lead", "seat-lead").await;
+    let session = rig.session_of(LEAD).await;
+
+    rig.family.forget();
+    let answer = rig
+        .tool(LEAD, "turn-get", IDENTITY_GET, json!({"name": "scout"}))
+        .await;
+    assert_eq!(
+        rig.family.seen(),
+        vec![Seen::Read {
+            requester: ChangeRequester::agent_session(LEAD, session),
+            read: IdentityRead::Get(GetAgent::new("scout")),
+        }],
+        "identity_get hands the family its read, as the calling member"
+    );
+    assert_eq!(
+        answer.content,
+        json!({
+            "name": "scout",
+            "display_name": "Scout",
+            "profile": WORKER,
+            "spec_digest": sha("scout").as_str(),
+            "spec_revision": 3,
+            "archived": true,
+            "readiness": "unseated",
+            "instructions": ["Find the open questions."],
+            "context": {"desk": "north"},
+            "labels": {"team": "research"},
+            "peers": [PLAIN],
+        }),
+        "the family's record, without what only the host's read shows"
+    );
+    assert!(!answer.is_error);
+    let shown = answer.content.to_string();
+    for hidden in NEVER_SHOWN_TO_AN_AGENT {
+        assert!(
+            !shown.contains(hidden),
+            "identity_get names no `{hidden}`: {shown}"
+        );
+    }
+
+    rig.family.forget();
+    for (arguments, field) in [
+        (json!({"name": "scout", "requester": PLAIN}), "requester"),
+        (json!({"name": "scout", "mob_id": "m"}), "mob_id"),
+        (
+            json!({"name": "scout", "include_provenance": true}),
+            "include_provenance",
+        ),
+        (json!({}), "name"),
+        (json!({"name": 7}), "name"),
+    ] {
+        let answer = call(&rig, IDENTITY_GET, arguments.clone()).await;
+        assert_eq!(
+            (
+                answer.content["outcome"].as_str(),
+                answer.content["kind"].as_str(),
+                answer.content["field"].as_str(),
+            ),
+            (Some("refused"), Some("invalid_request"), Some(field)),
+            "{arguments}: {}",
+            answer.content
+        );
+        assert!(answer.refused, "{arguments}");
+    }
+    assert!(
+        rig.family.seen().is_empty(),
+        "a read the schema refuses never reaches the family: {:?}",
+        rig.family.seen()
+    );
+    rig.shutdown().await;
+}
+
+/// End to end, on the real identity family under a host's policy: an agent
+/// reads one agent's record by name. It is shown the fields the host's read
+/// of the agent has (with the digest its list entry has), and never who
+/// asked for the agent. A name the caller is shown no agent under answers
+/// `identity_unknown` at the name in one shape, whether no agent holds the
+/// name or its member is private to a person. The read wakes nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn identity_get_reads_one_agent_and_answers_unknown_for_a_name_it_is_not_shown() {
+    let state = tempfile::tempdir().unwrap();
+    let rig = boot(state.path(), &fresh_mob_id()).await;
+    assert!(
+        rig.runtime
+            .attach_identity_policy(policy(), IdentityFamilyOptions::new())
+    );
+    // An agent the calling agent asked for itself, with what a record holds.
+    let created = rig
+        .tool(
+            LEAD,
+            "get-create",
+            IDENTITY_CREATE,
+            json!({"agents": [{
+                "name": "scout",
+                "profile": WORKER,
+                "display_name": "Scout",
+                "instructions": ["Find the open questions."],
+                "context": {"desk": "north"},
+                "peers": [LEAD],
+            }]}),
+        )
+        .await;
+    assert_eq!(created.content["outcome"], "done", "{}", created.content);
+    let digest = created.content["agents"][0]["spec_digest"].clone();
+    let scout = rig.session_of("scout").await;
+    // An agent the host asked for, of a profile the caller may create no
+    // agent of, and a member private to a person.
+    rig.create("warden", MAKER).await;
+    rig.worker_turn("side", WORKER, &[(PRIVATE_TO, "alice")], "get-private")
+        .await;
+
+    let record = rig
+        .tool(LEAD, "get-scout", IDENTITY_GET, json!({"name": "scout"}))
+        .await;
+    assert!(!record.is_error, "{record:?}");
+    let listed = rig.tool(LEAD, "get-list", IDENTITY_LIST, json!({})).await;
+    let entry = listed.content["agents"]
+        .as_array()
+        .expect("the agents")
+        .iter()
+        .find(|entry| entry["name"] == "scout")
+        .expect("the agent's list entry")
+        .clone();
+    for (member, value) in entry.as_object().expect("an entry") {
+        assert_eq!(
+            &record.content[member], value,
+            "the record carries the list entry's `{member}`"
+        );
+    }
+    assert_eq!(record.content["spec_digest"], digest);
+    assert_eq!(
+        record.content["instructions"],
+        json!(["Find the open questions."])
+    );
+    assert_eq!(record.content["context"], json!({"desk": "north"}));
+    assert_eq!(record.content["peers"], json!([LEAD]));
+    assert!(record.content["labels"].is_object(), "{}", record.content);
+    let shown = record.content.to_string();
+    for hidden in [
+        "provenance",
+        "requester",
+        "consent",
+        "at_ms",
+        "open_operations",
+    ] {
+        assert!(
+            !shown.contains(hidden),
+            "an agent is not shown `{hidden}` of an agent it asked for itself: {shown}"
+        );
+    }
+    assert!(
+        rig.runtime.mob_handle().session_unborn(&scout),
+        "the read built nothing of the dormant agent"
+    );
+
+    // An agent the host asked for, of a profile the caller may not create:
+    // its record is read like any other, and says nothing of who asked.
+    let warden = rig
+        .tool(LEAD, "get-warden", IDENTITY_GET, json!({"name": "warden"}))
+        .await;
+    assert!(!warden.is_error, "{warden:?}");
+    assert_eq!(warden.content["name"], "warden");
+    assert_eq!(warden.content["profile"], MAKER);
+    let shown = warden.content.to_string();
+    for hidden in ["provenance", "requester", "consent", "at_ms", "console"] {
+        assert!(
+            !shown.contains(hidden),
+            "an agent is not shown `{hidden}` of the host's agent: {shown}"
+        );
+    }
+
+    // A name no agent holds and a member private to a person answer alike.
+    let unknown = |name: &'static str, mark: &'static str| {
+        let rig = &rig;
+        async move {
+            let answer = rig
+                .tool(LEAD, mark, IDENTITY_GET, json!({"name": name}))
+                .await;
+            assert!(answer.is_error, "{name}: {answer:?}");
+            answer.content
+        }
+    };
+    let nobody = unknown("nobody", "get-nobody").await;
+    let private = unknown("side", "get-side").await;
+    for (name, answer) in [("nobody", &nobody), ("side", &private)] {
+        assert_eq!(
+            (
+                answer["outcome"].as_str(),
+                answer["kind"].as_str(),
+                answer["field"].as_str(),
+            ),
+            (Some("refused"), Some("identity_unknown"), Some("name")),
+            "a read of {name}: {answer}"
+        );
+    }
+    assert_eq!(
+        nobody, private,
+        "nothing tells a member private to a person from a name no agent holds"
+    );
     rig.shutdown().await;
 }

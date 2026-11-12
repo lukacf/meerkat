@@ -97,10 +97,10 @@ mod interface_tests;
 mod tests;
 
 pub use agent_tools::{
-    IDENTITY_ARCHIVE, IDENTITY_CREATE, IDENTITY_DIRECTORY, IDENTITY_LIST, IDENTITY_REMOVE,
-    IDENTITY_TOOLS, IDENTITY_UNARCHIVE, IDENTITY_UPDATE, IdentityAgentTools, IdentityToolAnswer,
-    IdentityToolCallSite, IdentityToolCaller, IdentityToolFault, identity_tool_catalog,
-    identity_tool_defs, identity_tool_provenance, is_identity_tool,
+    IDENTITY_ARCHIVE, IDENTITY_CREATE, IDENTITY_DIRECTORY, IDENTITY_GET, IDENTITY_LIST,
+    IDENTITY_REMOVE, IDENTITY_TOOLS, IDENTITY_UNARCHIVE, IDENTITY_UPDATE, IdentityAgentTools,
+    IdentityToolAnswer, IdentityToolCallSite, IdentityToolCaller, IdentityToolFault,
+    identity_tool_catalog, identity_tool_defs, identity_tool_provenance, is_identity_tool,
 };
 pub use approval::{ApprovalPlan, PlanRequest, PlanTarget, PlannedOutcome, plan_approval};
 pub use config::{

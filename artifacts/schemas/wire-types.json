@@ -17341,7 +17341,8 @@
         "enum": [
           "model",
           "provider",
-          "provider_params"
+          "provider_params",
+          "reasoning_effort"
         ],
         "type": "string"
       },
@@ -25888,7 +25889,8 @@
         "enum": [
           "model",
           "provider",
-          "provider_params"
+          "provider_params",
+          "reasoning_effort"
         ],
         "type": "string"
       },
@@ -76777,7 +76779,8 @@
         "enum": [
           "model",
           "provider",
-          "provider_params"
+          "provider_params",
+          "reasoning_effort"
         ],
         "type": "string"
       },
@@ -83658,7 +83661,8 @@
         "enum": [
           "model",
           "provider",
-          "provider_params"
+          "provider_params",
+          "reasoning_effort"
         ],
         "type": "string"
       },
@@ -128812,7 +128816,8 @@
         "enum": [
           "model",
           "provider",
-          "provider_params"
+          "provider_params",
+          "reasoning_effort"
         ],
         "type": "string"
       },
@@ -132478,7 +132483,8 @@
         "enum": [
           "model",
           "provider",
-          "provider_params"
+          "provider_params",
+          "reasoning_effort"
         ],
         "type": "string"
       },
@@ -142145,7 +142151,8 @@
         "enum": [
           "model",
           "provider",
-          "provider_params"
+          "provider_params",
+          "reasoning_effort"
         ],
         "type": "string"
       },
@@ -143427,7 +143434,8 @@
         "enum": [
           "model",
           "provider",
-          "provider_params"
+          "provider_params",
+          "reasoning_effort"
         ],
         "type": "string"
       },
@@ -148938,7 +148946,8 @@
         "enum": [
           "model",
           "provider",
-          "provider_params"
+          "provider_params",
+          "reasoning_effort"
         ],
         "type": "string"
       },
@@ -150493,7 +150502,8 @@
         "enum": [
           "model",
           "provider",
-          "provider_params"
+          "provider_params",
+          "reasoning_effort"
         ],
         "type": "string"
       },
@@ -202749,7 +202759,8 @@
         "enum": [
           "model",
           "provider",
-          "provider_params"
+          "provider_params",
+          "reasoning_effort"
         ],
         "type": "string"
       },

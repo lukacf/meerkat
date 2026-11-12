@@ -33,6 +33,12 @@ from typing import TYPE_CHECKING, Any, Literal, TypeAlias, TypedDict, cast
 from uuid import UUID
 
 from .errors import MeerkatError
+from .reasoning_effort import (
+    ReasoningEffortRefusal,
+    ReasoningEffortResolution,
+    parse_reasoning_effort_refusal,
+    parse_reasoning_effort_resolution,
+)
 from .generated.event_inventory import KNOWN_AGENT_EVENT_TYPES
 from .generated.event_types import (
     ConfinementRefusal,
@@ -150,6 +156,9 @@ class RunStarted(Event):
     session_id: str
     input: RunInput
     identity: TranscriptMessageIdentity | None = None
+    # How the session's reasoning effort level resolves against its
+    # route at the start of the run. ``None`` when the session has none.
+    reasoning_effort: ReasoningEffortResolution | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,6 +238,9 @@ class AgentErrorReason:
     # of it (tagged by ``provider``; ``None`` when it sent none).
     stop: Literal["refusal", "content_filter"] | None = None
     detail: dict[str, Any] | None = None
+    # ``reasoning_effort_refused``: the typed refusal of the session's
+    # reasoning effort level, raised before a provider request.
+    reasoning_effort_refusal: ReasoningEffortRefusal | None = None
 
     def __getitem__(self, key: str) -> Any:
         if key == "reason_type":
@@ -681,6 +693,22 @@ class StreamTruncationReason:
 
 
 @dataclass(frozen=True, slots=True)
+class RequestReasoningEffortResolved(Event):
+    """One provider request carried the session's reasoning effort level.
+
+    Emitted once per provider request that carries the level (turn
+    requests, structured-output extraction, compaction summaries,
+    model fallback attempts). ``resolution`` says what was sent: the
+    level, the provider and model, the route and the provider fields
+    written. Advisory: values this SDK does not know are kept as sent.
+    """
+
+    resolution: ReasoningEffortResolution | None = None
+    turn_number: int | None = None
+    fallback_attempt: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class StreamTruncated(Event):
     """The event stream was truncated."""
 
@@ -895,6 +923,7 @@ _EVENT_MAP: dict[str, type[Event]] = {
     "background_job_completed": BackgroundJobCompleted,
     "live_channel_closed": LiveChannelClosed,
     "transcript_rewrite_committed": TranscriptRewriteCommitted,
+    "request_reasoning_effort_resolved": RequestReasoningEffortResolved,
 }
 
 
@@ -1014,6 +1043,22 @@ def _parse_agent_error_reason(raw: Any) -> AgentErrorReason | None:
             raw=dict(raw),
             stop=stop,
             detail=dict(detail) if detail is not None else None,
+        )
+
+    if reason_type == "reasoning_effort_refused":
+        refusal = parse_reasoning_effort_refusal(raw.get("refusal"))
+        if refusal is None:
+            # A refusal this SDK cannot read (a reason from a newer
+            # server) is never read as another one: the raw data stays.
+            return AgentErrorReason(
+                reason_type="unknown",
+                raw_reason_type=reason_type,
+                raw=dict(raw),
+            )
+        return AgentErrorReason(
+            reason_type=reason_type,
+            raw=dict(raw),
+            reasoning_effort_refusal=refusal,
         )
 
     if reason_type not in {
@@ -1854,6 +1899,10 @@ def parse_event(raw: dict[str, Any]) -> Event:
         for f in cls.__dataclass_fields__:
             if f == "input" and cls is RunStarted:
                 kwargs[f] = _parse_run_input(raw.get(f))
+            elif f == "reasoning_effort" and cls is RunStarted:
+                kwargs[f] = parse_reasoning_effort_resolution(raw.get(f))
+            elif f == "resolution" and cls is RequestReasoningEffortResolved:
+                kwargs[f] = parse_reasoning_effort_resolution(raw.get(f))
             elif f == "identity" and f in raw:
                 kwargs[f] = _parse_transcript_identity(raw[f])
             elif f == "usage":

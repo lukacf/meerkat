@@ -6182,6 +6182,13 @@ export interface SessionConfig {
   additionalInstructions?: string[];
   /** Opaque application context. */
   appContext?: unknown;
+  /**
+   * The session's provider-neutral reasoning effort level. Meerkat checks it
+   * against the model on the route that serves the request and writes the
+   * provider's own field; a level the model or route does not accept is
+   * refused before any provider request.
+   */
+  reasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 }
 
 /** Fail-closed parse guard for WASM `init_runtime*` output (K19/K21).

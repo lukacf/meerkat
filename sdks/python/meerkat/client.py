@@ -63,6 +63,7 @@ from .instructions import (
     parse_session_instruction_status,
     parse_session_instruction_write_result,
 )
+from .reasoning_effort import ReasoningEffortLevel, parse_reasoning_effort_report
 from .generated.rpc_contracts import RpcRequest
 from .generated.types import (
     CONTRACT_VERSION,
@@ -520,6 +521,12 @@ _TURN_SESSION_EVENTS_OPT_OUT_MIN_CONTRACT = (0, 9, 5)
 # An older server, released 0.9.8 included, ignores the field and builds the
 # session with the gated tools ungated, so the SDK refuses to send a gate to it.
 _GRANT_GATED_TOOLS_MIN_CONTRACT = (0, 9, 9)
+
+# The first server contract that takes the provider-neutral `reasoning_effort`
+# parameter. An older server ignores it on session/create (the session then
+# runs with no level, silently) and refuses it on turn/start and
+# mob/turn_start, so the SDK refuses to send it to such a server.
+_REASONING_EFFORT_MIN_CONTRACT = (0, 9, 15)
 
 
 @contextmanager
@@ -1629,6 +1636,7 @@ class MeerkatClient:
         peer_meta: dict[str, Any] | None = None,
         budget_limits: dict[str, Any] | None = None,
         provider_params: dict[str, Any] | None = None,
+        reasoning_effort: ReasoningEffortLevel | None = None,
         preload_skills: list[SkillRef] | None = None,
         skill_refs: list[SkillRef] | None = None,
         labels: dict[str, str] | None = None,
@@ -1645,6 +1653,15 @@ class MeerkatClient:
         and refuses them until :meth:`grant_tool` opens them. It is sent only
         to a server whose contract (0.9.9 or later) takes it.
 
+        ``reasoning_effort`` is the session's provider-neutral reasoning
+        effort level (``"none"``, ``"minimal"``, ``"low"``, ``"medium"``,
+        ``"high"``, ``"xhigh"`` or ``"max"``). Meerkat checks it against the
+        model on the route that serves the request and writes the provider's
+        own field; a level the model or route does not accept is refused
+        before any provider request (see
+        :func:`meerkat.reasoning_effort_refusal`). It is sent only to a
+        server whose contract (0.9.15 or later) takes it.
+
         Example::
 
             session = await client.create_session(
@@ -1654,6 +1671,7 @@ class MeerkatClient:
             print(session.text)
         """
         self._require_grant_gate_support(grant_gated_tools)
+        self._require_reasoning_effort_support(reasoning_effort)
         params = self._build_create_params(
             prompt,
             injected_context=injected_context,
@@ -1678,6 +1696,7 @@ class MeerkatClient:
             peer_meta=peer_meta,
             budget_limits=budget_limits,
             provider_params=provider_params,
+            reasoning_effort=reasoning_effort,
             preload_skills=preload_skills,
             skill_refs=skill_refs,
             labels=labels,
@@ -1718,6 +1737,7 @@ class MeerkatClient:
         peer_meta: dict[str, Any] | None = None,
         budget_limits: dict[str, Any] | None = None,
         provider_params: dict[str, Any] | None = None,
+        reasoning_effort: ReasoningEffortLevel | None = None,
         preload_skills: list[SkillRef] | None = None,
         skill_refs: list[SkillRef] | None = None,
         labels: dict[str, str] | None = None,
@@ -1742,6 +1762,7 @@ class MeerkatClient:
         if not self._dispatcher or not self._process or not self._process.stdin:
             raise MeerkatError("NOT_CONNECTED", "Client not connected")
         self._require_grant_gate_support(grant_gated_tools)
+        self._require_reasoning_effort_support(reasoning_effort)
         params = self._build_create_params(
             prompt,
             injected_context=injected_context,
@@ -1766,6 +1787,7 @@ class MeerkatClient:
             peer_meta=peer_meta,
             budget_limits=budget_limits,
             provider_params=provider_params,
+            reasoning_effort=reasoning_effort,
             preload_skills=preload_skills,
             skill_refs=skill_refs,
             labels=labels,
@@ -1821,6 +1843,7 @@ class MeerkatClient:
         peer_meta: dict[str, Any] | None = None,
         budget_limits: dict[str, Any] | None = None,
         provider_params: dict[str, Any] | None = None,
+        reasoning_effort: ReasoningEffortLevel | None = None,
         preload_skills: list[SkillRef] | None = None,
         skill_refs: list[SkillRef] | None = None,
         labels: dict[str, str] | None = None,
@@ -1845,6 +1868,7 @@ class MeerkatClient:
             result = await deferred.start_turn("Begin")
         """
         self._require_grant_gate_support(grant_gated_tools)
+        self._require_reasoning_effort_support(reasoning_effort)
         params = self._build_create_params(
             prompt,
             injected_context=injected_context,
@@ -1868,6 +1892,7 @@ class MeerkatClient:
             peer_meta=peer_meta,
             budget_limits=budget_limits,
             provider_params=provider_params,
+            reasoning_effort=reasoning_effort,
             preload_skills=preload_skills,
             skill_refs=skill_refs,
             labels=labels,
@@ -1981,6 +2006,19 @@ class MeerkatClient:
             raise CapabilityUnavailableError(
                 "CAPABILITY_UNAVAILABLE",
                 f"grant_gated_tools needs a server contract >= {minimum}; "
+                f"this server reports {self._server_contract_version or 'none'}",
+            )
+
+    def _require_reasoning_effort_support(self, reasoning_effort: Any) -> None:
+        """Refuse a reasoning effort level before sending it to a server that would drop it."""
+        if reasoning_effort is None:
+            return
+        parts = _contract_parts(self._server_contract_version)
+        if parts is None or parts < _REASONING_EFFORT_MIN_CONTRACT:
+            minimum = ".".join(str(part) for part in _REASONING_EFFORT_MIN_CONTRACT)
+            raise CapabilityUnavailableError(
+                "CAPABILITY_UNAVAILABLE",
+                f"reasoning_effort needs a server contract >= {minimum}; "
                 f"this server reports {self._server_contract_version or 'none'}",
             )
 
@@ -4645,6 +4683,7 @@ class MeerkatClient:
         output_schema: Any | None = None,
         structured_output_retries: int | None = None,
         provider_params: dict[str, Any] | None = None,
+        reasoning_effort: ReasoningEffortLevel | dict[str, str] | None = None,
         auth_binding: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Start a turn on a mob member.
@@ -4662,7 +4701,14 @@ class MeerkatClient:
         server admits as Set), ``{"action": "clear"}``, or omit the argument
         to inherit. The retired split ``clear_*`` keyword form is rejected by
         the server as an unknown field.
+
+        ``reasoning_effort`` sets the member session's provider-neutral
+        reasoning effort level for this turn and the turns after it (a level,
+        for example ``"high"``), removes it (``{"action": "clear"}``), or
+        keeps it (omitted). It is sent only to a server whose contract
+        (0.9.15 or later) takes it.
         """
+        self._require_reasoning_effort_support(reasoning_effort)
         params = MobTurnStartParams(
             mob_id=mob_id,
             agent_identity=agent_identity,
@@ -4684,6 +4730,8 @@ class MeerkatClient:
             auth_binding=auth_binding,
         )
         wire = _wire_value(params)
+        if reasoning_effort is not None:
+            wire["reasoning_effort"] = reasoning_effort
         self._opt_out_of_turn_session_events(wire)
         return await self._request("mob/turn_start", wire)
 
@@ -5588,8 +5636,10 @@ class MeerkatClient:
         output_schema: dict[str, Any] | None = None,
         structured_output_retries: int | None = None,
         provider_params: dict[str, Any] | None = None,
+        reasoning_effort: ReasoningEffortLevel | dict[str, str] | None = None,
         auth_binding: TurnAuthBindingOverride | None = None,
     ) -> RunResult:
+        self._require_reasoning_effort_support(reasoning_effort)
         params: dict[str, Any] = {"session_id": session_id, "prompt": prompt}
         if injected_context is not None:
             params["injected_context"] = injected_context
@@ -5620,6 +5670,8 @@ class MeerkatClient:
             params["structured_output_retries"] = structured_output_retries
         if provider_params is not None:
             params["provider_params"] = provider_params
+        if reasoning_effort is not None:
+            params["reasoning_effort"] = reasoning_effort
         if auth_binding is not None:
             params["auth_binding"] = _wire_value(auth_binding)
         self._opt_out_of_turn_session_events(params)
@@ -5645,11 +5697,13 @@ class MeerkatClient:
         output_schema: dict[str, Any] | None = None,
         structured_output_retries: int | None = None,
         provider_params: dict[str, Any] | None = None,
+        reasoning_effort: ReasoningEffortLevel | dict[str, str] | None = None,
         auth_binding: TurnAuthBindingOverride | None = None,
         _session: Session | None = None,
     ) -> EventStream:
         if not self._dispatcher or not self._process or not self._process.stdin:
             raise MeerkatError("NOT_CONNECTED", "Client not connected")
+        self._require_reasoning_effort_support(reasoning_effort)
         self._request_id += 1
         request_id = self._request_id
         event_queue = self._dispatcher.subscribe_events(session_id)
@@ -5684,6 +5738,8 @@ class MeerkatClient:
             params["structured_output_retries"] = structured_output_retries
         if provider_params is not None:
             params["provider_params"] = provider_params
+        if reasoning_effort is not None:
+            params["reasoning_effort"] = reasoning_effort
         if auth_binding is not None:
             params["auth_binding"] = _wire_value(auth_binding)
         request = {
@@ -6798,6 +6854,7 @@ class MeerkatClient:
         peer_meta: dict[str, Any] | None = None,
         budget_limits: dict[str, Any] | None = None,
         provider_params: dict[str, Any] | None = None,
+        reasoning_effort: ReasoningEffortLevel | None = None,
         preload_skills: list[SkillRef] | None = None,
         skill_refs: list[SkillRef] | None = None,
         labels: dict[str, str] | None = None,
@@ -6852,6 +6909,8 @@ class MeerkatClient:
             params["budget_limits"] = budget_limits
         if provider_params is not None:
             params["provider_params"] = provider_params
+        if reasoning_effort is not None:
+            params["reasoning_effort"] = reasoning_effort
         if preload_skills is not None:
             params["preload_skills"] = _skill_keys_to_wire(preload_skills)
         wire_refs = _skill_refs_to_wire(skill_refs)
@@ -9446,6 +9505,9 @@ class MeerkatClient:
             usage=usage,
             run_usage=run_usage,
             request_usage=request_usage,
+            reasoning_effort=parse_reasoning_effort_report(
+                data.get("reasoning_effort")
+            ),
             terminal_cause_kind=data.get("terminal_cause_kind")
             if isinstance(data.get("terminal_cause_kind"), str)
             else None,

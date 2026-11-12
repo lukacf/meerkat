@@ -33,6 +33,12 @@
 import type { ContentBlock, SchemaWarning, SkillKey } from "./types.js";
 import { KNOWN_AGENT_EVENT_TYPES } from "./generated/events.js";
 import { MeerkatError } from "./generated/errors.js";
+import {
+  parseReasoningEffortRefusal,
+  parseReasoningEffortResolution,
+  type ReasoningEffortRefusal,
+  type ReasoningEffortResolution,
+} from "./reasoning-effort.js";
 import type { ConfinementRefusal } from "./generated/types.js";
 import type {
   HookFailureReason as NativeHookFailureReason,
@@ -188,6 +194,11 @@ export interface RunStartedEvent {
   readonly sessionId: string;
   readonly input: RunInput;
   readonly identity?: TranscriptMessageIdentity;
+  /**
+   * How the session's reasoning effort level resolves against its route
+   * at the start of the run. Absent when the session has none.
+   */
+  readonly reasoningEffort?: ReasoningEffortResolution;
 }
 
 export interface RunCompletedEvent {
@@ -284,8 +295,18 @@ export interface ContentFilteredAgentErrorReason {
   readonly detail?: ContentFilteredStopDetail;
 }
 
+/**
+ * The session's reasoning effort level was refused before a provider
+ * request: the typed refusal.
+ */
+export interface ReasoningEffortRefusedAgentErrorReason {
+  readonly reasonType: "reasoning_effort_refused";
+  readonly refusal: ReasoningEffortRefusal;
+}
+
 export type AgentErrorReason =
   | ProviderAgentErrorReason
+  | ReasoningEffortRefusedAgentErrorReason
   | ContentFilteredAgentErrorReason
   | TurnTerminalCauseReason
   | UnknownAgentErrorReason
@@ -697,6 +718,20 @@ export type StreamTruncationReason =
       readonly raw: Readonly<Record<string, unknown>>;
     };
 
+/**
+ * One provider request carried the session's reasoning effort level.
+ * Emitted once per provider request that carries it (turn requests,
+ * structured-output extraction, compaction summaries, model fallback
+ * attempts). `resolution` says what was sent. Advisory: values this SDK
+ * does not know are kept as sent.
+ */
+export interface RequestReasoningEffortResolvedEvent {
+  readonly type: "request_reasoning_effort_resolved";
+  readonly resolution?: ReasoningEffortResolution;
+  readonly turnNumber?: number;
+  readonly fallbackAttempt?: number;
+}
+
 export interface StreamTruncatedEvent {
   readonly type: "stream_truncated";
   readonly reason: StreamTruncationReason;
@@ -845,6 +880,7 @@ export type AgentEvent =
   | InteractionCompleteEvent
   | InteractionFailedEvent
   | StreamTruncatedEvent
+  | RequestReasoningEffortResolvedEvent
   | ToolConfigChangedEvent
   | BackgroundJobCompletedEvent
   | LiveChannelClosedEvent
@@ -897,6 +933,17 @@ export function isRunFailed(event: StreamEvent): event is RunFailedEvent {
 // ---------------------------------------------------------------------------
 // Wire → typed parser
 // ---------------------------------------------------------------------------
+
+/** `{ [key]: resolution }` when `raw` is a readable resolution, else nothing. */
+function reasoningEffortResolutionField<K extends "reasoningEffort" | "resolution">(
+  raw: unknown,
+  key: K,
+): { readonly [P in K]?: ReasoningEffortResolution } {
+  const resolution = parseReasoningEffortResolution(raw);
+  return (resolution === undefined ? {} : { [key]: resolution }) as {
+    readonly [P in K]?: ReasoningEffortResolution;
+  };
+}
 
 function isPlainRecord(raw: unknown): raw is Record<string, unknown> {
   return typeof raw === "object" && raw !== null && !Array.isArray(raw);
@@ -1189,6 +1236,15 @@ function parseAgentErrorReason(raw: unknown): AgentErrorReason | null | undefine
       return { reasonType, stop, detail: detail as ContentFilteredStopDetail };
     }
     return { reasonType, stop };
+  }
+
+  if (reasonType === "reasoning_effort_refused") {
+    const refusal = parseReasoningEffortRefusal(raw.refusal);
+    // A refusal this SDK cannot read (a reason from a newer server) is
+    // never read as another one: the raw data stays.
+    return refusal === undefined
+      ? { reasonType: "unknown", rawReasonType: reasonType, raw }
+      : { reasonType, refusal };
   }
 
   if (!["hook_denied", "hook_timeout", "hook_execution_failed"].includes(reasonType)) {
@@ -1840,7 +1896,13 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
   switch (type) {
     // Session lifecycle
     case "run_started":
-      return { type, sessionId: requireStringField(raw, "session_id"), input: parseRunInput(raw.input), ...transcriptIdentityField(raw) };
+      return {
+        type,
+        sessionId: requireStringField(raw, "session_id"),
+        input: parseRunInput(raw.input),
+        ...transcriptIdentityField(raw),
+        ...reasoningEffortResolutionField(raw.reasoning_effort, "reasoningEffort"),
+      };
     case "run_completed":
       return {
         type,
@@ -2037,6 +2099,17 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
         type,
         interactionId: requireStringField(raw, "interaction_id"),
         reason: parseInteractionFailureReason(raw.reason),
+      };
+
+    // Reasoning effort
+    case "request_reasoning_effort_resolved":
+      return {
+        type,
+        ...reasoningEffortResolutionField(raw.resolution, "resolution"),
+        ...(typeof raw.turn_number === "number" ? { turnNumber: raw.turn_number } : {}),
+        ...(typeof raw.fallback_attempt === "number"
+          ? { fallbackAttempt: raw.fallback_attempt }
+          : {}),
       };
 
     // Stream management

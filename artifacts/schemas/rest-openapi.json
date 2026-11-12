@@ -17738,6 +17738,17 @@
               }
             ]
           },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireTurnMetadataOverride"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Set, clear, or keep the session's provider-neutral reasoning effort\nlevel from this message on: a level (or `{\"action\":\"set\",\"value\":\n<level>}`) sets it, `{\"action\":\"clear\"}` removes it, and omission\nkeeps the level the session recorded."
+          },
           "session_id": {
             "type": "string"
           },
@@ -18002,6 +18013,17 @@
               }
             ],
             "description": "Typed provider-specific parameter overrides (for example reasoning\nconfig). Parsed fail-closed at the wire boundary (K2)."
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EffortLevel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The session's provider-neutral reasoning effort level: `none`,\n`minimal`, `low`, `medium`, `high`, `xhigh` or `max` (one spelling\neach). The same setting as `provider_params.reasoning_effort`; a\nrequest that gives both must give the same level. A level the model\nor its route does not accept is refused before any provider request."
           },
           "shell_env": {
             "additionalProperties": {
@@ -26099,7 +26121,8 @@
         "enum": [
           "model",
           "provider",
-          "provider_params"
+          "provider_params",
+          "reasoning_effort"
         ],
         "type": "string"
       },
@@ -26256,6 +26279,16 @@
             "default": false,
             "description": "Whether the model supports realtime bidirectional transport.",
             "type": "boolean"
+          },
+          "reasoning_effort_levels": {
+            "description": "The levels the provider-neutral `reasoning_effort` option accepts for\nthis model on its provider's own API (the direct route), lowest\nfirst. Empty when the model takes no level there. Absent when no\nsource states them: a self-hosted model (the operator declares its\nlevels) or a model with no catalog row. A route that answers for\nitself (a GitHub Copilot account's model list) can accept other\nlevels than these; a refused request names that route's own.",
+            "items": {
+              "$ref": "#/components/schemas/EffortLevel"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
           },
           "release_stage": {
             "$ref": "#/components/schemas/WireModelReleaseStage",
@@ -28295,6 +28328,39 @@
             "required": [
               "kind",
               "public_key"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireTurnMetadataOverride": {
+        "description": "Wire tri-state override for per-turn runtime metadata fields.\n\n`None` on the containing field means preserve, `Set` provides a new value,\nand `Clear` removes the durable value for this turn.",
+        "oneOf": [
+          {
+            "properties": {
+              "action": {
+                "const": "set",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/components/schemas/WireProviderParamsOverride"
+              }
+            },
+            "required": [
+              "action",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "action": {
+                "const": "clear",
+                "type": "string"
+              }
+            },
+            "required": [
+              "action"
             ],
             "type": "object"
           }

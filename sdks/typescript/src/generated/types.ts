@@ -3184,6 +3184,7 @@ export interface MobTurnStartParams {
   prompt: WireContentInput;
   provider?: string | null;
   provider_params?: Record<string, unknown> | null;
+  reasoning_effort?: Record<string, unknown> | null;
   self_hosted_server_id?: string | null;
   session_events?: boolean | null;
   skill_refs?: SkillKey[] | null;
@@ -4677,7 +4678,7 @@ export type WireMemberRef = string;
 
 export type WireMobBackendKind = "session" | "external";
 
-export type WireMobResumeOverrideField = "model" | "provider" | "provider_params";
+export type WireMobResumeOverrideField = "model" | "provider" | "provider_params" | "reasoning_effort";
 
 export interface WireRuntimeBindingSession {
   kind: "session";
@@ -7602,6 +7603,7 @@ export interface WireModelProfile {
   model_family: string;
   params_schema: unknown;
   realtime?: boolean;
+  reasoning_effort_levels?: ("none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max")[] | null;
   release_stage?: "stable" | "experimental" | "operator_defined";
   supports_mid_conversation_system_messages?: boolean;
   supports_reasoning: boolean;

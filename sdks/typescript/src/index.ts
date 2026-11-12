@@ -394,6 +394,24 @@ export {
   mobQuarantined,
   type MobQuarantinedRefusal,
 } from "./mob-errors.js";
+export {
+  REASONING_EFFORT_LEVELS,
+  REASONING_EFFORT_REFUSAL_REASONS,
+  REASONING_EFFORT_REFUSED_KIND,
+  parseReasoningEffortRefusal,
+  parseReasoningEffortReport,
+  parseReasoningEffortResolution,
+  reasoningEffortRefusal,
+  reasoningEffortReport,
+  type ReasoningEffortLevel,
+  type ReasoningEffortRefusal,
+  type ReasoningEffortRefusalReason,
+  type ReasoningEffortReport,
+  type ReasoningEffortResolution,
+  type ReasoningEffortSent,
+  type ReasoningEffortTurnOverride,
+  type ReasoningRoute,
+} from "./reasoning-effort.js";
 export { BinaryIntegrityError } from "./binary-errors.js";
 export type { BinaryIntegrityFailure } from "./binary-errors.js";
 
@@ -703,6 +721,8 @@ export type {
   ScopedAgentEvent,
   StreamScopeFrame,
   RunInput,
+  RequestReasoningEffortResolvedEvent,
+  ReasoningEffortRefusedAgentErrorReason,
   RunStartedEvent,
   RunCompletedEvent,
   ExtractionSucceededEvent,

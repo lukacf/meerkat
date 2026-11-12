@@ -18,6 +18,7 @@ else:
     from typing_extensions import NotRequired, TypedDict
 
 from .generated.types import CONTRACT_VERSION as CONTRACT_VERSION  # re-export
+from .reasoning_effort import ReasoningEffortReport
 from .generated.types import (
     AttentionBindingRequest as AttentionBindingRequest,
     AttentionBindingResult as AttentionBindingResult,
@@ -558,6 +559,10 @@ class RunResult:
     #: One row per provider request this run made, in order, each with its
     #: ``accounting`` (tool-loop calls, extraction and compaction summaries).
     request_usage: list[Usage] | None = None
+    #: What the run did with the session's reasoning effort level: the
+    #: level requested and each distinct resolution sent. ``None`` when
+    #: the session has no level.
+    reasoning_effort: ReasoningEffortReport | None = None
 
 
 HelpExecutionMode = Literal["explain_only", "plan_execution"]
@@ -841,6 +846,13 @@ class ModelProfile(TypedDict):
     supports_web_search: bool
     image_generation: bool
     params_schema: dict[str, Any]
+    #: The levels the provider-neutral ``reasoning_effort`` option accepts for
+    #: the model on its provider's own API, lowest first; empty when the model
+    #: takes no level there. Absent when no source states them (a self-hosted
+    #: model, a model with no catalog row). A route that answers for itself (a
+    #: GitHub Copilot account's model list) can accept other levels: a refused
+    #: request names that route's own.
+    reasoning_effort_levels: NotRequired[list[str]]
 
 
 class CatalogModelEntry(TypedDict, total=False):

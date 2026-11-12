@@ -18532,7 +18532,8 @@
         "enum": [
           "model",
           "provider",
-          "provider_params"
+          "provider_params",
+          "reasoning_effort"
         ],
         "type": "string"
       },
@@ -33071,7 +33072,8 @@
         "enum": [
           "model",
           "provider",
-          "provider_params"
+          "provider_params",
+          "reasoning_effort"
         ],
         "type": "string"
       },
@@ -36329,7 +36331,8 @@
         "enum": [
           "model",
           "provider",
-          "provider_params"
+          "provider_params",
+          "reasoning_effort"
         ],
         "type": "string"
       },
@@ -37662,7 +37665,8 @@
         "enum": [
           "model",
           "provider",
-          "provider_params"
+          "provider_params",
+          "reasoning_effort"
         ],
         "type": "string"
       },
@@ -40520,7 +40524,8 @@
         "enum": [
           "model",
           "provider",
-          "provider_params"
+          "provider_params",
+          "reasoning_effort"
         ],
         "type": "string"
       },
@@ -43048,6 +43053,39 @@
                 "type": "string"
               },
               "value": {
+                "$ref": "#/$defs/EffortLevel"
+              }
+            },
+            "required": [
+              "action",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "action": {
+                "const": "clear",
+                "type": "string"
+              }
+            },
+            "required": [
+              "action"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireTurnMetadataOverride3": {
+        "description": "Wire tri-state override for per-turn runtime metadata fields.\n\n`None` on the containing field means preserve, `Set` provides a new value,\nand `Clear` removes the durable value for this turn.",
+        "oneOf": [
+          {
+            "properties": {
+              "action": {
+                "const": "set",
+                "type": "string"
+              },
+              "value": {
                 "$ref": "#/$defs/WireAuthBindingRef"
               }
             },
@@ -43091,7 +43129,7 @@
       "auth_binding": {
         "anyOf": [
           {
-            "$ref": "#/$defs/WireTurnMetadataOverride2"
+            "$ref": "#/$defs/WireTurnMetadataOverride3"
           },
           {
             "type": "null"
@@ -43150,6 +43188,17 @@
             "type": "null"
           }
         ]
+      },
+      "reasoning_effort": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireTurnMetadataOverride2"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Set, clear, or keep the member session's provider-neutral reasoning\neffort level from this turn on, exactly as `turn/start` does: a level\nsets it, `{\"action\":\"clear\"}` removes it, and omission keeps it.\nSince 0.9.15; an older server refuses the field."
       },
       "self_hosted_server_id": {
         "description": "Exact configured local-server route for a self-hosted model.",

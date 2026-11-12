@@ -1602,6 +1602,68 @@ def test_a_status_says_when_the_roster_lists_an_agent_served_from_its_record():
     )
 
 
+@pytest.mark.asyncio
+async def test_get_list_the_directory_and_a_plan_say_when_the_roster_lists_an_agent():
+    """``get``, ``list``, the directory and the plan of a change of one
+    agent carry ``roster_listing_superseded``, written only when it is so:
+    the host's roster lists the name while the agent is served from its
+    record."""
+    from meerkat_meta import AgentRef
+
+    plan = {
+        "outcome": "allow",
+        "change": "archive",
+        "timeout_ms": 600_000,
+        "request_digest": DIGEST,
+        "subject_digest": NEXT_DIGEST,
+        "rendering": "archive scout",
+    }
+    peer = {"profile": "researcher", "verdict": "allowed"}
+    request = AgentRef(name="scout", expected_spec_digest=DIGEST, request_id="req-1")
+    identities, transport = make_identities(
+        results={
+            "meta/identity/get": summary(
+                instructions=[], labels={}, peers=[], roster_listing_superseded=True
+            ),
+            "meta/identity/list": {
+                "agents": [
+                    summary("scout", roster_listing_superseded=True),
+                    # Left out: the roster does not list it, or serves it.
+                    summary("editor"),
+                    # Only the boolean true says so.
+                    summary("clerk", roster_listing_superseded="true"),
+                ]
+            },
+            "meta/identity/directory": {
+                "profiles": [],
+                "peers": [
+                    dict(peer, name="scout", roster_listing_superseded=True),
+                    dict(peer, name="editor"),
+                    dict(peer, name="clerk", roster_listing_superseded=1),
+                ],
+            },
+            "meta/identity/plan": dict(plan, roster_listing_superseded=True),
+        }
+    )
+    assert (await identities.get("scout")).roster_listing_superseded is True
+    listed = (await identities.list()).agents
+    assert [agent.roster_listing_superseded for agent in listed] == [True, False, False]
+    peers = (await identities.directory()).peers
+    assert [entry.roster_listing_superseded for entry in peers] == [True, False, False]
+    assert (await identities.plan("archive", request)).roster_listing_superseded is True
+
+    transport._results["meta/identity/get"] = summary(instructions=[], labels={}, peers=[])
+    assert (await identities.get("scout")).roster_listing_superseded is False
+    transport._results["meta/identity/get"] = summary(
+        instructions=[], labels={}, peers=[], roster_listing_superseded=1
+    )
+    assert (await identities.get("scout")).roster_listing_superseded is False
+    transport._results["meta/identity/plan"] = plan
+    assert (await identities.plan("archive", request)).roster_listing_superseded is False
+    transport._results["meta/identity/plan"] = dict(plan, roster_listing_superseded="true")
+    assert (await identities.plan("archive", request)).roster_listing_superseded is False
+
+
 def test_a_status_says_when_an_agent_is_archived_or_waits_for_its_host():
     from meerkat_meta.identity_first_models import IdentityStatus
 

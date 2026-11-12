@@ -438,6 +438,7 @@ describe("identity family: typed answers", () => {
       openOperations: [OPERATION_ID],
       addressability: null,
       runtimeModeOverride: null,
+      rosterListingSuperseded: false,
       instructions: ["Find sources."],
       context: { team: "research" },
       labels: { area: "research" },
@@ -459,6 +460,7 @@ describe("identity family: typed answers", () => {
           openOperations: [],
           addressability: null,
           runtimeModeOverride: null,
+          rosterListingSuperseded: false,
         },
         {
           name: "editor",
@@ -472,6 +474,7 @@ describe("identity family: typed answers", () => {
           openOperations: [],
           addressability: null,
           runtimeModeOverride: null,
+          rosterListingSuperseded: false,
         },
       ],
       next: "editor",
@@ -727,6 +730,7 @@ describe("identity family: typed answers", () => {
           verdict: "not_allowed",
           lines: [],
           reason: null,
+          rosterListingSuperseded: false,
         },
       ],
       next: "editor",
@@ -746,6 +750,7 @@ describe("identity family: typed answers", () => {
         subjectDigest: NEXT_DIGEST,
         rendering: "adopt scout",
         schedules: null,
+        rosterListingSuperseded: false,
       },
     );
   });
@@ -1449,6 +1454,67 @@ describe("identity family: who reaches an agent, its schedules, host preparation
         .rosterListingSuperseded,
       false,
     );
+  });
+
+  // `get`, `list`, the directory and the plan of a change of one agent
+  // carry `roster_listing_superseded`, written only when it is so: the
+  // host's roster lists the name while the agent is served from its record.
+  it("get, list, the directory and a plan say when the roster lists an agent", async () => {
+    const plan = {
+      outcome: "allow",
+      change: "archive",
+      timeout_ms: 600_000,
+      request_digest: DIGEST,
+      subject_digest: NEXT_DIGEST,
+      rendering: "archive scout",
+    };
+    const peer = { profile: "researcher", verdict: "allowed" };
+    const record = { instructions: [], labels: {}, peers: [] };
+    const { identities } = await scripted([
+      { result: summary("scout", { ...record, roster_listing_superseded: true }) },
+      {
+        result: {
+          agents: [
+            summary("scout", { roster_listing_superseded: true }),
+            // Left out: the roster does not list it, or serves it.
+            summary("editor"),
+            // Only the boolean true says so.
+            summary("clerk", { roster_listing_superseded: "true" }),
+          ],
+        },
+      },
+      {
+        result: {
+          profiles: [],
+          peers: [
+            { ...peer, name: "scout", roster_listing_superseded: true },
+            { ...peer, name: "editor" },
+            { ...peer, name: "clerk", roster_listing_superseded: 1 },
+          ],
+        },
+      },
+      { result: { ...plan, roster_listing_superseded: true } },
+      { result: summary("scout", record) },
+      { result: summary("scout", { ...record, roster_listing_superseded: 1 }) },
+      { result: plan },
+      { result: { ...plan, roster_listing_superseded: "true" } },
+    ]);
+    const request = { name: "scout", expectedSpecDigest: DIGEST, requestId: "req-1" };
+    assert.equal((await identities.get("scout")).rosterListingSuperseded, true);
+    assert.deepEqual(
+      (await identities.list()).agents.map((agent) => agent.rosterListingSuperseded),
+      [true, false, false],
+    );
+    assert.deepEqual(
+      (await identities.directory()).peers.map((entry) => entry.rosterListingSuperseded),
+      [true, false, false],
+    );
+    assert.equal((await identities.plan("archive", request)).rosterListingSuperseded, true);
+
+    assert.equal((await identities.get("scout")).rosterListingSuperseded, false);
+    assert.equal((await identities.get("scout")).rosterListingSuperseded, false);
+    assert.equal((await identities.plan("archive", request)).rosterListingSuperseded, false);
+    assert.equal((await identities.plan("archive", request)).rosterListingSuperseded, false);
   });
 });
 

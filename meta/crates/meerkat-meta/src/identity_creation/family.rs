@@ -746,6 +746,15 @@ pub struct AgentSummary {
     /// answer an agent reads leaves this empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub open_operations: Vec<OperationId>,
+    /// Who reaches it, when that is not the default: `internal_only`. An
+    /// addressable agent says nothing. What a create and an update set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub addressability: Option<AgentAddressability>,
+    /// How it runs, when its record says so: `autonomous_host` or
+    /// `turn_driven`. An agent that runs as its profile says says nothing.
+    /// What a create and an update set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_mode_override: Option<MobRuntimeMode>,
     /// Whether the host's roster lists this name while the agent is served
     /// from its record: the roster's entry is not applied. Written only
     /// when it is so.
@@ -773,6 +782,8 @@ impl AgentSummary {
             readiness,
             provenance: None,
             open_operations: Vec::new(),
+            addressability: None,
+            runtime_mode_override: None,
             roster_listing_superseded: false,
         }
     }

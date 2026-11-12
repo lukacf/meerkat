@@ -379,6 +379,14 @@ impl AgentFacts {
             readiness: self.readiness,
             provenance: self.provenance.clone(),
             open_operations: Vec::new(),
+            // Said only when it is not the default, as a roster row's.
+            addressability: match self.spec.addressability {
+                meerkat_mob::IdentityAddressability::InternalOnly => {
+                    Some(crate::identity_first::AgentAddressability::InternalOnly)
+                }
+                _ => None,
+            },
+            runtime_mode_override: self.spec.runtime_mode_override,
             roster_listing_superseded: self.roster_listing_superseded,
         }
     }

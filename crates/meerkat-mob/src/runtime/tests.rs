@@ -30846,6 +30846,180 @@ async fn list_members_names_no_hidden_external_peer_of_a_listed_member() {
     );
 }
 
+/// A host's member tool audience that decides by the calling member alone:
+/// it hides `kept_from` from `caller`, and `kept_for` from every caller but
+/// `caller` (a call no member made included).
+struct HideAroundOneCaller {
+    caller: AgentIdentity,
+    kept_from: AgentIdentity,
+    kept_for: AgentIdentity,
+}
+
+impl MemberToolAudience for HideAroundOneCaller {
+    fn hides(
+        &self,
+        _mob_id: &MobId,
+        caller: Option<&AgentIdentity>,
+        _caller_labels: Option<&BTreeMap<String, String>>,
+        target: &AgentIdentity,
+        _target_labels: Option<&BTreeMap<String, String>>,
+    ) -> bool {
+        if target == &self.kept_from {
+            caller == Some(&self.caller)
+        } else if target == &self.kept_for {
+            caller != Some(&self.caller)
+        } else {
+            false
+        }
+    }
+}
+
+/// One operator call of the placed member `member-a`, served by the
+/// controlling side's executor as it serves the member's own request.
+async fn placed_member_operator_call(
+    seams: &crate::runtime::upcall_responder::MobUpcallSeams,
+    authority: &crate::store::MobMemberOperatorAuthorityRecord,
+    request_id: &str,
+    op: crate::runtime::bridge_protocol::MemberOperatorOp,
+) -> crate::runtime::member_upcall::UpcallToolOutcome {
+    use crate::runtime::upcall_responder::UpcallServeSeams;
+
+    let pending = crate::store::MobMemberOperatorRequestRecord::pending(
+        crate::store::MobMemberOperatorRequestKey::new(
+            "member-a",
+            0,
+            1,
+            "host-a",
+            1,
+            "member-session-a",
+            request_id,
+        ),
+        crate::store::member_operator_op_digest(&op).expect("digest the operation"),
+    );
+    UpcallServeSeams::execute(seams, &pending, authority, request_id, op)
+        .await
+        .expect("the placed member's operation executes")
+}
+
+/// A placed member's operator calls reach the host's member tool audience
+/// as that member, not as a call no member made: a member the audience
+/// hides from the placed member is not in its list and answers its
+/// `member_status` as a member the mob does not hold, and a member the
+/// audience keeps for the placed member alone is listed to it and checked
+/// by it.
+#[tokio::test]
+async fn a_placed_members_operator_calls_ask_the_audience_as_that_member() {
+    use crate::runtime::bridge_protocol::MemberOperatorOp;
+    use crate::runtime::member_upcall::UpcallToolOutcome;
+    use crate::runtime::upcall_responder::MobUpcallSeams;
+
+    let kept_from = AgentIdentity::from("placed-kept-from");
+    let kept_for = AgentIdentity::from("placed-kept-for");
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(
+        with_unique_mob_id(sample_definition(), "placed-member-audience"),
+        MobStorage::in_memory(),
+    )
+    .with_session_service(service)
+    .with_member_tool_audience(Arc::new(HideAroundOneCaller {
+        caller: AgentIdentity::from("member-a"),
+        kept_from: kept_from.clone(),
+        kept_for: kept_for.clone(),
+    }))
+    .create()
+    .await
+    .expect("create mob");
+    seed_operator_execution_residency(&handle, "member-session-a").await;
+    for member in [&kept_from, &kept_for] {
+        handle
+            .spawn(ProfileName::from("worker"), member.clone(), None)
+            .await
+            .expect("spawn a local member");
+    }
+    let metadata_store: Arc<dyn MobRuntimeMetadataStore> =
+        Arc::new(InMemoryMobRuntimeMetadataStore::new());
+    let seams = MobUpcallSeams::new(handle.clone(), metadata_store);
+    let authority = crate::store::MobMemberOperatorAuthorityRecord {
+        agent_identity: "member-a".to_string(),
+        generation: 0,
+        can_create_mobs: false,
+        can_mutate_profiles: false,
+        can_run_adaptive_packs: false,
+        managed_mob_scope: BTreeSet::from([handle.mob_id().as_str().to_string()]),
+        spawn_profile_scope: BTreeMap::new(),
+    };
+
+    let listed = match placed_member_operator_call(
+        &seams,
+        &authority,
+        "placed-audience-list",
+        MemberOperatorOp::ListMembers,
+    )
+    .await
+    {
+        UpcallToolOutcome::Ok { content, .. } => {
+            let payload: serde_json::Value = serde_json::from_str(&content).expect("list payload");
+            payload["members"]
+                .as_array()
+                .expect("members array")
+                .iter()
+                .map(|entry| entry["agent_identity"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        }
+        other => panic!("the placed member's list answers: {other:?}"),
+    };
+    assert!(
+        !listed.contains(&"placed-kept-from".to_owned()),
+        "a placed member is listed no member the audience hides from it: {listed:?}"
+    );
+    assert!(
+        listed.contains(&"placed-kept-for".to_owned()),
+        "a placed member is listed a member the audience keeps for it alone: {listed:?}"
+    );
+
+    match placed_member_operator_call(
+        &seams,
+        &authority,
+        "placed-audience-status-hidden",
+        MemberOperatorOp::MemberStatus {
+            member_id: "placed-kept-from".to_string(),
+        },
+    )
+    .await
+    {
+        UpcallToolOutcome::ToolError(error) => assert_eq!(
+            error.data.as_ref().map(|data| &data["kind"]),
+            Some(&serde_json::json!("member_not_found")),
+            "a member hidden from the placed member answers as one the mob does not hold: \
+             {error:?}"
+        ),
+        other => panic!(
+            "a member hidden from the placed member answers as one the mob does not hold: \
+             {other:?}"
+        ),
+    }
+    let own = placed_member_operator_call(
+        &seams,
+        &authority,
+        "placed-audience-status-own",
+        MemberOperatorOp::MemberStatus {
+            member_id: "placed-kept-for".to_string(),
+        },
+    )
+    .await;
+    assert!(
+        matches!(
+            own,
+            UpcallToolOutcome::Ok {
+                is_error: false,
+                ..
+            }
+        ),
+        "the placed member checks the member the audience keeps for it alone: {own:?}"
+    );
+}
+
 /// A force cancel reaches a fork child's run one of two typed ways. A run
 /// already current receives an exact boundary cancel (`boundary_cancelled`);
 /// a run still queued is abandoned at the cancel point, so its supervised run

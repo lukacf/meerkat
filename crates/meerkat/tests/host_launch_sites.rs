@@ -7,6 +7,13 @@
 //! The other method `clippy.toml` disallows, the mob incarnation witness
 //! constructor, has its own inventory here (`WITNESS_SITES`): both rely on
 //! the same lint, so the lint's allows are counted against both lists.
+//!
+//! The same scan of shipped code keeps one more inventory, which no lint
+//! can: every production `MobSessionService` impl of Core and Connect
+//! answers the recorded build sections read
+//! (`MobSessionService::recorded_build_instructions`, a provided method) or
+//! is listed with the reason it has no committed read
+//! (`NO_COMMITTED_SECTIONS_READ`).
 
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
@@ -1603,4 +1610,377 @@ fn after_fields() { let _ = std::process::Command::new("after-a-test-only-field"
 "#;
     let found = launches(&shipped_code(source));
     assert_eq!(found.get("Command::new("), Some(&2), "{found:?}");
+}
+
+/// The read of the instruction sections a session's committed build state
+/// records, a provided method of meerkat-mob's `MobSessionService`.
+const RECORDED_SECTIONS_READ: &str = "recorded_build_instructions";
+
+/// What an impl's own `recorded_build_instructions` calls to count as an
+/// answer: the same read of the service it wraps (a forward), or the
+/// persistent service's metadata-only read of the committed build state.
+const RECORDED_SECTIONS_SOURCES: &[&str] = &[
+    "recorded_build_instructions(",
+    "load_authoritative_session_build_state(",
+];
+
+/// The production `MobSessionService` impls of Core and Connect that do not
+/// define `recorded_build_instructions`, each with the reason the trait
+/// default is its answer: file, type, reason. Each keeps no committed
+/// session store, so there is no committed read to forward to. Never add an
+/// entry to silence the guard: a wrapper over a service that keeps committed
+/// sessions forwards the read.
+const NO_COMMITTED_SECTIONS_READ: &[(&str, &str, &str)] = &[
+    (
+        "crates/meerkat-mob/src/runtime/session_service.rs",
+        "EphemeralSessionService",
+        "keeps its sessions in memory and has no committed store: the trait default answers \
+         from the live session",
+    ),
+    (
+        "crates/meerkat-mob-mcp/src/lib.rs",
+        "LocalSessionService",
+        "keeps its sessions in memory and no session documents: no committed store, so every \
+         session answers not known",
+    ),
+    (
+        "crates/meerkat-cli/src/main.rs",
+        "RunMobSessionService",
+        "wraps the in-memory service of one `rkat run`, which has no committed store, and \
+         forwards both persisted loads the trait default derives from",
+    ),
+];
+
+/// Source files in a `src` tree that hold test fixtures, not shipped code:
+/// the file, the file that declares its module, and that declaration, which
+/// compiles the module only for tests.
+const TEST_SUPPORT_MODULES: &[(&str, &str, &str)] = &[(
+    "crates/meerkat-mob/src/runtime/member_status_test_support.rs",
+    "crates/meerkat-mob/src/runtime/mod.rs",
+    "#[cfg(any(test, feature = \"test-support\"))]\nmod member_status_test_support;",
+)];
+
+/// One `MobSessionService` impl in scanned code.
+#[derive(Debug, PartialEq, Eq)]
+struct SessionServiceImpl {
+    /// The type the impl is for, without its path and generics (`$name` for
+    /// the type a macro writes the impl for).
+    target: String,
+    /// Whether the impl defines `recorded_build_instructions` with a body
+    /// that calls one of `RECORDED_SECTIONS_SOURCES`.
+    answers_recorded_sections: bool,
+}
+
+/// Every `impl .. MobSessionService for <type>` in `code` (comments and
+/// literals blanked). `Err` holds the text around a `MobSessionService for`
+/// that is not an impl header this scan can read: the guard fails on it
+/// instead of leaving an impl unchecked.
+fn mob_session_service_impls(code: &str) -> Result<Vec<SessionServiceImpl>, String> {
+    const TRAIT: &str = "MobSessionService";
+    let mut impls = Vec::new();
+    for (at, _) in code.match_indices(TRAIT) {
+        let after = &code[at + TRAIT.len()..];
+        if code[..at].ends_with(is_identifier_char) || after.starts_with(is_identifier_char) {
+            continue;
+        }
+        // `impl[<..>] [path::]MobSessionService for <type> [where ..] {`
+        let Some(header) = after
+            .trim_start()
+            .strip_prefix("for")
+            .filter(|rest| rest.starts_with(char::is_whitespace))
+        else {
+            continue;
+        };
+        let unreadable = || {
+            let start = code[..at].rfind('\n').map_or(0, |newline| newline + 1);
+            let end = code[at..]
+                .find('\n')
+                .map_or(code.len(), |newline| at + newline);
+            code[start..end].trim().to_string()
+        };
+        // The word before the trait, past any path to it and the generics
+        // of an `impl<..>` (a `->` in a bound closes nothing).
+        let mut before = code[..at].trim_end();
+        while let Some(path) = before.strip_suffix("::") {
+            before = path
+                .trim_end()
+                .trim_end_matches(is_identifier_char)
+                .trim_end();
+        }
+        if before.ends_with('>') {
+            let mut depth = 0usize;
+            for (index, character) in before.char_indices().rev() {
+                match character {
+                    '>' if !before[..index].ends_with('-') => depth += 1,
+                    '<' => {
+                        depth = depth.saturating_sub(1);
+                        if depth == 0 {
+                            before = before[..index].trim_end();
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if &before[before.trim_end_matches(is_identifier_char).len()..] != "impl" {
+            return Err(unreadable());
+        }
+        let (Some(open), Some(body)) = (header.find('{'), block_after(code, at)) else {
+            return Err(unreadable());
+        };
+        let target: String = header[..open]
+            .split_whitespace()
+            .take_while(|word| *word != "where")
+            .collect();
+        let target = target.split('<').next().unwrap_or_default();
+        let target = target.rsplit("::").next().unwrap_or_default();
+        if target.is_empty() {
+            return Err(unreadable());
+        }
+        impls.push(SessionServiceImpl {
+            target: target.to_string(),
+            answers_recorded_sections: answers_recorded_sections(body),
+        });
+    }
+    Ok(impls)
+}
+
+/// Whether the body of a `MobSessionService` impl defines
+/// `recorded_build_instructions` and that method calls one of
+/// `RECORDED_SECTIONS_SOURCES`.
+fn answers_recorded_sections(impl_body: &str) -> bool {
+    impl_body
+        .match_indices(RECORDED_SECTIONS_READ)
+        .any(|(at, _)| {
+            let before = impl_body[..at].trim_end();
+            let keyword = &before[before.trim_end_matches(is_identifier_char).len()..];
+            let after = &impl_body[at + RECORDED_SECTIONS_READ.len()..];
+            if keyword != "fn" || before.len() == at || after.starts_with(is_identifier_char) {
+                return false;
+            }
+            block_after(impl_body, at).is_some_and(|method| {
+                let method = compact(method);
+                RECORDED_SECTIONS_SOURCES
+                    .iter()
+                    .any(|source| method.contains(source))
+            })
+        })
+}
+
+/// Every `.rs` file under `dir`, skipping build output and VCS metadata.
+fn rust_sources_under(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if entry.file_type().is_ok_and(|file_type| file_type.is_dir()) {
+                if !matches!(name.as_ref(), "target" | ".git" | "node_modules" | "dist") {
+                    pending.push(entry.path());
+                }
+            } else if name.ends_with(".rs") {
+                out.push(entry.path());
+            }
+        }
+    }
+    out
+}
+
+/// Every production `MobSessionService` impl of Core and Connect answers the
+/// recorded build sections read itself: its `recorded_build_instructions`
+/// forwards to the service it wraps or reads the committed build state, or
+/// the impl is listed in `NO_COMMITTED_SECTIONS_READ` with the reason it has
+/// no committed read. The method is provided, so an impl without it
+/// compiles and answers the trait default: that loads the session's
+/// transcript for every read, and answers "not known" for a session whose
+/// record exists when the impl forwards neither persisted load. A listed
+/// impl that is gone, or that answers the read now, fails too. Meta's impls
+/// are checked for every trait method by
+/// `meta/scripts/verify-session-service-decorators.py`.
+#[test]
+fn every_mob_session_service_impl_answers_the_recorded_sections_read() {
+    const CONNECT_ROOT: &str = "connect";
+    let root = repo_root();
+    for (file, declared_in, declaration) in TEST_SUPPORT_MODULES {
+        let path = root.join(declared_in);
+        let parent = fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        assert!(
+            parent.contains(declaration),
+            "{file} is skipped as a test fixture, so {declared_in} must compile its module \
+             only for tests: {declaration:?}"
+        );
+    }
+    let mut paths = walk_rust_sources(&root);
+    paths.extend(rust_sources_under(&root.join(CONNECT_ROOT)));
+    let mut found: BTreeMap<(String, String), bool> = BTreeMap::new();
+    let (mut core, mut connect) = (0usize, 0usize);
+    for path in paths {
+        let relative = path
+            .strip_prefix(&root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let relative = relative.trim_start_matches("./").to_string();
+        let in_product = relative
+            .strip_prefix(CONNECT_ROOT)
+            .and_then(|rest| rest.strip_prefix('/'));
+        if !is_shipped_source(in_product.unwrap_or(relative.as_str()))
+            || TEST_SUPPORT_MODULES
+                .iter()
+                .any(|(file, _, _)| *file == relative)
+        {
+            continue;
+        }
+        if in_product.is_some() {
+            connect += 1;
+        } else {
+            core += 1;
+        }
+        let source = fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        let impls = mob_session_service_impls(&shipped_code(&source)).unwrap_or_else(|header| {
+            panic!(
+                "{relative}: `MobSessionService for` in a form this scan cannot read as an \
+                 impl header, so the impl would go unchecked: {header}"
+            )
+        });
+        for implementation in impls {
+            *found
+                .entry((relative.clone(), implementation.target))
+                .or_insert(true) &= implementation.answers_recorded_sections;
+        }
+    }
+    assert!(
+        core > 100 && connect > 0,
+        "the shipped sources were not found under {} ({core} Core files, {connect} Connect \
+         files)",
+        root.display()
+    );
+
+    let listed: BTreeMap<(String, String), &str> = NO_COMMITTED_SECTIONS_READ
+        .iter()
+        .map(|(file, target, reason)| (((*file).to_string(), (*target).to_string()), *reason))
+        .collect();
+    assert!(
+        listed.len() == NO_COMMITTED_SECTIONS_READ.len()
+            && listed.values().all(|reason| !reason.trim().is_empty()),
+        "every NO_COMMITTED_SECTIONS_READ entry is listed once, with its reason"
+    );
+    let unanswered: Vec<String> = found
+        .iter()
+        .filter(|(site, answers)| !**answers && !listed.contains_key(*site))
+        .map(|((file, target), _)| format!("{target} ({file})"))
+        .collect();
+    assert!(
+        unanswered.is_empty(),
+        "these MobSessionService impls do not answer `{RECORDED_SECTIONS_READ}`: {unanswered:?}. \
+         The method is provided, so the impl compiles and answers the trait default, which \
+         loads the session's transcript for every read and answers \"not known\" when the \
+         impl forwards neither persisted load. Forward it to the service the impl wraps \
+         (or read the committed build state); list an impl in NO_COMMITTED_SECTIONS_READ \
+         only when it keeps no committed session store"
+    );
+    let stale: Vec<String> = listed
+        .keys()
+        .filter(|site| found.get(*site) != Some(&false))
+        .map(|(file, target)| format!("{target} ({file})"))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "NO_COMMITTED_SECTIONS_READ lists impls that are gone or that answer the read now: \
+         {stale:?}"
+    );
+    // The scan is not passing on nothing: the service that owns the
+    // committed read and Core's two wrappers of it are found answering.
+    for (file, target) in [
+        (
+            "crates/meerkat-mob/src/runtime/session_service.rs",
+            "PersistentSessionService",
+        ),
+        (
+            "crates/meerkat-rpc/src/session_runtime.rs",
+            "RpcMobSessionService",
+        ),
+        ("crates/meerkat-cli/src/main.rs", "MobCliSessionService"),
+    ] {
+        assert_eq!(
+            found.get(&(file.to_string(), target.to_string())),
+            Some(&true),
+            "the scan finds `impl MobSessionService for {target}` in {file} answering \
+             `{RECORDED_SECTIONS_READ}`: {found:?}"
+        );
+    }
+}
+
+/// The impl scan reads every form of an impl header (a path to the trait,
+/// generics with a where clause, a macro's type), tells an impl that
+/// forwards or reads the committed build state from one that omits the
+/// method or answers it from nothing, and skips comments, literals, test
+/// modules and other mentions of the trait.
+#[test]
+fn the_session_service_scan_reads_every_impl_form() {
+    let source = r##"
+impl MobSessionService for Forwarding {
+    async fn recorded_build_instructions(&self, id: &SessionId) -> Sections {
+        self.inner.recorded_build_instructions(id).await
+    }
+}
+impl meerkat_mob::MobSessionService for Forgetful {
+    async fn load_persisted_session(&self, id: &SessionId) -> Loaded { self.inner.load_persisted_session(id).await }
+}
+impl<B: Fn() -> u8 + Send> MobSessionService for meerkat_session::Committed<B>
+where
+    B: Sync,
+{
+    async fn recorded_build_instructions(&self, id: &SessionId) -> Sections {
+        Ok(self
+            .load_authoritative_session_build_state(id)
+            .await?
+            .and_then(|state| state.additional_instructions))
+    }
+}
+macro_rules! delegate {
+    ($wrapper:ident) => {
+        impl crate::MobSessionService for $wrapper {
+            async fn recorded_build_instructions(&self, id: &SessionId) -> Sections {
+                <Inner as MobSessionService>::recorded_build_instructions(&self.inner, id).await
+            }
+        }
+    };
+}
+impl MobSessionService for Hollow {
+    async fn recorded_build_instructions(&self, _id: &SessionId) -> Sections { Ok(None) }
+}
+// impl MobSessionService for InAComment {}
+fn mentions(service: impl MobSessionService, other: &dyn MobSessionService) {
+    let _ = "impl MobSessionService for InALiteral {}";
+}
+#[cfg(test)]
+mod tests {
+    impl MobSessionService for TestDouble {}
+}
+"##;
+    let found: Vec<(String, bool)> = mob_session_service_impls(&shipped_code(source))
+        .expect("every header is readable")
+        .into_iter()
+        .map(|found| (found.target, found.answers_recorded_sections))
+        .collect();
+    assert_eq!(
+        found,
+        [
+            ("Forwarding".to_string(), true),
+            ("Forgetful".to_string(), false),
+            ("Committed".to_string(), true),
+            ("$wrapper".to_string(), true),
+            ("Hollow".to_string(), false),
+        ]
+    );
+    assert_eq!(
+        mob_session_service_impls("fn build() -> Box<dyn MobSessionService for Odd> {}"),
+        Err("fn build() -> Box<dyn MobSessionService for Odd> {}".to_string()),
+        "a `MobSessionService for` that is no impl header is reported, not skipped"
+    );
 }

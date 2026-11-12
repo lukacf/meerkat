@@ -2487,7 +2487,12 @@ pub trait MobSessionService:
     /// head on a HeadCanonical store; on a WholeBlob store the committed
     /// body is fetched and verified, and its rows are skipped) and still
     /// answers an archived session's record. A wrapper over such a service
-    /// forwards it to keep the read from loading the transcript.
+    /// forwards it to keep the read from loading the transcript; a wrapper
+    /// that forwards neither this method nor the persisted load answers
+    /// `Ok(None)` for a session whose record exists. The facade's
+    /// `host_launch_sites` source test fails a `MobSessionService` impl of
+    /// Core or Connect that neither answers this read nor is listed there
+    /// as keeping no committed store.
     async fn recorded_build_instructions(
         &self,
         session_id: &SessionId,

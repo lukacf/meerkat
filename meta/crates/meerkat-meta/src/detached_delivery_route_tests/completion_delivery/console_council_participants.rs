@@ -1256,6 +1256,185 @@ async fn a_settled_record_without_a_destroyed_receipt_keeps_its_mob_id() {
     realm.fixture.stop().await;
 }
 
+/// The person a private member belongs to, and that person's private-owner
+/// key.
+const OWNER: &str = "owner@example.test";
+const OWNER_KEY: &str = "owner-private-key";
+
+/// [`captured`] for a member of the primary mob that is private to the
+/// person with `owner_key`.
+fn captured_private(
+    identity: &str,
+    session: &str,
+    primary_mob: &str,
+    owner_key: &str,
+) -> ConsoleFrameMemberProvenance {
+    let mut provenance = captured(identity, session, "general", primary_mob, primary_mob);
+    let label = crate::access::PRIVATE_TO_LABEL.to_string();
+    provenance
+        .identity
+        .labels
+        .insert(label.clone(), owner_key.to_string());
+    provenance
+        .member
+        .labels
+        .insert(label.clone(), owner_key.to_string());
+    for link in &mut provenance.lineage {
+        if let Some(labels) = link.labels.as_mut() {
+            labels.insert(label.clone(), owner_key.to_string());
+        }
+    }
+    provenance
+}
+
+/// The seeded frames a caller with `view` is served.
+async fn seeds_served_to(
+    aggregator: &MetaConsoleAggregator,
+    view: crate::access::AccessView,
+    names: &[&str],
+) -> BTreeSet<String> {
+    served_to(aggregator, view, names)
+        .await
+        .into_iter()
+        .filter_map(|frame| frame.payload.get("seeded")?.as_str().map(str::to_string))
+        .collect()
+}
+
+/// With no runtime registered each caller's own access rules still decide
+/// every stored frame, as they do with one registered: a frame of a member
+/// private to one person is served to that person and to no other signed-in
+/// person, with its captured member attributes and without them, and a frame
+/// of a member the rules deny a caller is not served to that caller. What
+/// the registered runtime's visibility policy alone hides (here a nested
+/// member, on a console that hides nested members) is printed for both
+/// states.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stored_frames_with_no_runtime_registered_keep_each_callers_access_rules() {
+    stored_frames_keep_access_rules(Some(deny_source_by_identity())).await;
+}
+
+async fn stored_frames_keep_access_rules(deny: Option<AccessRule>) {
+    let denies = deny.is_some();
+    let realm = Realm::start().await;
+    let primary = realm.fixture.runtime.handle().mob_id().to_string();
+    let aggregator = MetaConsoleAggregator::in_memory();
+    let mut without_capture = stored_frame(
+        "private-member-without-capture",
+        SOURCE_TURN,
+        captured_private("side-chat", "side-chat-session", &primary, OWNER_KEY),
+    );
+    without_capture.source.member_provenance = None;
+    let seeds = [
+        stored_frame(
+            "private-member",
+            SOURCE_TURN,
+            captured_private("side-chat", "side-chat-session", &primary, OWNER_KEY),
+        ),
+        without_capture,
+        stored_frame(
+            "denied-member",
+            SOURCE_TURN,
+            captured(SOURCE, "source-session", SOURCE_ROLE, &primary, &primary),
+        ),
+        stored_frame(
+            "shared-member",
+            SOURCE_TURN,
+            captured("bob", "bob-session", "general", &primary, &primary),
+        ),
+        stored_frame(
+            "nested-member",
+            SOURCE_TURN,
+            captured(
+                NESTED_MEMBER,
+                &realm.nested_session.to_string(),
+                "general",
+                &primary,
+                &realm.nested_mob,
+            ),
+        ),
+    ];
+    for seed in seeds {
+        aggregator
+            .store()
+            .append_if_absent(seed)
+            .await
+            .expect("seeded frame");
+    }
+    register(
+        &aggregator,
+        &realm.fixture.runtime,
+        Arc::new(HideImplicitDelegateMembersConsoleVisibilityPolicy),
+    );
+    let _ = listed(&aggregator).await;
+
+    let mut names = realm.names();
+    names.push("side-chat");
+    let controller = match deny {
+        Some(deny) => controller(deny),
+        None => AccessController::new(AccessControlConfig {
+            enabled: true,
+            admins: vec![ROOT.to_string()],
+            rules: vec![everyone_views()],
+            ..AccessControlConfig::default()
+        })
+        .expect("controller"),
+    };
+    let callers = || {
+        [
+            (
+                "owner",
+                controller.view_for_caller(Some(OWNER), Some(OWNER_KEY)),
+            ),
+            (
+                "other",
+                controller.view_for_caller(Some(CALLER), Some("other-private-key")),
+            ),
+            ("administrator", controller.view_for_subject(Some(ROOT))),
+        ]
+    };
+    let mut registered = BTreeMap::new();
+    for (caller, view) in callers() {
+        registered.insert(caller, seeds_served_to(&aggregator, view, &names).await);
+    }
+    aggregator.unregister_runtime(RUNTIME);
+    let mut no_runtime = BTreeMap::new();
+    for (caller, view) in callers() {
+        no_runtime.insert(caller, seeds_served_to(&aggregator, view, &names).await);
+    }
+    println!("served with the runtime registered: {registered:#?}");
+    println!("served with no runtime registered: {no_runtime:#?}");
+
+    let mut wrong = Vec::new();
+    for (state, served) in [("registered", &registered), ("no runtime", &no_runtime)] {
+        for seed in [
+            "private-member",
+            "private-member-without-capture",
+            "denied-member",
+        ] {
+            if seed == "denied-member" && !denies {
+                continue;
+            }
+            if served["other"].contains(seed) {
+                wrong.push(format!(
+                    "{state}: another signed-in person is served {seed}"
+                ));
+            }
+        }
+    }
+    if !no_runtime["owner"].contains("private-member") {
+        wrong.push("no runtime: the owner is not served the private member's frame".to_string());
+    }
+    if !no_runtime["other"].contains("shared-member") {
+        wrong.push("no runtime: a shared member's frame is not served".to_string());
+    }
+    assert!(
+        wrong.is_empty(),
+        "a caller's access rules do not decide a stored frame: {wrong:#?}\nregistered: \
+         {registered:#?}\nno runtime: {no_runtime:#?}"
+    );
+    realm.fixture.stop().await;
+}
+
 /// What stays as it is on a console that includes nested members: the
 /// source, the other members and the members of ordinary nested mobs (one
 /// whose id has a council mob's form included) are listed and resolved by

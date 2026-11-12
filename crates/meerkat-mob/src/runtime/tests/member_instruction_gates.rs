@@ -167,6 +167,10 @@ struct Fixture {
     /// The record seam of the mob's session service double, when the mob
     /// runs over [`ServiceDouble::RecordsNeedALiveActor`].
     records: Arc<RecordSeam>,
+    /// The mob's journal and its runtime metadata, kept so a row can crash
+    /// the mob and resume it from them ([`Self::crash_and_resume`]).
+    events: Arc<dyn MobEventStore>,
+    runtime_metadata: Arc<dyn MobRuntimeMetadataStore>,
 }
 
 impl Fixture {
@@ -310,7 +314,10 @@ impl Fixture {
                 records: Arc::clone(&records),
             }),
         };
-        let mut builder = MobBuilder::new(definition, MobStorage::in_memory())
+        let storage = MobStorage::in_memory();
+        let events = storage.events.clone();
+        let runtime_metadata = storage.runtime_metadata.clone();
+        let mut builder = MobBuilder::new(definition, storage)
             .with_session_service(Arc::clone(&mob_service))
             .with_default_llm_client(Arc::new(client.clone()));
         if let Some(policy) = fork_instruction_policy {
@@ -363,9 +370,52 @@ impl Fixture {
                 service,
                 mob_service,
                 records,
+                events,
+                runtime_metadata,
             },
             created.session_id,
         )
+    }
+
+    /// Crash the mob (its volatile tasks stop, nothing is terminalized) and
+    /// resume it from its journal over the same session service and model
+    /// client, as a restarted host does. The resumed mob runs under the
+    /// default fork instruction and member restore policies.
+    async fn crash_and_resume(self) -> Self {
+        let Self {
+            _root,
+            handle,
+            identity,
+            client,
+            service,
+            mob_service,
+            records,
+            events,
+            runtime_metadata,
+        } = self;
+        crash_stop_and_release_routes(handle).await;
+        let builder = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+            events.clone(),
+            runtime_metadata.clone(),
+        ))
+        .with_session_service(Arc::clone(&mob_service))
+        .with_default_llm_client(Arc::new(client.clone()))
+        .notify_orchestrator_on_resume(false);
+        let handle = tokio::time::timeout(WAIT, Box::pin(builder.resume()))
+            .await
+            .expect("the resume answers")
+            .expect("the mob resumes from its journal");
+        Self {
+            _root,
+            handle,
+            identity,
+            client,
+            service,
+            mob_service,
+            records,
+            events,
+            runtime_metadata,
+        }
     }
 
     async fn activate(

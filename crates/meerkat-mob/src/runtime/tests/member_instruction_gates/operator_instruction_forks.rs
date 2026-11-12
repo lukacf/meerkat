@@ -72,6 +72,77 @@ fn header_and_entry_positions(
     (headers, entries)
 }
 
+/// The bodies among `bodies` that the operator instruction entry rows of
+/// `request` carry, in the order the rows list them, repeats included.
+fn entry_bodies(
+    request: &meerkat_client::LlmRequest,
+    bodies: &[&'static str],
+) -> Vec<&'static str> {
+    let mut listed = Vec::new();
+    for message in &request.messages {
+        let Message::System(system) = message else {
+            continue;
+        };
+        if !system.content.starts_with(ENTRY_HEADER) {
+            continue;
+        }
+        let mut hits: Vec<(usize, &'static str)> = bodies
+            .iter()
+            .flat_map(|body| {
+                system
+                    .content
+                    .match_indices(*body)
+                    .map(move |(at, _)| (at, *body))
+            })
+            .collect();
+        hits.sort_unstable();
+        listed.extend(hits.into_iter().map(|(_, body)| body));
+    }
+    listed
+}
+
+/// Every message of `earlier` is still in `later`, unchanged and at the same
+/// position: whatever `later` holds beyond them was appended.
+fn assert_appended(
+    earlier: &meerkat_client::LlmRequest,
+    later: &meerkat_client::LlmRequest,
+    what: &str,
+) {
+    assert!(
+        later.messages.len() > earlier.messages.len(),
+        "{what}: the later request holds {} rows, the earlier one {}",
+        later.messages.len(),
+        earlier.messages.len()
+    );
+    for (index, message) in earlier.messages.iter().enumerate() {
+        assert_eq!(
+            later.messages.get(index),
+            Some(message),
+            "{what}: row {index} of the earlier request was rewritten or moved"
+        );
+    }
+}
+
+impl Fixture {
+    /// Fork the source as a host does (`fork_member`): the child is seated
+    /// and runs nothing until the host starts a turn on it.
+    async fn host_driven_fork(&self, child: &str) -> AgentIdentity {
+        let child = AgentIdentity::from(child);
+        tokio::time::timeout(
+            WAIT,
+            self.handle.fork_member(
+                &self.identity,
+                SpawnMemberSpec::new(ProfileName::from("lead"), child.clone()),
+                None,
+            ),
+        )
+        .await
+        .expect("the fork answers")
+        .expect("the fork commits and seats the child");
+        child
+    }
+}
+
 impl Fixture {
     /// Wait until `identity`'s session recorded the mob's current snapshot.
     async fn instructions_current(&self, identity: &AgentIdentity) {
@@ -469,9 +540,15 @@ async fn a_seated_fork_follows_a_later_revision_and_the_revoke() {
         0,
         "the child's own entries revoked the slot: {effective:?}"
     );
-    assert!(
-        third.messages.len() > second.messages.len(),
-        "the revoke appended an entry, nothing was rewritten"
+    assert_appended(
+        &first,
+        &second,
+        "the revision reached the child as an appended entry",
+    );
+    assert_appended(
+        &second,
+        &third,
+        "the revoke reached the child as an appended entry",
     );
     fixture.finish().await;
 }
@@ -542,6 +619,217 @@ async fn a_self_starting_fork_runs_its_first_turn_under_the_shared_records() {
         entries_with(&request, HOUSE_STYLE),
         1,
         "the child's first request has the shared record's body in effect, once"
+    );
+    fixture.finish().await;
+}
+
+/// A member with two records for it and its forks, in two slots: its fork's
+/// first request has both bodies in effect, each once, in the order the
+/// source's own entry lists them (slot order).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fork_of_a_member_with_two_records_has_both_once_in_slot_order() {
+    let fixture = Fixture::restored_member().await;
+    fixture
+        .set(write(
+            "house-style",
+            1,
+            HOUSE_STYLE,
+            member_and_forks(&fixture.identity),
+        ))
+        .await;
+    fixture
+        .set(write(
+            "call-sign",
+            1,
+            CALL_SIGN,
+            member_and_forks(&fixture.identity),
+        ))
+        .await;
+    fixture.instructions_current(&fixture.identity).await;
+    let source = fixture
+        .turn_request(&fixture.identity, "source turn under both records")
+        .await;
+    let listed = entry_bodies(&source, &[CALL_SIGN, HOUSE_STYLE]);
+    assert_eq!(
+        listed,
+        vec![CALL_SIGN, HOUSE_STYLE],
+        "the source's own entry lists both bodies once, in slot order"
+    );
+    let request = fixture.self_starting_fork("fork-child").await;
+    assert_eq!(
+        entry_bodies(&request, &[CALL_SIGN, HOUSE_STYLE]),
+        listed,
+        "the child's first request has both bodies in effect, each once, in the source's order"
+    );
+    fixture.finish().await;
+}
+
+/// Guard: a mob with no record anywhere. The fork's first request holds no
+/// operator instruction entry row and no inherited header.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fork_of_a_member_with_no_record_has_none() {
+    let fixture = Fixture::restored_member().await;
+    fixture.run_turn("source turn under no record").await;
+    let request = fixture.self_starting_fork("fork-child").await;
+    let instruction_rows: Vec<&str> = request
+        .messages
+        .iter()
+        .filter_map(|message| match message {
+            Message::System(system)
+                if system.content.starts_with(ENTRY_HEADER)
+                    || system.content.starts_with(INHERITED_ENTRY_HEADER) =>
+            {
+                Some(system.content.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        instruction_rows.is_empty(),
+        "the child's first request holds no operator instruction row: {instruction_rows:?}"
+    );
+    fixture.finish().await;
+}
+
+/// Guard: a record written for the member alone after its fork is seated
+/// never reaches the fork. The fork's next turns carry the body nowhere,
+/// and nothing in its conversation is rewritten.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_record_written_after_the_fork_for_the_member_alone_never_reaches_the_fork() {
+    let fixture = Fixture::restored_member().await;
+    fixture.run_turn("source turn before the fork").await;
+    let child = fixture.host_driven_fork("fork-child").await;
+    let first = fixture.turn_request(&child, "the child's first task").await;
+
+    fixture
+        .set(write(
+            "call-sign",
+            1,
+            CALL_SIGN,
+            member_only(&fixture.identity),
+        ))
+        .await;
+    fixture.instructions_current(&fixture.identity).await;
+    let source = fixture
+        .turn_request(&fixture.identity, "source turn under its own record")
+        .await;
+    assert_eq!(
+        entries_with(&source, CALL_SIGN),
+        1,
+        "the record is in effect in the member it was written for"
+    );
+
+    let second = fixture
+        .turn_request(&child, "the child's second task")
+        .await;
+    let third = fixture.turn_request(&child, "the child's third task").await;
+    for (request, turn) in [(&second, "second"), (&third, "third")] {
+        assert!(
+            !carries(request, CALL_SIGN),
+            "the fork's {turn} turn carries the body nowhere"
+        );
+    }
+    assert_appended(&first, &second, "the fork's second turn");
+    assert_appended(&second, &third, "the fork's third turn");
+    fixture.finish().await;
+}
+
+/// A record written for the member and its forks after the fork is seated
+/// reaches the seated fork: its next run has the entry once, appended after
+/// everything its earlier request held, and the run after that does not
+/// repeat it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_record_written_after_the_fork_for_the_member_and_its_forks_reaches_the_seated_fork_once()
+{
+    let fixture = Fixture::restored_member().await;
+    fixture.run_turn("source turn before the fork").await;
+    let child = fixture.host_driven_fork("fork-child").await;
+    let first = fixture.turn_request(&child, "the child's first task").await;
+    assert!(
+        !carries(&first, CALL_SIGN),
+        "no record exists yet: the child's first turn carries the body nowhere"
+    );
+
+    fixture
+        .set(write(
+            "call-sign",
+            1,
+            CALL_SIGN,
+            member_and_forks(&fixture.identity),
+        ))
+        .await;
+    fixture.instructions_current(&child).await;
+    let second = fixture
+        .turn_request(&child, "the child's second task")
+        .await;
+    assert_eq!(
+        entries_with(&second, CALL_SIGN),
+        1,
+        "the fork's next run has the record's body in effect, once"
+    );
+    assert_appended(
+        &first,
+        &second,
+        "the record reached the fork as an appended entry",
+    );
+    let (_, entries) = header_and_entry_positions(&second, CALL_SIGN);
+    assert!(
+        entries[0] >= first.messages.len(),
+        "the entry follows every row of the fork's earlier request: entry at {}, earlier rows {}",
+        entries[0],
+        first.messages.len()
+    );
+
+    let third = fixture.turn_request(&child, "the child's third task").await;
+    assert_eq!(
+        entries_with(&third, CALL_SIGN),
+        1,
+        "the run after that does not repeat the entry"
+    );
+    assert_appended(&second, &third, "the fork's third turn");
+    fixture.finish().await;
+}
+
+/// A host-driven fork is seated and the mob's host restarts before the
+/// child's first run. The resumed mob still knows what the child was forked
+/// from: the child's first turn has its source's record once, and a higher
+/// revision written after the restart reaches the child at its next run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_forks_inheritance_survives_a_restart_before_its_first_run() {
+    let fixture =
+        Fixture::source_with_record(member_and_forks(&AgentIdentity::from("restored-member")))
+            .await;
+    let child = fixture.host_driven_fork("fork-child").await;
+
+    let fixture = fixture.crash_and_resume().await;
+    let first = fixture.turn_request(&child, "the child's first task").await;
+    assert_eq!(
+        entries_with(&first, CALL_SIGN),
+        1,
+        "after the restart the child's first request has the record's body in effect, once"
+    );
+
+    fixture
+        .set(write(
+            "call-sign",
+            2,
+            CALL_SIGN_REVISED,
+            member_and_forks(&fixture.identity),
+        ))
+        .await;
+    fixture.instructions_current(&child).await;
+    let second = fixture
+        .turn_request(&child, "the child's second task")
+        .await;
+    assert_eq!(
+        entries_with(&second, CALL_SIGN_REVISED),
+        1,
+        "a revision written after the restart reaches the child: its lineage was restored"
+    );
+    assert_appended(
+        &first,
+        &second,
+        "the revision reached the child as an appended entry",
     );
     fixture.finish().await;
 }

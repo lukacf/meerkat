@@ -24,6 +24,7 @@ import re
 import shutil
 import signal
 import stat
+import struct
 import subprocess
 import sys
 import tarfile
@@ -374,9 +375,10 @@ class Recorder:
         except BaseException as error:
             return None, False, error, error.__traceback__
 
-    def run(self, name, argv, *, cwd=ROOT, env=None, seconds=600):
+    def run(self, name, argv, *, cwd=ROOT, env=None, seconds=600, inherit=True):
         argv = [str(item) for item in argv]
-        selected_env = {**os.environ, **(env or {})}
+        # inherit=False: env is the complete environment of the child. Nothing of the caller's reaches it.
+        selected_env = {**(os.environ if inherit else {}), **(env or {})}
         log = self.records / (name + ".log")
         started = time.time()
         expired = False
@@ -436,6 +438,9 @@ class Recorder:
                 "HOME", "PATH", "RUST_TEST_THREADS", "RUST_MIN_STACK",
                 "PYTHONNOUSERSITE", "PYTHONDONTWRITEBYTECODE")
                 if key in selected_env}
+            if not inherit:
+                # The producer wrote this complete environment itself: every name and value is its own.
+                record_env = dict(sorted(selected_env.items()))
             record = {"argv": argv, "cwd": str(cwd), "env": record_env,
                       "exit_code": code if failure is None else None,
                       "timed_out": expired, "elapsed_seconds": time.time() - started, "log": binding(log)}
@@ -1743,7 +1748,1594 @@ def publish_accepted(directory, expected_sha256, output):
         write_new(output / "publication.json", report)
 
 
+# ---------------------------------------------------------------------------------------------------
+# The complete macOS arm64 installation: `connect-candidate.py macos <step> --work ABS`.
+#
+# Stage one runs on a GitHub-hosted macos-15 runner, one step per workflow step, and ends in a stage
+# record: every check's evidence, the finished gateway product and a PENDING shutdown review. Stage two
+# (`macos assemble`) runs after the independent review accepted that record and assembles the CLI
+# product; it executes no product, no Cargo and no signing. `macos release-check` then requires a clean
+# private-text scan of exactly the two product archives before anything may be published.
+# Everything comes from one commit: this checkout builds Connect, both SDK wheels and the library
+# tools. Pinned public files are read from the fetch step's directory; nothing is downloaded here.
+# The resource packager, the library packagers and the consumer exporter are called by command line.
+# No GNU-only tool is used: hashing, sizes, free space, archives and Mach-O facts are read in Python.
+MACOS_TARGET = "macos-arm64"
+MACOS_TRIPLE = "aarch64-apple-darwin"
+MACOS_PREFIX = "meerkat-connect-" + MACOS_TARGET
+MACOS_INPUTS_KIND = "connect-macos-producer-inputs"
+MACOS_STAGE_SCHEMA = "connect-macos-stage/1"
+MACOS_ASSEMBLY_SCHEMA = "connect-macos-assembly/1"
+MACOS_PINS_SCHEMA = "connect-library-pins/1"
+WORKSPACE = ROOT.parent
+CODESIGN = "/usr/bin/codesign"
+# macOS allows 104 bytes for a Unix socket path; the installed checks keep theirs under the work root.
+MACOS_WORK_ROOT_LIMIT = 24
+MACOS_BUILD_SECONDS = 5 * 3600
+MACOS_LANE = "connect-macos-arm64"
+MACOS_STEPS = ("preflight", "library", "resources", "build", "stage", "check-gateway", "check-cli",
+               "check-consumer", "check-conversation", "check-official-install", "stage-record")
+# Each step needs the step records of these earlier steps (stage-record also takes check-consumer, or its
+# stated absence).
+MACOS_REQUIRES = {"preflight": (), "library": ("preflight",), "resources": ("library",),
+                  "build": ("resources",), "stage": ("build",), "check-gateway": ("stage",),
+                  "check-cli": ("stage",), "check-consumer": ("stage",), "check-conversation": ("stage",),
+                  "check-official-install": ("stage",),
+                  "stage-record": ("check-gateway", "check-cli", "check-conversation", "check-official-install")}
+# The integration library's native tools: name, Cargo feature of toolkit-package ("" for none). The inspector
+# is built with local-artifacts here: the library advertises MCPB archive inspection, which needs it.
+MACOS_TOOLS = (("toolkit-local-recipes", "local-recipes"), ("toolkit-package-inspect", "local-artifacts"),
+               ("toolkit-python-plan", ""), ("toolkit-node-plan", ""), ("toolkit-compose-plan", ""),
+               ("toolkit-mcpb-install", "local-artifacts"))
+# The three first-party components of the consumer bundle: family, the exporter's option kind.
+MACOS_COMPONENTS = (("agno", "wheel", None), ("services", "wheel", None), ("activepieces", "archive", None))
+CONSUMER_EXPORT_TARGET = "darwin-arm64-cpython311"
+PACKAGE_LINE = re.compile(r"[A-Za-z0-9_.-]+ v[0-9][^\s]*(?: \([^()]*\))*\Z")
+MACOS_SHIPPED = ("toolkit_gateway", "meerkat-connect")
+MACOS_TESTS = ("packaged_setup", "cli_paired_host")
+CLI_CONSUMER = "actual_cli_public_service_survives_setup_exit_and_fresh_rkat_in_exact_realm"
+# What the setup conversation prints around the resource step (crates/meerkat-connect/src/main.rs and
+# src/resources.rs; a test pins these three strings to the Rust source).
+CONVERSATION_REALM = "Realm: "
+CONVERSATION_PREPARING = "Preparing the supplied setup helper."
+CONVERSATION_UNAVAILABLE = "Installed Connect resources are unavailable or changed"
+MACOS_GATES = ("gateway_verification", "cli_composition", "shutdown_review", "consumer", "conversation_start",
+               "official_playwright_install")
+# The official Playwright route as the product's setup backend selects it (install-library-consumer.py's own
+# fixed profile; a test pins these values to that script). The install hashes the browser, never starts it.
+PLAYWRIGHT_CONFIGURATION = {"profile": "isolated-chrome", "config": {}, "operations": [
+    "browser_navigate", "browser_snapshot", "browser_fill_form", "browser_click", "browser_close"]}
+PLAYWRIGHT_SERVER = "playwright-isolated"
+MACOS_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+# What each check is expected to reach, read from its source and not measured: the producer captures no
+# traffic. The stage record adds the hosts each step's own logs and evidence name.
+MACOS_NETWORK = {
+    "library": "registry.npmjs.org: npm ci of one first-party component's integrity-locked build dependencies "
+               "(the build's one network use); every other input is a pinned file or the checkout",
+    "check-gateway": "outbound HTTPS to public pages: one live public Hacker News read through the supplied "
+                     "integration; controlled model, no provider key",
+    "check-cli": "none expected: empty PATH, bundled runtimes",
+    "check-consumer": "outbound HTTPS to public pages: live public Hacker News reads through the supplied "
+                      "integration; controlled model, no provider key",
+    "check-conversation": "none expected: the resource step prepares from the bundled runtimes",
+    "check-official-install": "none expected: npm cache add and npm ci run with --offline from the library's "
+                              "three pinned Playwright archives"}
+# Mach-O constants (read only; nothing here executes or changes a file).
+MACHO_MAGIC_64, MACHO_CPU_ARM64, MACHO_EXECUTE = 0xFEEDFACF, 0x0100000C, 2
+LC_CODE_SIGNATURE, LC_VERSION_MIN_MACOSX, LC_BUILD_VERSION = 0x1D, 0x24, 0x32
+LC_DYLIBS = (0x0C, 0x80000018, 0x8000001F, 0x20, 0x80000023)
+CS_SUPERBLOB, CS_CODE_DIRECTORY, CS_ADHOC, CS_LINKER_SIGNED = 0xFADE0CC0, 0xFADE0C02, 0x2, 0x20000
+MACOS_SYSTEM_LIBRARIES = ("/usr/lib/", "/System/Library/")
+
+
+def macos_input_file():
+    return input_path(MACOS_TARGET)
+
+
+def checked_macos_inputs(value):
+    """The committed macOS producer selection. A pending or unbound record refuses every step."""
+    require(isinstance(value, dict) and value.get("schema_version") == 2
+            and value.get("kind") == MACOS_INPUTS_KIND and value.get("target") == MACOS_TARGET,
+            "not the macOS producer input selection")
+    require(set(value) == {"schema_version", "kind", "target", "rust_toolchain", "features", "source",
+                           "minimum_macos", "minimum_free_bytes", "sdk_build_tools", "node_prebuilt_policy",
+                           "library"}, "exact macOS producer input fields required")
+    library = value["library"]
+    require(isinstance(library, dict) and set(library) == {"state", "pins", "reason"}
+            and isinstance(library["pins"], dict) and set(library["pins"]) == {"path", "sha256"},
+            "exact macOS library selection fields required")
+    require(library["state"] == "selected" and not unbound({key: item for key, item in value.items()}),
+            "unbound macOS producer inputs: the library selection is pending")
+    source = value["source"]
+    require(isinstance(source, dict) and set(source) == {"repository", "export_commit"}
+            and source["repository"] == PUBLICATION_REPO and SHA.fullmatch(source["export_commit"]),
+            "exact source repository and connect/ export commit required")
+    require(isinstance(value["rust_toolchain"], str) and VERSION.fullmatch(value["rust_toolchain"])
+            and isinstance(value["features"], str) and value["features"]
+            and re.fullmatch(r"[0-9]+\.[0-9]+", value["minimum_macos"])
+            and type(value["minimum_free_bytes"]) is int and value["minimum_free_bytes"] > 0,
+            "invalid macOS build selection")
+    tools = value["sdk_build_tools"]
+    require(isinstance(tools, dict) and 0 < len(tools) <= 16
+            and all(re.fullmatch(r"[a-z0-9_]+", name) and isinstance(version, str)
+                    and re.fullmatch(r"[0-9][0-9A-Za-z.]*", version) for name, version in tools.items()),
+            "exact SDK build tool selection required")
+    for row in (value["node_prebuilt_policy"], library["pins"]):
+        require(isinstance(row, dict) and set(row) == {"path", "sha256"} and HEX.fullmatch(row["sha256"]),
+                "invalid committed file pin")
+        require(checked_file(ROOT / relative(row["path"]), MAX_METADATA)["sha256"] == row["sha256"],
+                "committed file differs from the macOS producer selection: " + row["path"])
+    return value
+
+
+def macos_work(work, *, create=False):
+    require(isinstance(work, Path) and work.is_absolute() and str(work) == os.path.normpath(str(work)),
+            "absolute normal work root required")
+    if create and not work.exists():
+        require(work.parent.is_dir(), "the work root's parent must exist")
+        work.mkdir()
+    require(work.is_dir() and not work.is_symlink() and work.resolve(strict=True) == work,
+            "canonical existing work root required")
+    require(not work.is_relative_to(WORKSPACE), "the work root must be outside the checkout")
+    return work
+
+
+def macos_git(*args):
+    return subprocess.check_output(["git", "-C", str(WORKSPACE), *args], text=True).strip()
+
+
+def macos_checkout():
+    """This checkout's commit and tree; it must be clean (every step, before and after)."""
+    require(macos_git("status", "--porcelain", "--untracked-files=normal") == "", "source checkout is dirty")
+    return macos_git("rev-parse", "--verify", "HEAD^{commit}"), macos_git("rev-parse", "--verify", "HEAD^{tree}")
+
+
+def step_path(work, step):
+    return work / "records" / (step + ".step.json")
+
+
+class StepRecorder(Recorder):
+    """One macOS step's recorder: the steps share <work>/records, and every command name stays unique."""
+
+    def __init__(self, work, step):
+        self.work = work
+        self.step = step
+        self.records = work / "records"
+        self.records.mkdir(exist_ok=True)
+        self.commands = []
+
+    def run(self, name, argv, **kwargs):
+        self.commands.append(name)
+        return super().run(name, argv, **kwargs)
+
+
+def macos_environment(work, **extra):
+    """The complete environment of a child that is not Cargo. No directory is named "home"."""
+    for leaf in ("hm", "tmp"):
+        (work / leaf).mkdir(exist_ok=True)
+    return {"HOME": str(work / "hm"), "TMPDIR": str(work / "tmp"), "PATH": "/usr/bin:/bin",
+            "LC_ALL": "en_US.UTF-8", "PIP_CONFIG_FILE": "/dev/null", "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+            "PIP_NO_CACHE_DIR": "1", "PYTHONDONTWRITEBYTECODE": "1", **extra}
+
+
+def macos_cargo_environment(**extra):
+    # Cargo inherits the job's toolchain environment; the lane name keeps one target directory per producer.
+    return {"RUST_LANE_ID": MACOS_LANE, "CARGO_TERM_COLOR": "never", **extra}
+
+
+def macos_begin(work, step):
+    """Start one step: its earlier steps ran, it did not, and the checkout is still the recorded commit."""
+    require(step in MACOS_STEPS and step != "preflight", "unknown macOS producer step")
+    macos_work(work)
+    require(not step_path(work, step).exists(), "this step already ran in this work root: " + step)
+    for earlier in MACOS_REQUIRES[step]:
+        require(step_path(work, earlier).is_file(), "an earlier step has no record: " + earlier)
+    preflight = read_json(step_path(work, "preflight"))
+    selection = work / "inputs-selection.json"
+    require(binding(selection) == preflight["inputs"] and digest(macos_input_file()) == preflight["inputs"]["sha256"],
+            "the macOS producer selection changed after preflight")
+    inputs = checked_macos_inputs(read_json(selection))
+    require(macos_checkout() == (preflight["revision"], preflight["tree"])
+            and str(WORKSPACE) == preflight["checkout_root"] and str(work) == preflight["work_root"],
+            "the checkout or the work root is not the one preflight recorded")
+    require(binding(work / "source-manifest.json") == preflight["source_manifest"], "the source manifest changed")
+    return {"work": work, "step": step, "inputs": inputs, "preflight": preflight,
+            "record": StepRecorder(work, step), "source_manifest": work / "source-manifest.json"}
+
+
+def macos_finish(context, outputs):
+    work, step = context["work"], context["step"]
+    require(macos_checkout() == (context["preflight"]["revision"], context["preflight"]["tree"]),
+            "the checkout changed during the step")
+    write_new(step_path(work, step), {"schema_version": 1, "kind": "connect-macos-step", "step": step,
+        "revision": context["preflight"]["revision"], "commands": context["record"].commands,
+        "outputs": outputs})
+    return outputs
+
+
+def macos_free_space(context):
+    free = shutil.disk_usage(context["work"]).free
+    require(free >= context["inputs"]["minimum_free_bytes"],
+            f"free space {free} B is below the selected minimum {context['inputs']['minimum_free_bytes']} B")
+    return free
+
+
+def macho_facts(path):
+    """Facts of a thin 64-bit Mach-O file, read from its header and load commands. Runs nothing."""
+    with path.open("rb") as stream:
+        header = stream.read(32)
+        require(len(header) == 32, "not a Mach-O file: " + path.name)
+        magic, cpu, _subtype, filetype, count, size, _flags, _reserved = struct.unpack("<8I", header)
+        require(magic == MACHO_MAGIC_64 and 0 < count <= 4096 and 0 < size <= 4 * 1024**2,
+                "thin 64-bit Mach-O file required: " + path.name)
+        commands = stream.read(size)
+        require(len(commands) == size, "truncated Mach-O load commands: " + path.name)
+        facts = {"cpu": cpu, "filetype": filetype, "minimum_os": None, "sdk": None, "platform": None,
+                 "libraries": [], "code_signature": None}
+        offset = 0
+        for _ in range(count):
+            require(offset + 8 <= size, "invalid Mach-O load command: " + path.name)
+            command, length = struct.unpack_from("<II", commands, offset)
+            require(length >= 8 and offset + length <= size, "invalid Mach-O load command: " + path.name)
+            if command == LC_BUILD_VERSION:
+                platform_id, minimum, sdk = struct.unpack_from("<III", commands, offset + 8)
+                facts.update(platform=platform_id, minimum_os=macho_version(minimum), sdk=macho_version(sdk))
+            elif command == LC_VERSION_MIN_MACOSX:
+                minimum, sdk = struct.unpack_from("<II", commands, offset + 8)
+                facts.update(platform=1, minimum_os=macho_version(minimum), sdk=macho_version(sdk))
+            elif command in LC_DYLIBS:
+                name = struct.unpack_from("<I", commands, offset + 8)[0]
+                require(24 <= name < length, "invalid Mach-O library name: " + path.name)
+                raw = commands[offset + name:offset + length].split(b"\0", 1)[0]
+                facts["libraries"].append(raw.decode("utf-8"))
+            elif command == LC_CODE_SIGNATURE:
+                where, extent = struct.unpack_from("<II", commands, offset + 8)
+                require(8 <= extent <= 64 * 1024**2, "invalid Mach-O code signature: " + path.name)
+                stream.seek(where)
+                blob = stream.read(extent)
+                require(len(blob) == extent, "truncated Mach-O code signature: " + path.name)
+                facts["code_signature"] = macho_signature(blob, path.name)
+            offset += length
+    return facts
+
+
+def macho_version(value):
+    major, minor, patch = value >> 16, (value >> 8) & 0xFF, value & 0xFF
+    return f"{major}.{minor}" + (f".{patch}" if patch else "")
+
+
+def macho_signature(blob, name):
+    magic, _length, count = struct.unpack_from(">III", blob, 0)
+    require(magic == CS_SUPERBLOB and 0 < count <= 64 and 12 + 8 * count <= len(blob),
+            "unsupported code signature: " + name)
+    for index in range(count):
+        _kind, where = struct.unpack_from(">II", blob, 12 + 8 * index)
+        if where + 16 <= len(blob) and struct.unpack_from(">I", blob, where)[0] == CS_CODE_DIRECTORY:
+            flags = struct.unpack_from(">I", blob, where + 12)[0]
+            return {"flags": flags, "adhoc": bool(flags & CS_ADHOC), "linker_signed": bool(flags & CS_LINKER_SIGNED)}
+    raise ValueError("code signature without a code directory: " + name)
+
+
+def version_tuple(value):
+    return tuple(int(part) for part in value.split("."))
+
+
+def checked_macos_executable(path, minimum_macos):
+    """A thin arm64 executable that links system libraries only and runs on the selected macOS."""
+    facts = macho_facts(path)
+    require(facts["cpu"] == MACHO_CPU_ARM64 and facts["filetype"] == MACHO_EXECUTE,
+            "thin arm64 Mach-O executable required: " + path.name)
+    outside = [name for name in facts["libraries"] if not name.startswith(MACOS_SYSTEM_LIBRARIES)]
+    require(not outside, path.name + " links a library a user's Mac does not have: " + ", ".join(outside[:8]))
+    require(facts["platform"] == 1 and facts["minimum_os"] is not None
+            and version_tuple(facts["minimum_os"]) <= version_tuple(minimum_macos),
+            f"{path.name} needs macOS {facts['minimum_os']}, above the selected {minimum_macos}")
+    return facts
+
+
+def signature_path(path):
+    return path.with_name(path.name + ".signature.json")
+
+
+def macos_sign(record, path, label):
+    """Ad-hoc sign one executable in place, right after it was copied out of Cargo's output.
+
+    Signing changes the file's bytes, so it happens before any record binds a digest. No identity is used.
+    """
+    require(path.is_file() and not path.is_symlink() and not signature_path(path).exists(),
+            "one fresh unsigned executable required: " + path.name)
+    unsigned = {"sha256": digest(path), "size": path.stat().st_size}
+    record.run("sign-" + label, [CODESIGN, "--force", "--sign", "-", path], seconds=600)
+    record.run("sign-verify-" + label, [CODESIGN, "--verify", "--strict", path], seconds=600)
+    observed = macho_facts(path)["code_signature"]
+    require(observed is not None and observed["adhoc"] and not observed["linker_signed"],
+            "the executable does not carry codesign's ad-hoc signature: " + path.name)
+    write_new(signature_path(path), {"schema_version": 1, "kind": "connect-macos-adhoc-signature",
+        "identity": "-", "unsigned": unsigned, "signed": binding(path), "code_directory": observed,
+        "sign": binding(record.records / ("sign-" + label + ".json")),
+        "verify": binding(record.records / ("sign-verify-" + label + ".json"))})
+    return signature_path(path)
+
+
+def signed_binding(path):
+    """The only way an executable's digest enters a macOS record: the bytes that were signed, unchanged."""
+    signature = signature_path(path)
+    require(signature.is_file() and not signature.is_symlink(),
+            "no ad-hoc signature record: an executable is signed before a record binds its digest: " + path.name)
+    current = binding(path)
+    require(read_json(signature)["signed"] == current, "executable changed after signing: " + path.name)
+    return current
+
+
+def macos_emit(context, log, name, destination, *, test, label):
+    """Copy the one executable Cargo emitted, make it executable, sign it. Returns its signed binding."""
+    destination.parent.mkdir(exist_ok=True)
+    require(not destination.exists(), "fresh executable destination required: " + destination.name)
+    copy_exact(emitted_executable(log, name, test=test), destination)
+    destination.chmod(0o755)
+    macos_sign(context["record"], destination, label)
+    return signed_binding(destination)
+
+
+def pin_rows(context, pins_path, pinned_inputs):
+    """The resolved pin file and the directory the fetch step filled, bound to this selection and checkout.
+
+    `--pins` is the RESOLVED file the fetch step wrote (the committed pins plus one row per crate of the tool
+    closure, derived from Cargo.lock). The fetch step's own record binds the three: the committed pin file
+    this selection names, the resolved file given here, and this checkout's Cargo.lock. Read, never written.
+    """
+    require(pins_path is not None and pinned_inputs is not None, "--pins and --pinned-inputs required")
+    require(pins_path.is_absolute() and pinned_inputs.is_absolute() and pinned_inputs.is_dir()
+            and not pinned_inputs.is_symlink(), "absolute pin file and pinned input directory required")
+    value = read_json(pins_path)
+    require(isinstance(value, dict) and value.get("schema") == MACOS_PINS_SCHEMA
+            and value.get("target") == MACOS_TARGET and isinstance(value.get("pins"), list),
+            "not the macOS library pin file")
+    fetched_path = pinned_inputs / "FETCHED.json"
+    fetched = read_json(fetched_path)
+    require(isinstance(fetched, dict) and fetched.get("schema") == "connect-pinned-inputs/1"
+            and isinstance(fetched.get("resolved_pins"), dict), "not the fetch step's record")
+    require(fetched.get("pins_sha256") == context["inputs"]["library"]["pins"]["sha256"],
+            "the fetch did not start from the committed pin file this selection names")
+    require(fetched["resolved_pins"].get("sha256") == digest(pins_path),
+            "--pins is not the resolved pin file of this fetch")
+    require(fetched.get("lock_sha256") == digest(WORKSPACE / "Cargo.lock"),
+            "the fetch resolved another Cargo.lock than this checkout's")
+    # One copy of the binding stays with the records: the first step that reads a fetch keeps it, and every
+    # later step must be given the same one.
+    kept = context["work"] / "records/pinned-inputs"
+    for source, name in ((fetched_path, "FETCHED.json"), (pins_path, pins_path.name)):
+        if (kept / name).exists():
+            require(digest(kept / name) == digest(source), "another fetch than the one an earlier step read: " + name)
+        else:
+            copy_exact(source, kept / name)
+    return value["pins"]
+
+
+def checked_pin(row, pinned_inputs):
+    """One pinned public file, checked against its pin again before use."""
+    require(isinstance(row.get("file"), str) and "/" not in row["file"] and isinstance(row.get("kind"), str),
+            "invalid pin row")
+    path = pinned_inputs / relative(row["kind"]) / relative(row["file"])
+    require(path.is_file() and not path.is_symlink(), "pinned input is missing: " + row["file"])
+    if row.get("sha256") is not None:
+        require(HEX.fullmatch(row["sha256"]) and digest(path) == row["sha256"], "pinned input differs: " + row["file"])
+    else:
+        with path.open("rb") as stream:
+            observed = hashlib.file_digest(stream, "sha512").hexdigest()
+        require(isinstance(row.get("sha512"), str) and observed == row["sha512"], "pinned input differs: " + row["file"])
+    return path
+
+
+def pinned_file(rows, pinned_inputs, kind, name, version):
+    """The one pin of an index name and version."""
+    found = [row for row in rows if isinstance(row, dict) and row.get("kind") == kind
+             and str(row.get("name", "")).lower().replace("-", "_") == name and row.get("version") == version]
+    require(len(found) == 1, f"exactly one pin required for {kind} {name} {version}")
+    return checked_pin(found[0], pinned_inputs)
+
+
+def pinned_node(rows, pinned_inputs, destination):
+    """The pinned upstream Node for this host, unpacked for the component build. Returns node and npm's CLI."""
+    found = [row for row in rows if isinstance(row, dict) and row.get("kind") == "release-download"
+             and re.fullmatch(r"node-v[0-9]+\.[0-9]+\.[0-9]+-darwin-arm64\.tar\.gz", str(row.get("file")))]
+    require(len(found) == 1, "exactly one pinned Node archive for darwin arm64 required")
+    archive = checked_pin(found[0], pinned_inputs)
+    prefix = archive.name.removesuffix(".tar.gz")
+    destination.mkdir()
+    with tarfile.open(archive, "r:gz") as source:
+        for member in source:
+            require(member.name == prefix or member.name.startswith(prefix + "/"), "Node archive member outside its root")
+        source.extractall(destination, filter="tar")
+    node, npm = destination / prefix / "bin/node", destination / prefix / "lib/node_modules/npm/bin/npm-cli.js"
+    require(node.is_file() and npm.is_file(), "the pinned Node archive lacks node or npm")
+    return node, npm
+
+
+def wheel_metadata(path):
+    """Name, version and requirements of one wheel, from its own METADATA."""
+    with zipfile.ZipFile(path) as wheel:
+        names = [name for name in wheel.namelist() if re.fullmatch(r"[^/]+\.dist-info/METADATA", name)]
+        require(len(names) == 1, "one wheel metadata file required: " + path.name)
+        metadata = email.parser.BytesParser().parsebytes(wheel.read(names[0]))
+    return {"name": metadata["Name"], "version": metadata["Version"],
+            "requires": metadata.get_all("Requires-Dist") or [], **binding(path)}
+
+
+def macos_versions():
+    """The versions of this tree: one commit supplies Connect, Core and Meta."""
+    connect = tomllib.loads((ROOT / "crates/meerkat-connect/Cargo.toml").read_text())["package"]["version"]
+    core = tomllib.loads((WORKSPACE / "Cargo.toml").read_text())["workspace"]["package"]["version"]
+    toolkit = tomllib.loads((ROOT / "sdk/python/pyproject.toml").read_text())["project"]
+    meta = tomllib.loads((WORKSPACE / "meta/sdk/python/pyproject.toml").read_text())["project"]
+    require(all(isinstance(item, str) and VERSION.fullmatch(item)
+                for item in (connect, core, toolkit["version"], meta["version"])),
+            "explicit versions required in the tree")
+    require(toolkit["name"] == "meerkat-toolkit" and toolkit["version"] == connect
+            and meta["name"] == "meerkat-meta", "Connect's crate and SDK versions differ")
+    require("meerkat-meta==" + meta["version"] in toolkit.get("optional-dependencies", {}).get("native-host", []),
+            "Connect's SDK must require this tree's Meta SDK for its native host")
+    return {"connect": connect, "core": core, "toolkit_sdk": toolkit["version"], "meta_sdk": meta["version"]}
+
+
+def macos_preflight(work, source_sha):
+    """Step 1: the host, the checkout, the selection and the toolchain, before anything is built."""
+    require_native_host(MACOS_TARGET)
+    require(isinstance(source_sha, str) and SHA.fullmatch(source_sha), "--source-sha: full commit required")
+    macos_work(work, create=True)
+    require(len(str(work)) <= MACOS_WORK_ROOT_LIMIT, "work root too long for macOS Unix socket paths")
+    require(not step_path(work, "preflight").exists() and not (work / "inputs-selection.json").exists(),
+            "preflight already ran in this work root")
+    inputs = checked_macos_inputs(read_json(macos_input_file()))
+    revision, tree = macos_checkout()
+    require(revision == source_sha, "the checkout is not the selected commit")
+    versions = macos_versions()
+    copy_exact(macos_input_file(), work / "inputs-selection.json")
+    record = StepRecorder(work, "preflight")
+    channel = tomllib.loads((WORKSPACE / "rust-toolchain.toml").read_text())["toolchain"]["channel"]
+    require(channel == inputs["rust_toolchain"], "rust-toolchain.toml differs from the selected toolchain")
+    _, rustc = record.run("rust-version", ["rustc", "--version", "--verbose"], cwd=WORKSPACE)
+    facts = dict(line.split(": ", 1) for line in rustc.read_text().splitlines() if ": " in line)
+    require(facts.get("release") == channel and facts.get("host") == MACOS_TRIPLE,
+            "the active Rust toolchain is not the selected one for this host")
+    record.run("cargo-version", ["cargo", "--version", "--verbose"], cwd=WORKSPACE)
+    record.run("cargo-paths", [ROOT / "scripts/repo-cargo", "--print-env"], cwd=WORKSPACE,
+               env=macos_cargo_environment())
+    record.run("python-version", [sys.executable, "--version"])
+    require(sys.version_info >= (3, 11) and hasattr(tarfile, "tar_filter"), "Python 3.11.4 or newer required")
+    record.run("system", ["/usr/bin/uname", "-a"])
+    record.run("system-version", ["/usr/bin/sw_vers"])
+    record.run("system-sdk", ["/usr/bin/xcrun", "--show-sdk-path"])
+    zstd = shutil.which("zstd")
+    require(zstd is not None, "zstd is not on PATH")
+    record.run("zstd-version", [zstd, "--version"])
+    source_manifest = work / "source-manifest.json"
+    record.run("source-record", [sys.executable, "-I", "-B", ROOT / "scripts/connect-source-identity.py", "record",
+        "--commit", revision, "--export-commit", inputs["source"]["export_commit"], "--output", source_manifest],
+        cwd=work, env=macos_environment(work), inherit=False, seconds=900)
+    epoch = int(macos_git("log", "-1", "--format=%ct", "HEAD"))
+    edition = time.strftime("%Y%m%d", time.gmtime(epoch)) + "-connect-" + revision[:8]
+    value = {"schema_version": 1, "kind": "connect-macos-step", "step": "preflight", "target": MACOS_TARGET,
+        "repository": PUBLICATION_REPO, "revision": revision, "tree": tree, "checkout_root": str(WORKSPACE),
+        "work_root": str(work), "versions": versions, "rust_toolchain": channel, "source_date_epoch": epoch,
+        "library_edition": edition, "inputs": binding(work / "inputs-selection.json"),
+        "source_manifest": binding(source_manifest), "zstd": zstd, "commands": record.commands,
+        "free_bytes": shutil.disk_usage(work).free}
+    write_new(step_path(work, "preflight"), value)
+    return value
+
+
+def macos_tool_argv(name, feature):
+    argv = [ROOT / "scripts/repo-cargo", "build", "--locked", "--release", "--manifest-path",
+            WORKSPACE / "Cargo.toml", "-p", "toolkit-package"]
+    if feature:
+        argv += ["--features", feature]
+    return [*argv, "--bin", name, "--message-format=json-render-diagnostics"]
+
+
+def macos_owner_argv(context, pins, pinned_inputs, step, **values):
+    """The other owners' library scripts, by command line only (their interface files own these lines)."""
+    work, python = context["work"], [sys.executable, "-I", "-B"]
+    pinned = ["--pins", pins, "--pinned-inputs", pinned_inputs]
+    closure = work / "consumers-closure/dependency-closure-macos-arm64.json"
+    if step == "library-components":
+        return [*python, ROOT / "scripts/build-library-components.py", *pinned, "--python", sys.executable,
+                "--node", values["node"], "--npm-cli", values["npm"],
+                "--source-date-epoch", str(context["preflight"]["source_date_epoch"]),
+                "--output", work / "components", "--verify-reproducible"]
+    if step == "library-consumers":
+        components = [item for label, kind, _file in MACOS_COMPONENTS for item in (
+            f"--{label}-{kind}", values["components"][label]["path"],
+            f"--{label}-sha256", values["components"][label]["sha256"])]
+        return [*python, ROOT / "scripts/export-library-consumers.py", "--target", CONSUMER_EXPORT_TARGET,
+                *pinned, *components, "--closure-record", closure, "--output", work / "consumers"]
+    if step == "library-kit":
+        return [*python, ROOT / "scripts/package-agent-install-kit.py", "--target", MACOS_TARGET, *pinned,
+                "--tools", work / "tools", "--tool-dependencies", work / "tools/dependencies.txt",
+                "--rust-license", values["rust_license"], "--output", work / "kit"]
+    require(step == "library-package", "unknown library owner step")
+    kit = work / "kit" / ("agent-install-kit-" + MACOS_TARGET + ".tar.gz")
+    return [*python, ROOT / "scripts/package-library-release.py", "--target", MACOS_TARGET,
+            "--edition", context["preflight"]["library_edition"], *pinned, "--consumers", work / "consumers",
+            "--consumers-contents-sha256", digest(work / "consumers/CONTENTS.json"),
+            "--consumer-closure", closure, "--kit", kit, "--kit-sha256", digest(kit),
+            "--output", work / "library"]
+
+
+def macos_library_archive(context):
+    name = "toolkit-library-" + context["preflight"]["library_edition"] + "-" + MACOS_TARGET + ".tar.gz"
+    directory = context["work"] / "library"
+    found = sorted(path.name for path in directory.glob("toolkit-library-*.tar.gz"))
+    require(found == [name], "exactly this commit's one macOS library archive required")
+    return directory / name
+
+
+def macos_library(work, pins, pinned_inputs):
+    """Step 3: the six library tools from this checkout (signed, recorded), then the library itself."""
+    context = macos_begin(work, "library")
+    pin_rows(context, pins, pinned_inputs)
+    record, preflight = context["record"], context["preflight"]
+    free = macos_free_space(context)
+    tools = work / "tools"
+    tools.mkdir()
+    outputs = {"free_bytes": free, "tools": {}}
+    for name, feature in MACOS_TOOLS:
+        cargo, log = record.run("tool-" + name, macos_tool_argv(name, feature), cwd=WORKSPACE,
+                                env=macos_cargo_environment(), seconds=MACOS_BUILD_SECONDS)
+        bound = macos_emit(context, log, name, tools / name, test=False, label="tool-" + name)
+        checked_macos_executable(tools / name, context["inputs"]["minimum_macos"])
+        build = tools / (name + ".build.json")
+        write_new(build, {"schema_version": 1, "binary": "tools/" + name, "sha256": bound["sha256"],
+            "bytes": bound["size"], "mode": "0755", "target": MACOS_TRIPLE, "command": cargo["argv"],
+            "features": [feature] if feature else [],
+            "source": {"repository": PUBLICATION_REPO, "revision": preflight["revision"], "tree": preflight["tree"],
+                       "source_manifest_sha256": preflight["source_manifest"]["sha256"],
+                       "lock_sha256": digest(WORKSPACE / "Cargo.lock")},
+            "signature": binding(signature_path(tools / name)),
+            "build": {"record": binding(record.records / ("tool-" + name + ".json")), "messages": binding(log)},
+            "scope": "one tool of the integration library built from this commit; not native or business execution"})
+        outputs["tools"][name] = binding(build)
+    # The crates the tools were built from, for the kit's archives and licence texts. It builds nothing.
+    _, listing = record.run("tool-dependencies", [ROOT / "scripts/repo-cargo", "tree", "--locked",
+        "--manifest-path", WORKSPACE / "Cargo.toml", "-p", "toolkit-package",
+        "--features", "local-recipes,local-artifacts", "--target", MACOS_TRIPLE, "-e", "normal,build",
+        "--prefix", "none", "--format", "{p}"], cwd=WORKSPACE, env=macos_cargo_environment(), seconds=1800)
+    lines = [line for line in listing.read_text().splitlines() if PACKAGE_LINE.fullmatch(line)]
+    require(lines, "the tool dependency listing is empty")
+    (tools / "dependencies.txt").write_text("\n".join(lines) + "\n")
+    _, sysroot = record.run("rust-sysroot", ["rustc", "--print", "sysroot"], cwd=WORKSPACE)
+    rust_license = Path(sysroot.read_text().strip()) / "share/doc/rust/COPYRIGHT-library.html"
+    environment = macos_environment(work)
+
+    def owner(step, **values):
+        record.run(step, macos_owner_argv(context, pins, pinned_inputs, step, **values), cwd=work,
+                   env=environment, inherit=False, seconds=3600)
+
+    node, npm = pinned_node(pin_rows(context, pins, pinned_inputs), pinned_inputs, work / "node")
+    owner("library-components", node=node, npm=npm)
+    built = read_json(work / "components/components.json")
+    require(built.get("schema") == "connect-library-components/1" and isinstance(built.get("components"), dict),
+            "not the component build's record")
+    components = {}
+    for label, _kind, _file in MACOS_COMPONENTS:
+        row = built["components"][label]
+        path = work / "components" / relative(row["file"])
+        require("/" not in row["file"] and path.is_file() and not path.is_symlink()
+                and digest(path) == row["sha256"], "a built component differs from its record: " + label)
+        components[label] = binding(path)
+    (work / "consumers-closure").mkdir()
+    owner("library-consumers", components=components)
+    owner("library-kit", rust_license=rust_license)
+    owner("library-package")
+    archive = macos_library_archive(context)
+    read_json(work / "library/build.json")
+    for name, _feature in MACOS_TOOLS:
+        signed_binding(tools / name)
+    outputs.update(library=binding(archive), library_build=binding(work / "library/build.json"),
+                   components=components, components_reproducible=built.get("reproducible"),
+                   tool_dependencies=binding(tools / "dependencies.txt"))
+    return macos_finish(context, outputs)
+
+
+def macos_resources(work, pins, pinned_inputs):
+    """Step 4: the starter for exactly this library, then the resource closure the executables bind."""
+    context = macos_begin(work, "resources")
+    pin_rows(context, pins, pinned_inputs)
+    record, environment = context["record"], macos_environment(work)
+    archive = macos_library_archive(context)
+    require(binding(archive) == read_json(step_path(work, "library"))["outputs"]["library"],
+            "the library changed after the library step")
+    selection = work / "library-selection.json"
+    write_new(selection, {"schema_version": 1, "status": "candidate_input_not_published",
+        "assets": [{"upload_name": archive.name, "bytes": archive.stat().st_size, "sha256": digest(archive)}]})
+    starter = work / "starter"
+    record.run("starter-export", [sys.executable, "-I", "-B", ROOT / "scripts/export-setup-starter.py",
+        "--destination", starter, "--manifest", selection, "--manifest-sha256", digest(selection)],
+        cwd=work, env=environment, inherit=False, seconds=600)
+    policy = ROOT / relative(context["inputs"]["node_prebuilt_policy"]["path"])
+    record.run("resources", [sys.executable, "-I", "-B", ROOT / "scripts/package-connect-resources.py",
+        "--destination", work / "resources", "--zstd", context["preflight"]["zstd"], "--target", MACOS_TARGET,
+        "--pins", pins, "--pinned-inputs", pinned_inputs,
+        "--library", archive, "--library-sha256", digest(archive), "--library-bytes", str(archive.stat().st_size),
+        "--starter", starter, "--release-manifest-sha256", digest(starter / "release-manifest.json"),
+        "--node-prebuilt-policy", policy,
+        "--node-prebuilt-policy-sha256", context["inputs"]["node_prebuilt_policy"]["sha256"]],
+        cwd=work, env=environment, inherit=False, seconds=3600)
+    built = macos_resource_record(work)
+    print("resources_sha256 " + built["resources_sha256"])
+    return macos_finish(context, {"resources_sha256": built["resources_sha256"],
+        "resource_build_record": binding(work / "resources/build.json"),
+        "resource_archive": binding(macos_resource_archive(work)), "library_selection": binding(selection)})
+
+
+def macos_resource_archive(work):
+    return work / "resources" / ("meerkat-connect-resources-" + MACOS_TARGET + ".tar.gz")
+
+
+def macos_resource_record(work):
+    value = read_json(work / "resources/build.json")
+    archive = macos_resource_archive(work)
+    require(value.get("target") == MACOS_TARGET and isinstance(value.get("resources_sha256"), str)
+            and HEX.fullmatch(value["resources_sha256"]) and archive.is_file()
+            and value.get("archive_sha256") == digest(archive), "not this target's resource build record")
+    return value
+
+
+def macos_resource_digest(context):
+    """The digest every native build, test build and assembly of this work root is bound to."""
+    built = macos_resource_record(context["work"])
+    recorded = read_json(step_path(context["work"], "resources"))["outputs"]
+    require(recorded["resource_build_record"] == binding(context["work"] / "resources/build.json")
+            and recorded["resources_sha256"] == built["resources_sha256"],
+            "the resource closure changed after the resources step")
+    return built["resources_sha256"]
+
+
+def macos_native_argv(context, *selection):
+    return [ROOT / "scripts/repo-cargo", selection[0], "--locked", "--release", "--manifest-path",
+            WORKSPACE / "Cargo.toml", "-p", "meerkat-connect", "--features", context["inputs"]["features"],
+            *selection[1:], "--message-format=json-render-diagnostics"]
+
+
+def macos_source_check(context, label):
+    manifest = context["source_manifest"]
+    context["record"].run(label, [sys.executable, "-I", "-B", ROOT / "scripts/connect-source-identity.py", "check",
+        "--manifest", manifest, "--manifest-sha256", digest(manifest)], cwd=context["work"],
+        env=macos_environment(context["work"]), inherit=False, seconds=900)
+
+
+def macos_build(work):
+    """Step 5: both executables in one Cargo build, signed before any record binds them."""
+    require_native_host(MACOS_TARGET)
+    context = macos_begin(work, "build")
+    record, inputs = context["record"], context["inputs"]
+    resources_sha = macos_resource_digest(context)
+    macos_source_check(context, "identity-check-before-build")
+    free = macos_free_space(context)
+    cargo, log = record.run("native-build", macos_native_argv(context, "build",
+        "--bin", "toolkit_gateway", "--bin", "meerkat-connect"), cwd=WORKSPACE,
+        env=macos_cargo_environment(MEERKAT_CONNECT_RESOURCES_SHA256=resources_sha), seconds=MACOS_BUILD_SECONDS)
+    outputs = {"free_bytes": free, "resources_sha256": resources_sha}
+    version = context["preflight"]["versions"]["connect"]
+    for name in MACOS_SHIPPED:
+        # Order: copy, sign, verify, facts, first run. Only then may a record name the digest.
+        binary = work / "binary" / name
+        bound = macos_emit(context, log, name, binary, test=False, label=name)
+        facts = checked_macos_executable(binary, inputs["minimum_macos"])
+        write_new(binary.with_name(name + ".facts.json"), {"schema_version": 1, "binary": bound, **facts})
+        _, said = record.run("version-" + name, [binary, "--version"], cwd=work,
+                             env=macos_environment(work), inherit=False, seconds=120)
+        require(said.read_text().startswith(name + " " + version), name + " does not report the tree's version")
+        outputs[name] = signed_binding(binary)
+    macos_source_check(context, "identity-check-after-build")
+    gateway = work / "records/gateway-build-record.json"
+    write_new(gateway, macos_build_record(context, "toolkit_gateway", cargo, resources_sha))
+    outputs["gateway_build_record"] = binding(gateway)
+    return macos_finish(context, outputs)
+
+
+def macos_build_record(context, kind, cargo, resources_sha, **extra):
+    """The assembler's schema 1 native build record. The binary is bound through its signature record."""
+    work = context["work"]
+    binary = work / "binary" / kind
+    return {"schema_version": 1, "target": MACOS_TARGET, "binary_kind": kind, "resources_sha256": resources_sha,
+            "binary": signed_binding(binary), "signature": binding(signature_path(binary)), "cargo": cargo,
+            "source_manifest": binding(context["source_manifest"]),
+            "resource_build_record_sha256": digest(work / "resources/build.json"), **extra}
+
+
+def macos_assembly_argv(context, kind, record_path):
+    work = context["work"]
+    binary, resources = work / "binary" / kind, work / "resources/build.json"
+    return [sys.executable, "-I", "-B", ROOT / "scripts/assemble-connect-product.py", "--binary", binary,
+            "--binary-sha256", signed_binding(binary)["sha256"], "--build-record", record_path,
+            "--resource-build-record", resources, "--resource-build-record-sha256", digest(resources),
+            "--binary-kind", kind, "--target", MACOS_TARGET,
+            "--release-version", context["preflight"]["versions"]["connect"]]
+
+
+def macos_sdk_wheels(context, pins, pinned_inputs, meta_wheel, meta_wheel_sha256):
+    """Connect's SDK wheel from this checkout, and Meta's: from this checkout, or the supplied published one."""
+    work, record, versions = context["work"], context["record"], context["preflight"]["versions"]
+    rows = pin_rows(context, pins, pinned_inputs)
+    environment = macos_environment(work, SOURCE_DATE_EPOCH=str(context["preflight"]["source_date_epoch"]))
+    scratch = work / "sdk-build"
+    wheelhouse = scratch / "tools"
+    wheelhouse.mkdir(parents=True)
+    lines = []
+    for name, version in sorted(context["inputs"]["sdk_build_tools"].items()):
+        source = pinned_file(rows, pinned_inputs, "pypi-wheel", name, version)
+        copy_exact(source, wheelhouse / source.name)
+        lines.append(f"{name}=={version} --hash=sha256:{digest(source)}")
+    requirements = scratch / "requirements.txt"
+    requirements.write_text("\n".join(lines) + "\n")
+    venv = scratch / "venv"
+    record.run("sdk-build-venv", [sys.executable, "-I", "-m", "venv", venv], cwd=work, env=environment, inherit=False)
+    python = venv / "bin/python"
+    record.run("sdk-build-tools", [python, "-I", "-m", "pip", "install", "--no-index", "--no-deps",
+        "--require-hashes", "--find-links", wheelhouse, "-r", requirements], cwd=work, env=environment, inherit=False)
+    record.run("sdk-build-inventory", [python, "-I", "-m", "pip", "list", "--format=json"], cwd=work,
+               env=environment, inherit=False)
+    (work / "sdk").mkdir()
+    sources = {"toolkit": ("meerkat-toolkit", versions["toolkit_sdk"], ROOT / "sdk/python"),
+               "meta": ("meerkat-meta", versions["meta_sdk"], WORKSPACE / "meta/sdk/python")}
+    described = {}
+    for label, (distribution, version, source) in sources.items():
+        if label == "meta" and meta_wheel is not None:
+            require(HEX.fullmatch(meta_wheel_sha256 or "") and checked_file(meta_wheel)["sha256"] == meta_wheel_sha256,
+                    "the supplied Meta wheel differs from its stated digest")
+            built, origin = meta_wheel, "supplied"
+        else:
+            # A scratch copy: the build backend writes build/ and egg-info, never into the checkout.
+            shutil.copytree(source, scratch / label / "source", symlinks=True)
+            (scratch / label / "dist").mkdir()
+            record.run("sdk-wheel-" + label, [python, "-I", "-m", "build", "--wheel", "--no-isolation",
+                "--outdir", scratch / label / "dist", scratch / label / "source"], cwd=scratch / label,
+                env=environment, inherit=False, seconds=900)
+            wheels = list((scratch / label / "dist").iterdir())
+            require(len(wheels) == 1 and wheels[0].suffix == ".whl", "one built SDK wheel required: " + label)
+            built, origin = wheels[0], "built_from_checkout"
+        metadata = wheel_metadata(built)
+        require(metadata["name"] == distribution and metadata["version"] == version,
+                "SDK wheel is not this tree's " + distribution)
+        copy_exact(built, work / "sdk" / built.name)
+        described[label] = {"source": origin, "distribution": distribution, "version": version,
+                            **binding(work / "sdk" / built.name)}
+    extra = [item for item in wheel_metadata(Path(described["toolkit"]["path"]))["requires"]
+             if re.match(r"meerkat-meta\s*==\s*" + re.escape(versions["meta_sdk"]) + r"\s*;", item)
+             and "native-host" in item]
+    require(len(extra) == 1, "Connect's SDK wheel must require this tree's Meta SDK for its native host")
+    write_new(work / "sdk/SDK-WHEELS.json", {"schema_version": 1, **described})
+    return described
+
+
+def macos_stage(work, pins, pinned_inputs, meta_wheel=None, meta_wheel_sha256=None):
+    """Step 6: both test executables in one Cargo build, the SDK wheels, and the two unqualified prefixes."""
+    require_native_host(MACOS_TARGET)
+    context = macos_begin(work, "stage")
+    record = context["record"]
+    resources_sha = macos_resource_digest(context)
+    for name in MACOS_SHIPPED:
+        # The production bytes were copied and signed before this test build can replace Cargo's output.
+        signed_binding(work / "binary" / name)
+    free = macos_free_space(context)
+    tests = [item for name in MACOS_TESTS for item in ("--test", name)]
+    cargo, log = record.run("test-build", macos_native_argv(context, "test", *tests, "--no-run"), cwd=WORKSPACE,
+        env=macos_cargo_environment(MEERKAT_CONNECT_RESOURCES_SHA256=resources_sha), seconds=MACOS_BUILD_SECONDS)
+    outputs = {"free_bytes": free}
+    for name in MACOS_TESTS:
+        outputs[name] = macos_emit(context, log, name, work / "binary" / name, test=True, label=name)
+    native = read_json(record.records / "native-build.json")
+    cli_record = work / "records/cli-build-record.json"
+    write_new(cli_record, macos_build_record(context, "meerkat-connect", native, resources_sha,
+        test_executable=signed_binding(work / "binary/packaged_setup"), test_build=cargo))
+    outputs["sdk"] = macos_sdk_wheels(context, pins, pinned_inputs, meta_wheel, meta_wheel_sha256)
+    environment = macos_environment(work)
+    for kind, label, record_path in (("toolkit_gateway", "gateway", work / "records/gateway-build-record.json"),
+                                     ("meerkat-connect", "cli", cli_record)):
+        record.run(label + "-stage", [*macos_assembly_argv(context, kind, record_path), "--stage-only",
+            "--destination", work / (label + "-stage")], cwd=work, env=environment, inherit=False, seconds=1800)
+        outputs[label + "_staging"] = binding(work / (label + "-stage") / "staging.json")
+    installed = work / "cli-stage" / MACOS_PREFIX / "bin/packaged_setup"
+    copy_exact(work / "binary/packaged_setup", installed)
+    installed.chmod(0o755)
+    outputs.update(cli_build_record=binding(cli_record), installed_test=binding(installed))
+    return macos_finish(context, outputs)
+
+
+def macos_check_gateway(work):
+    """Step 7: the installed gateway verifier against the staged gateway and exactly the two SDK wheels."""
+    require_native_host(MACOS_TARGET)
+    context = macos_begin(work, "check-gateway")
+    record, environment = context["record"], macos_environment(work)
+    wheels = read_json(work / "sdk/SDK-WHEELS.json")
+    lines = []
+    for label in ("meta", "toolkit"):
+        row = wheels[label]
+        require(binding(Path(row["path"])) == {key: row[key] for key in ("path", "size", "sha256")},
+                "an SDK wheel changed after staging")
+        lines.append(f"{row['distribution']}=={row['version']} --hash=sha256:{row['sha256']}")
+    requirements = work / "verifier-requirements.txt"
+    requirements.write_text("\n".join(lines) + "\n")
+    venv = work / "verifier-venv"
+    record.run("verifier-venv", [sys.executable, "-I", "-m", "venv", venv], cwd=work, env=environment, inherit=False)
+    python = venv / "bin/python"
+    record.run("verifier-install", [python, "-I", "-m", "pip", "install", "--no-index", "--no-deps",
+        "--require-hashes", "--find-links", work / "sdk", "-r", requirements], cwd=work, env=environment, inherit=False)
+    record.run("verifier-inventory", [python, "-I", "-m", "pip", "list", "--format=json"], cwd=work,
+               env=environment, inherit=False)
+    _, site_log = record.run("verifier-site", [python, "-I", "-c",
+        "import sysconfig; print(sysconfig.get_path('purelib'))"], cwd=work, env=environment, inherit=False)
+    site = Path(site_log.read_text().strip())
+    staged = work / "gateway-stage/staging.json"
+    record.run("gateway-verify", [python, "-I", "-B", ROOT / "scripts/verify_native_gateway_subprocess.py",
+        "--toolkit-gateway", work / "gateway-stage" / MACOS_PREFIX / "bin/toolkit_gateway",
+        "--toolkit-python", site, "--meta-python", site, "--case", "installed-product",
+        "--installed-staging", staged, "--installed-staging-sha256", digest(staged),
+        "--output", work / "gateway-verification"], cwd=work, env=environment, inherit=False, seconds=3600)
+    manifest = work / "gateway-verification/manifest.json"
+    require(read_json(manifest)["status"] == "passed", "the installed gateway verification did not pass")
+    return macos_finish(context, {"status": "passed", "manifest": binding(manifest)})
+
+
+def macos_installed_test(context, executable, name, directory, *, prefix=None, extra=None, path="", seconds=900):
+    """Run one ignored installed test exactly once, outside the checkout, with a complete environment."""
+    for leaf in ("hm", "tmp", "empty-path"):
+        (directory / leaf).mkdir(parents=True)
+    environment = {"HOME": str(directory / "hm"), "TMPDIR": str(directory / "tmp"),
+                   "PATH": path or str(directory / "empty-path"), "LC_ALL": "en_US.UTF-8",
+                   "RUST_TEST_THREADS": "1", "RUST_MIN_STACK": "8388608", **(extra or {})}
+    record = context["record"]
+    execution, log = record.run(name, [executable, "--exact", "--ignored", name, "--nocapture"],
+                                cwd=directory, env=environment, inherit=False, seconds=seconds)
+    # libtest exits successfully when a filter selects zero tests, too.
+    require(re.search(r"test result: ok\. 1 passed; 0 failed; 0 ignored;", log.read_text(errors="replace")),
+            "the selected installed test did not actually run once: " + name)
+    evidence = [binding(record.records / (name + ".json")), binding(log)]
+    if prefix is not None:
+        roots = list((directory / "tmp").glob(prefix + "*"))
+        require(len(roots) == 1 and (roots[0] / "native-dispatch.jsonl").is_file(),
+                "owned installed test evidence is missing: " + name)
+        evidence += [binding(item) for item in sorted(roots[0].iterdir()) if item.is_file() and not item.is_symlink()]
+    return execution, evidence
+
+
+def macos_check_cli(work):
+    """Step 8: the two installed CLI tests. A passing shutdown test leaves its review pending."""
+    require_native_host(MACOS_TARGET)
+    context = macos_begin(work, "check-cli")
+    staged = work / "cli-stage/staging.json"
+    candidate = read_json(staged)["candidate"]
+    installed = work / "cli-stage" / MACOS_PREFIX / "bin/packaged_setup"
+    require(binding(installed) == read_json(step_path(work, "stage"))["outputs"]["installed_test"],
+            "the installed test executable changed after staging")
+    directory = work / "cli-qualification"
+    directory.mkdir(exist_ok=True)
+    execution, evidence = macos_installed_test(context, installed, CLI_COMPOSITION,
+        directory / "composition-run", prefix="connect-product-acceptance-")
+    composition = directory / "installed-composition.json"
+    write_new(composition, {"schema_version": 1, "kind": "meerkat_connect_installed_composition",
+        "scope": CLI_COMPOSITION, "status": "passed", "candidate": candidate,
+        "test_executable": binding(installed), "execution": execution, "evidence": evidence})
+    execution, evidence = macos_installed_test(context, installed, CLI_SHUTDOWN,
+        directory / "shutdown-run", prefix="connect-active-worker-acceptance-")
+    evidence += [binding(item) for item in (staged, work / "records/cli-build-record.json",
+        work / "resources/build.json", context["source_manifest"], work / "records/native-build.json",
+        work / "records/test-build.json", composition)]
+    # Deliberately not accepted: an independent reader assesses these observations in stage two.
+    pending = directory / "native-shutdown-review.pending.json"
+    write_new(pending, {"schema_version": 1, "kind": "meerkat_connect_native_shutdown_review",
+        "scope": "active_setup_worker_shutdown", "disposition": "pending", "candidate": candidate,
+        "test_executable": binding(installed), "execution": execution, "evidence": evidence})
+    return macos_finish(context, {"composition": binding(composition), "pending_review": binding(pending)})
+
+
+def macos_rkat(context, archive, archive_sha256, from_checkout):
+    """The ordinary Core executable of the consumer check: the published asset, or this commit's build."""
+    work, record = context["work"], context["record"]
+    require((archive is not None) != bool(from_checkout),
+            "exactly one of --rkat-archive (with --rkat-archive-sha256) and --rkat-from-checkout required")
+    destination = work / "rkat/rkat"
+    destination.parent.mkdir()
+    core = context["preflight"]["versions"]["core"]
+    if from_checkout:
+        _, log = record.run("rkat-build", [ROOT / "scripts/repo-cargo", "build", "--locked", "--release",
+            "--manifest-path", WORKSPACE / "Cargo.toml", "-p", "rkat", "--bin", "rkat",
+            "--message-format=json-render-diagnostics"], cwd=WORKSPACE, env=macos_cargo_environment(),
+            seconds=MACOS_BUILD_SECONDS)
+        copy_exact(emitted_executable(log, "rkat", test=False), destination)
+        described = {"source": "built_from_checkout", "version": core,
+                     "build": binding(record.records / "rkat-build.json")}
+    else:
+        expected = "rkat-" + core + "-" + MACOS_TRIPLE + ".tar.gz"
+        require(archive.name == expected, "the Core archive of this tree's version is " + expected)
+        require(HEX.fullmatch(archive_sha256 or "") and checked_file(archive)["sha256"] == archive_sha256,
+                "the Core archive differs from its stated digest")
+        with tarfile.open(archive, "r:gz") as source:
+            members = source.getmembers()
+            require(len(members) == 1 and members[0].name in ("rkat", "./rkat") and members[0].isfile()
+                    and 0 < members[0].size <= MAX_FILE, "the Core archive must hold exactly the rkat executable")
+            with source.extractfile(members[0]) as reader, destination.open("xb") as writer:
+                shutil.copyfileobj(reader, writer)
+        described = {"source": "published_archive", "version": core,
+                     "archive": {"name": archive.name, "size": archive.stat().st_size, "sha256": archive_sha256}}
+    destination.chmod(0o755)
+    # Not a shipped file: only that this host can run it is required of it.
+    facts = macho_facts(destination)
+    require(facts["cpu"] == MACHO_CPU_ARM64 and facts["filetype"] == MACHO_EXECUTE,
+            "thin arm64 Mach-O rkat executable required")
+    return destination, {**described, "executable": binding(destination)}
+
+
+def macos_check_consumer(work, archive=None, archive_sha256=None, from_checkout=False):
+    """Step 9: setup, exit, then a fresh ordinary rkat in the same realm, against the staged product."""
+    require_native_host(MACOS_TARGET)
+    context = macos_begin(work, "check-consumer")
+    rkat, described = macos_rkat(context, archive, archive_sha256, from_checkout)
+    cli = signed_binding(work / "binary/meerkat-connect")
+    prefix = work / "cli-stage" / MACOS_PREFIX
+    require(digest(prefix / "bin/meerkat-connect") == cli["sha256"], "the staged CLI is not the signed executable")
+    directory = work / "cli-qualification"
+    directory.mkdir(exist_ok=True)
+    execution, evidence = macos_installed_test(context, work / "binary/cli_paired_host", CLI_CONSUMER,
+        directory / "consumer-run", path="/usr/bin:/bin", seconds=3600,
+        extra={"CONNECT_REAL_LIBRARY_PREFIX": str(prefix), "CONNECT_SUPPLIED_CLI_SHA256": cli["sha256"],
+               "CONNECT_FINAL_RKAT": str(rkat), "CONNECT_FINAL_RKAT_SHA256": digest(rkat)})
+    consumer = directory / "consumer.json"
+    write_new(consumer, {"schema_version": 1, "kind": "meerkat_connect_consumer_check", "scope": CLI_CONSUMER,
+        "status": "passed", "rkat": described, "cli": cli, "test_executable": signed_binding(work / "binary/cli_paired_host"),
+        "execution": execution, "evidence": evidence})
+    return macos_finish(context, {"consumer": binding(consumer), "rkat_source": described["source"]})
+
+
+def after_resource_step(transcript):
+    """What the CLI printed after the line that announces its resource step ("" when nothing yet)."""
+    if CONVERSATION_PREPARING not in transcript:
+        return ""
+    rest = transcript.split(CONVERSATION_PREPARING, 1)[1]
+    return rest.split("\n", 1)[1].strip() if "\n" in rest else ""
+
+
+def conversation_verdict(transcript, *, alive, quiet):
+    """What one observed start of the setup conversation shows. Text only; nothing is inferred beyond it."""
+    require(CONVERSATION_UNAVAILABLE not in transcript,
+            "the staged CLI refused its installed resources")
+    require(CONVERSATION_REALM in transcript and CONVERSATION_PREPARING in transcript,
+            "the staged CLI did not reach its resource step")
+    after = after_resource_step(transcript)
+    require(alive and quiet and after, "the staged CLI did not print and then wait after its resource step")
+    return after
+
+
+def macos_conversation(argv, cwd, environment, *, seconds=900, quiet_seconds=20, close_seconds=60):
+    """Start argv on a pseudo-terminal, read until it waits at a prompt, then close it. POSIX only."""
+    import pty
+    import select
+    pid, master = pty.fork()
+    if pid == 0:  # the child: a controlling terminal of its own, then the product
+        try:
+            os.chdir(cwd)
+            os.execve(argv[0], argv, environment)
+        finally:
+            os._exit(127)
+    raw, deadline, last, status = b"", time.monotonic() + seconds, time.monotonic(), None
+    observed = {"timed_out": False, "closed_by": None}
+
+    def reap():
+        nonlocal status
+        if status is None:
+            done, code = os.waitpid(pid, os.WNOHANG)
+            if done:
+                status = code
+        return status is not None
+
+    def read_some(wait):
+        nonlocal raw, last
+        if select.select([master], [], [], wait)[0]:
+            try:
+                block = os.read(master, 65536)
+            except OSError:
+                block = b""
+            if block and len(raw) < 1024**2:
+                raw += block
+                last = time.monotonic()
+            return bool(block)
+        return False
+
+    try:
+        while not reap():
+            read_some(0.5)
+            if (time.monotonic() - last >= quiet_seconds
+                    and after_resource_step(raw.decode("utf-8", errors="replace"))):
+                break
+            if time.monotonic() >= deadline:
+                observed["timed_out"] = True
+                break
+        alive_at_prompt = not reap()
+        while not alive_at_prompt and read_some(0.2):
+            pass  # a program that already ended: take what it still had to say
+        quiet = time.monotonic() - last >= quiet_seconds
+        at_prompt = len(raw)  # what follows is the program's answer to being closed, not its start
+        # Close: Ctrl-C at the terminal first, then signals to the session. Each wait is bounded.
+        for name, action in (("terminal_interrupt", lambda: os.write(master, b"\x03")),
+                             ("sigint", lambda: os.killpg(pid, signal.SIGINT)),
+                             ("sigterm", lambda: os.killpg(pid, signal.SIGTERM)),
+                             ("sigkill", lambda: os.killpg(pid, signal.SIGKILL))):
+            if reap():
+                break
+            try:
+                action()
+            except OSError:
+                pass
+            observed["closed_by"] = name
+            limit = time.monotonic() + close_seconds
+            while not reap() and time.monotonic() < limit:
+                read_some(0.2)
+        require(reap(), "the staged CLI could not be closed")
+    finally:
+        os.close(master)
+    observed.update(alive_at_prompt=alive_at_prompt, quiet_at_prompt=quiet,
+        exit_code=os.waitstatus_to_exitcode(status), transcript=raw[:at_prompt].decode("utf-8", errors="replace"),
+        closing_output=raw[at_prompt:].decode("utf-8", errors="replace")[:65536])
+    return observed
+
+
+def macos_check_conversation(work):
+    """Step 10: the staged CLI itself, on a terminal, gets past its resource step to a prompt."""
+    require_native_host(MACOS_TARGET)
+    context = macos_begin(work, "check-conversation")
+    cli = work / "cli-stage" / MACOS_PREFIX / "bin/meerkat-connect"
+    require(digest(cli) == signed_binding(work / "binary/meerkat-connect")["sha256"],
+            "the staged CLI is not the signed executable")
+    directory = work / "cli-qualification/conversation-run"
+    for leaf in ("hm", "tmp", "empty-path", "state", "config", "context"):
+        (directory / leaf).mkdir(parents=True)
+    environment = {"HOME": str(directory / "hm"), "TMPDIR": str(directory / "tmp"),
+                   "PATH": str(directory / "empty-path"), "LC_ALL": "en_US.UTF-8", "TERM": "xterm-256color"}
+    argv = [str(cli), "--realm", "conversation-check", "--state-root", str(directory / "state"),
+            "--context-root", str(directory / "context"), "--user-config-root", str(directory / "config")]
+    observed = macos_conversation(argv, directory / "context", environment)
+    transcript = directory / "transcript.txt"
+    transcript.write_text(observed.pop("transcript"), encoding="utf-8")
+    conversation = work / "cli-qualification/conversation-start.json"
+    try:
+        prompt = conversation_verdict(transcript.read_text(encoding="utf-8"),
+                                      alive=observed["alive_at_prompt"], quiet=observed["quiet_at_prompt"])
+        require(observed["closed_by"] in ("terminal_interrupt", "sigint", "sigterm"),
+                "the staged CLI did not close on an interrupt or a termination request")
+    except ValueError as refusal:
+        write_new(conversation.with_name("conversation-start.refused.json"), {"schema_version": 1,
+            "status": "refused", "reason": str(refusal), "argv": argv, "environment": environment,
+            **observed, "transcript": binding(transcript)})
+        raise
+    write_new(conversation, {"schema_version": 1, "kind": "meerkat_connect_conversation_start",
+        "scope": "staged_cli_on_a_terminal_passes_its_resource_step_then_prints_and_waits", "status": "passed",
+        "cli": signed_binding(work / "binary/meerkat-connect"), "argv": argv, "environment": environment,
+        **observed, "after_resource_step_bytes": len(prompt.encode()), "transcript": binding(transcript),
+        "evidence": [binding(transcript)],
+        "not_claimed": ["model choice", "sign-in", "the conversation itself", "terminal interaction beyond the first prompt"]})
+    return macos_finish(context, {"conversation": binding(conversation)})
+
+
+def macos_check_official_install(work, chrome=None):
+    """The official Playwright install, through the library's own installer, with the closure's Node and npm.
+
+    This is the command the product's setup backend runs for that route (its Python, its installer, its
+    official bundle, `--node` and `--npm-cli` from the assembled closure). A failure fails the step. When the
+    host has no Chrome executable to pin, the check is recorded as not run, never as passed.
+    """
+    require_native_host(MACOS_TARGET)
+    context = macos_begin(work, "check-official-install")
+    closure = work / "cli-stage" / MACOS_PREFIX / "libexec/meerkat-connect"
+    manifest = read_json(closure / "resources.json")
+    python, node, npm, archive = (closure / relative(manifest[key]) for key in ("python", "node", "npm_cli", "archive"))
+    directory = work / "cli-qualification/official-run"
+    for leaf in ("hm", "tmp", "process", "library"):
+        (directory / leaf).mkdir(parents=True)
+    result = work / "cli-qualification/official-playwright.json"
+    chrome = Path(MACOS_CHROME) if chrome is None else chrome
+    common = {"schema_version": 1, "kind": "meerkat_connect_official_install_check", "route": "official-playwright",
+              "scope": "official_playwright_install_through_the_library_installer"}
+    if not (chrome.is_absolute() and chrome.is_file() and not chrome.is_symlink() and os.access(chrome, os.X_OK)):
+        reason = "no Chrome executable at " + str(chrome) + ": the installer pins the host's Chrome by digest"
+        write_new(result, {**common, "status": "not_run", "reason": reason, "evidence": []})
+        return macos_finish(context, {"status": "not_run", "reason": reason, "record": binding(result)})
+    stem = archive.name.removesuffix(".tar.gz")
+    with tarfile.open(archive, "r:gz") as source:
+        for member in source:
+            require(member.name == stem or member.name.startswith(stem + "/"), "library member outside its root")
+        source.extractall(directory / "library", filter="tar")
+    library = directory / "library" / stem
+    installer, official = library / "setup/install-library-consumer.py", library / "official"
+    configuration, profile = directory / "selected.json", directory / "playwright-host.json"
+    write_new(configuration, PLAYWRIGHT_CONFIGURATION)
+    write_new(profile, {"schema_version": 1, "chrome_executable": str(chrome), "chrome_sha256": digest(chrome),
+                        "process_parent": str(directory / "process")})
+    destination = directory / "install"
+    argv = [python, "-I", "-B", installer, "--official-bundle", official,
+            "--contents-sha256", digest(official / "CONTENTS.json"), "--component", "playwright",
+            "--playwright-host-profile", profile, "--playwright-host-profile-sha256", digest(profile),
+            "--node", node, "--npm-cli", npm, "--destination", destination,
+            "--config", configuration, "--config-sha256", digest(configuration), "--server-name", PLAYWRIGHT_SERVER]
+    environment = {"HOME": str(directory / "hm"), "TMPDIR": str(directory / "tmp"), "PATH": "/usr/bin:/bin",
+                   "LC_ALL": "en_US.UTF-8"}
+    record = context["record"]
+
+    def observed_npm():
+        said = destination / "npm-runtime.stdout"  # the installer's own log of `npm --version`
+        return said.read_text(errors="replace").strip()[:64] if said.is_file() else None
+
+    try:
+        execution, log = record.run("official-playwright-install", argv, cwd=directory, env=environment,
+                                    inherit=False, seconds=1800)
+        receipt = read_json(destination / "ready/installed.json")
+        require(receipt.get("scope") == "observed_software_installation_only"
+                and receipt.get("family") == "official-playwright" and (destination / "ready/mcp.json").is_file(),
+                "the install left no installation receipt")
+    except (ValueError, OSError) as failure:
+        # The first run of this route with the closure's npm: say which route failed and what npm it saw.
+        write_new(result.with_name("official-playwright.refused.json"), {**common, "status": "refused",
+            "reason": str(failure), "npm_version": observed_npm(),
+            "installer_logs": sorted(path.name for path in destination.glob("*.std*")) if destination.is_dir() else []})
+        raise ValueError("the official-playwright install route failed: " + str(failure)) from failure
+    evidence = [binding(record.records / "official-playwright-install.json"), binding(log),
+                binding(destination / "ready/installed.json"), binding(destination / "ready/mcp.json"),
+                binding(configuration), binding(profile)]
+    evidence += [binding(path) for path in sorted(destination.glob("*.stdout")) + sorted(destination.glob("*.stderr"))]
+    write_new(result, {**common, "status": "passed", "execution": execution, "npm_version": observed_npm(),
+        "installer": binding(installer), "official_contents_sha256": digest(official / "CONTENTS.json"),
+        "runtime": {"python": binding(python), "node": binding(node), "npm_cli": binding(npm)},
+        "evidence": evidence,
+        "not_claimed": ["a browser start", "Chrome compatibility", "the MCP endpoint serving", "any tool call"]})
+    return macos_finish(context, {"status": "passed", "record": binding(result)})
+
+
+def tar_tree(directory, destination):
+    """An uncompressed tar of one tree: sorted, numeric owner 0, links kept as links, modes kept.
+
+    Returns the names it left out: sockets and other special files a check may leave behind hold no bytes.
+    """
+    skipped = []
+    with tarfile.open(destination, "x", format=tarfile.PAX_FORMAT) as archive:
+        for path in [directory, *sorted(directory.rglob("*"))]:
+            name = path.relative_to(directory.parent).as_posix()
+            mode = path.lstat().st_mode
+            if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode) or stat.S_ISLNK(mode)):
+                skipped.append(name)
+                continue
+            info = archive.gettarinfo(str(path), arcname=name)
+            info.uid = info.gid = 0
+            info.uname = info.gname = ""
+            if info.isfile():
+                with path.open("rb") as payload:
+                    archive.addfile(info, payload)
+            else:
+                archive.addfile(info)
+    return skipped
+
+
+def record_hosts(paths):
+    """Host names that a step's own logs and evidence name in URLs. Not a capture of traffic."""
+    hosts = set()
+    for path in paths:
+        if path.is_file() and not path.is_symlink() and path.stat().st_size <= MAX_METADATA:
+            text = path.read_bytes().decode("utf-8", errors="replace")
+            hosts.update(match.lower() for match in re.findall(r"https?://([A-Za-z0-9.-]+\.[A-Za-z]{2,})", text))
+    return sorted(hosts)
+
+
+def evidence_files(work, record_path):
+    """A record and every file under the work root that its evidence rows bind."""
+    value = read_json(record_path)
+    rows = list(value.get("evidence", []))
+    rows += [value[key] for key in ("test_executable", "transcript") if isinstance(value.get(key), dict)]
+    paths = [record_path]
+    for row in rows:
+        path = Path(row["path"])
+        require(binding(path) == {key: row[key] for key in ("path", "size", "sha256")},
+                "bound evidence changed: " + path.name)
+        if path.is_relative_to(work):
+            paths.append(path)
+    return paths
+
+
+def macos_product(directory, kind, version, binary_sha256):
+    """One assembled product as the assembler left it: the archive, its checksum file and assembly.json."""
+    assembly = read_json(directory / "assembly.json")
+    expected = ("meerkat-connect-gateway-" if kind == "toolkit_gateway" else "meerkat-connect-") + version \
+        + "-" + MACOS_TARGET + ".tar.gz"
+    require(assembly.get("archive") == expected and assembly.get("release_version") == version
+            and assembly.get("binary_sha256") == binary_sha256, "assembly differs from the selection: " + kind)
+    archive = directory / expected
+    checksum = archive.with_name(expected + ".sha256")
+    require(checksum.read_text() == f"{digest(archive)}  {expected}\n", "product checksum file differs: " + kind)
+    return {"archive": checked_file(archive), "checksum": checked_file(checksum, MAX_METADATA),
+            "assembly": checked_file(directory / "assembly.json", MAX_METADATA)}
+
+
+def macos_stage_record(work, output, consumer_not_run=None):
+    """Step 11: the stage record. The gateway product is complete here; the CLI product waits for the
+    independent shutdown review, which stays pending."""
+    require_native_host(MACOS_TARGET)
+    context = macos_begin(work, "stage-record")
+    preflight = context["preflight"]
+    require(output is not None and output.is_absolute() and not output.exists() and output.parent.is_dir(),
+            "fresh absolute --output with an existing parent required")
+    steps = {step: read_json(step_path(work, step)) for step in MACOS_STEPS[:-1] if step_path(work, step).is_file()}
+    consumer_ran = "check-consumer" in steps
+    require(consumer_ran != (consumer_not_run is not None),
+            "the consumer check either ran, or --consumer-not-run states why it did not")
+    require(consumer_ran or consumer_not_run.strip(), "a reason is required with --consumer-not-run")
+    qualification = work / "cli-qualification"
+    official = read_json(qualification / "official-playwright.json")
+    gates = {"gateway_verification": {"status": steps["check-gateway"]["outputs"]["status"]},
+             "official_playwright_install": {key: official[key] for key in ("status", "reason") if key in official},
+             "cli_composition": {"status": read_json(qualification / "installed-composition.json")["status"]},
+             "shutdown_review": {"status": read_json(qualification / "native-shutdown-review.pending.json")["disposition"]},
+             "conversation_start": {"status": read_json(qualification / "conversation-start.json")["status"]},
+             "consumer": ({"status": read_json(qualification / "consumer.json")["status"],
+                           "rkat": read_json(qualification / "consumer.json")["rkat"]["source"]} if consumer_ran
+                          else {"status": "not_run", "reason": consumer_not_run.strip()})}
+    require(gates["shutdown_review"]["status"] == "pending", "stage one never accepts the shutdown review")
+    require(gates["gateway_verification"]["status"] == "passed", "the gateway verification did not pass")
+    fetched = read_json(work / "records/pinned-inputs/FETCHED.json")
+    require(fetched["pins_sha256"] == context["inputs"]["library"]["pins"]["sha256"]
+            and fetched["lock_sha256"] == digest(WORKSPACE / "Cargo.lock"),
+            "the kept fetch record is not of this selection and checkout")
+    # The gateway product needs nothing from the review: its final archive is assembled now, so the exact
+    # bytes can be scanned from this stage record. Nothing here publishes it.
+    verification = work / "gateway-verification/manifest.json"
+    (work / "products").mkdir()
+    context["record"].run("gateway-final", [*macos_assembly_argv(context, "toolkit_gateway",
+        work / "records/gateway-build-record.json"), "--gateway-verification", verification,
+        "--gateway-verification-sha256", digest(verification), "--destination", work / "products/gateway"],
+        cwd=work, env=macos_environment(work), inherit=False, seconds=1800)
+    executables = {name: signed_binding(work / "binary" / name) for name in (*MACOS_SHIPPED, *MACOS_TESTS)}
+    gateway = macos_product(work / "products/gateway", "toolkit_gateway", preflight["versions"]["connect"],
+                            executables["toolkit_gateway"]["sha256"])
+    selected = [work / name for name in ("inputs-selection.json", "source-manifest.json", "library-selection.json",
+                "library/build.json", "resources/build.json", "sdk/SDK-WHEELS.json", "components/components.json",
+                "tools/dependencies.txt", "gateway-verification/manifest.json")]
+    selected += [macos_library_archive(context), macos_resource_archive(work)]
+    selected += sorted(path for path in (work / "products/gateway").iterdir() if path.is_file() and not path.is_symlink())
+    selected += sorted(path for path in (work / "records").rglob("*") if path.is_file() and not path.is_symlink())
+    selected += sorted(path for path in (work / "binary").iterdir() if path.is_file())
+    selected += sorted(path for path in (work / "tools").iterdir() if path.name.endswith((".build.json", ".signature.json")))
+    selected += sorted(path for path in (work / "sdk").iterdir() if path.suffix == ".whl")
+    checks = {"check-cli": ["installed-composition.json", "native-shutdown-review.pending.json"],
+              "check-consumer": ["consumer.json"] if consumer_ran else [],
+              "check-conversation": ["conversation-start.json"],
+              "check-official-install": ["official-playwright.json"]}
+    by_step = {}
+    for step, names in checks.items():
+        by_step[step] = [path for name in names for path in evidence_files(work, qualification / name)]
+        selected += by_step[step]
+    by_step["check-gateway"] = [path for path in (work / "gateway-verification").rglob("*") if path.is_file()]
+    by_step["library"] = [work / "components/components.json",
+                          *sorted(path for path in (work / "components").glob("logs/*") if path.is_file())]
+    for step in [step for step in by_step if step not in steps]:
+        del by_step[step]
+    for step in by_step:
+        # Cargo's own logs name registry URLs of every crate; they are not what a step reached.
+        by_step[step] = by_step[step] + [work / "records" / (name + ".log") for name in steps[step]["commands"]
+                                         if step != "library" or name == "library-components"]
+    output.mkdir()
+    rows, seen = [], set()
+    for path in selected:
+        name = path.relative_to(work).as_posix()
+        if name in seen:
+            continue
+        seen.add(name)
+        require(path.is_file() and not path.is_symlink(), "a stage file is missing: " + name)
+        copy_exact(path, output / name)
+        rows.append({"path": name, "bytes": path.stat().st_size, "sha256": digest(path)})
+    restore, skipped = {}, []
+    for name in ("gateway-stage", "cli-stage", "gateway-verification"):
+        skipped += tar_tree(work / name, output / (name + ".tar"))
+        restore[name + ".tar"] = name
+        rows.append({"path": name + ".tar", "bytes": (output / (name + ".tar")).stat().st_size,
+                     "sha256": digest(output / (name + ".tar"))})
+    stage = {"schema": MACOS_STAGE_SCHEMA, "target": MACOS_TARGET, "repository": PUBLICATION_REPO,
+        "revision": preflight["revision"], "tree": preflight["tree"], "checkout_root": preflight["checkout_root"],
+        "work_root": preflight["work_root"], "versions": preflight["versions"],
+        "library_edition": preflight["library_edition"], "inputs_sha256": preflight["inputs"]["sha256"],
+        "pins_sha256": context["inputs"]["library"]["pins"]["sha256"],
+        "resolved_pins_sha256": fetched["resolved_pins"]["sha256"], "lock_sha256": fetched["lock_sha256"],
+        "resources_sha256": steps["resources"]["outputs"]["resources_sha256"],
+        "executables": executables, "gates": gates,
+        "products": {"gateway": {"state": "assembled_not_scanned_not_published", "directory": "products/gateway",
+                                 **gateway},
+                     "cli": {"state": "awaits_shutdown_review"}},
+        "network": {step: {"expected": MACOS_NETWORK[step], "hosts_named_in_records": record_hosts(paths),
+                           "captured": False} for step, paths in sorted(by_step.items())},
+        "steps": {step: {"commands": value["commands"]} for step, value in steps.items()},
+        "restore": restore, "special_files_left_out": skipped,
+        "files": sorted(rows, key=lambda row: row["path"])}
+    write_new(output / "STAGE.json", stage)
+    macos_finish(context, {"stage": binding(output / "STAGE.json"), "files": len(rows)})
+    return stage
+
+
+def checked_stage(directory):
+    """A stage record directory: STAGE.json and exactly its files, each with its recorded bytes."""
+    require(directory is not None and directory.is_absolute() and directory.is_dir(), "absolute --stage directory required")
+    stage = read_json(directory / "STAGE.json")
+    require(isinstance(stage, dict) and stage.get("schema") == MACOS_STAGE_SCHEMA
+            and stage.get("target") == MACOS_TARGET and isinstance(stage.get("products"), dict)
+            and set(stage["products"]) == {"gateway", "cli"}
+            and stage["products"]["cli"] == {"state": "awaits_shutdown_review"}
+            and isinstance(stage.get("files"), list) and 0 < len(stage["files"]) <= 32768
+            and set(stage.get("gates", {})) == set(MACOS_GATES), "not a macOS stage record")
+    for row in stage["files"]:
+        path = directory / relative(row["path"])
+        require(set(row) == {"path", "bytes", "sha256"} and path.is_file() and not path.is_symlink()
+                and path.stat().st_size == row["bytes"] and digest(path) == row["sha256"],
+                "a stage file is missing or changed: " + str(row.get("path")))
+    return stage
+
+
+def restore_stage(stage, directory, work):
+    """Put every stage file at its place under the same absolute work root; existing bytes must be equal."""
+    # The staged trees first: a file below gives its own bytes a second check, never a partial tree.
+    for archive, name in sorted(stage["restore"].items()):
+        require(archive == name + ".tar" and name in ("gateway-stage", "cli-stage", "gateway-verification"),
+                "unexpected stage tree")
+        if (work / name).exists():
+            continue
+        with tarfile.open(directory / archive, "r:") as source:
+            for member in source:
+                require(member.name == name or member.name.startswith(name + "/"), "stage tree member outside its root")
+            source.extractall(work, filter="tar")
+    for row in stage["files"]:
+        if row["path"] in stage["restore"]:
+            continue
+        target = work / row["path"]
+        if target.exists():
+            require(target.is_file() and not target.is_symlink() and digest(target) == row["sha256"],
+                    "the work root holds other bytes: " + row["path"])
+        else:
+            copy_exact(directory / row["path"], target)
+    for name in (*MACOS_SHIPPED, *MACOS_TESTS):
+        (work / "binary" / name).chmod(0o755)
+    (work / "cli-stage" / MACOS_PREFIX / "bin/packaged_setup").chmod(0o755)
+
+
+def macos_assemble(work, stage_directory, review, review_sha256, output):
+    """Stage two: the CLI product, after the independent review accepted the shutdown record.
+
+    No product is run and nothing is built or signed. It runs on macOS: the product tree's symbolic links
+    carry modes there that the installed executables compare with their inventory.
+    """
+    require_native_host(MACOS_TARGET)
+    stage = checked_stage(stage_directory)
+    require(str(work) == stage["work_root"] and str(WORKSPACE) == stage["checkout_root"],
+            "stage two needs the stage-one paths: work root " + stage["work_root"]
+            + " and checkout " + stage["checkout_root"])
+    macos_work(work, create=True)
+    require(macos_checkout() == (stage["revision"], stage["tree"]), "the checkout is not the stage's commit")
+    require(output is not None and output.is_absolute() and not output.exists() and output.parent.is_dir(),
+            "fresh absolute --output with an existing parent required")
+    gates = stage["gates"]
+    refused = [name for name in MACOS_GATES if name != "shutdown_review" and gates[name].get("status") != "passed"]
+    require(not refused, "stage gates did not pass: " + ", ".join(refused))
+    require(gates["shutdown_review"].get("status") == "pending", "the stage's shutdown review must be pending")
+    require(gates["consumer"].get("rkat") == "published_archive",
+            "a release needs the consumer check against Core's published rkat")
+    restore_stage(stage, stage_directory, work)
+    require(binding(work / "inputs-selection.json")["sha256"] == stage["inputs_sha256"]
+            == digest(macos_input_file()), "the macOS producer selection differs from the stage's")
+    checked_macos_inputs(read_json(work / "inputs-selection.json"))
+    executables = {name: signed_binding(work / "binary" / name) for name in MACOS_SHIPPED}
+    require(all(executables[name] == stage["executables"][name] for name in MACOS_SHIPPED),
+            "an executable differs from the stage's signed bytes")
+    version = stage["versions"]["connect"]
+    gateway = macos_product(work / "products/gateway", "toolkit_gateway", version,
+                            executables["toolkit_gateway"]["sha256"])
+    recorded = stage["products"]["gateway"]
+    require(all(gateway[key] == recorded[key] for key in ("archive", "checksum", "assembly")),
+            "the gateway product differs from the stage's")
+    pending_path = work / "cli-qualification/native-shutdown-review.pending.json"
+    require(HEX.fullmatch(review_sha256 or "") and review is not None
+            and checked_file(review, MAX_METADATA)["sha256"] == review_sha256,
+            "exact independent shutdown review required")
+    pending, accepted = read_json(pending_path), read_json(review)
+    require(accepted.get("disposition") == "accepted" and accepted.get("candidate") == pending["candidate"]
+            and all(row in accepted.get("evidence", []) for row in pending["evidence"]),
+            "the accepted review does not cover this producer's exact observations")
+    output.mkdir()
+    record = Recorder(output)
+    preflight = read_json(step_path(work, "preflight"))
+    context = {"work": work, "preflight": preflight, "source_manifest": work / "source-manifest.json"}
+    require(binding(context["source_manifest"]) == preflight["source_manifest"], "the source manifest changed")
+    qualified = output / "qualified-build-record.json"
+    final = read_json(work / "records/cli-build-record.json")
+    final.update(installed_composition=binding(work / "cli-qualification/installed-composition.json"),
+                 native_shutdown_review=binding(review))
+    write_new(qualified, final)
+    record.run("cli-final", [*macos_assembly_argv(context, "meerkat-connect", qualified),
+        "--destination", output / "cli"], cwd=output, env=macos_environment(output), inherit=False, seconds=1800)
+    products = {"cli": macos_product(output / "cli", "meerkat-connect", version, executables["meerkat-connect"]["sha256"])}
+    # The gateway product of the stage, beside the CLI product, so one directory holds what would be published.
+    (output / "gateway").mkdir()
+    for key in ("archive", "checksum", "assembly"):
+        copy_exact(work / "products/gateway" / gateway[key]["name"], output / "gateway" / gateway[key]["name"])
+    products["gateway"] = macos_product(output / "gateway", "toolkit_gateway", version,
+                                        executables["toolkit_gateway"]["sha256"])
+    require(products["gateway"] == gateway, "the gateway product changed while it was copied")
+    value = {"schema": MACOS_ASSEMBLY_SCHEMA, "target": MACOS_TARGET, "revision": stage["revision"],
+        "version": version, "stage_sha256": digest(stage_directory / "STAGE.json"),
+        "shutdown_review_sha256": review_sha256, "products": products, "native_execution": False,
+        "private_text_scan": "required_before_publication", "publication": "not_performed"}
+    write_new(output / "ASSEMBLY.json", value)
+    return value
+
+
+SCAN_REPORT_TOKENS = {"status": ("clean", "refused"), "result": ("clean", "hits", "errors", "hits-and-errors")}
+SCAN_REPORT_KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
+
+
+def checked_scan_report(report, assets):
+    """A private-text scan report as it may leave the place where the private rules are.
+
+    It may hold counts by class, file digests, the digest of the scanner's list, a schema name, a status
+    and a tool version. It never holds matched text, token text or the list: any other text refuses.
+    """
+    require(isinstance(report, dict) and isinstance(report.get("payload"), list), "not a private-text scan report")
+    expected = {(row["name"], row["size"], row["sha256"]) for row in assets}
+    scanned = set()
+    for row in report["payload"]:
+        require(isinstance(row, dict) and set(row) == {"name", "bytes", "sha256"}
+                and (row["name"], row["bytes"], row["sha256"]) in expected,
+                "the scan report names a file that is not one of the product files")
+        scanned.add(row["name"])
+    missing = sorted(row["name"] for row in assets if row["name"] not in scanned)
+    require(not missing, "the private-text scan did not cover: " + ", ".join(missing))
+
+    def walk(value, key):
+        if value is None or isinstance(value, (bool, int)):
+            return
+        if isinstance(value, dict):
+            for name, item in value.items():
+                require(SCAN_REPORT_KEY.match(name), "the scan report carries free text")
+                walk(item, name)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item, key)
+        else:
+            require(isinstance(value, str) and (HEX.fullmatch(value)
+                    or value in SCAN_REPORT_TOKENS.get(key, ())
+                    or (key == "schema" and re.fullmatch(r"[a-z0-9-]+(?:/[a-z0-9-]+){0,3}", value))
+                    or (key in ("version", "tool_version") and re.fullmatch(r"[0-9]+(?:\.[0-9]+){0,3}", value))),
+                    "the scan report carries free text")
+
+    walk({key: value for key, value in report.items() if key != "payload"}, "")
+    require(report.get("status") == "clean", "the private-text scan is not clean")
+    return report
+
+
+def macos_accept_review(stage_directory, output, stated_sha256=None):
+    """Record the independent reader's acceptance of the shutdown record of one exact stage.
+
+    Running it is the act of acceptance, after the evidence was read. It checks that every observation the
+    pending record binds is in the stage record with exactly its bytes, and writes the accepted record.
+    The record is a function of the stage alone, so a second run elsewhere writes the same bytes: with
+    `--review-sha256` (the digest the reader stated after the first run) it refuses any other record
+    before it writes one.
+    """
+    stage = checked_stage(stage_directory)
+    require(output is not None and output.is_absolute() and not output.exists() and output.parent.is_dir(),
+            "fresh absolute --output with an existing parent required")
+    pending_path = stage_directory / "cli-qualification/native-shutdown-review.pending.json"
+    pending = read_json(pending_path)
+    require(pending.get("disposition") == "pending" and stage["gates"]["shutdown_review"] == {"status": "pending"}
+            and isinstance(pending.get("evidence"), list) and pending["evidence"],
+            "the stage holds no pending shutdown record")
+    root = Path(stage["work_root"])
+    for row in pending["evidence"]:
+        path = stage_directory / relative(Path(row["path"]).relative_to(root).as_posix())
+        require(path.is_file() and not path.is_symlink() and path.stat().st_size == row["size"]
+                and digest(path) == row["sha256"],
+                "an observation the record binds is missing or changed: " + path.name)
+    accepted = {**pending, "disposition": "accepted", "pending_record_sha256": digest(pending_path),
+                "stage_sha256": digest(stage_directory / "STAGE.json")}
+    encoded = (json.dumps(accepted, indent=2, sort_keys=True, ensure_ascii=True, allow_nan=False) + "\n").encode()
+    require(stated_sha256 is None or (HEX.fullmatch(stated_sha256)
+            and hashlib.sha256(encoded).hexdigest() == stated_sha256),
+            "this stage's accepted record is not the one the reader stated")
+    write_new(output, accepted)
+    require(output.read_bytes() == encoded, "the accepted record was not written as computed")
+    print("accepted shutdown review sha256 " + digest(output))
+    return digest(output)
+
+
+def macos_release_check(assembly_directory, privacy_report, privacy_report_sha256):
+    """The last check before publication: a clean private-text scan of exactly the two product archives.
+
+    The scan runs where the private rules are. Its report holds counts and file digests only, so it can be
+    handed to a hosted job; the rules never are.
+    """
+    require(assembly_directory is not None and assembly_directory.is_absolute() and assembly_directory.is_dir(),
+            "absolute --assembly directory required")
+    assembly = read_json(assembly_directory / "ASSEMBLY.json")
+    require(isinstance(assembly, dict) and assembly.get("schema") == MACOS_ASSEMBLY_SCHEMA
+            and assembly.get("target") == MACOS_TARGET and set(assembly.get("products", {})) == {"gateway", "cli"}
+            and assembly.get("publication") == "not_performed", "not a macOS assembly record")
+    publishable = assembly_directory / "PUBLISHABLE.json"
+    require(not publishable.exists(), "this assembly was already checked")
+    assets = []
+    for label in ("cli", "gateway"):
+        for key in ("archive", "checksum"):
+            row = assembly["products"][label][key]
+            require(checked_file(assembly_directory / label / relative(row["name"])) == row,
+                    "a product file differs from the assembly record: " + row["name"])
+            assets.append(row)
+    require(HEX.fullmatch(privacy_report_sha256 or "") and privacy_report is not None
+            and checked_file(privacy_report, MAX_METADATA)["sha256"] == privacy_report_sha256,
+            "exact private-text scan report required")
+    report = checked_scan_report(read_json(privacy_report), assets)
+    value = {"schema": "connect-macos-publishable/1", "target": MACOS_TARGET, "revision": assembly["revision"],
+        "version": assembly["version"], "assembly_sha256": digest(assembly_directory / "ASSEMBLY.json"),
+        "privacy_report_sha256": privacy_report_sha256,
+        "scanner_list_sha256": report.get("rules_sha256"), "assets": assets, "publication": "not_performed"}
+    write_new(publishable, value)
+    return value
+
+
+def macos_main(arguments):
+    parser = argparse.ArgumentParser(prog="connect-candidate.py macos",
+        description="The complete macOS arm64 installation: the stage one steps, the stage two assembly and "
+                    "the check before publication.")
+    parser.add_argument("step", choices=(*MACOS_STEPS, "accept-review", "assemble", "release-check"))
+    parser.add_argument("--work", type=Path)
+    for name in ("pins", "pinned-inputs", "output", "stage", "review", "assembly", "privacy-report",
+                 "rkat-archive", "meta-wheel", "chrome"):
+        parser.add_argument("--" + name, type=Path)
+    for name in ("source-sha", "review-sha256", "privacy-report-sha256", "rkat-archive-sha256",
+                 "meta-wheel-sha256", "consumer-not-run"):
+        parser.add_argument("--" + name)
+    parser.add_argument("--rkat-from-checkout", action="store_true")
+    args = parser.parse_args(arguments)
+    os.umask(0o022)
+    try:
+        require(args.work is not None or args.step in ("accept-review", "release-check"), "--work required")
+        if args.step == "accept-review":
+            macos_accept_review(args.stage, args.output, args.review_sha256)
+        elif args.step == "preflight":
+            macos_preflight(args.work, args.source_sha)
+        elif args.step == "library":
+            macos_library(args.work, args.pins, args.pinned_inputs)
+        elif args.step == "resources":
+            macos_resources(args.work, args.pins, args.pinned_inputs)
+        elif args.step == "build":
+            macos_build(args.work)
+        elif args.step == "stage":
+            macos_stage(args.work, args.pins, args.pinned_inputs, args.meta_wheel, args.meta_wheel_sha256)
+        elif args.step == "check-gateway":
+            macos_check_gateway(args.work)
+        elif args.step == "check-cli":
+            macos_check_cli(args.work)
+        elif args.step == "check-consumer":
+            macos_check_consumer(args.work, args.rkat_archive, args.rkat_archive_sha256, args.rkat_from_checkout)
+        elif args.step == "check-conversation":
+            macos_check_conversation(args.work)
+        elif args.step == "check-official-install":
+            macos_check_official_install(args.work, args.chrome)
+        elif args.step == "stage-record":
+            macos_stage_record(args.work, args.output, args.consumer_not_run)
+        elif args.step == "assemble":
+            macos_assemble(args.work, args.stage, args.review, args.review_sha256, args.output)
+        else:
+            macos_release_check(args.assembly, args.privacy_report, args.privacy_report_sha256)
+    except (ValueError, OSError, KeyError, subprocess.CalledProcessError, tarfile.TarError,
+            zipfile.BadZipFile) as refusal:
+        print(f"connect-candidate macos {args.step} refused: {type(refusal).__name__}: {refusal}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main():
+    if sys.argv[1:2] == ["macos"]:
+        return macos_main(sys.argv[2:])
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("preflight", "build", "stage-cli", "assemble-cli", "fetch-built",
                                             "accept-publication", "publish-accepted", "privacy-scan"))
@@ -1787,4 +3379,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

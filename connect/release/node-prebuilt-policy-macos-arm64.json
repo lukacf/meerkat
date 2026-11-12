@@ -1,0 +1,18 @@
+{
+  "allowed_origins": [
+    "https://github.com"
+  ],
+  "allowed_redirect_origins": [
+    "https://release-assets.githubusercontent.com"
+  ],
+  "schema_version": 1,
+  "scope": "trusted_public_node_prebuilt_resources",
+  "target": {
+    "arch": "arm64",
+    "libc": null,
+    "node_abi": "137",
+    "node_sha256": "27db838bb204ef7c21df2931f5656e4c8fb32e6e947f363a402b49714d32b5b1",
+    "node_version": "v24.19.0",
+    "platform": "darwin"
+  }
+}

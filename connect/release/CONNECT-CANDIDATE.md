@@ -277,11 +277,187 @@ python3 scripts/connect-candidate.py privacy-scan \
   `scripts/fixtures/release-payload-privacy-scan/`. CI does not scan release
   bytes.
 
+## Complete macOS installation from one commit
+
+The complete macOS arm64 installation (`meerkat-connect-<version>-macos-arm64.tar.gz`
+and `meerkat-connect-gateway-<version>-macos-arm64.tar.gz`: each executable with
+the bundled Python, Node, integration library and setup resources) is produced
+by `scripts/connect-candidate.py macos <step>` on a GitHub-hosted `macos-15`
+runner. It uses none of the candidate inputs above. Everything comes from one
+commit: the checkout builds Connect, both SDK wheels and the integration
+library's six native tools; pinned public files are read from the directory the
+fetch step filled; the producer itself downloads nothing. Nothing in it uses a
+signing identity, a retained host or a private input.
+
+Stage one, one step per workflow step, each with `--work <absolute work root>`:
+
+| Step | What it does | What it leaves |
+| --- | --- | --- |
+| `preflight --source-sha SHA` | Checks the host (Darwin arm64), the clean checkout at SHA, the macOS selection, and that the active Rust toolchain is the one `rust-toolchain.toml` names. Records the tool versions and writes the source manifest. | `records/preflight.step.json`, `inputs-selection.json`, `source-manifest.json` |
+| `library --pins FILE --pinned-inputs DIR` | Builds the six tools of `toolkit-package` with Cargo, signs each, writes each tool's build record, lists their crates, then calls the component build, the consumer exporter, the kit packager and the library packager. | `tools/`, `components/`, `consumers/`, `kit/`, `library/` |
+| `resources --pins FILE --pinned-inputs DIR` | Exports the starter for exactly this library and calls the resource packager with the darwin Node prebuilt policy. | `starter/`, `resources/`; prints the resource digest |
+| `build` | One Cargo build of `meerkat-connect` and `toolkit_gateway` with the resource digest bound, then for each: copy, ad-hoc signature, verification, Mach-O facts, `--version`. | `binary/`, `records/gateway-build-record.json` |
+| `stage --pins FILE --pinned-inputs DIR` | One Cargo test build of `packaged_setup` and `cli_paired_host`, both SDK wheels, and the two unqualified prefixes through `assemble-connect-product.py --stage-only`. | `binary/`, `sdk/`, `gateway-stage/`, `cli-stage/`, `records/cli-build-record.json` |
+| `check-gateway` | The installed gateway verifier (`--case installed-product`) in a virtual environment that holds exactly the two SDK wheels. | `gateway-verification/` |
+| `check-cli` | The two installed CLI tests, each run once with an empty PATH. | `cli-qualification/installed-composition.json`, `native-shutdown-review.pending.json` |
+| `check-consumer` | Setup, exit, then a fresh ordinary `rkat` in the same realm. `--rkat-archive FILE --rkat-archive-sha256 HEX` takes Core's published archive; `--rkat-from-checkout` builds `rkat` from this commit. | `cli-qualification/consumer.json` |
+| `check-conversation` | Starts the staged `meerkat-connect` on a pseudo-terminal and closes it once it printed past its resource step and waits. | `cli-qualification/conversation-start.json` |
+| `check-official-install` | Runs the official Playwright install through the library's own installer, as the setup backend calls it: the closure's Python, `--node` and `--npm-cli` from the closure's runtime Node, the library's `official/` bundle, and a host profile that pins the runner's Chrome by digest. The install hashes the browser and never starts it. A failure fails the step, names the route and leaves `official-playwright.refused.json` with the reason and the npm version the installer observed. Without a Chrome executable (`--chrome FILE` names another one) the check is recorded as `not_run` with the reason, never as passed. | `cli-qualification/official-playwright.json` |
+| `stage-record --output DIR` | Assembles the gateway product and writes the stage record. | `DIR/STAGE.json` and the files it lists |
+
+A step runs once per work root, needs the records of the steps before it, and
+refuses when the checkout is no longer the commit that `preflight` recorded. No
+step reads the Cargo target directory of an earlier step, so the steps can be
+split over jobs that restore the work root at the same absolute path.
+
+Signing. Each executable is copied out of Cargo's output and signed with
+`/usr/bin/codesign --force --sign -` before any record names its digest:
+signing changes the file's bytes, and the build record, the staging record and
+the assembly all bind those bytes. A record takes an executable's digest only
+through the signature record written for the same bytes
+(`<executable>.signature.json`), and the producer reads the code signature
+back from the file: it must be codesign's ad-hoc signature, not the one the
+linker leaves. The two test executables and the six tools are signed the same
+way. No Developer ID is used and nothing is notarized.
+
+What the producer refuses in an executable: anything but a thin arm64 Mach-O
+executable, a linked library outside `/usr/lib/` and `/System/Library/` (a
+user's Mac would not have it), a minimum macOS above the selection's
+`minimum_macos`, and a `--version` output without the tree's Connect version.
+These facts are read from the file in Python. Hashing, sizes, free space and
+archives are Python too: no GNU-only tool is used.
+
+Environment. Cargo inherits the job's toolchain environment. Every other
+child, and every product executable in particular, gets a complete
+environment written by the producer (`HOME`, `TMPDIR`, `PATH`, `LC_ALL` and
+the check's own variables), so no variable of the job reaches a product.
+
+The stage record. `STAGE.json` (schema `connect-macos-stage/1`) names the
+commit and tree, the checkout and work root, the versions, the selection, pin
+file and resource digests, the signed executables, the six gates, and every
+file of the directory with its size and SHA-256. It holds the finished
+gateway archive, which needs nothing from the review, marked
+`assembled_not_scanned_not_published`. It never holds the CLI archive: the
+assembler refuses that product without the accepted shutdown review, and
+stage one leaves the review `pending` whatever the tests said.
+
+Network. The library step's component build runs `npm ci`, which reads the
+public npm registry for integrity-locked packages: the build's one network
+use. The gateway verifier and the consumer check read live public pages
+through the supplied integration, with a controlled model and no provider
+key. The other checks are expected to need none. For each step the stage
+record states that expected use, as read from the source, and the host names
+the step's own logs and evidence name. The records name expected hosts and do
+not measure contacts: the producer captures no traffic, and every entry says
+so (`captured: false`).
+
+Stage two. The release owner reads the stage record's evidence and accepts
+the shutdown record, the assembly follows, and a clean private-text scan of
+the exact archives is the last gate:
+
+```sh
+python3 scripts/connect-candidate.py macos accept-review \
+  --stage /absolute/downloaded/stage-record \
+  --output /absolute/new/native-shutdown-review.accepted.json
+
+python3 scripts/connect-candidate.py macos assemble \
+  --work /absolute/stage-one/work-root \
+  --stage /absolute/downloaded/stage-record \
+  --review /absolute/new/native-shutdown-review.accepted.json \
+  --review-sha256 <the sha256 accept-review printed> \
+  --output /absolute/new-assembly
+
+python3 scripts/connect-candidate.py macos release-check \
+  --assembly /absolute/new-assembly \
+  --privacy-report /absolute/report.json \
+  --privacy-report-sha256 <exact-report-sha256>
+```
+
+`accept-review` records the acceptance. The reader first reads
+`cli-qualification/native-shutdown-review.pending.json` in the stage record and
+the files its `evidence` rows name; running the command is the act of
+accepting them. It checks every file of the stage record, then that each
+observation the pending record binds is there with exactly its bytes, writes
+the accepted record (the pending record with `disposition: accepted`, the
+pending record's digest and the stage record's digest) and prints its SHA-256.
+It runs anywhere and never changes the stage record. The accepted record is a
+function of the stage record alone, so a second run writes the same bytes:
+with `--review-sha256 <the digest the reader stated>` it refuses any other
+record before it writes one. A hosted assembly job runs it that way, so the
+record it assembles from is the one the reader accepted.
+
+`assemble` runs no product, no Cargo and no signing. It runs on macOS, at the
+stage's own work root and checkout paths: the records bind absolute paths, the
+assembler requires the build's `--manifest-path` to be this checkout's, and the
+product tree's symbolic links carry modes on macOS that the installed
+executables compare with their inventory. It restores the stage record, checks
+every file, requires all gates passed (the consumer check against Core's
+published `rkat`, never one built from the checkout), requires the accepted
+review to cover every observation of the pending one, and calls the assembler
+for the CLI product. Its output holds both product archives and
+`ASSEMBLY.json`, and publishes nothing. A stage record that went through a
+workflow artifact has lost every file mode: `assemble` does not rely on any.
+The staged trees travel as tar members, which keep modes and links, and it
+sets the modes of the executables it restores.
+
+`release-check` is the last gate. The private-text scan described below runs
+where the private rules are, over exactly four files: the two product archives
+and their `.sha256` files. `release-check` takes that scan's report and its
+SHA-256, nothing else of the scan. It refuses unless the report is `clean` and
+names all four files by name, size and SHA-256, and only then writes
+`PUBLISHABLE.json` with those four rows, the report's digest and the digest of
+the scanner's list. A report may hold counts by class, file digests, the
+digest of the scanner's list, a schema name, a status and a tool version. It
+never holds matched text, token text or the list: `release-check` refuses a
+report with any other text in it, and one that names a file that is not one
+of the four. The rules never enter the workflow.
+
+Publication is not part of this producer and never part of a build job. It is
+a separate add-only step after the scan. That step must require
+`PUBLISHABLE.json` and check the four digests in it against the files it
+uploads, immediately before the upload.
+
+The macOS selection is `connect-release-inputs-macos-arm64.json`
+(`schema_version` 2, kind `connect-macos-producer-inputs`): the toolchain, the
+Cargo features, the public commit that imported `connect/`, the minimum macOS,
+the free-space bound, the five SDK build tools by version, the darwin Node
+prebuilt policy and the library pin file, each committed file with its
+SHA-256. It names no product version: versions are read from the checkout.
+Its library fields are pending in this tree (`"state": "pending"`, a null pin
+file digest), and every `macos` step refuses a pending or unbound selection.
+It is completed by setting the committed pin file's SHA-256 and `"state":
+"selected"`.
+
+Pinned inputs. `--pins` is the resolved pin file the fetch step writes beside
+the files it fetched: the committed pins plus one row per crate of the tools'
+dependency closure, derived from `Cargo.lock`. The selection names the
+committed pin file, not the resolved one. The fetch step's record
+(`FETCHED.json` in `--pinned-inputs`) binds the three, and every step that
+reads pinned inputs checks all of them: the record's committed pin digest is
+the selection's, its resolved pin digest is that of the `--pins` file, and its
+lock digest is this checkout's `Cargo.lock`. The first such step keeps the
+record and the resolved pin file under `records/pinned-inputs/`; a later step
+given another fetch refuses, and the stage record carries both.
+
+`node-prebuilt-policy-macos-arm64.json` is the Linux policy's shape for
+`darwin` and `arm64`, with no libc and the SHA-256 of `bin/node` inside the
+pinned Node v24.19.0 archive. The resource packager refuses a policy whose
+digest is not that of the Node it packages.
+
+Not shown by anything that runs on Linux, and so only by a hosted `macos-15`
+run: that the builds fit the job's time and disk, that `codesign` produces the
+signature the producer requires, that the six tools and both executables link
+system libraries only, and that the gateway verifier, the two installed tests,
+the consumer check, the conversation start and the official Playwright install
+pass on macOS.
+
 ## Required inputs still unbound
 
-`connect-release-inputs.json` selects Linux; `connect-release-inputs-macos-arm64.json`
-selects macOS. Both contain deliberate nulls and refuse before any native build.
-The existing owners must supply all of the following separately for each target:
+`connect-release-inputs.json` selects Linux for the hosted candidate workflow
+above and contains deliberate nulls: it refuses before any native build. The
+macOS file is no longer a candidate input (see "Complete macOS installation
+from one commit"); the candidate commands refuse it as unbound, as before.
+The existing owners must supply all of the following for the Linux candidate:
 
 - The final dispatched public Connect source commit, its native package version,
   SDK distribution/version, and exact native Cargo manifest/lock hashes.

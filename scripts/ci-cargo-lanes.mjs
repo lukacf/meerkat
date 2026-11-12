@@ -3416,10 +3416,16 @@ function plan(args) {
 // its script, SDK and docs checks (connect/.github/workflows/checks.yml, run
 // by ci.yml's connect-checks job); every Connect path selects them, since
 // the docs check reads the whole tree, and so does a change to Meta's
-// Python SDK, which Connect's installed acceptance controls import.
+// Python SDK, which Connect's installed acceptance controls import, or to
+// the Core and Meta TypeScript SDKs, which Connect's TypeScript SDK links
+// from the same commit for its build and tests.
 // Meta's console, Flow Editor and SDK lanes keep Meta's own classifier
 // (meta/scripts/ci-changes.py) in the transition workflow meta-ci.yml.
-export const PRODUCT_LANES = [{ product: "connect", lane: "connect_checks", paths: ["connect/", "meta/sdk/python/"] }];
+export const PRODUCT_LANES = [{
+  product: "connect",
+  lane: "connect_checks",
+  paths: ["connect/", "meta/sdk/python/", "sdks/typescript/", "meta/sdk/typescript/"],
+}];
 
 // The plan's product section (see the header of ci-products.mjs):
 //   changed       the products whose roots hold a changed path (every

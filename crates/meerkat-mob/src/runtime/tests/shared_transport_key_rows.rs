@@ -11,6 +11,8 @@
 //!   before MobMachine refused the endpoint) starts again: the row's member is
 //!   listed broken with the reason, the key's holder is untouched, the broken
 //!   member retires through the ordinary verb, and the next start is clean;
+//!   the same holds for the journal of a mob that was stopped before its host
+//!   went away, which starts stopped and lifts;
 //! * a member whose recovered session binding comes up, at a start, on the
 //!   key another member holds is listed broken alone, and the mob starts;
 //! * while a spawn's activation has not published the member's trusted peer,
@@ -1232,6 +1234,122 @@ async fn a_journal_with_a_row_of_another_members_key_starts_and_the_row_is_clean
     );
 
     // And the next start is clean.
+    mob.reconstruct(None)
+        .await
+        .expect("the mob starts again after the cleanup");
+    mob.handle.status().await.expect("the mob answers");
+    assert_eq!(
+        mob.listed().await,
+        vec![(alice.to_string(), MobMemberStatus::Active, None)],
+        "only the holder is left, with no error"
+    );
+    assert_eq!(mob.recorded_endpoint(&alice), Some(alice_endpoint));
+}
+
+/// The same journal, of a mob that was stopped before its host went away, as
+/// every mob is that an upgrade finds: the start records the row's member
+/// broken while its seeded MobMachine is no longer Running, and must not fail
+/// on it. The mob starts stopped, twice in a row, with the row's member
+/// listed broken and the holder untouched; it lifts; the broken member
+/// retires through the ordinary verb, and the next start is clean.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stopped_mobs_journal_with_a_row_of_another_members_key_starts_and_lifts() {
+    let mut mob = KeyMob::new("shared-key-stopped-journal").await;
+    let (alice, carol) = (id("alice"), id("carol"));
+    mob.spawn_on_shared_key(&alice)
+        .await
+        .expect("the key's first member spawns");
+    let alice_endpoint = mob
+        .recorded_endpoint(&alice)
+        .expect("the first member's endpoint is recorded");
+    let carol_session = SessionId::new();
+    mob.service
+        .replace_live_session(Session::with_id(carol_session.clone()))
+        .await;
+    mob.append_unterminated_row_with_the_key_of(&carol, &carol_session, &alice)
+        .await;
+    tokio::time::timeout(STEP, mob.handle.stop())
+        .await
+        .expect("the stop answers")
+        .expect("the mob stops");
+
+    for start in ["the first start", "the second start"] {
+        mob.reconstruct(None)
+            .await
+            .unwrap_or_else(|error| panic!("{start} of the stopped mob: {error}"));
+        assert_eq!(
+            mob.handle.status().await.expect("the mob answers"),
+            MobState::Stopped,
+            "{start}: the mob starts as it was left, stopped"
+        );
+        let listed = mob.listed().await;
+        assert_eq!(
+            listed
+                .iter()
+                .map(|(member, _, _)| member.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alice", "carol"],
+            "{start}: both members are listed: {listed:?}"
+        );
+        assert!(
+            listed[0].1 != MobMemberStatus::Broken && listed[0].2.is_none(),
+            "{start}: the holder is not broken: {listed:?}"
+        );
+        assert_eq!(
+            listed[1].1,
+            MobMemberStatus::Broken,
+            "{start}: the row's member is broken: {listed:?}"
+        );
+        let reason = listed[1].2.clone().expect("the broken member has a reason");
+        assert!(
+            reason.contains("retire"),
+            "{start}: the reason says the way out: {reason}"
+        );
+        assert_caller_text(&reason, &carol, &alice, &alice_endpoint);
+        assert_eq!(
+            mob.recorded_endpoint(&alice),
+            Some(alice_endpoint.clone()),
+            "{start}: the holder keeps its endpoint"
+        );
+        assert_eq!(
+            mob.recorded_endpoint(&carol),
+            None,
+            "{start}: the row's member holds no endpoint"
+        );
+    }
+
+    // The mob lifts with the broken member in it.
+    tokio::time::timeout(STEP, mob.handle.resume())
+        .await
+        .expect("the lift answers")
+        .expect("the stopped mob lifts");
+    let listed = mob.listed().await;
+    assert_eq!(
+        listed
+            .iter()
+            .map(|(member, status, _)| (member.as_str(), *status))
+            .collect::<Vec<_>>(),
+        vec![
+            ("alice", MobMemberStatus::Active),
+            ("carol", MobMemberStatus::Broken)
+        ],
+        "after the lift the holder is active and the row's member broken: {listed:?}"
+    );
+    assert_eq!(
+        mob.recorded_endpoint(&alice),
+        Some(alice_endpoint.clone()),
+        "the lift leaves the holder its endpoint"
+    );
+
+    // The way out is the ordinary verb, and the next start is clean.
+    tokio::time::timeout(STEP, mob.handle.retire(carol.clone()))
+        .await
+        .expect("the retire answers")
+        .expect("the broken member retires");
+    assert!(
+        !mob.machine_holds(&carol),
+        "the retired member is gone from MobMachine"
+    );
     mob.reconstruct(None)
         .await
         .expect("the mob starts again after the cleanup");

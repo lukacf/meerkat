@@ -508,6 +508,47 @@ numeric code; not every CLI error has structured JSON, and code 2 is shared
 by usage errors and `INVALID_PARAMS`. Session persistence and compaction
 disabled conditions exit 1 like other internal errors.
 
+### Reasoning effort refusal
+
+`rkat run --reasoning-effort <LEVEL>` (with or without `--resume`) exits 2
+when the level is refused for the selected model on the route that serves it
+(see [Reasoning effort](/concepts/providers#reasoning-effort)): no provider
+request was sent, and a resumed session's stored identity is unchanged. The
+exit status is 2 whichever checkpoint refused, the session's build or a
+request inside the turn. With `--output json` the last document on stdout is
+the failure document, whose `details` is the typed refusal:
+
+```json
+{
+  "error": {
+    "code": "INVALID_PARAMS",
+    "category": "validation",
+    "message": "reasoning effort 'max' is not supported by anthropic model 'claude-opus-4-5' on anthropic_api/messages; supported: low, medium, high",
+    "details": {
+      "kind": "reasoning_effort_refused",
+      "retryable": false,
+      "reasoning_effort_refusal": {
+        "requested": "max",
+        "provider": "anthropic",
+        "model": "claude-opus-4-5",
+        "route": { "backend": "anthropic_api", "api": "messages" },
+        "reason": "unsupported_level",
+        "supported": ["low", "medium", "high"],
+        "facts": "catalog"
+      }
+    }
+  }
+}
+```
+
+Read `details.kind` and `reasoning_effort_refusal.reason`, never the message.
+`details.retryable` tells the one transient refusal from the permanent ones:
+it is `true` only for `supported_levels_unavailable` (the account's model
+list is not loaded yet), where the same command can succeed later with no
+change; the exit status is 2 for it too. A word that is not a level
+(`--reasoning-effort x_high`) is an argument error: exit status 2 with the
+argument parser's text on stderr and nothing on stdout.
+
 ## See also
 
 - [Realms](/concepts/realms)

@@ -364,6 +364,174 @@ format:
 The transcript itself is not rewritten merely because a different provider
 wire has stricter placement rules.
 
+## Reasoning Effort
+
+`reasoning_effort` is one provider-neutral setting for how much reasoning a
+model spends: `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`
+(one spelling each; `x_high` is not accepted here). Meerkat checks the level
+against the selected model on the route that serves the request, writes the
+provider's own field, and reports what it sent.
+
+```bash
+rkat run --model gpt-5.5 --reasoning-effort high "Plan the migration"
+```
+
+| Surface | Where |
+|---|---|
+| CLI | `rkat run --reasoning-effort <LEVEL>`; with `--resume` also `--no-reasoning-effort` to remove the session's level |
+| JSON-RPC | `reasoning_effort` on `session/create`, `turn/start` and `mob/turn_start` |
+| REST | `reasoning_effort` on `POST /sessions` and `POST /sessions/{id}/messages` |
+| MCP | `reasoning_effort` on `meerkat_run` and `meerkat_resume` |
+| Python and TypeScript SDKs | `reasoning_effort` / `reasoningEffort` on session create, turns and mob member turns |
+| Web SDK | `SessionConfig.reasoningEffort` |
+| Mob profiles | the `reasoning_effort` key of the profile's `provider_params` |
+| Rust | `AgentBuildConfig.provider_params.reasoning_effort` |
+
+The setting lives in the session's provider params, so
+`provider_params.reasoning_effort` is the same setting wherever provider
+params are accepted (`--param reasoning_effort=high` on the CLI). A request
+that gives both must give the same level in both, or it is refused as invalid
+params.
+
+**On a session.** The level is part of the session's LLM identity: it is
+stored with the session and survives recovery, a resumed build, a hot swap of
+the model, and a model fallback switch. A create request sets it. A turn (or
+a resume input) changes it with a tri-state of its own: a level sets it for
+that turn and the turns after it, `{"action": "clear"}` removes it, and
+leaving the field out keeps it. It is independent of the other provider
+params: a turn that replaces or clears `provider_params` keeps the level
+unless it also names `reasoning_effort` (or its new params name the nested
+key).
+
+**What Meerkat writes.** The level is translated to the field of the route
+that serves the request:
+
+| Route | Field |
+|---|---|
+| OpenAI Responses | `reasoning.effort` |
+| Chat Completions (self-hosted and GitHub Copilot routes) | `reasoning_effort` and `reasoning.effort` |
+| Anthropic Messages | `output_config.effort` (on the GitHub Copilot Messages route together with `thinking: {"type": "adaptive"}`) |
+| Gemini | `generationConfig.thinkingConfig.thinkingLevel` |
+
+**Where the supported levels come from.** A route states its levels from
+exactly one source:
+
+- the model catalog, on routes that forward to the provider's own API and
+  validation (the OpenAI, Anthropic and Gemini APIs and the cloud routes that
+  serve them); the levels a model's catalog row lists;
+- the account's model list, on GitHub Copilot: the levels the account's list
+  states for the model. Meerkat reads the list it already fetched for the
+  account and ships no table of its own, so the same model can accept
+  different levels on different accounts, and the catalog row of a model is
+  never used for a Copilot route;
+- the operator's configuration, for a self-hosted model: its
+  `reasoning_effort_levels` (see
+  [Self-hosting models](/guides/self-hosting-models)).
+
+**Refusal.** Meerkat never lowers a level, changes the model, moves to another
+route or applies a provider-specific parameter in the level's place. A request
+it cannot honour is refused before any provider request with
+`INVALID_PARAMS` and typed data:
+
+```json
+{
+  "kind": "reasoning_effort_refused",
+  "retryable": false,
+  "reasoning_effort_refusal": {
+    "requested": "max",
+    "provider": "anthropic",
+    "model": "claude-opus-4-5",
+    "route": { "backend": "anthropic_api", "api": "messages" },
+    "reason": "unsupported_level",
+    "supported": ["low", "medium", "high"],
+    "facts": "catalog"
+  }
+}
+```
+
+| `reason` | Meaning |
+|---|---|
+| `unsupported_level` | The route's source states its levels and the requested one is not among them. `supported` lists them; an empty list means the route or the model takes no level. |
+| `supported_levels_unknown` | No source states the levels: a model id with no catalog row, a Copilot model whose list entry states none, a self-hosted model with none declared. `supported` and `facts` are `null`. |
+| `supported_levels_unavailable` | The source exists and cannot be read now: the Copilot account's model list is not loaded yet. The one transient reason: `retryable` is `true`, and the same request can succeed later with no configuration change. |
+| `conflicting_provider_effort` | The request also sets a provider-specific effort with another level (`conflicting_param`, `conflicting_level`). An equal one is accepted. |
+| `conflicting_thinking_budget` | The request also sets a thinking budget: a budget and a level are two controls. |
+| `conflicting_thinking_type` | The request also sets a thinking type the model does not accept with the level on that route. |
+| `conflicting_reasoning_body` | The request also carries a raw provider reasoning body, which may carry an effort of its own. |
+| `conflicting_reasoning_mode` | The request also turns reasoning off. |
+
+`route` names the endpoint as `backend` (for example `openai_api`,
+`anthropic_api`, `bedrock`, `vertex`, `google_genai`, `copilot`,
+`self_hosted`) and `api` (`responses`, `chat_completions`, `messages`,
+`generate_content`, `realtime`); it is `null` when the client that serves the
+request reports no route. `facts` is the source of `supported`: `catalog`,
+`account` or `operator`. The reason vocabulary is closed. The route names and
+`facts` may grow, so a client keeps a value it does not know. Read the fields,
+never the message text.
+
+The refusal has the same shape wherever it is raised: when the session is
+created or resumed, on a turn that changes the level or the model, and before
+a provider request inside a turn (a Copilot account's list can change between
+turns). A run refused inside a turn fails with `run_failed` reason
+`reasoning_effort_refused`. It is never retried and never triggers a model
+fallback. A provider-specific parameter the caller writes itself
+(`provider_params.provider_tag`) stays available on every route, including
+routes whose levels no source states.
+
+**Reports.** A request that carries the level is reported; requests without
+it report nothing new.
+
+- `run_started` and `run_resumed` carry `reasoning_effort`: the resolution
+  against the session's route at the start of the run.
+- `request_reasoning_effort_resolved` is emitted once per provider request
+  that carries the level (turn requests, structured-output extraction,
+  compaction summaries, fallback attempts).
+- The run result carries `reasoning_effort`: the level requested and each
+  distinct resolution the run sent, in first-use order, with a request count.
+
+```json
+"reasoning_effort": {
+  "requested": "high",
+  "sent": [
+    {
+      "level": "high",
+      "provider": "openai",
+      "model": "gpt-5.5",
+      "route": { "backend": "openai_api", "api": "responses" },
+      "fields": ["reasoning.effort"],
+      "facts": "catalog",
+      "decided_by": "request",
+      "requests": 3
+    }
+  ]
+}
+```
+
+**Model fallback.** A fallback target receives the session's level. A target
+whose route does not accept it is skipped with the reason
+`reasoning_effort_unsupported` in `model_fallback_skipped`.
+
+**Finding the levels beforehand.** `models/catalog` lists
+`reasoning_effort_levels` in a model's profile: the levels of the model's
+direct provider route. Levels that depend on an account or an operator
+setting (a GitHub Copilot account's list, a self-hosted model) are not in the
+catalog; a caller learns them from the refusal's `supported` and `facts`, and
+sees the level that was applied in the run-start, per-request and result
+reports.
+
+**Mob profiles.** A profile sets the level of its members in its provider
+params:
+
+```toml
+[profiles.analyst]
+model = "claude-opus-4-8"
+provider_params = { reasoning_effort = "high" }
+```
+
+A resumed member keeps the level its session recorded. Add
+`"reasoning_effort"` to the profile's `resume_overrides` to make the profile
+decide it on resume: the level its `provider_params` name, or none.
+
 ## Provider Parameters
 
 Use `--param` for common top-level parameters such as `temperature`. Use the

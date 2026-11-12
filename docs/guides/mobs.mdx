@@ -426,9 +426,20 @@ image_generation_provider = "gemini"
 auto_compact_threshold = 60000
 # Profile fields that win over durable session metadata when a member
 # resumes. Without this, editing `model` in the definition does NOT apply to
-# resumed durable sessions. Vocabulary: model | provider | provider_params.
+# resumed durable sessions. Vocabulary: model | provider | provider_params |
+# reasoning_effort.
 resume_overrides = ["model", "provider"]
 ```
+
+A profile sets its members' provider-neutral
+[reasoning effort](/concepts/providers#reasoning-effort) level in its
+provider params: `provider_params = { reasoning_effort = "high" }`. The
+member's build checks the level against the profile's model and route like
+any session's, and refuses it with the same typed `reasoning_effort_refused`
+data. A resumed member keeps the level its session recorded, also when
+`provider_params` is in `resume_overrides`; add `reasoning_effort` to
+`resume_overrides` to make the profile decide the level on resume: the level
+its `provider_params` name, or none.
 
 A profile's `auth_binding` is an explicit build input: its members build on
 that binding, a resumed member included, and a spawn that names its own

@@ -164,6 +164,8 @@ Advanced options (`rkat run --help` only):
 --yolo                          # alias for --tools full
 --param <KEY=VALUE>             # repeatable
 --params-json <JSON>
+--reasoning-effort <none|minimal|low|medium|high|xhigh|max>  # provider-neutral level; refused (exit 2) if the model or route does not accept it
+--no-reasoning-effort           # with --resume only: remove the session's level
 --schema <SCHEMA>               # inline JSON when it starts with {, else a file path
 --export-atif                   # opt-in: write an ATIF trajectory after the turn (run and --resume)
 --allow-tool <TOOL>             # repeatable first-turn allow overlay

@@ -91,6 +91,30 @@ them.
   Code that builds it with a struct literal sets the new field; `None` keeps
   the earlier behaviour.
 
+- The request types of the public surfaces gain the field `reasoning_effort`
+  (see Added): `meerkat-rpc` `handlers::session::CreateSessionParams`
+  (`Option<EffortLevel>`) and `handlers::turn::StartTurnParams`
+  (`Option<TurnMetadataOverride<EffortLevel>>`); `meerkat-contracts`
+  `RestCreateSessionRequest` (`Option<EffortLevel>`),
+  `RestContinueSessionRequest` and `MobTurnStartParams`
+  (`Option<WireTurnMetadataOverride<EffortLevel>>`); `meerkat-mcp-server`
+  `MeerkatRunInput` (`Option<EffortLevel>`) and `MeerkatResumeInput`
+  (`Option<WireTurnMetadataOverride<EffortLevel>>`). Code that builds one
+  with a struct literal sets the new field; `None` keeps the earlier
+  behaviour. On the wire each is optional and left out when absent.
+
+- `meerkat-contracts`: `WireModelProfile` gains the field
+  `reasoning_effort_levels: Option<Vec<EffortLevel>>` (see Added). Code that
+  builds it with a struct literal sets the new field. On the wire it is
+  optional and left out when no source states the levels.
+
+- `meerkat-mob`: `ResumeOverrideField` gains the variant `ReasoningEffort`,
+  and `meerkat-contracts`: `WireMobResumeOverrideField` gains the variant
+  `ReasoningEffort` (wire value `reasoning_effort`; see Added). Code that
+  matches either enum exhaustively handles the new variant. The
+  LayerDecision schema that adaptive mob packs bundle does not carry the
+  value, so the schema stays the released one.
+
 ### Added
 
 - `meerkat-core`, `meerkat-llm-core`: the vocabulary of a provider-neutral
@@ -273,8 +297,9 @@ them.
   and of every stored form of it. Wherever provider params are accepted as
   an object (RPC `session/create` and `turn/start`, REST session requests,
   MCP `meerkat_run` and `meerkat_resume`, mob profiles, the CLI's `--param`
-  and `--provider-params-json`), the nested key is accepted too. No request
-  has a top-level `reasoning_effort` parameter yet.
+  and `--provider-params-json`), the nested key is accepted too. The
+  request surfaces also take it as a parameter of their own (see the
+  "Reasoning effort" entry below).
 
   A turn carries the level as a field of its own beside `provider_params`,
   with the same three states: a level sets it, `{"action":"clear"}` removes
@@ -332,6 +357,78 @@ them.
   unchanged. The LayerDecision schema that adaptive mob packs bundle does
   not carry the level, so the schema stays the released one.
 
+- **Reasoning effort, one setting for every provider.** A provider-neutral
+  `reasoning_effort` level (`none`, `minimal`, `low`, `medium`, `high`,
+  `xhigh`, `max`) can be set on every request surface:
+  - CLI: `rkat run --reasoning-effort <LEVEL>`, with or without `--resume`;
+    `rkat run --resume <SESSION> --no-reasoning-effort` removes a session's
+    level. The flag takes the seven level words only; any other word,
+    `x_high` included, is an argument error. `--param
+    reasoning_effort=<LEVEL>` is the same setting.
+  - JSON-RPC: `reasoning_effort` on `session/create` (a level) and on
+    `turn/start` and `mob/turn_start` (a level, `{"action":"clear"}`, or
+    absent to keep the session's level).
+  - REST: `reasoning_effort` on `POST /sessions` (a level) and on
+    `POST /sessions/{id}/messages` (the same tri-state).
+  - MCP: `reasoning_effort` on `meerkat_run` (a level) and `meerkat_resume`
+    (the tri-state).
+  - Python and TypeScript SDKs: `reasoning_effort` / `reasoningEffort` on
+    session create, turns and mob member turns. Web SDK:
+    `SessionConfig.reasoningEffort`.
+  - Mob profiles: the profile's `provider_params.reasoning_effort`; the new
+    `resume_overrides` value `reasoning_effort` makes a profile decide a
+    resumed member's level (the level its `provider_params` name, or none).
+
+  Meerkat checks the level against the selected model on the route that
+  serves the request and writes the provider's own field (`reasoning.effort`
+  on OpenAI Responses, `reasoning_effort` and `reasoning.effort` on Chat
+  Completions, `output_config.effort` on Anthropic,
+  `thinkingConfig.thinkingLevel` on Gemini). A level the model or route does
+  not accept, a route whose accepted levels no source states, and a level
+  that conflicts with a provider-specific effort, a thinking budget or
+  `reasoning: off` are refused before any provider request with
+  `INVALID_PARAMS` and the typed data `reasoning_effort_refused`, which names
+  the requested level, provider, model, route and supported levels. A refusal
+  never lowers the level, changes the model or moves to another route, and
+  Meerkat never applies a provider-specific parameter in its place;
+  `provider_params` still sets a provider-specific effort on every route.
+  The level is the same setting as `provider_params.reasoning_effort`: a
+  request that gives both must give the same level. On a session it is
+  sticky and independent of the other provider params, and a resume that
+  names no level keeps the recorded one.
+
+  `rkat run --reasoning-effort` exits with status 2 when the level is
+  refused, at the session's build or before a request inside the turn, and
+  with `--output json` ends stdout with one failure document, `{"error":
+  {"code", "category", "message", "details"}}`, whose `details` is the typed
+  refusal with `retryable` (`true` only for `supported_levels_unavailable`,
+  the one transient refusal). A successful run's JSON result carries the
+  `reasoning_effort` block: the level requested and what was sent, per
+  model and route.
+
+  `models/catalog` lists `reasoning_effort_levels` in a model's profile: the
+  levels of the model's direct provider route. Levels that depend on an
+  account or an operator setting (a GitHub Copilot account's model list, a
+  self-hosted model's declared levels) are named by the refusal's
+  `supported` and `facts`.
+
+  The Python and TypeScript SDKs send the field only to a server whose
+  contract is 0.9.15 or later and raise `CapabilityUnavailableError`
+  otherwise: an older server ignores it on `session/create` and refuses it
+  on a turn. `reasoning_effort_refusal(error)` / `reasoningEffortRefusal(error)`
+  (Python, TypeScript and Web) return the typed refusal with its eight
+  closed reasons and a `transient` flag; a reason an SDK does not know is
+  not parsed and the raw data stays on the error. The route's names, `facts`,
+  `decided_by` and `fields` are advisory and kept as strings. Report
+  parsers read the run result's block and the run-start and per-request
+  resolutions.
+
+- `meerkat-core`: `resolve_build_provider_params`, the one rule by which a
+  build folds a request's own `reasoning_effort` parameter into its provider
+  params (a level is written into them and must equal a nested
+  `reasoning_effort` key; a clear leaves them without a level and is refused
+  beside a nested one). Every surface that takes the parameter calls it.
+
 ### Fixed
 
 - `meerkat-copilot` (GitHub Copilot device sign-in): an account no longer
@@ -352,8 +449,10 @@ them.
 
 ### Upgrade notes
 
-- Before rolling back to 0.9.13 or earlier, clear the reasoning effort level
-  from every session that set it, and let accepted turns that carry it
+- Before rolling back to 0.9.14 or earlier, clear the reasoning effort level
+  from every session that set it (`rkat run --resume <SESSION>
+  --no-reasoning-effort`, or a turn with `reasoning_effort`
+  `{"action":"clear"}`), and let accepted turns that carry it
   finish. Two kinds of stored record carry `reasoning_effort`, and a release
   without the field refuses both, because those records refuse unknown
   fields. The first is a session whose stored provider params hold the

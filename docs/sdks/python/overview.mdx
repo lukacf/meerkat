@@ -120,6 +120,11 @@ asyncio.run(main())
 - `additional_instructions`
 - `keep_alive`, `model`, `provider`, `self_hosted_server_id`, `system_prompt`
 - `provider_params`
+- `reasoning_effort`: a level (`"high"`) sets the session's provider-neutral
+  [reasoning effort](/concepts/providers#reasoning-effort) from this turn on,
+  `{"action": "clear"}` removes it, and omitting it keeps it (server contract
+  0.9.15 or later; see the
+  [reference](/sdks/python/reference#reasoning-effort))
 - `auth_binding`: a binding ref (or `{"action": "set", "value": ref}`) switches
   the session's credential binding from this turn on, `{"action": "clear"}`
   drops it, and omitting it keeps the current one

@@ -852,6 +852,19 @@ During execution, `session/event` notifications are emitted (see
   Provider-specific parameters (e.g., thinking config, reasoning effort).
 </ParamField>
 
+<ParamField body="reasoning_effort" type="string | null" default="null">
+  The session's provider-neutral reasoning effort level: `none`, `minimal`,
+  `low`, `medium`, `high`, `xhigh` or `max` (see
+  [Reasoning effort](/concepts/providers#reasoning-effort)). It is the same
+  setting as `provider_params.reasoning_effort`; a request that gives both
+  must give the same level, or it is refused as invalid params. A level the
+  model or its route does not accept fails the session's build with invalid
+  params whose `data` is
+  `{"kind": "reasoning_effort_refused", "retryable": false, "reasoning_effort_refusal": {...}}`,
+  before any provider request. Since 0.9.15; an older server ignores the
+  field.
+</ParamField>
+
 <ParamField body="grant_gated_tools" type="object | null" default="null">
   Scoped tool grant gate, `{"families": [...], "tools": [...], "mcp_servers": [...], "unconfigured_mcp_servers": true}`:
   built-in tool families, tool names and MCP servers whose tools the session
@@ -1656,6 +1669,21 @@ Only a mechanical failure is `-32603`.
   `thinking_budget_tokens`, and typed `provider_tag` extensions, not an
   arbitrary bag of provider-native keys. Applies alongside model/provider
   overrides.
+</ParamField>
+
+<ParamField body="reasoning_effort" type="TurnMetadataOverride | null" default="preserve">
+  The session's provider-neutral reasoning effort level from this turn on
+  (see [Reasoning effort](/concepts/providers#reasoning-effort)). A level
+  (`"high"`, or `{"action":"set","value":"high"}`) sets it,
+  `{"action":"clear"}` removes it, and omission/`null` keeps it. It is its
+  own setting: a turn that replaces or clears `provider_params` keeps the
+  level unless it also names this field, or its new params name the nested
+  `reasoning_effort` key. A turn that names both must ask for one outcome:
+  two different levels, or a clear beside a nested level, are refused as
+  invalid params. A level the model or its route does not accept is refused
+  with the `reasoning_effort_refused` data of `session/create`, and the
+  session keeps its identity. `mob/turn_start` takes the same field. Since
+  0.9.15; an older server refuses the field.
 </ParamField>
 
 <ParamField body="auth_binding" type="TurnMetadataOverride | null" default="preserve">

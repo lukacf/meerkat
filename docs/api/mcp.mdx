@@ -1128,6 +1128,22 @@ extraction calls.
   Max retries for structured output validation. Omit / `null` to use the product default on run or inherit the persisted session value on resume.
 </ParamField>
 
+<ParamField body="reasoning_effort" type="string | object | null" default="null">
+  The session's provider-neutral reasoning effort level (see
+  [Reasoning effort](/concepts/providers#reasoning-effort)). On
+  `meerkat_run`: `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or
+  `max`. On `meerkat_resume`: a level sets it from this turn on,
+  `{"action":"clear"}` removes it, and omission keeps the level the session
+  recorded. It is the same setting as `provider_params.reasoning_effort`; an
+  input that gives both must ask for one outcome (refused as invalid params
+  otherwise). A level the model or its route does not accept is refused
+  before any provider request: the tool call fails with the refusal's
+  message (`reasoning effort '<level>' is not supported by ...`), which names
+  the model, the route and the supported levels. The MCP surface carries
+  this refusal as the tool error's text; JSON-RPC, REST and the CLI carry it
+  as typed data.
+</ParamField>
+
 <ParamField body="stream" type="bool" default="false">
   Stream agent events via `notifications/message`; see
   [event streaming](#event-streaming) for the envelope and pull-stream tools.

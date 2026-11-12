@@ -64,7 +64,7 @@ them.
     (a failure or a cancellation included) reaches the peer and the notices
     that stay keep their order. There is no bound across peers or members:
     the lane holds at most eight notices for every wired pair of members.
-  - A notice that is not delivered is logged at WARN with the member
+  - A notice the lane does not deliver is logged at WARN with the member
     (`from`), the peer (`to`), the notice's kind (`intent`) and a `class`
     (`preparation_failed`, `send_failed`, `pending_bound` or `cancelled`),
     and is not sent again. The messages are `a kickoff notice to a peer that
@@ -72,7 +72,12 @@ them.
     was not delivered` (before: `failed to emit kickoff lifecycle notice`,
     without the peer) and `a kickoff notice could not be prepared for a peer
     and was not delivered`. A notice whose preparation or send fails for one
-    peer no longer skips the member's remaining peers.
+    peer no longer skips the member's remaining peers. "Not delivered" means
+    not confirmed: a notice whose send budget ended, or that was cancelled,
+    after its recipient had admitted it can still arrive, once. Three cases
+    have no such record: a sending member with no comms runtime (nothing is
+    prepared), a placed sending member (logged without the peer and the
+    class), and notices still pending when the mob's actor exits.
   - Cancel: a stop, a complete, a reset, a destroy or a shutdown of the mob,
     an unwire of the edge, a retirement of either member and the rollback of
     a failed spawn cancel the notices that are pending when they start, as
@@ -100,10 +105,19 @@ them.
   member woken at the same time recorded its edge to it as owing a repair.
   The mob now reads the recorded endpoint, without looking the comms runtime
   up, for a member that is not materialized and for one whose wake has not
-  yet applied its plan, wherever it resolves an endpoint, the rollback of a
-  refused spawn included. Such a member takes the edge on its own side when
-  its wake restores its wiring. A member whose wake has applied its plan is
-  wired through its comms runtime, as before.
+  yet applied its plan and whose endpoint is recorded: when it wires,
+  messages or notifies the member, and when a retirement or the rollback of
+  a refused spawn removes an edge to it. Such a member takes the edge on its
+  own side when its wake restores its wiring. A member whose wake has applied
+  its plan, and one being woken with no recorded endpoint yet, are wired
+  through their comms runtime, as before. A rollback that read a peer's
+  recorded endpoint and finds, when it removes its edges, that the peer's
+  wake has applied its plan meanwhile ends that attempt, so that the peer is
+  not left trusting a member that is gone: the spawn then still answers
+  `rollback remains owned for retry`, and the rollback's next attempt,
+  seconds later, removes the edge on both sides. (A peer that was not
+  materialized when a rollback began and was woken during it could be left
+  with such a trust entry in the same releases.)
 
 ## [0.9.14] - 2026-11-11
 

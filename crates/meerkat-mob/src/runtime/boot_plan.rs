@@ -333,9 +333,12 @@ pub(crate) fn domain_member_is_unmaterialized(
 }
 
 /// Where endpoint resolution reads a seated local member's peer endpoint
-/// from, as MobMachine's residency facts decide it. Every place that
-/// resolves an endpoint takes this one answer, so no caller decides it from
-/// what the session service or the provisioner happen to hold.
+/// from, as MobMachine's residency facts decide it. `resolve_wiring_endpoint`,
+/// the retirement endpoint stage and the retirement unwire resolver (for the
+/// surviving end of an edge) take this one answer for the ORDER: whether the
+/// recorded endpoint is read without a comms runtime lookup. For
+/// `RuntimeThenRecorded` and `Runtime` the caller still asks the provisioner
+/// for the member's comms runtime, as it did before this read existed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MemberEndpointSource {
     /// MobMachine's recorded endpoint, with no comms runtime lookup: a

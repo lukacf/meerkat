@@ -18880,6 +18880,23 @@ mod tests {
         ));
     }
 
+    /// The endpoint of `identity` that carries the key `key` under the
+    /// member's own name and address.
+    fn member_endpoint_with_key(
+        definition: &MobDefinition,
+        identity: &AgentIdentity,
+        key: [u8; 32],
+    ) -> meerkat_core::comms::TrustedPeerDescriptor {
+        let comms_name = format!("{}/worker/{identity}", definition.id);
+        meerkat_core::comms::TrustedPeerDescriptor {
+            peer_id: meerkat_comms::PubKey::new(key).to_peer_id(),
+            name: meerkat_core::comms::PeerName::new(comms_name.clone()).expect("a peer name"),
+            address: meerkat_core::comms::PeerAddress::parse(format!("inproc://{comms_name}"))
+                .expect("an address"),
+            pubkey: key,
+        }
+    }
+
     /// A `MemberSpawned` row of `identity` (generation 0) whose endpoint
     /// carries the key `key` under the member's own name and address.
     fn member_spawned_row_with_key(
@@ -18888,14 +18905,7 @@ mod tests {
         identity: &AgentIdentity,
         key: [u8; 32],
     ) -> MobEvent {
-        let comms_name = format!("{}/worker/{identity}", definition.id);
-        let endpoint = meerkat_core::comms::TrustedPeerDescriptor {
-            peer_id: meerkat_comms::PubKey::new(key).to_peer_id(),
-            name: meerkat_core::comms::PeerName::new(comms_name.clone()).expect("a peer name"),
-            address: meerkat_core::comms::PeerAddress::parse(format!("inproc://{comms_name}"))
-                .expect("an address"),
-            pubkey: key,
-        };
+        let endpoint = member_endpoint_with_key(definition, identity, key);
         MobEvent {
             cursor,
             timestamp: Utc::now(),
@@ -19010,6 +19020,240 @@ mod tests {
                     .to_string()
                     .contains("recover_member_spawned_peer_endpoint"),
                 "{label}: the endpoint signal's own refusal fails the replay: {error}"
+            );
+        }
+    }
+
+    /// The rows of a member that was spawned on the key `spawned_on` and
+    /// whose recovered session binding then moved it to the key `moved_to`:
+    /// MobMachine keeps `spawned_on` as the member's prior endpoint.
+    fn rows_of_a_member_moved_to_another_key(
+        definition: &MobDefinition,
+        cursor: u64,
+        identity: &AgentIdentity,
+        spawned_on: [u8; 32],
+        moved_to: [u8; 32],
+    ) -> [MobEvent; 2] {
+        let session = meerkat_core::types::SessionId::new();
+        let mut spawned = member_spawned_row_with_key(definition, cursor, identity, spawned_on);
+        let MobEventKind::MemberSpawned(row) = &mut spawned.kind else {
+            unreachable!("a MemberSpawned row");
+        };
+        row.bridge_member_ref = Some(crate::event::MemberRef::from_bridge_session_id(
+            session.clone(),
+        ));
+        let moved = MobEvent {
+            cursor: cursor + 1,
+            timestamp: Utc::now(),
+            mob_id: definition.id.clone(),
+            kind: MobEventKind::MemberSessionBindingRecovered(
+                crate::event::MemberSessionBindingRecoveredEvent::new(
+                    identity.clone(),
+                    AgentRuntimeId::initial(identity.clone()),
+                    session,
+                )
+                .with_member_peer_endpoint(Some(member_endpoint_with_key(
+                    definition, identity, moved_to,
+                ))),
+            ),
+        };
+        [spawned, moved]
+    }
+
+    /// What the replay does today with a refused endpoint row while another
+    /// member holds the row's key, pinned: it asks who holds the key, not
+    /// why MobMachine refused, so the row's member is recorded a restore
+    /// failure with the key-held reason, holds no endpoint, and the replay
+    /// goes on. That covers a row MobMachine refuses for a second reason
+    /// too (an endpoint generation that is not its incarnation's) and a key
+    /// its holder carries as a prior endpoint. The row without any holder
+    /// still fails the replay
+    /// (`seeded_authority_still_fails_on_an_endpoint_row_refused_for_another_reason`).
+    #[test]
+    fn seeded_authority_replays_every_refused_endpoint_row_as_a_restore_failure_while_another_member_holds_its_key()
+     {
+        let definition = MobDefinition::explicit("test-key-holder-mob");
+        let (holder, second) = (AgentIdentity::from("alice"), AgentIdentity::from("carol"));
+        let (key, later_key) = ([7u8; 32], [8u8; 32]);
+        let mismatched = {
+            let mut row = member_spawned_row_with_key(&definition, 2, &second, key);
+            let MobEventKind::MemberSpawned(spawned) = &mut row.kind else {
+                unreachable!("a MemberSpawned row");
+            };
+            spawned.generation = Generation::new(1);
+            row
+        };
+        let [holder_spawned, holder_moved] =
+            rows_of_a_member_moved_to_another_key(&definition, 1, &holder, key, later_key);
+        for (label, events, holder_key) in [
+            (
+                "a second refusal reason and a holder of the same key",
+                vec![
+                    member_spawned_row_with_key(&definition, 1, &holder, key),
+                    mismatched,
+                ],
+                key,
+            ),
+            (
+                "a holder through a prior endpoint",
+                vec![
+                    holder_spawned,
+                    holder_moved,
+                    member_spawned_row_with_key(&definition, 3, &second, key),
+                ],
+                later_key,
+            ),
+        ] {
+            let mut authority = seed_mob_authority();
+            seed_mob_authority_sync_from_events(
+                &mut authority,
+                &events,
+                &definition,
+                false,
+                &BTreeSet::new(),
+            )
+            .unwrap_or_else(|error| panic!("{label}: the replay goes on: {error}"));
+
+            let state = authority.state();
+            let (dsl_holder, dsl_second) = (
+                mob_dsl::AgentIdentity::from_domain(&holder),
+                mob_dsl::AgentIdentity::from_domain(&second),
+            );
+            assert_eq!(
+                state.member_peer_endpoints.get(&dsl_holder),
+                Some(&mob_dsl::MemberPeerEndpoint::from(
+                    &member_endpoint_with_key(&definition, &holder, holder_key)
+                )),
+                "{label}: the holder keeps its endpoint"
+            );
+            assert!(
+                !state.member_restore_failures.contains_key(&dsl_holder),
+                "{label}: the holder is not broken"
+            );
+            assert!(
+                state.identity_to_runtime.contains_key(&dsl_second)
+                    && !state.member_peer_endpoints.contains_key(&dsl_second)
+                    && !state.member_peer_ids.contains_key(&dsl_second),
+                "{label}: the row's member stays a member and holds no endpoint"
+            );
+            assert_eq!(
+                state.member_restore_failures.get(&dsl_second),
+                Some(&member_endpoint_key_held_reason(&second)),
+                "{label}: the row's member is recorded the key-held restore failure"
+            );
+        }
+    }
+
+    /// `member_endpoint_key_holder` is the shell's reading of the one rule
+    /// MobMachine refuses an endpoint by (`peer_id_available_for_identity`),
+    /// which the shell cannot call. For a member that holds no endpoint the
+    /// two must agree: MobMachine refuses the endpoint, at a replay and at a
+    /// spawn, exactly when the lookup names another member, whether that
+    /// member holds the key now or as a prior endpoint. A member's own
+    /// current endpoint is admitted and has no other holder. This row fails
+    /// when MobMachine's rule and the lookup drift apart.
+    #[test]
+    fn member_endpoint_key_holder_agrees_with_mobmachines_refusal_of_an_endpoint() {
+        let definition = MobDefinition::explicit("test-key-holder-agreement-mob");
+        let (moved, settled, unkeyed) = (
+            AgentIdentity::from("alice"),
+            AgentIdentity::from("dave"),
+            AgentIdentity::from("carol"),
+        );
+        let (prior_key, current_key, settled_key, free_key) =
+            ([7u8; 32], [8u8; 32], [9u8; 32], [10u8; 32]);
+        let [moved_spawned, moved_binding] =
+            rows_of_a_member_moved_to_another_key(&definition, 1, &moved, prior_key, current_key);
+        let events = vec![
+            moved_spawned,
+            moved_binding,
+            member_spawned_row_with_key(&definition, 3, &settled, settled_key),
+            MobEvent {
+                cursor: 4,
+                timestamp: Utc::now(),
+                mob_id: definition.id.clone(),
+                kind: MobEventKind::MemberSpawned(MemberSpawnedEvent::new(
+                    unkeyed.clone(),
+                    Generation::INITIAL,
+                    FenceToken::new(4),
+                    AgentRuntimeId::initial(unkeyed.clone()),
+                    ProfileName::from("worker"),
+                )),
+            },
+        ];
+        let mut authority = seed_mob_authority();
+        seed_mob_authority_sync_from_events(
+            &mut authority,
+            &events,
+            &definition,
+            false,
+            &BTreeSet::new(),
+        )
+        .expect("the journal replays");
+        assert!(
+            authority
+                .state()
+                .member_prior_peer_endpoints
+                .contains_key(&mob_dsl::AgentIdentity::from_domain(&moved)),
+            "the moved member carries its first key as a prior endpoint"
+        );
+
+        for (label, identity, fence, key, refused) in [
+            (
+                "another member's current key",
+                &unkeyed,
+                4,
+                current_key,
+                true,
+            ),
+            ("another member's prior key", &unkeyed, 4, prior_key, true),
+            ("a third member's key", &unkeyed, 4, settled_key, true),
+            ("a key no member holds", &unkeyed, 4, free_key, false),
+            (
+                "the member's own current key",
+                &settled,
+                3,
+                settled_key,
+                false,
+            ),
+        ] {
+            let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
+            let peer_endpoint = mob_dsl::MemberPeerEndpoint::from(&member_endpoint_with_key(
+                &definition,
+                identity,
+                key,
+            ));
+            let runtime_id =
+                mob_dsl::AgentRuntimeId::from_domain(&AgentRuntimeId::initial(identity.clone()));
+            let replay_refused = authority
+                .prepare_authority()
+                .apply_signal(
+                    mob_dsl::MobMachineSignal::RecoverSpawnedMemberPeerEndpoint {
+                        agent_identity: dsl_identity.clone(),
+                        agent_runtime_id: runtime_id.clone(),
+                        fence_token: mob_dsl::FenceToken::from_domain(FenceToken::new(fence)),
+                        generation: mob_dsl::Generation::from_domain(Generation::INITIAL),
+                        peer_endpoint: peer_endpoint.clone(),
+                    },
+                )
+                .is_err();
+            let spawn_refused = mob_dsl::MobMachineMutator::apply(
+                &mut authority.prepare_authority(),
+                mob_dsl::MobMachineInput::RegisterMemberPeer {
+                    agent_identity: dsl_identity.clone(),
+                    agent_runtime_id: runtime_id,
+                    generation: mob_dsl::Generation::from_domain(Generation::INITIAL),
+                    fence_token: mob_dsl::FenceToken::from_domain(FenceToken::new(fence)),
+                    peer_endpoint: peer_endpoint.clone(),
+                },
+            )
+            .is_err();
+            let holder =
+                member_endpoint_key_holder(authority.state(), &dsl_identity, &peer_endpoint);
+            assert_eq!(
+                (replay_refused, spawn_refused, holder.is_some()),
+                (refused, refused, refused),
+                "{label}: MobMachine's refusal (at a replay, at a spawn) and the lookup's holder ({holder:?}) agree"
             );
         }
     }

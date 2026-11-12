@@ -11433,6 +11433,38 @@ impl MobHandle {
             .collect()
     }
 
+    /// For the member tools that wire or unwire member `local` and member
+    /// `peer`: the end the tool answers `caller` as a member the mob does
+    /// not hold, when the host's member tool audience
+    /// ([`Self::members_hidden_from`]) hides one of the two from it.
+    ///
+    /// It is the first of the two, in the order the mob looks them up, that
+    /// is hidden or that the roster holds no row for, so the answer names
+    /// the end a name the mob does not hold would have named in the hidden
+    /// member's place. `None` when neither end is hidden (the mob answers
+    /// the call itself) and when both names are the same (a call the mob
+    /// refuses without looking a member up). `peer` is `None` for a peer
+    /// that is no member of the mob.
+    #[doc(hidden)]
+    pub async fn wire_end_answered_absent(
+        &self,
+        caller: Option<&AgentIdentity>,
+        local: &AgentIdentity,
+        peer: Option<&AgentIdentity>,
+    ) -> Option<AgentIdentity> {
+        if peer == Some(local) {
+            return None;
+        }
+        let ends: Vec<AgentIdentity> = std::iter::once(local).chain(peer).cloned().collect();
+        let hidden = self.members_hidden_from(caller, &ends).await;
+        if hidden.is_empty() {
+            return None;
+        }
+        let roster = self.roster().await;
+        ends.into_iter()
+            .find(|end| hidden.contains(end) || roster.get(end).is_none())
+    }
+
     async fn resolve_peer_connectivity(
         &self,
         entry: &RosterEntry,

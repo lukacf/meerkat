@@ -1514,6 +1514,31 @@ impl MobOperatorToolDispatcher {
         authority.can_manage_mob(mob_id, self.handle.incarnation())
     }
 
+    /// A wire or unwire that names a member the host's audience hides from
+    /// the caller is answered as one that names a member the mob does not
+    /// hold, before the mob is asked: nothing is wired or unwired. Without
+    /// an audience the mob answers every call itself, as before.
+    async fn ensure_wire_ends_shown(
+        &self,
+        owner: Option<&SessionId>,
+        call: ToolCallView<'_>,
+        member: &AgentIdentity,
+        peer: &AgentIdentity,
+    ) -> Result<(), ToolError> {
+        if self.handle.member_tool_audience.is_none() {
+            return Ok(());
+        }
+        let validated = self.validated_caller(owner, call.name).await?;
+        match self
+            .handle
+            .wire_end_answered_absent(validated.as_ref(), member, Some(peer))
+            .await
+        {
+            Some(absent) => Err(Self::map_mob_error(call, MobError::MemberNotFound(absent))),
+            None => Ok(()),
+        }
+    }
+
     async fn ensure_spawn_member_scope(
         &self,
         tool_name: &str,
@@ -2364,11 +2389,12 @@ impl MobOperatorToolDispatcher {
                 let args: WireMembersArgs = call
                     .parse_args()
                     .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
+                let member = AgentIdentity::from(args.member_id);
+                let peer = AgentIdentity::from(args.peer_member_id);
+                self.ensure_wire_ends_shown(owner, call, &member, &peer)
+                    .await?;
                 self.handle
-                    .wire(
-                        AgentIdentity::from(args.member_id),
-                        AgentIdentity::from(args.peer_member_id),
-                    )
+                    .wire(member, peer)
                     .await
                     .map_err(|error| Self::map_mob_error(call, error))?;
                 self.record_successful_operator_action(call.name, &authority)
@@ -2379,11 +2405,12 @@ impl MobOperatorToolDispatcher {
                 let args: WireMembersArgs = call
                     .parse_args()
                     .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
+                let member = AgentIdentity::from(args.member_id);
+                let peer = AgentIdentity::from(args.peer_member_id);
+                self.ensure_wire_ends_shown(owner, call, &member, &peer)
+                    .await?;
                 self.handle
-                    .unwire(
-                        AgentIdentity::from(args.member_id),
-                        AgentIdentity::from(args.peer_member_id),
-                    )
+                    .unwire(member, peer)
                     .await
                     .map_err(|error| Self::map_mob_error(call, error))?;
                 self.record_successful_operator_action(call.name, &authority)

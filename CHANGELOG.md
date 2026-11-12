@@ -99,6 +99,18 @@ them.
   answered such a member as one the mob does not hold. Through 0.9.14 a
   list named it. Hosts with no audience see no change.
 
+- Mob: the member tools that name another member keep to the host's member
+  tool audience (`MobBuilder::with_member_tool_audience`) too. `council`
+  answers a participant the audience hides from the convener, and
+  `wire_members`, `unwire_members`, `mob_wire` and `mob_unwire` answer a
+  member it hides from the caller (as either end), exactly as a name the
+  mob does not hold, and fork, wire or unwire nothing. Through 0.9.14 a
+  member with manage scope over the mob (and, for a council, the capability
+  to create mobs) could have a member hidden from it take part in its
+  council and receive the council's result, could wire a member to a
+  hidden one, and could tell a hidden member's name from a name the mob
+  does not hold. Hosts with no audience see no change.
+
 - Mob: Core asks the host's member build preparer
   (`MobBuilder::with_member_build_preparer`) before the spawn of a
   store-owned identity's member, as it asks before a wake and a boot

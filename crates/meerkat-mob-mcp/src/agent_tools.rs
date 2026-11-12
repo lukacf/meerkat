@@ -2413,6 +2413,30 @@ impl AgentMobToolSurface {
     // ─── Profile CRUD dispatch ────────────────────────────────────────
     // ─── Wire / Unwire ────────────────────────────────────────────────
 
+    /// A wire or unwire that names a member the mob's host hides from the
+    /// caller's member tools is answered as one that names a member the mob
+    /// does not hold, before the mob is asked: nothing is wired or unwired.
+    async fn ensure_wire_ends_shown(
+        &self,
+        call: ToolCallView<'_>,
+        handle: &MobHandle,
+        local: &AgentIdentity,
+        target: &meerkat_mob::PeerTarget,
+    ) -> Result<(), ToolError> {
+        let peer = match target {
+            meerkat_mob::PeerTarget::Local(peer) => Some(peer),
+            _ => None,
+        };
+        let caller = self.caller_identity_in(handle).await;
+        match handle
+            .wire_end_answered_absent(caller.as_ref(), local, peer)
+            .await
+        {
+            Some(absent) => Err(Self::map_mob_error(call, MobError::MemberNotFound(absent))),
+            None => Ok(()),
+        }
+    }
+
     async fn dispatch_mob_wire(
         &self,
         call: ToolCallView<'_>,
@@ -2426,6 +2450,8 @@ impl AgentMobToolSurface {
 
         let local = AgentIdentity::from(args.member_id.as_str());
         let target = wire_peer_target_from_args(args.peer);
+        self.ensure_wire_ends_shown(call, &audit_handle, &local, &target)
+            .await?;
         audit_handle
             .wire(local, target)
             .await
@@ -2448,6 +2474,8 @@ impl AgentMobToolSurface {
 
         let local = AgentIdentity::from(args.member_id.as_str());
         let target = unwire_peer_target_from_args(args.peer)?;
+        self.ensure_wire_ends_shown(call, &audit_handle, &local, &target)
+            .await?;
         audit_handle
             .unwire(local, target)
             .await

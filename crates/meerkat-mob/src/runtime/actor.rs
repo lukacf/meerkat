@@ -50688,11 +50688,11 @@ impl MobActor {
 
         // Resolve endpoints. Failing here leaves the DSL + roster
         // untouched — matches the zero-side-effect expectations.
-        let (local_endpoint, peer_endpoint) = if retiring_identity.is_some() {
+        let (local_endpoint, peer_endpoint) = if let Some(retiring) = retiring_identity.as_ref() {
             (
-                self.resolve_wiring_endpoint_for_retirement(&local_entry)
+                self.resolve_wiring_endpoint_for_retirement(&local_entry, retiring)
                     .await?,
-                self.resolve_wiring_endpoint_for_retirement(&peer_entry)
+                self.resolve_wiring_endpoint_for_retirement(&peer_entry, retiring)
                     .await?,
             )
         } else {
@@ -66037,14 +66037,9 @@ impl MobActor {
             successful_wiring_targets,
             planned_wiring_targets,
         } = rollback_context;
-        // The member leaves its seat: nothing it still owes a peer on the
-        // delivery lane (a kickoff notice handed off before the spawn
-        // failed) is sent for it, and nothing still owed to it is sent
-        // either. A retirement by command cancels these in a stage of its
-        // own; the rollback's retirement skips that stage, so the cancel is
-        // here.
-        self.cancel_peer_deliveries_for_member(agent_identity, "member spawn is rolling back")
-            .await?;
+        // The member's pending deliveries are cancelled by the attempt
+        // itself (`start_spawn_rollback`), so a rollback a caller drives has
+        // the cancel too.
         let Some((custody, material, owner)) = self.claim_retained_spawn_rollback(agent_identity)
         else {
             return Err(MobError::LifecycleOperationPending {
@@ -66753,6 +66748,7 @@ impl MobActor {
     async fn resolve_wiring_endpoint_for_retirement(
         &self,
         entry: &RosterEntry,
+        retiring: &AgentIdentity,
     ) -> Result<WiringEndpoint, MobError> {
         // Retire has already removed the live MobMachine session binding before
         // trust cleanup runs. The roster's exact local session reference is
@@ -66760,7 +66756,24 @@ impl MobActor {
         // than trying to resurrect an ordinary behavior binding.
         if matches!(&entry.member_ref, MemberRef::Session { .. }) {
             let comms_name = self.comms_name_for(entry)?;
-            if let Some(comms) = self.provisioner_comms(&entry.member_ref).await {
+            // The surviving end of the edge follows MobMachine's one
+            // endpoint read, as ordinary resolution does: a member that is
+            // Dormant, or Waking and not Bound, is answered from its
+            // recorded endpoint below, and its comms runtime is not looked
+            // up (a wake builds one before it binds the member's operation
+            // record, and it is not the mob's to wire through until then).
+            // The retiring member keeps its direct read.
+            let recorded_first = entry.agent_identity != *retiring
+                && super::boot_plan::domain_member_endpoint_source(
+                    self.dsl_authority.state(),
+                    &entry.agent_identity,
+                ) == super::boot_plan::MemberEndpointSource::Recorded;
+            let comms = if recorded_first {
+                None
+            } else {
+                self.provisioner_comms(&entry.member_ref).await
+            };
+            if let Some(comms) = comms {
                 let public_key = comms.public_key().ok_or_else(|| {
                     MobError::WiringError(format!(
                         "unwire retirement requires public key for '{}'",

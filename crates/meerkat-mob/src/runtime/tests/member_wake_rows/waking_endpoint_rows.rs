@@ -448,7 +448,11 @@ async fn a_spawn_wired_to_a_peer_whose_wake_is_bound_installs_both_sides_before_
 /// then refused (its next edge cannot be journaled), is rolled back at once:
 /// the rollback's endpoint stage takes that peer by its recorded endpoint.
 /// The member is gone when the spawn answers, no edge of it is left, and a
-/// member spawned afterwards is wired to both peers.
+/// member spawned afterwards is wired to both peers. "At once" holds while
+/// the peers stay unbound through the rollback, as here: when a peer's wake
+/// binds it before the rollback removes its edges, the rollback ends by its
+/// next attempt instead (the rows on a rollback whose peers' wakes end
+/// meanwhile).
 ///
 /// Both of the member's peers are held in the same span, so whichever is
 /// wired first is the one the rollback has to undo. A peer's failed endpoint

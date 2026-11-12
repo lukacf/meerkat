@@ -2372,11 +2372,14 @@ impl CopilotAuthorizer {
             cached.source_published_at_millis = source_published_at_millis;
             cached.source_expires_at = source.expires_at;
             // The model list was fetched with the earlier sign-in's token and
-            // states what that sign-in may use. The current one has fetched
-            // none, so the account's routes resolve without a list until its
-            // own token fetches one (the next mint replaces the entry whole).
+            // states what that sign-in may use, and the API base is the one
+            // that token named. The current sign-in has fetched no list and
+            // named no base, so the account's routes resolve without a list,
+            // on the default base, until its own token brings both (the next
+            // mint replaces the entry whole).
             cached.models = None;
             cached.model_discovery_refresh_at = None;
+            cached.api_base = DEFAULT_COPILOT_API_BASE.to_string();
         }
         cached.exchange_unavailable = Some(unavailable);
         Err(CopilotTokenError::ExchangeUnavailable(error))

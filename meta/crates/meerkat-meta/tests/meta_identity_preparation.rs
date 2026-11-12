@@ -1752,8 +1752,9 @@ async fn a_reset_of_a_pending_agent_is_refused_before_the_host_composes_a_build(
 /// The operation of a create whose agent never waited reads the create as
 /// it committed, whatever became of the agent later: after the agent's
 /// removal it still reads `done` with the agent `committed` and its spec
-/// digest, and no seat. `removed` on a create's operation is the end of a
-/// create that never completed: an agent removed while it still waited.
+/// digest, and no seat. `removed` on a create's operation is read for an
+/// agent that waited at its create and has been removed since, whether or
+/// not it was settled in between.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_create_that_completed_reads_committed_after_its_agents_removal() {
     let temp = tempfile::tempdir().unwrap();

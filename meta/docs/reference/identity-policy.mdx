@@ -99,7 +99,9 @@ profile waits for its host:
 - The create commits the agent and answers `pending_preparation`. A create
   a person approved answers the same once it is carried out.
 - Until the host settles it the agent has no member: `meta/identity/get`
-  and `meta/identity/list` read it `readiness: "preparation_pending"`, a
+  and `meta/identity/list` read it `readiness: "preparation_pending"` and
+  name its create in `open_operations`, `meta/status_identity` reads it
+  `preparation_pending: true`, a
   message to it is refused retryable, its archive is refused the retryable
   `host_preparation_pending`, and nothing is built, run or woken for it. Its
   `first_message` waits too. An update changes its record and leaves it
@@ -128,6 +130,10 @@ prepares. Such an update is refused `unsupported`
 (`feature: "move_into_prepared_profile"`, at `set.profile`) and changes
 nothing: the agent ran on another profile already and would run on this one
 without ever having been prepared. Create the agent in that profile instead.
+The refusal is given when the move is asked, whatever the approval rules
+say of a profile change: a rule that has a person decide it asks nobody
+for a move that could only be refused, and a plan of the move answers the
+refusal.
 A move out of a prepared profile is an update like any other, and an agent
 that still waits keeps waiting after it.
 

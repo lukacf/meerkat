@@ -1022,7 +1022,7 @@ manifest cannot be read.
 
 | Method | Params | Result |
 |--------|--------|--------|
-| `meta/status_identity` | `{identity}` | `IdentityStatus`: `identity`, `state`, `agent_runtime_id` (`null` when not live), `session_id` and `generation` (Core's last binding; `null` when it holds none), `member_id` (Core's mob member id of that binding, live or retired: the identity's roster member id, which is the identity itself when it is already a valid comms name and its `mk--...` encoding otherwise, as for an identity with a `:`; absent when Core holds no binding), `profile`, `runtime_mode` (the runtime mode Core runs the identity's member in; `null` while Core holds no member of it), `addressability`, `display_name`, `labels`, `intent_managed` (`true` when Core drives the identity itself, so Meta's lifecycle verbs refuse it: a host adopted it, or it is store-owned), `customizer_tools_pending` (`null` once the identity's customizer tools are published) and `delivery_scope` (see [Scope-bound dispatch](#scope-bound-dispatch)); `convergence` (host-adopted identities), `wake_refusal` and `replaced_session` only when set |
+| `meta/status_identity` | `{identity}` | `IdentityStatus`: `identity`, `state`, `agent_runtime_id` (`null` when not live), `session_id` and `generation` (Core's last binding; `null` when it holds none), `member_id` (Core's mob member id of that binding, live or retired: the identity's roster member id, which is the identity itself when it is already a valid comms name and its `mk--...` encoding otherwise, as for an identity with a `:`; absent when Core holds no binding), `profile`, `runtime_mode` (the runtime mode Core runs the identity's member in; `null` while Core holds no member of it), `addressability`, `display_name`, `labels`, `intent_managed` (`true` when Core drives the identity itself, so Meta's lifecycle verbs refuse it: a host adopted it, or it is store-owned), `customizer_tools_pending` (`null` once the identity's customizer tools are published) and `delivery_scope` (see [Scope-bound dispatch](#scope-bound-dispatch)); `convergence` (host-adopted identities), `wake_refusal` and `replaced_session` only when set; `archived` (`true` for an archived agent: it has no member and a delivery to it is refused until its unarchive) and `preparation_pending` (`true` for an agent that waits for its host's preparation: it has no member yet), each written only when `true` and read from Core's entry of the agent's name, so the read builds and wakes nothing. An agent's spec digest and revision, who asked for it and the operations open for it are not on its status: [`meta/identity/get` and `meta/identity/list`](#metaidentitylist-and-metaidentityget) answer them, to each caller what it may read |
 | `meta/inspect_identity` | `{identity}` | The execution view: `identity`, `state`, `profile`, `addressability`, `display_name`, `labels`, `generation`, `agent_runtime_id`, `session_id`, `intent_managed`, `output_preview`, `preview_unavailable`, `is_final`, `peer_reachable_count`, `completion_cursor`, and the optional keys of the status |
 | `meta/retire` | `{identity}` | `{identity, cleanup_warning}`. Releases the member's live materialization: the identity stays a member of Core's mob, on the same session at the same generation, and still reads `active`; its next delivery materializes it again, and a delivery scope captured before stays valid. A member that is not materialized is left as it is. No `spawned_by` descendant of the member is retired (earlier releases retired them), and a completion wait on the identity goes on to its next completion. A member that is being woken or has work in flight is refused with `-32052`: nothing is interrupted (earlier releases interrupted its run), and the retire succeeds once it is quiescent. An identity Core holds no member for is refused as invalid state. A retire ends no incarnation: a reset or a delete ends it, with Core's rotation onto a fresh session, and so does a respawn, which wakes the member on its session at a new generation. A member that no identity of the gateway holds and no host adopted (a Console side chat, a member made on the worker plane) is retired instead, by Core's retire: it leaves the roster with its `spawned_by` descendants, work in flight is interrupted rather than refused with `-32052`, and the answer carries no `cleanup_warning`. A member a host adopted is refused (`-32053`) whether or not an identity of the gateway holds it |
 | `meta/respawn` | `{identity}` | `{identity, agent_runtime_id, session_id, generation, live_respawn_warning, cleanup_warning}`. Retires the live member and wakes it on the same session at a new generation, so a delivery scope captured before is refused as stale. Core's retirement ends the member's wiring, so Meta wires the identity's managed edges (the roster's and the topology controller's) again at once, bounded, as a reset does; a re-wire that fails is logged and the next reconcile retries it. The atoms are `null` for a peer-only member. A side chat is refused (`-32602`, `side_chat_restart_refused`; see `meta/fork_member` above) |
@@ -1427,7 +1427,10 @@ model, tools and skills on the same conversation. A move into a profile
 whose agents the host prepares is refused `unsupported`
 (`feature: "move_into_prepared_profile"`): the agent would run there
 unprepared, so create it in that profile instead (see
-[Identity policy](/reference/identity-policy#preparation)).
+[Identity policy](/reference/identity-policy#preparation)). The move is
+refused when it is asked, also where a rule has a person decide a profile
+change: nothing is held, nobody is asked, and `meta/identity/plan` of the
+move answers the same refusal.
 
 An update can touch several change classes of the policy at once; each is
 judged by its own rules and the strictest outcome applies to the whole
@@ -1485,6 +1488,19 @@ at_ms, consent}` for an agent whose record keeps it: `entered` is `created`,
 `imported`. It is recorded and shown, and no rule reads it. This is where a
 committed change's consent reads back.
 
+`open_operations` are the ids of the operations open for the agent: the
+create of an agent that waits for its host's preparation (until the host
+settles it), and each change of the agent that is held for a person's
+decision or approved and not yet carried out. Each id reads with
+[`meta/identity/operation`](#metaidentityoperation) as `operation_id`. The
+member is absent when nothing is open; it is never an empty list. An
+operation id names its requester's kind and a digest of who asked, so it is
+answered as an operation read is: the host on the stdio gateway reads every
+open operation, a Console caller its own and, with `runtime.admin`, every
+one, and an agent none. When the mob's held changes cannot be read the
+read is refused `approval_unavailable`, with a detail that says to read
+again, and is never answered as if nothing were open.
+
 Every agent of the mob is listed the same way, whoever asked for it and
 however it came to exist. A read never wakes an agent.
 
@@ -1505,10 +1521,12 @@ The entry of an agent whose create answered `pending_preparation` says what
 became of the agent since: `pending_preparation` while it waits for its
 host, `committed` (and the outcome `done`) once its preparation was settled,
 and `removed` once it was removed. The create asked again answers the same.
-`removed` on a create's operation is the end of a create that never
-completed. The operation of a create whose agent was seated reads the
-create as it committed (`committed`, with its spec digest) whatever became
-of the agent later, its removal included.
+`removed` on a create's operation says that the agent waited at its create
+and has been removed since, whether or not it was settled in between: the
+entry says where the agent stands, not whether it ever ran. The operation
+of a create whose agent was seated at its create reads the create as it
+committed (`committed`, with its spec digest) whatever became of the agent
+later, its removal included.
 
 ### `meta/identity/withdraw` and `meta/identity/changes_hold`
 

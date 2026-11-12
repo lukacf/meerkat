@@ -633,6 +633,17 @@ class RunBuiltKitTests(unittest.TestCase):
         self.run["dependencies"].write_bytes(b"alpha v1.0.0\nbeta-macro v0.2.1\n")
         self.refused("invalid_tool_dependency_listing", output="listing-no-tool-crate")
 
+    def test_a_dependency_listing_with_a_terminal_escape_sequence_is_refused(self):
+        # Cargo colours the repeat mark when its environment asks for colour. The listing is refused
+        # whole; nothing here strips or skips terminal control text.
+        good = self.run["dependencies"].read_bytes()
+        for index, line in enumerate((b"alpha v1.0.0 \x1b[33m\x1b[2m(*)\x1b[39m\x1b[22m\n",
+                                      b"\x1b[1malpha\x1b[0m v1.0.0\n", b"alpha v1.0.0\x1b[0m\n",
+                                      b"alpha v1.0.0 (\x1b[2m*\x1b[22m)\n", b"\x1b\n")):
+            with self.subTest(line=line):
+                self.run["dependencies"].write_bytes(good + line)
+                self.refused("invalid_tool_dependency_listing", output="escape-" + str(index))
+
     def test_tool_records_bind_signed_bytes_target_command_and_features(self):
         cases = [("binary", "tools/other"), ("sha256", "0" * 64), ("bytes", 1), ("mode", "0644"),
                  ("target", "x86_64-unknown-linux-gnu"), ("features", "local-recipes"),

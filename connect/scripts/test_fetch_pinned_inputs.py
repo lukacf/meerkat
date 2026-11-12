@@ -590,10 +590,28 @@ class CrateRowTests(unittest.TestCase):
         with self.assertRaises(FETCH.Refusal):
             FETCH.crate_rows(CLOSURE, twice)
 
+    def test_a_listing_line_with_a_terminal_escape_sequence_is_refused(self):
+        # Cargo colours the repeat mark when its environment asks for colour (CARGO_TERM_COLOR=always).
+        # Such a listing is refused whole: the command forces plain output, and nothing here strips or
+        # skips what it does not know.
+        for name, line in (
+                ("a coloured repeat mark, as Cargo prints it", "itoa v1.0.18 \x1b[33m\x1b[2m(*)\x1b[39m\x1b[22m\n"),
+                ("a coloured name", "\x1b[1mitoa\x1b[0m v1.0.18\n"),
+                ("a reset after the version", "itoa v1.0.18\x1b[0m\n"),
+                ("a terminal link", "\x1b]8;;https://example.invalid/itoa\x1b\\itoa v1.0.18\x1b]8;;\x1b\\\n"),
+                ("an escape character alone", "\x1b\n")):
+            with self.subTest(name=name), self.assertRaises(FETCH.Refusal) as caught:
+                FETCH.crate_rows(CLOSURE + line, LOCK)
+            self.assertIn("unsupported closure line", str(caught.exception))
+            self.assertIn("\\x1b", str(caught.exception))
+
     def test_the_closure_command_is_the_tool_closure_for_macos_arm64(self):
+        # `--color never` is part of the command: the listing is read by a parser, so it must be the same
+        # text whatever the caller's environment or terminal asks of Cargo.
         self.assertEqual(FETCH.TOOL_CLOSURE_ARGUMENTS, (
             "-p", "toolkit-package", "--features", "local-recipes,local-artifacts",
-            "--target", "aarch64-apple-darwin", "-e", "normal,build", "--prefix", "none", "--format", "{p}"))
+            "--target", "aarch64-apple-darwin", "-e", "normal,build", "--prefix", "none", "--format", "{p}",
+            "--color", "never"))
 
 
 def rows_with(rows, label):
@@ -675,21 +693,41 @@ class CommittedPinFileTests(unittest.TestCase):
         self.assertEqual(library["pins"]["sha256"], self.pins.sha256)
         self.assertNotIn("PENDING", library["reason"])
 
-    @unittest.skipUnless(os.environ.get("CONNECT_PINS_TOOL_CLOSURE") == "1",
-                         "needs Cargo and the registry: set CONNECT_PINS_TOOL_CLOSURE=1 (the macOS stage run does)")
-    def test_the_tool_closure_cargo_prints_resolves_against_the_current_lock(self):
+    def tool_closure(self, **environment):
+        """What the closure command prints here, with these variables added to this process's environment."""
         result = subprocess.run(
             [str(ROOT / "scripts/repo-cargo"), "tree", "--locked", "--manifest-path",
              str(REPOSITORY / "Cargo.toml"), *FETCH.TOOL_CLOSURE_ARGUMENTS],
-            cwd=REPOSITORY, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+            cwd=REPOSITORY, capture_output=True, text=True, stdin=subprocess.DEVNULL,
+            env={**os.environ, **environment})
         self.assertEqual(result.returncode, 0, result.stderr[-2000:])
+        return result.stdout
+
+    @unittest.skipUnless(os.environ.get("CONNECT_PINS_TOOL_CLOSURE") == "1",
+                         "needs Cargo and the registry: set CONNECT_PINS_TOOL_CLOSURE=1 (the macOS stage run does)")
+    def test_the_tool_closure_cargo_prints_resolves_against_the_current_lock(self):
         lock = (REPOSITORY / "Cargo.lock").read_text(encoding="utf-8")
-        crates = FETCH.crate_rows(result.stdout, lock)
+        crates = FETCH.crate_rows(self.tool_closure(), lock)
         self.assertGreater(len(crates), 50)
         document = FETCH.resolve(self.pins, crates)
         self.assertEqual(FETCH.validate_document(document, resolved=True),
                          crates + self.rows)
         self.assertEqual(rows_with(document["pins"], "tool build provenance"), crates)
+
+    @unittest.skipUnless(os.environ.get("CONNECT_PINS_TOOL_CLOSURE") == "1",
+                         "needs Cargo and the registry: set CONNECT_PINS_TOOL_CLOSURE=1 (the macOS stage run does)")
+    def test_the_tool_closure_is_the_same_plain_text_when_the_environment_asks_cargo_for_colour(self):
+        # A hosted runner's Rust setup exports CARGO_TERM_COLOR=always, and Cargo then colours the repeat
+        # mark even when its output is a file. The command line alone must decide what is printed.
+        lock = (REPOSITORY / "Cargo.lock").read_text(encoding="utf-8")
+        plain = self.tool_closure(CARGO_TERM_COLOR="never", NO_COLOR="1")
+        asked = self.tool_closure(CARGO_TERM_COLOR="always", CLICOLOR_FORCE="1", CARGO_TERM_HYPERLINKS="true",
+                                  CARGO_TERM_UNICODE="true", CARGO_TERM_VERBOSE="true")
+        crates = FETCH.crate_rows(asked, lock)
+        self.assertNotIn("\x1b", asked)
+        self.assertEqual(asked, plain)
+        self.assertEqual(crates, FETCH.crate_rows(plain, lock))
+        self.assertGreater(len(crates), 50)
 
 
 if __name__ == "__main__":

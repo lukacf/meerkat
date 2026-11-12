@@ -1299,6 +1299,24 @@ class ConnectMacosStageTests(unittest.TestCase):
                     for word in ("curl", "wget", "https://", "pip install", "npm install", "brew "):
                         self.assertNotIn(word, block, f"{job}: {name}")
 
+    def test_cargo_text_that_a_step_hands_to_a_reader_is_forced_plain(self):
+        # The jobs' Rust setup exports CARGO_TERM_COLOR=always, and Cargo then colours `cargo tree`
+        # even into a file. Every Cargo command of the three jobs whose output a step redirects, pipes
+        # or captures must say `--color never` itself; the reader refuses a line it does not know.
+        fetch = load_fetch_script()
+        self.assertEqual(fetch.TOOL_CLOSURE_ARGUMENTS[-2:], ("--color", "never"))
+        read = []
+        for job in (*STAGE_JOBS, "assemble_macos"):
+            for step in re.findall(r"(?m)^      - name: (.+)$", job_block(job)):
+                if "        run: |\n" not in step_block(step, job) + "\n":
+                    continue
+                body = re.sub(r"\\\n\s*", " ", indented_body(step, job, "run", 10))
+                for command in body.splitlines():
+                    if re.search(r"(?:^|[\s(/])(?:repo-)?cargo\s", command) and re.search(r"[|>]|\$\(", command):
+                        read.append((job, step))
+                        self.assertIn(" --color never ", command, f"{job}: {step}")
+        self.assertEqual(read, [("stage_macos_build", "Fetch the pinned public inputs")])
+
     def work_root(self, scratch: Path):
         work = scratch / "private" / "cw"
         (work / "records").mkdir(parents=True)

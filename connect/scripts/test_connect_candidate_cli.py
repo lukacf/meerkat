@@ -876,6 +876,40 @@ def test_library_step_builds_signs_and_records_six_tools_then_calls_the_owners(l
         assert "/home/" not in call[2]["HOME"].replace(str(lane.root), "")
 
 
+def test_the_tool_dependency_listing_is_the_fetch_steps_closure_command_and_forces_plain_text(lane):
+    # The listing is read line by line, and a hosted runner's Rust setup asks Cargo for colour
+    # (CARGO_TERM_COLOR=always), which colours the repeat mark even into a file. The command line itself
+    # says `--color never`; the environment says it too, for Cargo's status lines in the same log.
+    lane.through("library")
+    fetch = load("connect_fetch_pinned_inputs_for_the_producer", CONNECT / "scripts/fetch-pinned-inputs.py")
+    call = next(call for call in lane.calls if call[0] == "tool-dependencies")
+    assert call[1] == [str(CONNECT / "scripts/repo-cargo"), "tree", "--locked", "--manifest-path",
+                       str(CONNECT.parent / "Cargo.toml"), *fetch.TOOL_CLOSURE_ARGUMENTS]
+    assert call[1][-2:] == ["--color", "never"]
+    assert call[3] is True and call[2] == {"RUST_LANE_ID": "connect-macos-arm64", "CARGO_TERM_COLOR": "never"}
+
+
+@pytest.mark.parametrize("line", (
+    "syn v2.0.117 \x1b[33m\x1b[2m(*)\x1b[39m\x1b[22m",       # a coloured repeat mark, as Cargo prints it
+    "\x1b[1m\x1b[32m    Updating\x1b[0m crates.io index",  # a coloured status line
+    "serde v1.0.228\x1b[0m"))
+def test_a_tool_dependency_listing_with_a_terminal_escape_sequence_is_refused(lane, line):
+    # Such a line is not a package line, and it is not skipped as a status line either: a listing that
+    # carries terminal control text is not the plain listing the command asks for.
+    lane.through("preflight")
+    original = lane.effect
+
+    def effect(name, argv, cwd, env):
+        text = original(name, argv, cwd, env)
+        return text + line + "\n" if name == "tool-dependencies" else text
+
+    lane.effect = effect
+    with pytest.raises(ValueError, match="escape"):
+        lane.step("library")
+    assert not (lane.work / "tools/dependencies.txt").exists()
+    assert not p.step_path(lane.work, "library").exists()
+
+
 def test_resources_step_calls_the_resource_packager_with_the_pinned_pair_only(lane):
     lane.through("resources")
     work = lane.work

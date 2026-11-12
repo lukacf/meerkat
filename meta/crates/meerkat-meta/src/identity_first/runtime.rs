@@ -15308,12 +15308,30 @@ impl IdentityRuntime {
         let operation = life.operation();
         let bridge = Arc::clone(self.core_bridge(identity)?);
         // An archived identity has no life to start again: its unarchive
-        // seats it. Read only for an identity Core holds no live member of.
-        if last.as_ref().is_none_or(|binding| !binding.is_live())
-            && let Some(refusal @ IdentityRuntimeError::IdentityArchived { .. }) =
-                self.unseated_refusal(identity).await
-        {
-            return Err(refusal);
+        // seats it. Neither has one that awaits its host's preparation: it
+        // was never seated, and its host's settle seats it. Read only for an
+        // identity Core holds no live member of, and before anything is
+        // composed for the fresh life.
+        if last.as_ref().is_none_or(|binding| !binding.is_live()) {
+            match self.unseated_refusal(identity).await {
+                Some(refusal @ IdentityRuntimeError::IdentityArchived { .. }) => {
+                    return Err(refusal);
+                }
+                Some(IdentityRuntimeError::IdentityWakeRetryable { .. })
+                    if self.awaits_host_preparation(identity).await =>
+                {
+                    return Err(IdentityRuntimeError::IdentityWakeRetryable {
+                        identity: identity.clone(),
+                        session_id: None,
+                        detail: format!(
+                            "the {operation} was not started, and nothing was retired: the \
+                             identity awaits its host's preparation and has no life to start \
+                             again; ask again once its host settled it"
+                        ),
+                    });
+                }
+                _ => {}
+            }
         }
         let spec = self
             .entries

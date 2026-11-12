@@ -933,4 +933,15 @@ impl IdentityRuntime {
             detail: detail.to_string(),
         })
     }
+
+    /// Whether Core holds `identity` with no member because it awaits its
+    /// host's preparation: Core's entry of the name says so. `false` for
+    /// any other entry, and for a read Core could not serve.
+    pub(super) async fn awaits_host_preparation(&self, identity: &AgentIdentity) -> bool {
+        matches!(
+            self.core_entry_of_name(identity).await,
+            Ok(Some(entry)) if entry.member.is_none()
+                && entry.unseated == Some(meerkat_mob::UnseatedEntryCause::PreparationPending)
+        )
+    }
 }

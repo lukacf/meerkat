@@ -7289,7 +7289,7 @@ async fn commit_update_transaction_of(
 
 /// The row of an update an earlier release committed: the row at its next
 /// revision and the receipt, with no record of what the seat is owed, and
-/// the roster entry left as it was. Releases 0.9.9 through 0.9.13 left a
+/// the roster entry left as it was. Releases 0.9.9 through 0.9.14 left a
 /// seat so at every label update.
 async fn commit_update_transaction_of_an_earlier_release(
     handle: &MobHandle,

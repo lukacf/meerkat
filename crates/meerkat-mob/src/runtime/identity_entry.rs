@@ -551,7 +551,12 @@ pub struct IdentityRecordCensus {
     /// while the member's seat row carried other labels, and no seat row
     /// has carried the row's labels since. A retry of the update or the
     /// identity's next update while the member is idle, or a respawn with
-    /// the row's labels, settles it. A release before 0.9.15 reads such a
+    /// the row's labels ([`super::MobHandle::respawn_member`]), settles
+    /// it; a member no same-session successor can serve is settled by a
+    /// rotation ([`super::MobHandle::rotate_member`]), and an archive or a
+    /// removal drops the record. The row lets the record go when one of
+    /// these acts observes the seat: a seat row another act wrote keeps
+    /// it counted until then. A release before 0.9.15 reads such a
     /// row as unreadable, for its identity alone: settle them before a
     /// rollback.
     pub label_restamps_owed: usize,

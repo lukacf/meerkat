@@ -13416,13 +13416,15 @@ pub(super) async fn restore_resumed_member(
             Ok(StoreOwnedSeatRow::Row { .. } | StoreOwnedSeatRow::Absent) => {}
             Ok(StoreOwnedSeatRow::Unreadable) => {
                 row_unavailable = Some(format!(
-                    "the identity store holds a row of store-owned '{}' that this build cannot                      read, so the member's build waits until the row reads again",
+                    "the identity store holds a row of store-owned '{}' that this build cannot \
+                     read, so the member's build waits until the row reads again",
                     entry.agent_identity
                 ));
             }
             Err(error) => {
                 row_unavailable = Some(format!(
-                    "the identity store could not serve the row of store-owned '{}' now, so                      the member's build waits for the store and is tried again: {error}",
+                    "the identity store could not serve the row of store-owned '{}' now, so \
+                     the member's build waits for the store and is tried again: {error}",
                     entry.agent_identity
                 ));
             }

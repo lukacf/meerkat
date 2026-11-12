@@ -713,7 +713,8 @@ composition without the built-in identity and member store commits no change
   host is asked; a row the identity store cannot serve then, or holds in
   a form this build cannot read, ends the build for a retry as a store
   that cannot serve the member (`ResumeGateUnavailable`), never as the
-  host's refusal, with the host asked nothing and the member left Dormant
+  host's refusal, with the host's build preparer asked nothing (its spawn
+  customizer still runs) and the member left Dormant
   and not broken. A build must carry exactly the seat's labels, since what
   decides on a member's labels reads its seat. Core compares them at every
   build it composes, on the host's answer and again on the labels the

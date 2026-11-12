@@ -1766,13 +1766,16 @@ preparation (`preparations_open`), the held constructions
 last seat row predates their row's labels or profile (`seats_stale`: 0.9.8
 rebuilds such a member from its seat row; a respawn with the row's labels,
 `MemberRespawn::with_labels`, or a restamp brings the seat row up to date).
-From the release after 0.9.13 a label update restamps its idle member
+From 0.9.15 a label update restamps its idle member
 itself, so only a seat an earlier release left behind, or one whose member
 was not restamped at its update (it held work, say), counts here. From
 that release on, an update that leaves its member's restamp owed records
 it in the identity's row (`label_restamps_owed` counts those rows): the
 mob's roster reads the row's labels from the update's commit and from each
-start on, the member's builds are compared with them, and a retry of the
+start on (a host's own respawn of the member with other labels in between
+keeps those on its roster entry until the next start or the restamp, while
+its builds carry the row's), the member's builds are compared with them,
+and a retry of the
 update, the identity's next update while the member is idle, or a respawn
 with the row's labels settles it. Such a seat needs no step before its
 host adopts `MemberBuildPreparer::prepare_store_owned_seat` or a spawn

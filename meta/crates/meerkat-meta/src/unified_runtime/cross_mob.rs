@@ -496,14 +496,19 @@ async fn mutate_member_unchecked(
     peer: PeerTarget,
     wire: bool,
 ) -> Result<(), CrossMobError> {
-    let member_id = crate::member_comms_id::runtime_alias_str(member_id).into_owned();
-    let member = crate::member_comms_id::mob_member_id(&member_id);
+    let member = local_roster_member(member_id);
     let result = if wire {
         handle.wire(member, peer).await
     } else {
         handle.unwire(member, peer).await
     };
     result.map_err(CrossMobError::Mob)
+}
+
+/// The roster id of the local member a (resolved) alias names.
+fn local_roster_member(member_id: &str) -> AgentIdentity {
+    let member_id = crate::member_comms_id::runtime_alias_str(member_id).into_owned();
+    crate::member_comms_id::mob_member_id(&member_id)
 }
 
 async fn send_member_unchecked(
@@ -801,6 +806,32 @@ async fn wire_member_with_authority(
     peer: PeerTarget,
     wire: bool,
 ) -> Result<(), CrossMobError> {
+    with_member_under_authority(
+        handle,
+        identity_runtime,
+        member_id,
+        mob_id,
+        move |handle, current_member_id| async move {
+            mutate_member_unchecked(handle, &current_member_id, peer, wire).await
+        },
+    )
+    .await
+}
+
+/// Run `operation` on the member `member_id` names now, under the identity
+/// authority that owns its alias when there is one: the operation gets the
+/// handle and the member's current alias.
+async fn with_member_under_authority<F, Fut>(
+    handle: MobHandle,
+    identity_runtime: Option<&std::sync::Arc<crate::identity_first::IdentityRuntime>>,
+    member_id: &str,
+    mob_id: &str,
+    operation: F,
+) -> Result<(), CrossMobError>
+where
+    F: FnOnce(MobHandle, String) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<(), CrossMobError>> + Send + 'static,
+{
     let operation_member_id = crate::member_comms_id::runtime_alias_str(member_id).into_owned();
     let operation_mob_id = mob_id.to_string();
     let identity_runtime = identity_runtime.cloned();
@@ -824,7 +855,7 @@ async fn wire_member_with_authority(
                 &operation_mob_id,
             )
             .await?;
-            mutate_member_unchecked(handle, &current_member_id, peer, wire).await
+            operation(handle, current_member_id).await
         },
     )
     .await
@@ -2689,8 +2720,9 @@ impl UnifiedRuntime {
     /// Get comms peer info for a member of this mob.
     /// Returns `(peer_id, comms_name, address)`. The address is
     /// `inproc://{comms_name}` for a member whose runtime is in this process
-    /// (for cross-process peering, replace it with the remote gateway's
-    /// TCP/UDS endpoint), and the durable host-acknowledged address for a
+    /// (a peer in another process wires the member by its own socket
+    /// endpoint and key, which the host RPC's peer info reports), and the
+    /// durable host-acknowledged address for a
     /// placed member. A placed member without a usable endpoint is
     /// `CrossMobError::PlacedMemberUnavailable`.
     pub async fn local_member_peer_info(
@@ -2769,10 +2801,11 @@ impl UnifiedRuntime {
     ///
     /// `remote_address` is the comms transport address (e.g. `"inproc://name"`
     /// for same-process, `"tcp://host:port"` for cross-process).
-    /// `remote_pubkey` is the peer gateway's 32-byte Ed25519 verifying
-    /// key. Inproc transports may pass `None` (the in-process router
-    /// authorises by identity map). Non-inproc transports MUST supply a
-    /// non-zero pubkey — this call fails closed with
+    /// `remote_pubkey` is the remote MEMBER's 32-byte Ed25519 transport
+    /// key, the key its peer info reports and its peer id is derived from
+    /// (never a gateway's key). An inproc descriptor of a live member of
+    /// another mob in this process may pass `None`. Non-inproc transports
+    /// MUST supply a non-zero pubkey: this call fails closed with
     /// [`CrossMobError::MissingPeerPubkey`] otherwise so unsigned
     /// descriptors never reach a real transport.
     ///
@@ -2783,6 +2816,12 @@ impl UnifiedRuntime {
     /// one on each mob, are a working edge. The registered key must derive
     /// `remote_peer_id`; another peer id under that name is refused with
     /// [`CrossMobError::InprocAlias`] and nothing changes.
+    ///
+    /// Wiring the identical edge again succeeds and changes nothing. A wire
+    /// is never replaced: when the member is already wired to that peer
+    /// name with another endpoint, the call is refused with
+    /// [`CrossMobError::PeerSpec`] (unwire both sides first) and nothing
+    /// changes.
     pub async fn wire_local(
         &self,
         local_member_id: &str,
@@ -2817,31 +2856,30 @@ impl UnifiedRuntime {
             remote_address,
             remote_pubkey,
         )?;
-        let mob_id = self.mob_id();
-        // Route first, then trust: a route without trust delivers nothing,
-        // and taking it back needs no second member mutation.
-        let (spec, route) = install_local_wire_route(&mob_id, spec)?;
-        let wired = wire_member_with_authority(
+        let member_alias = local_member_id.to_string();
+        with_member_under_authority(
             self.mob_runtime.handle(),
             identity_runtime.or_else(|| self.identity_runtime_ref()),
             local_member_id,
-            &mob_id,
-            PeerTarget::External(spec),
-            true,
+            &self.mob_id(),
+            move |handle, current_member_id| async move {
+                wire_local_edge(
+                    &handle,
+                    local_roster_member(&current_member_id),
+                    &member_alias,
+                    spec,
+                    SameProcessPeers::Resolve,
+                )
+                .await
+            },
         )
-        .await;
-        if wired.is_err()
-            && let Some(route) = route
-        {
-            route.roll_back();
-        }
-        wired
+        .await
     }
 
     /// Undo a `wire_local` — unwire a local member from a previously wired peer.
     /// Only affects the local side; the remote side is left unchanged. The
-    /// route a `wire_local` installed for a same-process peer goes with the
-    /// trust, unless another member of this mob is still wired to that peer.
+    /// route this mob holds for a same-process peer goes with the trust,
+    /// unless another member of this mob is still wired to that peer.
     pub async fn unwire_local(
         &self,
         local_member_id: &str,
@@ -2876,23 +2914,16 @@ impl UnifiedRuntime {
             remote_address,
             remote_pubkey,
         )?;
-        let handle = self.mob_runtime.handle();
-        let mob_id = self.mob_id();
-        let (spec, route) = installed_local_wire_route(&mob_id, spec)?;
-        let peer_name = spec.name.as_str().to_string();
-        wire_member_with_authority(
-            handle.clone(),
+        with_member_under_authority(
+            self.mob_runtime.handle(),
             identity_runtime.or_else(|| self.identity_runtime_ref()),
             local_member_id,
-            &mob_id,
-            PeerTarget::External(spec),
-            false,
+            &self.mob_id(),
+            move |handle, current_member_id| async move {
+                unwire_local_edge(&handle, local_roster_member(&current_member_id), spec).await
+            },
         )
-        .await?;
-        if let Some(route) = route {
-            route.remove_unless_referenced(&handle, &peer_name).await;
-        }
-        Ok(())
+        .await
     }
 
     // -- internal helpers --
@@ -3204,7 +3235,8 @@ fn ensure_alias_slot(
 
 /// Install the route by which `namespace` reaches the member `name` of
 /// `canonical_namespace`: an alias of that member's own inbox. `Ok(true)`
-/// when this call installed it, `Ok(false)` when it was already there.
+/// when this call installed it, `Ok(false)` when it was already there (it is
+/// then re-pointed at the member's inbox of now).
 /// Refuses displacement: a wire must never evict an unrelated inproc route.
 ///
 /// The one owner of a cross-namespace route install: the bilateral
@@ -3224,8 +3256,14 @@ fn install_route_alias(
         .ok_or_else(|| {
             format!("{side} peer {name:?} is not registered in {canonical_namespace:?}")
         })?;
-    if alias_already_installed(namespace, name, pubkey) {
-        return Ok(false);
+    // A route that is already there may hold the inbox of an earlier build
+    // of the member: a member built again over its state keeps its name and
+    // key and gets a new inbox, and nothing takes the old route away. The
+    // route is re-pointed at the member's inbox of now. It stays the earlier
+    // wire's route (`Ok(false)`).
+    let already_installed = alias_already_installed(namespace, name, pubkey);
+    if already_installed {
+        registry.unregister_in_namespace(namespace, &pubkey);
     }
     let outcome = registry.register_with_meta_in_namespace(
         namespace,
@@ -3246,7 +3284,7 @@ fn install_route_alias(
     {
         return Err(format!("{side} alias installation failed: {outcome:?}"));
     }
-    Ok(true)
+    Ok(!already_installed)
 }
 
 /// Install the routing aliases that make two isolated mob namespaces able to
@@ -3371,31 +3409,49 @@ pub(crate) fn install_local_wire_route(
         return Ok((spec, None));
     };
     let local_namespace = mob_inproc_namespace_for_id(local_mob_id)?;
+    if peer_namespace == local_namespace {
+        // A member of this mob: its own registration routes it, and its
+        // mob's own wiring wires it. Without a key there is nothing to
+        // describe it by here either.
+        if spec.pubkey == [0u8; 32] {
+            return Err(CrossMobError::PeerSpec(format!(
+                "{:?} is a member of this mob: wire_local wires a member to a peer of another \
+                 mob, and two members of one mob are wired by the mob's own wiring",
+                spec.name.as_str()
+            )));
+        }
+        return Ok((spec, None));
+    }
     let Some(member) = InprocRegistry::global()
         .peers_in_namespace(&peer_namespace)
         .into_iter()
         .find(|peer| peer.name == spec.name.as_str())
     else {
         if spec.pubkey == [0u8; 32] {
-            return Err(CrossMobError::PeerSpec(format!(
-                "{:?} is not a live member of a mob in this process, and an in-process address \
-                 reaches no other process: wire it by the dialable address and key its peer info \
-                 reports (a member gets a dialable address from its gateway's member_comms_address)",
-                spec.name.as_str()
-            )));
+            return Err(not_live_in_this_process(&spec));
         }
         return Ok((spec, None));
     };
-    if peer_namespace == local_namespace {
-        // A member of this mob: its own registration routes it.
-        return Ok((spec, None));
-    }
     let key = *member.pubkey.as_bytes();
     if member.pubkey.to_peer_id() != spec.peer_id
         || (spec.pubkey != [0u8; 32] && spec.pubkey != key)
     {
         return Err(CrossMobError::InprocAlias(format!(
             "{:?} is a live member of this process under another peer id or key; read its peer info again",
+            spec.name.as_str()
+        )));
+    }
+    // The route is an entry of the local namespace under the member's key.
+    // A key the local namespace holds under another name is somebody else's
+    // entry (a member of this mob, or another route): the wire is refused
+    // and that entry stays.
+    if InprocRegistry::global()
+        .peers_in_namespace(&local_namespace)
+        .into_iter()
+        .any(|peer| peer.pubkey == member.pubkey && peer.name != spec.name.as_str())
+    {
+        return Err(CrossMobError::InprocAlias(format!(
+            "this mob already holds that key under another name, so {:?} cannot be wired in-process",
             spec.name.as_str()
         )));
     }
@@ -3417,10 +3473,148 @@ pub(crate) fn install_local_wire_route(
     ))
 }
 
-/// The route a one-sided local wire installed for `spec`'s peer, found before
-/// the local member is unwired from it, and the descriptor carrying that
-/// route's key when the caller supplied none (the wire stored the member
-/// under its own key). `None` when this mob's namespace routes no such peer.
+/// The refusal of a keyless in-process wire to a member comms name that no
+/// mob of this process has live. It is the answer for a name no mob has at
+/// all, too: the two are not told apart.
+fn not_live_in_this_process(spec: &TrustedPeerDescriptor) -> CrossMobError {
+    CrossMobError::PeerSpec(format!(
+        "{:?} is not a live member of a mob in this process. If this process hosts it and it is \
+         not running, pass its key (remote_pubkey_b64, from its peer info). If another process \
+         hosts it, an in-process address does not reach it: wire it by the dialable address and \
+         key its peer info reports (a member gets a dialable address from its gateway's \
+         member_comms_address; member_comms_tcp() or memberCommsTcp() in the SDKs)",
+        spec.name.as_str()
+    ))
+}
+
+/// [`install_local_wire_route`] for a caller that must learn nothing about
+/// the other mobs of this process: the descriptor is treated as naming a
+/// member no mob of this process has. No route is installed and no key is
+/// filled in; a keyless in-process descriptor of a member comms name gets
+/// the refusal of [`not_live_in_this_process`], word for word.
+pub(crate) fn local_wire_without_route(
+    local_mob_id: &str,
+    spec: TrustedPeerDescriptor,
+) -> Result<(TrustedPeerDescriptor, Option<LocalWireRoute>), CrossMobError> {
+    if other_mob_namespaces(local_mob_id, &spec)?.is_some() && spec.pubkey == [0u8; 32] {
+        return Err(not_live_in_this_process(&spec));
+    }
+    Ok((spec, None))
+}
+
+/// Whether a one-sided local wire may look at the other mobs of this
+/// process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SameProcessPeers {
+    /// The operator's wire: a live member of another mob in this process is
+    /// described by its own key and routed.
+    Resolve,
+    /// A caller that must learn nothing about another mob: every name is
+    /// treated as one no mob of this process has
+    /// ([`local_wire_without_route`]).
+    Unresolved,
+}
+
+/// A wire is never replaced. When `member` is already wired to `spec`'s peer
+/// name with ANOTHER endpoint (another peer id, so another key, or another
+/// address), the wire is refused in plain words that name the remedy, before
+/// anything is installed. The identical edge passes: wiring it again changes
+/// nothing.
+async fn refuse_replacing_wire(
+    handle: &MobHandle,
+    member: &AgentIdentity,
+    member_alias: &str,
+    spec: &TrustedPeerDescriptor,
+) -> Result<(), CrossMobError> {
+    let Some(entry) = handle
+        .get_member(member)
+        .await
+        .map_err(CrossMobError::Mob)?
+    else {
+        // No such member: the wire itself answers that.
+        return Ok(());
+    };
+    let Some(existing) = entry.external_peer_descriptor(spec.name.as_str()) else {
+        return Ok(());
+    };
+    // A keyless in-process descriptor names its key by its peer id.
+    let same_key = spec.pubkey == [0u8; 32] || existing.pubkey == spec.pubkey;
+    if existing.peer_id == spec.peer_id && existing.address == spec.address && same_key {
+        return Ok(());
+    }
+    Err(CrossMobError::PeerSpec(format!(
+        "{member_alias:?} is already wired to {:?} with another endpoint (peer id {} at {}), and \
+         a wire is never replaced: unwire both sides first (unwire_local on each side, with the \
+         other member's current peer info), then wire again",
+        spec.name.as_str(),
+        existing.peer_id,
+        existing.address,
+    )))
+}
+
+/// The local half of a one-sided wire, for a roster member already resolved
+/// under its authority: refuse a wire that would replace an edge, install
+/// the route of a same-process peer, then the trust; a failed trust takes
+/// back the route this call installed. The one body of
+/// `UnifiedRuntime::wire_local` and the Console's `wire_local`.
+pub(crate) async fn wire_local_edge(
+    handle: &MobHandle,
+    member: AgentIdentity,
+    member_alias: &str,
+    spec: TrustedPeerDescriptor,
+    peers: SameProcessPeers,
+) -> Result<(), CrossMobError> {
+    refuse_replacing_wire(handle, &member, member_alias, &spec).await?;
+    let mob_id = handle.mob_id().to_string();
+    // Route first, then trust: a route without trust delivers nothing, and
+    // taking it back needs no second member mutation.
+    let (spec, route) = match peers {
+        SameProcessPeers::Resolve => install_local_wire_route(&mob_id, spec)?,
+        SameProcessPeers::Unresolved => local_wire_without_route(&mob_id, spec)?,
+    };
+    let wired = handle
+        .wire(member, PeerTarget::External(spec))
+        .await
+        .map_err(CrossMobError::Mob);
+    if wired.is_err()
+        && let Some(route) = route
+    {
+        route.roll_back();
+    }
+    wired
+}
+
+/// The local half of an unwire, for a roster member already resolved under
+/// its authority: the trust goes, and the route this mob's namespace holds
+/// under the peer's name goes with it unless another member of the mob is
+/// still wired to that peer. The one body of `UnifiedRuntime::unwire_local`
+/// and the Console's `unwire_local`.
+pub(crate) async fn unwire_local_edge(
+    handle: &MobHandle,
+    member: AgentIdentity,
+    spec: TrustedPeerDescriptor,
+) -> Result<(), CrossMobError> {
+    let mob_id = handle.mob_id().to_string();
+    let (spec, route) = installed_local_wire_route(&mob_id, spec)?;
+    let peer_name = spec.name.as_str().to_string();
+    handle
+        .unwire(member, PeerTarget::External(spec))
+        .await
+        .map_err(CrossMobError::Mob)?;
+    if let Some(route) = route {
+        route.remove_unless_referenced(handle, &peer_name).await;
+    }
+    Ok(())
+}
+
+/// The route this mob's namespace holds under `spec`'s peer name, found
+/// before the local member is unwired from it, and the descriptor carrying
+/// that route's key when the caller supplied none and named the route's own
+/// peer id (the wire stored the member under its own key). The route is
+/// found by name: the trust is removed by name too, so an unwire with a peer
+/// id of another incarnation of the member (a read after a respawn) takes
+/// the route with the trust. `None` when this mob's namespace routes no such
+/// peer.
 pub(crate) fn installed_local_wire_route(
     local_mob_id: &str,
     spec: TrustedPeerDescriptor,
@@ -3431,11 +3625,11 @@ pub(crate) fn installed_local_wire_route(
     let Some(route) = InprocRegistry::global()
         .peers_in_namespace(&local_namespace)
         .into_iter()
-        .find(|peer| peer.name == spec.name.as_str() && peer.pubkey.to_peer_id() == spec.peer_id)
+        .find(|peer| peer.name == spec.name.as_str())
     else {
         return Ok((spec, None));
     };
-    let spec = if spec.pubkey == [0u8; 32] {
+    let spec = if spec.pubkey == [0u8; 32] && route.pubkey.to_peer_id() == spec.peer_id {
         spec.with_pubkey(*route.pubkey.as_bytes())
     } else {
         spec

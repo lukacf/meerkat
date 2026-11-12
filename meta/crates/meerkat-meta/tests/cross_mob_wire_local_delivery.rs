@@ -1536,12 +1536,25 @@ async fn console_wire_local_installs_the_route_and_its_unwire_removes_it() {
     let mut right = Mob::start(root.path(), "wire-console-b", "bob").await;
     let alice = left.peer_info().await;
     let bob = right.peer_info().await;
-    // A Console with no access configuration: every caller is its operator.
+    // The caller is the Console's access admin: the one caller whose wire
+    // may look at the other mobs of the process.
+    left.runtime.set_access_controller(
+        meerkat_meta::AccessController::new(meerkat_meta::AccessControlConfig {
+            approvers: Default::default(),
+            enabled: true,
+            admins: vec!["root@example.test".to_string()],
+            groups: Default::default(),
+            rules: Vec::new(),
+        })
+        .expect("controller"),
+    );
     let console = left.runtime.build_reference_app_router(console_decisions());
+    let admin = console_token("root@example.test");
+    let admin = Some(admin.as_str());
 
     console_rpc(
         &console,
-        None,
+        admin,
         "meta/cross_mob/wire_local",
         left.wire_params(&bob),
     )
@@ -1565,7 +1578,7 @@ async fn console_wire_local_installs_the_route_and_its_unwire_removes_it() {
     };
     let refusal = console_rpc(
         &console,
-        None,
+        admin,
         "meta/cross_mob/wire_local",
         left.wire_params(&moved),
     )
@@ -1576,7 +1589,7 @@ async fn console_wire_local_installs_the_route_and_its_unwire_removes_it() {
 
     console_rpc(
         &console,
-        None,
+        admin,
         "meta/cross_mob/unwire_local",
         left.wire_params(&bob),
     )

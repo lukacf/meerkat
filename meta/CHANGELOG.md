@@ -61,6 +61,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   cross-process caller to pass the gateway key of `peer_pubkey`: a
   descriptor carries the member's key from `peer_info`.
 
+  Wiring a pair again is safe. The identical edge is accepted and changes
+  nothing; a same-process route that is already there is re-pointed at
+  the member's inbox of now (a member built again over its state keeps
+  its name and key and gets a new inbox). A wire is never replaced:
+  `wire_local` on a member that is already wired to that peer name with
+  another endpoint (another address, or another key after a respawn) is
+  refused in plain words before anything is installed (`peer spec error:
+  ... is already wired to ... with another endpoint ...: unwire both
+  sides first ...`). Through 0.9.14 that call answered `mob error:
+  invalid state transition: Running -> Running`. `unwire_local` removes
+  the same-process route with the trust also when the caller names the
+  peer id of another incarnation of the member, and also a route the
+  bilateral same-process wire installed, once no member of the mob is
+  still wired to that peer. A keyless in-process wire to a member of the
+  caller's own mob is refused in plain words, and a wire is refused when
+  the local mob already holds that key. The keyless refusal for a member
+  no mob of the process has live also says what to do when the process
+  hosts it and it is not running (pass its key from `peer_info`).
+
+  On the Console, `meta/cross_mob/wire_local` resolves a member of
+  another mob of its process (the route, the member's key) only for an
+  access admin, a subject the access configuration's `admins` names (and
+  for every caller of a Console assembled with no access controller at
+  all). Any other caller (the action `runtime.admin` can be granted to
+  one) gets, for such a member, the answer of a name no mob has, and no
+  route. On a Console with an access controller and no admins
+  configured, the same-process route is available through the host RPC
+  only. The two new `peer_info` fields are answered on the stdio RPC;
+  the Console's `peer_info` is unchanged.
+
 ## [0.9.14] - 2026-11-11
 
 Meta 0.9.14 is part of Meerkat 0.9.14 (Core 0.9.14, Meta 0.9.14 and Connect

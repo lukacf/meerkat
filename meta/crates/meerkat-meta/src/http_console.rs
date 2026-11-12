@@ -20,9 +20,7 @@ use meerkat_core::comms::TrustedPeerDescriptor;
 use meerkat_mob::ids::{AgentIdentity, AgentRuntimeId, FenceToken, MobId};
 use meerkat_mob::launch::MemberLaunchMode;
 use meerkat_mob::runtime::reconcile::MemberFilter;
-use meerkat_mob::{
-    MobBackendKind, MobHandle, MobRuntimeMode, PeerTarget, ProfileName, SpawnMemberSpec,
-};
+use meerkat_mob::{MobBackendKind, MobHandle, MobRuntimeMode, ProfileName, SpawnMemberSpec};
 
 use crate::mob_handle_runtime::{
     is_recoverable_lifecycle_cleanup_error, member_entry_to_json, member_model_registry,
@@ -17531,6 +17529,7 @@ async fn handle_console_runtime_rpc_with_visibility(
             handle_console_wire_local(
                 runtime,
                 identity_runtime.as_ref(),
+                access_view,
                 &request.params,
                 response_id,
                 true,
@@ -17542,6 +17541,7 @@ async fn handle_console_runtime_rpc_with_visibility(
             handle_console_wire_local(
                 runtime,
                 identity_runtime.as_ref(),
+                access_view,
                 &request.params,
                 response_id,
                 false,
@@ -17985,6 +17985,7 @@ async fn console_member_peer_info(
 async fn handle_console_wire_local(
     runtime: &MobRuntime,
     identity_runtime: Option<&Arc<crate::identity_first::IdentityRuntime>>,
+    access_view: Option<&AccessView>,
     params: &Value,
     response_id: Value,
     wire: bool,
@@ -18053,24 +18054,42 @@ async fn handle_console_wire_local(
     };
 
     let handle = runtime.handle();
-    // The route half of a same-process peer, as in
-    // `UnifiedRuntime::wire_local` and `unwire_local`.
-    let mob_id = handle.mob_id().to_string();
-    let route_lookup = if wire {
-        crate::unified_runtime::cross_mob::install_local_wire_route(&mob_id, spec)
+    // The body is `UnifiedRuntime::wire_local` / `unwire_local`'s
+    // (`wire_local_edge`, `unwire_local_edge`): the refusal of a wire that
+    // would replace an edge, the route half of a same-process peer, the
+    // trust. Only an operator's wire looks at the other mobs of this
+    // process: on a Console with an access controller, a caller who is no
+    // access admin gets, for a member of another mob, the answer of a name
+    // no mob has, and no route is installed (a member private to another
+    // person is hidden from such a caller with access enforced or not, and
+    // this Console cannot judge the members of another mob).
+    let peers = if access_view.is_none_or(AccessView::is_admin) {
+        crate::unified_runtime::cross_mob::SameProcessPeers::Resolve
     } else {
-        crate::unified_runtime::cross_mob::installed_local_wire_route(&mob_id, spec)
+        crate::unified_runtime::cross_mob::SameProcessPeers::Unresolved
     };
-    let (spec, route) = match route_lookup {
-        Ok(found) => found,
-        Err(err) => {
-            let action = if wire { "wire_local" } else { "unwire_local" };
-            return internal_error(response_id, format!("cross_mob/{action} failed: {err}"));
-        }
-    };
-    let peer_name = spec.name.as_str().to_string();
-    let route_handle = handle.clone();
     let local_alias = crate::member_comms_id::runtime_alias_str(local_id).into_owned();
+    let edge = move |handle: meerkat_mob::runtime::MobHandle,
+                     member: meerkat_mob::AgentIdentity,
+                     member_alias: String| async move {
+        let result = if wire {
+            crate::unified_runtime::cross_mob::wire_local_edge(
+                &handle,
+                member,
+                &member_alias,
+                spec,
+                peers,
+            )
+            .await
+        } else {
+            crate::unified_runtime::cross_mob::unwire_local_edge(&handle, member, spec).await
+        };
+        // The mob's own refusal reads as it always did here.
+        result.map_err(|err| match err {
+            crate::unified_runtime::cross_mob::CrossMobError::Mob(err) => err.to_string(),
+            other => other.to_string(),
+        })
+    };
     let authority_target = if let Some(identity_runtime) = identity_runtime {
         identity_runtime
             .member_alias_lifecycle_target(&local_alias)
@@ -18089,26 +18108,12 @@ async fn handle_console_wire_local(
             crate::identity_first::IdentityRuntime::run_member_alias_targets_operation_tracked(
                 vec![target],
                 move || async move {
-                    let result = if wire {
-                        handle
-                            .wire(
-                                crate::member_comms_id::roster_member_id_for_supplied_id(
-                                    &operation_alias,
-                                ),
-                                PeerTarget::External(spec),
-                            )
-                            .await
-                    } else {
-                        handle
-                            .unwire(
-                                crate::member_comms_id::roster_member_id_for_supplied_id(
-                                    &operation_alias,
-                                ),
-                                PeerTarget::External(spec),
-                            )
-                            .await
-                    };
-                    result.map_err(|err| err.to_string())
+                    edge(
+                        handle,
+                        crate::member_comms_id::roster_member_id_for_supplied_id(&operation_alias),
+                        operation_alias,
+                    )
+                    .await
                 },
             )
             .await
@@ -18118,35 +18123,14 @@ async fn handle_console_wire_local(
             format!("generated member alias requires current identity authority: {local_alias}"),
         ),
         Ok(None) => {
-            let result = if wire {
-                handle
-                    .wire(
-                        crate::member_comms_id::mob_member_id(&local_alias),
-                        PeerTarget::External(spec),
-                    )
-                    .await
-            } else {
-                handle
-                    .unwire(
-                        crate::member_comms_id::mob_member_id(&local_alias),
-                        PeerTarget::External(spec),
-                    )
-                    .await
-            };
-            result.map_err(|err| err.to_string())
+            edge(
+                handle,
+                crate::member_comms_id::mob_member_id(&local_alias),
+                local_alias.clone(),
+            )
+            .await
         }
     };
-    if let Some(route) = route {
-        match (&result, wire) {
-            (Err(_), true) => route.roll_back(),
-            (Ok(()), false) => {
-                route
-                    .remove_unless_referenced(&route_handle, &peer_name)
-                    .await;
-            }
-            _ => {}
-        }
-    }
 
     let action = if wire { "wire_local" } else { "unwire_local" };
     match result {

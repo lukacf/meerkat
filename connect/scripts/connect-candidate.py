@@ -1774,13 +1774,14 @@ MACOS_WORK_ROOT_LIMIT = 24
 MACOS_BUILD_SECONDS = 5 * 3600
 MACOS_LANE = "connect-macos-arm64"
 MACOS_STEPS = ("preflight", "library", "resources", "build", "stage", "check-gateway", "check-cli",
-               "check-consumer", "check-conversation", "stage-record")
+               "check-consumer", "check-conversation", "check-official-install", "stage-record")
 # Each step needs the step records of these earlier steps (stage-record also takes check-consumer, or its
 # stated absence).
 MACOS_REQUIRES = {"preflight": (), "library": ("preflight",), "resources": ("library",),
                   "build": ("resources",), "stage": ("build",), "check-gateway": ("stage",),
                   "check-cli": ("stage",), "check-consumer": ("stage",), "check-conversation": ("stage",),
-                  "stage-record": ("check-gateway", "check-cli", "check-conversation")}
+                  "check-official-install": ("stage",),
+                  "stage-record": ("check-gateway", "check-cli", "check-conversation", "check-official-install")}
 # The integration library's native tools: name, Cargo feature of toolkit-package ("" for none). The inspector
 # is built with local-artifacts here: the library advertises MCPB archive inspection, which needs it.
 MACOS_TOOLS = (("toolkit-local-recipes", "local-recipes"), ("toolkit-package-inspect", "local-artifacts"),
@@ -1798,7 +1799,14 @@ CLI_CONSUMER = "actual_cli_public_service_survives_setup_exit_and_fresh_rkat_in_
 CONVERSATION_REALM = "Realm: "
 CONVERSATION_PREPARING = "Preparing the supplied setup helper."
 CONVERSATION_UNAVAILABLE = "Installed Connect resources are unavailable or changed"
-MACOS_GATES = ("gateway_verification", "cli_composition", "shutdown_review", "consumer", "conversation_start")
+MACOS_GATES = ("gateway_verification", "cli_composition", "shutdown_review", "consumer", "conversation_start",
+               "official_playwright_install")
+# The official Playwright route as the product's setup backend selects it (install-library-consumer.py's own
+# fixed profile; a test pins these values to that script). The install hashes the browser, never starts it.
+PLAYWRIGHT_CONFIGURATION = {"profile": "isolated-chrome", "config": {}, "operations": [
+    "browser_navigate", "browser_snapshot", "browser_fill_form", "browser_click", "browser_close"]}
+PLAYWRIGHT_SERVER = "playwright-isolated"
+MACOS_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 # What each check is expected to reach, read from its source and not measured: the producer captures no
 # traffic. The stage record adds the hosts each step's own logs and evidence name.
 MACOS_NETWORK = {
@@ -1809,7 +1817,9 @@ MACOS_NETWORK = {
     "check-cli": "none expected: empty PATH, bundled runtimes",
     "check-consumer": "outbound HTTPS to public pages: live public Hacker News reads through the supplied "
                       "integration; controlled model, no provider key",
-    "check-conversation": "none expected: the resource step prepares from the bundled runtimes"}
+    "check-conversation": "none expected: the resource step prepares from the bundled runtimes",
+    "check-official-install": "none expected: npm cache add and npm ci run with --offline from the library's "
+                              "three pinned Playwright archives"}
 # Mach-O constants (read only; nothing here executes or changes a file).
 MACHO_MAGIC_64, MACHO_CPU_ARM64, MACHO_EXECUTE = 0xFEEDFACF, 0x0100000C, 2
 LC_CODE_SIGNATURE, LC_VERSION_MIN_MACOSX, LC_BUILD_VERSION = 0x1D, 0x24, 0x32
@@ -2784,6 +2794,67 @@ def macos_check_conversation(work):
     return macos_finish(context, {"conversation": binding(conversation)})
 
 
+def macos_check_official_install(work, chrome=None):
+    """The official Playwright install, through the library's own installer, with the closure's Node and npm.
+
+    This is the command the product's setup backend runs for that route (its Python, its installer, its
+    official bundle, `--node` and `--npm-cli` from the assembled closure). A failure fails the step. When the
+    host has no Chrome executable to pin, the check is recorded as not run, never as passed.
+    """
+    require_native_host(MACOS_TARGET)
+    context = macos_begin(work, "check-official-install")
+    closure = work / "cli-stage" / MACOS_PREFIX / "libexec/meerkat-connect"
+    manifest = read_json(closure / "resources.json")
+    python, node, npm, archive = (closure / relative(manifest[key]) for key in ("python", "node", "npm_cli", "archive"))
+    directory = work / "cli-qualification/official-run"
+    for leaf in ("hm", "tmp", "process", "library"):
+        (directory / leaf).mkdir(parents=True)
+    result = work / "cli-qualification/official-playwright.json"
+    chrome = Path(MACOS_CHROME) if chrome is None else chrome
+    common = {"schema_version": 1, "kind": "meerkat_connect_official_install_check",
+              "scope": "official_playwright_install_through_the_library_installer"}
+    if not (chrome.is_absolute() and chrome.is_file() and not chrome.is_symlink() and os.access(chrome, os.X_OK)):
+        reason = "no Chrome executable at " + str(chrome) + ": the installer pins the host's Chrome by digest"
+        write_new(result, {**common, "status": "not_run", "reason": reason, "evidence": []})
+        return macos_finish(context, {"status": "not_run", "reason": reason, "record": binding(result)})
+    stem = archive.name.removesuffix(".tar.gz")
+    with tarfile.open(archive, "r:gz") as source:
+        for member in source:
+            require(member.name == stem or member.name.startswith(stem + "/"), "library member outside its root")
+        source.extractall(directory / "library", filter="tar")
+    library = directory / "library" / stem
+    installer, official = library / "setup/install-library-consumer.py", library / "official"
+    configuration, profile = directory / "selected.json", directory / "playwright-host.json"
+    write_new(configuration, PLAYWRIGHT_CONFIGURATION)
+    write_new(profile, {"schema_version": 1, "chrome_executable": str(chrome), "chrome_sha256": digest(chrome),
+                        "process_parent": str(directory / "process")})
+    destination = directory / "install"
+    argv = [python, "-I", "-B", installer, "--official-bundle", official,
+            "--contents-sha256", digest(official / "CONTENTS.json"), "--component", "playwright",
+            "--playwright-host-profile", profile, "--playwright-host-profile-sha256", digest(profile),
+            "--node", node, "--npm-cli", npm, "--destination", destination,
+            "--config", configuration, "--config-sha256", digest(configuration), "--server-name", PLAYWRIGHT_SERVER]
+    environment = {"HOME": str(directory / "hm"), "TMPDIR": str(directory / "tmp"), "PATH": "/usr/bin:/bin",
+                   "LC_ALL": "en_US.UTF-8"}
+    record = context["record"]
+    execution, log = record.run("official-playwright-install", argv, cwd=directory, env=environment,
+                                inherit=False, seconds=1800)
+    receipt = read_json(destination / "ready/installed.json")
+    require(receipt.get("scope") == "observed_software_installation_only"
+            and receipt.get("family") == "official-playwright" and (destination / "ready/mcp.json").is_file(),
+            "the official Playwright install left no installation receipt")
+    evidence = [binding(record.records / "official-playwright-install.json"), binding(log),
+                binding(destination / "ready/installed.json"), binding(destination / "ready/mcp.json"),
+                binding(configuration), binding(profile)]
+    evidence += [binding(path) for path in sorted(destination.glob("*.stdout")) + sorted(destination.glob("*.stderr"))]
+    write_new(result, {**common, "status": "passed", "execution": execution,
+        "installer": binding(installer), "official_contents_sha256": digest(official / "CONTENTS.json"),
+        "runtime": {"python": binding(python), "node": binding(node), "npm_cli": binding(npm)},
+        "evidence": evidence,
+        "not_claimed": ["a browser start", "Chrome compatibility", "the MCP endpoint serving", "any tool call"]})
+    return macos_finish(context, {"status": "passed", "record": binding(result)})
+
+
 def tar_tree(directory, destination):
     """An uncompressed tar of one tree: sorted, numeric owner 0, links kept as links, modes kept.
 
@@ -2861,7 +2932,9 @@ def macos_stage_record(work, output, consumer_not_run=None):
             "the consumer check either ran, or --consumer-not-run states why it did not")
     require(consumer_ran or consumer_not_run.strip(), "a reason is required with --consumer-not-run")
     qualification = work / "cli-qualification"
+    official = read_json(qualification / "official-playwright.json")
     gates = {"gateway_verification": {"status": steps["check-gateway"]["outputs"]["status"]},
+             "official_playwright_install": {key: official[key] for key in ("status", "reason") if key in official},
              "cli_composition": {"status": read_json(qualification / "installed-composition.json")["status"]},
              "shutdown_review": {"status": read_json(qualification / "native-shutdown-review.pending.json")["disposition"]},
              "conversation_start": {"status": read_json(qualification / "conversation-start.json")["status"]},
@@ -2882,8 +2955,8 @@ def macos_stage_record(work, output, consumer_not_run=None):
     gateway = macos_product(work / "products/gateway", "toolkit_gateway", preflight["versions"]["connect"],
                             executables["toolkit_gateway"]["sha256"])
     selected = [work / name for name in ("inputs-selection.json", "source-manifest.json", "library-selection.json",
-                "library/build.json", "resources/build.json", "sdk/SDK-WHEELS.json",
-                "gateway-verification/manifest.json")]
+                "library/build.json", "resources/build.json", "sdk/SDK-WHEELS.json", "components/components.json",
+                "tools/dependencies.txt", "gateway-verification/manifest.json")]
     selected += [macos_library_archive(context), macos_resource_archive(work)]
     selected += sorted(path for path in (work / "products/gateway").iterdir() if path.is_file() and not path.is_symlink())
     selected += sorted(path for path in (work / "records").rglob("*") if path.is_file() and not path.is_symlink())
@@ -2892,7 +2965,8 @@ def macos_stage_record(work, output, consumer_not_run=None):
     selected += sorted(path for path in (work / "sdk").iterdir() if path.suffix == ".whl")
     checks = {"check-cli": ["installed-composition.json", "native-shutdown-review.pending.json"],
               "check-consumer": ["consumer.json"] if consumer_ran else [],
-              "check-conversation": ["conversation-start.json"]}
+              "check-conversation": ["conversation-start.json"],
+              "check-official-install": ["official-playwright.json"]}
     by_step = {}
     for step, names in checks.items():
         by_step[step] = [path for name in names for path in evidence_files(work, qualification / name)]
@@ -3056,6 +3130,75 @@ def macos_assemble(work, stage_directory, review, review_sha256, output):
     return value
 
 
+SCAN_REPORT_TOKENS = {"status": ("clean", "refused"), "result": ("clean", "hits", "errors", "hits-and-errors")}
+SCAN_REPORT_KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
+
+
+def checked_scan_report(report, assets):
+    """A private-text scan report as it may leave the place where the private rules are.
+
+    It may hold counts by class, file digests, the digest of the scanner's list, a schema name, a status
+    and a tool version. It never holds matched text, token text or the list: any other text refuses.
+    """
+    require(isinstance(report, dict) and isinstance(report.get("payload"), list), "not a private-text scan report")
+    expected = {(row["name"], row["size"], row["sha256"]) for row in assets}
+    scanned = set()
+    for row in report["payload"]:
+        require(isinstance(row, dict) and set(row) == {"name", "bytes", "sha256"}
+                and (row["name"], row["bytes"], row["sha256"]) in expected,
+                "the scan report names a file that is not one of the product files")
+        scanned.add(row["name"])
+    missing = sorted(row["name"] for row in assets if row["name"] not in scanned)
+    require(not missing, "the private-text scan did not cover: " + ", ".join(missing))
+
+    def walk(value, key):
+        if value is None or isinstance(value, (bool, int)):
+            return
+        if isinstance(value, dict):
+            for name, item in value.items():
+                require(SCAN_REPORT_KEY.match(name), "the scan report carries free text")
+                walk(item, name)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item, key)
+        else:
+            require(isinstance(value, str) and (HEX.fullmatch(value)
+                    or value in SCAN_REPORT_TOKENS.get(key, ())
+                    or (key == "schema" and re.fullmatch(r"[a-z0-9-]+(?:/[a-z0-9-]+){0,3}", value))
+                    or (key in ("version", "tool_version") and re.fullmatch(r"[0-9]+(?:\.[0-9]+){0,3}", value))),
+                    "the scan report carries free text")
+
+    walk({key: value for key, value in report.items() if key != "payload"}, "")
+    require(report.get("status") == "clean", "the private-text scan is not clean")
+    return report
+
+
+def macos_accept_review(stage_directory, output):
+    """Record the independent reader's acceptance of the shutdown record of one exact stage.
+
+    Running it is the act of acceptance, after the evidence was read. It checks that every observation the
+    pending record binds is in the stage record with exactly its bytes, and writes the accepted record.
+    """
+    stage = checked_stage(stage_directory)
+    require(output is not None and output.is_absolute() and not output.exists() and output.parent.is_dir(),
+            "fresh absolute --output with an existing parent required")
+    pending_path = stage_directory / "cli-qualification/native-shutdown-review.pending.json"
+    pending = read_json(pending_path)
+    require(pending.get("disposition") == "pending" and stage["gates"]["shutdown_review"] == {"status": "pending"}
+            and isinstance(pending.get("evidence"), list) and pending["evidence"],
+            "the stage holds no pending shutdown record")
+    root = Path(stage["work_root"])
+    for row in pending["evidence"]:
+        path = stage_directory / relative(Path(row["path"]).relative_to(root).as_posix())
+        require(path.is_file() and not path.is_symlink() and path.stat().st_size == row["size"]
+                and digest(path) == row["sha256"],
+                "an observation the record binds is missing or changed: " + path.name)
+    write_new(output, {**pending, "disposition": "accepted", "pending_record_sha256": digest(pending_path),
+                       "stage_sha256": digest(stage_directory / "STAGE.json")})
+    print("accepted shutdown review sha256 " + digest(output))
+    return digest(output)
+
+
 def macos_release_check(assembly_directory, privacy_report, privacy_report_sha256):
     """The last check before publication: a clean private-text scan of exactly the two product archives.
 
@@ -3080,14 +3223,11 @@ def macos_release_check(assembly_directory, privacy_report, privacy_report_sha25
     require(HEX.fullmatch(privacy_report_sha256 or "") and privacy_report is not None
             and checked_file(privacy_report, MAX_METADATA)["sha256"] == privacy_report_sha256,
             "exact private-text scan report required")
-    report = read_json(privacy_report)
-    scanned = {row.get("sha256") for row in report.get("payload", []) if isinstance(row, dict)}
-    missing = [row["name"] for row in assets if row["sha256"] not in scanned]
-    require(report.get("status") == "clean" and not missing,
-            "the private-text scan is not clean or did not cover: " + ", ".join(missing))
+    report = checked_scan_report(read_json(privacy_report), assets)
     value = {"schema": "connect-macos-publishable/1", "target": MACOS_TARGET, "revision": assembly["revision"],
         "version": assembly["version"], "assembly_sha256": digest(assembly_directory / "ASSEMBLY.json"),
-        "privacy_report_sha256": privacy_report_sha256, "assets": assets, "publication": "not_performed"}
+        "privacy_report_sha256": privacy_report_sha256,
+        "scanner_list_sha256": report.get("rules_sha256"), "assets": assets, "publication": "not_performed"}
     write_new(publishable, value)
     return value
 
@@ -3096,10 +3236,10 @@ def macos_main(arguments):
     parser = argparse.ArgumentParser(prog="connect-candidate.py macos",
         description="The complete macOS arm64 installation: the stage one steps, the stage two assembly and "
                     "the check before publication.")
-    parser.add_argument("step", choices=(*MACOS_STEPS, "assemble", "release-check"))
+    parser.add_argument("step", choices=(*MACOS_STEPS, "accept-review", "assemble", "release-check"))
     parser.add_argument("--work", type=Path)
     for name in ("pins", "pinned-inputs", "output", "stage", "review", "assembly", "privacy-report",
-                 "rkat-archive", "meta-wheel"):
+                 "rkat-archive", "meta-wheel", "chrome"):
         parser.add_argument("--" + name, type=Path)
     for name in ("source-sha", "review-sha256", "privacy-report-sha256", "rkat-archive-sha256",
                  "meta-wheel-sha256", "consumer-not-run"):
@@ -3108,8 +3248,10 @@ def macos_main(arguments):
     args = parser.parse_args(arguments)
     os.umask(0o022)
     try:
-        require(args.work is not None or args.step == "release-check", "--work required")
-        if args.step == "preflight":
+        require(args.work is not None or args.step in ("accept-review", "release-check"), "--work required")
+        if args.step == "accept-review":
+            macos_accept_review(args.stage, args.output)
+        elif args.step == "preflight":
             macos_preflight(args.work, args.source_sha)
         elif args.step == "library":
             macos_library(args.work, args.pins, args.pinned_inputs)
@@ -3127,6 +3269,8 @@ def macos_main(arguments):
             macos_check_consumer(args.work, args.rkat_archive, args.rkat_archive_sha256, args.rkat_from_checkout)
         elif args.step == "check-conversation":
             macos_check_conversation(args.work)
+        elif args.step == "check-official-install":
+            macos_check_official_install(args.work, args.chrome)
         elif args.step == "stage-record":
             macos_stage_record(args.work, args.output, args.consumer_not_run)
         elif args.step == "assemble":

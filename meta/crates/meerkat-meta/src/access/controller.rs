@@ -1498,13 +1498,19 @@ impl AccessView {
     }
 
     /// `agent.view` on a record a member wrote that carries no captured
-    /// member attributes (written before they were captured, or with no
-    /// confirmed incarnation). Any applicable deny the bare identity cannot
-    /// decide refuses it (fails closed); otherwise it is decided as the
-    /// identity, as before, so allow rules keep their behaviour. A member
-    /// this caller may not know of ([`Self::hides_agent`]) is refused with
-    /// the configuration enabled or not.
+    /// member attributes (written before they were captured, or by a writer
+    /// that could name no member). Nothing says whose record it is: the
+    /// attributes of whoever holds the name now belong to another
+    /// incarnation, so they never decide it. Every caller a console keeps
+    /// apart from other people ([`Self::kept_apart_from_other_people`]) is
+    /// refused, whatever the rules say; an admin reads it. The one anonymous
+    /// caller of a console without sign-in is decided as before: any
+    /// applicable deny the bare identity cannot decide refuses it, otherwise
+    /// the identity decides.
     pub(crate) fn can_view_uncaptured_member(&self, identity: &str) -> bool {
+        if self.kept_apart_from_other_people() {
+            return false;
+        }
         if self.config.enabled
             && super::engine::deny_undecidable_by_identity(
                 &self.config,
@@ -1568,7 +1574,20 @@ impl AccessView {
     /// caller of a console without sign-in, and an admin, are withheld
     /// nothing for it.
     pub(crate) fn withholds_unknown_member(&self, identity: &str) -> bool {
-        self.principal.subject.is_some() && !self.is_admin && !self.knows_agent(identity)
+        self.kept_apart_from_other_people() && !self.knows_agent(identity)
+    }
+
+    /// Whether the console keeps this caller apart from other people: the
+    /// caller is signed in and is not an admin. A console with sign-in tells
+    /// its people apart and holds members private to one of them, so what it
+    /// cannot attribute it shows to none of them. The anonymous caller of a
+    /// console without sign-in is its one operator, with no other person to
+    /// be kept apart from, and an admin reads everything. The unknown member
+    /// rule ([`Self::withholds_unknown_member`]) and the rule for a record
+    /// with no captured member attributes
+    /// ([`Self::can_view_uncaptured_member`]) both decide by it.
+    fn kept_apart_from_other_people(&self) -> bool {
+        self.principal.subject.is_some() && !self.is_admin
     }
 
     /// Can this principal read and edit the access configuration?
@@ -2644,10 +2663,12 @@ mod tests {
         ]));
     }
 
-    /// A record without captured attributes fails closed under a label deny
-    /// and keeps today's decision under an allow-only view.
+    /// A record without captured attributes is refused to every signed-in
+    /// caller who is not an admin, whatever the rules say, with an access
+    /// configuration or without one; an admin reads it. The anonymous caller
+    /// of a console without sign-in keeps the identity decision.
     #[test]
-    fn an_uncaptured_record_fails_closed_only_under_undecidable_denies() {
+    fn a_record_with_no_captured_attributes_is_read_by_an_admin_only() {
         let controller = secret_label_deny_controller();
         let bob = controller.view_for_subject(Some("bob@example.test"));
         assert!(!bob.can_view_uncaptured_member("anyone"));
@@ -2655,15 +2676,33 @@ mod tests {
         assert!(root.can_view_uncaptured_member("anyone"));
         let allow_only = AccessController::new(enabled_config()).expect("controller");
         assert!(
-            allow_only
+            !allow_only
                 .view_for_subject(Some("alice@example.test"))
+                .can_view_uncaptured_member("anyone"),
+            "an allow rule grants a signed-in caller no record with no captured attributes"
+        );
+        assert!(
+            allow_only
+                .view_for_subject(Some("root@example.test"))
                 .can_view_uncaptured_member("anyone")
+        );
+        let unconfigured = AccessController::disabled();
+        assert!(
+            !unconfigured
+                .view_for_subject(Some("alice@example.test"))
+                .can_view_uncaptured_member("anyone"),
+            "nor does a console with sign-in and no access configuration"
+        );
+        assert!(
+            unconfigured
+                .view_for_subject(None)
+                .can_view_uncaptured_member("anyone"),
+            "the anonymous caller of a console without sign-in reads it as before"
         );
         assert!(
             !allow_only
                 .view_for_subject(Some("bob@example.test"))
-                .can_view_uncaptured_member("anyone"),
-            "no allow for bob: the identity decision denies as before"
+                .can_view_uncaptured_member("anyone")
         );
     }
 

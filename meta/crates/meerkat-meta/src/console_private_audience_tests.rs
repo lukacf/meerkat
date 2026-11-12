@@ -1557,9 +1557,12 @@ async fn a_private_member_is_hidden_on_every_read_without_access_configuration()
         assert!(!crate::console_aggregator::timeline_frame_visible_to(
             &bob, frame
         ));
-        assert!(crate::console_aggregator::timeline_frame_visible_to(
-            &alice, frame
-        ));
+        assert_eq!(
+            crate::console_aggregator::timeline_frame_visible_to(&alice, frame),
+            frame.source.member_provenance.is_some(),
+            "the owner reads the frame that carries her member's witness; one with none is \
+             read by an administrator only"
+        );
         let decider = crate::console_aggregator::TimelineFrameDecider::new(bob.clone());
         assert!(!decider.visible(frame));
     }
@@ -1965,8 +1968,8 @@ async fn a_workgraph_goal_aimed_at_a_hidden_member_targets_no_one() -> TestResul
 
 /// A console with no local runtime (sign-in for Alice and Bob, no access
 /// configuration) over an aggregator of a runtime with the worker `alpha`
-/// and Alice's private side chat `alpha-side`, which has one frame the
-/// console captured no provenance for (`PRIVATE-DELTA`).
+/// and Alice's private side chat `alpha-side`, which has one frame that
+/// carries the side chat's witness (`PRIVATE-DELTA`).
 async fn aggregator_only_console(
     mob_id: &str,
 ) -> Result<(tempfile::TempDir, MobRuntime, Router), Box<dyn std::error::Error + Send + Sync>> {
@@ -2001,25 +2004,35 @@ async fn aggregator_only_console(
         ConsoleEventStore::new(),
         Arc::new(crate::console_aggregator::AllowAllConsoleVisibilityPolicy),
     );
+    let side_session = runtime
+        .handle()
+        .get_member(&AgentIdentity::from("alpha-side"))
+        .await?
+        .and_then(|entry| entry.bridge_session_id().map(ToString::to_string))
+        .ok_or("the side chat's session")?;
+    let provenance = aggregator
+        .capture_member_provenance_for_test("agg", "alpha-side", &side_session)
+        .await
+        .ok_or("the owner captures the side chat")?;
     aggregator
         .store()
         .append_if_absent(NewConsoleFrame {
             id: None,
-            dedupe_key: "uncaptured-private".to_string(),
+            dedupe_key: "captured-private".to_string(),
             timestamp_ms: 2_000,
             runtime_key: "agg".to_string(),
             identity: "alpha-side".to_string(),
             conversation_id: Some("alpha-side".to_string()),
-            session_id: None,
+            session_id: Some(side_session),
             kind: "text_delta".to_string(),
             status: ConsoleFrameStatus::Completed,
             payload: json!({ "delta": "PRIVATE-DELTA" }),
             source: ConsoleFrameSource {
-                member_provenance: None,
+                member_provenance: Some(provenance),
                 kind: ConsoleFrameSourceKind::ConsoleEvent,
                 source_cursor: None,
             },
-            source_event_id: Some("uncaptured-private".to_string()),
+            source_event_id: Some("captured-private".to_string()),
             interaction_id: None,
             turn_id: None,
             run_id: None,

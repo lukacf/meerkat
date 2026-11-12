@@ -352,6 +352,24 @@ pub(crate) fn lineage_parent(labels: &BTreeMap<String, String>) -> Option<Lineag
     })
 }
 
+/// The agent whose spawn made a member, as its console labels name it
+/// (`spawned_by`, bound by `spawned_by_session`): the spawn path's own
+/// record, never a side chat's source. A spawn-initial frame is written for
+/// a member only when this names the spawning agent.
+pub(crate) fn spawned_by(labels: &BTreeMap<String, String>) -> Option<LineageParent<'_>> {
+    let trimmed = |key: &str| {
+        labels
+            .get(key)
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    };
+    Some(LineageParent {
+        identity: trimmed(SPAWNED_BY_LABEL)?,
+        bound_session: trimmed(SPAWNED_BY_SESSION_LABEL),
+    })
+}
+
 /// Whether a member's console labels name the source it was forked from as a
 /// side chat (a non-empty `side_chat_of`). Such a member holds its source's
 /// audience exactly: the console's access decisions decide it as its source,

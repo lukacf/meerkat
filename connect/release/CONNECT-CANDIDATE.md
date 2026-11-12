@@ -314,7 +314,11 @@ accepting them. It checks every file of the stage record, then that each
 observation the pending record binds is there with exactly its bytes, writes
 the accepted record (the pending record with `disposition: accepted`, the
 pending record's digest and the stage record's digest) and prints its SHA-256.
-It runs anywhere and never changes the stage record.
+It runs anywhere and never changes the stage record. The accepted record is a
+function of the stage record alone, so a second run writes the same bytes:
+with `--review-sha256 <the digest the reader stated>` it refuses any other
+record before it writes one. A hosted assembly job runs it that way, so the
+record it assembles from is the one the reader accepted.
 
 `assemble` runs no product, no Cargo and no signing. It runs on macOS, at the
 stage's own work root and checkout paths: the records bind absolute paths, the
@@ -325,7 +329,10 @@ every file, requires all gates passed (the consumer check against Core's
 published `rkat`, never one built from the checkout), requires the accepted
 review to cover every observation of the pending one, and calls the assembler
 for the CLI product. Its output holds both product archives and
-`ASSEMBLY.json`, and publishes nothing.
+`ASSEMBLY.json`, and publishes nothing. A stage record that went through a
+workflow artifact has lost every file mode: `assemble` does not rely on any.
+The staged trees travel as tar members, which keep modes and links, and it
+sets the modes of the executables it restores.
 
 `release-check` is the last gate. The private-text scan described below runs
 where the private rules are, over exactly four files: the two product archives

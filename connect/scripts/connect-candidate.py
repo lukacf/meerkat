@@ -3201,11 +3201,14 @@ def checked_scan_report(report, assets):
     return report
 
 
-def macos_accept_review(stage_directory, output):
+def macos_accept_review(stage_directory, output, stated_sha256=None):
     """Record the independent reader's acceptance of the shutdown record of one exact stage.
 
     Running it is the act of acceptance, after the evidence was read. It checks that every observation the
     pending record binds is in the stage record with exactly its bytes, and writes the accepted record.
+    The record is a function of the stage alone, so a second run elsewhere writes the same bytes: with
+    `--review-sha256` (the digest the reader stated after the first run) it refuses any other record
+    before it writes one.
     """
     stage = checked_stage(stage_directory)
     require(output is not None and output.is_absolute() and not output.exists() and output.parent.is_dir(),
@@ -3221,8 +3224,14 @@ def macos_accept_review(stage_directory, output):
         require(path.is_file() and not path.is_symlink() and path.stat().st_size == row["size"]
                 and digest(path) == row["sha256"],
                 "an observation the record binds is missing or changed: " + path.name)
-    write_new(output, {**pending, "disposition": "accepted", "pending_record_sha256": digest(pending_path),
-                       "stage_sha256": digest(stage_directory / "STAGE.json")})
+    accepted = {**pending, "disposition": "accepted", "pending_record_sha256": digest(pending_path),
+                "stage_sha256": digest(stage_directory / "STAGE.json")}
+    encoded = (json.dumps(accepted, indent=2, sort_keys=True, ensure_ascii=True, allow_nan=False) + "\n").encode()
+    require(stated_sha256 is None or (HEX.fullmatch(stated_sha256)
+            and hashlib.sha256(encoded).hexdigest() == stated_sha256),
+            "this stage's accepted record is not the one the reader stated")
+    write_new(output, accepted)
+    require(output.read_bytes() == encoded, "the accepted record was not written as computed")
     print("accepted shutdown review sha256 " + digest(output))
     return digest(output)
 
@@ -3278,7 +3287,7 @@ def macos_main(arguments):
     try:
         require(args.work is not None or args.step in ("accept-review", "release-check"), "--work required")
         if args.step == "accept-review":
-            macos_accept_review(args.stage, args.output)
+            macos_accept_review(args.stage, args.output, args.review_sha256)
         elif args.step == "preflight":
             macos_preflight(args.work, args.source_sha)
         elif args.step == "library":

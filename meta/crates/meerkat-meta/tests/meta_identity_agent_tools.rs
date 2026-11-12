@@ -2221,3 +2221,141 @@ async fn an_agent_creates_changes_archives_and_removes_an_agent_under_the_hosts_
     );
     rig.shutdown().await;
 }
+
+/// An agent that holds the grant creates a long-term agent with its tool,
+/// and the created agent exists after a restart with no roster listing: the
+/// agent that asked lists it again, with the same spec digest, and the mob
+/// holds its seat.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_an_agents_tool_created_exists_after_a_restart() {
+    let state = tempfile::tempdir().unwrap();
+    let mob_id = fresh_mob_id();
+    let rig = boot(state.path(), &mob_id).await;
+    assert!(
+        rig.runtime
+            .attach_identity_policy(policy(), IdentityFamilyOptions::new())
+    );
+    let created = rig
+        .tool(
+            LEAD,
+            "restart-create",
+            IDENTITY_CREATE,
+            json!({"agents": [{"name": "keeper", "profile": WORKER, "display_name": "Keeper"}]}),
+        )
+        .await;
+    assert_eq!(created.content["outcome"], "done", "{}", created.content);
+    let digest = created.content["agents"][0]["spec_digest"].clone();
+    rig.shutdown_for_reopen().await;
+
+    let rig = boot(state.path(), &mob_id).await;
+    assert!(
+        rig.runtime
+            .attach_identity_policy(policy(), IdentityFamilyOptions::new())
+    );
+    let listed = rig
+        .tool(LEAD, "restart-list", IDENTITY_LIST, json!({}))
+        .await;
+    let entry = listed.content["agents"]
+        .as_array()
+        .expect("the agents")
+        .iter()
+        .find(|entry| entry["name"] == "keeper")
+        .unwrap_or_else(|| {
+            panic!(
+                "the created agent is listed after the restart: {}",
+                listed.content
+            )
+        })
+        .clone();
+    assert_eq!(
+        entry["spec_digest"], digest,
+        "with the spec it was created with"
+    );
+    assert_eq!(entry["display_name"], "Keeper");
+    let keeper = core_member_name("keeper").expect("an agent name");
+    assert!(
+        rig.runtime
+            .mob_handle()
+            .get_member(&keeper)
+            .await
+            .expect("the roster reads")
+            .is_some(),
+        "the mob holds the created agent's seat after the restart"
+    );
+    rig.shutdown().await;
+}
+
+/// An agent is refused, typed, a change the host's rules do not give it:
+/// a create of a profile no rule allows it, and an archive and a removal of
+/// an agent of such a profile. Nothing is written: the agent it may not act
+/// on is unchanged.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_is_refused_a_change_the_hosts_rules_do_not_give_it() {
+    let state = tempfile::tempdir().unwrap();
+    let rig = boot(state.path(), &fresh_mob_id()).await;
+    assert!(
+        rig.runtime
+            .attach_identity_policy(policy(), IdentityFamilyOptions::new())
+    );
+    // An agent of the profile the rules do not cover, created by the host.
+    rig.create("warden", MAKER).await;
+    let listed = rig
+        .tool(LEAD, "denied-list", IDENTITY_LIST, json!({}))
+        .await;
+    let digest = listed.content["agents"]
+        .as_array()
+        .expect("the agents")
+        .iter()
+        .find(|entry| entry["name"] == "warden")
+        .unwrap_or_else(|| panic!("the host's agent is listed: {}", listed.content))["spec_digest"]
+        .clone();
+
+    let denied = [
+        (
+            IDENTITY_CREATE,
+            json!({"agents": [{"name": "second-lead", "profile": MAKER}]}),
+        ),
+        (
+            IDENTITY_ARCHIVE,
+            json!({"name": "warden", "expected_spec_digest": digest}),
+        ),
+        (
+            IDENTITY_REMOVE,
+            json!({"name": "warden", "expected_spec_digest": digest}),
+        ),
+    ];
+    for (tool, arguments) in denied {
+        let answer = rig
+            .tool(LEAD, &format!("denied-{tool}"), tool, arguments)
+            .await;
+        assert_eq!(
+            (
+                answer.content["outcome"].as_str(),
+                answer.content["kind"].as_str()
+            ),
+            (Some("refused"), Some("change_denied")),
+            "{tool} of a profile no rule gives the agent: {}",
+            answer.content
+        );
+        assert!(answer.is_error, "{tool}");
+    }
+
+    let after = rig
+        .tool(LEAD, "denied-after", IDENTITY_LIST, json!({}))
+        .await;
+    let names: Vec<&str> = after.content["agents"]
+        .as_array()
+        .expect("the agents")
+        .iter()
+        .filter_map(|entry| entry["name"].as_str())
+        .collect();
+    assert!(
+        names.contains(&"warden"),
+        "the agent is still there: {names:?}"
+    );
+    assert!(
+        !names.contains(&"second-lead"),
+        "the refused create made nothing: {names:?}"
+    );
+    rig.shutdown().await;
+}

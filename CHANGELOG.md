@@ -98,11 +98,12 @@ them.
   `ReviewStageNotAllowed`, so an agent never approves a change of an agent.
   No released surface held a decision of these kinds.
 
-- Mob: a wire or unwire between two members, and a wire of a member to an
-  external peer, answer a name the mob does not hold as member not found
-  before any refusal about the other member or about the edge; before,
-  such a call could answer that other refusal (an open approval branch, a
-  Broken member, an edge MobMachine does not admit) instead.
+- Mob: a wire or unwire between two members, and a wire or unwire of a
+  member and an external peer, answer a name the mob does not hold as
+  member not found before any refusal about the other member, about the
+  external peer's binding or about the edge; before, such a call could
+  answer that other refusal (an open approval branch, a Broken member, a
+  binding the mob refuses, an edge MobMachine does not admit) instead.
 
 ### Fixed
 
@@ -115,15 +116,15 @@ them.
   its external peers) names no member or external peer the audience hides
   from the caller either. Hosts with no audience see no change.
 
-- Mob: the member tools that name another member keep to the host's member
-  tool audience (`MobBuilder::with_member_tool_audience`) too. `council`
-  answers a participant the audience hides from the convener, and
+- Mob: the wire tools keep to the host's member tool audience
+  (`MobBuilder::with_member_tool_audience`) too. In a running mob,
   `wire_members`, `unwire_members`, `mob_wire` and `mob_unwire` answer a
-  member it hides from the caller (as either end), exactly as a name the
-  mob does not hold, and fork, wire or unwire nothing. Through 0.9.14 a
-  member with manage scope over the mob could learn that a member hidden
-  from it exists and reach it through these tools. Hosts with no audience
-  see no change.
+  call that names a member the audience hides from the caller, beside
+  another member or an external peer, exactly as the same call with a name
+  the mob does not hold in its place, and wire or unwire nothing. Through
+  0.9.14 a member with manage scope over the mob could learn that a member
+  hidden from it exists and reach it through these tools. Hosts with no
+  audience see no change.
 
 - Mob: the mob tools' `mob_check_member` and `mob_retire_member` ask the
   host's member tool audience themselves, before the caller's scope or
@@ -132,12 +133,6 @@ them.
   had not wrapped the two tools, a member could learn that a member hidden
   from it exists, and one with manage scope over the mob could read its
   status and retire it.
-
-- Mob: a resume launch of `spawn_member` or `spawn_many_members` that names
-  a session bound to a member the host's member tool audience hides from
-  the caller is refused exactly as a resume of a session nobody holds.
-  Through 0.9.14 the refusal told a member with manage scope over the mob
-  which member the session is bound to.
 
 - Mob: the report `mob_destroy` answers an agent with names no member the
   host's member tool audience hides from that agent: not in its member
@@ -169,12 +164,29 @@ them.
 
 ### Security
 
-- Mob: a fork launch of `spawn_member` or `spawn_many_members` (a placed
-  member's included) answers a source the host's member tool audience
-  (`MobBuilder::with_member_tool_audience`) hides from the caller as a
-  source the mob does not hold, where a member with manage scope over the
-  mob could before start a member of its own from the conversation of a
-  member hidden from it. Affects 0.9.11 through 0.9.14.
+- Mob: the fork and resume launches of `spawn_member` and
+  `spawn_many_members` keep to the host's member tool audience
+  (`MobBuilder::with_member_tool_audience`). A fork launch (a placed
+  member's included) answers a source the audience hides from the caller
+  as a source the mob does not hold, where a member with manage scope over
+  the mob could before start a member of its own from the conversation of
+  a member hidden from it. A resume launch that names a session bound to
+  such a member is refused exactly as a resume of a session nobody holds,
+  where the refusal before told a member with manage scope over the mob
+  which member the session is bound to. Affects 0.9.11 through 0.9.14.
+
+- Mob: `council` keeps to the host's member tool audience too: a
+  participant the audience hides from the convener is answered exactly as
+  a name the mob does not hold, and nothing is forked. Before, a member
+  that may create mobs and holds manage scope over the mob could convene a
+  member hidden from it and be answered from that member's conversation.
+  Affects 0.9.11 through 0.9.14.
+
+### Known limitations
+
+- Mob: a schedule whose target forks a member's session is not checked
+  against the member tool audience on a host that mounts the schedule
+  tools itself.
 
 ## [0.9.13] - 2026-11-11
 

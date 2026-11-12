@@ -877,6 +877,15 @@ fn session_error_envelope(e: meerkat_core::SessionError) -> serde_json::Value {
             "details": meerkat_contracts::error::session_error_details(&error),
         }),
         meerkat_core::SessionError::CapabilityUnavailable(refusal) => serde_json::json!(refusal),
+        // A refused reasoning effort level keeps its typed wire form, as RPC
+        // answers it: invalid params, with the typed refusal as the details.
+        error @ meerkat_core::SessionError::Agent(
+            meerkat_core::AgentError::ReasoningEffortRefused(_),
+        ) => serde_json::json!({
+            "code": meerkat_contracts::error::session_transport_error_code(&error),
+            "message": error.to_string(),
+            "details": meerkat_contracts::error::session_error_details(&error),
+        }),
         meerkat_core::SessionError::NotFound { .. } => {
             serde_json::json!({ "code": "SESSION_NOT_FOUND", "message": "session not found" })
         }
@@ -3410,6 +3419,62 @@ mod tests {
             )
             .expect("typed runtime intent");
             assert_eq!(config.keep_alive, Some(keep_alive));
+        }
+    }
+
+    /// A refused reasoning effort level reaches JavaScript typed: invalid
+    /// params, with the refusal object the Web SDK's `reasoningEffortRefusal`
+    /// reads, a refusal that names no route included.
+    #[test]
+    fn a_refused_reasoning_effort_level_keeps_its_typed_envelope() {
+        for (reason, route, retryable) in [
+            (
+                "unsupported_level",
+                json!({"backend": "anthropic_api", "api": "messages"}),
+                false,
+            ),
+            ("supported_levels_unavailable", json!(null), true),
+        ] {
+            let supported = if retryable {
+                json!(null)
+            } else {
+                json!(["low", "high"])
+            };
+            let facts = if retryable {
+                json!(null)
+            } else {
+                json!("catalog")
+            };
+            let refusal = json!({
+                "requested": "max",
+                "provider": "anthropic",
+                "model": "claude-opus-4-5",
+                "route": route,
+                "reason": reason,
+                "supported": supported,
+                "facts": facts,
+            });
+            let typed: meerkat_core::ReasoningEffortRefusal =
+                serde_json::from_value(refusal.clone()).expect("a refusal");
+            let envelope = super::session_error_envelope(meerkat_core::SessionError::Agent(
+                meerkat_core::AgentError::ReasoningEffortRefused(Box::new(typed)),
+            ));
+            assert_eq!(envelope["code"], "INVALID_PARAMS", "{envelope}");
+            assert!(
+                envelope["message"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("reasoning effort 'max'")),
+                "{envelope}"
+            );
+            assert_eq!(
+                envelope["details"],
+                json!({
+                    "kind": "reasoning_effort_refused",
+                    "retryable": retryable,
+                    "reasoning_effort_refusal": refusal,
+                }),
+                "{reason}"
+            );
         }
     }
 

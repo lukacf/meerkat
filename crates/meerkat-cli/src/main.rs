@@ -387,11 +387,18 @@ fn completion_outcome_to_cli_runtime_turn_result(
         meerkat_runtime::completion::CompletionOutcome::Abandoned { reason, .. } => {
             Err(anyhow::anyhow!("turn abandoned: {reason}"))
         }
+        // A turn that ended because the session's reasoning effort level was
+        // refused before a provider request fails as a refused build does:
+        // the same typed owner, exit status and failure document.
         meerkat_runtime::completion::CompletionOutcome::AbandonedWithError { reason, error } => {
-            Err(anyhow::anyhow!(
-                "turn abandoned: {reason}; error={}",
-                serde_json::to_string(&error).unwrap_or_else(|_| "<unserializable>".to_string())
-            ))
+            match exit_status::reasoning_effort_refused_turn(&error) {
+                Some(refused) => Err(session_err_to_anyhow(refused)),
+                None => Err(anyhow::anyhow!(
+                    "turn abandoned: {reason}; error={}",
+                    serde_json::to_string(&error)
+                        .unwrap_or_else(|_| "<unserializable>".to_string())
+                )),
+            }
         }
         meerkat_runtime::completion::CompletionOutcome::CompletedWithFinalizationFailure {
             error,
@@ -4440,6 +4447,16 @@ fn default_trace_filter(cli: &Cli) -> &'static str {
     }
 }
 
+/// Whether this invocation is `rkat run` asked for JSON output
+/// (`--output json` or `--json`): the one invocation whose refused
+/// reasoning effort level also writes a failure document to stdout.
+fn cli_run_wants_json_output(cli: &Cli) -> bool {
+    matches!(
+        &cli.command,
+        Some(Commands::Run { output, json, .. }) if *json || *output == CliOutputFormat::Json
+    )
+}
+
 fn init_tracing(cli: &Cli) {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_trace_filter(cli)));
@@ -4498,6 +4515,9 @@ async fn cli_main() -> anyhow::Result<ExitCode> {
         None
     };
     init_tracing(&cli);
+    // Whether a refused reasoning effort level also writes its failure
+    // document: only `rkat run` with JSON output does.
+    let run_wants_json_output = cli_run_wants_json_output(&cli);
 
     // `rkat storage …` dispatches before runtime-scope resolution on
     // purpose: the dual-root resolver refuses a realm materialized under
@@ -4784,10 +4804,18 @@ async fn cli_main() -> anyhow::Result<ExitCode> {
     };
 
     // Map result to exit code: a typed failure exits with its public code's
-    // `cli_exit_code()` (§17.4 mob codes included), anything else with 1.
+    // `cli_exit_code()` (§17.4 mob codes included), anything else with 1. A
+    // `rkat run` that asked for JSON output and was refused for its
+    // reasoning effort level also ends stdout with the refusal's failure
+    // document.
     Ok(match result {
         Ok(()) => ExitCode::from(EXIT_SUCCESS),
-        Err(e) => exit_status::report_failure(&e),
+        Err(e) => {
+            if run_wants_json_output {
+                exit_status::write_reasoning_effort_refusal_document(&e);
+            }
+            exit_status::report_failure(&e)
+        }
     })
 }
 

@@ -1155,3 +1155,288 @@ async fn the_thread_read_and_a_console_with_no_runtime_decide_by_the_witness() -
     let _ = runtime.shutdown().await;
     Ok(())
 }
+
+/// A console log that holds, on the system page and in this order, the
+/// records `order` names: `started` (a dream started), `conflict` (a memory
+/// conflict signal) and `completed` (a dream completed).
+async fn system_page_log(order: &[&str]) -> RigResult<MetaConsoleAggregator> {
+    use crate::memory::events::MemoryTimelineEvent;
+
+    let aggregator = MetaConsoleAggregator::in_memory();
+    for (index, name) in order.iter().enumerate() {
+        let event = match *name {
+            "started" => MemoryTimelineEvent::DreamStarted {
+                realm: "pages".to_string(),
+                run_id: "dream-started-record".to_string(),
+            },
+            "conflict" => MemoryTimelineEvent::ConflictSignal {
+                realm: "pages".to_string(),
+                entity: "conflict-entity-text".to_string(),
+                topic: "conflict-topic-text".to_string(),
+                reason: "conflict-reason-text".to_string(),
+            },
+            _ => MemoryTimelineEvent::DreamCompleted {
+                realm: "pages".to_string(),
+                run_id: "dream-completed-record".to_string(),
+                ops_committed: 0,
+                detail: json!({}),
+            },
+        };
+        let mut frame = frame_with(
+            crate::console_contracts::SYSTEM_EVENT_IDENTITY,
+            &format!("system-page-{index}-{name}"),
+            None,
+        );
+        frame.kind = event.event_type().to_string();
+        frame.payload = event.data();
+        frame.timestamp_ms = 2_000 + index as u64;
+        aggregator.store().append_if_absent(frame).await?;
+    }
+    Ok(aggregator)
+}
+
+/// What the holder of `token` (the anonymous caller with none) reads of the
+/// global timeline, surface by surface: the REST window and the RPC page in
+/// each scan order (newest first, oldest first), and the stream's snapshot.
+async fn global_pages(app: &axum::Router, token: Option<&str>) -> Vec<(String, String)> {
+    use futures::StreamExt;
+    use tower::ServiceExt;
+
+    let get = |uri: String| {
+        let mut request = axum::http::Request::builder().uri(uri);
+        if let Some(token) = token {
+            request = request.header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        request
+            .body(axum::body::Body::empty())
+            .expect("timeline request")
+    };
+    let mut pages = Vec::new();
+    for (order, query, params) in [
+        (
+            "newest first",
+            "mode=recent&limit=100",
+            json!({ "mode": "recent", "limit": 100 }),
+        ),
+        ("oldest first", "limit=100", json!({ "limit": 100 })),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(get(format!("/console/timeline?{query}")))
+            .await
+            .expect("window response");
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::OK,
+            "the window, {order}"
+        );
+        let body = axum::body::to_bytes(response.into_body(), 1 << 24)
+            .await
+            .expect("window body");
+        pages.push((
+            format!("the REST window, {order}"),
+            String::from_utf8_lossy(&body).into_owned(),
+        ));
+        let answer = console_rpc_as(app, token, "meta/console/query_timeline", params).await;
+        assert!(
+            answer["error"].is_null(),
+            "the RPC page, {order}: {answer:#}"
+        );
+        pages.push((
+            format!("the RPC page, {order}"),
+            answer["result"].to_string(),
+        ));
+    }
+    let response = app
+        .clone()
+        .oneshot(get("/console/timeline/stream".to_string()))
+        .await
+        .expect("stream response");
+    assert_eq!(response.status(), axum::http::StatusCode::OK, "the stream");
+    let mut body = response.into_body().into_data_stream();
+    let mut snapshot = String::new();
+    while !snapshot.contains("snapshot_complete") {
+        let chunk = tokio::time::timeout(Duration::from_secs(30), body.next())
+            .await
+            .unwrap_or_else(|_| panic!("the snapshot ends: {snapshot}"))
+            .unwrap_or_else(|| panic!("the stream stays open through its snapshot: {snapshot}"))
+            .expect("a stream chunk");
+        snapshot.push_str(&String::from_utf8_lossy(&chunk));
+    }
+    pages.push(("the stream snapshot".to_string(), snapshot));
+    pages
+}
+
+/// Every page of the global timeline decides each record on the system page
+/// by itself, whatever other record of that page the read met first. With a
+/// dream's started record, a memory conflict signal and the dream's
+/// completed record in the log, in either order, a person who is not an
+/// administrator reads the two dream records and nothing of the conflict
+/// signal (its entity, topic and reason) on the REST window and the RPC
+/// page, newest first and oldest first, and on the stream's snapshot, on a
+/// console with its own runtime and on one that only aggregates. An
+/// administrator reads all three. The one operator of a console that can
+/// identify nobody reads all three as well, as it reads a member's record
+/// with no witness.
+#[tokio::test]
+async fn every_timeline_page_decides_each_system_record_by_itself() -> TestResult {
+    let state_dir = tempfile::tempdir()?;
+    let runtime =
+        persistent_gateway_runtime_in(state_dir.path(), "witness-system-pages", "", "").await?;
+    let bob = bearer(bob_claims());
+    let root = bearer(root_claims());
+    let conflict_text = [
+        "conflict-entity-text",
+        "conflict-topic-text",
+        "conflict-reason-text",
+    ];
+    let dream_records = ["dream-started-record", "dream-completed-record"];
+    for order in [
+        ["started", "conflict", "completed"],
+        ["conflict", "started", "completed"],
+        ["started", "completed", "conflict"],
+    ] {
+        let log = system_page_log(&order).await?;
+        for (console, own_runtime) in [
+            ("a console with its own runtime", true),
+            ("a console that only aggregates", false),
+        ] {
+            let mut state = enforced_console(&runtime, Some(everyone_drives_every_agent()));
+            if !own_runtime {
+                state.runtime = None;
+            }
+            state.console_aggregator = Some(log.clone());
+            let app = console_json_router_with_state(state);
+            for (reader, token, reads_conflict) in [
+                ("a person who is not an administrator", &bob, false),
+                ("an administrator", &root, true),
+            ] {
+                for (surface, page) in global_pages(&app, Some(token.as_str())).await {
+                    for record in dream_records {
+                        assert!(
+                            page.contains(record),
+                            "{surface} of {console} with the log {order:?}: {reader} reads \
+                             {record}"
+                        );
+                    }
+                    for text in conflict_text {
+                        assert_eq!(
+                            page.contains(text),
+                            reads_conflict,
+                            "{surface} of {console} with the log {order:?}: {reader} and the \
+                             conflict signal's {text}"
+                        );
+                    }
+                }
+            }
+        }
+        let mut state = super::console_private_side_chat_tests::open_console(&runtime);
+        state.console_aggregator = Some(log.clone());
+        let app = console_json_router_with_state(state);
+        for (surface, page) in global_pages(&app, None).await {
+            for text in dream_records.into_iter().chain(conflict_text) {
+                assert!(
+                    page.contains(text),
+                    "{surface} of a console that can identify nobody with the log {order:?}: \
+                     its one operator reads {text}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The decision kept for a request equals the decision itself, frame by
+/// frame: for every kind of frame these rows store (a member's frame with
+/// its witness and with none, a nested member's, each record of the system
+/// page, an update marker of each), read in either order, the cached decider
+/// answers what the uncached decision answers, for an administrator, for two
+/// people who are not, for a caller with no token on a console that can
+/// identify a person, and for the one operator of a console that can
+/// identify nobody.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_decision_kept_for_a_request_equals_the_decision_for_every_frame() -> TestResult {
+    use crate::console_aggregator::TimelineFrameDecider;
+
+    let (_state, runtime, aggregator) = runtime_and_aggregator("witness-decider").await?;
+    let session = session_of(&runtime, "alpha").await?;
+    let witness = aggregator
+        .capture_member_provenance_for_test(RUNTIME_KEY, "alpha", &session)
+        .await
+        .ok_or("the owner captures alpha")?;
+    let mut nested = witness.clone();
+    nested.source_mob_id = format!("{}-child", witness.primary_mob_id);
+    let store = MetaConsoleAggregator::in_memory();
+    let mut frames = Vec::new();
+    for new_frame in [
+        frame_with("alpha", "member-with-witness", Some(witness)),
+        frame_with("alpha", "member-without-witness", None),
+        frame_with("alpha", "nested-member", Some(nested)),
+        frame_with("ghost", "no-member", None),
+    ] {
+        frames.push(store.store().append_if_absent(new_frame).await?.frame);
+    }
+    let system_log = system_page_log(&["started", "conflict", "completed"]).await?;
+    frames.extend(frames_of(&system_log, crate::console_contracts::SYSTEM_EVENT_IDENTITY).await);
+    // An update marker of each frame, as the owner writes it.
+    let markers = frames
+        .iter()
+        .map(|frame| {
+            let mut marker = frame.clone();
+            marker.kind = "frame_updated".to_string();
+            marker.payload = json!({ "frame": frame });
+            marker.source.kind = ConsoleFrameSourceKind::Synthetic;
+            marker
+        })
+        .collect::<Vec<_>>();
+    frames.extend(markers);
+    assert_eq!(frames.len(), 14, "every kind of frame is in the page");
+
+    let enforced = everyone_drives_every_agent();
+    let open = crate::access::AccessController::new(crate::access::AccessControlConfig::default())
+        .expect("access controller");
+    let readers = readers();
+    let views = [
+        ("an administrator", readers.root),
+        ("the owner of the private member", readers.alice),
+        ("another person", readers.bob),
+        (
+            "a caller with no token on a console that can identify a person",
+            enforced.view_for_caller(None, None).on_console(true),
+        ),
+        (
+            "the one operator of a console that can identify nobody",
+            open.view_for_caller(None, None).on_console(false),
+        ),
+    ];
+    let mut decisions = BTreeSet::new();
+    for (reader, view) in &views {
+        for newest_first in [false, true] {
+            let decider = TimelineFrameDecider::new(view.clone());
+            let mut page = frames.iter().collect::<Vec<_>>();
+            if newest_first {
+                page.reverse();
+            }
+            for frame in page {
+                let decided = timeline_frame_visible_to(view, frame);
+                assert_eq!(
+                    decider.visible(frame),
+                    decided,
+                    "{reader}, newest first {newest_first}: the kept decision for the {} frame \
+                     under {} ({})",
+                    frame.kind,
+                    frame.identity,
+                    frame.payload
+                );
+                decisions.insert(decided);
+            }
+        }
+    }
+    assert_eq!(
+        decisions.len(),
+        2,
+        "the page holds frames that are served and frames that are refused"
+    );
+    let _ = runtime.shutdown().await;
+    Ok(())
+}

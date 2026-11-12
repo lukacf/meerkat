@@ -10384,7 +10384,7 @@ pub(crate) fn timeline_frame_visible_to(
         // written from memory records (a memory conflict signal) is decided
         // as a record with no member witness: nothing says whose records the
         // text speaks of.
-        if crate::memory::events::carries_record_text_with_no_member(&frame.kind) {
+        if runtime_plane_record_text(frame) {
             return view.can_view_uncaptured_member(&frame.identity);
         }
         return view.can_view_agent(&frame.identity);
@@ -10457,17 +10457,32 @@ fn captured_lineage(
         .collect()
 }
 
+/// Whether `frame` is a runtime-plane record that carries text written from
+/// memory records (a memory conflict signal): the one input of the decision
+/// ([`timeline_frame_visible_to`]) that is neither the frame's identity nor
+/// its witness. The decision branches on it and the decider's cache key
+/// holds it, both through this function, so the decision kept for one
+/// record of a runtime-plane identity is never the answer for a record of
+/// the other class under the same identity.
+fn runtime_plane_record_text(frame: &ConsoleFrame) -> bool {
+    crate::console_contracts::is_runtime_plane_identity(&frame.identity)
+        && crate::memory::events::carries_record_text_with_no_member(&frame.kind)
+}
+
 /// One caller's [`timeline_frame_visible_to`] over the frames of one
-/// request, cached per (runtime, identity, captured provenance): a restricted
-/// caller scanning many hidden frames decides each distinct member context
-/// once.
+/// request, cached per everything the decision reads of a frame (runtime,
+/// identity, captured provenance, and whether it is a runtime-plane record
+/// that carries text written from memory records): a restricted caller
+/// scanning many hidden frames decides each distinct member context once.
 pub(crate) struct TimelineFrameDecider {
     view: crate::access::AccessView,
     decisions: std::sync::Mutex<HashMap<FrameDecisionKey, bool>>,
 }
 
-/// (runtime key, frame identity, encoded captured provenance).
-type FrameDecisionKey = (String, String, Option<String>);
+/// (runtime key, frame identity, encoded captured provenance,
+/// [`runtime_plane_record_text`]): every input of the decision for a frame
+/// that is no update marker. An input added to the decision belongs here.
+type FrameDecisionKey = (String, String, Option<String>, bool);
 
 impl TimelineFrameDecider {
     pub(crate) fn new(view: crate::access::AccessView) -> Self {
@@ -10493,6 +10508,7 @@ impl TimelineFrameDecider {
             frame.runtime_key.clone(),
             frame.identity.clone(),
             provenance,
+            runtime_plane_record_text(frame),
         );
         if let Some(visible) = self
             .decisions

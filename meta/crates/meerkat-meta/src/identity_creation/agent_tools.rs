@@ -151,6 +151,9 @@ const GOVERNED_FIRST_MESSAGE: &str = "In a governed realm an agent is created wi
 
 const AS_FOR_CREATE: &str = "and `request_id` works, as for identity_create.";
 
+const UNKNOWN_NAME: &str = "A `name` that no agent holds, and an agent you are not shown (one \
+    private to a person), both answer `identity_unknown`.";
+
 /// The description of the identity tool `name`, as a model reads it.
 fn description(name: &str) -> String {
     match name {
@@ -200,7 +203,7 @@ fn description(name: &str) -> String {
              Send `expected_spec_digest`: the agent's `spec_digest` from identity_list, or \
              from the last result that named it. If the agent changed meanwhile you get \
              `stale_spec` with `current_digest`: read the agent again, then decide whether \
-             your change still applies.\n\n\
+             your change still applies. {UNKNOWN_NAME}\n\n\
              `set` names what changes; a member you leave out stays as it is. \
              `instructions` and `context` are replaced whole. `labels` sets each key you \
              give and keeps the others; `labels_remove` removes keys. `profile` moves the \
@@ -225,7 +228,7 @@ fn description(name: &str) -> String {
              agent may be needed later; identity_remove is for good.\n\n\
              Send the agent's `name` and `expected_spec_digest` (its `spec_digest` from \
              identity_list; a changed agent answers `stale_spec` with `current_digest`). \
-             You cannot archive yourself (`self_change_refused`).\n\n\
+             {UNKNOWN_NAME} You cannot archive yourself (`self_change_refused`).\n\n\
              The result's `outcome` is `done` (the agent's `state` is `archiving` while its \
              member stops, then `archived`), `pending_decision` or `refused`, \
              {AS_FOR_CREATE}"
@@ -235,7 +238,7 @@ fn description(name: &str) -> String {
              with its name, memory and current instructions, and takes messages again.\n\n\
              Send the agent's `name` and `expected_spec_digest` (its `spec_digest` from \
              identity_list with `include_archived: true`). An agent that is not archived \
-             answers `not_archived`. You cannot unarchive yourself \
+             answers `not_archived`. {UNKNOWN_NAME} You cannot unarchive yourself \
              (`self_change_refused`).\n\n\
              The result's `outcome` is `done` (the agent's `state` is `restored`), \
              `pending_decision` or `refused`, {AS_FOR_CREATE}"
@@ -247,7 +250,7 @@ fn description(name: &str) -> String {
              when the agent may be needed later.\n\n\
              Send the agent's `name` and `expected_spec_digest` (its `spec_digest` from \
              identity_list; a changed agent answers `stale_spec` with `current_digest`). \
-             You cannot remove yourself (`self_change_refused`).\n\n\
+             {UNKNOWN_NAME} You cannot remove yourself (`self_change_refused`).\n\n\
              The result's `outcome` is `done` (the agent's `state` is `retiring` while its \
              member stops, then `removed`), `pending_decision` or `refused`, \
              {AS_FOR_CREATE}"
@@ -267,8 +270,9 @@ fn description(name: &str) -> String {
             .to_owned(),
         IDENTITY_DIRECTORY => "See what you may name before you create or change a long-term \
              agent: `profiles`, the profiles of your mob, each with whether you may create \
-             an agent of it, and `peers`, the agents of your mob, each with whether you may \
-             list it as a peer. Read only: it never wakes an agent and loads nothing.\n\n\
+             an agent of it, and `peers`, the agents of your mob that are neither archived \
+             nor private to a person, each with whether you may list it as a peer. Read \
+             only: it never wakes an agent and loads nothing.\n\n\
              Every entry has a `verdict`: `allowed`; `needs_decision` (a person decides a \
              request that names it, and `lines` is what they are shown); `not_allowed` \
              (with `reason` when the host's rule gives one).\n\n\
@@ -822,16 +826,17 @@ impl IdentityAgentTools {
             )
             .at("request_id"));
         };
+        // A call id is unique within one model response only: the round
+        // names the response within the run.
         Ok(OperationId::for_tool_call(
             &requester,
-            &ToolCallOrigin {
-                mob_id: self.mob.mob_id().as_str(),
-                session_id: &caller.session.to_string(),
+            &ToolCallOrigin::new(
+                self.mob.mob_id().as_str(),
+                &caller.session.to_string(),
                 run_id,
-                // A call id is unique within one model response only: the
-                // round names the response within the run.
-                tool_call_id: &format!("{round}.{}", site.call_id),
-            },
+                &round.to_string(),
+                site.call_id,
+            ),
         ))
     }
 
@@ -907,9 +912,12 @@ impl IdentityAgentTools {
             Err(refusal) => return Ok(IdentityToolAnswer::refusal(refusal)),
             Ok(IdentityReadAnswer::List(mut page)) if listed => {
                 // An agent is not shown who asked for an agent, when, or
-                // under which consent: the host's read keeps it.
+                // under which consent: the host's read keeps it. An open
+                // operation's id tells who asked too, so it stays there as
+                // well.
                 for agent in &mut page.agents {
                     agent.provenance = None;
+                    agent.open_operations.clear();
                 }
                 serde_json::to_value(page)
             }

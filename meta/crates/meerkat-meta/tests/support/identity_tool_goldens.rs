@@ -101,7 +101,7 @@ A name that was removed is never available again (`name_taken`)."#,
         "identity_update",
         r"Change a long-term agent of your mob: its display name, instructions, context, labels, profile or peers.
 
-Send `expected_spec_digest`: the agent's `spec_digest` from identity_list, or from the last result that named it. If the agent changed meanwhile you get `stale_spec` with `current_digest`: read the agent again, then decide whether your change still applies.
+Send `expected_spec_digest`: the agent's `spec_digest` from identity_list, or from the last result that named it. If the agent changed meanwhile you get `stale_spec` with `current_digest`: read the agent again, then decide whether your change still applies. A `name` that no agent holds, and an agent you are not shown (one private to a person), both answer `identity_unknown`.
 
 `set` names what changes; a member you leave out stays as it is. `instructions` and `context` are replaced whole. `labels` sets each key you give and keeps the others; `labels_remove` removes keys. `profile` moves the agent to that profile's model, tools and skills on the same conversation. `peers_add` and `peers_remove` change who it can message.
 
@@ -190,7 +190,7 @@ The result's `outcome` is `done`, `pending_decision`, `pending_preparation` or `
         "identity_archive",
         r"Stop a long-term agent and keep it. Its name, record, conversation and memory stay; it has no running member, messages to it are refused, and identity_unarchive brings it back on the same conversation. Use this when the agent may be needed later; identity_remove is for good.
 
-Send the agent's `name` and `expected_spec_digest` (its `spec_digest` from identity_list; a changed agent answers `stale_spec` with `current_digest`). You cannot archive yourself (`self_change_refused`).
+Send the agent's `name` and `expected_spec_digest` (its `spec_digest` from identity_list; a changed agent answers `stale_spec` with `current_digest`). A `name` that no agent holds, and an agent you are not shown (one private to a person), both answer `identity_unknown`. You cannot archive yourself (`self_change_refused`).
 
 The result's `outcome` is `done` (the agent's `state` is `archiving` while its member stops, then `archived`), `pending_decision` or `refused`, and `request_id` works, as for identity_create.",
         r#"{
@@ -220,7 +220,7 @@ The result's `outcome` is `done` (the agent's `state` is `archiving` while its m
         "identity_unarchive",
         r"Bring an archived long-term agent back. It returns on the conversation it had, with its name, memory and current instructions, and takes messages again.
 
-Send the agent's `name` and `expected_spec_digest` (its `spec_digest` from identity_list with `include_archived: true`). An agent that is not archived answers `not_archived`. You cannot unarchive yourself (`self_change_refused`).
+Send the agent's `name` and `expected_spec_digest` (its `spec_digest` from identity_list with `include_archived: true`). An agent that is not archived answers `not_archived`. A `name` that no agent holds, and an agent you are not shown (one private to a person), both answer `identity_unknown`. You cannot unarchive yourself (`self_change_refused`).
 
 The result's `outcome` is `done` (the agent's `state` is `restored`), `pending_decision` or `refused`, and `request_id` works, as for identity_create.",
         r#"{
@@ -250,7 +250,7 @@ The result's `outcome` is `done` (the agent's `state` is `restored`), `pending_d
         "identity_remove",
         r"Remove a long-term agent for good. Its member stops, its peer links end, and its name can never be used again, by anyone. Its conversation and memory are kept, and nothing can reach them. This cannot be undone: use identity_archive when the agent may be needed later.
 
-Send the agent's `name` and `expected_spec_digest` (its `spec_digest` from identity_list; a changed agent answers `stale_spec` with `current_digest`). You cannot remove yourself (`self_change_refused`).
+Send the agent's `name` and `expected_spec_digest` (its `spec_digest` from identity_list; a changed agent answers `stale_spec` with `current_digest`). A `name` that no agent holds, and an agent you are not shown (one private to a person), both answer `identity_unknown`. You cannot remove yourself (`self_change_refused`).
 
 The result's `outcome` is `done` (the agent's `state` is `retiring` while its member stops, then `removed`), `pending_decision` or `refused`, and `request_id` works, as for identity_create.",
         r#"{
@@ -304,7 +304,7 @@ Each entry of `agents` has `name`, `display_name`, `profile`, `spec_digest` (wha
     ),
     (
         "identity_directory",
-        r"See what you may name before you create or change a long-term agent: `profiles`, the profiles of your mob, each with whether you may create an agent of it, and `peers`, the agents of your mob, each with whether you may list it as a peer. Read only: it never wakes an agent and loads nothing.
+        r"See what you may name before you create or change a long-term agent: `profiles`, the profiles of your mob, each with whether you may create an agent of it, and `peers`, the agents of your mob that are neither archived nor private to a person, each with whether you may list it as a peer. Read only: it never wakes an agent and loads nothing.
 
 Every entry has a `verdict`: `allowed`; `needs_decision` (a person decides a request that names it, and `lines` is what they are shown); `not_allowed` (with `reason` when the host's rule gives one).
 

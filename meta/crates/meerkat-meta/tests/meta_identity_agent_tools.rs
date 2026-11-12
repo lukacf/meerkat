@@ -438,6 +438,17 @@ impl IdentityFamily for ScriptedFamily {
                     1_700_000_000_000,
                     ConsentSummary::Decided,
                 ));
+                // An operation another agent holds open for it: its id
+                // tells who asked.
+                agent.open_operations = vec![
+                    OperationId::for_request(
+                        &Requester::Agent {
+                            identity: "another-agent".to_owned(),
+                        },
+                        "held-request-1",
+                    )
+                    .expect("a request id"),
+                ];
                 let mut page = AgentPage::default();
                 page.agents = vec![agent];
                 page.next = Some("next-agent".to_owned());
@@ -1060,7 +1071,8 @@ async fn each_identity_tool_reaches_the_family_with_its_wire_request() {
             "{tool} hands the family its read, as the calling member"
         );
         let expected_answer = if tool == IDENTITY_LIST {
-            // The family's page, without the agent's provenance.
+            // The family's page, without the agent's provenance and without
+            // the operation another requester holds open for it.
             json!({
                 "agents": [{
                     "name": "scout",
@@ -1098,10 +1110,18 @@ async fn each_identity_tool_reaches_the_family_with_its_wire_request() {
     }
 
     // An agent that lists the mob's agents is not shown who asked for
-    // another agent, when, or under which consent: the host's read keeps
-    // that.
+    // another agent, when, or under which consent, nor an operation another
+    // requester holds open for it: the host's read keeps that.
     let listed = call(&rig, IDENTITY_LIST, json!({})).await.text();
-    for hidden in ["provenance", "another-agent", "consent", "at_ms", "decided"] {
+    for hidden in [
+        "provenance",
+        "another-agent",
+        "consent",
+        "at_ms",
+        "decided",
+        "open_operations",
+        "held-request-1",
+    ] {
         assert!(
             !listed.contains(hidden),
             "identity_list names no `{hidden}`: {listed}"
@@ -1919,6 +1939,33 @@ fn the_descriptions_say_what_a_model_must_know() {
             .contains("An agent of a profile you may not create agents of is listed too")
     );
     assert!(!text(IDENTITY_LIST).contains("your grant covers"));
+    // A name the caller is shown no agent under: one answer, whatever the
+    // reason (`identity_list_shows_an_agent_of_a_profile_the_caller_may_not_create`).
+    for tool in [
+        IDENTITY_UPDATE,
+        IDENTITY_ARCHIVE,
+        IDENTITY_UNARCHIVE,
+        IDENTITY_REMOVE,
+    ] {
+        assert!(
+            text(tool).contains(
+                "A `name` that no agent holds, and an agent you are not shown (one private to \
+                 a person), both answer `identity_unknown`."
+            ),
+            "{tool} says what a name it is shown no agent under answers"
+        );
+    }
+    assert!(
+        text(IDENTITY_DIRECTORY)
+            .contains("the agents of your mob that are neither archived nor private to a person")
+    );
+    // No text has an agent act for another: who asks is the caller.
+    for tool in IDENTITY_TOOLS {
+        let lower = text(tool).to_lowercase();
+        for absent in ["on behalf of", "for another agent", "as another agent"] {
+            assert!(!lower.contains(absent), "{tool} names no `{absent}`");
+        }
+    }
     assert!(text(IDENTITY_DIRECTORY).contains("it never wakes an agent"));
     for tool in IDENTITY_TOOLS {
         let all = format!("{} {}", text(tool), schema_of(tool)).to_lowercase();
@@ -2227,6 +2274,11 @@ async fn an_agent_creates_changes_archives_and_removes_an_agent_under_the_hosts_
         "name_taken",
         "a create of the removed agent's name",
     );
+    assert_eq!(
+        reused.content["field"], "agents[0].name",
+        "the refusal names the argument: {}",
+        reused.content
+    );
     rig.shutdown().await;
 }
 
@@ -2460,5 +2512,52 @@ async fn identity_list_shows_an_agent_of_a_profile_the_caller_may_not_create() {
         BTreeSet::from([LEAD.to_owned(), "warden".to_owned()]),
         "the profile filter keeps the agents of that profile"
     );
+
+    // The directory's peers follow the same rule: the shared agent is an
+    // entry, a worker member is none.
+    let peers: Vec<&str> = directory.content["peers"]
+        .as_array()
+        .expect("the peers")
+        .iter()
+        .filter_map(|entry| entry["name"].as_str())
+        .collect();
+    assert!(
+        peers.contains(&"warden"),
+        "the agent is a peer entry: {peers:?}"
+    );
+    for worker in ["side", "temp"] {
+        assert!(
+            !peers.contains(&worker),
+            "a worker member is no peer entry: {peers:?}"
+        );
+    }
+
+    // A change of a name the caller is shown no agent under answers
+    // `identity_unknown` at the name, whatever the reason.
+    for (tool, name) in [
+        (IDENTITY_ARCHIVE, "nobody"),
+        (IDENTITY_REMOVE, "side"),
+        (IDENTITY_UNARCHIVE, "temp"),
+    ] {
+        let answer = rig
+            .tool(
+                LEAD,
+                &format!("seen-unknown-{tool}"),
+                tool,
+                json!({"name": name, "expected_spec_digest": warden["spec_digest"]}),
+            )
+            .await;
+        assert_eq!(
+            (
+                answer.content["outcome"].as_str(),
+                answer.content["kind"].as_str(),
+                answer.content["field"].as_str(),
+            ),
+            (Some("refused"), Some("identity_unknown"), Some("name")),
+            "{tool} of {name}: {}",
+            answer.content
+        );
+        assert!(answer.is_error, "{tool} of {name}");
+    }
     rig.shutdown().await;
 }

@@ -123,7 +123,9 @@ These are the same requests the host methods `meta/identity/*` take, field
 for field, without the two members only the host plane writes (`proposer`,
 `source_evidence`). The arguments are closed: an argument a tool does not name
 is refused `invalid_request` with the argument as `field`. Who asks is never
-an argument. It is the member whose session made the call.
+an argument. It is the member whose session made the call: an agent acts only
+as itself, and a change attributed to another agent than the calling session's
+member is refused `invalid_request`.
 
 What the tools do not take in this release: grants, schedules, a fork source,
 another mob, placement, binding, backend or runtime mode. Grants and schedules
@@ -225,7 +227,13 @@ under which consent, nor another requester's open operations; the host's
 continues it.
 
 `identity_directory` answers "what may I name" before a create: each profile
-and each possible peer with a verdict.
+and each possible peer with a verdict. Its peers are the agents that are
+neither archived nor private to a person.
+
+One rule decides which agents an agent is shown, in both reads and in every
+change: an agent is shown no member that is private to a person. A change
+that names such a member answers `identity_unknown` at `name`, exactly as for
+a name no agent holds, so the answer tells nothing about it.
 
 Both are reads: they never wake an agent and load nothing.
 

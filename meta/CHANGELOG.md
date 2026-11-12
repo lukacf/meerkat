@@ -276,7 +276,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     private to a person, of any profile: also an agent of a profile the
     calling agent may create no agent of. It shows an agent no provenance:
     who asked for another agent, when and under which consent stay with the
-    host's read.
+    host's read, and so do another requester's open operations. A change
+    that names a member private to a person answers `identity_unknown`, as
+    for a name no agent holds.
   - The seven tools may wait behind the deferred tool catalog: in a session
     whose catalog is exact, their definitions are loaded on demand.
   - Rust API: `identity_creation::{IdentityAgentTools, IdentityToolCaller,

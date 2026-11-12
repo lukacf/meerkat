@@ -531,6 +531,11 @@ impl ScheduleService {
     /// as it is: both answer the schedule unchanged and write nothing, so
     /// the call can be made again. The answer is the schedule as it is
     /// after the call and whether this call changed it.
+    ///
+    /// A schedule holds one mark for its target, so one owner of the
+    /// target's lifecycle sends this and [`Self::resume_for_target`] for a
+    /// target: a second sender's resume would end the first one's pause
+    /// while its reason still holds.
     pub async fn pause_for_target(
         &self,
         schedule_id: &ScheduleId,

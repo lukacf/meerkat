@@ -12,9 +12,12 @@
 //! instructions against what the mob holds for that agent, which is one
 //! operator instruction record of Meerkat's mob
 //! ([`meerkat_mob::MobHandle::set_operator_instruction`]) in a namespace the
-//! platform reserves, keyed by the agent's name and targeted at that agent
-//! alone. When they differ it writes the record at the slot's next
-//! revision, with the whole current text as its body.
+//! platform reserves, keyed by the agent's name and written for that agent
+//! and its forks (a member target with `include_forks`: Meerkat's mob
+//! selects the agent and every fork of its fork family, and owes a seated
+//! fork the entry as it owes the agent). When they differ it writes the
+//! record at the slot's next revision, with the whole current text as its
+//! body.
 //!
 //! Delivery is Meerkat's: the record is durable in the mob's journal, the
 //! mob records it in the agent's session (store-only while the agent is not
@@ -407,9 +410,13 @@ impl IdentityRuntime {
             revision,
             body,
             content_sha256: Some(digest),
+            // The record is the agent's and its forks': a live fork of the
+            // agent is owed the entry at its next run, and a fork taken
+            // later has the record in its snapshot. The mob selects the
+            // forks; this file reads no fork.
             target: OperatorInstructionTarget::Member {
                 agent_identity: member,
-                include_forks: false,
+                include_forks: true,
             },
         };
         match mob.set_operator_instruction(write).await {

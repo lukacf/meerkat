@@ -444,8 +444,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   conversation kept. When the instructions of an agent created at run time
   are updated, or a configured agent's instructions are edited in the host's
   configuration, the gateway records the whole current text as one operator
-  instruction for that agent alone (namespace `meerkat.identity.instructions`,
-  keyed by the agent's name), and Meerkat's mob delivers it: the change
+  instruction for that agent and its forks (namespace
+  `meerkat.identity.instructions`, keyed by the agent's name, a member target
+  with Meerkat's `include_forks`), and Meerkat's mob delivers it: the change
   reaches the agent at its next run; a run that starts within moments of the
   change may still use the earlier instructions; earlier instructions are
   never rewritten. An agent that is not loaded is not woken, a restart
@@ -455,10 +456,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   fresh conversation's first prompt is the current text, and nothing is
   appended to it. A model that takes a system instruction only ahead of the
   conversation applies the change after a compaction or with a fresh
-  conversation. See
+  conversation. A fork of the agent follows the record by Meerkat's rule for
+  a member and its forks: a fork that is live when the change is recorded
+  gets the entry at its next run, once; a fork taken afterwards has the
+  record in its own snapshot, which a durable fork has recorded in its
+  session before it is seated and a helper fork is born with. See
   [Changing an agent's instructions](docs/concepts/roster.mdx#changing-an-agents-instructions),
   with this release's limits (one agent's set of operator instructions,
-  governed runtimes, forks).
+  which also counts the longest instruction record of another agent;
+  governed runtimes; the forks the record does not reach).
 
 - Rust: `IdentityRuntime` implements the identity change interface's
   `identity_creation::InstructionStep`: `after_update` answers an

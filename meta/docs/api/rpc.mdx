@@ -4324,7 +4324,9 @@ agent in `meerkat.identity.instructions`, keyed by the agent's name (see
 `meta/set_instruction` and `meta/revoke_instruction` refuse such a namespace
 with `-32602` and `instruction_set_code` `invalid_request`, and nothing is
 written: change the agent's instructions in its spec instead.
-`meta/instruction_status` shows these records like any other.
+`meta/instruction_status` shows these records like any other; each is
+written for its agent and the agent's forks, so its member target reads
+`"include_forks": true`.
 
 ### `meta/instruction_status`
 

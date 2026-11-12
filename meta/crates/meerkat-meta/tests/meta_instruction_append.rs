@@ -819,7 +819,7 @@ async fn a_store_owned_agents_updated_instructions_are_appended_at_its_next_run(
     rig.turn(CONFIGURED, "OTHER-AGENT-TURN").await;
     assert!(
         entries(&rig.request_messages("OTHER-AGENT-TURN")).is_empty(),
-        "the record targets the changed agent alone: another agent reads no entry"
+        "the record selects the changed agent and its forks: another agent reads no entry"
     );
     rig.shutdown().await;
 }
@@ -2728,9 +2728,9 @@ async fn a_host_write_to_the_reserved_namespaces_is_refused_and_their_records_ar
             json!(CONFIGURED),
             json!(1),
             json!("active"),
-            json!({"kind": "member", "identity": CONFIGURED})
+            json!({"kind": "member", "identity": CONFIGURED, "include_forks": true})
         ),
-        "the status read shows the agent's record, untouched: {record:#?}"
+        "the status read shows the agent's record, untouched and with its fork scope: {record:#?}"
     );
 
     let own = rig
@@ -3085,26 +3085,44 @@ async fn a_governed_runtime_answers_prepared_authorization_required_and_keeps_th
 }
 
 /// What a fork of an agent whose instructions changed runs on, one route
-/// each: the fork's first request, and whether it holds the agent's first
-/// prompt text and its changed text.
+/// each, read from the fork's first request: whether it holds the agent's
+/// first prompt text, how many entries carry the agent's whole changed text
+/// (the fork's own entries of the agent's record), how many other entries
+/// with a body it holds, and how many rows it reads as an inherited header
+/// (an entry of its source, copied with the conversation, without its
+/// text).
+#[derive(Debug, PartialEq, Eq)]
 struct ForkFacts {
     first_prompt_text: bool,
-    changed_text: bool,
-    entries_with_a_body: usize,
+    entries_with_the_changed_text: usize,
+    other_entries: usize,
+    inherited_headers: usize,
 }
 
 fn fork_facts(request: &[Value]) -> ForkFacts {
     let whole = Value::Array(request.to_vec()).to_string();
+    let entries = entries(request);
+    let with_the_changed_text = entries
+        .iter()
+        .filter(|entry| carries(entry, &["Answer in BETA style."]))
+        .count();
     ForkFacts {
         first_prompt_text: whole.contains("Answer in ALPHA style."),
-        changed_text: whole.contains("Answer in BETA style."),
-        entries_with_a_body: entries(request).len(),
+        entries_with_the_changed_text: with_the_changed_text,
+        other_entries: entries.len() - with_the_changed_text,
+        inherited_headers: request
+            .iter()
+            .filter_map(|message| message["content"].as_str())
+            .filter(|content| content.starts_with("[meerkat-inherited-operator-instructions-v1]"))
+            .count(),
     }
 }
 
-/// The source of the fork rows: the configured agent on the profile with
-/// mob tools, built with one text, changed to another, and run once on the
-/// change.
+/// The source of the three rows that fork an agent AFTER its change was
+/// recorded: the configured agent on the profile with mob tools, built with
+/// one text, changed to another, and run once on the change. Its record is
+/// the agent's and its forks', so each fork taken from here on has the
+/// record in its own snapshot.
 async fn edited_fork_source(state: &Path) -> Rig {
     let mut rig = boot(
         state,
@@ -3126,13 +3144,13 @@ async fn edited_fork_source(state: &Path) -> Rig {
     rig
 }
 
-/// `fork_off`, the agent tool: the child's first request, as it is today.
-/// The child is another member, which the source's record does not select.
-///
-/// Pinned as it is, not as it should be: a fork does not carry the agent's
-/// changed instructions in this release.
+/// `fork_off`, the agent tool, after the change was recorded: the child's
+/// first request. The child is a durable fork, which the source's record
+/// selects: it copies the source's conversation (the first prompt, and the
+/// source's entry as a header without its text) and holds its own entry
+/// with the whole changed text, once.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_fork_off_child_of_an_edited_agent_starts_from_the_first_prompt() {
+async fn a_fork_off_child_of_an_edited_agent_holds_its_own_entry_once() {
     let temp = tempfile::tempdir().unwrap();
     let mut rig = edited_fork_source(temp.path()).await;
     let sent = rig
@@ -3147,29 +3165,29 @@ async fn a_fork_off_child_of_an_edited_agent_starts_from_the_first_prompt() {
         "the fork child runs its task"
     );
     let facts = fork_facts(&rig.request_messages("FORK-TASK-MARKER"));
-    eprintln!(
-        "MEASURED fork_off: first prompt text {}, changed text {}, entries with a body {}",
-        facts.first_prompt_text, facts.changed_text, facts.entries_with_a_body
-    );
+    eprintln!("MEASURED fork_off: {facts:?}");
     assert_eq!(
-        (
-            facts.first_prompt_text,
-            facts.changed_text,
-            facts.entries_with_a_body
-        ),
-        (true, false, 0),
-        "the child starts from the agent's first prompt, without the changed text"
+        facts,
+        ForkFacts {
+            first_prompt_text: true,
+            entries_with_the_changed_text: 1,
+            other_entries: 0,
+            inherited_headers: 1,
+        },
+        "the child holds the copied first prompt, the source's entry as a header and its own \
+         entry with the changed text, once"
     );
     rig.shutdown().await;
 }
 
 /// The durable fork (`UnifiedRuntime::fork_member`, which `meta/fork_member`
-/// and a console side chat run): the child's first request, as it is today.
-/// The child reads the source's entry row as an inherited header that names
-/// the record and its digest and holds no text: it is told an instruction
-/// exists that it cannot read. Pinned as it is.
+/// and a console side chat run), after the change was recorded: the child's
+/// first request. The child reads the source's entry row as an inherited
+/// header that names the record and its digest and holds no text, and
+/// behind it its own entry of the same record, with the whole changed text,
+/// once.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_durable_fork_of_an_edited_agent_starts_from_the_first_prompt() {
+async fn a_durable_fork_of_an_edited_agent_holds_its_own_entry_once() {
     let temp = tempfile::tempdir().unwrap();
     let mut rig = edited_fork_source(temp.path()).await;
     let forked = rig
@@ -3191,35 +3209,49 @@ async fn a_durable_fork_of_an_edited_agent_starts_from_the_first_prompt() {
     assert!(rig.asked("DURABLE-FORK-TURN").await, "the fork runs a turn");
     let request = rig.request_messages("DURABLE-FORK-TURN");
     let facts = fork_facts(&request);
-    let inherited = request
-        .iter()
-        .filter_map(|message| message["content"].as_str())
-        .filter(|content| content.starts_with("[meerkat-inherited-operator-instructions-v1]"))
-        .count();
-    eprintln!(
-        "MEASURED durable fork: first prompt text {}, changed text {}, entries with a body {}, \
-         inherited headers {inherited}",
-        facts.first_prompt_text, facts.changed_text, facts.entries_with_a_body
-    );
+    eprintln!("MEASURED durable fork: {facts:?}");
     assert_eq!(
-        (
-            facts.first_prompt_text,
-            facts.changed_text,
-            facts.entries_with_a_body,
-            inherited
-        ),
-        (true, false, 0, 1),
-        "the child reads the source's entry as a header without its text"
+        facts,
+        ForkFacts {
+            first_prompt_text: true,
+            entries_with_the_changed_text: 1,
+            other_entries: 0,
+            inherited_headers: 1,
+        },
+        "the child reads the source's entry as a header without its text and holds its own \
+         entry with the changed text, once"
+    );
+    let header = request
+        .iter()
+        .position(|message| {
+            message["content"].as_str().is_some_and(|content| {
+                content.starts_with("[meerkat-inherited-operator-instructions-v1]")
+            })
+        })
+        .expect("the inherited header");
+    let own = request
+        .iter()
+        .position(|message| {
+            message["content"]
+                .as_str()
+                .is_some_and(|content| content.starts_with(ENTRY_HEADER))
+        })
+        .expect("the child's own entry");
+    assert!(
+        header < own,
+        "the child's own entry follows the header it copied: header at {header}, entry at {own}"
     );
     rig.shutdown().await;
 }
 
-/// The helper fork (`meta/fork_helper`): the helper's first request, as it
-/// is today. A helper is a fresh one-shot member handed the source's
-/// conversation as context: it holds neither the source's first prompt text
-/// nor its changed text.
+/// The helper fork (`meta/fork_helper`), after the change was recorded: the
+/// helper's first request. A helper is a fresh one-shot member on its own
+/// profile's prompt, handed the source's conversation as context: it does
+/// not hold the source's first prompt text. The source's record selects it,
+/// and it is born with the record: its first request holds its own entry
+/// with the whole changed text, once.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_helper_fork_of_an_edited_agent_carries_neither_text() {
+async fn a_helper_fork_of_an_edited_agent_holds_its_own_entry_once() {
     let temp = tempfile::tempdir().unwrap();
     let mut rig = edited_fork_source(temp.path()).await;
     let helped = rig
@@ -3243,18 +3275,17 @@ async fn a_helper_fork_of_an_edited_agent_carries_neither_text() {
         "the helper runs its task"
     );
     let facts = fork_facts(&rig.request_messages("HELPER-FORK-TASK"));
-    eprintln!(
-        "MEASURED helper fork: first prompt text {}, changed text {}, entries with a body {}",
-        facts.first_prompt_text, facts.changed_text, facts.entries_with_a_body
-    );
+    eprintln!("MEASURED helper fork: {facts:?}");
     assert_eq!(
-        (
-            facts.first_prompt_text,
-            facts.changed_text,
-            facts.entries_with_a_body
-        ),
-        (false, false, 0),
-        "the helper holds none of the source's instructions"
+        facts,
+        ForkFacts {
+            first_prompt_text: false,
+            entries_with_the_changed_text: 1,
+            other_entries: 0,
+            inherited_headers: 0,
+        },
+        "the helper holds its own entry with the changed text, once, and not the source's \
+         first prompt"
     );
     rig.shutdown().await;
 }

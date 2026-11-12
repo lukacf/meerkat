@@ -367,12 +367,14 @@ This holds for every agent, whatever declares it:
 
 How it works. The gateway keeps one operator instruction record per agent
 whose instructions changed, in the namespace `meerkat.identity.instructions`,
-keyed by the agent's name and targeted at that agent alone (see
+keyed by the agent's name and written for that agent and its forks (a member
+target with Meerkat's `include_forks`; see
 [Operator instructions](/api/rpc#operator-instructions)). Meerkat's mob owns
 the delivery: the record is durable in the mob's journal, each change is the
 record's next revision, and the agent applies it at its next run start. A
 restart neither loses nor repeats it. `meta/instruction_status` shows these
-records like any other. The namespaces that start with `meerkat.identity.`
+records like any other, with `"include_forks": true` on their target. The
+namespaces that start with `meerkat.identity.`
 are the platform's: `meta/set_instruction` and `meta/revoke_instruction`
 refuse them (`invalid_request`).
 
@@ -491,22 +493,43 @@ update's result:
 - A mob keeps a record for each of any number of agents. What is bounded is
   one agent's own set: the operator instructions that select it (those for
   every member or for its profile, and its own) hold at most 64 records and
-  1 MiB of text. The change of an agent whose set is full is not recorded
+  1 MiB of text. An agent's record is also its forks', and any member may be
+  seated as a fork of an agent, so Meerkat counts in each agent's set, beside
+  those, the records one other agent passes to its forks (the agent that
+  passes the most): with these records alone, one record of the 64 and, of
+  the 1 MiB, the longest instruction record of another agent. The
+  instruction records of the two agents with the longest texts therefore
+  fit in 1 MiB together with the records for every member or a profile.
+  The change of an agent whose set would be full is not recorded
   (`slot_limit_exceeded`, `active_set_budget_exceeded`); it applies from the
   agent's next fresh conversation.
 - A governed runtime (one with a native work authorization host) takes no
   operator instruction record (`prepared_authorization_required`): there, a
   change applies from the agent's next fresh conversation.
-- A fork of an agent does not carry the agent's changed instructions. What
-  it starts from depends on the route:
-  - a `fork_off` child starts from the agent's first prompt;
-  - a durable fork (`meta/fork_member`, a console side chat) starts from the
-    agent's first prompt too, and reads one header row that says an
-    instruction of its source is not active in it, without the
-    instruction's text;
-  - a helper fork is a fresh member on its own profile's prompt, with the
-    agent's conversation as context: it carries neither the first prompt's
-    text nor the changed one.
+- Forks follow the agent's record by Meerkat's rule for a record written for
+  a member and its forks (see
+  [Operator instructions](https://docs.rkat.ai/guides/mobs#operator-instructions)
+  in the Meerkat guide), forks of forks included:
+  - A fork that is live when the change is recorded gets the entry with the
+    whole current text appended at its next run, once, as the agent does.
+  - A fork taken after the change was recorded has the agent's record in its
+    own snapshot. A durable fork (a `fork_off` child, `meta/fork_member`, a
+    console side chat) has that snapshot recorded in its session before it
+    is seated. It copies the agent's conversation, so it also reads the
+    agent's own earlier entry as one header row without the text, which is
+    history; its own entry, behind that row, carries the text. A helper
+    fork is a fresh member on its own profile's prompt with the agent's
+    conversation as context, and is born with the record: it holds its own
+    entry with the text, and not the agent's first prompt.
+  - A seated fork then follows the record as the agent does: a later change,
+    and the revoke of the record (a reset, a delete or a removal of the
+    agent revokes it), reach the fork as entries appended at its next run.
+  - A fork's first prompt stays the copy it was taken with: a change reaches
+    a fork as an entry, never as a rewritten prompt.
+  - Not reached: the participants of a temporary council (they are seated in
+    the council's own mob), a session forked outside the mob and seated
+    later as a member, and a fork seated by a release before 0.9.15 (it has
+    no fork family on record).
 
 ## Deep member status
 

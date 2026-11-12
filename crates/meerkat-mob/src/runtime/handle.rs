@@ -11391,6 +11391,48 @@ impl MobHandle {
         }
     }
 
+    /// The members among `targets` that the host's member tool audience
+    /// ([`MobBuilder::with_member_tool_audience`](super::MobBuilder::with_member_tool_audience))
+    /// hides from `caller`: the one check behind every member operator tool
+    /// that names or lists members (`member_status`, `retire_member`,
+    /// `force_cancel_member`, `list_members`, and the mob tools'
+    /// `mob_list_members`).
+    ///
+    /// A hidden member is one the caller's tools answer exactly as a member
+    /// the mob does not hold: a tool that names it answers member not
+    /// found, and a list leaves its row out whole. `caller` is the member
+    /// bound to the session that made the call; `None` is a call no
+    /// member's session made (a host's or an operator's own surface), and
+    /// what such a call is shown is the audience's to say, like every other.
+    /// The audience is asked once per target, with the labels the caller
+    /// and that target carry on their own roster rows, from one roster read.
+    /// Empty when the host installed no audience.
+    pub async fn members_hidden_from(
+        &self,
+        caller: Option<&AgentIdentity>,
+        targets: &[AgentIdentity],
+    ) -> BTreeSet<AgentIdentity> {
+        let Some(audience) = self.member_tool_audience.as_ref() else {
+            return BTreeSet::new();
+        };
+        let roster = self.roster().await;
+        let labels = |member: &AgentIdentity| roster.get(member).map(|entry| &entry.labels);
+        let caller_labels = caller.and_then(labels);
+        targets
+            .iter()
+            .filter(|target| {
+                audience.hides(
+                    &self.definition().id,
+                    caller,
+                    caller_labels,
+                    target,
+                    labels(target),
+                )
+            })
+            .cloned()
+            .collect()
+    }
+
     async fn resolve_peer_connectivity(
         &self,
         entry: &RosterEntry,

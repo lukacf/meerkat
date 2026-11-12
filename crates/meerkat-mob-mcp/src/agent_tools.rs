@@ -2304,12 +2304,15 @@ impl AgentMobToolSurface {
             .current_mob_admission(call.name, &mob_id, &handle)
             .await?;
         self.state.pause_agent_call().await;
+        // The calling member, when it is a member of the listed mob: the
+        // owner view and the host's member tool audience both read it.
+        let caller = self.caller_identity_in(&handle).await;
         let owner_view = if manage {
             None
         } else {
             // Without manage scope a member of this mob still sees the
             // members it spawned (e.g. its fork_off children), and only those.
-            match self.caller_identity_in(&handle).await {
+            match caller.clone() {
                 Some(caller) => Some(caller),
                 None => return Err(ToolError::access_denied(call.name)),
             }
@@ -2333,6 +2336,14 @@ impl AgentMobToolSurface {
             }
             members = owned;
         }
+        // A member the mob's host hides from the caller's member tools is
+        // not in the list at all, with manage scope too.
+        let listed: Vec<AgentIdentity> = members
+            .iter()
+            .map(|member| member.agent_identity.clone())
+            .collect();
+        let hidden = handle.members_hidden_from(caller.as_ref(), &listed).await;
+        members.retain(|member| !hidden.contains(&member.agent_identity));
 
         Self::encode_result(call, json!({"members": members}))
     }
@@ -3108,7 +3119,8 @@ fn build_tool_defs_with_profile_support(
              and session metadata. More efficient than calling mob_check_member on each member \
              individually when you need a status overview of the whole mob.\n\n\
              Without manage scope over the mob, you see only the members you own: the members \
-             you forked and, transitively, the members they forked.",
+             you forked and, transitively, the members they forked. A member the mob's host \
+             keeps from your member tools is not listed, with manage scope too.",
             typed_schema::<MobIdArgs>(),
         ),
         tool_def(

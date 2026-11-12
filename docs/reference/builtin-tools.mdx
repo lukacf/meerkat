@@ -641,7 +641,10 @@ all of these tools reach every member, as before. A host can hide members
 from other members' operator tools (`MobBuilder::with_member_tool_audience`):
 `member_status`, `retire_member` and `force_cancel_member` answer a member its
 audience hides from the calling member exactly as a member the mob does not
-hold, with manage scope too, and do nothing to it.
+hold, with manage scope too, and do nothing to it, and `list_members` and
+`mob_list_members` leave such a member out of the list. The audience is
+handed the labels the calling member and the target carry on their own
+roster rows, so its rule can rest on a member's durable labels.
 
 A member placed on a member host holds manage scope over its mob, including
 the privileged spawn arguments, unless its controlling host narrowed it with

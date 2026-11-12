@@ -30261,10 +30261,202 @@ impl MemberToolAudience for HideMemberFrom {
         &self,
         _mob_id: &MobId,
         caller: Option<&AgentIdentity>,
+        _caller_labels: Option<&BTreeMap<String, String>>,
         target: &AgentIdentity,
+        _target_labels: Option<&BTreeMap<String, String>>,
     ) -> bool {
         caller == Some(&self.caller) && target == &self.target
     }
+}
+
+/// A host's member tool audience that decides on the roster labels alone: a
+/// member whose row carries the label `kept_for` is hidden from every caller
+/// whose own row does not carry the same value.
+struct HideKeptMembers;
+
+impl MemberToolAudience for HideKeptMembers {
+    fn hides(
+        &self,
+        _mob_id: &MobId,
+        _caller: Option<&AgentIdentity>,
+        caller_labels: Option<&BTreeMap<String, String>>,
+        _target: &AgentIdentity,
+        target_labels: Option<&BTreeMap<String, String>>,
+    ) -> bool {
+        let kept_for = |labels: Option<&BTreeMap<String, String>>| {
+            labels.and_then(|labels| labels.get("kept_for")).cloned()
+        };
+        match kept_for(target_labels) {
+            Some(keeper) => kept_for(caller_labels) != Some(keeper),
+            None => false,
+        }
+    }
+}
+
+/// The audience is handed the labels the caller and the target carry on
+/// their own roster rows, so a host's rule about a member's durable labels
+/// holds for a member the host never built in this process. A member whose
+/// row carries the label is answered to a caller whose row does not carry
+/// it, with manage scope too, exactly as a member the mob does not hold; a
+/// caller whose row carries the same value is admitted, and a member whose
+/// row does not carry the label is admitted as before.
+#[tokio::test]
+async fn owned_member_tools_hand_the_audience_the_roster_labels_of_both_members() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    service.set_return_exact_run_result(true);
+    let handle = MobBuilder::new(sample_definition_with_mob_tools(), MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .with_member_tool_audience(Arc::new(HideKeptMembers))
+        .create()
+        .await
+        .expect("create mob");
+    let mob_id = handle.definition().id.to_string();
+    let kept_for = |keeper: &str| BTreeMap::from([("kept_for".to_string(), keeper.to_string())]);
+    for (member, labels) in [
+        ("labels-kept", Some(kept_for("ann"))),
+        ("labels-keeper", Some(kept_for("ann"))),
+        ("labels-other-keeper", Some(kept_for("bob"))),
+        ("labels-plain", None),
+    ] {
+        let mut spec = crate::runtime::handle::SpawnMemberSpec::new(
+            ProfileName::from("worker"),
+            AgentIdentity::from(member),
+        )
+        .with_initial_message(ContentInput::Text("source context".to_string()));
+        if let Some(labels) = labels {
+            spec = spec.with_labels(labels);
+        }
+        handle.spawn_spec(spec).await.expect("spawn the member");
+    }
+    let manager_tools = |caller: &'static str| {
+        let handle = handle.clone();
+        let mob_id = mob_id.clone();
+        async move {
+            owned_member_tool_dispatcher(
+                &handle,
+                &AgentIdentity::from(caller),
+                generated_mob_operator_authority_with_scope(&mob_id, handle.live_incarnation()),
+            )
+            .await
+        }
+    };
+    let plain = manager_tools("labels-plain").await;
+    let other_keeper = manager_tools("labels-other-keeper").await;
+    let keeper = manager_tools("labels-keeper").await;
+
+    // Each tool that names or lists members is asked, and the row says at
+    // its end which of them showed the kept member to a caller it is hidden
+    // from: every one of them goes through the audience.
+    let mut shown: Vec<String> = Vec::new();
+    let absent = |result: &Result<ToolDispatchOutcome, ToolError>| {
+        matches!(
+            result,
+            Err(ToolError::ExecutionFailedWithData { data, .. })
+                if data["kind"] == "member_not_found"
+        )
+    };
+    let listed = |tools: Arc<dyn AgentToolDispatcher>| async move {
+        let args = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+        let result = tools
+            .dispatch(ToolCallView {
+                id: "audience-list",
+                name: "list_members",
+                args: &args,
+            })
+            .await
+            .expect("list_members dispatches");
+        let payload: serde_json::Value =
+            serde_json::from_str(&result.result.text_content()).expect("list payload");
+        let mut names: Vec<String> = payload["members"]
+            .as_array()
+            .expect("members array")
+            .iter()
+            .map(|entry| entry["agent_identity"].as_str().unwrap().to_owned())
+            .collect();
+        names.sort_unstable();
+        names
+    };
+    for (tools, caller) in [
+        (&plain, "a caller whose row carries no such label"),
+        (&other_keeper, "a caller whose row carries another value"),
+    ] {
+        // The retirement is asked last: a tool that is not asked through
+        // the audience would carry it out.
+        for tool in ["member_status", "force_cancel_member"] {
+            if !absent(&dispatch_owned_member_tool(tools, tool, "labels-kept").await) {
+                shown.push(format!("{tool} by {caller}"));
+            }
+        }
+        if listed(Arc::clone(tools))
+            .await
+            .contains(&"labels-kept".to_owned())
+        {
+            shown.push(format!("list_members by {caller}"));
+        }
+    }
+    for (tools, caller) in [
+        (&plain, "a caller whose row carries no such label"),
+        (&other_keeper, "a caller whose row carries another value"),
+    ] {
+        if !absent(&dispatch_owned_member_tool(tools, "retire_member", "labels-kept").await) {
+            shown.push(format!("retire_member by {caller}"));
+        }
+    }
+    assert!(
+        shown.is_empty(),
+        "the kept member is answered as one the mob does not hold, and listed to no caller \
+         it is hidden from; shown by: {shown:?}"
+    );
+    assert_member_absence_error(
+        dispatch_owned_member_tool(&plain, "member_status", "labels-kept").await,
+        "member_not_found",
+        &mob_id,
+        "labels-kept",
+        "member_status of a hidden member",
+    );
+    assert!(
+        handle
+            .get_member(&AgentIdentity::from("labels-kept"))
+            .await
+            .unwrap()
+            .is_some(),
+        "nothing is done to the hidden member"
+    );
+    dispatch_owned_member_tool(&keeper, "member_status", "labels-kept")
+        .await
+        .expect("a caller whose row carries the same value checks it");
+    dispatch_owned_member_tool(&other_keeper, "member_status", "labels-plain")
+        .await
+        .expect("a member whose row carries no such label is admitted as before");
+
+    // The lists in full: a member the audience hides from the caller is
+    // not in its list at all, with manage scope, and every other member is.
+    let everyone = vec![
+        "labels-keeper".to_owned(),
+        "labels-kept".to_owned(),
+        "labels-other-keeper".to_owned(),
+        "labels-plain".to_owned(),
+    ];
+    assert_eq!(
+        listed(plain).await,
+        vec!["labels-plain".to_owned()],
+        "a caller whose row carries no such label is listed no kept member"
+    );
+    assert_eq!(
+        listed(other_keeper).await,
+        vec!["labels-other-keeper".to_owned(), "labels-plain".to_owned()],
+        "a caller whose row carries another value is listed its own kind only"
+    );
+    assert_eq!(
+        listed(keeper).await,
+        everyone
+            .iter()
+            .filter(|name| *name != "labels-other-keeper")
+            .cloned()
+            .collect::<Vec<_>>(),
+        "a caller whose row carries the same value is listed the kept members"
+    );
 }
 
 /// A member the host's audience hides from the calling member

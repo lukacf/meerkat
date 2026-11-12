@@ -35,7 +35,23 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- `meerkat-mob`: `MemberToolAudience::hides` takes two more arguments,
+  `caller_labels` and `target_labels`: the labels the calling member and
+  the target carry on their own roster rows at the call, `None` for one
+  the roster holds no row for. Meerkat hands them in from one roster read,
+  so a host's rule about a member's durable labels holds for a member the
+  host did not build in this process. An implementation adds the two
+  parameters; one that decides by identity alone ignores them.
+
 ### Added
+
+- Mob: `MobHandle::members_hidden_from` answers which of the members it is
+  given the host's member tool audience
+  (`MobBuilder::with_member_tool_audience`) hides from a calling member:
+  the one check behind every member operator tool that names or lists
+  members. Empty when the host installed no audience.
 
 - `MobHandle::seat_owed_store_owned_identities` seats, while the mob runs,
   every store-owned identity that is owed its seat (the spawn of its
@@ -75,6 +91,13 @@ them.
   No released surface held a decision of these kinds.
 
 ### Fixed
+
+- Mob: the member lists a member's own tools answer (`list_members`, and
+  the mob tools' `mob_list_members`) leave out a member the host's member
+  tool audience hides from the caller, with manage scope too, as
+  `member_status`, `retire_member` and `force_cancel_member` already
+  answered such a member as one the mob does not hold. Through 0.9.14 a
+  list named it. Hosts with no audience see no change.
 
 - Mob: Core asks the host's member build preparer
   (`MobBuilder::with_member_build_preparer`) before the spawn of a

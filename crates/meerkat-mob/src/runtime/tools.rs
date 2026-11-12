@@ -1191,8 +1191,19 @@ pub trait MemberToolAudience: Send + Sync {
     /// Whether member `target` of mob `mob_id` is hidden from `caller`, the
     /// member bound to the session that made the call (`None` for a call no
     /// member's session made).
-    fn hides(&self, mob_id: &MobId, caller: Option<&AgentIdentity>, target: &AgentIdentity)
-    -> bool;
+    ///
+    /// `caller_labels` and `target_labels` are the labels each of the two
+    /// carries on its own roster row at the call, `None` for one the roster
+    /// holds no row for: what a member's durable row says of it reaches the
+    /// audience whether or not the host built the member in this process.
+    fn hides(
+        &self,
+        mob_id: &MobId,
+        caller: Option<&AgentIdentity>,
+        caller_labels: Option<&BTreeMap<String, String>>,
+        target: &AgentIdentity,
+        target_labels: Option<&BTreeMap<String, String>>,
+    ) -> bool;
 }
 
 pub(crate) struct MobOperatorToolDispatcher {
@@ -1464,8 +1475,11 @@ impl MobOperatorToolDispatcher {
         let validated = self.validated_caller(owner, tool_name).await?;
         // A member the host's audience hides from the caller is answered as
         // one the mob does not hold, whatever the caller's scope.
-        if let Some(audience) = self.handle.member_tool_audience.as_ref()
-            && audience.hides(&self.handle.definition().id, validated.as_ref(), target)
+        if !self
+            .handle
+            .members_hidden_from(validated.as_ref(), std::slice::from_ref(target))
+            .await
+            .is_empty()
         {
             return Err(MemberTargetAbsence::NotFound.to_tool_error(
                 tool_name,
@@ -1837,7 +1851,7 @@ pub(crate) fn local_operator_tool_defs() -> Vec<Arc<ToolDef>> {
     ));
     defs.push(tool_def(
             TOOL_LIST_MEMBERS,
-            "List all active mob members. Response includes identity-native lifecycle and runtime fields.",
+            "List the active mob members. A member the mob's host keeps from this caller's member tools is not listed. Response includes identity-native lifecycle and runtime fields.",
             json!({
                 "type": "object",
                 "properties": {}
@@ -2120,6 +2134,9 @@ impl MobOperatorToolDispatcher {
         // Every check of this call reads one snapshot of the authority.
         let authority = self.admission_authority(call.name)?;
         let mut owner_list_view = None;
+        // The member a list is made for: the host's audience says which
+        // members it is shown.
+        let mut list_caller = None;
         if matches!(
             call.name,
             TOOL_MEMBER_STATUS | TOOL_RETIRE_MEMBER | TOOL_FORCE_CANCEL_MEMBER
@@ -2140,6 +2157,7 @@ impl MobOperatorToolDispatcher {
             && self.tools.iter().any(|tool| tool.name == call.name)
         {
             let validated = self.validated_caller(owner, call.name).await?;
+            list_caller.clone_from(&validated);
             if let Err(denied) = self.ensure_current_mob_scope(call.name, &authority).await {
                 // Without manage scope a member sees only the members it
                 // spawned (its fork_off children).
@@ -2394,6 +2412,18 @@ impl MobOperatorToolDispatcher {
                     }
                     members = owned;
                 }
+                // A member the host's audience hides from the caller is not
+                // in its list at all, with manage scope too: the same check
+                // the per-member tools answer by.
+                let listed: Vec<AgentIdentity> = members
+                    .iter()
+                    .map(|entry| entry.agent_identity.clone())
+                    .collect();
+                let hidden = self
+                    .handle
+                    .members_hidden_from(list_caller.as_ref(), &listed)
+                    .await;
+                members.retain(|entry| !hidden.contains(&entry.agent_identity));
                 let mob_id = self.handle.definition().id.clone();
                 let members = members
                     .into_iter()

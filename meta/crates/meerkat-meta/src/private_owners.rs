@@ -697,7 +697,9 @@ impl meerkat_mob::MemberToolAudience for PrivateOwners {
         &self,
         mob_id: &meerkat_mob::MobId,
         caller: Option<&meerkat_mob::AgentIdentity>,
+        _caller_labels: Option<&BTreeMap<String, String>>,
         target: &meerkat_mob::AgentIdentity,
+        _target_labels: Option<&BTreeMap<String, String>>,
     ) -> bool {
         let Some(owner) = self.owner_of(mob_id.as_str(), target.as_str()) else {
             return false;

@@ -558,6 +558,16 @@ class PinnedExportTests(PinnedCase):
         self.assertEqual(summary["contents_sha256"], sha((self.fixture.output / "CONTENTS.json").read_bytes()))
         self.assertEqual(summary["closure_record"]["key"], self.fixture.closure.name)
 
+    def test_cli_refuses_the_linux_target_with_otherwise_complete_pinned_inputs(self):
+        # In process, so the carried pins are the fixture's and the target is the only defect.
+        stdout, stderr = io.StringIO(), io.StringIO()
+        argv = [str(SCRIPT), *self.fixture.argv(), "--target", "linux-x86_64-cpython311"]
+        with patch.object(sys, "argv", argv), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            self.assertEqual(MODULE.main(), 2)
+        self.assertEqual((stdout.getvalue(), stderr.getvalue()), ("", FAILURE))
+        self.assertFalse(self.fixture.output.exists())
+        self.assertFalse(self.fixture.closure.exists())
+
     def test_export_opens_no_socket_and_starts_no_process(self):
         with patch("socket.socket", side_effect=AssertionError("no network")), \
                 patch("subprocess.Popen", side_effect=AssertionError("no child process")), \
@@ -672,7 +682,9 @@ class PinnedRefusalTests(PinnedCase):
             self.fixture.rows.append(alpha)
             self.fixture.write()
         with self.subTest("two rows for one selection"):
+            # Both rows are whole (file present, digest right): the only defect is that there are two.
             twin = {**alpha, "file": "alpha-1.0-py2.py3-none-any.whl"}
+            (self.fixture.pinned / "pypi-wheel" / twin["file"]).write_bytes(self.fixture.wheels["alpha"][1])
             self.fixture.rows.append(twin)
             self.fixture.write()
             self.refuse()

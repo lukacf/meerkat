@@ -159,6 +159,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   encodes. A member with the label resolves exactly as before, and a plain
   worker still resolves to no identity.
 
+- The console joins the live roster row of an agent whose record is its
+  row to its durable identity record. It took a live row for the record's
+  member only when the row carried the `agent_identity` label, which such
+  an agent's seat does not, so the console listed the agent twice in the
+  identities list, and inspecting it, retiring it or sending to it from
+  the console was refused with "stale durable identity alias" (since
+  0.9.13, for an agent a host created through Core or adopted into the
+  store). The row is now matched by Core's member id, which the durable
+  record carries, for every agent alike.
+
 - The console experience read labels an agent by its registration's
   display name when it has one, else by its name: the roster, the sidebar
   and the topology node read the same answer the identities listing gives.

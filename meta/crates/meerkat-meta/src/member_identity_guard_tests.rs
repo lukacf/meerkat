@@ -75,11 +75,15 @@ const ALLOWED_READERS: &[AllowedReader] = &[
     },
     AllowedReader {
         file: "console_aggregator/mod.rs",
-        reads: Some(4),
-        why: "`live_record_realizes_durable_binding`, `dedupe_identity_records` and \
-              `identity_record_prefer` read a `ConsoleIdentityRecord`, a serialized \
-              projection that carries no mob handle: switching them needs the record to \
-              carry the resolved fact, or every caller to lend Core's entry read",
+        reads: Some(2),
+        why: "`identity_record_prefer` reads a `ConsoleIdentityRecord`, a serialized \
+              projection with no mob to ask, only to prefer a labelled roster row over a \
+              durable row listed under the very same id (a member seated under the \
+              generated alias itself). Which roster row realizes a binding is no label \
+              read: `live_record_realizes_durable_binding` and `dedupe_identity_records` \
+              compare the row's roster id with Core's member id of the binding, which \
+              the durable record carries, so an unlabelled store-owned row answers as a \
+              labelled one does",
     },
 ];
 

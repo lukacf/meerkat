@@ -1803,24 +1803,26 @@ pub(crate) async fn run_compaction<C>(
 where
     C: crate::agent::AgentLlmClient + ?Sized,
 {
-    let mut uncommitted_call = None;
-    let mut sent_reasoning_effort = Vec::new();
+    let mut calls = SummaryCalls::default();
     let result = compact_history(
-        client,
-        compactor,
-        curator,
-        invocation,
-        event_tx,
-        event_tap,
-        &mut uncommitted_call,
-        &mut sent_reasoning_effort,
+        client, compactor, curator, invocation, event_tx, event_tap, &mut calls,
     )
     .await;
     CompactionAttempt {
         result,
-        uncommitted_call,
-        sent_reasoning_effort,
+        uncommitted_call: calls.uncommitted_call,
+        sent_reasoning_effort: calls.sent_reasoning_effort,
     }
+}
+
+/// What the summary calls of one compaction attempt leave for the caller,
+/// whatever the attempt's result: the call still to be charged, and the
+/// resolution of each summary request that was sent with the session's
+/// `reasoning_effort` level.
+#[derive(Default)]
+struct SummaryCalls {
+    uncommitted_call: Option<UncommittedSummaryCall>,
+    sent_reasoning_effort: Vec<crate::ReasoningEffortResolution>,
 }
 
 /// `messages` without its operator-instruction entry rows: what a
@@ -1849,12 +1851,15 @@ async fn compact_history<C>(
     invocation: CompactionInvocation<'_>,
     event_tx: &Option<mpsc::Sender<AgentEvent>>,
     event_tap: &crate::event_tap::EventTap,
-    uncommitted_call: &mut Option<UncommittedSummaryCall>,
-    sent_reasoning_effort: &mut Vec<crate::ReasoningEffortResolution>,
+    calls: &mut SummaryCalls,
 ) -> Result<CompactionOutcome, CompactionError>
 where
     C: crate::agent::AgentLlmClient + ?Sized,
 {
+    let SummaryCalls {
+        uncommitted_call,
+        sent_reasoning_effort,
+    } = calls;
     let CompactionInvocation {
         authorization,
         budget,

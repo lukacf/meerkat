@@ -216,6 +216,17 @@ fn surface(
     runtime: &MobRuntime,
     session: meerkat_core::types::SessionId,
 ) -> AutoWireParentMobToolDispatcher {
+    surface_with_owners(runtime, session, runtime.private_owners().clone())
+}
+
+/// [`surface`] with `private_owners` as the process's record of whom the
+/// members it built are private to: an empty one is a process that built
+/// none of the mob's members and has not read its event log yet.
+fn surface_with_owners(
+    runtime: &MobRuntime,
+    session: meerkat_core::types::SessionId,
+    private_owners: crate::private_owners::PrivateOwners,
+) -> AutoWireParentMobToolDispatcher {
     AutoWireParentMobToolDispatcher {
         inner: Arc::new(InnerTools),
         implicit_delegate_retirement_overrides: runtime
@@ -233,7 +244,7 @@ fn surface(
         realm_profiles: None,
         caller: Some(MobToolCaller::new(
             session,
-            runtime.private_owners().clone(),
+            private_owners,
             runtime
                 .agent_mob_mcp_state()
                 .as_ref()
@@ -362,6 +373,129 @@ async fn a_private_members_identity_tool_call_is_refused_private_requester() {
         "a call that ran in another session is not answered: {outcome:?}"
     );
     assert_eq!(family.calls.load(Ordering::SeqCst), 1);
+    runtime.clear_identity_runtime_authority();
+}
+
+/// Two members of one mob on surfaces whose process record knows nobody (a
+/// process that built neither and has not read the mob's event log yet):
+/// `side`, whose own roster row names the person it is private to, and
+/// `shared`, private to no one. Answers the runtime, the family, and the
+/// two surfaces in that order.
+async fn members_this_process_did_not_build(
+    dir: &Path,
+) -> (
+    MobRuntime,
+    Arc<CountingFamily>,
+    AutoWireParentMobToolDispatcher,
+    AutoWireParentMobToolDispatcher,
+) {
+    let family = Arc::new(CountingFamily::default());
+    let (runtime, _identity) = runtime_with(dir, Some(Arc::clone(&family))).await;
+    let side = member_session(
+        &runtime,
+        "side",
+        &[(crate::access::PRIVATE_TO_LABEL, "alice")],
+    )
+    .await;
+    let row = runtime
+        .handle()
+        .get_member(&AgentIdentity::from("side"))
+        .await
+        .expect("the roster answers")
+        .expect("the private member has a roster row");
+    assert_eq!(
+        crate::access::private_owner(&row.labels),
+        Some("alice"),
+        "its own roster row names its person"
+    );
+    let unread = crate::private_owners::PrivateOwners::default();
+    assert_eq!(
+        unread.owner_of(runtime.handle().mob_id().as_str(), "side"),
+        None,
+        "the process's record knows nobody"
+    );
+    let private = surface_with_owners(&runtime, side, unread.clone());
+    let shared = surface_with_owners(
+        &runtime,
+        member_session(&runtime, "shared", &[]).await,
+        unread,
+    );
+    (runtime, family, private, shared)
+}
+
+/// Who a member is private to is its own roster row's to say first; the
+/// process's record of the members it built only adds to that. So a member
+/// private to a person is offered no identity tool by a process that did
+/// not build it either: its tool list names none. The member private to no
+/// one beside it, on the same empty record, is offered them all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_private_member_this_process_did_not_build_is_offered_no_identity_tool() {
+    let dir = tempfile::tempdir().expect("state dir");
+    let (runtime, _family, private, shared) = members_this_process_did_not_build(dir.path()).await;
+
+    assert_eq!(
+        identity_tools_of(&shared),
+        IDENTITY_TOOLS,
+        "a member private to no one is offered the identity tools"
+    );
+    assert_eq!(
+        identity_tools_of(&private),
+        Vec::<String>::new(),
+        "a member whose own roster row names a person is offered no identity tool, \
+         whatever the process's record knows"
+    );
+    assert!(
+        private
+            .tool_catalog()
+            .iter()
+            .all(|entry| !is_identity_tool(&entry.tool.name.to_string())),
+        "and its catalog holds none"
+    );
+    runtime.clear_identity_runtime_authority();
+}
+
+/// The wrapper's own refusal reads the same row: a call of an identity tool
+/// by a member private to a person is refused `private_requester` as a
+/// policy denial, before the family is called, by a process that did not
+/// build that member too. The call of the member private to no one beside
+/// it reaches the family.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_private_member_this_process_did_not_build_is_refused_private_requester() {
+    let dir = tempfile::tempdir().expect("state dir");
+    let (runtime, family, private, shared) = members_this_process_did_not_build(dir.path()).await;
+    let create = json!({
+        "request_id": "r-1",
+        "agents": [{"name": "scout", "profile": "coordinator"}],
+    });
+
+    for (tool, arguments) in [
+        (IDENTITY_CREATE, create.clone()),
+        (IDENTITY_LIST, json!({})),
+    ] {
+        match call(&private, tool, arguments).await {
+            Err(ToolError::PolicyDenied { denial }) => {
+                assert_eq!(denial.code, "private_requester", "{}", denial.message);
+            }
+            other => panic!(
+                "the {tool} of a member whose own roster row names a person is refused \
+                 as a policy denial: {other:?}"
+            ),
+        }
+    }
+    assert_eq!(
+        family.calls.load(Ordering::SeqCst),
+        0,
+        "the family was never called for the private member"
+    );
+
+    let answer = call(&shared, IDENTITY_CREATE, create)
+        .await
+        .expect("a shared member's call is answered");
+    assert_eq!(
+        family.calls.load(Ordering::SeqCst),
+        1,
+        "the shared member's call reached the family: {answer:?}"
+    );
     runtime.clear_identity_runtime_authority();
 }
 

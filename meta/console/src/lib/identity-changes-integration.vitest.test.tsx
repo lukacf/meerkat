@@ -1573,7 +1573,11 @@ describe("long-term agents in the console", () => {
     await openArchived(view);
     fireEvent.click(await find(view, "roster-archived-action:scout:remove"));
     confirm = await find(view, "identity-confirm:scout:remove");
-    expect(confirm.textContent).toContain(harvest);
+    // The agent is archived: its last conversation was harvested at its
+    // archive, and the question of its removal says so and no harvest to come.
+    expect(confirm.textContent).toContain("Its last conversation was already harvested and distilled when it was archived.");
+    expect(confirm.textContent).not.toContain(harvest);
+    expect(confirm.textContent).not.toContain("Archive is the reversible choice");
     family.failSchedulesAfter("scout", 2);
     fireEvent.click(within(confirm).getByTestId("identity-confirm-yes"));
     notice = await find(view, "identity-notice");
@@ -1899,10 +1903,13 @@ describe("long-term agents in the console", () => {
     await find(view, "roster-archived:oldhand");
     fireEvent.click(view.getByTestId("identity-confirm-cancel"));
 
-    // An archived agent is asked as before: it had a conversation.
+    // An archived agent is asked as one that had a conversation, which was
+    // harvested when it was archived: its removal harvests nothing more.
     fireEvent.click(view.getByTestId("roster-archived-action:oldhand:remove"));
     const archived = await find(view, "identity-confirm:oldhand:remove");
-    expect(archived.textContent).toContain("Its last conversation is harvested and distilled, as for any agent that leaves the team.");
+    expect(archived.textContent).toContain("Its last conversation was already harvested and distilled when it was archived.");
+    expect(archived.textContent).toContain("Left archived, it keeps its name, its record, its conversation and its memory, and you can bring it back.");
+    expect(archived.textContent || "").not.toContain("is harvested");
     expect(archived.textContent || "").not.toContain("It never started");
     view.unmount();
     cleanup();

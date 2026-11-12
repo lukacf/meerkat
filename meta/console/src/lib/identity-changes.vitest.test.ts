@@ -587,6 +587,30 @@ describe("an outcome in words", () => {
     expect(agentChangeConfirmWords("archive", "Scout", { waiting: true })).toEqual(agentChangeConfirmWords("archive", "Scout"));
     expect(agentChangeConfirmWords("unarchive", "Scout", { waiting: true })).toEqual(agentChangeConfirmWords("unarchive", "Scout"));
   });
+
+  it("says before the removal of an archived agent that its last conversation was harvested at its archive", () => {
+    // An archived agent left the team at its archive: its last conversation
+    // was harvested and distilled then, and its removal harvests nothing.
+    // The question never says a harvest that will not run.
+    const archived = agentChangeConfirmWords("remove", "Scout", { archived: true });
+    expect(archived.question).toBe("Remove Scout for good?");
+    expect(archived.confirm).toBe("Remove for good");
+    expect(archived.consequence).toBe("Its name can never be used again, and this cannot be undone. Its last conversation was already harvested and distilled when it was archived. Left archived, it keeps its name, its record, its conversation and its memory, and you can bring it back.");
+    expect(archived.consequence).not.toContain("is harvested");
+    // It is archived already: an archive is no choice to name.
+    expect(archived.consequence).not.toContain("Archive is the reversible choice");
+    // An agent that is not archived is asked as before, whatever is said of
+    // it; so is every other change.
+    const seated = agentChangeConfirmWords("remove", "Scout");
+    expect(agentChangeConfirmWords("remove", "Scout", { archived: false })).toEqual(seated);
+    expect(seated.consequence).toContain("Its last conversation is harvested and distilled, as for any agent that leaves the team.");
+    expect(seated.consequence).toContain("Archive is the reversible choice");
+    expect(seated.consequence).not.toContain("already harvested");
+    expect(agentChangeConfirmWords("archive", "Scout", { archived: true })).toEqual(agentChangeConfirmWords("archive", "Scout"));
+    expect(agentChangeConfirmWords("unarchive", "Scout", { archived: true })).toEqual(agentChangeConfirmWords("unarchive", "Scout"));
+    // An agent that waits for its host never started, whatever else is said.
+    expect(agentChangeConfirmWords("remove", "Scout", { waiting: true, archived: true })).toEqual(agentChangeConfirmWords("remove", "Scout", { waiting: true }));
+  });
 });
 
 describe("who reaches an agent and how it runs", () => {

@@ -472,6 +472,22 @@ function actionVisible(
 function normalizeConsoleInspectResult(
   value: unknown,
 ): IdentityInspectViewState | null {
+  const view = normalizeConsoleInspectView(value);
+  if (!view) return null;
+  // The status says so at its top level, and only with `true`: the host's
+  // roster lists this name while the agent is served from its record. The
+  // details pane says it as a note at the status.
+  const superseded =
+    value !== null && typeof value === "object" &&
+    (value as Record<string, unknown>).roster_listing_superseded === true;
+  return superseded
+    ? ({ ...view, roster_listing_superseded: true } as IdentityInspectViewState)
+    : view;
+}
+
+function normalizeConsoleInspectView(
+  value: unknown,
+): IdentityInspectViewState | null {
   const direct = normalizeIdentityInspectViewState(value);
   if (direct) return direct;
   const record =

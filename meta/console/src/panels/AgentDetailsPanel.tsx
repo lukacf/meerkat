@@ -15,7 +15,7 @@ import {
   shortSpan,
 } from "../lib/agent-activity";
 import { LifecycleConfirm, type ConfirmedLifecycleAction } from "./LifecycleConfirm";
-import type { AgentIdentityControls } from "../lib/identity-changes";
+import { ROSTER_LISTING_SUPERSEDED_NOTE, type AgentIdentityControls } from "../lib/identity-changes";
 import type { IdentityChangesApi } from "../lib/use-identity-changes";
 import { AgentChangePanel, type OpenAgentChange } from "./IdentityChangePanels";
 import { useMeasuredWidth } from "../lib/use-element-width";
@@ -80,6 +80,10 @@ export type ConsoleInspectView = IdentityInspectViewState & {
   /** Who may see the agent ("public", "internal"). */
   visibility?: string;
   response_phase?: ConsoleAgent["response_phase"];
+  /** The status says that the host's roster lists this name while the
+   * agent is served from its record: the roster's entry is not applied.
+   * Only `true` is carried. */
+  roster_listing_superseded?: boolean;
 };
 
 /** Status words and tone for an identity: the repair hold and health problems
@@ -452,6 +456,11 @@ export function AgentDetailsPanel({
                   spawnedBy ? { label: "Started by", value: <AgentName id={spawnedBy} link /> } : null,
                 ]}
               />
+              {view.roster_listing_superseded === true ? (
+                <Notice tone="neutral" className="agent-details__status-note" testId={`inspect-roster-superseded:${identity}`}>
+                  {ROSTER_LISTING_SUPERSEDED_NOTE}
+                </Notice>
+              ) : null}
               <Part label="Activity · 24h" action={`${countWords(turnsToday, "turn")} today`} testId={`inspect-activity:${identity}`}>
                 <div ref={barsRef} className="agent-details__bars-box" />
                 <ActivityBars

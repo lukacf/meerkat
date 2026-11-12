@@ -174,6 +174,12 @@ export interface AgentSummary {
   readiness: string;
   provenance?: AgentProvenance;
   openOperations: string[];
+  /** Who reaches the agent, where its record says so: `internal_only`. An
+   * agent that can be messaged says nothing. */
+  addressability?: string;
+  /** How the agent runs, where its record says so (`autonomous_host`,
+   * `turn_driven`). An agent that runs as its profile says says nothing. */
+  runtimeMode?: string;
 }
 
 export interface AgentRecord extends AgentSummary {
@@ -203,6 +209,8 @@ function summaryOf(raw: Raw): AgentSummary | null {
   const displayName = textOf(raw.display_name);
   const specRevision = numberOf(raw.spec_revision);
   const provenance = provenanceOf(raw.provenance);
+  const addressability = textOf(raw.addressability);
+  const runtimeMode = textOf(raw.runtime_mode_override);
   return {
     name,
     ...(displayName ? { displayName } : {}),
@@ -213,6 +221,8 @@ function summaryOf(raw: Raw): AgentSummary | null {
     readiness: textOf(raw.readiness) ?? "",
     ...(provenance ? { provenance } : {}),
     openOperations: textsOf(raw.open_operations),
+    ...(addressability ? { addressability } : {}),
+    ...(runtimeMode ? { runtimeMode } : {}),
   };
 }
 
@@ -272,6 +282,30 @@ export interface InstructionOutcome {
   reason?: string;
 }
 
+/** One schedule a change of an agent took with it. */
+export interface ScheduleRef {
+  scheduleId: string;
+  /** Its name, where it has one. */
+  name?: string;
+}
+
+/** What became of the schedules that target an agent: paused by its
+ * archive, resumed by its unarchive, ended by its removal. Only the first
+ * answer of such a change states it; the same request answered again
+ * states none. */
+export interface SchedulesFollowed {
+  /** `paused`, `resumed` or `ended`. */
+  effect: string;
+  count: number;
+  schedules: ScheduleRef[];
+  /** A schedule could not be read or changed: the list is what was done
+   * so far, and the same request sent again follows the rest. */
+  incomplete: boolean;
+  /** The console's own: the same request was sent again after an answer
+   * that was incomplete, and that answer states nothing of the schedules. */
+  askedAgain?: boolean;
+}
+
 export interface AgentOutcome {
   name: string;
   /** `committed`, `pending_preparation`, `archiving`, `archived`,
@@ -282,6 +316,7 @@ export interface AgentOutcome {
   /** `seated` or `owed`, on a create. */
   seat?: string;
   instructions?: InstructionOutcome;
+  schedules?: SchedulesFollowed;
 }
 
 export type IdentityOutcome =
@@ -327,6 +362,23 @@ function refusalOf(data: unknown, message?: unknown): IdentityRefusal | null {
   };
 }
 
+function schedulesOf(value: unknown): SchedulesFollowed | undefined {
+  const raw = rawOf(value);
+  const effect = textOf(raw?.effect);
+  if (!raw || !effect) return undefined;
+  const schedules = (Array.isArray(raw.schedules) ? raw.schedules : []).flatMap((entry): ScheduleRef[] => {
+    const scheduleId = textOf(rawOf(entry)?.schedule_id);
+    const name = textOf(rawOf(entry)?.name)?.trim();
+    return scheduleId ? [{ scheduleId, ...(name ? { name } : {}) }] : [];
+  });
+  return {
+    effect,
+    count: numberOf(raw.count) ?? schedules.length,
+    schedules,
+    incomplete: raw.incomplete === true,
+  };
+}
+
 function agentOutcomeOf(value: unknown): AgentOutcome | null {
   const raw = rawOf(value);
   const name = textOf(raw?.name);
@@ -337,6 +389,7 @@ function agentOutcomeOf(value: unknown): AgentOutcome | null {
   const instructions = rawOf(raw.instructions);
   const instructionKind = textOf(instructions?.kind);
   const reason = textOf(instructions?.reason);
+  const schedules = schedulesOf(raw.schedules);
   return {
     name,
     state: textOf(raw.state) ?? "",
@@ -344,7 +397,28 @@ function agentOutcomeOf(value: unknown): AgentOutcome | null {
     ...(specRevision !== undefined ? { specRevision } : {}),
     ...(seat ? { seat } : {}),
     ...(instructionKind ? { instructions: { kind: instructionKind, ...(reason ? { reason } : {}) } } : {}),
+    ...(schedules ? { schedules } : {}),
   };
+}
+
+/**
+ * The outcome of a request that was sent again, with what its first answer
+ * said of the agent's schedules. The same request answered again states
+ * the agent's state and nothing of its schedules, so an answer is never
+ * taken whole in place of the first: where it says nothing of an agent's
+ * schedules and the first answer did, the first answer's word stays, marked
+ * as asked again. An answer that states them itself is kept as it is.
+ */
+export function keepFirstSchedules(first: IdentityOutcome, again: IdentityOutcome): IdentityOutcome {
+  if (!("agents" in first) || !("agents" in again)) return again;
+  let kept = false;
+  const agents = again.agents.map((agent) => {
+    const said = first.agents.find((known) => known.name === agent.name)?.schedules;
+    if (agent.schedules || !said) return agent;
+    kept = true;
+    return { ...agent, schedules: { ...said, askedAgain: true } };
+  });
+  return kept ? { ...again, agents } : again;
 }
 
 /** The answer of a change or of the operation read; null for an answer
@@ -465,14 +539,20 @@ export interface NewAgentDraft {
   instructions: string;
   firstMessage: string;
   peers: string[];
+  /** Who reaches it: `addressable` or `internal_only`. */
+  addressability: string;
+  /** How it runs: `autonomous_host`, `turn_driven`, or empty for an agent
+   * that runs as its profile says. */
+  runtimeMode: string;
 }
 
 export const EMPTY_NEW_AGENT_DRAFT: NewAgentDraft = {
   profile: "", name: "", displayName: "", instructions: "", firstMessage: "", peers: [],
+  addressability: "addressable", runtimeMode: "",
 };
 
 /** The create request of one agent, without its `request_id`. A member the
- * form left empty is left out. */
+ * form left empty, or at its default, is left out. */
 export function createAgentsRequest(draft: NewAgentDraft): Raw {
   const displayName = draft.displayName.trim();
   return {
@@ -483,6 +563,8 @@ export function createAgentsRequest(draft: NewAgentDraft): Raw {
       ...(draft.instructions.trim() ? { instructions: [draft.instructions] } : {}),
       ...(draft.firstMessage.trim() ? { first_message: draft.firstMessage } : {}),
       ...(draft.peers.length ? { peers: [...draft.peers] } : {}),
+      ...(draft.addressability && draft.addressability !== "addressable" ? { addressability: draft.addressability } : {}),
+      ...(draft.runtimeMode ? { runtime_mode_override: draft.runtimeMode } : {}),
     }],
   };
 }
@@ -501,6 +583,10 @@ export interface AgentEditDraft {
   labels: AgentLabelDraft[];
   profile: string;
   peers: string[];
+  /** Who reaches it: `addressable` or `internal_only`. */
+  addressability: string;
+  /** How it runs; empty for an agent whose record names no way. */
+  runtimeMode: string;
 }
 
 /** The form of an agent as its record reads now. An agent without a
@@ -513,6 +599,8 @@ export function editDraftOf(record: AgentRecord): AgentEditDraft {
     labels: Object.entries(record.labels).map(([key, value]) => ({ key, value })),
     profile: record.profile,
     peers: [...record.peers],
+    addressability: record.addressability ?? "addressable",
+    runtimeMode: record.runtimeMode ?? "",
   };
 }
 
@@ -562,6 +650,10 @@ export function updateAgentRequest(record: AgentRecord, draft: AgentEditDraft): 
   if (Object.keys(labelsSet).length) set.labels = labelsSet;
   if (labelsRemove.length) set.labels_remove = labelsRemove;
   if (draft.profile && draft.profile !== record.profile) set.profile = draft.profile;
+  if (draft.addressability && draft.addressability !== (record.addressability ?? "addressable")) set.addressability = draft.addressability;
+  // An update's absent way of running is unchanged, so no request hands it
+  // back to the profile: a form that names none sets none.
+  if (draft.runtimeMode && draft.runtimeMode !== (record.runtimeMode ?? "")) set.runtime_mode_override = draft.runtimeMode;
   const peersAdd = draft.peers.filter((peer) => !record.peers.includes(peer));
   const peersRemove = record.peers.filter((peer) => !draft.peers.includes(peer));
   return {
@@ -623,7 +715,9 @@ export type IdentityFormField =
   | "first_message"
   | "peers"
   | "context"
-  | "labels";
+  | "labels"
+  | "addressability"
+  | "runtime_mode";
 
 const CREATE_FIELDS: Readonly<Record<string, IdentityFormField>> = {
   name: "name",
@@ -632,6 +726,8 @@ const CREATE_FIELDS: Readonly<Record<string, IdentityFormField>> = {
   instructions: "instructions",
   first_message: "first_message",
   peers: "peers",
+  addressability: "addressability",
+  runtime_mode_override: "runtime_mode",
 };
 
 const UPDATE_FIELDS: Readonly<Record<string, IdentityFormField>> = {
@@ -641,6 +737,8 @@ const UPDATE_FIELDS: Readonly<Record<string, IdentityFormField>> = {
   "set.labels": "labels",
   "set.labels_remove": "labels",
   "set.profile": "profile",
+  "set.addressability": "addressability",
+  "set.runtime_mode_override": "runtime_mode",
   peers_add: "peers",
   peers_remove: "peers",
 };
@@ -706,6 +804,118 @@ export function seatWords(seat: string | undefined): string | null {
     ? "It exists and its name is taken, but it has not started yet: its first message did not start. It starts with its next message, and its first message runs once then."
     : null;
 }
+
+/** One choice of a setting a form lists: the wire's value, its words, and
+ * what it means. */
+export interface SettingChoice {
+  value: string;
+  label: string;
+  hint: string;
+}
+
+/** Who reaches an agent, as a form lists it. */
+export const REACH_CHOICES: readonly SettingChoice[] = [
+  { value: "addressable", label: "Can receive messages", hint: "People and the agents connected to it can message it." },
+  { value: "internal_only", label: "Internal only", hint: "Nobody messages it. It works only on what the team itself hands it." },
+];
+
+/** How an agent runs, as a form lists it. The empty value is an agent whose
+ * record names no way: it runs as its profile says. */
+export const RUN_MODE_CHOICES: readonly SettingChoice[] = [
+  { value: "", label: "As its profile says", hint: "Its profile decides how it runs." },
+  { value: "autonomous_host", label: "On its own", hint: "It works through what it is sent by itself, without waiting to be driven." },
+  { value: "turn_driven", label: "Turn by turn", hint: "It runs one turn for each thing it is given and waits in between." },
+];
+
+/** A value of the wire in words, for one this console has no words for:
+ * never the token. */
+function plainWords(value: string): string {
+  const words = value.replace(/[_-]+/g, " ").trim();
+  return words ? words.charAt(0).toUpperCase() + words.slice(1) : "";
+}
+
+/** Who reaches an agent, in words. A record that says nothing is an agent
+ * that can be messaged. */
+export function reachWords(addressability: string | undefined): string {
+  const value = addressability || "addressable";
+  return REACH_CHOICES.find((choice) => choice.value === value)?.label ?? plainWords(value);
+}
+
+/** How an agent runs, in words. A record that says nothing is an agent
+ * that runs as its profile says. */
+export function runModeWords(runtimeMode: string | undefined): string {
+  const value = runtimeMode || "";
+  return RUN_MODE_CHOICES.find((choice) => choice.value === value)?.label ?? plainWords(value);
+}
+
+/** "schedule" for one, "3 schedules" for more. */
+function scheduleCount(count: number): string {
+  return count === 1 ? "schedule" : `${count} schedules`;
+}
+
+/**
+ * What a change did to the schedules that target its agent, in words: how
+ * many, what was done, and which by name. A schedule without a name is
+ * counted and never shown by its id (the ids are for Technical details).
+ * Nothing for an answer that states none (a replay, a team whose host
+ * gives the family no schedules), for a change that had none to follow,
+ * and for an effect this console has no words for.
+ */
+export function schedulesWords(followed: SchedulesFollowed | undefined): string[] {
+  if (!followed) return [];
+  const count = Math.max(followed.count, followed.schedules.length);
+  const one = count === 1;
+  let done: string;
+  switch (followed.effect) {
+    case "paused":
+      done = `${one ? "is" : "are"} paused until it is unarchived`;
+      break;
+    case "resumed":
+      done = one ? "runs again" : "run again";
+      break;
+    case "ended":
+      done = `${one ? "is" : "are"} ended`;
+      break;
+    default:
+      return [];
+  }
+  const lines: string[] = [];
+  if (count > 0) {
+    const named = followed.schedules.flatMap((schedule) => (schedule.name ? [schedule.name] : []));
+    const unnamed = count - named.length;
+    if (one) {
+      lines.push(`Its schedule${named.length ? ` ${named[0]}` : ""} ${done}.`);
+    } else if (named.length === 0) {
+      lines.push(`Its ${scheduleCount(count)} ${done}.`);
+    } else {
+      const list = unnamed > 0 ? `${named.join(", ")} and ${unnamed} without a name` : named.join(", ");
+      lines.push(`Its ${scheduleCount(count)} ${done}: ${list}.`);
+    }
+  }
+  if (followed.incomplete) {
+    if (followed.askedAgain) {
+      lines.push("Not every schedule could be changed at first. The team was asked again to follow the rest.");
+    } else {
+      lines.push(count > 0
+        ? "Not every schedule could be changed. Try again to follow the rest."
+        : "Its schedules could not be changed. Try again to follow them.");
+    }
+  }
+  return lines;
+}
+
+/** Whether a change's answer says that not every schedule was followed
+ * and the same request has not been sent again since: trying again is
+ * then what follows the rest. */
+export function schedulesOweRetry(outcome: IdentityOutcome): boolean {
+  return "agents" in outcome && outcome.agents.some((agent) => agent.schedules?.incomplete === true && !agent.schedules.askedAgain);
+}
+
+/** What the host's roster and an agent's record say of one name, as a
+ * note at the agent's status: the status says so with
+ * `roster_listing_superseded`. */
+export const ROSTER_LISTING_SUPERSEDED_NOTE =
+  "The host's configuration lists an agent of this name too. That entry is not applied: this agent runs from its own record, and a change made here changes that record.";
 
 export interface OutcomeWords {
   tone: NoticeTone;
@@ -776,6 +986,8 @@ export function outcomeWords(change: IdentityChangeKind, outcome: IdentityOutcom
         title = `${name} is updated`;
       }
   }
+  // What became of the agent's schedules, where the answer says.
+  lines.push(...schedulesWords(agent?.schedules));
   const instructions = instructionOutcomeWords(agent?.instructions);
   if (instructions) lines.push(instructions);
   return { tone: "ok", title, lines };
@@ -939,12 +1151,16 @@ export function requesterWords(provenance: AgentProvenance, personName: (key: st
   return { kind: "host", words: Object.hasOwn(HOST_SURFACE_WORDS, provenance.requester) ? HOST_SURFACE_WORDS[provenance.requester] : `The host (${provenance.requester})` };
 }
 
+/** What an archive and a removal owe an agent beside the change itself: it
+ * leaves the team as any agent leaves it. */
+const HARVEST_WORDS = "Its last conversation is harvested, as for any agent that leaves the team.";
+
 /** What the confirmation of a change of one agent as a whole says. */
 export function agentChangeConfirmWords(change: "archive" | "unarchive" | "remove", name: string): { question: string; consequence: string; confirm: string } {
   if (change === "archive") {
     return {
       question: `Archive ${name}?`,
-      consequence: "It stops and keeps its name, its record, its conversation and its memory. Messages to it are refused until you unarchive it.",
+      consequence: `It stops and keeps its name, its record, its conversation and its memory. ${HARVEST_WORDS} Messages to it are refused until you unarchive it.`,
       confirm: "Archive",
     };
   }
@@ -957,7 +1173,7 @@ export function agentChangeConfirmWords(change: "archive" | "unarchive" | "remov
   }
   return {
     question: `Remove ${name} for good?`,
-    consequence: "Its name can never be used again, and this cannot be undone. Archive is the reversible choice: an archived agent keeps its name, its record, its conversation and its memory, and you can bring it back.",
+    consequence: `Its name can never be used again, and this cannot be undone. ${HARVEST_WORDS} Archive is the reversible choice: an archived agent keeps its name, its record, its conversation and its memory, and you can bring it back.`,
     confirm: "Remove for good",
   };
 }

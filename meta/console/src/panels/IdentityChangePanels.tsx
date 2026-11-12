@@ -2,6 +2,8 @@ import React from "react";
 
 import {
   EMPTY_NEW_AGENT_DRAFT,
+  REACH_CHOICES,
+  RUN_MODE_CHOICES,
   agentChangeConfirmWords,
   agentRefRequest,
   agentShownName,
@@ -9,6 +11,7 @@ import {
   consentWords,
   createAgentsRequest,
   editDraftOf,
+  keepFirstSchedules,
   outcomeWords,
   planWords,
   answeredRefusalOf,
@@ -17,6 +20,8 @@ import {
   refusalSentence,
   requestIdFor,
   requesterWords,
+  runModeWords,
+  schedulesOweRetry,
   updateAgentRequest,
   verdictWords,
   type AgentEditDraft,
@@ -26,9 +31,11 @@ import {
   type DirectoryVerdict,
   type IdentityChangeKind,
   type IdentityFormField,
+  type IdentityOutcome,
   type IdentityRefusal,
   type NewAgentDraft,
   type RequestIdSlot,
+  type SettingChoice,
 } from "../lib/identity-changes";
 import type { IdentityChangeResult, IdentityChangesApi, IdentityDirectory, IdentityPlanResult } from "../lib/use-identity-changes";
 import { errorMessage } from "../lib/errors";
@@ -197,6 +204,51 @@ function ProfilePicker({
   );
 }
 
+/**
+ * One setting of an agent that has a few choices (who reaches it, how it
+ * runs): each choice in words with what it means, one to pick. The wire's
+ * value is the radio's value and never text.
+ */
+function SettingPicker({
+  label,
+  choices,
+  value,
+  onChange,
+  testIdPrefix,
+  describedBy,
+  invalid,
+}: {
+  label: string;
+  choices: readonly SettingChoice[];
+  value: string;
+  onChange: (value: string) => void;
+  /** A choice's test id is this and its value; the choice without a value
+   * (as the profile says) reads `profile`. */
+  testIdPrefix: string;
+  describedBy?: string;
+  invalid: boolean;
+}) {
+  const name = React.useId();
+  return (
+    <div className="identity-form__options" role="radiogroup" aria-label={label} aria-describedby={describedBy} aria-invalid={invalid || undefined}>
+      {choices.map((choice) => (
+        <label key={choice.value} className="identity-form__option">
+          <input
+            type="radio"
+            name={name}
+            value={choice.value}
+            checked={value === choice.value}
+            onChange={() => onChange(choice.value)}
+            data-testid={`${testIdPrefix}:${choice.value || "profile"}`}
+          />
+          <span className="identity-form__option-name">{choice.label}</span>
+          <span className="identity-form__option-hint">{choice.hint}</span>
+        </label>
+      ))}
+    </div>
+  );
+}
+
 /** The agents of the directory, any number to pick, each with its verdict. */
 function PeerPicker({
   directory,
@@ -341,13 +393,25 @@ export function IdentityResultNotice({
   const { outcome } = result;
   const words = outcomeWords(change, outcome, name);
   const pending = outcome.outcome === "pending_decision";
+  // A change that could not follow every schedule of its agent: the same
+  // request sent again follows the rest.
+  const followAgain = schedulesOweRetry(outcome) && onRetry;
+  const scheduleIds = "agents" in outcome
+    ? outcome.agents.flatMap((agent) => agent.schedules?.schedules ?? []).map((schedule) => schedule.scheduleId)
+    : [];
   return (
     <Notice
       tone={VERDICT_TONE[words.tone]}
       role="status"
       testId="identity-notice"
       className="identity-notice"
-      action={pending && onWithdraw ? <Button size="sm" disabled={busy} onClick={onWithdraw} data-testid="identity-withdraw">Withdraw request</Button> : undefined}
+      action={
+        pending && onWithdraw
+          ? <Button size="sm" disabled={busy} onClick={onWithdraw} data-testid="identity-withdraw">Withdraw request</Button>
+          : followAgain
+            ? <Button size="sm" disabled={busy} onClick={onRetry} data-testid="identity-retry">Try again</Button>
+            : undefined
+      }
     >
       <span data-outcome={outcome.outcome} className="identity-notice__title">{words.title}</span>
       {words.lines.map((line, index) => <span key={index} className="identity-notice__line">{line}</span>)}
@@ -362,6 +426,7 @@ export function IdentityResultNotice({
           items={[
             { label: "Operation", value: outcome.operationId },
             pending ? { label: "Decision", value: outcome.decisionId } : null,
+            ...scheduleIds.map((scheduleId) => ({ label: "Schedule", value: scheduleId })),
           ]}
         />
       ) : null}
@@ -372,6 +437,9 @@ export function IdentityResultNotice({
 /** The request a form or a confirmation sends, its id, and how it went. */
 function useChangeSender(api: IdentityChangesApi, change: IdentityChangeKind, name: string) {
   const slot = React.useRef<RequestIdSlot | null>(null);
+  // The first outcome this request was answered with: the same request
+  // answered again is never taken whole in its place.
+  const first = React.useRef<{ requestId: string; outcome: IdentityOutcome } | null>(null);
   const [busy, setBusy] = React.useState(false);
   const [result, setResult] = React.useState<ShownResult | null>(null);
   const alive = React.useRef(true);
@@ -379,8 +447,18 @@ function useChangeSender(api: IdentityChangesApi, change: IdentityChangeKind, na
   const send = async (request: Record<string, unknown>): Promise<ShownResult> => {
     // The same request keeps its id; a changed request takes a new one.
     slot.current = requestIdFor(slot.current, change, request, api.mintRequestId);
+    const requestId = slot.current.requestId;
     setBusy(true);
-    const answer = await api.change(change, request, slot.current.requestId, name);
+    let answer = await api.change(change, request, requestId, name);
+    if (answer.kind === "outcome") {
+      if (first.current?.requestId === requestId) {
+        // What the first answer said of the agent's schedules stays: a
+        // request answered again states nothing of them.
+        answer = { kind: "outcome", outcome: keepFirstSchedules(first.current.outcome, answer.outcome) };
+      } else {
+        first.current = { requestId, outcome: answer.outcome };
+      }
+    }
     if (alive.current) {
       setBusy(false);
       setResult(answer);
@@ -541,7 +619,31 @@ export function NewAgentForm({ api, onClose }: { api: IdentityChangesApi; onClos
             <Field field="peers" label="Peers" hint="Optional. The agents it can message. Nothing else is connected to it." error={errors.peers}>
               {(ids) => <PeerPicker directory={directory} value={draft.peers} onChange={(peers) => set("peers", "peers", peers)} describedBy={ids.describedBy} />}
             </Field>
-            <Field field="first_message" label="First message" hint="Optional. The agent is given it once, when it starts; what an agent does at its start is its profile's to decide." error={errors.first_message}>
+            <Field field="addressability" label="Reachability" error={errors.addressability}>
+              {(ids) => (
+                <SettingPicker
+                  label="Reachability"
+                  choices={REACH_CHOICES}
+                  value={draft.addressability}
+                  onChange={(value) => set("addressability", "addressability", value)}
+                  testIdPrefix="identity-addressability"
+                  {...ids}
+                />
+              )}
+            </Field>
+            <Field field="runtime_mode" label="How it runs" error={errors.runtime_mode}>
+              {(ids) => (
+                <SettingPicker
+                  label="How it runs"
+                  choices={RUN_MODE_CHOICES}
+                  value={draft.runtimeMode}
+                  onChange={(value) => set("runtimeMode", "runtime_mode", value)}
+                  testIdPrefix="identity-runtime-mode"
+                  {...ids}
+                />
+              )}
+            </Field>
+            <Field field="first_message" label="First message" hint="Optional. The agent is given it once, when it starts; what an agent does at its start follows from how it runs, which its profile decides unless you choose above." error={errors.first_message}>
               {(ids) => (
                 <textarea
                   className="cc-input"
@@ -605,9 +707,10 @@ function useProfilePlan(api: IdentityChangesApi, record: AgentRecord | null, pro
 }
 
 /**
- * Edit one agent: its display name, instructions, context, labels, profile
- * and peers, against the record read when the form opened. Only what the
- * form changed is sent, at that record's spec digest.
+ * Edit one agent: its display name, instructions, context, labels, profile,
+ * peers, who reaches it and how it runs, against the record read when the
+ * form opened. Only what the form changed is sent, at that record's spec
+ * digest.
  */
 export function EditAgentForm({
   api,
@@ -754,6 +857,38 @@ export function EditAgentForm({
             </Field>
             <Field field="peers" label="Peers" hint="The agents it can message." error={errors.peers}>
               {(ids) => <PeerPicker directory={directory} value={draft.peers} exclude={name} onChange={(peers) => set("peers", "peers", peers)} describedBy={ids.describedBy} />}
+            </Field>
+            <Field field="addressability" label="Reachability" error={errors.addressability}>
+              {(ids) => (
+                <SettingPicker
+                  label="Reachability"
+                  choices={REACH_CHOICES}
+                  value={draft.addressability}
+                  onChange={(value) => set("addressability", "addressability", value)}
+                  testIdPrefix="identity-addressability"
+                  {...ids}
+                />
+              )}
+            </Field>
+            <Field
+              field="runtime_mode"
+              label="How it runs"
+              // An update cannot hand the way an agent runs back to its
+              // profile, so that choice is listed only for an agent whose
+              // record names no way.
+              hint={record.runtimeMode ? "It can be changed, not handed back to the profile." : undefined}
+              error={errors.runtime_mode}
+            >
+              {(ids) => (
+                <SettingPicker
+                  label="How it runs"
+                  choices={record.runtimeMode ? RUN_MODE_CHOICES.filter((choice) => choice.value !== "") : RUN_MODE_CHOICES}
+                  value={draft.runtimeMode}
+                  onChange={(value) => set("runtimeMode", "runtime_mode", value)}
+                  testIdPrefix="identity-runtime-mode"
+                  {...ids}
+                />
+              )}
             </Field>
             <Field field="labels" label="Labels" error={errors.labels}>
               {(ids) => (
@@ -1146,9 +1281,9 @@ export function PendingIdentityRequests({ api }: { api: IdentityChangesApi }): R
 }
 
 /**
- * Who asked for an agent and when, as its record says: a record, not a
- * mark on the agent. Shown where the record carries it; the spec digest
- * and revision stay in Technical details.
+ * Who asked for an agent and when, and how it runs, as its record says: a
+ * record, not a mark on the agent. The spec digest and revision stay in
+ * Technical details.
  */
 export function AgentRecordFacts({
   load,
@@ -1191,6 +1326,9 @@ export function AgentRecordFacts({
               : null,
             provenance ? { label: "When", value: <time dateTime={new Date(provenance.atMs).toISOString()}>{formatAbsoluteTime(provenance.atMs)}</time> } : null,
             provenance?.consentForm ? { label: "Consent", value: consentWords(provenance.consentForm) } : null,
+            // How the agent runs, as its record says; who reaches it is
+            // the status's word, in the pane's overview.
+            { label: "How it runs", value: runModeWords(record.runtimeMode) },
             record.openOperations.length
               ? { label: "Open requests", value: `${record.openOperations.length} waiting` }
               : null,

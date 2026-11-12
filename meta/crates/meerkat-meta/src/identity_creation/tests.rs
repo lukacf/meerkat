@@ -966,30 +966,31 @@ fn a_constructed_preparation_needs_its_deadline_and_a_native_host() {
     assert_eq!(refusal.path, "preparation.analyst");
     assert_eq!(refusal.kind, PolicyRefusalKind::NeedsNativeHost);
     // With a native host it is not the host the launch lacks. The launch
-    // still refuses the policy in this release, at the preparation's mode:
-    // no method settles a preparation yet.
+    // still refuses the policy in this release, at the constructed
+    // preparation's mode: no method holds or activates a construction yet.
     let unserved = resolve(
         Some(Ok(None)),
         RuntimeOptionPolicy::Enabled(Box::new(policy)),
         true,
     )
-    .expect_err("no preparation is carried out in this release");
+    .expect_err("no construction is held in this release");
     assert_eq!(unserved.path, "preparation.analyst.mode");
     assert!(
-        matches!(unserved.kind, PolicyRefusalKind::Unsupported { .. }),
+        matches!(&unserved.kind, PolicyRefusalKind::Unsupported { feature }
+            if feature.contains("constructed") && feature.contains("write required")),
         "{unserved}"
     );
-    // Only a constructed preparation needs a native host: a required one is
-    // refused for what it is, not for a host.
+    // A required preparation needs no native host and is served: the host
+    // settles it.
     value["preparation"] = json!({"analyst": {"mode": "required"}});
     let required = parse(&value);
     assert!(!required.needs_native_host());
-    let unserved = resolve(None, RuntimeOptionPolicy::Enabled(Box::new(required)), true)
-        .expect_err("no preparation is carried out in this release");
-    assert_eq!(unserved.path, "preparation.analyst.mode");
-    assert!(
-        matches!(unserved.kind, PolicyRefusalKind::Unsupported { .. }),
-        "{unserved}"
+    let served = resolve(None, RuntimeOptionPolicy::Enabled(Box::new(required)), true)
+        .expect("a launch serves a required preparation")
+        .expect("the policy is the launch's");
+    assert_eq!(
+        preparation_of(&served, "analyst"),
+        PreparationMode::Required
     );
     value["preparation"] =
         json!({"analyst": {"mode": "constructed", "construction_deadline_ms": 10}});

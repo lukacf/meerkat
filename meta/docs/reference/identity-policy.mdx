@@ -78,6 +78,49 @@ every level.
 | `authority_fields` | The reserved label keys a request may set, each with the values it may take (`{"values": [...]}`). An authority field is set only under a human decision. |
 | `peers` | Which agents a new or updated agent may list as peers: `rules` (each `{id, target, outcome, reason?}`) and `default`. A peer outcome is `allow`, `require_approval` or `deny` (the default). |
 | `approval` | Which outcome each change gets: `rules`, `default` (`{"kind": "deny"}` unless the host says otherwise) and `timeouts_ms`, the decision timeout per change class (24 hours for `create`, 4 hours for the others, at most 7 days). |
+| `preparation` | Which profiles' new agents the host prepares before their first use: `{"<profile>": {"mode": "required"}}`. See [Preparation](#preparation). A profile the policy does not name needs none. |
+
+## Preparation
+
+Some agents need something from their host before they can run: a
+workspace, a credential, a record in another system. Name the profile under
+`preparation` with `{"mode": "required"}`, and every agent created of that
+profile waits for its host:
+
+```json
+{ "enabled": true,
+  "preparation": { "assistant": { "mode": "required" } },
+  "approval": { "rules": [
+    { "change": ["create"], "requester": { "kind": "host", "surface": "rpc" },
+      "target": { "profile": ["assistant"] }, "outcome": { "kind": "allow" } }
+  ] } }
+```
+
+- The create commits the agent and answers `pending_preparation`. A create
+  a person approved answers the same once it is carried out.
+- Until the host settles it the agent has no member: `meta/identity/get`
+  and `meta/identity/list` read it `readiness: "preparation_pending"`, a
+  message to it is refused retryable, its archive is refused the retryable
+  `host_preparation_pending`, and nothing is built, run or woken for it. Its
+  `first_message` waits too. An update changes its record and leaves it
+  waiting.
+- The host prepares what the agent needs and calls
+  [`meta/identity/settle_preparation`](/api/rpc#metaidentitysettle_preparation)
+  with the agent's `name`. The agent is seated dormant, and its first
+  message, if it has one, runs once.
+- A restart changes nothing of this: a waiting agent waits in the next
+  process, and its settle seats it there.
+
+Waiting costs nothing, so a host that cannot prepare an agent yet leaves it
+waiting and settles later. A host that gives up on an agent removes it with
+`meta/identity/remove`: that is the removal every agent has, and the name is
+retired like any removed name.
+
+Only the host's operator settles a preparation (the SDK host on the stdio
+gateway): the host is what prepares, so nobody else says an agent is
+prepared. The preparation applies to an agent's first use only: an update
+and an unarchive ask for none, and neither does a move to a profile the
+policy prepares.
 
 ## Approval rules
 
@@ -150,9 +193,10 @@ write `notify`: the consent a change committed under is recorded with the
 agent and reads back from `meta/identity/get` and `meta/identity/list`
 (`provenance.consent`) and from `meta/identity/operation`. Write
 `require_approval` where you would write `review`, or review the request in
-your own code before you ask under `allow`. A `preparation` other than
-`none` is refused at init too: no method of this release settles an agent's
-preparation, so an agent of such a profile would wait for it without end.
+your own code before you ask under `allow`. The preparation mode
+`constructed` is refused at init too: no method of this release holds or
+activates a construction, so an agent of such a profile would wait for it
+without end. Write `required` (see [Preparation](#preparation)).
 
 A mob whose runtime is governed runs no first message: a create that gives
 `first_message` there is refused `unsupported`

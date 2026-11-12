@@ -31,6 +31,10 @@
 //! after a removal, so what the step holds for the agent ends with it. An
 //! archive calls nothing: an archived agent keeps what the step holds, so
 //! its unarchive resumes on its current instructions.
+//!
+//! Beside the changes, the seam settles the preparation of an agent that
+//! awaits it ([`IdentityChangeExecutor::settle_preparation`]): one call of
+//! Core's settle, by the host's operator.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -64,8 +68,10 @@ use super::request::{
 };
 
 mod core_commit;
+mod preparation;
 
 pub(crate) use core_commit::row_spec;
+pub use preparation::PreparationSettle;
 
 /// The consent a change commits under, as Core's commit takes it: the
 /// host's rule committed it without a decision (`Policy`, `allow` or
@@ -425,6 +431,23 @@ pub trait IdentityChangeExecutor: Send + Sync {
     /// with nothing written; an error is a commit that ended with no
     /// outcome ([`ExecutorError`]).
     async fn commit(&self, commit: ChangeCommit<'_>) -> Result<ChangeCommitted, ExecutorError>;
+
+    /// Settle the preparation of the agent `settle.name` in `settle.mob`,
+    /// as `settle.requester`: the agent, committed pending its preparation,
+    /// is seated. Only the host's operator settles one (`change_denied`
+    /// otherwise). A typed refusal is an outcome, with nothing written; an
+    /// error is a settle that ended with no outcome. An executor that
+    /// reaches no settle refuses it `unsupported`.
+    async fn settle_preparation(
+        &self,
+        _settle: PreparationSettle<'_>,
+    ) -> Result<ChangeCommitted, ExecutorError> {
+        Ok(ChangeCommitted::refused(IdentityRefusal::new(
+            IdentityRefusalKind::Unsupported {
+                feature: "the settle of an agent's preparation".to_owned(),
+            },
+        )))
+    }
 }
 
 /// What the seam asks its launch about the agents of the mob, beside what
@@ -571,6 +594,13 @@ impl IdentityChangeExecutor for CoreChangeExecutor {
                 expected_spec_digest,
             } => commit_adopt(self, &commit, operation, identity, expected_spec_digest).await,
         }
+    }
+
+    async fn settle_preparation(
+        &self,
+        settle: PreparationSettle<'_>,
+    ) -> Result<ChangeCommitted, ExecutorError> {
+        preparation::settle(&settle).await
     }
 }
 
@@ -923,8 +953,13 @@ pub(super) fn outcome_of_receipt(
         if let Some(meerkat_mob::EntryStanding::Seated(seated)) = &standing {
             agent.session_id = seated.session_id.as_ref().map(ToString::to_string);
         }
-        if receipt.change == meerkat_mob::IdentityChangeKind::Create
-            && state == AgentChangeState::Committed
+        // A create and the settle of a preparation both seat the agent they
+        // commit: each says whether its seat stands.
+        if matches!(
+            receipt.change,
+            meerkat_mob::IdentityChangeKind::Create
+                | meerkat_mob::IdentityChangeKind::SettlePreparation
+        ) && state == AgentChangeState::Committed
         {
             agent.seat = match standing {
                 Some(meerkat_mob::EntryStanding::Seated(_)) => Some(AgentSeat::Seated),

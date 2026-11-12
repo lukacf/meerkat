@@ -63,6 +63,14 @@
 //! A read reads the same records and wakes nothing: an agent's member is
 //! read from the state the mob last published, and its record from the
 //! identity store or the identity runtime's registration.
+//!
+//! An agent of a profile the policy says its host prepares
+//! (`preparation.<profile>.mode: "required"`) is committed pending its
+//! preparation: Core holds it with no member, and it runs nothing and wakes
+//! nothing. The host's operator settles the preparation
+//! ([`IdentityFamily::settle_preparation`]), which is Core's settle through
+//! the seam and no rule of the policy's: nobody else settles one. A host
+//! that gives up on such an agent removes it, as any agent is removed.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -86,11 +94,13 @@ use super::decided::{
     HeldChangeHost, HeldIdentityChange, HeldTarget, IdentityDecisionNotices, IdentityDecisions,
 };
 use super::digest::Sha256Digest;
+use super::executor::PreparationSettle;
 use super::executor::{
     AgentSpecs, ChangeCommit, ChangeCommitted, ChangeRequester, CoreChangeExecutor, ExecutorError,
     IdentityChangeExecutor, InstructionStep, committed_outcome, consent_of_plan, refusal_of_error,
     row_spec,
 };
+use super::family::SettlePreparationCall;
 use super::family::{
     AgentEntered, AgentPage, AgentProvenance, AgentReadiness, AgentRecord, AgentSummary,
     ChangePlan, ChangesHold, ChangesHoldRequest, ConsentSummary, DirectoryPage, DirectoryPeer,
@@ -1448,6 +1458,38 @@ impl IdentityGate {
         Ok(committed.outcome)
     }
 
+    /// The settle of one agent's preparation: Core's, through the seam.
+    /// A launch without an identity policy settles nothing, as it changes
+    /// nothing. Core says which agent awaits a preparation; for one that
+    /// awaits none, a name no agent holds is told apart here
+    /// (`identity_unknown`), as every change of one agent answers it.
+    async fn settled(
+        &self,
+        mob: &MobHandle,
+        requester: &ChangeRequester,
+        call: &SettlePreparationCall,
+    ) -> Result<IdentityOutcome, IdentityRefusal> {
+        if self.policy.is_none() {
+            return Err(no_policy(ChangeClass::Create));
+        }
+        let settle = PreparationSettle::new(mob, &call.operation_id, requester, &call.name);
+        let committed = self
+            .executor
+            .settle_preparation(settle)
+            .await
+            .map_err(|error| unsettled(&call.operation_id, &error))?;
+        let refusal = match committed.outcome {
+            IdentityOutcome::Refused(refusal) => refusal,
+            outcome => return Ok(outcome),
+        };
+        if matches!(refusal.kind, IdentityRefusalKind::PreparationNotPending)
+            && self.agent(mob, &call.name).await?.is_none()
+        {
+            return Err(unknown_agent("name"));
+        }
+        Err(refusal)
+    }
+
     /// The page of the mob's agents `list` names, as `requester` is shown
     /// them.
     async fn list(
@@ -1761,6 +1803,18 @@ impl IdentityFamily for IdentityGate {
         Ok(ChangesHold::new(request.held))
     }
 
+    async fn settle_preparation(
+        &self,
+        mob: &MobHandle,
+        requester: &ChangeRequester,
+        call: SettlePreparationCall,
+    ) -> IdentityOutcome {
+        match self.settled(mob, requester, &call).await {
+            Ok(outcome) => outcome,
+            Err(refusal) => IdentityOutcome::Refused(refusal),
+        }
+    }
+
     async fn read(
         &self,
         mob: &MobHandle,
@@ -1927,6 +1981,21 @@ impl IdentityChangeExecutor for LaunchExecutor {
         let committed = self.core.commit(commit).await?;
         // Each agent the change wrote is served from its record from now
         // on: registered, registered again or forgotten, with no wake.
+        if let Some(identities) = self.identities.upgrade() {
+            for agent in committed.outcome.agents() {
+                identities.note_agent_record_changed(&agent.name).await;
+            }
+        }
+        Ok(committed)
+    }
+
+    async fn settle_preparation(
+        &self,
+        settle: PreparationSettle<'_>,
+    ) -> Result<ChangeCommitted, ExecutorError> {
+        let committed = self.core.settle_preparation(settle).await?;
+        // The settled agent has a member now: it is served from its record,
+        // registered with no wake.
         if let Some(identities) = self.identities.upgrade() {
             for agent in committed.outcome.agents() {
                 identities.note_agent_record_changed(&agent.name).await;

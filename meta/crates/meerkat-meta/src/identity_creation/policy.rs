@@ -478,10 +478,12 @@ impl IdentityCreationPolicy {
 
     /// Refuse what a launch cannot name in this release: the approval
     /// outcome `notify`, for which no notice reaches an approver, the
-    /// outcome `review`, for which no reviewer decides, and a preparation
-    /// other than `none`, which no method of this release settles. Each
-    /// would otherwise do less than it says: the refusal names the policy
-    /// path and what a host writes instead.
+    /// outcome `review`, for which no reviewer decides, and the preparation
+    /// `constructed`, whose held construction no method of this release
+    /// asks for or activates. Each would otherwise do less than it says:
+    /// the refusal names the policy path and what a host writes instead.
+    /// The preparation `required` is served: the host settles an agent's
+    /// preparation with `meta/identity/settle_preparation`.
     pub fn check_served(&self) -> Result<(), PolicyRefusal> {
         let refused = |path: String, feature: &str| {
             refusal(
@@ -494,14 +496,15 @@ impl IdentityCreationPolicy {
         if let Some((profile, rule)) = self
             .preparation
             .iter()
-            .find(|(_, rule)| rule.mode != PreparationMode::None)
+            .find(|(_, rule)| rule.mode == PreparationMode::Constructed)
         {
             return Err(refused(
                 format!("preparation.{profile}.mode"),
                 &format!(
-                    "the preparation {} (no method of this release settles an agent's \
-                     preparation, so an agent of the profile would wait for it without end: \
-                     leave the profile out)",
+                    "the preparation {} (no method of this release holds or activates a \
+                     construction, so an agent of the profile would wait for it without end: \
+                     write required, which the host settles with \
+                     meta/identity/settle_preparation)",
                     rule.mode.token()
                 ),
             ));

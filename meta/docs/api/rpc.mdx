@@ -1256,6 +1256,7 @@ recorded and grants or limits nothing.
 | `meta/identity/changes_hold` | Hold, or release, every change of the mob's agents |
 | `meta/identity/directory` | What the caller may name in a create or an update: profiles and peers |
 | `meta/identity/plan` | The outcome and the rendering a change would get; nothing is held or written |
+| `meta/identity/settle_preparation` | Settle the preparation of an agent that waits for its host: the agent is seated |
 
 `meta/delete_identity` and `meta/identity/remove` are different things.
 `meta/delete_identity` gives an agent a fresh life and keeps it: its name,
@@ -1314,13 +1315,13 @@ A change answers one of three results, each with `outcome` and
 |-----------|---------|
 | `done` | The change committed. `agents` lists each agent it changed |
 | `pending_decision` | The host's rule holds the change for a person: `decision_id` and `deadline_ms`. Nothing is written until it is decided. Do not send the change again with other params; ask the same request again, or read `meta/identity/operation`, to see how it ended |
-| `pending_preparation` | The change committed, and at least one of its `agents` is not usable yet |
+| `pending_preparation` | The change committed, and at least one of its `agents` waits for its host's preparation: it has no member until the host settles it with [`meta/identity/settle_preparation`](#metaidentitysettle_preparation) |
 
 Each entry of `agents` is `{name, state, spec_digest?, spec_revision?,
 session_id?, seat?, instructions?}`. `state` is `committed`,
 `pending_preparation`, `archiving`, `archived`, `restored`, `retiring` or
-`removed`. `seat`, on a create, is `seated` or `owed` (see
-[`meta/identity/create`](#metaidentitycreate)). `instructions` is absent
+`removed`. `seat`, on a create and on the settle of a preparation, is
+`seated` or `owed` (see [`meta/identity/create`](#metaidentitycreate)). `instructions` is absent
 unless the launch has an instruction step for updates (see
 [`meta/identity/update`](#metaidentityupdate)).
 
@@ -1512,6 +1513,41 @@ operator's on the stdio gateway, or a signed-in person's with
 a host that holds changes across a deploy holds them again at its next
 start.
 
+### `meta/identity/settle_preparation`
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `request_id` | `string` | yes | The caller's id of the operation |
+| `name` | `string` | yes | The agent whose preparation the host has carried out |
+
+An agent of a profile the launch's policy prepares
+(`preparation.<profile>.mode: "required"`, see
+[Identity policy](/reference/identity-policy#preparation)) is committed
+pending its preparation: its create answers `pending_preparation`, it reads
+`readiness: "preparation_pending"`, and it has no member, takes no message
+and runs nothing. Once the host has prepared what the agent needs, it calls
+this method. The agent is seated dormant, and its `first_message`, if it has
+one, runs once.
+
+It answers a change's outcome: `{"outcome": "done", "operation_id",
+"agents": [{name, "state": "committed", spec_digest, spec_revision,
+session_id?, seat}]}`, with `seat` as a create answers it. The same
+`request_id` and `name` again answer the same and write nothing. After the
+settle `meta/identity/operation` of the agent's create reads `done` too,
+with the agent `committed`.
+
+Only the host's operator calls it (the SDK host on the stdio gateway): any
+other caller is refused `change_denied`. An agent that waits for no
+preparation (it is seated, archived or was settled before, or its host
+configures it) is refused `preparation_not_pending`, and a name no agent
+holds `identity_unknown`. A `request_id` another change used is
+`operation_reused`.
+
+A host that gives up on an agent it cannot prepare removes it with
+`meta/identity/remove`: the agent is gone, the operation of its create reads
+`done` with the agent `removed`, and its name is retired like any removed
+name. Nothing was built or run for it.
+
 ### `meta/identity/directory` and `meta/identity/plan`
 
 `meta/identity/directory` takes `{query?, after?}` and answers `{profiles,
@@ -1539,7 +1575,9 @@ agent for an update, an archive, an unarchive and an adoption, and
 `agent.identity.remove` on the named agent for a removal.
 `meta/identity/changes_hold` needs `runtime.admin`: a signed-in person who
 has it holds and releases the mob's changes, and a caller the Console
-could not verify does not. `meta/identity/plan` needs what the change it
+could not verify does not. `meta/identity/settle_preparation` is the host's
+operator's, which no Console caller is: the Console does not list it and
+refuses it for every caller. `meta/identity/plan` needs what the change it
 plans needs, on the agent that change names. `meta/identity/operation`
 answers the caller's own operations; another requester's operation, named
 by its `operation_id`, reads as `unknown` unless the caller has

@@ -35,7 +35,7 @@ use meerkat_core::Message;
 use meerkat_core::types::StopReason;
 use meerkat_meta::identity_creation::{
     ChangeRequester, GetAgent, IdentityChangeCall, IdentityChangeSpec, IdentityCreationPolicy,
-    IdentityFamilyOptions, IdentityRead, IdentityReadAnswer, OperationId,
+    IdentityFamilyOptions, IdentityRead, IdentityReadAnswer, OperationId, SettlePreparationCall,
 };
 use meerkat_meta::identity_first::contracts::RosterProvider;
 use meerkat_meta::identity_first::{
@@ -1245,6 +1245,71 @@ async fn giving_up_on_a_pending_agent_is_its_removal_and_nothing_was_built() {
     assert!(
         rig.asked.lock().unwrap().is_empty(),
         "nobody was woken: {:?}",
+        rig.asked.lock().unwrap()
+    );
+    rig.shutdown().await;
+}
+
+/// Only the host's operator settles a preparation: the host on a surface
+/// that is not its operator's, a signed-in person and an agent are refused
+/// `change_denied`, and the agent stays pending. The settle is a change
+/// like any other to the mob's hold of its changes: while they are held it
+/// is refused the retryable `changes_held`, and it seats the agent once
+/// they are released.
+#[tokio::test(flavor = "multi_thread")]
+async fn only_the_hosts_operator_settles_a_preparation() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), prepared_policy()).await;
+    rig.create_pending("create-1", json!({"name": "scout", "profile": "worker"}))
+        .await;
+    let family = rig.runtime.identity_family().expect("the family");
+    let mob = rig.mob();
+    for requester in [
+        ChangeRequester::host("rpc"),
+        ChangeRequester::host("console"),
+        ChangeRequester::human("person-1"),
+        ChangeRequester::agent_recorded(HOST_A),
+    ] {
+        let operation =
+            OperationId::for_request(&requester.recorded(), "s-1").expect("a request id");
+        let outcome = family
+            .settle_preparation(
+                &mob,
+                &requester,
+                SettlePreparationCall::new(operation, "scout"),
+            )
+            .await;
+        let refusal = outcome
+            .refusal()
+            .unwrap_or_else(|| panic!("{requester:?} settles nothing: {outcome:?}"));
+        assert_eq!(refusal.kind_token(), "change_denied", "{requester:?}");
+        assert!(
+            refusal.detail().contains("host's operator"),
+            "{requester:?}: {refusal}"
+        );
+    }
+    assert!(rig.pending("scout"), "{:?}", rig.standing("scout"));
+
+    rig.ok("meta/identity/changes_hold", json!({"held": true}))
+        .await;
+    let held = rig
+        .refused(SETTLE, json!({"request_id": "s-1", "name": "scout"}))
+        .await;
+    assert_eq!(
+        (held["kind"].clone(), held["retryable"].clone()),
+        (json!("changes_held"), json!(true)),
+        "{held:#}"
+    );
+    assert!(rig.pending("scout"));
+    rig.ok("meta/identity/changes_hold", json!({"held": false}))
+        .await;
+    let settled = rig
+        .ok(SETTLE, json!({"request_id": "s-1", "name": "scout"}))
+        .await;
+    assert_eq!(settled["agents"][0]["seat"], json!("seated"), "{settled:#}");
+    assert!(
+        rig.asked.lock().unwrap().is_empty(),
+        "a settle wakes nobody: {:?}",
         rig.asked.lock().unwrap()
     );
     rig.shutdown().await;

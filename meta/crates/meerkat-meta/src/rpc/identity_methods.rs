@@ -10,8 +10,8 @@
 //! the executor seam.
 //!
 //! Writes: `create`, `update`, `archive`, `unarchive`, `remove`, `adopt`,
-//! `withdraw`, `changes_hold`. Reads: `list`, `get`, `operation`,
-//! `directory`, `plan`. A read never wakes an agent.
+//! `withdraw`, `changes_hold`, `settle_preparation`. Reads: `list`, `get`,
+//! `operation`, `directory`, `plan`. A read never wakes an agent.
 //!
 //! A change names its operation with `request_id`, which a host method
 //! requires: the same requester and `request_id` with the same request
@@ -45,6 +45,7 @@ use crate::identity_creation::{
     IdentityRefusal, IdentityRefusalKind, ListAgents, OperationId, OperationRef, OperationState,
     ReadDirectory, RequestProblem, UpdateAgent, WithdrawRequest,
 };
+use crate::identity_creation::{SettlePreparation, SettlePreparationCall};
 
 /// Release an agent from configuration: from the adoption on it is changed
 /// at run time and configuration no longer declares it.
@@ -73,6 +74,9 @@ pub(crate) const IDENTITY_CHANGES_HOLD: &str = "meta/identity/changes_hold";
 pub(crate) const IDENTITY_DIRECTORY: &str = "meta/identity/directory";
 /// The outcome and the rendering a change would get; nothing is held.
 pub(crate) const IDENTITY_PLAN: &str = "meta/identity/plan";
+/// Settle the preparation of an agent that awaits it: the host's
+/// operator's.
+pub(crate) const IDENTITY_SETTLE_PREPARATION: &str = "meta/identity/settle_preparation";
 
 /// The family, one registry every surface derives its dispatch arm, its
 /// read/write split and its advertised methods from.
@@ -90,6 +94,7 @@ pub(crate) const IDENTITY_FAMILY_METHODS: &[&str] = &[
     IDENTITY_CHANGES_HOLD,
     IDENTITY_DIRECTORY,
     IDENTITY_PLAN,
+    IDENTITY_SETTLE_PREPARATION,
 ];
 
 /// The JSON-RPC code of every refusal of the family. Its `data` is the
@@ -132,7 +137,16 @@ pub(crate) fn is_identity_family_mutating_method(method: &str) -> bool {
             | IDENTITY_REMOVE
             | IDENTITY_WITHDRAW
             | IDENTITY_CHANGES_HOLD
+            | IDENTITY_SETTLE_PREPARATION
     )
+}
+
+/// Whether `method` is the host's operator's alone: the stdio gateway's SDK
+/// host calls it, and the family refuses every other caller. A surface whose
+/// callers are never the operator (the Console) advertises none.
+#[must_use]
+pub(crate) fn is_identity_family_operator_method(method: &str) -> bool {
+    method == IDENTITY_SETTLE_PREPARATION
 }
 
 /// The requester of the stdio gateway's caller: the host's operator, on
@@ -218,6 +232,7 @@ pub(crate) async fn handle_identity_family_rpc(
         IDENTITY_CHANGES_HOLD => changes_hold(surface, params).await,
         IDENTITY_DIRECTORY => directory(surface, params).await,
         IDENTITY_PLAN => plan(surface, params).await,
+        IDENTITY_SETTLE_PREPARATION => settle_preparation(surface, params).await,
         _ => return None,
     };
     let (result, error) = match answer {
@@ -260,13 +275,13 @@ fn parse<T: serde::de::DeserializeOwned>(params: &Value) -> Result<T, IdentityRe
     })
 }
 
-/// The change `change` as the requester's operation. A host method's
-/// change names its operation: one without a `request_id` is refused.
-fn change_call(
+/// The requester's operation `request_id` names. A host method's change
+/// names its operation: one without a `request_id` is refused.
+fn named_request(
     surface: &IdentityFamilySurface<'_>,
-    change: IdentityChangeSpec,
-) -> Result<IdentityChangeCall, IdentityRefusal> {
-    let Some(request_id) = change.request_id() else {
+    request_id: Option<&str>,
+) -> Result<OperationId, IdentityRefusal> {
+    let Some(request_id) = request_id else {
         return Err(IdentityRefusal::new(IdentityRefusalKind::InvalidRequest {
             problem: RequestProblem::Empty,
         })
@@ -276,7 +291,15 @@ fn change_call(
              the change's result.",
         ));
     };
-    let operation_id = OperationId::for_request(&surface.requester.recorded(), request_id)?;
+    OperationId::for_request(&surface.requester.recorded(), request_id)
+}
+
+/// The change `change` as the requester's operation.
+fn change_call(
+    surface: &IdentityFamilySurface<'_>,
+    change: IdentityChangeSpec,
+) -> Result<IdentityChangeCall, IdentityRefusal> {
+    let operation_id = named_request(surface, change.request_id())?;
     Ok(IdentityChangeCall::new(operation_id, change))
 }
 
@@ -389,6 +412,27 @@ async fn changes_hold(
         .changes_hold(surface.mob, &surface.requester, request)
         .await?;
     serialized(&hold)
+}
+
+/// The settle of one agent's preparation: `{name, request_id}`, asked of
+/// the family as the requester's operation. It answers a change's typed
+/// outcome; the family refuses every caller but the host's operator.
+async fn settle_preparation(
+    surface: &IdentityFamilySurface<'_>,
+    params: &Value,
+) -> Result<Value, IdentityRefusal> {
+    let request: SettlePreparation = parse(params)?;
+    let operation_id = named_request(surface, request.request_id.as_deref())?;
+    outcome_answer(
+        surface
+            .family
+            .settle_preparation(
+                surface.mob,
+                &surface.requester,
+                SettlePreparationCall::new(operation_id, request.name),
+            )
+            .await,
+    )
 }
 
 async fn read(
@@ -565,10 +609,10 @@ mod tests {
 
     const DIGEST: &str = "sha256:0000000000000000000000000000000000000000000000000000000000000001";
 
-    /// The 13 methods, in the order an application needs them: the four it
+    /// The 14 methods, in the order an application needs them: the four it
     /// moves its existing agents with first.
     #[test]
-    fn the_family_registry_is_the_thirteen_methods_and_its_write_split() {
+    fn the_family_registry_is_the_fourteen_methods_and_its_write_split() {
         assert_eq!(
             IDENTITY_FAMILY_METHODS,
             &[
@@ -585,6 +629,7 @@ mod tests {
                 "meta/identity/changes_hold",
                 "meta/identity/directory",
                 "meta/identity/plan",
+                "meta/identity/settle_preparation",
             ]
         );
         let writers: Vec<&str> = IDENTITY_FAMILY_METHODS
@@ -603,6 +648,7 @@ mod tests {
                 "meta/identity/remove",
                 "meta/identity/withdraw",
                 "meta/identity/changes_hold",
+                "meta/identity/settle_preparation",
             ]
         );
         // The identity reads the family does not own stay outside it.

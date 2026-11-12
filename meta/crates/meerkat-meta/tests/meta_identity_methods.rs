@@ -57,7 +57,7 @@ const REFUSED: i64 = -32058;
 const LINE_WAIT: Duration = Duration::from_mins(3);
 
 /// The family's methods, in the order `meta/capabilities` lists them.
-const METHODS: [&str; 13] = [
+const METHODS: [&str; 14] = [
     "meta/identity/adopt",
     "meta/identity/get",
     "meta/identity/list",
@@ -71,6 +71,7 @@ const METHODS: [&str; 13] = [
     "meta/identity/changes_hold",
     "meta/identity/directory",
     "meta/identity/plan",
+    "meta/identity/settle_preparation",
 ];
 
 /// The rows' policy: the stdio host may make every change of an agent of
@@ -415,6 +416,11 @@ fn a_launch_without_an_enabled_identity_policy_serves_the_reads_and_refuses_ever
         no_policy(&withdrawn, "create", "meta/identity/withdraw");
         let held = gateway.refused("meta/identity/changes_hold", json!({"held": true}));
         no_policy(&held, "create", "meta/identity/changes_hold");
+        let settled = gateway.refused(
+            "meta/identity/settle_preparation",
+            json!({"request_id": "no-policy-settle", "name": HOST_A}),
+        );
+        no_policy(&settled, "create", "meta/identity/settle_preparation");
 
         // Nothing was written: no operation, and the agents are as they were.
         let unknown = gateway.ok(
@@ -435,7 +441,7 @@ fn a_launch_without_an_enabled_identity_policy_serves_the_reads_and_refuses_ever
 }
 
 /// The launch's identity policy reaches the family: the gateway lists the
-/// family's thirteen methods, and its reads answer the agents the host
+/// family's fourteen methods, and its reads answer the agents the host
 /// configures.
 #[test]
 fn the_launch_policy_reaches_the_family_and_its_methods_are_advertised() {
@@ -790,62 +796,43 @@ fn a_policy_naming_notify_or_review_is_refused_at_init() {
     }
 }
 
-/// A policy that names a preparation other than `none` is refused at
-/// init: no method of this release settles an agent's preparation, so an
-/// agent of such a profile would wait for it without end. The refusal names
-/// the policy path and says so.
+/// A policy that names the preparation `constructed` is refused at init:
+/// its held construction needs a native host, which the stdio gateway is
+/// not. The refusal names the policy path. The modes `none` and `required`
+/// are accepted: the host settles a required preparation with
+/// `meta/identity/settle_preparation`.
 #[test]
-fn a_policy_naming_a_preparation_is_refused_at_init() {
-    for (mode, rule) in [
-        ("required", json!({"mode": "required"})),
-        (
-            "constructed",
-            json!({"mode": "constructed", "construction_deadline_ms": 60_000}),
-        ),
-    ] {
-        let scratch = tempfile::tempdir().unwrap();
-        let mut gateway = Gateway::start(scratch.path());
-        let init = gateway.init(
-            &scratch.path().join("state"),
-            Some(json!({
-                "enabled": true,
-                "preparation": {"worker": rule},
-            })),
-        );
-        assert_eq!(init["error"]["code"], json!(-32602), "{mode}: {init:#}");
-        let message = init["error"]["message"].as_str().unwrap_or_default();
-        assert!(
-            message.contains("identity_creation.preparation.worker"),
-            "{mode}: {message}"
-        );
-        // A required preparation is refused for what it is. A constructed
-        // one needs a native host first, which the stdio gateway is not.
-        if mode == "required" {
-            assert!(
-                message.contains("identity_creation.preparation.worker.mode")
-                    && message.contains(mode)
-                    && message.contains("no method of this release settles"),
-                "{mode}: {message}"
-            );
-        } else {
-            assert!(
-                message.contains("needs a native host")
-                    && !message.contains("no method of this release settles"),
-                "{mode}: {message}"
-            );
-        }
-    }
-    // The mode `none` is what every profile has without a word: accepted.
+fn a_policy_naming_a_constructed_preparation_is_refused_at_init() {
     let scratch = tempfile::tempdir().unwrap();
     let mut gateway = Gateway::start(scratch.path());
     let init = gateway.init(
         &scratch.path().join("state"),
         Some(json!({
             "enabled": true,
-            "preparation": {"worker": {"mode": "none"}},
+            "preparation": {"worker": {"mode": "constructed", "construction_deadline_ms": 60_000}},
         })),
     );
-    assert!(init["error"].is_null(), "{init:#}");
+    assert_eq!(init["error"]["code"], json!(-32602), "{init:#}");
+    let message = init["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("identity_creation.preparation.worker")
+            && message.contains("needs a native host"),
+        "{message}"
+    );
+    // The mode `none` is what every profile has without a word, and the
+    // mode `required` is served: both are accepted.
+    for mode in ["none", "required"] {
+        let scratch = tempfile::tempdir().unwrap();
+        let mut gateway = Gateway::start(scratch.path());
+        let init = gateway.init(
+            &scratch.path().join("state"),
+            Some(json!({
+                "enabled": true,
+                "preparation": {"worker": {"mode": mode}},
+            })),
+        );
+        assert!(init["error"].is_null(), "{mode}: {init:#}");
+    }
 }
 
 /// A change whose rule says `require_approval` is held: it answers
@@ -1908,7 +1895,7 @@ fn names(gateway: &mut Gateway) -> Vec<String> {
     names
 }
 
-/// A candidate launch changes nothing: it refuses the family's eight
+/// A candidate launch changes nothing: it refuses the family's nine
 /// writers with the candidate refusal, before anything is read or written,
 /// and serves its reads.
 #[test]
@@ -1940,6 +1927,10 @@ fn a_candidate_launch_refuses_the_writers_and_serves_the_reads() {
             json!({"request_id": "candidate-1"}),
         ),
         ("meta/identity/changes_hold", json!({"held": true})),
+        (
+            "meta/identity/settle_preparation",
+            json!({"request_id": "candidate-1", "name": "scout"}),
+        ),
     ] {
         let answer = candidate.rpc(method, params);
         assert_eq!(

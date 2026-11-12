@@ -26,11 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   unchanged while the record's members are unset.
 - `runtime_options.identity_creation` (and the Rust form a native host
   returns): a policy that names the approval outcome `notify` or `review`, or
-  a `preparation` other than `none`, is refused at init, with the policy path
-  and what to write instead. Before, such a policy was accepted and nothing
-  acted on it. No notice reaches an approver for `notify` yet, no reviewer
-  decides for `review` yet, and no method settles a preparation yet: write
-  `allow` or `require_approval`, and leave `preparation` out.
+  the preparation mode `constructed`, is refused at init, with the policy
+  path and what to write instead. Before, such a policy was accepted and
+  nothing acted on it. No notice reaches an approver for `notify` yet, no
+  reviewer decides for `review` yet, and no method holds or activates a
+  construction yet: write `allow` or `require_approval`, and the preparation
+  mode `required`.
 - Rust, source only: `CustomizerToolsSpawnCustomizer` no longer implements
   the auto traits `UnwindSafe` and `RefUnwindSafe`. It now holds a
   late-bound reference to the session bridge, through which it asks whether
@@ -103,6 +104,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   whose runtime is governed refuses a create that gives a first message
   (`unsupported`, `first_message_in_governed_realm`) before anything is
   written.
+- A host prepares an agent created at run time before its first use. A
+  launch's identity policy names `preparation.<profile>.mode: "required"`;
+  a create of an agent of that profile, at once or after a person approved
+  it, commits it pending its preparation (`pending_preparation`): it reads
+  `readiness: "preparation_pending"`, has no member, takes no message, and
+  nothing is built, run or woken for it, its first message included. The
+  host's operator settles it with the new method
+  `meta/identity/settle_preparation` (`{name, request_id}`), which answers a
+  change's outcome with the agent `committed` and its `seat`: the agent is
+  seated dormant and its first message runs once. A restart keeps a waiting
+  agent waiting. The operation of the agent's create reads what became of
+  the agent: `done` once it is settled, and `done` with the agent `removed`
+  once a host that gave up on it removed it with `meta/identity/remove`
+  (the name is then retired like any removed name). An update asks no
+  preparation. The Console does not serve the method. Rust:
+  `IdentityFamily::settle_preparation` (with a refusing default),
+  `IdentityChangeExecutor::settle_preparation` (with a refusing default)
+  and `identity_creation::{SettlePreparation, SettlePreparationCall,
+  PreparationSettle}`.
 - Console access actions `agent.identity.create`, `agent.identity.manage`
   (update, archive, unarchive and adopt, on the named agent) and
   `agent.identity.remove` (on the named agent). `GET /console/experience`

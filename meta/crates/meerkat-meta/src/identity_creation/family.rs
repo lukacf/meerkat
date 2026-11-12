@@ -11,8 +11,9 @@
 //! ([`super::IdentityChangeExecutor`]); it is not in this module.
 //!
 //! Writes: create (1 to 256 agents, all or nothing), update, archive,
-//! unarchive, remove, adopt, withdraw, changes hold. Reads: list, get,
-//! operation, directory, plan. A read never wakes an agent.
+//! unarchive, remove, adopt, withdraw, changes hold, settle preparation.
+//! Reads: list, get, operation, directory, plan. A read never wakes an
+//! agent.
 //!
 //! The types here are the one spelling of the family for every surface:
 //! a host method's params, an agent tool's arguments, an SDK's call and the
@@ -602,6 +603,60 @@ impl ChangesHold {
     }
 }
 
+/// The host's settle of one agent's preparation, as every surface writes
+/// it. An agent of a profile its host prepares
+/// (`preparation.<profile>.mode: "required"` in the launch's policy) is
+/// committed pending its preparation: it has no member, runs nothing and
+/// wakes nothing. Once the host has prepared what the agent needs, its
+/// operator settles the preparation: the agent is seated dormant, and its
+/// first message, if it has one, runs once. A host that gives up on an
+/// agent it cannot prepare removes it instead, which retires its name like
+/// any removal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct SettlePreparation {
+    /// The caller's id of the request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// The agent whose preparation the host has carried out.
+    pub name: String,
+}
+
+impl SettlePreparation {
+    /// The settle of `name`'s preparation.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            request_id: None,
+            name: name.into(),
+        }
+    }
+}
+
+/// One settle of the family: the operation it is, and the agent it
+/// settles.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SettlePreparationCall {
+    /// The operation: the same id and agent return the same state, and
+    /// another request under it is refused `operation_reused`. Made from
+    /// the request's `request_id` by the requester
+    /// ([`OperationId::for_request`]).
+    pub operation_id: OperationId,
+    /// The agent whose preparation is settled.
+    pub name: String,
+}
+
+impl SettlePreparationCall {
+    /// The settle of `name`'s preparation as the operation `operation_id`.
+    pub fn new(operation_id: OperationId, name: impl Into<String>) -> Self {
+        Self {
+            operation_id,
+            name: name.into(),
+        }
+    }
+}
+
 /// A page of the mob's agents: which ones, and after which name.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1057,6 +1112,24 @@ pub trait IdentityFamily: Send + Sync {
         requester: &ChangeRequester,
         request: ChangesHoldRequest,
     ) -> Result<ChangesHold, IdentityRefusal>;
+
+    /// Settle the preparation of one agent that awaits it: the agent is
+    /// seated dormant, and its first message, if it has one, runs once. The
+    /// host's operator's alone. Answers the typed outcome of a change
+    /// (`done`, with the agent `committed` and its `seat`); a refusal is an
+    /// outcome: `preparation_not_pending` for an agent that awaits none,
+    /// `identity_unknown` for a name no agent holds. A family that settles
+    /// no preparation refuses it `unsupported`.
+    async fn settle_preparation(
+        &self,
+        _mob: &MobHandle,
+        _requester: &ChangeRequester,
+        _call: SettlePreparationCall,
+    ) -> IdentityOutcome {
+        IdentityOutcome::refused(IdentityRefusalKind::Unsupported {
+            feature: "the settle of an agent's preparation".to_owned(),
+        })
+    }
 
     /// One read. It never wakes an agent.
     async fn read(

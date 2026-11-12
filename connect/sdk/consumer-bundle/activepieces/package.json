@@ -1,0 +1,9 @@
+{
+  "name": "toolkit-activepieces-effects63-consumer",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@rkat/toolkit-activepieces": "file:./rkat-toolkit-activepieces-0.1.0.tgz"
+  }
+}

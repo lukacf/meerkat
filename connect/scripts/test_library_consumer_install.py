@@ -9,8 +9,10 @@ import json
 import os
 from pathlib import Path
 import signal
+import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import unittest
@@ -220,6 +222,238 @@ class InstallBoundaryTests(unittest.TestCase):
             if child.poll() is None:
                 child.kill()
                 child.wait()
+
+
+class OfficialReleaseAssetNoticeTests(unittest.TestCase):
+    """The GitHub component's notices: a locally built executable or an upstream release asset."""
+
+    def setUp(self):
+        self.scratch = tempfile.TemporaryDirectory(prefix="toolkit-official-notices-")
+        self.addCleanup(self.scratch.cleanup)
+        self.bundle = Path(self.scratch.name).resolve() / "official"
+        # A Mach-O arm64 header and inert bytes: the installer inspects, it never launches.
+        self.binary = bytes.fromhex("cffaedfe0c0000010000000002000000") + b"\0" * 64
+        self.component = {
+            "artifact": "github/github-mcp-server", "artifact_sha256": MODULE.sha(self.binary),
+            "catalog_id": "github", "configuration_template": "github/mcp.template.json",
+            "notices": "github/notices", "profile": "selected-reads",
+            "required_secret_environment": ["GITHUB_PERSONAL_ACCESS_TOKEN"],
+            "selected_operations": ["get_me", "list_commits", "get_file_contents"],
+            "source_revision": "b98d115bbb080e9555466a96656ec4df605aea21", "target": "macos-arm64"}
+        self.archive = {"bytes": 8983965, "sha256": "5" * 64}
+
+    def notices(self, count, upstream=True):
+        names = ["upstream-LICENSE"] if upstream else []
+        names += ["module-%02d-LICENSE" % index for index in range(count - len(names))]
+        return {"github/notices/" + name: b"licence text\n" for name in names}
+
+    def read(self, component, notices):
+        files = {"github/github-mcp-server": self.binary,
+                 "github/mcp.template.json": MODULE.encoded(MODULE.official_template("selected-reads")),
+                 "github/UPSTREAM-PROFILE.md": b"# profile\n", **notices,
+                 "delivery.json": MODULE.encoded({"format": "meerkat-toolkit.official-consumers.v1",
+                                                  "role": "service_connector", "catalog_ids": ["github"],
+                                                  "components": [component]})}
+        if self.bundle.exists():
+            for path in sorted(self.bundle.rglob("*"), reverse=True):
+                path.unlink() if path.is_file() else path.rmdir()
+        for name, data in files.items():
+            target = self.bundle / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+        contents = MODULE.encoded({"format": 1, "files": {
+            name: {"sha256": MODULE.sha(data), "bytes": len(data)} for name, data in files.items()}})
+        (self.bundle / "CONTENTS.json").write_bytes(contents)
+        return MODULE.official_inputs(self.bundle, MODULE.sha(contents), "github")
+
+    def test_release_asset_component_carries_exactly_the_upstream_licence(self):
+        component = {**self.component, "source_archive": self.archive}
+        files, selected = self.read(component, self.notices(1))
+        self.assertEqual(selected, component)
+        self.assertEqual(sorted(files), ["delivery.json", "github/UPSTREAM-PROFILE.md", "github/github-mcp-server",
+                                         "github/mcp.template.json", "github/notices/upstream-LICENSE"])
+
+    def test_release_asset_component_with_other_notices_is_refused(self):
+        component = {**self.component, "source_archive": self.archive}
+        for label, notices in (("the 78 of a local build", self.notices(78)), ("two", self.notices(2)),
+                               ("none", {}), ("one under another name", self.notices(1, upstream=False))):
+            with self.subTest(label), self.assertRaises(ValueError):
+                self.read(component, notices)
+
+    def test_release_asset_record_must_be_exactly_size_and_digest(self):
+        for label, archive in (("extra key", {**self.archive, "url": "https://example.invalid/asset"}),
+                               ("missing digest", {"bytes": 8983965}), ("boolean size", {**self.archive, "bytes": True}),
+                               ("zero size", {**self.archive, "bytes": 0}), ("text size", {**self.archive, "bytes": "8983965"}),
+                               ("short digest", {**self.archive, "sha256": "5" * 63}),
+                               ("uppercase digest", {**self.archive, "sha256": "A" * 64}),
+                               ("null", None), ("list", [8983965, "5" * 64])):
+            with self.subTest(label), self.assertRaises(ValueError):
+                self.read({**self.component, "source_archive": archive}, self.notices(1))
+
+    def test_component_without_a_release_asset_keeps_the_78_notice_rule(self):
+        files, selected = self.read(self.component, self.notices(78))
+        self.assertEqual(selected, self.component)
+        self.assertEqual(len([name for name in files if name.startswith("github/notices/")]), 78)
+        for label, notices in (("one", self.notices(1)), ("77", self.notices(77)), ("79", self.notices(79)),
+                               ("78 without the upstream licence", self.notices(78, upstream=False))):
+            with self.subTest(label), self.assertRaises(ValueError):
+                self.read(self.component, notices)
+
+    def test_release_asset_form_is_the_macos_contract_only(self):
+        # A Linux selected-reads record is judged as before: the release asset field changes nothing for it.
+        elf = bytearray(64 + 56)
+        elf[:16] = bytes.fromhex("7f454c46020101000000000000000000")
+        struct.pack_into("<HHIQQQIHHHHHH", elf, 16, 2, 62, 1, 0x400000, 64, 0, 0, 64, 56, 1, 0, 0, 0)
+        struct.pack_into("<IIQQQQQQ", elf, 64, 1, 5, 0, 0x400000, 0x400000, len(elf), len(elf), 0x1000)
+        self.binary = bytes(elf)
+        component = {**self.component, "target": "linux-x86_64", "artifact_sha256": MODULE.sha(self.binary),
+                     "source_archive": self.archive}
+        with self.assertRaises(ValueError):
+            self.read(component, self.notices(1))
+        files, _ = self.read(component, self.notices(78))
+        self.assertEqual(len([name for name in files if name.startswith("github/notices/")]), 78)
+
+
+class PlaywrightRuntimeNpmTests(unittest.TestCase):
+    """The Playwright route admits the npm that the product's pinned runtime Node archive carries.
+
+    The route is macOS arm64 only, so the platform is stated for the test and both runtimes are stand-ins:
+    no Node, npm, browser or package code runs.
+    """
+
+    def setUp(self):
+        base = "/private/tmp" if os.path.isdir("/private/tmp") else tempfile.gettempdir()
+        self.scratch = tempfile.TemporaryDirectory(prefix="pw-", dir=base)
+        self.addCleanup(self.scratch.cleanup)
+        self.root = Path(self.scratch.name).resolve()
+        versions = {"@playwright/mcp": "0.0.83", "playwright": "1.64.0-alpha-1790635538000",
+                    "playwright-core": "1.64.0-alpha-1790635538000"}
+        project = {"name": "fixture", "version": "0.1.0", "private": True, "dependencies": {"@playwright/mcp": "0.0.83"}}
+        lock = {"name": "fixture", "version": "0.1.0", "lockfileVersion": 3, "packages": {"": project}}
+        files, rows = {}, []
+        for index, (package, version) in enumerate(versions.items()):
+            dependencies = {key: value for key, value in versions.items()
+                            if (package == "@playwright/mcp" and key != package)
+                            or (package == "playwright" and key == "playwright-core")}
+            output = io.BytesIO()
+            members = {"package.json": MODULE.encoded({"name": package, "version": version, "dependencies": dependencies}),
+                       "cli.js": b"throw Error('must not execute');\n", "LICENSE": b"fixture licence\n"}
+            with tarfile.open(fileobj=output, mode="w:gz") as stream:
+                for member, raw in members.items():
+                    row = tarfile.TarInfo("package/" + member)
+                    row.size = len(raw)
+                    stream.addfile(row, io.BytesIO(raw))
+            raw = output.getvalue()
+            parsed = MODULE.npm_archive(raw)
+            path, location = "playwright/archives/%d.tgz" % index, "node_modules/" + package
+            url = "https://registry.example/%d.tgz" % index
+            files[path] = raw
+            rows.append({"id": package, "version": version, "path": path, "url": url, "integrity": parsed["integrity"],
+                         "sha256": MODULE.sha(raw), "bytes": len(raw), "install_path": location,
+                         "payload_files": len(parsed["files"])})
+            lock["packages"][location] = {"version": version, "resolved": url, "integrity": parsed["integrity"],
+                                          "dependencies": dependencies}
+        files["playwright/package.json"] = MODULE.encoded(project)
+        files["playwright/package-lock.json"] = MODULE.encoded(lock)
+        files["playwright/closure.json"] = MODULE.encoded({
+            "packages": rows, "package_json_sha256": MODULE.sha(files["playwright/package.json"]),
+            "package_lock_sha256": MODULE.sha(files["playwright/package-lock.json"])})
+        files["playwright/mcp.template.json"] = MODULE.encoded({"mcpServers": {"playwright-isolated": {
+            "command": "ABS_NODE_EXECUTABLE", "args": MODULE.PLAYWRIGHT_ARGS, "cwd": "ABS_PROCESS_WORKSPACE",
+            "env": {"PATH": "/usr/bin:/bin", "HOME": "ABS_PROCESS_HOME", "TMPDIR": "ABS_PROCESS_TMP",
+                    "PWTEST_SOCKETS_DIR": "ABS_SHORT_PROCESS_SOCKET_DIRECTORY"}}}})
+        files["playwright/UPSTREAM-PROFILE.md"] = b"fixture guide\n"
+        files.update({"playwright/notices/%d" % index: b"fixture notice\n" for index in range(7)})
+        files["delivery.json"] = MODULE.encoded({
+            "format": "meerkat-toolkit.official-consumers.v1", "role": "service_connector", "components": [{
+                "catalog_id": "playwright", "source_revision": "a" * 40,
+                "selected_operations": MODULE.PLAYWRIGHT_OPERATIONS, "whole_endpoint_exposed": True,
+                "browser_distributed": False, "package_json": "playwright/package.json",
+                "package_lock": "playwright/package-lock.json", "closure": "playwright/closure.json",
+                "configuration_template": "playwright/mcp.template.json"}]})
+        self.bundle = self.root / "bundle"
+        for name, raw in files.items():
+            target = self.bundle / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(raw)
+        contents = MODULE.encoded({"format": 1, "files": {
+            name: {"sha256": MODULE.sha(raw), "bytes": len(raw)} for name, raw in files.items()}})
+        (self.bundle / "CONTENTS.json").write_bytes(contents)
+        self.digest = MODULE.sha(contents)
+        chrome = self.root / "chrome"
+        chrome.write_bytes(b"NOT_EXECUTABLE_CHROME")
+        chrome.chmod(0o700)
+        (self.root / "p").mkdir()
+        self.profile = self.root / "host.json"
+        self.profile.write_bytes(MODULE.encoded({
+            "schema_version": 1, "chrome_executable": str(chrome), "chrome_sha256": MODULE.sha(chrome.read_bytes()),
+            "process_parent": str(self.root / "p")}))
+        self.node = self.root / "node"
+        self.node.write_bytes(b"NOT_EXECUTABLE_NODE")
+        self.node.chmod(0o700)
+        self.npm = self.root / "npm.js"
+        self.npm.write_bytes(b"NOT_EXECUTABLE_NPM")
+        self.config = self.root / "config.json"
+        self.config.write_bytes(MODULE.encoded({"profile": MODULE.PLAYWRIGHT_PROFILE,
+                                                "operations": MODULE.PLAYWRIGHT_OPERATIONS, "config": {}}))
+        self.calls = []
+
+    def arguments(self, **changes):
+        values = dict(official_bundle=str(self.bundle), contents_sha256=self.digest, component="playwright",
+                      playwright_host_profile=str(self.profile),
+                      playwright_host_profile_sha256=MODULE.sha(self.profile.read_bytes()),
+                      node=str(self.node), npm_cli=str(self.npm), official_describe=False, check_config_only=False,
+                      verify_existing=False, config=str(self.config), config_sha256=MODULE.sha(self.config.read_bytes()),
+                      server_name="playwright", destination=str(self.root / "install"))
+        values.update(changes)
+        return argparse.Namespace(**values)
+
+    def install(self, npm_version, destination="install"):
+        """Run the route with stand-in runtimes: Node reports macOS arm64, npm prints the given version."""
+        def stand_in(argv, cwd, env, label, **_):
+            self.calls.append(label)
+            if label == "node-runtime":
+                return MODULE.encoded({"version": "v24.19.0", "platform": "darwin", "arch": "arm64"})
+            if label == "npm-runtime":
+                self.assertEqual(argv[:2], [str(self.node), str(self.npm)])
+                return npm_version
+            if label == "npm-install":
+                for archive in (cwd / "inputs/playwright/archives").iterdir():
+                    content = MODULE.npm_archive(archive.read_bytes())
+                    for path, raw in content["files"].items():
+                        target = cwd / "node_modules" / content["name"] / path
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_bytes(raw)
+            return b""
+        with patch.object(MODULE.sys, "platform", "darwin"), patch("platform.machine", return_value="arm64"), \
+                patch.object(MODULE, "run", side_effect=stand_in):
+            return MODULE.official_consumer(self.arguments(destination=str(self.root / destination)))
+
+    def test_npm_of_the_pinned_runtime_node_archive_is_admitted(self):
+        receipt = self.install(b"11.17.0\n")
+        self.assertEqual(receipt["runtime_selection"], {"node": str(self.node), "npm_cli": str(self.npm)})
+        self.assertTrue((self.root / "install/ready/installed.json").is_file())
+        self.assertIn("npm-install", self.calls)
+
+    def test_any_other_npm_is_refused_before_the_offline_install(self):
+        for index, version in enumerate((b"11.12.1\n", b"11.17.1\n", b"12.2.0\n", b"10.9.8\n", b"11.17.0-pre\n",
+                                         b"v11.17.0\n", b"", b"not a version\n")):
+            with self.subTest(version=version):
+                self.calls = []
+                destination = "refused-%d" % index
+                with self.assertRaises(MODULE.InstallError) as refusal:
+                    self.install(version, destination)
+                self.assertEqual(str(refusal.exception), "unsupported selected npm")
+                self.assertEqual(self.calls, ["node-runtime", "npm-runtime"])
+                self.assertFalse((self.root / destination / "ready").exists())
+                self.assertFalse((self.root / destination / "node_modules").exists())
+
+    def test_described_runtime_names_the_admitted_npm(self):
+        described = MODULE.official_consumer(self.arguments(official_describe=True))
+        runtime = next(row["instruction"] for row in described["help"]["prerequisites"] if row["kind"] == "host_runtime")
+        self.assertIn("selected Node 24.19.0/npm 11.17.0", runtime)
+        self.assertNotIn("11.12.1", runtime)
+        self.assertEqual(described["target"], "macos-arm64")
 
 
 class NpmClosureTests(unittest.TestCase):

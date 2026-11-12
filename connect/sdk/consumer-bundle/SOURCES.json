@@ -1,0 +1,62 @@
+{
+  "schema": "connect-consumer-bundle-sources/1",
+  "origin": {
+    "release": "connect-v0.9.14",
+    "asset": "meerkat-connect-0.9.14-linux-x86_64.tar.gz",
+    "asset_url": "https://github.com/lukacf/meerkat/releases/download/connect-v0.9.14/meerkat-connect-0.9.14-linux-x86_64.tar.gz",
+    "asset_sha256": "ac687c53a525fa77e83a1ab02fd15e159517e73288e38908a11352acf3481a6e",
+    "library_member": "meerkat-connect-linux-x86_64/libexec/meerkat-connect/archives/toolkit-library-20261112-connect-abdabeb8-linux-x86_64.tar.gz",
+    "library_sha256": "d270136610966666f567ee5b93fa50e21ed2d60eba4df9d5c9e6c316ea1ebd75"
+  },
+  "files": [
+    {
+      "path": "install-library-consumer.py",
+      "library_member": "consumers/install-library-consumer.py",
+      "bytes": 82041,
+      "sha256": "106ba8c23a411ed16f119b3345dec6574bfab27bc72b794ec63f3859c8230c1c",
+      "use": "copied byte for byte"
+    },
+    {
+      "path": "agno/runtime-constraints.txt",
+      "library_member": "consumers/agno/runtime-constraints.txt",
+      "bytes": 2009,
+      "sha256": "5a115ba33029a05e7357595fea97d984d7ac28c523102ad8a9c532a73dcb67d7",
+      "use": "copied byte for byte"
+    },
+    {
+      "path": "services/runtime-constraints.txt",
+      "library_member": "consumers/services/runtime-constraints.txt",
+      "bytes": 566,
+      "sha256": "c83585d2633f11d0d4fb13c710d5a89ee6ea52ae3f5e6d6eff9757152a5755e5",
+      "use": "copied byte for byte"
+    },
+    {
+      "path": "activepieces/package.json",
+      "library_member": "consumers/activepieces/package.json",
+      "bytes": 221,
+      "sha256": "051f2da4acb70bd08df7b380a27ff5a239dbcd7176d89f1083a361c60e59e69c",
+      "use": "copied byte for byte"
+    },
+    {
+      "path": "activepieces/package-lock.json",
+      "library_member": "consumers/activepieces/package-lock.json",
+      "bytes": 2554,
+      "sha256": "dc577275169223fabc962e0b2337e73b6d21e81af05ec0c63b856325b5829272",
+      "use": "copied byte for byte; the export replaces the component integrity with the run's"
+    },
+    {
+      "path": "linux-routes.json",
+      "library_member": "consumers/routes.json",
+      "bytes": 38024,
+      "sha256": "41732384d5ada688b43d26c188df99781995a1ca0a2526565e66df4f1e8cd5cb",
+      "use": "copied byte for byte; not shipped: the export derives the macOS routes.json from it"
+    }
+  ],
+  "written_new": [
+    {
+      "path": "MACOS-CONSUMERS.md",
+      "wording_from": "consumers/README.md",
+      "wording_from_sha256": "e7bf4e6910f81d940ee01d2e903ece70f22bb4035ef12c4725bba7007133ad2c"
+    }
+  ]
+}

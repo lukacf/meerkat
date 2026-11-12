@@ -2783,6 +2783,14 @@ def official_inputs(bundle: Path, expected: str, component: str):
         if (notices != ["github/notices/upstream-LICENSE"]
                 or sha(files[notices[0]]) != GHE_LICENSE_SHA256):
             raise InstallError("unsupported enterprise license payload")
+    elif "source_archive" in selected and official_target(selected) == "macos-arm64":
+        # An executable taken from an upstream release archive carries that archive's one license.
+        archive = selected["source_archive"]
+        if (not isinstance(archive, dict) or set(archive) != {"bytes", "sha256"}
+                or type(archive["bytes"]) is not int or archive["bytes"] <= 0
+                or not isinstance(archive["sha256"], str) or not re.fullmatch(r"[a-f0-9]{64}", archive["sha256"])
+                or notices != ["github/notices/upstream-LICENSE"]):
+            raise InstallError("unsupported release asset notices")
     elif len(notices) != 78 or "github/notices/upstream-LICENSE" not in notices:
         raise InstallError("incomplete official notices")
     expected_files = {"delivery.json", "github/github-mcp-server", "github/mcp.template.json", "github/UPSTREAM-PROFILE.md", *notices}
@@ -3067,7 +3075,7 @@ def playwright_consumer(args):
     if args.official_describe:
         help_value={"profile":PLAYWRIGHT_PROFILE,"operations":PLAYWRIGHT_OPERATIONS,"effect":"unspecified","fields":[],"scope":"configuration_only","selectable_operations":False,
             "prerequisites":[{"kind":"whole_endpoint","instruction":"All Playwright endpoint tools are exposed. The five listed operations describe adopted coverage, not a tool filter. This profile accepts no custom fields."},
-                {"kind":"host_runtime","instruction":"macOS arm64, selected Node 24.19.0/npm 11.12.1 and an existing host-pinned Chrome executable. Metadata does not establish browser compatibility."},
+                {"kind":"host_runtime","instruction":"macOS arm64, selected Node 24.19.0/npm 11.17.0 and an existing host-pinned Chrome executable. Metadata does not establish browser compatibility."},
                 {"kind":"host_environment","instruction":"Launch only with a host-controlled minimal environment, excluding unrelated PLAYWRIGHT_MCP_*, NODE_OPTIONS, NODE_PATH and proxy settings. The MCP env object does not clear inherited values."}],
             "unresolved_details":["The host owns browser lifetime, filesystem/network policy, snapshot-file access and cleanup after joining all children.","No logged-in state, cookies, credentials, remote browser or extension connection is imported. Isolation flags are not a security boundary."],
             "guide_text":files["playwright/UPSTREAM-PROFILE.md"].decode("utf-8")}
@@ -3131,7 +3139,8 @@ def playwright_consumer(args):
     if observed!={'version':'v24.19.0','platform':'darwin','arch':'arm64'}:raise InstallError("unsupported selected Node runtime")
     env=npm_environment(destination,runtime,env);env.update(npm_config_engine_strict='true',npm_config_bin_links='false')
     command=[runtime,npm,'--prefix',str(destination)]
-    if run(command+['--version'],destination,env,'npm-runtime').decode('ascii').strip()!='11.12.1':raise InstallError("unsupported selected npm")
+    # The npm inside the product's pinned runtime Node v24.19.0 archive, which is the npm the product passes here.
+    if run(command+['--version'],destination,env,'npm-runtime').decode('ascii').strip()!='11.17.0':raise InstallError("unsupported selected npm")
     for i,(p,_) in enumerate(closure['rows'].values()):run(command+['cache','add',str(destination/'inputs'/p),'--offline'],destination,env,'npm-cache-'+str(i))
     run(command+['ci','--offline','--ignore-scripts','--no-audit','--no-fund','--bin-links=false'],destination,env,'npm-install')
     existing_tree(destination/'node_modules',1000);verify_selected_npm(destination,closure)

@@ -90,6 +90,24 @@ content = "For the initial message containing 'You have been spawned as' or a li
     } else {
         ""
     };
+    // META_FIXTURE_IDENTITY_PREPARATION=1: the mob has a second profile,
+    // `prepared`, whose new agents the fixture's identity policy says the
+    // host prepares before their first use.
+    let prepared_profile = std::env::var("META_FIXTURE_IDENTITY_PREPARATION")
+        .ok()
+        .as_deref()
+        == Some("1");
+    let prepared_definition = if prepared_profile {
+        r#"
+[profiles.prepared]
+model = "gpt-5.5"
+external_addressable = true
+[profiles.prepared.tools]
+comms = true
+"#
+    } else {
+        ""
+    };
     let mut definition = MobDefinition::from_toml(&format!(
         r#"
 [mob]
@@ -104,6 +122,7 @@ comms = true
 workgraph = true
 image_generation = {live_images}
 {bootstrap_definition}
+{prepared_definition}
 "#
     ))?;
     let plan = Arc::new(Mutex::new(ModelPlan {
@@ -229,11 +248,18 @@ image_generation = {live_images}
             .lease_provider(Arc::new(LocalLeaseProvider::new()));
     }
     let runtime = Arc::new(Box::pin(builder.build()).await?);
+    // The launch's schedules, as the family of changes of its long-term
+    // agents is given them: the schedules that target an agent follow its
+    // archive, its unarchive and its removal. Nothing drives them here: a
+    // fixture schedule is due a day ahead and never fires.
+    let schedules = meerkat::ScheduleService::new(Arc::new(meerkat::MemoryScheduleStore::new()));
     // META_FIXTURE_IDENTITY_POLICY=1: the runtime serves the changes and
     // reads of its long-term agents (`meta/identity/*`) under a policy that
-    // allows every change of an agent of the fixture's profile to any
+    // allows every change of an agent of the fixture's profiles to any
     // requester, and holds the create of the two names `held-one` and
-    // `held-two` for a decision of the approver `owner`.
+    // `held-two` for a decision of the approver `owner`. With
+    // META_FIXTURE_IDENTITY_PREPARATION=1 the host prepares the agents of
+    // the profile `prepared`: a new one waits until `/__fixture/settle`.
     if std::env::var("META_FIXTURE_IDENTITY_POLICY")
         .ok()
         .as_deref()
@@ -243,25 +269,39 @@ image_generation = {live_images}
             identity_mode,
             "the identity policy needs the identity-first runtime (META_FIXTURE_MODE=identity)"
         );
-        let policy = meerkat_meta::identity_creation::IdentityCreationPolicy::parse(&json!({
+        let profiles = if prepared_profile {
+            json!(["lead", "prepared"])
+        } else {
+            json!(["lead"])
+        };
+        let mut policy = json!({
             "enabled": true,
             "peers": {"default": "allow"},
             "approval": {"rules": [
                 {"change": ["create", "descriptive", "capability", "peers", "profile",
                             "archive", "remove", "adopt"],
-                 "target": {"profile": ["lead"]},
+                 "target": {"profile": profiles},
                  "outcome": {"kind": "allow"}},
                 {"change": ["create"],
                  "target": {"identity": ["held-one", "held-two"]},
                  "outcome": {"kind": "require_approval", "approver": {"id": "owner"}}},
             ]},
-        }))
-        .map_err(|refusal| refusal.to_string())?
-        .ok_or("the fixture's identity policy is enabled")?;
+        });
+        if prepared_profile {
+            policy["preparation"] = json!({"prepared": {"mode": "required"}});
+        }
+        let policy = meerkat_meta::identity_creation::IdentityCreationPolicy::parse(&policy)
+            .map_err(|refusal| refusal.to_string())?
+            .ok_or("the fixture's identity policy is enabled")?;
         assert!(
             runtime.attach_identity_policy(
                 Arc::new(policy),
-                meerkat_meta::identity_creation::IdentityFamilyOptions::new(),
+                meerkat_meta::identity_creation::IdentityFamilyOptions::new().with_schedules(
+                    Arc::new(meerkat_meta::schedule_wiring::MobAgentSchedules::new(
+                        schedules.clone(),
+                        meerkat_meta::schedule_wiring::ScheduleMobTargetRegistry::default(),
+                    )),
+                ),
             ),
             "the identity-first runtime takes the policy"
         );
@@ -348,9 +388,90 @@ image_generation = {live_images}
     );
     let approval_runtime = runtime.clone();
     let history_runtime = runtime.clone();
+    let settle_runtime = runtime.clone();
+    let created_schedules = schedules.clone();
+    let listed_schedules = schedules;
     let controls = Router::new()
         .merge(durable_steer::router(runtime.clone()))
         .merge(routine_tools::router(runtime.clone()))
+        // The launch's schedules. POST {identity, name}: a schedule that
+        // targets the agent `identity`, due a day ahead. GET: each schedule
+        // with its phase and whether it is paused for its target.
+        .route("/schedules", post(move |Json(value): Json<Value>| {
+            let schedules = created_schedules.clone();
+            async move {
+                let (Some(identity), Some(name)) = (
+                    value.get("identity").and_then(Value::as_str),
+                    value.get("name").and_then(Value::as_str),
+                ) else {
+                    return (axum::http::StatusCode::BAD_REQUEST, Json(json!({"error": "identity and name are required"})));
+                };
+                let created = schedules.create(meerkat::CreateScheduleRequest {
+                    name: Some(name.to_owned()),
+                    description: None,
+                    trigger: meerkat::TriggerSpec::Once {
+                        due_at_utc: chrono::Utc::now() + chrono::Duration::days(1),
+                    },
+                    target: meerkat::TargetBinding::identity(meerkat::IdentityTargetBinding::resumable(
+                        identity,
+                        meerkat::ScheduledSessionAction::Prompt {
+                            prompt: meerkat_core::ContentInput::Text("Check in.".into()),
+                            system_prompt: None,
+                            render_metadata: None,
+                            skill_refs: Vec::new(),
+                            additional_instructions: Vec::new(),
+                        },
+                    )),
+                    misfire_policy: meerkat::MisfirePolicy::default(),
+                    overlap_policy: meerkat::OverlapPolicy::default(),
+                    missing_target_policy: meerkat::MissingTargetPolicy::default(),
+                    labels: BTreeMap::new(),
+                    planning_horizon_days: Some(1),
+                    planning_horizon_occurrences: Some(1),
+                }).await;
+                match created {
+                    Ok(schedule) => (axum::http::StatusCode::OK, Json(json!({"schedule_id": schedule.schedule_id.to_string()}))),
+                    Err(error) => (axum::http::StatusCode::BAD_REQUEST, Json(json!({"error": error.to_string()}))),
+                }
+            }
+        }).get(move || {
+            let schedules = listed_schedules.clone();
+            async move {
+                match schedules.list().await {
+                    Ok(listed) => (axum::http::StatusCode::OK, Json(json!(listed.iter().map(|schedule| json!({
+                        "schedule_id": schedule.schedule_id.to_string(),
+                        "name": schedule.config.name,
+                        "phase": schedule.phase,
+                        "paused_for_target": schedule.paused_for_target(),
+                    })).collect::<Vec<_>>()))),
+                    Err(error) => (axum::http::StatusCode::BAD_REQUEST, Json(json!({"error": error.to_string()}))),
+                }
+            }
+        }))
+        // The host's operator settles the preparation of the agent `name`,
+        // as an SDK host does on the stdio gateway: no Console caller can.
+        .route("/settle", post(move |Json(value): Json<Value>| {
+            let runtime = settle_runtime.clone();
+            async move {
+                let name = value.get("name").and_then(Value::as_str).unwrap_or_default();
+                let request = value.get("request_id").and_then(Value::as_str).unwrap_or("fixture-settle");
+                let Some(family) = runtime.identity_family() else {
+                    return (axum::http::StatusCode::BAD_REQUEST, Json(json!({"error": "the runtime serves no long-term agents"})));
+                };
+                let operator = meerkat_meta::identity_creation::ChangeRequester::host_operator("fixture");
+                match meerkat_meta::identity_creation::OperationId::for_request(&operator.recorded(), request) {
+                    Ok(operation) => {
+                        let outcome = family.settle_preparation(
+                            &runtime.mob_handle(),
+                            &operator,
+                            meerkat_meta::identity_creation::SettlePreparationCall::new(operation, name),
+                        ).await;
+                        (axum::http::StatusCode::OK, Json(outcome.to_json()))
+                    }
+                    Err(refusal) => (axum::http::StatusCode::BAD_REQUEST, Json(json!({"error": refusal.to_string()}))),
+                }
+            }
+        }))
         .route("/access", post(move |Json(value): Json<Value>| {
             let access = access.clone();
             async move {

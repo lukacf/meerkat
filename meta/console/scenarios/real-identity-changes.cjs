@@ -371,15 +371,26 @@ async function fullStory() {
     await gone(page.getByTestId("inspect-panel:clerk"), "the closed details");
     await page.getByTestId("roster-panel").waitFor();
 
+    // One schedule targets the agent. A change of the whole agent takes it
+    // with it, and the result says what became of it, by its name.
+    const morning = await fixture.control("schedules", { identity: "scout", name: "Morning report" });
+    const schedule = async () => (await (await fetch(`${fixture.backendUrl}/__fixture/schedules`)).json())
+      .filter(listed => listed.schedule_id === morning.schedule_id)
+      .map(({ name, phase, paused_for_target }) => ({ name, phase, paused_for_target }));
+    assert.deepEqual(await schedule(), [{ name: "Morning report", phase: "active", paused_for_target: false }]);
+    // What a result says in its own lines: the technical details hold the ids.
+    const said = async () => (await notice.locator(".identity-notice__line").allTextContents()).join("\n");
+
     // Archive: the agent leaves the roster and is among the archived agents.
+    // Its schedule is paused for it, and the notice names the schedule.
     await openAgent("scout");
     await page.getByTestId("roster-action:scout:archive").click();
     await page.getByTestId("identity-confirm:scout:archive").getByText(/Its last conversation is harvested/).waitFor();
     await page.getByTestId("identity-confirm:scout:archive").getByTestId("identity-confirm-yes").click();
     await outcome(/is stopping$|is archived$/);
-    // This gateway's host gives the family no schedules, so the answer
-    // states none and the notice says nothing of them.
-    assert.equal(/schedule/i.test(await notice.textContent()), false);
+    await outcome("Its schedule Morning report is paused until it is unarchived.");
+    assert.equal((await said()).includes(morning.schedule_id), false, "a schedule's id is no line of the result");
+    assert.deepEqual(await schedule(), [{ name: "Morning report", phase: "paused", paused_for_target: true }]);
     assert.equal(sent(fixture, "meta/identity/archive")[0].expected_spec_digest, record.spec_digest);
     await gone(agent("scout"), "the archived agent in the roster");
     await page.getByTestId("identity-confirm-cancel").click();
@@ -387,10 +398,13 @@ async function fullStory() {
     assert.match(await archived.textContent(), /Chief scout/);
     await page.screenshot({ path: path.join(evidence, "real-identity-story-archived.png"), fullPage: true });
 
-    // Unarchive: it is back in the roster, on the record it had.
+    // Unarchive: it is back in the roster, on the record it had, and its
+    // schedule runs again.
     await page.getByTestId("roster-archived-action:scout:unarchive").click();
     await page.getByTestId("identity-confirm:scout:unarchive").getByTestId("identity-confirm-yes").click();
     await outcome(/is back$/);
+    await outcome("Its schedule Morning report runs again.");
+    assert.deepEqual(await schedule(), [{ name: "Morning report", phase: "active", paused_for_target: false }]);
     await agent("scout").waitFor();
     await page.getByTestId("identity-confirm-cancel").click();
     assert.equal((await call("meta/identity/get", { name: "scout" })).result.archived, false);
@@ -425,6 +439,9 @@ async function fullStory() {
     await confirm.getByTestId("identity-confirm-yes").click();
     await outcome(/is stopping$|is removed$/);
     await outcome(/can never be used again/);
+    // A removal ends the agent's schedule.
+    await outcome("Its schedule Morning report is ended.");
+    assert.deepEqual(await schedule(), []);
     await gone(agent("scout"), "the removed agent in the roster");
     await page.getByTestId("identity-confirm-cancel").click();
     await page.getByTestId("roster-new-agent").click();
@@ -488,9 +505,124 @@ async function fullStory() {
   }
 }
 
+/**
+ * An agent that waits for its host, against the real gateway: the fixture's
+ * policy says the host prepares the agents of the profile `prepared`, so a
+ * new one is committed and has no member until the host settles its
+ * preparation. The console shows it by name, as waiting, with no control;
+ * the settle is the host's operator's, which no console caller is.
+ */
+async function waitingAgent() {
+  requirePrebuilt();
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "meta-identity-waiting-"));
+  const fixture = await startFixture({
+    mode: "identity", identityPolicy: true, identityPreparation: true, person: true, stateDir, allowExtraMembers: true,
+  });
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
+  page.setDefaultTimeout(20_000);
+  const errors = [];
+  page.on("pageerror", error => errors.push(error.message));
+  const call = async (method, params = {}) => (await rpc(fixture.baseUrl, method, params)).body;
+  try {
+    const openRoster = async () => {
+      await page.locator('[data-testid="console-transport-status"][data-phase="live"]').waitFor();
+      await page.getByTestId("nav:roster").click();
+      await page.getByTestId("roster-panel").waitFor();
+    };
+    await page.goto(`${fixture.baseUrl}/console`);
+    await openRoster();
+    const agent = name => page.locator(`[data-testid="roster-card:${name}"], [data-testid="roster-row:${name}"]`);
+    const notice = page.getByTestId("identity-notice");
+    await agent(router).waitFor();
+    await fs.mkdir(evidence, { recursive: true });
+
+    // A new agent of the profile the host prepares: the create is made, and
+    // the result says that the agent is being prepared.
+    await page.getByTestId("roster-new-agent").click();
+    const form = page.getByTestId("identity-new-agent");
+    await form.getByTestId("identity-profile:prepared").check();
+    await form.getByTestId("identity-field:name").fill("porter");
+    await form.getByTestId("identity-field:display_name").fill("The porter");
+    await form.getByTestId("identity-submit").click();
+    await notice.getByText("The porter is being prepared").waitFor({ timeout: 90_000 });
+    await notice.getByText("The agent cannot be used until its preparation ends.").waitFor();
+    await page.screenshot({ path: path.join(evidence, "real-identity-waiting-created.png"), fullPage: true });
+    await page.getByTestId("identity-cancel").click();
+
+    // Its record says that it waits, and names the create that is open for
+    // it to the person who asked. It has no member, so no row of the roster.
+    const record = (await call("meta/identity/get", { name: "porter" })).result;
+    assert.equal(record.readiness, "preparation_pending");
+    assert.equal(record.archived, false);
+    assert.equal(Array.isArray(record.open_operations) && record.open_operations.length, 1);
+    const [operation] = record.open_operations;
+    assert.equal((await call("meta/identity/operation", { operation_id: operation })).result.outcome, "pending_preparation");
+    assert.equal(await agent("porter").count(), 0);
+
+    // The list under the roster shows it: its name first, a plain state,
+    // no id and no control.
+    await page.getByTestId("roster-archived-open").click();
+    const waiting = page.getByTestId("roster-waiting:porter");
+    await waiting.waitFor();
+    const row = await waiting.textContent();
+    assert.match(row, /The porter/);
+    assert.match(row, /Waiting for its host/);
+    assert.equal(row.includes(operation), false, "an operation id is no text of the row");
+    assert.equal(/preparation_pending|principal:/.test(row), false);
+    assert.equal(await waiting.locator("button").count(), 0);
+    await page.getByTestId("roster-archived").getByText("Its host is still preparing it. It joins the roster when that ends.").waitFor();
+    await page.screenshot({ path: path.join(evidence, "real-identity-waiting-listed.png"), fullPage: true });
+
+    // The settle is the host's operator's: the console lists no such method
+    // and the gateway refuses it for a console caller, so the console
+    // offers none. Nothing changed.
+    const offered = (await call("meta/capabilities")).result.methods;
+    assert.equal(offered.includes("meta/identity/create"), true);
+    assert.equal(offered.includes("meta/identity/settle_preparation"), false);
+    const refused = (await call("meta/identity/settle_preparation", { request_id: "console-settle", name: "porter" })).error;
+    assert.equal(refused.code, -32058);
+    assert.equal(refused.data.kind, "change_denied");
+    assert.equal((await call("meta/identity/get", { name: "porter" })).result.readiness, "preparation_pending");
+
+    // The host settles the preparation: the agent has a member, is in the
+    // roster, and the list no longer shows it.
+    const settled = await fixture.control("settle", { name: "porter" });
+    assert.equal(settled.outcome, "done");
+    assert.deepEqual(settled.agents.map(entry => [entry.name, entry.state]), [["porter", "committed"]]);
+    const after = (await call("meta/identity/get", { name: "porter" })).result;
+    assert.notEqual(after.readiness, "preparation_pending");
+    assert.equal(Object.hasOwn(after, "open_operations"), false, "nothing is open for it any more");
+    await page.reload();
+    await openRoster();
+    await agent("porter").waitFor({ timeout: 90_000 });
+    await agent("porter").getByText("The porter").first().waitFor();
+    await page.getByTestId("roster-archived-open").click();
+    await page.getByTestId("roster-archived").getByText("No archived agents, and none that waits for its host.").waitFor();
+    assert.equal(await page.getByTestId("roster-waiting:porter").count(), 0);
+    await page.screenshot({ path: path.join(evidence, "real-identity-waiting-settled.png"), fullPage: true });
+
+    assert.deepEqual(errors, []);
+  } catch (error) {
+    await fs.mkdir(evidence, { recursive: true });
+    await page.screenshot({ path: path.join(evidence, "real-identity-waiting-agent-failure.png"), fullPage: true }).catch(() => {});
+    await fs.writeFile(path.join(evidence, "real-identity-waiting-agent-failure.json"), JSON.stringify({
+      error: String(error && error.stack || error), errors,
+      identity: fixture.observations.filter(item => item.request && item.request.includes("meta/identity/")),
+      logs: fixture.logs(),
+    }, null, 2)).catch(() => {});
+    throw error;
+  } finally {
+    await browser.close();
+    await fixture.close();
+    await fs.rm(stateDir, { recursive: true, force: true });
+  }
+}
+
 const scenarios = [
   { id: "real-identity-reads-and-refusals", family: "real-console", backend: "real", run: readsAndRefusals },
   { id: "real-identity-full-story", family: "real-console", backend: "real", run: fullStory },
+  { id: "real-identity-waiting-agent", family: "real-console", backend: "real", run: waitingAgent },
 ];
 
 module.exports = { scenarios };

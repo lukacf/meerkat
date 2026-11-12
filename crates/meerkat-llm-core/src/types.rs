@@ -121,6 +121,22 @@ pub trait LlmClient: Send + Sync {
         None
     }
 
+    /// The route observation of the route `projection` is bound to: what
+    /// [`Self::reasoning_route`] reported for the route this client
+    /// projected the request on. A client whose route can change between
+    /// two requests answers from the projection's own route witness, so a
+    /// request prepared on an earlier route is told apart from the route
+    /// served now; every other client's route is the one it reports. A
+    /// wrapper that sends its client's requests on unchanged delegates to
+    /// the client it wraps. No I/O.
+    fn reasoning_route_of(
+        &self,
+        projection: &LlmReplayProjection,
+    ) -> Option<meerkat_core::ReasoningRouteObservation> {
+        let _ = projection;
+        self.reasoning_route()
+    }
+
     /// Prepare replay messages together with any opaque, request-scoped route
     /// witness required to keep later lowering and dispatch coherent.
     fn project_replay_request(
@@ -295,6 +311,14 @@ impl LlmReplayProjection {
     pub fn with_route_witness(mut self, witness: LlmRequestRouteWitness) -> Self {
         self.route_witness = Some(witness);
         self
+    }
+
+    /// The route witness a wrapper attached with
+    /// [`Self::with_route_witness`], read as `T`.
+    pub fn route_witness<T: Any>(&self) -> Option<&T> {
+        self.route_witness
+            .as_ref()
+            .and_then(LlmRequestRouteWitness::downcast_ref)
     }
 
     /// Attach the projecting client's own evidence of what it decided for

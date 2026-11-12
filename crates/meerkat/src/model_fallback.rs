@@ -207,6 +207,14 @@ impl AgentLlmClient for ModelFallbackClient {
             .reasoning_route()
     }
 
+    /// The default tag of the candidate this client is serving: a fallback
+    /// moves the answer to the target's client with it.
+    fn default_provider_tag(&self) -> Option<meerkat_core::lifecycle::run_primitive::ProviderTag> {
+        self.candidates[self.active_index()]
+            .client
+            .default_provider_tag()
+    }
+
     fn pin_controller(self: Arc<Self>) -> Option<meerkat_core::ControllerModelClient> {
         // Read the existing selector exactly once and retain the selected
         // child. Later fallback changes cannot retarget the admitted pin.
@@ -685,6 +693,23 @@ mod tests {
         })
     }
 
+    /// The default tag a scripted candidate of `provider` reports: one that
+    /// differs per provider, and none for a provider the rows do not use.
+    fn scripted_default_tag(
+        provider: Provider,
+    ) -> Option<meerkat_core::lifecycle::run_primitive::ProviderTag> {
+        use meerkat_core::lifecycle::run_primitive::{OpenAiProviderTag, ProviderTag};
+        let seed = match provider {
+            Provider::OpenAI => 1,
+            Provider::Anthropic => 2,
+            _ => return None,
+        };
+        Some(ProviderTag::OpenAi(OpenAiProviderTag {
+            seed: Some(seed),
+            ..Default::default()
+        }))
+    }
+
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl AgentLlmClient for ScriptedClient {
@@ -718,6 +743,12 @@ mod tests {
 
         fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
             scripted_route(self.provider)
+        }
+
+        fn default_provider_tag(
+            &self,
+        ) -> Option<meerkat_core::lifecycle::run_primitive::ProviderTag> {
+            scripted_default_tag(self.provider)
         }
 
         fn request_pressure(
@@ -927,6 +958,40 @@ mod tests {
         assert_eq!(client.reasoning_route(), primary_route);
         client.commit_model_fallback(&previous, &next).unwrap();
         assert_eq!(client.reasoning_route(), target_route);
+    }
+
+    /// The fallback client reports the default tag of its active candidate,
+    /// before and after a fallback moves it to another target: a level
+    /// resolved for a request is written into the tag of the client that
+    /// will serve it.
+    #[test]
+    fn the_fallback_client_reports_its_active_candidates_default_tag() {
+        let primary = candidate(
+            Provider::OpenAI,
+            "primary",
+            Some(1_000_000),
+            Some(8192),
+            Arc::default(),
+        );
+        let target = candidate(
+            Provider::Anthropic,
+            "target",
+            Some(1_000_000),
+            Some(8192),
+            Arc::default(),
+        );
+        let previous = primary.identity.clone();
+        let next = target.identity.clone();
+        let client =
+            ModelFallbackClient::new(vec![primary, target], Default::default(), Vec::new(), None)
+                .unwrap();
+
+        let primary_tag = scripted_default_tag(Provider::OpenAI);
+        let target_tag = scripted_default_tag(Provider::Anthropic);
+        assert!(primary_tag.is_some() && primary_tag != target_tag);
+        assert_eq!(client.default_provider_tag(), primary_tag);
+        client.commit_model_fallback(&previous, &next).unwrap();
+        assert_eq!(client.default_provider_tag(), target_tag);
     }
 
     #[test]

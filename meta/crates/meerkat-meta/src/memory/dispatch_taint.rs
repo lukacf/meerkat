@@ -390,6 +390,13 @@ impl AgentLlmClient for TaintObservingLlmClient {
         self.inner.reasoning_route()
     }
 
+    // The default tag of the wrapped client. The trait's default is no tag,
+    // and a level resolved for a member whose client hides its tag would
+    // replace that client's default fields instead of joining them.
+    fn default_provider_tag(&self) -> Option<meerkat_core::lifecycle::run_primitive::ProviderTag> {
+        self.inner.default_provider_tag()
+    }
+
     fn controller_model_facts(&self) -> Result<ControllerModelFacts, ControllerFactsUnavailable> {
         self.inner.controller_model_facts()
     }
@@ -867,16 +874,19 @@ mod tests {
     // `reasoning_effort` option reaches the member's agent. The trait's
     // default is no route, so a decorator that omits the forward compiles
     // and leaves every level set on the member without a route to check it
-    // against.
+    // against. The same holds for the wrapped client's default provider tag:
+    // the trait's default is no tag, and a level resolved for the member
+    // would then replace its client's default fields.
     #[test]
     fn forwards_the_wrapped_clients_reasoning_route() {
-        use super::controller_test_support::{PinnedInner, reasoning_route};
+        use super::controller_test_support::{PinnedInner, default_provider_tag, reasoning_route};
         let wrapped = TaintObservingLlmClient::new(
             Arc::new(PinnedInner::default()),
             "identity:r".to_string(),
             DispatchTaintSlot::default(),
         );
         assert_eq!(wrapped.reasoning_route(), Some(reasoning_route()));
+        assert_eq!(wrapped.default_provider_tag(), Some(default_provider_tag()));
     }
 
     #[test]
@@ -1152,6 +1162,28 @@ pub(crate) mod controller_test_support {
         }
     }
 
+    /// The route the pinned raw client reports for a replay projection: not
+    /// the route it reports without one, so a wrapper that answers for a
+    /// projection with its client's request-free route is told apart from
+    /// one that asks its client about the projection.
+    pub(crate) fn reasoning_route_of_a_projection() -> meerkat_core::ReasoningRouteObservation {
+        meerkat_core::ReasoningRouteObservation {
+            api: meerkat_core::ModelApi::ChatCompletions,
+            ..reasoning_route()
+        }
+    }
+
+    /// The default provider tag the pinned client reports. A decorator that
+    /// does not forward it answers the trait's default, no tag, and a level
+    /// resolved for the member would replace its client's default fields.
+    pub(crate) fn default_provider_tag() -> meerkat_core::lifecycle::run_primitive::ProviderTag {
+        use meerkat_core::lifecycle::run_primitive::{OpenAiProviderTag, ProviderTag};
+        ProviderTag::OpenAi(OpenAiProviderTag {
+            seed: Some(7),
+            ..Default::default()
+        })
+    }
+
     struct RefusingPolicy;
 
     impl WorkAuthorization for RefusingPolicy {
@@ -1218,6 +1250,12 @@ pub(crate) mod controller_test_support {
 
         fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
             Some(reasoning_route())
+        }
+
+        fn default_provider_tag(
+            &self,
+        ) -> Option<meerkat_core::lifecycle::run_primitive::ProviderTag> {
+            Some(default_provider_tag())
         }
 
         fn controller_model_facts(

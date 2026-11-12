@@ -150,6 +150,14 @@ impl LlmClient for SelectedTargetClient {
         self.inner.reasoning_route()
     }
 
+    /// The route the wrapped client bound `projection` to.
+    fn reasoning_route_of(
+        &self,
+        projection: &crate::LlmReplayProjection,
+    ) -> Option<meerkat_core::ReasoningRouteObservation> {
+        self.inner.reasoning_route_of(projection)
+    }
+
     fn plain_model_route(
         &self,
         logical_model: &str,
@@ -482,5 +490,92 @@ mod tests {
             Some(reported)
         );
         assert_eq!(wrapped(None).reasoning_route(), None);
+    }
+
+    /// A client whose route of a projection is not the route it reports
+    /// without one: a wrapper that answers for a projection with its
+    /// client's request-free route is told apart from one that asks its
+    /// client about the projection.
+    struct ProjectionRouteClient {
+        now: meerkat_core::ReasoningRouteObservation,
+        of_projection: meerkat_core::ReasoningRouteObservation,
+    }
+    #[async_trait]
+    impl LlmClient for ProjectionRouteClient {
+        fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+            Some(self.now.clone())
+        }
+        fn reasoning_route_of(
+            &self,
+            _projection: &crate::LlmReplayProjection,
+        ) -> Option<meerkat_core::ReasoningRouteObservation> {
+            Some(self.of_projection.clone())
+        }
+        fn stream<'a>(&'a self, _: &'a LlmRequest) -> LlmStream<'a> {
+            Box::pin(futures::stream::empty())
+        }
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::SelfHosted
+        }
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    /// The selected-target wrapper answers for a projection with what the
+    /// client it wraps says about that projection, not with the route the
+    /// client reports without one: a client whose route can change between
+    /// two requests tells the two apart, and the wrapper must not hide it.
+    #[test]
+    fn the_selected_target_wrapper_reports_its_clients_route_of_a_projection() {
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+        use meerkat_core::provider_matrix::SelfHostedBackendKind;
+
+        let route = |api, levels: &[EffortLevel]| meerkat_core::ReasoningRouteObservation {
+            backend: meerkat_core::ReasoningBackend::SelfHosted(
+                SelfHostedBackendKind::OpenAiCompatible,
+            ),
+            api,
+            account: meerkat_core::AccountLevelStatement::NotApplicable,
+            operator_levels: Some(levels.to_vec()),
+        };
+        let now = route(meerkat_core::ModelApi::Responses, &[EffortLevel::Low]);
+        let of_projection = route(
+            meerkat_core::ModelApi::ChatCompletions,
+            &[EffortLevel::Low, EffortLevel::High],
+        );
+        let client = SelectedTargetClient::new(
+            Arc::new(ProjectionRouteClient {
+                now: now.clone(),
+                of_projection: of_projection.clone(),
+            }),
+            ResolvedModelAuthorizationTarget {
+                identity: Arc::new(SessionLlmIdentity {
+                    model: "fixture".to_owned(),
+                    provider: meerkat_core::Provider::SelfHosted,
+                    self_hosted_server_id: Some("local".to_owned()),
+                    provider_params: None,
+                    auth_binding: None,
+                }),
+                backend_profile_id: Arc::from("profile"),
+                backend_kind: Arc::from("backend"),
+                credential: AuthCredentialIdentity::from_auth_binding(
+                    &meerkat_core::AuthBindingRef {
+                        realm: meerkat_core::RealmId::parse("dev").unwrap(),
+                        binding: meerkat_core::BindingId::parse("fixture").unwrap(),
+                        profile: None,
+                        origin: meerkat_core::BindingOrigin::Configured,
+                    },
+                ),
+                credential_requirement: meerkat_core::ControllerCredentialRequirement::Required,
+            },
+        );
+        let projection = crate::LlmReplayProjection::new(Vec::new());
+        assert_eq!(
+            client.reasoning_route_of(&projection),
+            Some(of_projection),
+            "the wrapped client's answer for the projection"
+        );
+        assert_eq!(client.reasoning_route(), Some(now));
     }
 }

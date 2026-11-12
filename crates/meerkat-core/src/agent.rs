@@ -33,10 +33,10 @@ mod operator_instruction_fold_tests;
 mod operator_instruction_run_start_tests;
 #[cfg(all(test, feature = "workspace-tests"))]
 mod operator_instruction_turn_tests;
-#[cfg(all(test, feature = "workspace-tests"))]
-mod reasoning_effort_guard_tests;
 pub(crate) mod reasoning_preference;
 pub(crate) mod request_reasoning_effort;
+#[cfg(all(test, feature = "workspace-tests"))]
+mod request_reasoning_effort_tests;
 #[cfg(all(test, feature = "workspace-tests"))]
 mod round_commit_tests;
 mod runner;
@@ -262,6 +262,17 @@ pub trait AgentLlmClient: Send + Sync {
     /// the client reports no route; a wrapper reports the route of the client
     /// it delegates to and must not guess one.
     fn reasoning_route(&self) -> Option<crate::ReasoningRouteObservation> {
+        None
+    }
+
+    /// The provider tag this client applies to a request that carries none:
+    /// its own default fields, which a request's own tag replaces as a
+    /// whole. The agent writes a resolved `reasoning_effort` level into
+    /// this tag when a request copy has no tag of its own, so the client's
+    /// default fields are still sent and are judged with the level. No I/O.
+    /// `None` for a client with no default tag. A wrapper reports the tag
+    /// of the client it delegates to.
+    fn default_provider_tag(&self) -> Option<crate::lifecycle::run_primitive::ProviderTag> {
         None
     }
 

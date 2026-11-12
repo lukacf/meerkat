@@ -1448,6 +1448,22 @@ impl meerkat_llm_core::LlmClient for CopilotRoutedClient {
         reasoning_route_observation(self.provider, &CopilotRouteFingerprint::from(&current))
     }
 
+    /// The route a request was projected on: the prepared route its
+    /// projection carries as its witness, read through the same mapping as
+    /// [`Self::reasoning_route`]. The account's list can move the model to
+    /// another endpoint or change its stated levels between two requests,
+    /// and a level that was resolved for the earlier route must not be sent
+    /// on the later one: this answers for the projection, not for the route
+    /// the list resolves now. A projection this client did not make carries
+    /// no such witness and has no route to report.
+    fn reasoning_route_of(
+        &self,
+        projection: &meerkat_llm_core::LlmReplayProjection,
+    ) -> Option<meerkat_core::ReasoningRouteObservation> {
+        let prepared = projection.route_witness::<PreparedCopilotRoute>()?;
+        reasoning_route_observation(self.provider, &prepared.fingerprint)
+    }
+
     async fn prepare_controller_credential(&self) -> Result<(), AuthError> {
         self.connection
             .resolved_authorizer()
@@ -1785,6 +1801,14 @@ impl meerkat_llm_core::LlmClient for CopilotCapabilityGatedClient {
     /// The route of the adapter this gate stands in front of.
     fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
         self.inner.reasoning_route()
+    }
+
+    /// The route the adapter behind this gate bound `projection` to.
+    fn reasoning_route_of(
+        &self,
+        projection: &meerkat_llm_core::LlmReplayProjection,
+    ) -> Option<meerkat_core::ReasoningRouteObservation> {
+        self.inner.reasoning_route_of(projection)
     }
 
     /// The account model's own output limit, the one the gate enforces.
@@ -7352,6 +7376,72 @@ mod tests {
             .reasoning_route(),
             None
         );
+    }
+
+    /// The account capability gate answers for a projection with what the
+    /// adapter behind it says about that projection, not with the route the
+    /// adapter reports without one.
+    #[test]
+    fn the_capability_gate_forwards_its_clients_route_of_a_projection() {
+        use meerkat_core::provider_matrix::OpenAiBackendKind;
+        use meerkat_core::{
+            AccountLevelStatement, ModelApi, ReasoningBackend, ReasoningRouteObservation,
+        };
+
+        struct ProjectionRouteClient {
+            now: ReasoningRouteObservation,
+            of_projection: ReasoningRouteObservation,
+        }
+
+        #[async_trait]
+        impl meerkat_llm_core::LlmClient for ProjectionRouteClient {
+            fn reasoning_route(&self) -> Option<ReasoningRouteObservation> {
+                Some(self.now.clone())
+            }
+
+            fn reasoning_route_of(
+                &self,
+                _projection: &meerkat_llm_core::LlmReplayProjection,
+            ) -> Option<ReasoningRouteObservation> {
+                Some(self.of_projection.clone())
+            }
+
+            fn stream<'a>(
+                &'a self,
+                _request: &'a meerkat_llm_core::LlmRequest,
+            ) -> meerkat_llm_core::LlmStream<'a> {
+                Box::pin(futures::stream::empty())
+            }
+
+            fn provider(&self) -> Provider {
+                Provider::OpenAI
+            }
+
+            async fn health_check(&self) -> Result<(), meerkat_llm_core::LlmError> {
+                Ok(())
+            }
+        }
+
+        let route = |api| ReasoningRouteObservation {
+            backend: ReasoningBackend::OpenAi(OpenAiBackendKind::Copilot),
+            api,
+            account: AccountLevelStatement::NotApplicable,
+            operator_levels: None,
+        };
+        let gated = capability_gated_client(
+            Arc::new(ProjectionRouteClient {
+                now: route(ModelApi::Responses),
+                of_projection: route(ModelApi::ChatCompletions),
+            }),
+            Some(crate::CopilotModelCapabilities::default()),
+        );
+        let projection = meerkat_llm_core::LlmReplayProjection::new(Vec::new());
+        assert_eq!(
+            gated.reasoning_route_of(&projection),
+            Some(route(ModelApi::ChatCompletions)),
+            "the answer of the adapter behind the gate for the projection"
+        );
+        assert_eq!(gated.reasoning_route(), Some(route(ModelApi::Responses)));
     }
 
     /// A model the account lists with a policy state other than `enabled`
@@ -14525,6 +14615,94 @@ mod tests {
             assert!(
                 !client.refresh_prepared_route().expect("the route resolves"),
                 "the rebuilt route stands while the list does not change"
+            );
+        }
+
+        /// A projection keeps the route it was made on. Once the account's
+        /// list states other levels for the model, the client reports the
+        /// new route without a request, and still answers for the earlier
+        /// projection with the route that projection is bound to: a level
+        /// resolved for one of the two is never taken for the other. A
+        /// projection this client did not make has no route here.
+        #[tokio::test]
+        async fn a_projection_reports_the_route_it_was_made_on() {
+            use meerkat_core::model_profile::capabilities::EffortLevel;
+            use meerkat_core::{AccountLevelStatement, ModelApi, ReasoningBackend};
+            use meerkat_llm_core::LlmClient as _;
+
+            let clock = TestClock::new();
+            let transport = Arc::new(ScriptedTransport::new([
+                token_response("derived-one"),
+                listing_stating_levels(&["low", "medium", "high"]),
+                listing_stating_levels(&["low", "medium", "high", "xhigh"]),
+            ]));
+            let account = RouteAccount::new(transport.clone(), &clock).await;
+            let client = concrete_routed_client(&account).await;
+            let state = account
+                .runtime
+                .connection_state(&client.connection)
+                .expect("the account's state");
+            let loaded_list = || {
+                state
+                    .cache
+                    .read()
+                    .as_ref()
+                    .and_then(|cached| cached.models.clone())
+                    .expect("a loaded model list")
+            };
+            let observed = |levels: &[EffortLevel]| {
+                Some(meerkat_core::ReasoningRouteObservation {
+                    backend: ReasoningBackend::OpenAi(OpenAiBackendKind::Copilot),
+                    api: ModelApi::Responses,
+                    account: AccountLevelStatement::Stated(levels.to_vec()),
+                    operator_levels: None,
+                })
+            };
+            let earlier = observed(&[EffortLevel::Low, EffortLevel::Medium, EffortLevel::High]);
+            let later = observed(&[
+                EffortLevel::Low,
+                EffortLevel::Medium,
+                EffortLevel::High,
+                EffortLevel::Xhigh,
+            ]);
+
+            let first_list = loaded_list();
+            let projection = client
+                .project_replay_request(&[])
+                .expect("the request projects on the first route");
+            assert_eq!(client.reasoning_route(), earlier);
+            assert_eq!(client.reasoning_route_of(&projection), earlier);
+
+            // Model discovery is due again (300 s); the next request
+            // preparation starts it off the request path.
+            clock.set(301);
+            client
+                .connection
+                .resolved_authorizer()
+                .expect("the route's authorizer")
+                .prepare_request()
+                .await
+                .expect("the token is fresh");
+            settle(|| !Arc::ptr_eq(&first_list, &loaded_list())).await;
+
+            assert_eq!(
+                client.reasoning_route(),
+                later,
+                "the route the account's list resolves now"
+            );
+            assert_eq!(
+                client.reasoning_route_of(&projection),
+                earlier,
+                "the earlier projection is still bound to the route it was made on"
+            );
+            let again = client
+                .project_replay_request(&[])
+                .expect("the request projects on the new route");
+            assert_eq!(client.reasoning_route_of(&again), later);
+            assert_eq!(
+                client.reasoning_route_of(&meerkat_llm_core::LlmReplayProjection::new(Vec::new())),
+                None,
+                "a projection without this client's route witness"
             );
         }
 

@@ -2166,6 +2166,7 @@ where
     pub(super) async fn emit_run_started_event(
         &self,
         input: RunInput,
+        reasoning_effort: Option<crate::ReasoningEffortResolution>,
         event_tx: Option<&mpsc::Sender<AgentEvent>>,
     ) {
         self.run_lifecycle_publication.announce_start();
@@ -2177,7 +2178,7 @@ where
                 identity: self.live_run_identity(),
                 input,
                 request_reasoning: self.active_turn_request_reasoning,
-                reasoning_effort: None,
+                reasoning_effort,
             },
         )
         .await;
@@ -2190,6 +2191,7 @@ where
         &self,
         run_id: &crate::lifecycle::RunId,
         cursor: &crate::SessionRunCursor,
+        reasoning_effort: Option<crate::ReasoningEffortResolution>,
         event_tx: Option<&mpsc::Sender<AgentEvent>>,
     ) {
         self.run_lifecycle_publication.announce_start();
@@ -2201,7 +2203,7 @@ where
                 run_id: run_id.clone(),
                 round: cursor.round,
                 resume_point: crate::event::RunResumePointKind::from(&cursor.resume_point),
-                reasoning_effort: None,
+                reasoning_effort,
             },
         )
         .await;
@@ -7994,6 +7996,7 @@ mod skill_activation_effect_tests {
                 RunInput::Content {
                     content: "go".to_string().into(),
                 },
+                None,
                 Some(&tx),
             )
             .await;
@@ -8042,6 +8045,7 @@ mod skill_activation_effect_tests {
                 RunInput::Content {
                     content: "go".to_string().into(),
                 },
+                None,
                 Some(&tx),
             );
             tokio::pin!(started);

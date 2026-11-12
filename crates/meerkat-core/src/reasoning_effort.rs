@@ -487,7 +487,9 @@ pub struct ReasoningEffortSent {
 }
 
 /// The run result block: the level a run's requests named and the distinct
-/// resolutions the run sent, in first-use order.
+/// resolutions the run sent, in first-use order. A run that continues a
+/// callback suspension keeps its report; a run resumed from its durable run
+/// cursor after a restart reports the requests it sends from the resume on.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ReasoningEffortReport {

@@ -2706,3 +2706,206 @@ async fn the_bilateral_wire_refuses_a_key_a_member_of_a_wiring_mob_is_seated_und
     left.stop().await;
     right.stop().await;
 }
+
+// ---------------------------------------------------------------------------
+// A member released to rest while its runtime keeps running. Its inbox is
+// gone, and no mob routes an inbox that is gone: the other mob's peer
+// message is handed to the member's own mob, which builds the member again
+// and delivers.
+// ---------------------------------------------------------------------------
+
+impl Mob {
+    /// The `meta/cross_mob/peer_info` answer for `member` of this mob.
+    async fn peer_info_of(&self, member: &str) -> PeerInfo {
+        let info = self
+            .rpc("meta/cross_mob/peer_info", json!({"member_id": member}))
+            .await
+            .expect("peer_info");
+        let field = |name: &str| {
+            info.get(name)
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| panic!("peer_info has no {name}: {info}"))
+                .to_string()
+        };
+        let optional = |name: &str| info.get(name).and_then(Value::as_str).map(str::to_string);
+        PeerInfo {
+            comms_name: field("comms_name"),
+            peer_id: field("peer_id"),
+            address: field("address"),
+            key: None,
+            pubkey_b64: optional("pubkey_b64"),
+            dialable_address: optional("dialable_address"),
+            answer: info.clone(),
+        }
+    }
+
+    /// Release `member` to rest through the mob's handle, as an embedder
+    /// does: it stays a member, its runtime keeps running, and its own
+    /// namespace no longer routes it. A release is refused while the member
+    /// still has work in flight, so it is asked again for a bounded time.
+    async fn release_to_rest(&self, member: &PeerInfo) {
+        let identity = MeerkatId::from(
+            member
+                .comms_name
+                .rsplit('/')
+                .next()
+                .expect("a member comms name"),
+        );
+        let mut refusal = None;
+        for _ in 0..60 {
+            match self.runtime.mob_handle().release_member(&identity).await {
+                Ok(()) => {
+                    refusal = None;
+                    break;
+                }
+                Err(error) => refusal = Some(error.to_string()),
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        assert_eq!(
+            refusal, None,
+            "{}: the member was not released",
+            self.mob_id
+        );
+        for _ in 0..100 {
+            if self.route_to(&member.comms_name).is_none() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!(
+            "{}: the released member is still routed in its own namespace",
+            self.mob_id
+        );
+    }
+}
+
+/// A member at rest is built by the other mob's peer message, which is
+/// delivered; so is the next one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_member_released_to_rest_is_built_by_the_other_mobs_peer_message() {
+    let root = tempfile::tempdir().expect("root");
+    let mut left = Mob::start_persistent(root.path(), "rest-wake-a", "alice", true).await;
+    let mut right = Mob::start_persistent(root.path(), "rest-wake-b", "bob", true).await;
+    let bob = right.peer_info().await;
+    sdk_wire_cross_mob(&left, &right)
+        .await
+        .expect("the helper's call sequence");
+    assert_delivers(&mut left, &mut right, "rest-wake before a-to-b").await;
+
+    right.release_to_rest(&bob).await;
+
+    // Alice's peer message builds bob, and he is handed it. No host message
+    // and no second wire.
+    assert_delivers(&mut left, &mut right, "rest-wake first a-to-b").await;
+    assert_eq!(
+        right.route_to(&bob.comms_name),
+        Some(bob.peer_id.clone()),
+        "the peer message built bob"
+    );
+    assert_delivers(&mut left, &mut right, "rest-wake second a-to-b").await;
+    assert_delivers(&mut right, &mut left, "rest-wake b-to-a").await;
+
+    left.stop().await;
+    right.stop().await;
+}
+
+/// A member released to rest and built again by its own mob (a host
+/// message) while its runtime kept running has its name, its key and a new
+/// inbox. The other mob's peer message reaches the member's inbox of now.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_member_released_and_built_again_is_reached_by_the_other_mobs_peer_message() {
+    let root = tempfile::tempdir().expect("root");
+    let mut left = Mob::start_persistent(root.path(), "rest-rebuilt-a", "alice", true).await;
+    let mut right = Mob::start_persistent(root.path(), "rest-rebuilt-b", "bob", true).await;
+    let bob = right.peer_info().await;
+    sdk_wire_cross_mob(&left, &right)
+        .await
+        .expect("the helper's call sequence");
+    assert_delivers(&mut left, &mut right, "rest-rebuilt before a-to-b").await;
+
+    right.release_to_rest(&bob).await;
+    right.wake("rest-rebuilt host message").await;
+    assert_eq!(right.peer_info().await.peer_id, bob.peer_id);
+
+    assert_delivers(&mut left, &mut right, "rest-rebuilt after a-to-b").await;
+    assert_delivers(&mut right, &mut left, "rest-rebuilt after b-to-a").await;
+
+    left.stop().await;
+    right.stop().await;
+}
+
+/// Releasing one member takes the other mob's route to THAT member only:
+/// the route to a member of the same mob that is still built stays, and
+/// that member is reached as before, with no wake.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn releasing_one_member_keeps_the_other_mobs_route_to_a_member_that_is_built() {
+    let root = tempfile::tempdir().expect("root");
+    let mut left = Mob::start_persistent(root.path(), "rest-other-a", "alice", true).await;
+    let mut right = Mob::start_persistent(root.path(), "rest-other-b", "bob", true).await;
+    right.spawn_second_member("carol").await;
+    let alice = left.peer_info().await;
+    let bob = right.peer_info().await;
+    let carol = right.peer_info_of("carol").await;
+    sdk_wire_cross_mob(&left, &right)
+        .await
+        .expect("alice and bob");
+    left.wire_local(&carol).await.expect("alice to carol");
+    right
+        .rpc(
+            "meta/cross_mob/wire_local",
+            right.wire_params_of("carol", &alice),
+        )
+        .await
+        .expect("carol to alice");
+    assert_delivers(&mut left, &mut right, "rest-other before a-to-b").await;
+    let to_carol = left.send(&carol.peer_id, "rest-other before a-to-c").await;
+    assert!(
+        right
+            .receives("rest-other before a-to-c", DELIVERY_WAIT)
+            .await,
+        "carol was not handed alice's message: {to_carol}"
+    );
+    assert_eq!(left.route_to(&bob.comms_name), Some(bob.peer_id.clone()));
+    assert_eq!(
+        left.route_to(&carol.comms_name),
+        Some(carol.peer_id.clone())
+    );
+
+    right.release_to_rest(&carol).await;
+
+    assert_eq!(
+        left.route_to(&carol.comms_name),
+        None,
+        "mob A still routes the member that was released"
+    );
+    assert_eq!(
+        left.route_to(&bob.comms_name),
+        Some(bob.peer_id.clone()),
+        "mob A lost its route to a member that is still built"
+    );
+    assert_eq!(
+        right.route_to(&bob.comms_name),
+        Some(bob.peer_id.clone()),
+        "bob's own registration went with carol's release"
+    );
+    assert_delivers(&mut left, &mut right, "rest-other after a-to-b").await;
+    assert_delivers(&mut right, &mut left, "rest-other after b-to-a").await;
+
+    // And the released member is built by alice's next message to it.
+    let to_carol = left.send(&carol.peer_id, "rest-other after a-to-c").await;
+    assert!(
+        right
+            .receives("rest-other after a-to-c", DELIVERY_WAIT)
+            .await,
+        "carol was not handed alice's message: {to_carol}"
+    );
+    assert_eq!(
+        right.route_to(&carol.comms_name),
+        Some(carol.peer_id.clone()),
+        "the peer message built carol"
+    );
+
+    left.stop().await;
+    right.stop().await;
+}

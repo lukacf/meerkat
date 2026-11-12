@@ -1271,6 +1271,298 @@ async fn a_sender_with_no_namespace_reaches_a_member_two_namespaces_route_to_one
     assert_eq!(queued(&other_inbox), 0);
 }
 
+/// The fixture of the rows below: a member's inbox routed in its own
+/// namespace (`realm-b`, as `worker-1`) and, by a host that links two
+/// namespaces, in a second one (`realm-a`, under [`LINKED_NAME`]).
+const LINKED_NAME: &str = "mob-b/worker/worker-1";
+
+fn routed_in_two_namespaces(registry: &InprocRegistry, member: PubKey, inbox: &InboxSender) {
+    for (namespace, name) in [("realm-b", "worker-1"), ("realm-a", LINKED_NAME)] {
+        let outcome = registry.register_with_meta_in_namespace(
+            namespace,
+            name,
+            member,
+            inbox.clone(),
+            PeerMeta::default(),
+        );
+        assert!(!outcome.is_rejected(), "{outcome:?}");
+    }
+}
+
+fn routes_the_linked_name(registry: &InprocRegistry, namespace: &str) -> bool {
+    registry
+        .peer_names_in_namespace(namespace)
+        .iter()
+        .any(|name| name == LINKED_NAME)
+}
+
+/// A route never outlives its inbox. An inbox that leaves by its own
+/// compare-and-remove takes every registration of that inbox in another
+/// namespace with it, and frees the name each one held.
+#[test]
+fn an_inbox_that_leaves_takes_its_routes_in_other_namespaces_with_it() {
+    let registry = InprocRegistry::new();
+    let member = make_keypair().public_key();
+    let (_inbox, inbox_sender) = open_inbox();
+    routed_in_two_namespaces(&registry, member, &inbox_sender);
+
+    assert!(registry.unregister_sender_in_namespace("realm-b", &member, &inbox_sender));
+
+    assert!(
+        registry
+            .get_by_pubkey_in_namespace("realm-a", &member)
+            .is_none(),
+        "realm-a still routes the key to the inbox that left"
+    );
+    assert!(
+        !routes_the_linked_name(&registry, "realm-a"),
+        "the route's name was not freed"
+    );
+    assert!(registry.get_by_pubkey_any_namespace(&member).is_none());
+    // The same generation leaving again (its runtime's drop after an
+    // explicit release) finds nothing.
+    assert!(!registry.unregister_sender_in_namespace("realm-b", &member, &inbox_sender));
+}
+
+/// The same when the inbox was closed for peer ingress in its own namespace
+/// before it left (a member of a stopped mob whose runtime is then dropped):
+/// its own namespace holds no live route any more, and the other namespace's
+/// route to it still goes when it leaves.
+#[test]
+fn a_closed_inbox_that_leaves_takes_its_routes_in_other_namespaces_with_it() {
+    let registry = InprocRegistry::new();
+    let member = make_keypair().public_key();
+    let (_inbox, inbox_sender) = open_inbox();
+    routed_in_two_namespaces(&registry, member, &inbox_sender);
+    assert!(registry.close_sender_in_namespace("realm-b", &member, &inbox_sender));
+
+    assert!(
+        !registry.unregister_sender_in_namespace("realm-b", &member, &inbox_sender),
+        "no live route of its own was left to remove"
+    );
+
+    assert!(
+        registry
+            .get_by_pubkey_in_namespace("realm-a", &member)
+            .is_none(),
+        "realm-a still routes the key to the inbox that left"
+    );
+    assert!(!routes_the_linked_name(&registry, "realm-a"));
+}
+
+/// After an inbox left, a send scoped to the other namespace finds no live
+/// route and takes the wake path: the member's own owner is asked once
+/// through the host forwarder, the member is built, and the envelope is
+/// handed to its next inbox once. Nothing is handed to the inbox that left.
+#[tokio::test]
+async fn a_send_after_an_inbox_left_wakes_the_member_from_another_namespace() {
+    let registry = Arc::new(InprocRegistry::new());
+    let sender = make_keypair();
+    let member = make_keypair().public_key();
+    let (gone_inbox, gone) = open_inbox();
+    let (next_inbox, next) = open_inbox();
+    routed_in_two_namespaces(&registry, member, &gone);
+    let owner = ScriptedOwner::new(OnWake::Materialize {
+        registry: Arc::clone(&registry),
+        namespace: "realm-b".to_string(),
+        name: "worker-1".to_string(),
+        pubkey: member,
+        sender: std::sync::Mutex::new(Some(next)),
+    });
+    let forwarder = Arc::new(HostForwarder {
+        registry: Arc::clone(&registry),
+        local: "realm-a".to_string(),
+        remote: "realm-b".to_string(),
+        alias: LINKED_NAME.to_string(),
+        forwarded: AtomicUsize::new(0),
+    });
+    assert!(registry.publish_wake_route("realm-b", member, "worker-1", owner.weak()));
+    assert!(registry.publish_forwarder_wake_route(
+        "realm-a",
+        member,
+        LINKED_NAME,
+        forwarder_weak(&forwarder)
+    ));
+
+    // The member is released to rest: its inbox leaves, its wake routes stay.
+    registry.unregister_sender_in_namespace("realm-b", &member, &gone);
+    assert!(registry.has_wake_route_in_namespace("realm-a", &member));
+    assert!(registry.has_wake_route_in_namespace("realm-b", &member));
+
+    for sends in 1..=2 {
+        registry
+            .send_to_pubkey_in_namespace_with_id_wait(
+                "realm-a",
+                &sender,
+                &member,
+                Uuid::new_v4(),
+                response(),
+                true,
+                BUDGET,
+                None,
+            )
+            .await
+            .expect("the send is delivered");
+        assert_eq!(
+            queued(&gone_inbox),
+            0,
+            "an envelope was handed to the inbox that left"
+        );
+        assert_eq!(queued(&next_inbox), sends);
+        assert_eq!(owner.calls(), 1, "the member is built once");
+        assert_eq!(forwarder.forwarded.load(Ordering::SeqCst), 1);
+    }
+}
+
+/// The same for an inbox the exact-generation seam replaces (a member built
+/// again in place): the other namespace's route to the replaced inbox goes
+/// with it, and the member's own namespace routes the replacement.
+#[test]
+fn a_replaced_inbox_takes_its_routes_in_other_namespaces_with_it() {
+    let registry = InprocRegistry::new();
+    let member = make_keypair().public_key();
+    let (_replaced_inbox, replaced) = open_inbox();
+    let (_inbox, replacement) = open_inbox();
+    routed_in_two_namespaces(&registry, member, &replaced);
+
+    registry
+        .replace_sender_in_namespace(
+            "realm-b",
+            "worker-1",
+            (&member, &replaced),
+            member,
+            replacement.clone(),
+        )
+        .expect("the exact generation is replaced");
+
+    assert!(
+        registry
+            .get_by_pubkey_in_namespace("realm-a", &member)
+            .is_none(),
+        "realm-a still routes the key to the inbox that was replaced"
+    );
+    assert!(!routes_the_linked_name(&registry, "realm-a"));
+    let own = registry
+        .get_by_pubkey_in_namespace("realm-b", &member)
+        .expect("the member's own namespace routes the replacement");
+    assert!(own.same_inbox(&replacement));
+}
+
+/// A sender with no namespace reaches a member whose inbox was replaced
+/// while another namespace routed it: the key has one inbox again, and the
+/// envelope is handed to it once.
+#[tokio::test]
+async fn a_sender_with_no_namespace_reaches_a_member_whose_inbox_was_replaced() {
+    let registry = InprocRegistry::new();
+    let sender = make_keypair();
+    let member = make_keypair().public_key();
+    let (replaced_inbox, replaced) = open_inbox();
+    let (inbox, replacement) = open_inbox();
+    routed_in_two_namespaces(&registry, member, &replaced);
+    registry
+        .replace_sender_in_namespace(
+            "realm-b",
+            "worker-1",
+            (&member, &replaced),
+            member,
+            replacement,
+        )
+        .expect("the exact generation is replaced");
+
+    registry
+        .send_to_pubkey_any_namespace_with_id_wait(
+            &sender,
+            &member,
+            Uuid::new_v4(),
+            response(),
+            true,
+            BUDGET,
+            None,
+        )
+        .await
+        .expect("one inbox under the key is one route");
+    assert_eq!(queued(&inbox), 1);
+    assert_eq!(queued(&replaced_inbox), 0);
+}
+
+/// Control: an inbox that leaves takes only registrations of ITSELF. The
+/// route another namespace holds to a different inbox stays, under the same
+/// key (the member's inbox of now, when an earlier generation leaves late)
+/// and under another key (another member), and so does every registration
+/// in the leaving inbox's own namespace.
+#[test]
+fn an_inbox_that_leaves_keeps_the_routes_of_other_inboxes() {
+    let registry = InprocRegistry::new();
+    let member = make_keypair().public_key();
+    let other_member = make_keypair().public_key();
+    let (_earlier_inbox, earlier) = open_inbox();
+    let (_inbox, current) = open_inbox();
+    let (_other_inbox, other) = open_inbox();
+    // The member's inbox of now, in both namespaces; another member's inbox
+    // in both namespaces too.
+    routed_in_two_namespaces(&registry, member, &current);
+    for (namespace, name) in [
+        ("realm-b", "worker-2"),
+        ("realm-a", "mob-b/worker/worker-2"),
+    ] {
+        let outcome = registry.register_with_meta_in_namespace(
+            namespace,
+            name,
+            other_member,
+            other.clone(),
+            PeerMeta::default(),
+        );
+        assert!(!outcome.is_rejected(), "{outcome:?}");
+    }
+    let routes = |namespace: &str, key: &PubKey, inbox: &InboxSender| {
+        registry
+            .get_by_pubkey_in_namespace(namespace, key)
+            .is_some_and(|routed| routed.same_inbox(inbox))
+    };
+
+    // An earlier generation of the member leaves late: nothing routes it.
+    assert!(!registry.unregister_sender_in_namespace("realm-b", &member, &earlier));
+    for namespace in ["realm-a", "realm-b"] {
+        assert!(routes(namespace, &member, &current), "{namespace}");
+        assert!(routes(namespace, &other_member, &other), "{namespace}");
+    }
+    assert!(routes_the_linked_name(&registry, "realm-a"));
+
+    // The other member's inbox leaves: the member's routes stay in both.
+    assert!(registry.unregister_sender_in_namespace("realm-b", &other_member, &other));
+    for namespace in ["realm-a", "realm-b"] {
+        assert!(routes(namespace, &member, &current), "{namespace}");
+    }
+    assert!(
+        registry
+            .get_by_pubkey_in_namespace("realm-b", &other_member)
+            .is_none()
+    );
+    assert!(routes_the_linked_name(&registry, "realm-a"));
+}
+
+/// Control: removing a route by its key alone is a host taking back ITS
+/// route while the inbox lives. It removes that one registration: the
+/// inbox's registration in its own namespace stays.
+#[test]
+fn a_route_removed_by_key_takes_no_other_registration_of_its_inbox() {
+    let registry = InprocRegistry::new();
+    let member = make_keypair().public_key();
+    let (_inbox, inbox_sender) = open_inbox();
+    routed_in_two_namespaces(&registry, member, &inbox_sender);
+
+    assert!(registry.unregister_in_namespace("realm-a", &member));
+
+    let own = registry
+        .get_by_pubkey_in_namespace("realm-b", &member)
+        .expect("the member's own registration stays");
+    assert!(own.same_inbox(&inbox_sender));
+    assert_eq!(
+        registry.get_name_by_pubkey_in_namespace("realm-b", &member),
+        Some("worker-1".to_string())
+    );
+}
+
 /// A wake route never claims a name: a live registration under the member's
 /// name still succeeds, and a lifecycle notice classifies as lifecycle.
 #[test]

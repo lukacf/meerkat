@@ -10035,6 +10035,131 @@ mod tests {
         );
     }
 
+    /// The route a second namespace holds to a published runtime's inbox,
+    /// installed as a host that links two namespaces installs one: the
+    /// inbox of the runtime's own registration, under the runtime's key.
+    /// Returns the second namespace.
+    fn route_from_a_second_namespace(namespace: &str, name: &str, key: &PubKey) -> String {
+        let linked = format!("{namespace}-linked");
+        let inbox = InprocRegistry::global()
+            .get_by_pubkey_in_namespace(namespace, key)
+            .expect("the runtime's own route is published");
+        let outcome = InprocRegistry::global().register_with_meta_in_namespace(
+            &linked,
+            name,
+            *key,
+            inbox,
+            crate::PeerMeta::default(),
+        );
+        assert!(!outcome.is_rejected(), "{outcome:?}");
+        linked
+    }
+
+    /// A route never outlives its inbox: a runtime that releases its route
+    /// takes the route a second namespace holds to its inbox with it.
+    #[test]
+    fn a_released_runtime_takes_the_route_another_namespace_holds_to_its_inbox() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let name = format!("mob.rest-{suffix}/worker/w-1");
+        let namespace = format!("mob.rest-{suffix}");
+        let runtime = CommsRuntime::inproc_only_scoped(&name, Some(namespace.clone()))
+            .expect("the runtime publishes");
+        let key = runtime.public_key();
+        let linked = route_from_a_second_namespace(&namespace, &name, &key);
+
+        assert!(runtime.retire_inproc_route());
+
+        assert!(
+            InprocRegistry::global()
+                .get_by_pubkey_in_namespace(&linked, &key)
+                .is_none(),
+            "the second namespace still routes the key to the released runtime's inbox"
+        );
+        assert!(
+            InprocRegistry::global()
+                .peer_names_in_namespace(&linked)
+                .is_empty(),
+            "the route's name was not freed"
+        );
+    }
+
+    /// The same for a runtime that is dropped with its route still
+    /// published.
+    #[test]
+    fn a_dropped_runtime_takes_the_route_another_namespace_holds_to_its_inbox() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let name = format!("mob.dropped-{suffix}/worker/w-1");
+        let namespace = format!("mob.dropped-{suffix}");
+        let runtime = CommsRuntime::inproc_only_scoped(&name, Some(namespace.clone()))
+            .expect("the runtime publishes");
+        let key = runtime.public_key();
+        let linked = route_from_a_second_namespace(&namespace, &name, &key);
+
+        drop(runtime);
+
+        assert!(
+            InprocRegistry::global()
+                .get_by_pubkey_in_namespace(&linked, &key)
+                .is_none(),
+            "the second namespace still routes the key to the dropped runtime's inbox"
+        );
+    }
+
+    /// The same for a runtime a successor replaces by naming it: the route a
+    /// second namespace held to the predecessor's inbox goes at the
+    /// replacement. A route installed to the successor's inbox afterwards
+    /// stays when the superseded predecessor is released and dropped.
+    #[test]
+    fn a_replaced_runtime_takes_the_route_another_namespace_holds_to_its_inbox() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let name = format!("mob.replaced-{suffix}/worker/w-1");
+        let namespace = format!("mob.replaced-{suffix}");
+        let keypair = Keypair::generate();
+        let key = keypair.public_key();
+        let predecessor = CommsRuntime::inproc_only_with_keypair_and_silent_intents(
+            &name,
+            Some(namespace.clone()),
+            keypair.clone(),
+            Arc::new(HashSet::new()),
+        )
+        .expect("predecessor should publish");
+        let linked = route_from_a_second_namespace(&namespace, &name, &key);
+
+        let successor = CommsRuntime::prepare_inproc_only_with_keypair_and_silent_intents(
+            &name,
+            Some(namespace.clone()),
+            keypair,
+            Arc::new(HashSet::new()),
+        )
+        .expect("preparing a replacement generation must not touch the registry")
+        .publish_replacing(&predecessor)
+        .expect("naming the exact predecessor generation must be admitted");
+
+        assert!(
+            InprocRegistry::global()
+                .get_by_pubkey_in_namespace(&linked, &key)
+                .is_none(),
+            "the second namespace still routes the key to the replaced runtime's inbox"
+        );
+
+        // The host routes the successor's inbox in the second namespace.
+        // The superseded predecessor leaving takes nothing of it.
+        assert_eq!(
+            route_from_a_second_namespace(&namespace, &name, &key),
+            linked
+        );
+        assert!(!predecessor.retire_inproc_route());
+        drop(predecessor);
+        let own = InprocRegistry::global()
+            .get_by_pubkey_in_namespace(&namespace, &key)
+            .expect("the successor stays routed in its own namespace");
+        let routed = InprocRegistry::global()
+            .get_by_pubkey_in_namespace(&linked, &key)
+            .expect("the route to the successor's inbox stays");
+        assert!(routed.same_inbox(&own));
+        drop(successor);
+    }
+
     /// Reconstruction of ONE logical participant in ONE process: the mob member
     /// name (`{mob}/{role}/{member}`) is session-independent while the signing
     /// identity is per session, so a rollback-and-retry or a retire-and-respawn

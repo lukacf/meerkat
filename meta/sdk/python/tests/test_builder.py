@@ -422,6 +422,25 @@ class TestBuilderChain:
         with pytest.raises(ValueError, match="must not be empty"):
             Meta.builder().meerkat_config("  ")
 
+    def test_member_comms_tcp_defaults_to_omitted(self):
+        params = MetaRuntime(Meta.builder()._config)._build_init_params()
+
+        assert "member_comms_address" not in params["runtime_options"]
+
+    def test_member_comms_tcp_sets_runtime_option(self):
+        b = Meta.builder()
+        assert b.member_comms_tcp() is b
+        params = MetaRuntime(b._config)._build_init_params()
+        assert params["runtime_options"]["member_comms_address"] == "127.0.0.1:0"
+
+        b.member_comms_tcp("192.0.2.10:0")
+        params = MetaRuntime(b._config)._build_init_params()
+        assert params["runtime_options"]["member_comms_address"] == "192.0.2.10:0"
+
+    def test_member_comms_tcp_rejects_empty_address(self):
+        with pytest.raises(ValueError, match="must not be empty"):
+            Meta.builder().member_comms_tcp("  ")
+
     def test_provider_credentials_root_defaults_to_omitted(self):
         params = MetaRuntime(Meta.builder()._config)._build_init_params()
 

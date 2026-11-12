@@ -682,6 +682,36 @@ if health.last_delivery_error and health.last_delivery_error["class"] == "reload
 status enum is non-exhaustive, so consumers should tolerate future state
 strings.
 
+### Cross-mob peering (two gateways)
+
+`wire_cross_mob(local_member_id, remote_member_id, remote_handle)` wires a
+member of this mob and a member of another mob to each other, so the two
+agents can send each other ordinary peer messages with their comms `send`
+tool. Every `MetaRuntime` starts its own gateway process, so two mob handles
+are normally two processes: give the members of both gateways a socket
+endpoint with `.member_comms_tcp()` on each builder.
+
+```python
+core = await Meta.builder().mob("core.toml").member_comms_tcp().build()
+desk = await Meta.builder().mob("desk.toml").member_comms_tcp().build()
+await core.mob_handle().wire_cross_mob("research", "calendar", desk.mob_handle())
+```
+
+The helper reads `peer_info` on both sides and calls `wire_local` on each
+side. `peer_info` answers `member_id`, `mob_id`, `comms_name`, `peer_id`,
+`address` (the in-process address), `pubkey_b64` (the member's own transport
+key) and, only for a member with a socket endpoint, `dialable_address`. When
+both answers carry `dialable_address`, each side is wired to the other by
+that address and the member's key. Otherwise each side is wired by the
+in-process address with no key, which works when one process hosts both mobs
+(the gateway takes the member's key from its own registration and installs
+the route with the trust); a member that process does not have is refused in
+plain words and nothing is wired. A refused second side undoes the first.
+
+A descriptor always carries the MEMBER's key from `peer_info`. `peer_pubkey()`
+is the gateway's own key, for contact directories; it never describes a
+member.
+
 ### Common pattern: new user first contact
 
 Per-user agents are **durable** members, so stand them up on the identity
@@ -727,6 +757,7 @@ rt = await (
 | `.mob(path)` | Path to mob TOML config |
 | `.mob_inline(toml_str)` | Inline mob TOML string (no temp file) |
 | `.meerkat_config(path)` | Meerkat host `config.toml` forwarded as `runtime_options.meerkat_config_path`, the only door for the `[self_hosted]` and `[realm]` tables Meerkat keeps out of `mob.toml` (a host-config `[models]` table reaches the factory too, but a profile's `model` must be catalogued, provider-annotated or defined under `mob.toml`'s own `[models.<id>]` to pass the init model check); a missing, malformed or non-validating file refuses init rather than building agents from the default config, and a top-level `[self_hosted]` or `[realm]` table inside `mob.toml` is refused at init with a message naming this option. TypeScript twin `meerkatConfig(path)`. See [Self-hosted models and the Meerkat host config](/reference/configuration#self-hosted-models-and-the-meerkat-host-config) |
+| `.member_comms_tcp(address="127.0.0.1:0")` | Signed TCP comms endpoints for the locally hosted mob members, forwarded as `runtime_options.member_comms_address`: each member binds a port on `address` (port `0`: one the system picks), and `MobHandle.peer_info` reports it as `dialable_address`. Needed on both gateways before `wire_cross_mob` can wire members of two gateways, which are two processes; pass a concrete externally reachable interface address for peers on another host. An empty address is a `ValueError`. TypeScript twin `memberCommsTcp(address)`. See [Cross-mob peering](#cross-mob-peering-two-gateways) |
 | `.provider_credentials_root(path)` | Provider credentials directory forwarded as `runtime_options.provider_credentials_root`: every agent the gateway builds resolves and persists provider logins and tokens there instead of the process default `<config dir>/meerkat/credentials`, which every process of the OS user shares. Absolute: the gateway opens it once at init, creating it when missing, and a relative path or a root it cannot open refuses init, never falling back to the default. Give each user their own root, and pass the same root on every reopen of that user's state; a host moving off a per-process `XDG_CONFIG_HOME=<C>` passes `<C>/meerkat/credentials` to keep existing logins. See [Provider credentials](/reference/configuration#provider-credentials) |
 | `.native_realm(realm_id, *, context_root, state_root, user_config_root)` | A native realm's effective configuration as every agent's configuration, forwarded as `runtime_options.native_realm`: the gateway reads it once at init with Meerkat's own native reader, copying and writing nothing, in place of `.meerkat_config(path)` (the two are refused together). Each root is an absolute path; a realm the state root does not hold, or a configuration that cannot be read or does not validate, refuses init, never falling back to the default configuration. The realm's whole configuration applies to every member. Requires `.member_auth_binding(...)`. TypeScript twin `nativeRealm({...})`. See [Native realm and member auth binding](/reference/configuration#native-realm-and-member-auth-binding) |
 | `.member_auth_binding(binding)` | The `AuthBindingRef(realm, binding, profile=None, origin=None)` every member is built with, forwarded as `runtime_options.member_auth_binding`; `origin` is `None` or `"configured"`. The gateway refuses at init a binding the members' configuration does not define, a definition profile the binding does not serve, and an automatic spawn policy, a model fallback target off the binding, image generation or the agent memory engines, in the definition, a realm profile it references or a stored child mob, and an identity declaration an earlier launch adopted that was sealed with no binding or another one; every member it builds then uses exactly this binding, or its build is refused (roster members, helpers and forks, later spawns, respawns and resets, members rebuilt after a restart, child mobs' members), never a default one; a member Meerkat rebuilds from its own records (a fork seated before the launch named the binding) that recorded another binding or none is refused at its rebuild and must be re-created; and a spawn that names another binding, an agent's child mob that would leave it, identity adoption, and an attach of a session whose live actor runs another binding are refused. A running gateway is never rebound. TypeScript twin `memberAuthBinding({...})`. See [Native realm and member auth binding](/reference/configuration#native-realm-and-member-auth-binding) |

@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `meta/cross_mob/peer_info` answers two more fields for a local member:
+  `pubkey_b64`, the member's own transport key (standard base64), and
+  `dialable_address`, the member's socket endpoint, only when it has one
+  (`runtime_options.member_comms_address`). `dialable_address` is left out,
+  never null, for a member with in-process comms only. Python
+  `MobHandle.peer_info` and TypeScript `MobHandle.peerInfo` return them as
+  they come.
+- Python `MetaBuilder.member_comms_tcp(address="127.0.0.1:0")` gives the
+  locally hosted mob members signed TCP comms endpoints
+  (`runtime_options.member_comms_address`), as TypeScript `memberCommsTcp`
+  does: what a member of another gateway needs to reach them.
+
+### Fixed
+
+- The SDK helper `wire_cross_mob` (Python `MobHandle.wire_cross_mob`,
+  TypeScript `MobHandle.wireCrossMob`) wires two members of two mobs so
+  that each can send the other ordinary peer messages, between two gateways
+  (two processes: every SDK runtime starts its own) and between two mobs
+  one process hosts. Through 0.9.14 it wired nothing. Every Meta release
+  since 0.9.9 is affected; earlier releases were not checked. There were
+  two causes:
+  - The helper passed no key, and `meta/cross_mob/peer_info` reported none
+    and only an in-process address. The first `meta/cross_mob/wire_local`
+    was refused with `external peer descriptor is invalid:
+    TrustedPeerDescriptor.pubkey must be non-zero`. The helper now wires
+    each side by the other member's `dialable_address` and `pubkey_b64`
+    when both gateways report a dialable address (give the members of both
+    a socket endpoint: `member_comms_tcp()` / `memberCommsTcp()`).
+    Otherwise it wires by the in-process address with no key, and
+    `wire_local` takes the key of a live member of another mob in its own
+    process from that member's registration.
+  - Between two mobs of one process, a caller that did supply each member's
+    key got both wires accepted and every send refused with
+    `peer_not_found_or_not_trusted`: only the bilateral same-process wire
+    installed the route by which one mob's namespace reaches a member of
+    the other. `wire_local` (`UnifiedRuntime::wire_local`, stdio and console
+    RPC) now installs that route with the trust, and `unwire_local` removes
+    both, the route once no member of the mob is still wired to that peer.
+    A failed wire takes back exactly the route it installed.
+
+  A mob that was not wired gets no route: sends between its members and
+  either wired mob are still refused. `wire_local` refuses, with nothing
+  changed, a peer id or key that the named live member of its process does
+  not have (`inproc alias error`), and refuses in plain words a keyless
+  in-process wire to a member that no mob of its process has (`peer spec
+  error: ... is not a live member of a mob in this process ...`), which is
+  what a helper call between two gateways without member socket endpoints
+  now answers. A keyed in-process wire to such a member is accepted as
+  before. The helper docstring and the SDK guides no longer tell a
+  cross-process caller to pass the gateway key of `peer_pubkey`: a
+  descriptor carries the member's key from `peer_info`.
+
 ## [0.9.14] - 2026-11-11
 
 Meta 0.9.14 is part of Meerkat 0.9.14 (Core 0.9.14, Meta 0.9.14 and Connect

@@ -4,6 +4,24 @@ All notable changes to the Python SDK are documented here.
 
 ## Unreleased
 
+- `MobHandle.wire_cross_mob` wires two members of two mobs so that each
+  can send the other ordinary peer messages. When both `peer_info` answers
+  carry `dialable_address` (two gateways whose members have socket
+  endpoints), each side is wired by the other member's dialable address and
+  its own key (`pubkey_b64`); otherwise by the in-process address with no
+  key, which a gateway from 0.9.15 resolves for a member of its own process
+  and refuses in plain words for any other. Through 0.9.14 the helper
+  passed no key and the first `wire_local` was refused. `peer_info` returns
+  the gateway's new `pubkey_b64` and `dialable_address` as they come.
+- `MetaBuilder.member_comms_tcp(address="127.0.0.1:0")` gives the locally
+  hosted mob members signed TCP comms endpoints
+  (`runtime_options.member_comms_address`), the TypeScript
+  `memberCommsTcp` twin: every `MetaRuntime` starts its own gateway
+  process, so `wire_cross_mob` between two runtimes needs it on both.
+- The `wire_local` and `wire_cross_mob` docstrings no longer tell a
+  cross-process caller to pass the gateway key of `peer_pubkey`: a
+  descriptor carries the member's key from `peer_info`.
+
 ## 0.9.14
 
 No SDK API changes; released with Meta 0.9.14.

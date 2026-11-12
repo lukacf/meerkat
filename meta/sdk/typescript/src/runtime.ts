@@ -5979,6 +5979,25 @@ export class MobHandle {
     await this._runtime._rpc("meta/cross_mob/unwire_local", params);
   }
 
+  /**
+   * Wire a local member to a member on another mob handle, both ways, so the
+   * two can send each other ordinary peer messages.
+   *
+   * Two gateways (two processes, the usual case: every runtime starts its own
+   * gateway): give the members of BOTH gateways a socket endpoint
+   * (`memberCommsTcp()` on each builder). `peerInfo` then reports each
+   * member's `dialable_address` and `pubkey_b64`, and each side is wired to
+   * the other by that address and key (the member's own key, never the
+   * gateway key of `peerPubkey`).
+   *
+   * When either answer has no `dialable_address`, each side is wired by the
+   * in-process address with no key. That works when one process hosts both
+   * mobs; otherwise the first `wireLocal` is refused in plain words and
+   * nothing is wired.
+   *
+   * When the second `wireLocal` is refused, the first side is undone with
+   * `unwireLocal` and the refusal is thrown.
+   */
   async wireCrossMob(
     localMemberId: string,
     remoteMemberId: string,
@@ -5986,27 +6005,28 @@ export class MobHandle {
   ): Promise<void> {
     const localInfo = await this.peerInfo(localMemberId);
     const remoteInfo = await remoteHandle.peerInfo(remoteMemberId);
-    await this.wireLocal(
-      localMemberId,
-      remoteInfo.comms_name,
-      remoteInfo.peer_id,
-      remoteInfo.address,
+    const bySocket = [localInfo, remoteInfo].every(
+      (info) => Boolean(info.dialable_address) && Boolean(info.pubkey_b64),
     );
+    const describe = (
+      info: Record<string, string>,
+    ): [string, string, string, { remotePubkeyB64?: string } | undefined] =>
+      bySocket
+        ? [
+            info.comms_name,
+            info.peer_id,
+            info.dialable_address,
+            { remotePubkeyB64: info.pubkey_b64 },
+          ]
+        : [info.comms_name, info.peer_id, info.address, undefined];
+    const remotePeer = describe(remoteInfo);
+    const localPeer = describe(localInfo);
+    await this.wireLocal(localMemberId, ...remotePeer);
     try {
-      await remoteHandle.wireLocal(
-        remoteMemberId,
-        localInfo.comms_name,
-        localInfo.peer_id,
-        localInfo.address,
-      );
+      await remoteHandle.wireLocal(remoteMemberId, ...localPeer);
     } catch (err) {
       try {
-        await this.unwireLocal(
-          localMemberId,
-          remoteInfo.comms_name,
-          remoteInfo.peer_id,
-          remoteInfo.address,
-        );
+        await this.unwireLocal(localMemberId, ...remotePeer);
       } catch {
         // Best-effort rollback; preserve the original remote error.
       }

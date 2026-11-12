@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- `MobHandle.wireCrossMob` wires two members of two mobs so that each can
+  send the other ordinary peer messages. When both `peerInfo` answers
+  carry `dialable_address` (two gateways whose members have socket
+  endpoints: `memberCommsTcp()` on both builders), each side is wired by
+  the other member's dialable address and its own key (`pubkey_b64`);
+  otherwise by the in-process address with no key, which a gateway from
+  0.9.15 resolves for a member of its own process and refuses in plain
+  words for any other. Through 0.9.14 the helper passed no key and the
+  first `wireLocal` was refused. `peerInfo` returns the gateway's new
+  `pubkey_b64` and `dialable_address` as they come.
+
 ## 0.9.14
 
 No SDK API changes; released with Meta 0.9.14.

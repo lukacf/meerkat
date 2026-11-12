@@ -1219,8 +1219,13 @@ impl MobActor {
     ) {
         use super::super::operator_instruction_delivery::{
             MemberInstructionPreparation, WAKE_INSTRUCTION_RECORD_BOUND,
-            record_owed_snapshot_at_wake,
+            record_owed_snapshot_at_wake, report_wake_failure,
         };
+        // A wake that cannot write leaves the member owed and reports why to
+        // the delivery module, which keeps the member's last failure and
+        // warns by its one rule (the member's first failure, and a change of
+        // its class): a wake that fails the same way again does not warn
+        // again.
         let prepared = match (epoch, own_bodies) {
             (Some(epoch), Ok(own_bodies)) => {
                 let bodies = self.operator_instructions.bodies.for_member(own_bodies);
@@ -1234,12 +1239,11 @@ impl MobActor {
                         | MemberInstructionPreparation::NotNow,
                     ) => None,
                     Err(error) => {
-                        tracing::warn!(
-                            mob_id = %self.definition.id,
-                            agent_identity = %run.identity,
-                            failure = "snapshot_not_prepared",
-                            "a waking member's owed operator instruction snapshot could not be \
-                             prepared; the member goes Live and stays owed"
+                        report_wake_failure(
+                            &self.operator_instructions.delivery,
+                            &run.identity,
+                            "snapshot_not_prepared",
+                            "the member's owed snapshot could not be prepared at its wake",
                         );
                         tracing::debug!(
                             mob_id = %self.definition.id,
@@ -1252,22 +1256,20 @@ impl MobActor {
                 }
             }
             (None, _) => {
-                tracing::warn!(
-                    mob_id = %self.definition.id,
-                    agent_identity = %run.identity,
-                    failure = "delivery_in_flight_past_bound",
-                    "a waking member's operator instruction delivery was still in flight past \
-                     the wake's bound; the member goes Live and stays owed"
+                report_wake_failure(
+                    &self.operator_instructions.delivery,
+                    &run.identity,
+                    "delivery_in_flight_past_bound",
+                    "a delivery to the member was still in flight past its wake's bound",
                 );
                 None
             }
             (Some(_), Err(error)) => {
-                tracing::warn!(
-                    mob_id = %self.definition.id,
-                    agent_identity = %run.identity,
-                    failure = "journal_rows_unread",
-                    "the journal rows of a waking member's own operator instruction records \
-                     could not be read; the member goes Live and stays owed"
+                report_wake_failure(
+                    &self.operator_instructions.delivery,
+                    &run.identity,
+                    "journal_rows_unread",
+                    "the journal rows of the member's own records could not be read at its wake",
                 );
                 tracing::debug!(
                     mob_id = %self.definition.id,
@@ -1444,23 +1446,26 @@ impl MobActor {
     /// (`RecordMemberInstructionTarget`, `RefuseMemberInstructionTarget`),
     /// before the member is Live. A record the session refused or could not
     /// take never fails the wake: the member goes Live and stays owed or
-    /// blocked, as MobMachine holds it and the status read shows it, and one
-    /// warning names the member and the typed class of the failure, never
-    /// an error's text or anything of an instruction. The last failure the
-    /// status shows is written by the delivery module, which made the
-    /// write.
+    /// blocked, as MobMachine holds it and the status read shows it. A
+    /// failure that leaves the member owed is kept and logged by the
+    /// delivery module, which made the write (one warning at the member's
+    /// first failure and when its class changes, never one per wake); a
+    /// block is logged here, once, since a blocked member is not tried
+    /// again. A warning names the member and a typed class, never an
+    /// error's text or anything of an instruction.
     async fn settle_member_instructions_recorded_at_wake(
         &mut self,
         identity: &AgentIdentity,
         record: super::super::operator_instruction_delivery::WakeInstructionRecord,
     ) {
         use super::super::operator_instruction_delivery::{
-            MemberInstructionDeliveryOutcome, WakeInstructionRecord,
+            MemberInstructionDeliveryOutcome, WakeInstructionRecord, report_wake_failure,
         };
         match record {
             // The member's release moved on since the snapshot was prepared:
-            // nothing was written, and nothing is fed back.
-            WakeInstructionRecord::NotWritten => {}
+            // nothing was written, and nothing is fed back. A failed write
+            // was kept and logged where it was made.
+            WakeInstructionRecord::NotWritten | WakeInstructionRecord::Failed => {}
             WakeInstructionRecord::Settled(outcome) => {
                 if let MemberInstructionDeliveryOutcome::Blocked { block, .. } = &outcome {
                     tracing::warn!(
@@ -1476,39 +1481,29 @@ impl MobActor {
                     .await
                     .is_err()
                 {
-                    tracing::warn!(
-                        mob_id = %self.definition.id,
-                        agent_identity = %identity,
-                        failure = "record_not_settled",
-                        "a woken member's operator instruction record could not be settled with \
-                         MobMachine; the member goes Live and stays owed"
+                    report_wake_failure(
+                        &self.operator_instructions.delivery,
+                        identity,
+                        "record_not_settled",
+                        "the member's record at its wake could not be settled with the mob",
                     );
                 }
             }
             // The session holds a later generation under this mob's id. A
             // write of this mob that landed while the wake held an earlier
             // snapshot is no failure: the mob's own delivery of that
-            // generation settles it. A generation this mob never minted is
-            // left to the delivery owner, which reports it.
+            // generation settles it. A generation this mob never minted
+            // leaves the member owed.
             WakeInstructionRecord::SessionAhead { session_generation } => {
                 if session_generation > self.dsl_authority.state().operator_instruction_generation {
-                    tracing::warn!(
-                        mob_id = %self.definition.id,
-                        agent_identity = %identity,
-                        failure = "session_generation_above_mob",
-                        "a woken member's session holds an operator instruction generation \
-                         this mob never minted; the member goes Live and stays owed"
+                    report_wake_failure(
+                        &self.operator_instructions.delivery,
+                        identity,
+                        "session_generation_above_mob",
+                        "the member session holds an operator instruction generation above \
+                         this mob's: an earlier mob with this id recorded it",
                     );
                 }
-            }
-            WakeInstructionRecord::Failed { class } => {
-                tracing::warn!(
-                    mob_id = %self.definition.id,
-                    agent_identity = %identity,
-                    failure = %class,
-                    "a woken member's session could not take the operator instruction snapshot \
-                     it is owed; the member goes Live and stays owed"
-                );
             }
         }
     }

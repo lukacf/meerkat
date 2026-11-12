@@ -319,9 +319,27 @@ pub(crate) struct OperatorInstructionShell {
 /// nothing, so no delivery lands after a release.
 #[derive(Debug)]
 pub(crate) struct OperatorInstructionDeliveryShared {
-    last_failures: std::sync::Mutex<BTreeMap<AgentIdentity, String>>,
+    last_failures: std::sync::Mutex<BTreeMap<AgentIdentity, RetryFailure>>,
     member_locks: std::sync::Mutex<BTreeMap<AgentIdentity, Arc<tokio::sync::Mutex<u64>>>>,
     pub(crate) dormant_concurrency: usize,
+}
+
+/// A retryable failure of a member's record: its typed class (the closed
+/// refusal code, the session error's stable code, or this module's own
+/// class) and the text the status read shows as the member's last failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RetryFailure {
+    pub(crate) class: String,
+    pub(crate) text: String,
+}
+
+impl RetryFailure {
+    fn new(class: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            class: class.into(),
+            text: text.into(),
+        }
+    }
 }
 
 impl OperatorInstructionDeliveryShared {
@@ -345,18 +363,47 @@ impl OperatorInstructionDeliveryShared {
         Arc::clone(locks.entry(agent_identity.clone()).or_default())
     }
 
-    fn record_failure(&self, agent_identity: &AgentIdentity, failure: String) {
-        self.last_failures
+    /// Keep `failure` as the member's last failure, for the status read, and
+    /// log it by this module's one rule: a warning at a member's first
+    /// failure and again when the failure's class changes, never one per
+    /// retry (a failure that never clears is retried for the life of the
+    /// mob). The warning names the member and the class, never the
+    /// failure's text. Answers whether it warned.
+    fn record_failure(&self, agent_identity: &AgentIdentity, failure: RetryFailure) -> bool {
+        let class = failure.class.clone();
+        let previous = self
+            .last_failures
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(agent_identity.clone(), failure);
+        let warned = previous.is_none_or(|previous| previous.class != class);
+        if warned {
+            tracing::warn!(
+                agent_identity = %agent_identity,
+                failure = %class,
+                "a member's operator instruction record failed; the member stays owed and the \
+                 mob goes on trying (logged again only when the failure's class changes)"
+            );
+        }
+        warned
     }
 
-    fn clear_failure(&self, agent_identity: &AgentIdentity) {
-        self.last_failures
+    /// Forget the member's last failure: its session answered the record.
+    /// A record that landed (`recorded`) after failing is logged once, so
+    /// the log shows the failure's end; the next failure warns again.
+    fn clear_failure(&self, agent_identity: &AgentIdentity, recorded: bool) {
+        let failed = self
+            .last_failures
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(agent_identity);
+        if let (Some(failed), true) = (failed, recorded) {
+            tracing::info!(
+                agent_identity = %agent_identity,
+                failure = %failed.class,
+                "a member's operator instruction record landed after failing"
+            );
+        }
     }
 
     fn last_failure(&self, agent_identity: &AgentIdentity) -> Option<String> {
@@ -364,7 +411,7 @@ impl OperatorInstructionDeliveryShared {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(agent_identity)
-            .cloned()
+            .map(|failure| failure.text.clone())
     }
 
     /// Drop the bookkeeping of members `state` no longer seats. It reads the
@@ -694,7 +741,7 @@ pub(crate) enum MemberInstructionDeliveryOutcome {
 /// How the delivery owner reads a session's answer.
 pub(crate) enum DeliveryResult {
     Settled(MemberInstructionDeliveryOutcome),
-    Retry(String),
+    Retry(RetryFailure),
 }
 
 /// How long one wait of a member's wake for its operator instruction record
@@ -714,18 +761,43 @@ pub(crate) enum WakeInstructionRecord {
     /// The session already holds a later generation under this mob's id.
     SessionAhead { session_generation: u64 },
     /// The write failed or did not answer within the bound: the member stays
-    /// owed. `class` is the typed class of the failure, for the log.
-    Failed { class: String },
+    /// owed. This module kept the failure and logged it by its rule.
+    Failed,
+}
+
+/// The typed class of a refusal: its closed code as hosts read it.
+fn refusal_class(code: InstructionSetErrorCode) -> String {
+    serde_json::to_value(code)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| format!("{code:?}"))
 }
 
 /// The typed class of a failed record: the closed refusal code, or the
 /// session error's stable code. Never an error's text.
 fn record_failure_class(error: &SessionInstructionError) -> String {
     match error {
-        SessionInstructionError::Refused(refusal) => format!("{:?}", refusal.code()),
-        SessionInstructionError::DurabilityUnavailable => "DurabilityUnavailable".to_string(),
+        SessionInstructionError::Refused(refusal) => refusal_class(refusal.code()),
+        SessionInstructionError::DurabilityUnavailable => {
+            refusal_class(InstructionSetErrorCode::DurabilityUnavailable)
+        }
         SessionInstructionError::Session(error) => error.code().to_string(),
     }
+}
+
+/// A failure of a member's wake that leaves the member owed and that the
+/// mob's actor saw (the member's delivery still in flight past the wake's
+/// bound, its journal rows unread, its snapshot not prepared, its record
+/// not settled). The actor reports it here: this module keeps the member's
+/// last failure and logs it by its one rule, so a wake that fails the same
+/// way again does not warn again.
+pub(crate) fn report_wake_failure(
+    shared: &OperatorInstructionDeliveryShared,
+    agent_identity: &AgentIdentity,
+    class: &'static str,
+    text: &'static str,
+) {
+    shared.record_failure(agent_identity, RetryFailure::new(class, text));
 }
 
 /// `agent_identity`'s release epoch, read under the member's delivery lock,
@@ -783,23 +855,25 @@ pub(crate) async fn record_owed_snapshot_at_wake(
         Ok(Err(_)) => {
             shared.record_failure(
                 &agent_identity,
-                "the record's task ended without an answer".to_string(),
+                RetryFailure::new(
+                    "record_task_ended",
+                    "the record's task ended without an answer",
+                ),
             );
-            return WakeInstructionRecord::Failed {
-                class: "record_task_ended".to_string(),
-            };
+            return WakeInstructionRecord::Failed;
         }
         Err(_) => {
             shared.record_failure(
                 &agent_identity,
-                format!(
-                    "the member's session did not answer the record within {} s",
-                    bound.as_secs()
+                RetryFailure::new(
+                    "timed_out",
+                    format!(
+                        "the member's session did not answer the record within {} s",
+                        bound.as_secs()
+                    ),
                 ),
             );
-            return WakeInstructionRecord::Failed {
-                class: "timed_out".to_string(),
-            };
+            return WakeInstructionRecord::Failed;
         }
     };
     match answer {
@@ -809,19 +883,17 @@ pub(crate) async fn record_owed_snapshot_at_wake(
             }
         }
         answer => {
-            let class = answer
-                .as_ref()
-                .err()
-                .map(record_failure_class)
-                .unwrap_or_default();
             match classify_delivery_result(&agent_identity, &session_id, generation, answer) {
                 DeliveryResult::Settled(outcome) => {
-                    shared.clear_failure(&agent_identity);
+                    shared.clear_failure(
+                        &agent_identity,
+                        matches!(outcome, MemberInstructionDeliveryOutcome::Recorded { .. }),
+                    );
                     WakeInstructionRecord::Settled(outcome)
                 }
                 DeliveryResult::Retry(failure) => {
                     shared.record_failure(&agent_identity, failure);
-                    WakeInstructionRecord::Failed { class }
+                    WakeInstructionRecord::Failed
                 }
             }
         }
@@ -849,11 +921,17 @@ fn classify_delivery_result(
         // target was released). The snapshot it holds is not this mob's, so
         // the delivery is not current; it is retried, and the status read
         // shows why.
-        Ok(receipt) if receipt.target_generation > generation => DeliveryResult::Retry(format!(
-            "the member session holds operator instruction generation {} under this mob's id, \
-             above this mob's generation {generation}: an earlier mob with this id recorded it",
-            receipt.target_generation
-        )),
+        Ok(receipt) if receipt.target_generation > generation => {
+            DeliveryResult::Retry(RetryFailure::new(
+                "session_generation_above_mob",
+                format!(
+                    "the member session holds operator instruction generation {} under this \
+                     mob's id, above this mob's generation {generation}: an earlier mob with \
+                     this id recorded it",
+                    receipt.target_generation
+                ),
+            ))
+        }
         Ok(_) => DeliveryResult::Settled(MemberInstructionDeliveryOutcome::Recorded {
             agent_identity: agent_identity.clone(),
             session_id: session_id.clone(),
@@ -873,7 +951,10 @@ fn classify_delivery_result(
         // (`durability_unavailable`) included, since a store comes back.
         // Only the three refusals above, which an operator has to clear,
         // block the member.
-        Err(other) => DeliveryResult::Retry(other.to_string()),
+        Err(other) => DeliveryResult::Retry(RetryFailure::new(
+            record_failure_class(&other),
+            other.to_string(),
+        )),
     }
 }
 
@@ -932,15 +1013,18 @@ fn classify_placed_delivery_result(
             }
             // `durability_unavailable` included: the member stays owed and
             // the record is tried again, as for a local session.
-            other => DeliveryResult::Retry(format!(
-                "the member's session on its member host refused the record: {other:?}"
+            other => DeliveryResult::Retry(RetryFailure::new(
+                refusal_class(other),
+                format!("the member's session on its member host refused the record: {other:?}"),
             )),
         },
-        Err(PlacedInstructionFailure::Stale) => DeliveryResult::Retry(
-            "the member host holds another incarnation of the member".to_string(),
-        ),
-        Err(PlacedInstructionFailure::Failed(error)) => DeliveryResult::Retry(format!(
-            "the record did not reach the member's host: {error}"
+        Err(PlacedInstructionFailure::Stale) => DeliveryResult::Retry(RetryFailure::new(
+            "member_host_stale",
+            "the member host holds another incarnation of the member",
+        )),
+        Err(PlacedInstructionFailure::Failed(error)) => DeliveryResult::Retry(RetryFailure::new(
+            "member_host_unreached",
+            format!("the record did not reach the member's host: {error}"),
         )),
     }
 }
@@ -1253,7 +1337,10 @@ impl OperatorInstructionDeliveryReconciler {
             Err(error) => {
                 return (
                     agent_identity,
-                    Some(DeliveryResult::Retry(error.to_string())),
+                    Some(DeliveryResult::Retry(RetryFailure::new(
+                        "snapshot_not_prepared",
+                        error.to_string(),
+                    ))),
                 );
             }
         };
@@ -1317,16 +1404,22 @@ impl OperatorInstructionDeliveryReconciler {
                 None => back_off(&mut lanes.retry, &owed, &identity),
                 Some(DeliveryResult::Settled(outcome)) => {
                     lanes.retry.remove(&identity);
-                    self.shared.clear_failure(&identity);
+                    self.shared.clear_failure(
+                        &identity,
+                        matches!(outcome, MemberInstructionDeliveryOutcome::Recorded { .. }),
+                    );
                     lanes.feeding.insert(identity.clone());
                     members.push(identity);
                     outcomes.push(outcome);
                 }
+                // The failure is kept for the status read and logged by the
+                // shared bookkeeping's rule: a warning at the member's first
+                // failure and when its class changes, never one per retry.
                 Some(DeliveryResult::Retry(failure)) => {
                     tracing::debug!(
                         agent_identity = %identity,
-                        failure = %failure,
-                        "operator instruction delivery remains owed and will retry"
+                        failure = %failure.text,
+                        "operator instruction delivery failed"
                     );
                     self.shared.record_failure(&identity, failure);
                     back_off(&mut lanes.retry, &owed, &identity);
@@ -2410,6 +2503,38 @@ mod tests {
         assert!(!retry_stands(&mut armed(), None, false));
     }
 
+    /// A member's failure is warned once: at its first failure, and again
+    /// only when the failure's class changes or after a record landed. A
+    /// retry that fails the same way keeps the last failure for the status
+    /// read and does not warn, so a failure that never clears (a service
+    /// that keeps no durable document) is one warning, not one per retry.
+    /// The class is the closed code as hosts read it.
+    #[test]
+    fn a_members_failure_warns_at_first_and_when_its_class_changes() {
+        let shared = OperatorInstructionDeliveryShared::new(1);
+        let member = AgentIdentity::from("member");
+        let other = AgentIdentity::from("other");
+        let store = record_failure_class(&SessionInstructionError::DurabilityUnavailable);
+        assert_eq!(store, "durability_unavailable");
+        assert_eq!(
+            refusal_class(InstructionSetErrorCode::OwnedByMob),
+            "owned_by_mob"
+        );
+        assert!(shared.record_failure(&member, RetryFailure::new(store.clone(), "first")));
+        assert!(!shared.record_failure(&member, RetryFailure::new(store.clone(), "second")));
+        assert_eq!(shared.last_failure(&member).as_deref(), Some("second"));
+        // Another member's first failure warns on its own.
+        assert!(shared.record_failure(&other, RetryFailure::new(store.clone(), "first")));
+        // Another class warns; the same class again does not.
+        assert!(shared.record_failure(&member, RetryFailure::new("timed_out", "third")));
+        assert!(!shared.record_failure(&member, RetryFailure::new("timed_out", "fourth")));
+        // A record that landed ends the failure: the next one warns again.
+        shared.clear_failure(&member, true);
+        assert_eq!(shared.last_failure(&member), None);
+        assert!(shared.record_failure(&member, RetryFailure::new("timed_out", "fifth")));
+        assert_eq!(shared.last_failure(&other).as_deref(), Some("first"));
+    }
+
     /// A receipt whose target generation is above the delivery's is never
     /// current: an earlier mob with this id recorded it, so the delivery is
     /// retried with the reason. A receipt at the delivery's own generation
@@ -2425,7 +2550,10 @@ mod tests {
             })
         };
         match classify_delivery_result(&identity, &session_id, 2, receipt(5)) {
-            DeliveryResult::Retry(reason) => assert!(reason.contains("generation 5"), "{reason}"),
+            DeliveryResult::Retry(failure) => {
+                assert_eq!(failure.class, "session_generation_above_mob");
+                assert!(failure.text.contains("generation 5"), "{}", failure.text);
+            }
             DeliveryResult::Settled(_) => {
                 panic!("a later generation under this mob's id is not current")
             }

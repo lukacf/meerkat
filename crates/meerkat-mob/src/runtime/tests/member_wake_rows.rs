@@ -4349,6 +4349,94 @@ async fn a_kickoff_notice_beyond_the_pending_bound_of_its_peer_is_refused_and_re
     fixture.finish().await;
 }
 
+/// Two notices of one member to one peer arrive in the order the member's
+/// kickoff went through them, through the whole path: the actor's hand-off,
+/// the delivery lane, the member's own comms send and the peer's transcript.
+/// While the send of the member's starting notice is held, its started
+/// notice, owed meanwhile, is not sent; once the starting notice is let go
+/// the peer holds starting, then started, once each.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_members_later_kickoff_notice_waits_for_its_earlier_one_to_the_same_peer() {
+    let fixture = kickoff_notice_fixture("kickoff-notice-order").await;
+    let starting = crate::runtime::actor::kickoff_notice::hold_kickoff_notice_send_for_test(
+        fixture.handle.mob_id(),
+        "mob.kickoff_starting",
+    );
+    // A live peer: nothing but the held send keeps a notice from it.
+    let peer = fixture.spawn("notice-order-peer").await;
+    let member = spawn_kickoff_member(&fixture, "notice-order-member").await;
+    wait_kickoff_started(&fixture, &member).await;
+    // The actor's step that owed the started notice is over once its next
+    // command answers: the notice was handed off.
+    let answered_after = actor_answer_time(&fixture).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let while_held = kickoff_notices_received(&fixture, &peer, &member).await;
+
+    let _ = starting.send(true);
+    let received = kickoff_notices_settled(
+        &fixture,
+        std::slice::from_ref(&peer),
+        std::slice::from_ref(&member),
+        STEP,
+    )
+    .await;
+    assert!(
+        answered_after < ACTOR_ANSWER_BOUND
+            && while_held.is_empty()
+            && received == [starting_then_started()],
+        "a member's later kickoff notice did not wait for its earlier one: the actor answered \
+         after {answered_after:?} (bound {ACTOR_ANSWER_BOUND:?}); while the starting notice was \
+         held the peer held {while_held:?} (nothing expected), and afterwards {received:?} \
+         (starting, then started, once each expected)"
+    );
+    fixture.finish().await;
+}
+
+/// An unwire of an edge to a peer that is being woken waits for that wake,
+/// and the actor answers meanwhile: the unwire is parked while the peer's
+/// wake step runs and proceeds once the peer is live. The unwire's lane
+/// therefore never meets a Waking peer, neither in its notices nor in the
+/// compensating notices its rollback still awaits on the actor.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unwire_of_an_edge_to_a_waking_peer_waits_for_its_wake_and_holds_nothing() {
+    let fixture = WakeFixture::new("unwire-waking-peer").await;
+    let (peer, readiness) = peer_held_at_wake_readiness(&fixture, "unwire-waking-peer").await;
+    let member = fixture.spawn("unwire-waking-member").await;
+    fixture.wire(&member, &peer).await;
+    let wake = {
+        let handle = fixture.handle.clone();
+        let woken = peer.clone();
+        tokio::spawn(async move { handle.ensure_member_live(&woken).await })
+    };
+    wait_wake_bound(&fixture, &peer).await;
+
+    let unwire = {
+        let handle = fixture.handle.clone();
+        let (local, target) = (member.clone(), peer.clone());
+        tokio::spawn(async move { handle.unwire(local, target).await })
+    };
+    let answered_after = actor_answer_time(&fixture).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let parked = !unwire.is_finished();
+    let answered_while_parked = actor_answer_time(&fixture).await;
+
+    let _ = readiness.send(true);
+    let unwired = tokio::time::timeout(WAIT, unwire).await;
+    let woken = tokio::time::timeout(WAIT, wake).await;
+    assert!(
+        parked
+            && answered_after < ACTOR_ANSWER_BOUND
+            && answered_while_parked < ACTOR_ANSWER_BOUND
+            && matches!(unwired, Ok(Ok(Ok(()))))
+            && matches!(woken, Ok(Ok(Ok(())))),
+        "an unwire of an edge to a waking peer did not wait for the wake, or held the actor: \
+         parked while the wake was held: {parked}; the actor answered after {answered_after:?} \
+         and {answered_while_parked:?} (bound {ACTOR_ANSWER_BOUND:?}); after the wake the unwire \
+         answered {unwired:?} and the wake {woken:?}"
+    );
+    fixture.finish().await;
+}
+
 /// The declared apply on a durable store: an identity a complete roster
 /// unlisted, then lists again, comes back as the same identity with its
 /// history. The unlisted retirement archives the member's session and

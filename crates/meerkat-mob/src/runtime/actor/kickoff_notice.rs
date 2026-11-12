@@ -13,9 +13,14 @@
 //! Order and bound: the notices of one member to one peer are sent in the
 //! order MobMachine emitted them. One is sent at a time, and each later one
 //! waits for the one before it to settle, delivered or not, and only then
-//! starts its own send with its own budget. At most
-//! [`MAX_PENDING_KICKOFF_NOTICES_PER_PEER`] are pending for one member and
-//! one peer; a notice beyond that is refused and recorded as not delivered.
+//! starts its own send with its own budget. Behind a notice that cannot be
+//! delivered, the next one is therefore attempted when that one's budget has
+//! ended: two notices to a peer that stays unreachable are recorded one send
+//! budget apart (30 s and 60 s after the first was sent), not together. At
+//! most [`MAX_PENDING_KICKOFF_NOTICES_PER_PEER`] are pending for one member
+//! and one peer; a notice beyond that is refused and recorded as not
+//! delivered. The notices take none of the peer message lane's permits
+//! ([`MAX_PENDING_PEER_DELIVERIES`]): this bound replaces them.
 //! Nothing is queued on the actor, and no fact about a kickoff lives here:
 //! a notice is presentation, and a notice that is not delivered changes no
 //! machine state.
@@ -80,6 +85,15 @@ impl MobActor {
         let (settled_tx, settled) = tokio::sync::watch::channel(false);
         let from = notice.from.clone();
         let to = notice.to.clone();
+        #[cfg(all(test, not(target_arch = "wasm32")))]
+        let notice = KickoffNoticeDelivery {
+            sender_comms: sender_held_for_test(
+                &mob_id,
+                notice.intent,
+                Arc::clone(&notice.sender_comms),
+            ),
+            ..notice
+        };
         let abort_handle = self.peer_delivery_tasks.spawn(async move {
             let result = deliver_kickoff_notice(
                 Arc::clone(&notice.sender_comms),
@@ -201,6 +215,74 @@ static KICKOFF_NOTICE_PENDING_LIMITS_FOR_TEST: std::sync::Mutex<BTreeMap<MobId, 
 pub(in crate::runtime) fn set_kickoff_notice_pending_limit_for_test(mob_id: &MobId, limit: usize) {
     if let Ok(mut limits) = KICKOFF_NOTICE_PENDING_LIMITS_FOR_TEST.lock() {
         limits.insert(mob_id.clone(), limit);
+    }
+}
+
+/// Test seam: the kickoff notices of one kind whose send waits until the
+/// test releases it, per mob. The wait is inside the delivery's own send, so
+/// it comes after the wait for the notice before it and ends with a
+/// cancellation.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+static KICKOFF_NOTICE_SEND_HOLDS_FOR_TEST: std::sync::Mutex<
+    Vec<(MobId, &'static str, tokio::sync::watch::Receiver<bool>)>,
+> = std::sync::Mutex::new(Vec::new());
+
+/// Hold the send of every kickoff notice of kind `intent` in `mob_id` until
+/// the returned sender sends `true`.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(in crate::runtime) fn hold_kickoff_notice_send_for_test(
+    mob_id: &MobId,
+    intent: &'static str,
+) -> tokio::sync::watch::Sender<bool> {
+    let (released_tx, released_rx) = tokio::sync::watch::channel(false);
+    KICKOFF_NOTICE_SEND_HOLDS_FOR_TEST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push((mob_id.clone(), intent, released_rx));
+    released_tx
+}
+
+/// `sender`, or `sender` behind the hold armed for `mob_id` and `intent`.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+fn sender_held_for_test(
+    mob_id: &MobId,
+    intent: &str,
+    sender: Arc<dyn CoreCommsRuntime>,
+) -> Arc<dyn CoreCommsRuntime> {
+    let held = KICKOFF_NOTICE_SEND_HOLDS_FOR_TEST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .find(|(armed_mob, armed_intent, _)| armed_mob == mob_id && *armed_intent == intent)
+        .map(|(_, _, released)| released.clone());
+    match held {
+        Some(released) => Arc::new(HeldSenderForTest { sender, released }),
+        None => sender,
+    }
+}
+
+/// A sender whose sends wait for the test's release.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+struct HeldSenderForTest {
+    sender: Arc<dyn CoreCommsRuntime>,
+    released: tokio::sync::watch::Receiver<bool>,
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[async_trait::async_trait]
+impl CoreCommsRuntime for HeldSenderForTest {
+    fn inbox_notify(&self) -> Arc<tokio::sync::Notify> {
+        self.sender.inbox_notify()
+    }
+
+    async fn send(&self, cmd: CommsCommand) -> Result<meerkat_core::comms::SendReceipt, SendError> {
+        let mut released = self.released.clone();
+        while !*released.borrow_and_update() {
+            if released.changed().await.is_err() {
+                break;
+            }
+        }
+        self.sender.send(cmd).await
     }
 }
 

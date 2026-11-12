@@ -5340,8 +5340,15 @@ const MAX_PARALLEL_REMOTE_MEMBER_TEARDOWNS: usize = 64;
 const MAX_LIFECYCLE_NOTIFICATION_TASKS: usize = 16;
 const MAX_PARALLEL_PEER_RETIRE_NOTIFICATIONS: usize = 64;
 const MAX_CONCURRENT_AUTONOMOUS_STOP_INTERRUPTS: usize = 8;
+/// How many peer messages may be pending on the peer delivery lane at once:
+/// each takes one permit, and a message beyond them is refused as saturated.
+/// Kickoff lifecycle notices run on the same lane and take no permit: their
+/// own bound is per member and peer
+/// ([`kickoff_notice::MAX_PENDING_KICKOFF_NOTICES_PER_PEER`]), so pending
+/// notices never refuse a peer message.
 #[cfg(not(test))]
 pub(super) const MAX_PENDING_PEER_DELIVERIES: usize = 1024;
+/// The test build's permit count (see the production constant).
 #[cfg(test)]
 pub(super) const MAX_PENDING_PEER_DELIVERIES: usize = 4;
 

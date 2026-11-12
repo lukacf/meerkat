@@ -18368,6 +18368,10 @@ svg[data-svg=fit],
 .identity-archived__actions {
   margin-left: auto;
 }
+.identity-archived__hint {
+  display: block;
+  margin: 4px 0 var(--_cc-sp-5, 12px);
+}
 .agent-details__change {
   padding: var(--_cc-sp-5, 12px) var(--_cc-panel-pad-x);
 }

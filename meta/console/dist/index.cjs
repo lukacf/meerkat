@@ -75267,6 +75267,12 @@ function summaryOf(raw) {
     ...runtimeMode ? { runtimeMode } : {}
   };
 }
+function waitsForItsHost(agent) {
+  return !agent.archived && agent.readiness === "preparation_pending";
+}
+function hasNoMember(agent) {
+  return agent.archived || waitsForItsHost(agent);
+}
 function parseAgentRecord(value) {
   const raw = rawOf(value);
   const summary = raw ? summaryOf(raw) : null;
@@ -76659,8 +76665,8 @@ function ArchivedAgents({
   const [open, setOpen] = import_react81.default.useState(false);
   const [agents, setAgents] = import_react81.default.useState(null);
   const [error48, setError] = import_react81.default.useState(null);
-  const load = import_react81.default.useRef(api.loadArchived);
-  load.current = api.loadArchived;
+  const load = import_react81.default.useRef(api.loadOffRoster);
+  load.current = api.loadOffRoster;
   const listId = import_react81.default.useId();
   import_react81.default.useEffect(() => {
     if (!open) return void 0;
@@ -76687,25 +76693,45 @@ function ArchivedAgents({
     }
     setOpen(!open);
   };
+  const waiting = (agents ?? []).filter(waitsForItsHost);
+  const archived = (agents ?? []).filter((agent) => agent.archived);
   return /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)("div", { className: "identity-archived", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Button, { size: "sm", variant: "ghost", "aria-expanded": open, "aria-controls": open ? listId : void 0, onClick: toggle, "data-testid": "roster-archived-open", children: "Archived agents" }),
-    open ? /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("section", { className: "identity-archived__section", id: listId, "aria-label": "Archived agents", "data-testid": "roster-archived", children: error48 ? /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)(Notice, { tone: "crit", role: "alert", testId: "roster-archived-error", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-notice__title", children: "The archived agents could not be read." }),
+    /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Button, { size: "sm", variant: "ghost", "aria-expanded": open, "aria-controls": open ? listId : void 0, onClick: toggle, "data-testid": "roster-archived-open", children: "Archived and waiting agents" }),
+    open ? /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("section", { className: "identity-archived__section", id: listId, "aria-label": "Archived and waiting agents", "data-testid": "roster-archived", children: error48 ? /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)(Notice, { tone: "crit", role: "alert", testId: "roster-archived-error", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-notice__title", children: "The archived and waiting agents could not be read." }),
       /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-notice__line", children: error48.sentence }),
       /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(RefusalDetails, { detail: error48.detail })
-    ] }) : agents === null ? /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(LoadingState, { label: "Loading the archived agents", rows: 2 }) : agents.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-form__hint", children: "No archived agents." }) : /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)(import_jsx_runtime107.Fragment, { children: [
-      /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)("div", { className: "roster__group-head", children: [
-        "Archived ",
-        /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "cc-count", children: agents.length })
-      ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("ul", { className: "identity-archived__list", children: agents.map((agent) => /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)("li", { className: "identity-archived__row", "data-testid": "roster-archived:".concat(agent.name), children: [
-        /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-archived__name", title: agent.name, children: agentShownName(agent) }),
-        /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-archived__meta", children: humanizeEnum(agent.profile) }),
-        /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)("span", { className: "cc-btn-row identity-archived__actions", children: [
-          controls.unarchive ? /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Button, { size: "sm", onClick: () => onOpen(agent, "unarchive"), "data-testid": "roster-archived-action:".concat(agent.name, ":unarchive"), children: "Unarchive" }) : null,
-          controls.remove ? /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Button, { size: "sm", variant: "danger", onClick: () => onOpen(agent, "remove"), "data-testid": "roster-archived-action:".concat(agent.name, ":remove"), children: "Remove" }) : null
-        ] })
-      ] }, agent.name)) })
+    ] }) : agents === null ? /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(LoadingState, { label: "Loading the archived and waiting agents", rows: 2 }) : waiting.length + archived.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-form__hint", children: "No archived agents, and none that waits for its host." }) : /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)(import_jsx_runtime107.Fragment, { children: [
+      waiting.length ? /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)(import_jsx_runtime107.Fragment, { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)("div", { className: "roster__group-head", children: [
+          "Waiting for their host ",
+          /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "cc-count", children: waiting.length })
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("ul", { className: "identity-archived__list", children: waiting.map((agent) => (
+          // Nothing can be done with it yet, so it has no
+          // control: it joins the roster when its host is done.
+          /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)("li", { className: "identity-archived__row", "data-testid": "roster-waiting:".concat(agent.name), children: [
+            /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-archived__name", title: agent.name, children: agentShownName(agent) }),
+            /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-archived__meta", children: humanizeEnum(agent.profile) }),
+            /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-archived__actions", children: /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(StatusPill, { tone: "warn", variant: "quiet", children: "Waiting for its host" }) })
+          ] }, agent.name)
+        )) }),
+        /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-form__hint identity-archived__hint", children: "Its host is still preparing it. It joins the roster when that ends." })
+      ] }) : null,
+      archived.length ? /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)(import_jsx_runtime107.Fragment, { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)("div", { className: "roster__group-head", children: [
+          "Archived ",
+          /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "cc-count", children: archived.length })
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("ul", { className: "identity-archived__list", children: archived.map((agent) => /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)("li", { className: "identity-archived__row", "data-testid": "roster-archived:".concat(agent.name), children: [
+          /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-archived__name", title: agent.name, children: agentShownName(agent) }),
+          /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-archived__meta", children: humanizeEnum(agent.profile) }),
+          /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)("span", { className: "cc-btn-row identity-archived__actions", children: [
+            controls.unarchive ? /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Button, { size: "sm", onClick: () => onOpen(agent, "unarchive"), "data-testid": "roster-archived-action:".concat(agent.name, ":unarchive"), children: "Unarchive" }) : null,
+            controls.remove ? /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Button, { size: "sm", variant: "danger", onClick: () => onOpen(agent, "remove"), "data-testid": "roster-archived-action:".concat(agent.name, ":remove"), children: "Remove" }) : null
+          ] })
+        ] }, agent.name)) })
+      ] }) : null
     ] }) }) : null
   ] });
 }
@@ -77783,12 +77809,12 @@ function useIdentityChanges({
         return { profiles, peers };
       },
       loadRecord,
-      loadArchived: async () => {
+      loadOffRoster: async () => {
         const agents = await readAllPages(async (after) => {
           const page = parseAgentPage(await runRef.current("listAgentRecords", { include_archived: true, ...after ? { after } : {} }));
           return { items: page.agents, next: page.next };
         });
-        return agents.filter((agent) => agent.archived);
+        return agents.filter(hasNoMember);
       },
       change,
       plan: async (kind, request) => {

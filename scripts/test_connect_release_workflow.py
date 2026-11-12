@@ -18,6 +18,14 @@ resolver's real shell, the build job's portable steps (source check, smoke
 run, packaging) with stand-in executables, and the publisher
 (scripts/connect_release_macos_assets.py) against a stub `gh`; the steps
 that need Apple's tools (lipo, file, codesign) are read, not run.
+
+The complete macOS installation is staged by a dispatch (`macos-stage`): two
+hosted macos-15 jobs call the producer once per step, pass the work root
+between them, and upload the stage record as a workflow artifact. They
+create no release and no tag, hold no token and no provider key, and upload
+nothing outside the run. The tests read the job graph, permissions, paths
+and step order, and run the portable shell (the layout check, the work root
+pack and restore, the choice of the consumer check's rkat) with stand-ins.
 """
 
 from __future__ import annotations
@@ -39,7 +47,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/connect-release.yml"
 PUBLISHER = ROOT / "scripts/connect_release_macos_assets.py"
 JOBS = ("resolve", "require_ci_green", "floor_check", "create_release", "build_macos", "publish_macos",
-        "recover_macos", "build", "attest", "accept", "publish")
+        "recover_macos", "stage_macos_build", "stage_macos_check", "build", "attest", "accept", "publish")
 
 
 def job_block(name: str) -> str:
@@ -988,6 +996,480 @@ class ConnectMacosPublisherTests(unittest.TestCase):
         download = step_block("Download this run's macOS archives", "publish_macos")
         self.assertIn('gh run download "${GITHUB_RUN_ID}"', download)
         self.assertIn("--pattern 'connect-macos-binaries-*'", download)
+
+
+STAGE_JOBS = ("stage_macos_build", "stage_macos_check")
+CHECKOUT_ROOT = "/Users/runner/work/meerkat/meerkat"
+WORK_ROOT = "/private/tmp/cw"
+PINS_DIRECTORY = "/private/tmp/cw/pins"
+RESOLVED_PINS = "/private/tmp/cw/pins/library-pins-macos-arm64.resolved.json"
+PRODUCER = "python3 connect/scripts/connect-candidate.py macos"
+WITH_PINS = '--work "${CONNECT_WORK}" --pins "${CONNECT_RESOLVED_PINS}" --pinned-inputs "${CONNECT_PINS}"'
+STAGE_BUILD_STEPS = (
+    "Checkout the dispatched source",
+    "Check the runner layout",
+    "Select Python",
+    "Install Rust",
+    "Install zstd",
+    "Preflight",
+    "Fetch the pinned public inputs",
+    "Build the integration library",
+    "Package the resources",
+    "Build and sign the executables",
+    "Free the Cargo output",
+    "Pack the work root for the check job",
+    "Upload the work root",
+)
+STAGE_CHECK_STEPS = (
+    "Checkout the dispatched source",
+    "Check the runner layout",
+    "Select Python",
+    "Install Rust",
+    "Install zstd",
+    "Download the work root",
+    "Restore the work root at its path",
+    "Stage the products and build the test executables",
+    "Check the installed gateway",
+    "Check the installed CLI",
+    "Check a fresh rkat consumer",
+    "Check the setup conversation start",
+    "Check the official Playwright install",
+    "Write the stage record",
+    "Attest the stage record",
+    "Retain the provenance bundle",
+    "Upload the stage record",
+    "Upload the stage provenance",
+)
+# The producer's one call per step: job, workflow step, the words after `connect-candidate.py macos`.
+PRODUCER_CALLS = (
+    ("stage_macos_build", "Preflight", 'preflight --work "${CONNECT_WORK}" --source-sha "${GITHUB_SHA}"'),
+    ("stage_macos_build", "Build the integration library", f"library {WITH_PINS}"),
+    ("stage_macos_build", "Package the resources", f"resources {WITH_PINS}"),
+    ("stage_macos_build", "Build and sign the executables", 'build --work "${CONNECT_WORK}"'),
+    ("stage_macos_check", "Stage the products and build the test executables", f"stage {WITH_PINS}"),
+    ("stage_macos_check", "Check the installed gateway", 'check-gateway --work "${CONNECT_WORK}"'),
+    ("stage_macos_check", "Check the installed CLI", 'check-cli --work "${CONNECT_WORK}"'),
+    ("stage_macos_check", "Check the setup conversation start", 'check-conversation --work "${CONNECT_WORK}"'),
+    ("stage_macos_check", "Check the official Playwright install",
+     'check-official-install --work "${CONNECT_WORK}"'),
+    ("stage_macos_check", "Write the stage record",
+     'stage-record --work "${CONNECT_WORK}" --output "${CONNECT_WORK}/artifact"'),
+)
+UNAME_STUB = "#!/bin/sh\ncase \"$1\" in -s) echo Darwin ;; -m) echo arm64 ;; *) echo Darwin ;; esac\n"
+PRODUCER_STUB = (
+    f"#!{sys.executable}\n"
+    "import json, os, sys\n"
+    "with open(os.environ['STUB_LOG'], 'a') as log:\n"
+    "    log.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+)
+CURL_STUB = (
+    f"#!{sys.executable}\n"
+    "import json, os, shutil, sys\n"
+    "args = sys.argv[1:]\n"
+    "url, destination = args[-1], args[args.index('-o') + 1]\n"
+    "with open(os.environ['CURL_LOG'], 'a') as log:\n"
+    "    log.write(url + '\\n')\n"
+    "source = os.path.join(os.environ['CURL_FILES'], url.rsplit('/', 1)[1])\n"
+    "if not os.path.exists(source):\n"
+    "    print('curl: (22) The requested URL returned error: 404', file=sys.stderr)\n"
+    "    sys.exit(22)\n"
+    "shutil.copyfile(source, destination)\n"
+)
+
+
+def one_line(step: str, job: str) -> str:
+    """A step's shell as one line: continuations joined, comments dropped."""
+    body = indented_body(step, job, "run", 10)
+    return " ".join(line.strip().rstrip("\\").strip() for line in body.splitlines()
+                    if line.strip() and not line.strip().startswith("#"))
+
+
+def job_mapping(job: str, key: str) -> dict:
+    """A job's own `permissions:` or `env:` mapping (the four-space key and its six-space rows)."""
+    lines = job_block(job).splitlines()
+    start = lines.index(f"    {key}:")
+    rows = {}
+    for line in lines[start + 1:]:
+        if not line.startswith("      ") or line.startswith("       "):
+            break
+        name, value = line.strip().split(":", 1)
+        rows[name] = value.strip().strip('"').strip("'")
+    return rows
+
+
+def run_stage_step(step: str, job: str, root: Path, env: dict):
+    script = indented_body(step, job, "run", 10)
+    return subprocess.run(["bash", "-c", script], cwd=root, capture_output=True, text=True,
+                          env={**os.environ, **env})
+
+
+def load_fetch_script():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("connect_fetch_pinned_inputs",
+                                                  ROOT / "connect/scripts/fetch-pinned-inputs.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class ConnectMacosStageTests(unittest.TestCase):
+    """Stage one of the complete macOS installation: a dispatch, two hosted macos-15 jobs, the producer
+    once per step, the stage record as a workflow artifact, nothing published."""
+
+    def test_the_stage_is_a_dispatch_mode_with_an_optional_core_release(self):
+        text = WORKFLOW.read_text()
+        self.assertIn("        options: [candidate, accept, publish, macos-build, macos-assets, macos-stage]\n", text)
+        inputs = text[text.index("    inputs:\n"):text.index("\npermissions:\n")]
+        block = inputs[inputs.index("      rkat_release_tag:\n"):]
+        self.assertIn('        required: false\n        default: ""\n        type: string\n', block[:400])
+
+    def test_only_the_stage_dispatch_runs_the_stage_jobs(self):
+        outcome = results("workflow_dispatch", "macos-stage")
+        self.assertEqual({job for job, result in outcome.items() if result == "success"},
+                         {"resolve", *STAGE_JOBS})
+        for event, mode in (("push", "tag"), ("workflow_dispatch", "candidate"), ("workflow_dispatch", "accept"),
+                            ("workflow_dispatch", "publish"), ("workflow_dispatch", "macos-build"),
+                            ("workflow_dispatch", "macos-assets")):
+            with self.subTest(mode=mode):
+                outcome = results(event, mode)
+                self.assertEqual([outcome[job] for job in STAGE_JOBS], ["skipped", "skipped"])
+        self.assertEqual(job_needs("stage_macos_build"), ["resolve"])
+        self.assertEqual(job_needs("stage_macos_check"), ["resolve", "stage_macos_build"])
+        for status in ("failure", "cancelled", "skipped"):
+            with self.subTest(status=status):
+                outcome = results("workflow_dispatch", "macos-stage", {"stage_macos_build": status})
+                self.assertEqual(outcome["stage_macos_check"], "skipped")
+
+    def test_the_resolver_names_the_dispatched_commit(self):
+        sha = "2" * 40
+        result, _, _, output = run_step("Resolve", job="resolve", env={
+            "EVENT": "workflow_dispatch", "REF": "", "MODE": "macos-stage", "RELEASE_TAG": "", "GITHUB_SHA": sha})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(dict(line.split("=", 1) for line in output.splitlines()),
+                         {"mode": "macos-stage", "version": TREE_VERSION, "tag": f"connect-v{TREE_VERSION}",
+                          "source_ref": sha})
+        result, _, _, output = run_step("Resolve", job="resolve", env={
+            "EVENT": "workflow_dispatch", "REF": "", "MODE": "macos-stage", "RELEASE_TAG": "connect-v0.9.14",
+            "GITHUB_SHA": sha})
+        self.assertEqual((result.returncode, output), (1, ""))
+
+    def test_both_jobs_are_hosted_macos_15_jobs_inside_the_job_limit(self):
+        for job in STAGE_JOBS:
+            with self.subTest(job=job):
+                block = job_block(job)
+                self.assertIn("    runs-on: macos-15\n", block)
+                timeout = int(re.search(r"(?m)^    timeout-minutes: ([0-9]+)$", block).group(1))
+                self.assertLessEqual(timeout, 360)
+
+    def test_the_stage_jobs_hold_no_token_and_publish_nothing(self):
+        self.assertEqual(job_mapping("stage_macos_build", "permissions"), {"contents": "read"})
+        self.assertEqual(job_mapping("stage_macos_check", "permissions"),
+                         {"contents": "read", "id-token": "write", "attestations": "write"})
+        for job in STAGE_JOBS:
+            block = job_block(job)
+            for word in ("secrets.", "github.token", "GH_TOKEN", "GITHUB_TOKEN", "API_KEY", "gh release",
+                         "gh api", "gh run", "git push", "git tag", "contents: write", "--clobber",
+                         "notarytool", "Developer ID"):
+                with self.subTest(job=job, word=word):
+                    self.assertNotIn(word, block)
+            # Whatever leaves a job leaves it as a workflow artifact of this run.
+            uses = re.findall(r"(?m)^        uses: ([^@\s]+)@", block)
+            self.assertLessEqual(set(uses), {"actions/checkout", "actions/setup-python", "dtolnay/rust-toolchain",
+                                             "actions/upload-artifact", "actions/download-artifact",
+                                             "actions/attest-build-provenance"})
+
+    def test_the_checkout_and_the_work_root_are_the_same_literals_in_both_jobs(self):
+        fetch = load_fetch_script()
+        self.assertEqual(RESOLVED_PINS, f"{PINS_DIRECTORY}/{fetch.resolved_name('macos-arm64')}")
+        for job in STAGE_JOBS:
+            with self.subTest(job=job):
+                self.assertEqual(job_mapping(job, "env"), {
+                    "CONNECT_CHECKOUT": CHECKOUT_ROOT, "CONNECT_WORK": WORK_ROOT, "CONNECT_PINS": PINS_DIRECTORY,
+                    "CONNECT_RESOLVED_PINS": RESOLVED_PINS, "PYTHONDONTWRITEBYTECODE": "1"})
+                checkout = step_block("Checkout the dispatched source", job)
+                for line in ("ref: ${{ needs.resolve.outputs.source_ref }}", "fetch-depth: 0",
+                             "persist-credentials: false"):
+                    self.assertIn(f"          {line}\n", checkout + "\n")
+                self.assertNotIn("          path:", checkout)
+        self.assertEqual(step_block("Check the runner layout", "stage_macos_build").rstrip(),
+                         step_block("Check the runner layout", "stage_macos_check").rstrip())
+
+    def test_the_steps_run_in_the_producers_order(self):
+        named = {job: tuple(re.findall(r"(?m)^      - name: (.+)$", job_block(job))) for job in STAGE_JOBS}
+        self.assertEqual(named["stage_macos_build"], STAGE_BUILD_STEPS)
+        self.assertEqual(named["stage_macos_check"], STAGE_CHECK_STEPS)
+        for job, step, words in PRODUCER_CALLS:
+            with self.subTest(step=step):
+                self.assertEqual(one_line(step, job), f"set -euo pipefail {PRODUCER} {words}")
+        called = re.findall(r"connect-candidate\.py macos ([a-z-]+)", "".join(job_block(job) for job in STAGE_JOBS))
+        self.assertEqual(called, ["preflight", "library", "resources", "build", "stage", "check-gateway",
+                                  "check-cli", "check-consumer", "check-consumer", "check-conversation",
+                                  "check-official-install", "stage-record"])
+        for job in STAGE_JOBS:
+            for step in ("Select Python", "Install Rust"):
+                self.assertEqual(step_block(step, "stage_macos_build").rstrip(), step_block(step, job).rstrip())
+        self.assertIn("python-version: '3.11'", step_block("Select Python", "stage_macos_build"))
+        rust = step_block("Install Rust", "stage_macos_build")
+        self.assertIn("uses: dtolnay/rust-toolchain@f08ac54821369508305fcb9e0121ec6e30ae9ada # 1.97.0", rust)
+        self.assertIn("targets: aarch64-apple-darwin", rust)
+        zstd = step_block("Install zstd", "stage_macos_build")
+        self.assertIn("HOMEBREW_NO_AUTO_UPDATE: '1'", zstd)
+        self.assertIn("brew install zstd", zstd)
+        self.assertEqual(zstd.rstrip(), step_block("Install zstd", "stage_macos_check").rstrip())
+
+    def layout(self, *, change=None, uname=True, env=None):
+        git = ["git", "-c", "user.name=test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false"]
+        with TempDir() as scratch:
+            scratch = scratch.resolve()
+            root, bin_dir = scratch / "checkout", scratch / "bin"
+            root.mkdir()
+            bin_dir.mkdir()
+            (scratch / "private").mkdir()
+            (root / "file").write_text("tracked\n")
+            for command in (["init", "-q", "-b", "main"], ["add", "-A"], ["commit", "-q", "-m", "source"]):
+                subprocess.run([*git, *command], cwd=root, check=True, capture_output=True)
+            head = subprocess.run([*git, "rev-parse", "HEAD"], cwd=root, check=True, capture_output=True,
+                                  text=True).stdout.strip()
+            if uname:
+                (bin_dir / "uname").write_text(UNAME_STUB)
+                (bin_dir / "uname").chmod(0o755)
+            values = {"CONNECT_CHECKOUT": str(root), "CONNECT_WORK": str(scratch / "private" / "cw"),
+                      "GITHUB_SHA": head, "PATH": f"{bin_dir}:{os.environ['PATH']}", **(env or {})}
+            if change:
+                change(scratch, root, values)
+            return run_stage_step("Check the runner layout", "stage_macos_build", root, values)
+
+    def test_the_layout_check_accepts_exactly_the_recorded_layout(self):
+        result = self.layout()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        def elsewhere(scratch, root, values):
+            values["CONNECT_CHECKOUT"] = CHECKOUT_ROOT
+
+        def work_exists(scratch, root, values):
+            (scratch / "private" / "cw").mkdir()
+
+        def linked_parent(scratch, root, values):
+            (scratch / "link").symlink_to(scratch / "private")
+            values["CONNECT_WORK"] = str(scratch / "link" / "cw")
+
+        def another_commit(scratch, root, values):
+            values["GITHUB_SHA"] = "3" * 40
+
+        def dirty(scratch, root, values):
+            (root / "untracked").write_text("left behind\n")
+
+        for name, change, message in (("another checkout path", elsewhere, "the checkout is at"),
+                                      ("an existing work root", work_exists, "already exists"),
+                                      ("a linked parent", linked_parent, "not a real directory"),
+                                      ("another commit", another_commit, "is not the dispatched commit"),
+                                      ("a dirty checkout", dirty, "not clean")):
+            with self.subTest(name=name):
+                result = self.layout(change=change)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(message, result.stderr)
+        if os.uname().sysname != "Darwin" or os.uname().machine != "arm64":
+            result = self.layout(uname=False)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("not a macOS arm64 runner", result.stderr)
+
+    def test_the_fetch_step_derives_the_crates_from_the_lock_and_keeps_its_record(self):
+        fetch = load_fetch_script()
+        step = step_block("Fetch the pinned public inputs", "stage_macos_build")
+        self.assertIn('          CONNECT_PINS_TOOL_CLOSURE: "1"\n', step)
+        command = one_line("Fetch the pinned public inputs", "stage_macos_build")
+        arguments = " ".join('"{p}"' if word == "{p}" else word for word in fetch.TOOL_CLOSURE_ARGUMENTS)
+        parts = [
+            "(cd connect && python3 -B -m unittest scripts.test_fetch_pinned_inputs)",
+            'connect/scripts/repo-cargo tree --locked --manifest-path "${CONNECT_CHECKOUT}/Cargo.toml" '
+            f'{arguments} > "${{CONNECT_WORK}}/tool-closure.txt"',
+            "python3 -I connect/scripts/fetch-pinned-inputs.py --pins connect/release/library-pins-macos-arm64.json "
+            '--closure "${CONNECT_WORK}/tool-closure.txt" --lock Cargo.lock --destination "${CONNECT_PINS}"',
+            'mkdir -p "${CONNECT_WORK}/records/pinned-inputs"',
+            'cp "${CONNECT_PINS}/FETCHED.json" "${CONNECT_RESOLVED_PINS}" "${CONNECT_WORK}/records/pinned-inputs/"',
+        ]
+        self.assertEqual(command, "set -euo pipefail " + " ".join(parts))
+        # The fetch step is the only step of either job that names a download host or tool.
+        for job in STAGE_JOBS:
+            for name in (STAGE_BUILD_STEPS if job == "stage_macos_build" else STAGE_CHECK_STEPS):
+                block = step_block(name, job)
+                if name not in ("Fetch the pinned public inputs", "Check a fresh rkat consumer", "Install zstd"):
+                    for word in ("curl", "wget", "https://", "pip install", "npm install", "brew "):
+                        self.assertNotIn(word, block, f"{job}: {name}")
+
+    def work_root(self, scratch: Path):
+        work = scratch / "private" / "cw"
+        (work / "records").mkdir(parents=True)
+        (work / "pins").mkdir()
+        (work / "binary").mkdir()
+        (work / "records/preflight.step.json").write_text("{}\n")
+        (work / "pins/library-pins-macos-arm64.resolved.json").write_text("{}\n")
+        (work / "binary/meerkat-connect").write_bytes(b"\xcf\xfa\xed\xfe signed")
+        (work / "binary/meerkat-connect").chmod(0o755)
+        (work / "records/build.log").write_text("log\n")
+        (work / "records/build.log").chmod(0o644)
+        (work / "current").symlink_to("binary/meerkat-connect")
+        return work
+
+    def pack(self, scratch: Path, work: Path):
+        (scratch / "build-temp").mkdir()
+        output = scratch / "github-output"
+        result = run_stage_step("Pack the work root for the check job", "stage_macos_build", scratch, {
+            "CONNECT_WORK": str(work), "RUNNER_TEMP": str(scratch / "build-temp"), "GITHUB_OUTPUT": str(output),
+            "GITHUB_RUN_ID": "77", "GITHUB_RUN_ATTEMPT": "2"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(output.read_text(), "work_artifact=connect-macos-arm64-work-77-2\n")
+        self.assertEqual(sorted(path.name for path in (scratch / "build-temp").iterdir()),
+                         ["connect-work.tar", "connect-work.tar.sha256"])
+        # What download-artifact leaves for the check job.
+        downloaded = scratch / "check-temp" / "connect-work"
+        downloaded.parent.mkdir()
+        shutil.move(str(scratch / "build-temp"), str(downloaded))
+        return downloaded
+
+    def restore(self, scratch: Path, work: Path):
+        return run_stage_step("Restore the work root at its path", "stage_macos_check", scratch, {
+            "CONNECT_WORK": str(work), "RUNNER_TEMP": str(scratch / "check-temp"),
+            "CONNECT_RESOLVED_PINS": str(work / "pins/library-pins-macos-arm64.resolved.json")})
+
+    def test_the_work_root_travels_between_the_jobs_at_its_own_path(self):
+        with TempDir() as scratch:
+            scratch = scratch.resolve()
+            work = self.work_root(scratch)
+            downloaded = self.pack(scratch, work)
+            shutil.rmtree(work)
+            result = self.restore(scratch, work)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((work / "binary/meerkat-connect").read_bytes(), b"\xcf\xfa\xed\xfe signed")
+            self.assertEqual((work / "binary/meerkat-connect").stat().st_mode & 0o777, 0o755)
+            self.assertEqual((work / "records/build.log").stat().st_mode & 0o777, 0o644)
+            self.assertEqual(os.readlink(work / "current"), "binary/meerkat-connect")
+            self.assertEqual(sorted(path.name for path in work.iterdir()), ["binary", "current", "pins", "records"])
+            self.assertFalse((downloaded / "connect-work.tar").exists(), "the copy is removed to free the disk")
+
+    def test_the_restore_refuses_other_bytes_an_existing_root_and_an_incomplete_one(self):
+        with TempDir() as scratch:
+            scratch = scratch.resolve()
+            work = self.work_root(scratch)
+            downloaded = self.pack(scratch, work)
+            result = self.restore(scratch, work)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("already exists", result.stderr)
+            shutil.rmtree(work)
+            with open(downloaded / "connect-work.tar", "ab") as archive:
+                archive.write(b"changed")
+            result = self.restore(scratch, work)
+            self.assertEqual(result.returncode, 1)
+            self.assertFalse(work.exists())
+        with TempDir() as scratch:
+            scratch = scratch.resolve()
+            work = self.work_root(scratch)
+            (work / "records/preflight.step.json").unlink()
+            self.pack(scratch, work)
+            shutil.rmtree(work)
+            result = self.restore(scratch, work)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("is not a preflighted work root", result.stderr)
+
+    def test_the_work_root_artifact_is_named_by_the_job_that_made_it(self):
+        build = job_block("stage_macos_build")
+        self.assertIn("    outputs:\n      work_artifact: ${{ steps.pack.outputs.work_artifact }}\n", build)
+        self.assertIn("        id: pack\n", step_block("Pack the work root for the check job", "stage_macos_build") + "\n")
+        upload = step_block("Upload the work root", "stage_macos_build") + "\n"
+        self.assertIn("        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4\n", upload)
+        for line in ("name: ${{ steps.pack.outputs.work_artifact }}", "if-no-files-found: error",
+                     "overwrite: false", "include-hidden-files: true"):
+            self.assertIn(f"          {line}\n", upload)
+        download = step_block("Download the work root", "stage_macos_check") + "\n"
+        self.assertIn("          name: ${{ needs.stage_macos_build.outputs.work_artifact }}\n", download)
+        self.assertIn("          path: ${{ runner.temp }}/connect-work\n", download)
+        # The Cargo output is freed before the pack: no later step reads it, and the runner's disk is small.
+        self.assertEqual(one_line("Free the Cargo output", "stage_macos_build"),
+                         "set -euo pipefail connect/scripts/repo-cargo clean df -k \"${CONNECT_WORK}\"")
+        self.assertIn("          RUST_LANE_ID: connect-macos-arm64\n",
+                      step_block("Free the Cargo output", "stage_macos_build") + "\n")
+
+    def consumer(self, tag, *, files=None):
+        with TempDir() as scratch:
+            scratch = scratch.resolve()
+            (scratch / "connect/scripts").mkdir(parents=True)
+            (scratch / "connect/scripts/connect-candidate.py").write_text(PRODUCER_STUB)
+            (scratch / "bin").mkdir()
+            (scratch / "bin/curl").write_text(CURL_STUB)
+            (scratch / "bin/curl").chmod(0o755)
+            (scratch / "served").mkdir()
+            (scratch / "temp").mkdir()
+            for name, data in (files or {}).items():
+                (scratch / "served" / name).write_bytes(data)
+            calls, urls = scratch / "calls", scratch / "urls"
+            result = run_stage_step("Check a fresh rkat consumer", "stage_macos_check", scratch, {
+                "RKAT_RELEASE_TAG": tag, "CONNECT_WORK": WORK_ROOT, "RUNNER_TEMP": str(scratch / "temp"),
+                "GITHUB_REPOSITORY": "lukacf/meerkat", "STUB_LOG": str(calls), "CURL_LOG": str(urls),
+                "CURL_FILES": str(scratch / "served"), "PATH": f"{scratch / 'bin'}:{os.environ['PATH']}"})
+            return (result, [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else [],
+                    urls.read_text().splitlines() if urls.exists() else [], scratch / "temp")
+
+    def test_the_consumer_check_builds_rkat_from_the_checkout_when_no_release_is_named(self):
+        result, calls, urls, _ = self.consumer("")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls, [["macos", "check-consumer", "--work", WORK_ROOT, "--rkat-from-checkout"]])
+        self.assertEqual(urls, [])
+        step = step_block("Check a fresh rkat consumer", "stage_macos_check")
+        self.assertIn("          RKAT_RELEASE_TAG: ${{ inputs.rkat_release_tag }}\n", step)
+
+    def test_the_consumer_check_takes_cores_published_archive_by_its_release_checksum(self):
+        archive = "rkat-0.9.15-aarch64-apple-darwin.tar.gz"
+        data = b"published rkat archive"
+        digest = hashlib.sha256(data).hexdigest()
+        checksums = (f"{'0' * 64}  rkat-0.9.15-x86_64-unknown-linux-gnu.tar.gz\n{digest}  {archive}\n").encode()
+        result, calls, urls, temp = self.consumer("v0.9.15", files={archive: data, "checksums.sha256": checksums})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls, [["macos", "check-consumer", "--work", WORK_ROOT, "--rkat-archive",
+                                  f"{temp}/rkat-release/{archive}", "--rkat-archive-sha256", digest]])
+        base = "https://github.com/lukacf/meerkat/releases/download/v0.9.15"
+        self.assertEqual(sorted(urls), sorted([f"{base}/checksums.sha256", f"{base}/{archive}"]))
+
+    def test_the_consumer_check_refuses_another_tag_form_and_other_bytes(self):
+        for tag in ("0.9.15", "v0.9", "v0.9.15-rc1", "v0.9.15;id", "connect-v0.9.15", "v0.9.15 x"):
+            with self.subTest(tag=tag):
+                result, calls, urls, _ = self.consumer(tag)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual((calls, urls), ([], []))
+        archive = "rkat-0.9.15-aarch64-apple-darwin.tar.gz"
+        good = hashlib.sha256(b"published rkat archive").hexdigest()
+        for name, files in (
+                ("other bytes", {archive: b"other bytes", "checksums.sha256": f"{good}  {archive}\n".encode()}),
+                ("no row", {archive: b"published rkat archive",
+                            "checksums.sha256": f"{good}  rkat-0.9.15-x86_64-apple-darwin.tar.gz\n".encode()}),
+                ("two rows", {archive: b"published rkat archive",
+                              "checksums.sha256": f"{good}  {archive}\n{good}  {archive}\n".encode()}),
+                ("no archive", {"checksums.sha256": f"{good}  {archive}\n".encode()}),
+                ("no checksum file", {archive: b"published rkat archive"})):
+            with self.subTest(name=name):
+                result, calls, _, _ = self.consumer("v0.9.15", files=files)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(calls, [])
+
+    def test_the_stage_record_is_attested_and_uploaded_as_the_producer_wrote_it(self):
+        attest = step_block("Attest the stage record", "stage_macos_check") + "\n"
+        self.assertIn("        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4\n",
+                      attest)
+        self.assertIn(f"          subject-path: {WORK_ROOT}/artifact/STAGE.json\n", attest)
+        upload = step_block("Upload the stage record", "stage_macos_check") + "\n"
+        self.assertIn("        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4\n", upload)
+        for line in ("name: connect-macos-arm64-stage-${{ github.run_id }}-${{ github.run_attempt }}",
+                     f"path: {WORK_ROOT}/artifact", "if-no-files-found: error", "overwrite: false",
+                     "include-hidden-files: true", "retention-days: 90"):
+            self.assertIn(f"          {line}\n", upload)
+        # The provenance bundle is an artifact of its own: the stage record holds exactly the producer's files.
+        retain = indented_body("Retain the provenance bundle", "stage_macos_check", "run", 10)
+        self.assertNotIn("/artifact", retain)
+        self.assertIn('"${RUNNER_TEMP}/stage-provenance/connect-macos-arm64-stage-provenance.jsonl"', retain)
+        provenance = step_block("Upload the stage provenance", "stage_macos_check") + "\n"
+        for line in ("name: connect-macos-arm64-stage-provenance-${{ github.run_id }}-${{ github.run_attempt }}",
+                     "path: ${{ runner.temp }}/stage-provenance/connect-macos-arm64-stage-provenance.jsonl",
+                     "if-no-files-found: error", "overwrite: false", "retention-days: 90"):
+            self.assertIn(f"          {line}\n", provenance)
 
 
 if __name__ == "__main__":

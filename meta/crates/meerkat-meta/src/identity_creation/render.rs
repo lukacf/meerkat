@@ -121,7 +121,7 @@ pub mod labels {
     /// The identity an update or a remove names.
     pub const IDENTITY: &str = "Identity";
     /// The digest of the spec a change of one identity was asked of. No
-    /// rendering writes this label since 0.9.14: the spec a requester read
+    /// rendering writes this label after 0.9.13: the spec a requester read
     /// is no part of what a decider is shown.
     pub const EXPECTED_SPEC_DIGEST: &str = "Expected spec digest";
     /// An update's change classes.

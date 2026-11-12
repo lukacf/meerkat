@@ -547,6 +547,36 @@ impl Rig {
         }
     }
 
+    /// Wait until `member`, a member that is no agent of the roster (a
+    /// fork), recorded the mob's current snapshot: its row on the status
+    /// page of `name`'s slot.
+    async fn member_recorded(&self, name: &str, member: &str) {
+        let deadline = tokio::time::Instant::now() + TURN_BOUND;
+        loop {
+            let status = self
+                .rpc(
+                    "meta/instruction_status",
+                    json!({"namespace": NAMESPACE, "key": name}),
+                )
+                .await;
+            assert!(status["error"].is_null(), "the status reads: {status:#?}");
+            let current = status["result"]["members"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|row| row["identity"] == member)
+                .any(|row| row["delivery"].to_string().contains("\"current\""));
+            if current {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{member}'s session records its snapshot: {status:#?}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
     /// Edit the configured agent's instructions in the host's configuration
     /// and run the roster pass a host's refresh runs.
     async fn configure(&self, instructions: &[&str]) {
@@ -3225,6 +3255,127 @@ async fn a_helper_fork_of_an_edited_agent_carries_neither_text() {
         ),
         (false, false, 0),
         "the helper holds none of the source's instructions"
+    );
+    rig.shutdown().await;
+}
+
+/// An agent created at run time that has a live fork is updated. The fork
+/// was taken before the change, ran a turn and holds no entry. The record of
+/// the change is the agent's and its forks': the fork's next run carries the
+/// entry with the whole current text, once, the run after that holds the
+/// same one entry, and the agent's own next run carries it once as well.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_update_of_an_agent_with_a_live_fork_reaches_the_forks_next_run_once() {
+    const FORK: &str = "live-fork";
+    let temp = tempfile::tempdir().unwrap();
+    let mut rig = boot(temp.path(), &fresh_mob_id(), vec![configured_spec(&[])]).await;
+    rig.create_spec(created_spec_on("forker", &["Keep ALPHA records."]))
+        .await;
+    rig.turn(CREATED, "FIRST-TURN").await;
+
+    // The fork is taken before the change and runs a turn: no record exists.
+    let forked = rig
+        .runtime
+        .fork_member(
+            CREATED,
+            meerkat_mob::SpawnMemberSpec::new("forker", FORK),
+            None,
+        )
+        .await;
+    assert!(forked.is_ok(), "the durable fork commits: {forked:?}");
+    let message = rig
+        .rpc(
+            "meta/send_message",
+            json!({"member_id": FORK, "message": "FORK-BEFORE-THE-CHANGE"}),
+        )
+        .await;
+    assert!(message["error"].is_null(), "{message:#?}");
+    assert!(
+        rig.asked("FORK-BEFORE-THE-CHANGE").await,
+        "the fork runs a turn"
+    );
+    assert!(
+        entries(&rig.request_messages("FORK-BEFORE-THE-CHANGE")).is_empty(),
+        "before the change the fork holds no entry"
+    );
+    run_ended(&rig, FORK, "FORK-BEFORE-THE-CHANGE").await;
+
+    // The agent is updated while its fork is live.
+    rig.update_spec(
+        "update-one",
+        created_spec_on("forker", &["Keep ALPHA records."]),
+        created_spec_on("forker", &["Keep BETA records."]),
+    )
+    .await;
+    assert_eq!(
+        rig.after_update(&["Keep ALPHA records."], &["Keep BETA records."])
+            .await,
+        InstructionOutcome::AppliesAtNextRun
+    );
+    rig.recorded(CREATED).await;
+    rig.member_recorded(CREATED, FORK).await;
+
+    // The fork's next run carries the entry, once.
+    let message = rig
+        .rpc(
+            "meta/send_message",
+            json!({"member_id": FORK, "message": "FORK-AFTER-THE-CHANGE"}),
+        )
+        .await;
+    assert!(message["error"].is_null(), "{message:#?}");
+    assert!(
+        rig.asked("FORK-AFTER-THE-CHANGE").await,
+        "the fork runs a turn after the change"
+    );
+    let request = entries(&rig.request_messages("FORK-AFTER-THE-CHANGE"));
+    assert_eq!(
+        request.len(),
+        1,
+        "the fork's next run carries the entry of the agent's changed instructions: {request:#?}"
+    );
+    assert!(
+        carries(&request[0], &["Keep BETA records."]),
+        "the fork's entry carries the whole current text: {}",
+        request[0]
+    );
+    run_ended(&rig, FORK, "FORK-AFTER-THE-CHANGE").await;
+
+    // Once: the fork's run after that holds the same one entry, and the
+    // agent's own next run holds one.
+    let message = rig
+        .rpc(
+            "meta/send_message",
+            json!({"member_id": FORK, "message": "FORK-LATER-TURN"}),
+        )
+        .await;
+    assert!(message["error"].is_null(), "{message:#?}");
+    assert!(rig.asked("FORK-LATER-TURN").await, "the fork runs again");
+    let later = entries(&rig.request_messages("FORK-LATER-TURN"));
+    assert_eq!(
+        later, request,
+        "the fork's conversation holds the entry once"
+    );
+    rig.turn(CREATED, "SECOND-TURN").await;
+    let own = entries(&rig.request_messages("SECOND-TURN"));
+    assert_eq!(
+        own.len(),
+        1,
+        "the agent's own next run carries the entry once: {own:#?}"
+    );
+    assert!(
+        carries(&own[0], &["Keep BETA records."]),
+        "the agent's entry carries the whole current text: {}",
+        own[0]
+    );
+
+    // One record serves the agent and its fork, and the status shows its
+    // scope.
+    let record = rig.record(CREATED).await.expect("the record");
+    assert_eq!(record["revision"], json!(1), "{record:#?}");
+    assert_eq!(
+        record["target"],
+        json!({"kind": "member", "identity": CREATED, "include_forks": true}),
+        "the record is the agent's and its forks': {record:#?}"
     );
     rig.shutdown().await;
 }

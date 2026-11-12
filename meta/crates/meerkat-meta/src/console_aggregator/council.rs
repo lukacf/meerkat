@@ -21,7 +21,9 @@
 //! settles only after its cleanup destroyed the temporary mob, so a settled
 //! record owns no mob the runtime holds now: one held under that id was
 //! created since and is an ordinary mob. The record still names the settled
-//! council's seats, and the frames stored for those stay unserved.
+//! council's seats and when it settled: the frames stored for those seats
+//! stay unserved, and so does every frame stored under the id before the
+//! council settled, since the mob held now did not exist then.
 
 use std::sync::Arc;
 
@@ -47,18 +49,25 @@ enum CouncilRecord {
     Settled(CouncilSeats),
 }
 
-/// The seats of a settled council, as its record names them: each
-/// participant's name in the temporary mob and the fork sessions the record
-/// holds for it.
+/// A settled council, as its record names it: each seat's name in the
+/// temporary mob, the fork sessions the record holds for the seats, and when
+/// the cleanup that settled it ran.
 #[derive(Debug, Default)]
 pub(super) struct CouncilSeats {
     names: Vec<String>,
     sessions: Vec<String>,
+    /// The time of the settling cleanup, as a frame's time. The council's
+    /// mob was destroyed before it, so a mob the runtime holds under the id
+    /// now was created after it.
+    settled_at_ms: u64,
 }
 
 impl CouncilSeats {
-    fn of(participants: &[TemporaryCouncilParticipantCustody]) -> Self {
-        let mut seats = Self::default();
+    fn of(participants: &[TemporaryCouncilParticipantCustody], settled_at_ms: u64) -> Self {
+        let mut seats = Self {
+            settled_at_ms,
+            ..Self::default()
+        };
         for participant in participants {
             // The console names a member by its public alias.
             seats.names.push(
@@ -81,11 +90,14 @@ impl CouncilSeats {
         seats
     }
 
-    /// Whether one of the seats wrote `frame`: its captured member has a
-    /// seat's name, or the frame runs on a seat's fork session. Either is
-    /// enough, so a seat whose session the record never came to hold is
-    /// still decided by its name.
+    /// Whether the settled council wrote `frame`, rather than a mob created
+    /// under its id since: the frame is no newer than the settling cleanup
+    /// (the mob held under the id now did not exist then, whoever the
+    /// frame's member was), or its captured member has a seat's name, or it
+    /// runs on a seat's fork session. Any one is enough, so a seat whose
+    /// session the record never came to hold is still decided by its name.
     fn wrote(&self, frame: &ConsoleFrame, provenance: &ConsoleFrameMemberProvenance) -> bool {
+        let before_settled = frame.timestamp_ms <= self.settled_at_ms;
         let named = self.names.iter().any(|name| {
             *name == provenance.member.agent_identity
                 || *name == provenance.identity.runtime_member_id
@@ -98,7 +110,7 @@ impl CouncilSeats {
         .into_iter()
         .flatten()
         .any(|session| self.sessions.contains(session));
-        named || on_seat_session
+        before_settled || named || on_seat_session
     }
 }
 
@@ -119,15 +131,22 @@ async fn council_record(state: &Arc<meerkat_mob_mcp::MobMcpState>, mob_id: &str)
         Err(_) => return CouncilRecord::Owns,
     };
     // Settled is the council machine's own verdict, and it is reached only
-    // by a cleanup that found the temporary mob destroyed.
-    let destroyed = record
+    // by a cleanup that found the temporary mob destroyed: that cleanup's
+    // receipt holds when.
+    let destroyed_at = record
         .cleanup
         .as_ref()
-        .is_some_and(|cleanup| cleanup.temporary_mob_destroyed);
-    if record.is_unfinished() || !destroyed {
+        .filter(|cleanup| cleanup.temporary_mob_destroyed)
+        .map(|cleanup| cleanup.attempted_at);
+    let Some(settled_at) = destroyed_at else {
+        return CouncilRecord::Owns;
+    };
+    if record.is_unfinished() {
         return CouncilRecord::Owns;
     }
-    CouncilRecord::Settled(CouncilSeats::of(&record.participants))
+    // A time no frame time can hold reads as later than every frame.
+    let settled_at_ms = u64::try_from(settled_at.timestamp_millis()).unwrap_or(u64::MAX);
+    CouncilRecord::Settled(CouncilSeats::of(&record.participants, settled_at_ms))
 }
 
 /// Whether the runtime holds, now, the mob `handle` was taken from under
@@ -176,8 +195,9 @@ pub(super) enum CouncilFrames {
     Ordinary,
     /// Every one.
     All,
-    /// Those of a settled council's seats. An ordinary mob holds the id
-    /// now, and its members' frames are no council's.
+    /// Those a settled council wrote: its seats' frames, and every frame
+    /// from before it settled. An ordinary mob holds the id now, and the
+    /// frames its members wrote since are no council's.
     Seats(CouncilSeats),
 }
 
@@ -206,7 +226,8 @@ impl CouncilFrames {
 /// council's too: only a mob the runtime holds now is an ordinary mob that
 /// merely carries such an id, and keeps its frames. With no council record
 /// it keeps them all; under the id of a council that settled it keeps all
-/// but those of the council's own seats.
+/// but the frames that council wrote (its seats', and every frame from
+/// before it settled).
 pub(super) async fn council_frames_of_source(
     entry: &RuntimeEntry,
     source_mob_id: &str,

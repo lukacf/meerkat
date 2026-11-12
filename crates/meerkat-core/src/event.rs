@@ -3160,7 +3160,11 @@ pub enum AgentEvent {
     /// preference: what the batch requested, what the attempt's baseline
     /// request already said, and what the attempt actually sent. Emitted per
     /// prepared request (and again for a model-fallback attempt), so a turn
-    /// whose attempts differ reports each one; never a turn-level claim.
+    /// whose attempts differ reports each one; never a turn-level claim. For
+    /// a model-fallback attempt the preference is judged on the direct route
+    /// of the target's provider and the target model's catalog row;
+    /// `RequestReasoningEffortResolved` is the authoritative record of what
+    /// a request was sent with.
     RequestReasoningLowered {
         /// The provider turn this attempt belongs to; absent for a
         /// model-fallback attempt (see `fallback_attempt`).

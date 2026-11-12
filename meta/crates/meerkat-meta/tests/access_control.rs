@@ -5156,7 +5156,8 @@ fn rules_with_root(rules: Vec<AccessRule>) -> AccessController {
 /// does not know (it was retired before this process read its members) is
 /// one of them: it is judged by the access rules on its name, for a
 /// signed-in person as for the caller with no token. A deny that names it
-/// withholds the history. An allow with no agent selector keeps it listed.
+/// withholds the history. An allow with no agent selector, with agents `*`
+/// or naming it keeps the history listed.
 /// An allow scoped by role does not reach it, since it has no role, and a
 /// deny scoped by label cannot be ruled out for it, since it has no labels:
 /// both withhold the history. The administrator reads it throughout.
@@ -5277,6 +5278,34 @@ async fn the_dream_history_counts_the_memory_of_an_identity_the_console_does_not
         "an allow for every agent, no deny, the caller with no token",
     )
     .await;
+
+    // The same grants as the allow scoped by role, with an agent selector
+    // in its place: one that reaches the identity by its name keeps the
+    // history listed.
+    for (agents, what) in [
+        (vec!["*"], "an allow with agents `*`"),
+        (
+            vec!["router", "delivery", "retiree"],
+            "an allow that names the identity",
+        ),
+    ] {
+        runtime.set_access_controller(rules_with_root(vec![
+            allow("read-memory", &every_grant[1..]),
+            AccessRule {
+                agents: agents.into_iter().map(String::from).collect(),
+                ..allow(
+                    "view-and-read-by-name",
+                    &["agent.view", "agent.memory.read"],
+                )
+            },
+        ]));
+        let app = runtime.build_reference_app_router(decision_state(false));
+        assert_eq!(
+            dream_history_as(&app, PERSON, RUN).await,
+            listed,
+            "{what}, no deny: listed for a signed-in person"
+        );
+    }
 
     let _ = runtime.mob_handle().stop().await;
 }

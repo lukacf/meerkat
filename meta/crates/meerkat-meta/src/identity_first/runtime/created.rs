@@ -940,8 +940,7 @@ impl IdentityRuntime {
     pub(super) async fn awaits_host_preparation(&self, identity: &AgentIdentity) -> bool {
         matches!(
             self.core_entry_of_name(identity).await,
-            Ok(Some(entry)) if entry.member.is_none()
-                && entry.unseated == Some(meerkat_mob::UnseatedEntryCause::PreparationPending)
+            Ok(Some(entry)) if entry.awaits_host_preparation()
         )
     }
 }

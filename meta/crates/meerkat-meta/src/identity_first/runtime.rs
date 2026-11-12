@@ -4263,6 +4263,11 @@ struct CoreViewFacts {
     /// ([`IdentityEntry::wake_refusal`]), while Core holds no member of the
     /// identity and the refusal names the session Core last bound it to.
     wake_note: Option<super::types::WakeRefusal>,
+    /// Why no member holds the identity, as Core's entry of its name says
+    /// it: it is archived, or it awaits its host's preparation. Nothing is
+    /// said of an identity a member holds, nor of one whose entry is not
+    /// read.
+    record: super::types::IdentityRecordFacts,
 }
 
 impl CoreViewFacts {
@@ -4332,6 +4337,7 @@ impl CoreViewFacts {
                 broken: member.broken.clone(),
                 role_hold,
                 wake_note: note_of(member.session_id.as_ref(), true),
+                record: super::types::IdentityRecordFacts::default(),
             };
         }
         let last = history.and_then(|history| history.last_binding(&core_identity));
@@ -4349,6 +4355,11 @@ impl CoreViewFacts {
             broken: None,
             role_hold,
             wake_note,
+            record: super::types::IdentityRecordFacts {
+                archived: entry.is_some_and(super::bridge::CoreIdentityEntry::is_archived),
+                preparation_pending: entry
+                    .is_some_and(super::bridge::CoreIdentityEntry::awaits_host_preparation),
+            },
         }
     }
 
@@ -13957,7 +13968,10 @@ impl IdentityRuntime {
     /// that never waits on the mob actor, and one read of whether Core holds
     /// the identity's member for unpublished customizer tools. A fault of
     /// any of them, the held member's included, is typed history
-    /// unavailable, never a guess. An identity created at runtime that this
+    /// unavailable, never a guess. Why no member holds an identity
+    /// (archived, or awaiting its host's preparation) is read from that
+    /// same entry of its name: no other read is made for it. An identity
+    /// created at runtime that this
     /// runtime has not registered yet is registered from its row first
     /// (`ensure_registered`).
     pub async fn status(
@@ -14025,7 +14039,7 @@ impl IdentityRuntime {
             replaced_session: None,
             session_repair_required,
             customizer_tools_pending: self.customizer_tools_pending_given(identity, tools_held),
-            record: Default::default(),
+            record: facts.record,
         })
     }
 

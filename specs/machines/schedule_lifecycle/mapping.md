@@ -45,6 +45,27 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResumeActiveOrPaused`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `PauseForTargetActive`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PauseForTargetPaused`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PauseForTargetDeleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResumeForTargetPausedForTarget`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResumeForTargetPausedByName`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResumeForTargetActive`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResumeForTargetDeleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `DeleteActive`
   - anchors: `schedule_lifecycle`
   - scenarios: (unclaimed)
@@ -80,6 +101,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: `schedule_revision_and_planning`
 - `deleted_has_no_planning_cursor`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `paused_for_target_only_while_paused`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `planning_cursor_requires_occurrence_progress`

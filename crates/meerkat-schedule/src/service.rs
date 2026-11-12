@@ -524,6 +524,82 @@ impl ScheduleService {
         Self::observe_schedule_commit(committed, expected)
     }
 
+    /// Pause `schedule_id` for its target, which stopped taking deliveries
+    /// for now: an Active schedule is paused and remembers that the pause
+    /// is its target's ([`Schedule::paused_for_target`]). A schedule that
+    /// is already Paused keeps the pause it has, and a Deleted one is left
+    /// as it is: both answer the schedule unchanged and write nothing, so
+    /// the call can be made again.
+    pub async fn pause_for_target(
+        &self,
+        schedule_id: &ScheduleId,
+    ) -> Result<Schedule, ScheduleDomainError> {
+        let _planning_guard = self.planning_lock.lock().await;
+        let current = self.get(schedule_id).await?;
+        let mutator = Schedule::apply(
+            Some(current.clone()),
+            ScheduleLifecycleInput::PauseForTarget {
+                at_utc: self.store.get_store_time_utc().await?,
+            },
+        )
+        .map_err(|error| ScheduleDomainError::InvalidSchedule(error.to_string()))?;
+        // The machine had nothing to do: nothing is written.
+        if mutator.effects().is_empty() {
+            return Ok(current);
+        }
+        let expected = ExpectedScheduleTransition::from_mutator(&mutator);
+        let committed = self
+            .store
+            .commit_schedule_write(mutator.into_authorized_write())
+            .await?;
+        self.notify_mutation();
+        Self::observe_schedule_transition(committed, expected)
+    }
+
+    /// Resume `schedule_id` for its target, which takes deliveries again:
+    /// a schedule paused for its target becomes Active and its occurrences
+    /// are planned, as for [`Self::resume`]. Any other schedule (one
+    /// somebody paused by name, an Active one, a Deleted one) answers
+    /// unchanged and nothing is written, so the call can be made again.
+    pub async fn resume_for_target(
+        &self,
+        schedule_id: &ScheduleId,
+    ) -> Result<Schedule, ScheduleDomainError> {
+        let _planning_guard = self.planning_lock.lock().await;
+        let current = self.get(schedule_id).await?;
+        let mut mutator = Schedule::apply(
+            Some(current.clone()),
+            ScheduleLifecycleInput::ResumeForTarget {
+                at_utc: self.store.get_store_time_utc().await?,
+            },
+        )
+        .map_err(|error| ScheduleDomainError::InvalidSchedule(error.to_string()))?;
+        // The machine had nothing to do: nothing is written.
+        if mutator.effects().is_empty() {
+            return Ok(current);
+        }
+        let store_now = self.store.get_store_time_utc().await?;
+        let planned = self
+            .plan_schedule_occurrences(mutator.schedule(), store_now)
+            .await?;
+        if let Some(planning_mutator) = planned.schedule_mutator {
+            mutator
+                .absorb_followup(planning_mutator)
+                .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
+        }
+        let expected = ExpectedScheduleTransition::from_mutator(&mutator);
+        let committed = self
+            .store
+            .commit_schedule_refill(
+                mutator.into_authorized_write(),
+                planned.occurrences,
+                planned.next_refill_at_utc,
+            )
+            .await?;
+        self.notify_mutation();
+        Self::observe_schedule_commit(committed, expected)
+    }
+
     pub async fn delete(&self, schedule_id: &ScheduleId) -> Result<Schedule, ScheduleDomainError> {
         let _planning_guard = self.planning_lock.lock().await;
         let current = self.get(schedule_id).await?;
@@ -1193,6 +1269,75 @@ mod tests {
             skill_refs: Vec::new(),
             additional_instructions: Vec::new(),
         }
+    }
+
+    /// A schedule follows its target through the service. `pause_for_target`
+    /// pauses an Active schedule and marks the pause as its target's, and
+    /// leaves a schedule somebody paused by name as it is; `resume_for_target`
+    /// resumes exactly the first kind and plans its occurrences again. A
+    /// call that has nothing to do writes nothing, and the mark survives a
+    /// reload of the stored schedule.
+    #[tokio::test]
+    async fn a_schedule_follows_its_target_and_keeps_a_pause_asked_by_name() {
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::new()));
+        let mut ids = Vec::new();
+        for _ in 0..2 {
+            let created = service
+                .create(identity_create_request(
+                    MOB_MEMBER_FIXTURE_IDENTITY,
+                    plain_prompt_action(),
+                ))
+                .await
+                .expect("a schedule is created");
+            ids.push(created.schedule_id);
+        }
+        let (follows, by_name) = (&ids[0], &ids[1]);
+        service.pause(by_name).await.expect("a pause by name");
+
+        let paused = service.pause_for_target(follows).await.expect("paused");
+        assert_eq!(paused.phase, SchedulePhase::Paused);
+        assert!(paused.paused_for_target());
+        let left = service.pause_for_target(by_name).await.expect("left");
+        assert_eq!(left.phase, SchedulePhase::Paused);
+        assert!(!left.paused_for_target());
+
+        // The mark is the stored machine state's: a stored schedule that
+        // is read back says the same, and one without it is written as
+        // before this field.
+        let stored = serde_json::to_value(service.get(follows).await.expect("read")).expect("json");
+        assert_eq!(stored["machine_state"]["paused_for_target"], true);
+        let reloaded: Schedule = serde_json::from_value(stored).expect("a stored schedule loads");
+        assert!(reloaded.paused_for_target());
+        let plain = serde_json::to_value(service.get(by_name).await.expect("read")).expect("json");
+        assert!(plain["machine_state"].get("paused_for_target").is_none());
+
+        // Sent again, both calls change nothing and write nothing.
+        let before = service.get(follows).await.expect("read");
+        let again = service.pause_for_target(follows).await.expect("again");
+        assert_eq!(again.config.updated_at_utc, before.config.updated_at_utc);
+        assert!(again.paused_for_target());
+
+        let resumed = service.resume_for_target(follows).await.expect("resumed");
+        assert_eq!(resumed.phase, SchedulePhase::Active);
+        assert!(!resumed.paused_for_target());
+        let kept = service.resume_for_target(by_name).await.expect("kept");
+        assert_eq!(kept.phase, SchedulePhase::Paused, "a pause by name stays");
+        let active = service.resume_for_target(follows).await.expect("active");
+        assert_eq!(active.phase, SchedulePhase::Active);
+
+        // A resume by name of a schedule paused for its target takes it
+        // over: it is Active, and no longer the target's.
+        service.pause_for_target(follows).await.expect("paused");
+        let taken = service.resume(follows).await.expect("resumed by name");
+        assert_eq!(taken.phase, SchedulePhase::Active);
+        assert!(!taken.paused_for_target());
+
+        // A deleted schedule follows no target.
+        service.delete(follows).await.expect("deleted");
+        let deleted = service.pause_for_target(follows).await.expect("left");
+        assert_eq!(deleted.phase, SchedulePhase::Deleted);
+        let deleted = service.resume_for_target(follows).await.expect("left");
+        assert_eq!(deleted.phase, SchedulePhase::Deleted);
     }
 
     #[tokio::test]

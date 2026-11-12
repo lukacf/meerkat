@@ -405,6 +405,16 @@ Schedule phase is intentionally small:
 - `paused`
 - `deleted`
 
+A paused schedule remembers whose pause it is. A host that owns the
+lifecycle of a schedule's target can pause the schedule for that target
+while the target takes no deliveries (`ScheduleService::pause_for_target`)
+and resume it when the target takes them again
+(`ScheduleService::resume_for_target`); only a schedule paused that way is
+resumed that way. A schedule paused by name (`schedule/pause`, the pause
+tool) stays paused, and a pause or a resume by name of a schedule paused
+for its target takes it over. The phase a read shows is `paused` either
+way.
+
 Occurrence phase is more detailed:
 
 - `pending`

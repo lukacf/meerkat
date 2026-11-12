@@ -19,6 +19,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `planning_cursor_utc_ms`: `Option<u64>`
 - `next_occurrence_ordinal`: `u64`
 - `superseded_ack_ids`: `Set<OccurrenceId>`
+- `paused_for_target`: `Bool`
 
 ## Inputs
 - `Create`(schedule_id: ScheduleId, trigger_key: TriggerKey, target_binding_key: TargetBindingId, misfire_policy: MisfirePolicy, overlap_policy: OverlapPolicy, missing_target_policy: MissingTargetPolicy, planning_horizon_days: Option<u64>, planning_horizon_occurrences: Option<u64>)
@@ -28,6 +29,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SyncTargetSnapshot`(target_binding_key: TargetBindingId)
 - `Pause`(at_utc_ms: u64)
 - `Resume`(at_utc_ms: u64)
+- `PauseForTarget`(at_utc_ms: u64)
+- `ResumeForTarget`(at_utc_ms: u64)
 - `Delete`(at_utc_ms: u64)
 - `ConfirmOccurrencesSuperseded`(occurrence_id: OccurrenceId, superseding_revision: u64)
 
@@ -41,6 +44,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## Invariants
 - `revision_is_positive`
 - `deleted_has_no_planning_cursor`
+- `paused_for_target_only_while_paused`
 - `planning_cursor_requires_occurrence_progress`
 
 ## Transitions
@@ -104,6 +108,47 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `Resume`(at_utc_ms)
 - Emits: `EmitScheduleNotice`
 - To: `Active`
+
+### `PauseForTargetActive`
+- From: `Active`
+- On: `PauseForTarget`(at_utc_ms)
+- Emits: `EmitScheduleNotice`
+- To: `Paused`
+
+### `PauseForTargetPaused`
+- From: `Paused`
+- On: `PauseForTarget`(at_utc_ms)
+- To: `Paused`
+
+### `PauseForTargetDeleted`
+- From: `Deleted`
+- On: `PauseForTarget`(at_utc_ms)
+- To: `Deleted`
+
+### `ResumeForTargetPausedForTarget`
+- From: `Paused`
+- On: `ResumeForTarget`(at_utc_ms)
+- Guards:
+  - ``
+- Emits: `EmitScheduleNotice`
+- To: `Active`
+
+### `ResumeForTargetPausedByName`
+- From: `Paused`
+- On: `ResumeForTarget`(at_utc_ms)
+- Guards:
+  - ``
+- To: `Paused`
+
+### `ResumeForTargetActive`
+- From: `Active`
+- On: `ResumeForTarget`(at_utc_ms)
+- To: `Active`
+
+### `ResumeForTargetDeleted`
+- From: `Deleted`
+- On: `ResumeForTarget`(at_utc_ms)
+- To: `Deleted`
 
 ### `DeleteActive`
 - From: `Active`

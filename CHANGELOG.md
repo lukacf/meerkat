@@ -35,7 +35,39 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- Rust API of `meerkat-schedule`: `ScheduleLifecycleInput` gains the variants
+  `PauseForTarget` and `ResumeForTarget`. A match on it needs both arms.
+- Rust API of `meerkat-machine-schema` and `meerkat-machine-kernels`: the
+  generated types of the `ScheduleLifecycleMachine` follow its new state
+  field and inputs. The state gains the field `paused_for_target`, the input
+  enums gain `PauseForTarget` and `ResumeForTarget`, and the transition enum
+  gains the seven arms of those two inputs (`PauseForTargetActive`,
+  `PauseForTargetPaused`, `PauseForTargetDeleted`,
+  `ResumeForTargetPausedForTarget`, `ResumeForTargetPausedByName`,
+  `ResumeForTargetActive`, `ResumeForTargetDeleted`). A match on one of
+  those enums needs the new arms, and a struct literal of the state names
+  the field.
+
 ### Added
+
+- Schedule: a schedule can follow its target. `ScheduleService::pause_for_target`
+  pauses an Active schedule because its target stopped taking deliveries for
+  now, and the schedule remembers that the pause is its target's
+  (`Schedule::paused_for_target`). `ScheduleService::resume_for_target`
+  resumes exactly the schedules paused that way and plans their occurrences
+  again. A schedule somebody paused by name keeps that pause through both
+  calls, and a pause or a resume by name of a schedule paused for its target
+  takes it over: it is no longer the target's. Both calls answer a schedule
+  they have nothing to do with unchanged and write nothing, a deleted one
+  included, so the owner of the target's lifecycle can make them again after
+  a crash. The `ScheduleLifecycleMachine` owns the fact (state
+  `paused_for_target`, inputs `PauseForTarget` and `ResumeForTarget`); a
+  stored schedule carries it in its machine state only while it is true, so
+  a schedule that is not paused for its target is stored as before, and one
+  stored by an earlier release loads as not paused for its target. No
+  schedule method, tool or wire type changes.
 
 - `MobHandle::seat_owed_store_owned_identities` seats, while the mob runs,
   every store-owned identity that is owed its seat (the spawn of its

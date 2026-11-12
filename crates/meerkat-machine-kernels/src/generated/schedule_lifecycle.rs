@@ -357,6 +357,7 @@ pub struct State {
     pub planning_cursor_utc_ms: Option<u64>,
     pub next_occurrence_ordinal: u64,
     pub superseded_ack_ids: std::collections::BTreeSet<OccurrenceId>,
+    pub paused_for_target: bool,
 }
 impl Default for State {
     fn default() -> Self {
@@ -412,6 +413,14 @@ pub mod inputs {
         pub at_utc_ms: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PauseForTarget {
+        pub at_utc_ms: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResumeForTarget {
+        pub at_utc_ms: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Delete {
         pub at_utc_ms: u64,
     }
@@ -431,6 +440,8 @@ pub enum Input {
     SyncTargetSnapshot(inputs::SyncTargetSnapshot),
     Pause(inputs::Pause),
     Resume(inputs::Resume),
+    PauseForTarget(inputs::PauseForTarget),
+    ResumeForTarget(inputs::ResumeForTarget),
     Delete(inputs::Delete),
     ConfirmOccurrencesSuperseded(inputs::ConfirmOccurrencesSuperseded),
 }
@@ -444,6 +455,8 @@ impl Input {
             Self::SyncTargetSnapshot(_) => InputKind::SyncTargetSnapshot,
             Self::Pause(_) => InputKind::Pause,
             Self::Resume(_) => InputKind::Resume,
+            Self::PauseForTarget(_) => InputKind::PauseForTarget,
+            Self::ResumeForTarget(_) => InputKind::ResumeForTarget,
             Self::Delete(_) => InputKind::Delete,
             Self::ConfirmOccurrencesSuperseded(_) => InputKind::ConfirmOccurrencesSuperseded,
         }
@@ -458,6 +471,8 @@ pub enum InputKind {
     SyncTargetSnapshot,
     Pause,
     Resume,
+    PauseForTarget,
+    ResumeForTarget,
     Delete,
     ConfirmOccurrencesSuperseded,
 }
@@ -508,6 +523,13 @@ pub enum TransitionId {
     SyncTargetSnapshotPaused,
     PauseActiveOrPaused,
     ResumeActiveOrPaused,
+    PauseForTargetActive,
+    PauseForTargetPaused,
+    PauseForTargetDeleted,
+    ResumeForTargetPausedForTarget,
+    ResumeForTargetPausedByName,
+    ResumeForTargetActive,
+    ResumeForTargetDeleted,
     DeleteActive,
     DeletePaused,
     DeleteDeleted,
@@ -598,5 +620,6 @@ pub fn initial_state() -> State {
         planning_cursor_utc_ms: None,
         next_occurrence_ordinal: 0,
         superseded_ack_ids: Default::default(),
+        paused_for_target: false,
     }
 }

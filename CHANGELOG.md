@@ -130,8 +130,9 @@ them.
 ### Added
 
 - `meerkat-core`, `meerkat-llm-core`: the vocabulary of a provider-neutral
-  `reasoning_effort` option, as types only. Nothing reads them yet: no
-  request, wire form or schema changes. `meerkat_core::reasoning_effort`
+  `reasoning_effort` option. The entries below are built from these types:
+  the resolver, the route every client reports, the typed refusal and the
+  reports of what a run sent. `meerkat_core::reasoning_effort`
   (re-exported at the crate root) adds the route a request is served on
   (`ModelApi`, `ReasoningBackend`, and the reported form `ReasoningRoute`,
   `{"backend": "<provider-matrix string>", "api": "<snake_case API>"}`),
@@ -153,8 +154,10 @@ them.
   compile unchanged; `LlmClientAdapter` forwards its client's answer.
 
 - `meerkat-core`: the resolver of the provider-neutral `reasoning_effort`
-  option. No request, wire form or schema names the option yet, so no
-  request changes. `resolve_reasoning_effort` decides, for a requested
+  option. The agent runs it right before each provider request of a session
+  that sets the level, and the check at a build, a model fallback's check of
+  its target and a turn's reasoning preference run it too (see the entries
+  below). `resolve_reasoning_effort` decides, for a requested
   level, a model and a `ReasoningRouteObservation`, what one provider
   request is sent with: it writes the route's typed effort field on the
   request's own params and returns a `ReasoningEffortResolution`, or
@@ -185,7 +188,7 @@ them.
     body, reasoning turned off). `ReasoningResolveMode::Preference` is the
     existing owner-only reasoning preference, whose per-request lowering
     now runs through the same resolver with its outcomes unchanged.
-    Upgrade note for when a request can name a level: beside a level, a
+    Upgrade note: beside a level, a
     generic `thinking_budget_tokens` is refused on every route, OpenAI
     routes included, where that field was accepted and had no effect
     before; remove the budget or the level.
@@ -209,21 +212,25 @@ them.
   `None` when the entry states none, otherwise the stated levels, each once,
   from `none` to `max`; a word that names no level is left out. The read is
   tolerant: a value that is not an array states no levels, array elements
-  that are not strings are skipped, and neither fails the model list. No
-  request changes: nothing Meerkat sends to Copilot reads the levels yet,
-  and the account capability gate does not check them. The levels are part
-  of what a Copilot route compares, so when a refreshed list states other
-  levels for a session's model, the session's prepared route is rebuilt, as
-  it already is when the list changes another capability of the model. A
-  list that only writes the same levels in another order, or writes one
-  twice, states nothing new and changes no route.
+  that are not strings are skipped, and neither fails the model list. On a
+  Copilot route these levels are the source of the levels the
+  `reasoning_effort` option and a turn's reasoning preference accept (see
+  the entries below); the account capability gate does not check them. The
+  levels are part of what a Copilot route compares, so when a refreshed
+  list states other levels for a session's model, the session's prepared
+  route is rebuilt, as it already is when the list changes another
+  capability of the model. A list that only writes the same levels in
+  another order, or writes one twice, states nothing new and changes no
+  route.
 
 - `meerkat-openai`, `meerkat-anthropic`, `meerkat-gemini`,
   `meerkat-copilot`, `meerkat-llm-core`, `meerkat`: every LLM client a
   factory builds reports, without I/O, the route it serves through
   `reasoning_route()` (the accessor above): the provider-matrix backend,
   the provider API, and the reasoning effort levels the route itself
-  states. Nothing reads the reports yet, and no request changes.
+  states. The per-request resolution, the check at a build and at a
+  caller's reconfiguration, a model fallback's check of its target and a
+  turn's reasoning preference read these reports (see the entries below).
   - OpenAI: `OpenAiClient` reports the Responses API on the backend of its
     wire. `OpenAiCompatibleClient` reports the API of its mode on the
     backend it was declared for (`with_openai_backend`, or the new
@@ -268,7 +275,8 @@ them.
   row, and for a model whose reasoning payload the catalog does not enable
   (no row, or a row without reasoning) it is sent as
   `reasoning: {"effort": "<level>"}` with no `summary` and no `include`.
-  Nothing sets the marker yet. A level without it behaves as before: it is
+  The resolver sets the marker when it writes a level for an OpenAI-family
+  route. A level without it behaves as before: it is
   checked against the row, and dropped for a model without a reasoning
   row. A request without a marked level builds the same body as before.
   On the Chat Completions wire of `OpenAiCompatibleClient` a marked level
@@ -292,7 +300,9 @@ them.
   (`SelfHostedServerRef.reasoning_effort_levels`), and the model's client
   reports them with its route
   (`OpenAiCompatibleClient::with_operator_reasoning_effort_levels`).
-  Nothing else reads the declaration yet, and no request changes.
+  On a self-hosted route the declared levels are the source of the levels
+  the `reasoning_effort` option and a turn's reasoning preference accept
+  (see the entries below).
 
 - `meerkat-core`, `meerkat-contracts`, `meerkat-runtime`, `meerkat-session`,
   `meerkat-mob`, `meerkat-rpc`, `meerkat-llm-core`: a session can store a

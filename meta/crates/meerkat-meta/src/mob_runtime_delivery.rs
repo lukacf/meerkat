@@ -289,6 +289,7 @@ impl MobRuntimeDelivery {
             runtime_adapter_override: Some(Arc::clone(&runtime)),
             archived_terminal_authority: None,
             member_sessions_in_memory: false,
+            member_socket_place: None,
         });
         let host = meerkat::surface::SessionServiceDeliveryHost::new(
             &service,

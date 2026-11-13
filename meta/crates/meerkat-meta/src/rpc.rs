@@ -26,6 +26,7 @@ use crate::unified_runtime::{EventQuery, UnifiedRuntime};
 
 mod console_ingress;
 mod gating_methods;
+pub(crate) mod identity_methods;
 pub(crate) mod memory_methods;
 pub(crate) mod mob_methods;
 pub(crate) mod operator_methods;
@@ -41,6 +42,7 @@ pub(crate) mod topology_methods;
 pub(crate) mod workgraph_methods;
 
 pub use console_ingress::handle_console_ingress_json;
+pub use identity_methods::{HOST_RPC_SURFACE, IDENTITY_REFUSED_CODE};
 
 use gating_methods::{
     GatingParamsError, gating_audit_result, gating_decide_rpc_error, gating_withdraw_rpc_error,
@@ -2172,8 +2174,11 @@ pub(crate) const CANDIDATE_LAUNCH_REFUSED_METHODS: &[&str] = &[
 /// ([`tool_grant_methods::is_tool_grant_mutating_method`]), which writes the
 /// runtime's grant rows and can seat a member; a realm MCP write
 /// ([`realm_mcp_methods::is_realm_mcp_mutating_method`]), which writes the
-/// realm's own config document or its credential store; a WorkGraph write
-/// ([`workgraph_methods::is_workgraph_mutating_method`]); the
+/// realm's own config document or its credential store; a change of the
+/// mob's long-term agents
+/// ([`identity_methods::is_identity_family_mutating_method`]), which writes
+/// the mob's identity store, its seats and its held decisions; a WorkGraph
+/// write ([`workgraph_methods::is_workgraph_mutating_method`]); the
 /// host-executing or externally writing arm of a method a candidate
 /// otherwise serves ([`candidate_launch_refuses_host_execution`]); or a
 /// Flow Editor change ([`candidate_launch_refuses_mobpack_change`]). Reads
@@ -2189,6 +2194,7 @@ pub(crate) fn candidate_launch_refuses(
         || mob_methods::is_member_declaration_mutating_method(method)
         || tool_grant_methods::is_tool_grant_mutating_method(method)
         || realm_mcp_methods::is_realm_mcp_mutating_method(method)
+        || identity_methods::is_identity_family_mutating_method(method)
         || workgraph_methods::is_workgraph_mutating_method(method)
         || candidate_launch_refuses_host_execution(method, params)
         || candidate_launch_refuses_mobpack_change(method, params, state_dir)
@@ -2792,6 +2798,16 @@ async fn handle_unified_rpc_json_inner(
             // served and advertised with it.
             if identity_ctx.is_some() || runtime.identity_runtime_ref().is_some() {
                 methods.extend_from_slice(tool_grant_methods::TOOL_GRANT_METHODS);
+            }
+            // The family of changes and reads of the mob's long-term agents,
+            // derived from its registry: served and advertised by every
+            // launch that has an identity runtime, which attached it.
+            if identity_ctx
+                .map(|ctx| ctx.runtime.runtime())
+                .or_else(|| runtime.identity_runtime_ref())
+                .is_some_and(|identity_runtime| identity_runtime.identity_family().is_some())
+            {
+                methods.extend_from_slice(identity_methods::IDENTITY_FAMILY_METHODS);
             }
             // The stdio gateway's realm MCP administration, derived from its
             // registry: advertised by the runtime the stdio gateway composed
@@ -4184,6 +4200,55 @@ async fn handle_unified_rpc_json_inner(
                     }),
                 },
             }
+        }
+        // ONE arm for the family of changes and reads of the mob's long-term
+        // agents, from its registry, served by a launch that has an
+        // identity policy, which attached the family. The stdio host is the
+        // operator, on the host surface `rpc`.
+        method
+            if identity_methods::is_identity_family_method(method)
+                && identity_ctx
+                    .map(|ctx| ctx.runtime.runtime())
+                    .or_else(|| runtime.identity_runtime_ref())
+                    .is_some_and(|identity_runtime| {
+                        identity_runtime.identity_family().is_some()
+                    }) =>
+        {
+            let family = identity_ctx
+                .map(|ctx| ctx.runtime.runtime())
+                .or_else(|| runtime.identity_runtime_ref())
+                .and_then(|identity_runtime| identity_runtime.identity_family());
+            let response = match family.as_ref() {
+                Some(family) => {
+                    let handle = runtime.mob_runtime().handle();
+                    let surface = identity_methods::IdentityFamilySurface {
+                        mob: &handle,
+                        family: family.as_ref(),
+                        requester: identity_methods::stdio_requester(),
+                        access: None,
+                    };
+                    identity_methods::handle_identity_family_rpc(
+                        &surface,
+                        method,
+                        response_id.clone(),
+                        &request.params,
+                    )
+                    .await
+                }
+                None => None,
+            };
+            response.unwrap_or_else(|| JsonRpcResponse {
+                jsonrpc: JSONRPC_VERSION.to_string(),
+                id: response_id,
+                result: None,
+                error: Some(JsonRpcError {
+                    code: -32601,
+                    message: format!(
+                        "{method} is registered in the identity family but has no dispatcher arm"
+                    ),
+                    data: None,
+                }),
+            })
         }
         // ONE arm for the realm MCP administration family, from its registry,
         // served by the runtime the stdio gateway composed it on (its SDK host
@@ -7374,12 +7439,15 @@ async fn stale_rpc_member_ids_for_identity_with_handle(
             if !rpc_live_identity_alias_member_visible(member) {
                 return false;
             }
-            let matches_identity =
-                rpc_member_id_matches_durable_identity(
-                    member.agent_identity.as_str(),
-                    durable_identity,
-                ) || crate::member_comms_id::durable_identity_label(&member.labels)
-                    .is_some_and(|identity| identity == durable_identity);
+            let matches_identity = rpc_member_id_matches_durable_identity(
+                member.agent_identity.as_str(),
+                durable_identity,
+            ) || crate::member_comms_id::resolve_member_identity(
+                handle,
+                &member.agent_identity,
+                &member.labels,
+            )
+            .is_some_and(|identity| identity == durable_identity);
             let public_alias =
                 crate::member_comms_id::runtime_alias_str(member.agent_identity.as_str());
             matches_identity
@@ -7586,9 +7654,11 @@ fn identity_lifecycle_state_json(
 /// member in; null while Core holds no member of it) and
 /// `customizer_tools_pending` (null while the identity's customizer tools
 /// are published); `convergence`, `wake_refusal` and `replaced_session`
-/// only when set. Every field comes from the one status read. The session
-/// repair hold is answered by `meta/member_health`, not here.
-fn identity_status_wire(status: &crate::identity_first::IdentityStatus) -> Value {
+/// only when set, and `archived` and `preparation_pending` only when true
+/// (why no member holds the identity). Every field comes from the one
+/// status read. The session repair hold is answered by
+/// `meta/member_health`, not here.
+pub(crate) fn identity_status_wire(status: &crate::identity_first::IdentityStatus) -> Value {
     let mut result = serde_json::json!({
         "state": identity_lifecycle_state_json(status.state),
         "identity": status.identity.as_str(),
@@ -7609,7 +7679,10 @@ fn identity_status_wire(status: &crate::identity_first::IdentityStatus) -> Value
 
 /// The optional status fields: Core's mob member id of the identity's
 /// binding, Core's convergence of a host-adopted identity, the last refused
-/// wake, and the session the last wake replaced.
+/// wake, the session the last wake replaced, the mark of a roster listing
+/// the identity's record supersedes, and why no member holds the identity
+/// (archived, or awaiting its host's preparation), each written only when
+/// it is so.
 fn insert_identity_status_extras(
     result: &mut Value,
     status: &crate::identity_first::IdentityStatus,
@@ -7620,6 +7693,7 @@ fn insert_identity_status_extras(
     if let Some(member_id) = status.member_id.as_ref() {
         fields.insert("member_id".to_string(), Value::String(member_id.clone()));
     }
+    insert_identity_status_marks(fields, status);
     if let Some(convergence) = status.convergence.as_ref()
         && let Ok(value) = serde_json::to_value(convergence)
     {
@@ -7634,6 +7708,30 @@ fn insert_identity_status_extras(
         && let Ok(value) = serde_json::to_value(replaced_session)
     {
         fields.insert("replaced_session".to_string(), value);
+    }
+}
+
+/// The marks of an identity's status, each written only when true: why no
+/// member holds the identity (`archived`, or `preparation_pending` while it
+/// awaits its host's preparation), and `roster_listing_superseded` when the
+/// host's roster lists the name of an agent that is served from its record,
+/// so the roster's entry is not applied. The stdio gateway's status answer
+/// and the console's write them here, so the two answer them alike.
+pub(crate) fn insert_identity_status_marks(
+    fields: &mut serde_json::Map<String, Value>,
+    status: &crate::identity_first::IdentityStatus,
+) {
+    for (mark, set) in [
+        ("archived", status.record.archived),
+        ("preparation_pending", status.record.preparation_pending),
+        (
+            "roster_listing_superseded",
+            status.roster_listing_superseded,
+        ),
+    ] {
+        if set {
+            fields.insert(mark.to_string(), Value::Bool(true));
+        }
     }
 }
 
@@ -8254,8 +8352,12 @@ async fn resolve_live_member_alias(
                 .await
                 .into_iter()
                 .filter(|entry| {
-                    crate::member_comms_id::durable_identity_label(&entry.labels)
-                        .is_some_and(|identity| identity == raw)
+                    crate::member_comms_id::resolve_member_identity(
+                        handle,
+                        &entry.agent_identity,
+                        &entry.labels,
+                    )
+                    .is_some_and(|identity| identity == raw)
                 })
                 .map(|entry| {
                     crate::member_comms_id::runtime_alias_str(entry.agent_identity.as_str())
@@ -9196,6 +9298,42 @@ mod tests {
             assert_eq!(set.get(key), record.get(key), "{key}: {set}");
         }
         assert!(set.get("session_repair_required").is_none(), "{set}");
+    }
+
+    /// `meta/status_identity` answers why no member holds an identity in
+    /// the status record's own form: `archived` and `preparation_pending`,
+    /// each only when true, so the answer of an identity a member holds
+    /// names neither.
+    #[test]
+    fn status_identity_answers_why_no_member_holds_an_identity() {
+        let seated: crate::identity_first::IdentityStatus = serde_json::from_value(json!({
+            "identity": "review:singleton",
+            "state": "active",
+            "addressability": "addressable",
+        }))
+        .expect("identity status");
+        let unset = super::identity_status_wire(&seated);
+        for member in ["archived", "preparation_pending"] {
+            assert!(unset.get(member).is_none(), "{member}: {unset}");
+        }
+        for (member, other) in [
+            ("archived", "preparation_pending"),
+            ("preparation_pending", "archived"),
+        ] {
+            let mut read = json!({
+                "identity": "review:singleton",
+                "state": "dormant",
+                "addressability": "addressable",
+            });
+            read[member] = json!(true);
+            let status: crate::identity_first::IdentityStatus =
+                serde_json::from_value(read).expect("identity status");
+            let set = super::identity_status_wire(&status);
+            let record = serde_json::to_value(&status).expect("the status record serializes");
+            assert_eq!(set.get(member), Some(&json!(true)), "{member}: {set}");
+            assert_eq!(set.get(member), record.get(member), "{member}: {set}");
+            assert!(set.get(other).is_none(), "{other}: {set}");
+        }
     }
 
     #[derive(Debug, Default)]
@@ -16070,7 +16208,7 @@ comms = true
     /// before this process's roster pass registered it, `-32052`
     /// (`identity_history_unavailable`, retryable). An identity created at
     /// runtime is registered from its row and goes through its door, which
-    /// refuses the retire: Core drives a store-owned identity.
+    /// serves the retire as any identity's: Core releases its member.
     ///
     /// RED: read `identity_for_member_mutation`'s refusal as "no identity"
     /// in the RPC member verbs: the raw plane retires the member under the
@@ -16155,10 +16293,35 @@ comms = true
             compaction_floors: None,
         };
 
+        // The door of the identity created at runtime registers it from its
+        // row and serves the retire as any identity's: Core releases its
+        // member, and the raw plane retires nothing.
+        let raw = handle_unified_rpc_json(
+            &runtime,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 100,
+                "method": "meta/retire_member",
+                "params": { "member_id": "door-created" },
+            })
+            .to_string(),
+            Duration::from_secs(5),
+            None,
+            Some(&identity_ctx),
+        )
+        .await;
+        let response: Value = serde_json::from_str(&raw)?;
+        assert!(
+            response["error"].is_null(),
+            "door-created: the identity's door serves the retire: {response:#?}"
+        );
+        assert_eq!(
+            core_bridge.releases(),
+            vec![created.clone()],
+            "door-created: Core released the identity's member"
+        );
+
         for (id, (name, code, data)) in [
-            // The door of the identity created at runtime refuses the
-            // retire, as the identity verb's failure.
-            ("door-created", -32000, Value::Null),
             ("door-removed", -32001, Value::Null),
             (
                 "door-unreadable",
@@ -16210,14 +16373,6 @@ comms = true
                 (json!(code), data),
                 "{name}: the identity door's typed refusal: {response:#?}"
             );
-            if name == "door-created" {
-                let message = response["error"]["message"].as_str().unwrap_or_default();
-                assert!(
-                    message.contains("retire_member (identity) failed")
-                        && message.contains("store-owned"),
-                    "{name}: the identity's door refused the retire: {response:#?}"
-                );
-            }
         }
 
         let members = runtime.mob_handle().list_members().await;

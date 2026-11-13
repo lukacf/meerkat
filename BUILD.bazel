@@ -849,6 +849,7 @@ test_suite(
         "//crates/meerkat-mob:kickoff_spawn_teardown_quiesce_test",
         "//crates/meerkat-mob:long_run_conformance_test",
         "//crates/meerkat-mob:meerkat_mob_unit_test",
+        "//crates/meerkat-mob:member_build_sections_test",
         "//crates/meerkat-mob:member_revival_rebinding_test",
         "//crates/meerkat-mob:member_run_resumed_after_kill_test",
         "//crates/meerkat-mob:member_session_bindings_test",

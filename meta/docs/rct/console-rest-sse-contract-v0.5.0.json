@@ -1043,7 +1043,7 @@
               "identity",
               "schedules"
             ],
-            "note": "schedules lists the agent's console schedules, oldest first, each a console_schedule: schedule_id, identity, name (or null), content, trigger (the scheduler's trigger, tagged by type: once, interval or calendar), phase (active or paused), revision, sender (the principal the schedule sends as, null for an anonymous caller and when withheld), sender_hidden (true when the caller may view the agent but not send to it: only a caller who may send to the agent sees who its schedules send as), defined_at_utc, created_at_utc, updated_at_utc and next_due_at_utc (the next planned send of an active schedule, else null). The agent's own schedules (its schedule tools) and other schedules of the store are not listed, and the agent's schedule tools neither list nor change console schedules."
+            "note": "schedules lists the agent's console schedules, oldest first, each a console_schedule: schedule_id, identity, name (or null), content, trigger (the scheduler's trigger, tagged by type: once, interval or calendar), phase (active or paused), paused_for_target (true on a paused schedule whose pause is its agent's: the agent is archived, and its unarchive resumes the schedule; absent on an active schedule and on one somebody paused by name), revision, sender (the principal the schedule sends as, null for an anonymous caller and when withheld), sender_hidden (true when the caller may view the agent but not send to it: only a caller who may send to the agent sees who its schedules send as), defined_at_utc, created_at_utc, updated_at_utc and next_due_at_utc (the next planned send of an active schedule, else null). The agent's own schedules (its schedule tools) and other schedules of the store are not listed, and the agent's schedule tools neither list nor change console schedules."
           },
           "errors": [
             {
@@ -1097,10 +1097,11 @@
                 -32001,
                 -32002,
                 -32004,
+                -32603,
                 -32602,
                 -32000
               ],
-              "note": "-32001 data.kind unknown_identity when no agent of the console has the name; -32002 data.kind not_addressable for an agent that takes no console sends; -32004 data.kind governed_target for an agent whose input is governed (a governed send needs its Console human present, and a fire has none) or data.kind schedule_host_unavailable where no schedule firing host sends the gateway's schedules; -32602 for an invalid identity, a blank content, an interval under 60 seconds, or an invalid trigger (the scheduler's validation, an unknown time zone among them), and with data.kind unsupported_param (param) for a create that names expected_revision or take_over_sender."
+              "note": "-32001 data.kind unknown_identity when no agent of the console has the name; -32002 data.kind not_addressable for an agent that takes no console sends; -32004 data.kind governed_target for an agent whose input is governed (a governed send needs its Console human present, and a fire has none) or data.kind schedule_host_unavailable where no schedule firing host sends the gateway's schedules; -32603 data.kind identity_archived (identity, remedy unarchive_identity) for an archived agent: nothing is written, and a pause, a resume and a delete of its schedules are still served; -32602 for an invalid identity, a blank content, an interval under 60 seconds, or an invalid trigger (the scheduler's validation, an unknown time zone among them), and with data.kind unsupported_param (param) for a create that names expected_revision or take_over_sender."
             }
           ]
         },
@@ -2625,6 +2626,439 @@
                 -32000,
                 -32601
               ]
+            }
+          ]
+        },
+        "meta/identity/create": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied",
+            "#/surfaces/rpc/policy_errors/candidate_launch"
+          ],
+          "request": {
+            "required_fields": [
+              "request_id",
+              "agents"
+            ],
+            "optional_fields": [],
+            "note": "Creates the agents (1 to 256, all or nothing), each {name, profile, display_name?, instructions? (an array of sections), context?, labels?, first_message?, peers?, addressability?, runtime_mode_override?}. addressability is addressable (the default) or internal_only; runtime_mode_override is autonomous_host or turn_driven (absent, the agent runs as its profile says). The requester is the signed-in person, or the host on its console surface. Gated on a writable console and agent.identity.create. An unknown member is refused."
+          },
+          "success": {
+            "required_fields": [
+              "outcome",
+              "operation_id"
+            ],
+            "note": "The change's typed outcome, tagged by outcome: done {operation_id, agents: [{name, state, spec_digest?, spec_revision?, session_id?, seat?, instructions?}]}, pending_decision {operation_id, decision_id, deadline_ms} (nothing is written but the decision) or pending_preparation {operation_id, agents}. The same caller, request_id and request answer the same state again and write nothing. pending_preparation is the create of an agent whose profile the host prepares before first use: the agent is committed, reads readiness preparation_pending, has no member and takes no message until the host's operator settles its preparation (meta/identity/settle_preparation on the stdio gateway). No console caller is the operator: the console RPC does not list that method and refuses it for every caller."
+          },
+          "errors": [
+            {
+              "codes": [
+                -32058,
+                -32601
+              ],
+              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. The reads are served on every launch that has agents of its own, with or without an identity policy; a change, and a plan, on a launch without an enabled identity policy is refused kind change_denied. -32601 only on a launch without agents of its own, or once its mob stopped."
+            }
+          ]
+        },
+        "meta/identity/update": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied",
+            "#/surfaces/rpc/policy_errors/candidate_launch"
+          ],
+          "request": {
+            "required_fields": [
+              "request_id",
+              "name",
+              "expected_spec_digest"
+            ],
+            "optional_fields": [
+              "set",
+              "peers_add",
+              "peers_remove"
+            ],
+            "note": "Updates one agent at the spec digest the caller read (a moved spec answers stale_spec with the current one). set {display_name?, instructions?, context?, labels?, labels_remove?, profile?, addressability?, runtime_mode_override?}: an absent member is unchanged. A move (set.profile) into a profile whose agents the host prepares is refused kind unsupported with feature move_into_prepared_profile at set.profile when it is asked, also where a rule has a person decide a profile change, and its plan answers the same refusal. addressability and runtime_mode_override take the values they take on a create; an update sets a runtime mode and cannot return the agent to its profile's. An agent's entry of the outcome says what became of an instructions change. Gated on a writable console and agent.identity.manage for the agent. An unknown member is refused. An agent the caller may not view is answered as a name no agent holds (-32058, kind identity_unknown at name), and nothing is changed."
+          },
+          "success": {
+            "required_fields": [
+              "outcome",
+              "operation_id"
+            ],
+            "note": "The change's typed outcome, tagged by outcome: done {operation_id, agents: [{name, state, spec_digest?, spec_revision?, session_id?, seat?, instructions?}]}, pending_decision {operation_id, decision_id, deadline_ms} (nothing is written but the decision) or pending_preparation {operation_id, agents}. The same caller, request_id and request answer the same state again and write nothing."
+          },
+          "errors": [
+            {
+              "codes": [
+                -32058,
+                -32601
+              ],
+              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. The reads are served on every launch that has agents of its own, with or without an identity policy; a change, and a plan, on a launch without an enabled identity policy is refused kind change_denied. -32601 only on a launch without agents of its own, or once its mob stopped."
+            }
+          ]
+        },
+        "meta/identity/archive": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied",
+            "#/surfaces/rpc/policy_errors/candidate_launch"
+          ],
+          "request": {
+            "required_fields": [
+              "request_id",
+              "name",
+              "expected_spec_digest"
+            ],
+            "optional_fields": [],
+            "note": "Archives one agent: it stops and keeps its name, record, conversation and memory, and its last conversation is harvested and distilled as for any agent that leaves. Gated on a writable console and agent.identity.manage for the agent. An unknown member is refused. An agent the caller may not view is answered as a name no agent holds (-32058, kind identity_unknown at name), and nothing is changed."
+          },
+          "success": {
+            "required_fields": [
+              "outcome",
+              "operation_id"
+            ],
+            "note": "The change's typed outcome, tagged by outcome: done {operation_id, agents: [{name, state, spec_digest?, spec_revision?, session_id?, seat?, instructions?, schedules?}]}, pending_decision {operation_id, decision_id, deadline_ms} (nothing is written but the decision) or pending_preparation {operation_id, agents}. The same caller, request_id and request answer the same state again and write nothing. schedules {effect, count, schedules: [{schedule_id, name?}], incomplete?} is on the agent's entry of the first answer, on a launch whose host gives the family its schedules: the schedules that target the agent, which the archive paused for their target. incomplete is true, and written only then, when a schedule could not be read or changed; the same request sent again follows the rest. The same request answered again states no schedules. The list (the schedules member inside the object) is given to a caller with runtime.admin, and to every caller of a console without access rules; any other caller's answer carries effect and count (and incomplete) without it."
+          },
+          "errors": [
+            {
+              "codes": [
+                -32058,
+                -32601
+              ],
+              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. The reads are served on every launch that has agents of its own, with or without an identity policy; a change, and a plan, on a launch without an enabled identity policy is refused kind change_denied. -32601 only on a launch without agents of its own, or once its mob stopped."
+            }
+          ]
+        },
+        "meta/identity/unarchive": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied",
+            "#/surfaces/rpc/policy_errors/candidate_launch"
+          ],
+          "request": {
+            "required_fields": [
+              "request_id",
+              "name",
+              "expected_spec_digest"
+            ],
+            "optional_fields": [],
+            "note": "Brings one archived agent back on its archived session. Gated on a writable console and agent.identity.manage for the agent. An unknown member is refused. An agent the caller may not view is answered as a name no agent holds (-32058, kind identity_unknown at name), and nothing is changed."
+          },
+          "success": {
+            "required_fields": [
+              "outcome",
+              "operation_id"
+            ],
+            "note": "The change's typed outcome, tagged by outcome: done {operation_id, agents: [{name, state, spec_digest?, spec_revision?, session_id?, seat?, instructions?, schedules?}]}, pending_decision {operation_id, decision_id, deadline_ms} (nothing is written but the decision) or pending_preparation {operation_id, agents}. The same caller, request_id and request answer the same state again and write nothing. schedules {effect, count, schedules: [{schedule_id, name?}], incomplete?} is on the agent's entry of the first answer, on a launch whose host gives the family its schedules: the schedules that target the agent, which the unarchive resumed (exactly those its archive paused). incomplete is true, and written only then, when a schedule could not be read or changed; the same request sent again follows the rest. The same request answered again states no schedules. The list (the schedules member inside the object) is given to a caller with runtime.admin, and to every caller of a console without access rules; any other caller's answer carries effect and count (and incomplete) without it."
+          },
+          "errors": [
+            {
+              "codes": [
+                -32058,
+                -32601
+              ],
+              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. The reads are served on every launch that has agents of its own, with or without an identity policy; a change, and a plan, on a launch without an enabled identity policy is refused kind change_denied. -32601 only on a launch without agents of its own, or once its mob stopped."
+            }
+          ]
+        },
+        "meta/identity/remove": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied",
+            "#/surfaces/rpc/policy_errors/candidate_launch"
+          ],
+          "request": {
+            "required_fields": [
+              "request_id",
+              "name",
+              "expected_spec_digest"
+            ],
+            "optional_fields": [],
+            "note": "Removes one agent for good: its name is never available again, and its last conversation is harvested and distilled as for any agent that leaves. Gated on a writable console and agent.identity.remove for the agent. An unknown member is refused. An agent the caller may not view is answered as a name no agent holds (-32058, kind identity_unknown at name), and nothing is changed."
+          },
+          "success": {
+            "required_fields": [
+              "outcome",
+              "operation_id"
+            ],
+            "note": "The change's typed outcome, tagged by outcome: done {operation_id, agents: [{name, state, spec_digest?, spec_revision?, session_id?, seat?, instructions?, schedules?}]}, pending_decision {operation_id, decision_id, deadline_ms} (nothing is written but the decision) or pending_preparation {operation_id, agents}. The same caller, request_id and request answer the same state again and write nothing. schedules {effect, count, schedules: [{schedule_id, name?}], incomplete?} is on the agent's entry of the first answer, on a launch whose host gives the family its schedules: the schedules that target the agent, which the removal ended. incomplete is true, and written only then, when a schedule could not be read or changed; the same request sent again follows the rest. The same request answered again states no schedules. The list (the schedules member inside the object) is given to a caller with runtime.admin, and to every caller of a console without access rules; any other caller's answer carries effect and count (and incomplete) without it."
+          },
+          "errors": [
+            {
+              "codes": [
+                -32058,
+                -32601
+              ],
+              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. The reads are served on every launch that has agents of its own, with or without an identity policy; a change, and a plan, on a launch without an enabled identity policy is refused kind change_denied. -32601 only on a launch without agents of its own, or once its mob stopped."
+            }
+          ]
+        },
+        "meta/identity/withdraw": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied",
+            "#/surfaces/rpc/policy_errors/candidate_launch"
+          ],
+          "request": {
+            "optional_fields": [
+              "request_id",
+              "operation_id"
+            ],
+            "note": "Withdraws a change whose decision is still held, named by the caller's own request_id or by the operation_id an outcome named (exactly one). Gated on a writable console and agent.view, and the signed-in person's who asked for the change: a caller the console could not verify withdraws nothing. The stock console withdraws a request from the page that made it, which holds its request_id; a host withdraws with the request_id it sent."
+          },
+          "success": {
+            "required_fields": [
+              "operation_id",
+              "decision_id"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32058,
+                -32601
+              ],
+              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. The reads are served on every launch that has agents of its own, with or without an identity policy; a change, and a plan, on a launch without an enabled identity policy is refused kind change_denied. -32601 only on a launch without agents of its own, or once its mob stopped."
+            }
+          ]
+        },
+        "meta/identity/get": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "required_fields": [
+              "name"
+            ],
+            "note": "Gated on agent.view for the agent. An agent the caller may not view is answered as a name no agent holds (-32058, kind identity_unknown at name)."
+          },
+          "success": {
+            "required_fields": [
+              "name",
+              "profile",
+              "spec_digest",
+              "archived",
+              "readiness",
+              "instructions",
+              "labels",
+              "peers"
+            ],
+            "note": "One agent in full. display_name, spec_revision, provenance {entered, requester_kind, requester, at_ms, consent} (when its record says), context is present when set. open_operations is the ids of the operations open for the agent that the caller may read (its own, and every one with runtime.admin): the create of an agent that waits for its host's preparation, and each change of the agent that is held for a decision or approved and not yet carried out. It is absent when none is open, never an empty list. When the team's held changes cannot be read, the read is refused -32058 kind approval_unavailable with a detail that says to read again; it is never answered as if nothing were open. addressability is present as internal_only (an addressable agent says nothing), and runtime_mode_override as autonomous_host or turn_driven (an agent that runs as its profile says says nothing). roster_listing_superseded is present as true, and only then, for an agent the host's configuration lists while it is served from its own record: that entry is not applied, and a change of the agent changes its record. peers names the peers the caller may view. The read never wakes the agent."
+          },
+          "errors": [
+            {
+              "codes": [
+                -32058,
+                -32601
+              ],
+              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. The reads are served on every launch that has agents of its own, with or without an identity policy; a change, and a plan, on a launch without an enabled identity policy is refused kind change_denied. -32601 only on a launch without agents of its own, or once its mob stopped."
+            }
+          ]
+        },
+        "meta/identity/list": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "optional_fields": [
+              "profile",
+              "include_archived",
+              "after"
+            ],
+            "note": "Gated on agent.view."
+          },
+          "success": {
+            "required_fields": [
+              "agents"
+            ],
+            "note": "A page of the mob's agents in one stable order that after continues (it is not name order), each as get names it without instructions, context, labels and peers; next names the agent to read the next page after. An agent the caller may not view is left out. When the team's held changes cannot be read, the read is refused -32058 kind approval_unavailable with a detail that says to read again; it is never answered as if nothing were open."
+          },
+          "errors": [
+            {
+              "codes": [
+                -32058,
+                -32601
+              ],
+              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. The reads are served on every launch that has agents of its own, with or without an identity policy; a change, and a plan, on a launch without an enabled identity policy is refused kind change_denied. -32601 only on a launch without agents of its own, or once its mob stopped."
+            }
+          ]
+        },
+        "meta/identity/operation": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "optional_fields": [
+              "request_id",
+              "operation_id"
+            ],
+            "note": "Names the caller's own request by request_id, or an operation by the operation_id an outcome named (exactly one). Gated on agent.view. It answers the caller's own operations: another requester's operation, named by its operation_id, reads as unknown unless the caller has runtime.admin."
+          },
+          "success": {
+            "required_fields": [
+              "outcome"
+            ],
+            "note": "The operation's typed outcome as its change answered it (a refused one as a result, outcome refused), or {outcome: unknown, operation_id} for an operation nothing committed under and no decision is held for. The entry of an agent whose create answered pending_preparation says where the agent stands since: pending_preparation while it waits for its host, committed (and the outcome done) once its preparation was settled, removed once it was removed."
+          },
+          "errors": [
+            {
+              "codes": [
+                -32058,
+                -32601
+              ],
+              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. The reads are served on every launch that has agents of its own, with or without an identity policy; a change, and a plan, on a launch without an enabled identity policy is refused kind change_denied. -32601 only on a launch without agents of its own, or once its mob stopped."
+            }
+          ]
+        },
+        "meta/identity/directory": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "optional_fields": [
+              "query",
+              "after"
+            ],
+            "note": "Gated on agent.view."
+          },
+          "success": {
+            "required_fields": [
+              "profiles",
+              "peers"
+            ],
+            "note": "What the caller may name in a create or an update: profiles [{profile, verdict, lines?, reason?}] and peers [{name, display_name?, profile, verdict, lines?, reason?}], verdict allowed, needs_decision (with the lines a decision shows) or not_allowed (with the rule's reason); next names the entry to read the next page after. A peer the caller may not view is left out."
+          },
+          "errors": [
+            {
+              "codes": [
+                -32058,
+                -32601
+              ],
+              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. The reads are served on every launch that has agents of its own, with or without an identity policy; a change, and a plan, on a launch without an enabled identity policy is refused kind change_denied. -32601 only on a launch without agents of its own, or once its mob stopped."
+            }
+          ]
+        },
+        "meta/identity/adopt": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied",
+            "#/surfaces/rpc/policy_errors/candidate_launch"
+          ],
+          "request": {
+            "required_fields": [
+              "request_id",
+              "name",
+              "expected_spec_digest"
+            ],
+            "optional_fields": [],
+            "note": "Releases one agent from the host's configuration: from the adoption on it is changed at run time and configuration no longer declares it. Gated on a writable console and agent.identity.manage for the agent. An unknown member is refused. An agent the caller may not view is answered as a name no agent holds (-32058, kind identity_unknown at name), and nothing is changed. The stock console does not call it."
+          },
+          "success": {
+            "required_fields": [
+              "outcome",
+              "operation_id"
+            ],
+            "note": "The change's typed outcome, tagged by outcome: done {operation_id, agents: [{name, state, spec_digest?, spec_revision?, session_id?, seat?, instructions?}]}, pending_decision {operation_id, decision_id, deadline_ms} (nothing is written but the decision) or pending_preparation {operation_id, agents}. The same caller, request_id and request answer the same state again and write nothing."
+          },
+          "errors": [
+            {
+              "codes": [
+                -32058,
+                -32601
+              ],
+              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. The reads are served on every launch that has agents of its own, with or without an identity policy; a change, and a plan, on a launch without an enabled identity policy is refused kind change_denied. -32601 only on a launch without agents of its own, or once its mob stopped."
+            }
+          ]
+        },
+        "meta/identity/changes_hold": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied",
+            "#/surfaces/rpc/policy_errors/candidate_launch"
+          ],
+          "request": {
+            "required_fields": [
+              "held"
+            ],
+            "optional_fields": [
+              "reason"
+            ],
+            "note": "Holds or releases the mob's changes of agents: while held, every change is refused the retryable changes_held. Not durable: a host that holds changes holds them again at its next start. Gated on a writable console and runtime.admin: a signed-in person who has it holds and releases the mob's changes, and a caller the console could not verify does not. The stock console does not call it."
+          },
+          "success": {
+            "required_fields": [
+              "held"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32058,
+                -32601
+              ],
+              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. The reads are served on every launch that has agents of its own, with or without an identity policy; a change, and a plan, on a launch without an enabled identity policy is refused kind change_denied. -32601 only on a launch without agents of its own, or once its mob stopped."
+            }
+          ]
+        },
+        "meta/identity/plan": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "required_fields": [
+              "change",
+              "request_id"
+            ],
+            "note": "The outcome and the rendering a change would get; nothing is held and nothing is written. change is create, update, archive, unarchive, remove or adopt, and the other members are that change's own params. Gated on what the change it plans needs: agent.identity.create for a create, agent.identity.remove on the agent for a removal, agent.identity.manage on the agent for every other change. A plan of a change of one agent the caller may not view is answered as a name no agent holds (-32058, kind identity_unknown at name). The stock console asks it before a profile change."
+          },
+          "success": {
+            "required_fields": [
+              "outcome",
+              "change",
+              "timeout_ms",
+              "request_digest",
+              "subject_digest",
+              "rendering"
+            ],
+            "note": "outcome is allow, notify or require_approval (a change the host's rules deny is refused, not planned); change is the change class whose rule decided; approver_id is present when the outcome names one. schedules {effect, count, schedules, incomplete?} is present on the plan of an archive, an unarchive and a removal, on a launch whose host gives the family its schedules: the schedules the change would take with it, as they are when the plan is made. The list (the schedules member inside the object) is given to a caller with runtime.admin, and to every caller of a console without access rules; any other caller's plan carries effect and count (and incomplete) without it."
+          },
+          "errors": [
+            {
+              "codes": [
+                -32058,
+                -32601
+              ],
+              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. The reads are served on every launch that has agents of its own, with or without an identity policy; a change, and a plan, on a launch without an enabled identity policy is refused kind change_denied. -32601 only on a launch without agents of its own, or once its mob stopped."
+            }
+          ]
+        },
+        "meta/identity/settle_preparation": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied",
+            "#/surfaces/rpc/policy_errors/candidate_launch"
+          ],
+          "request": {
+            "required_fields": [
+              "request_id",
+              "name"
+            ],
+            "optional_fields": [],
+            "note": "Settles the preparation of one agent that waits for its host: the agent is seated. It is the host's operator's, which no console caller is: the console RPC does not list the method in meta/capabilities and refuses it for every caller (kind change_denied; the settle completes a create, so the refusal names change create). It is gated on a writable console and runtime.admin all the same, so a caller without that reads a plain access refusal. A host settles on the stdio gateway. The stock console does not call it and offers no settle."
+          },
+          "success": {
+            "required_fields": [
+              "outcome",
+              "operation_id"
+            ],
+            "note": "No console caller is answered a success. To its host's operator the settle answers a change's typed outcome: done {operation_id, agents: [{name, state committed, spec_digest, spec_revision, session_id?, seat}]}."
+          },
+          "errors": [
+            {
+              "codes": [
+                -32058,
+                -32601
+              ],
+              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. The reads are served on every launch that has agents of its own, with or without an identity policy; a change, and a plan, on a launch without an enabled identity policy is refused kind change_denied. -32601 only on a launch without agents of its own, or once its mob stopped."
             }
           ]
         }

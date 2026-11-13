@@ -137681,7 +137681,7 @@
         "type": "object"
       },
       "WireInstructionTarget": {
-        "description": "Which members of a mob an operator instruction targets: every member, the\nmembers of one profile, or one member. A target is a predicate over the\nroster: a profile or member that does not exist yet selects nobody until\nit does. A target refuses a field its kind does not have (`Mob` is a\nstruct variant for that: serde lets a unit variant ignore extra fields),\nso a member or profile name sent with the wrong kind never widens a\nwrite to every member.",
+        "description": "Which members of a mob an operator instruction targets: every member, the\nmembers of one profile, or one member (alone, or with the forks of its\nfork family). A target is a predicate over the roster: a profile or\nmember that does not exist yet selects nobody until it does. A target\nrefuses a field its kind does not have (`Mob` is a struct variant for\nthat: serde lets a unit variant ignore extra fields), so a member or\nprofile name sent with the wrong kind never widens a write to every\nmember.",
         "oneOf": [
           {
             "additionalProperties": false,
@@ -137721,6 +137721,10 @@
             "properties": {
               "agent_identity": {
                 "type": "string"
+              },
+              "include_forks": {
+                "description": "Whether the record follows the member's fork family from its\nroot. Absent or `false` keeps the record the member's alone.\n\nWritten for a member that is not itself a fork, the record\nselects that member and every fork below it, forks of forks\nincluded, for as long as each is seated. Written for a member\nthat is a fork, it selects that member only: a fork family\nfollows the records written for its first member. A fork under\nthe record follows its later revisions and its revoke as the\nmember does.\n\nThe family's root is a name, as a member target is. Its forks go\non following the records written for that name after the root's\nidentity ends, so there is one exception to \"that member only\":\nwhen the name of a family's first member is seated again later,\nas a fork or not, a record written for it and its forks still\nselects the forks the earlier member of that name left.\n\nLeft out of a response when `false`.",
+                "type": "boolean"
               },
               "kind": {
                 "const": "member",
@@ -194788,7 +194792,7 @@
         "type": "integer"
       },
       "WireInstructionTarget": {
-        "description": "Which members of a mob an operator instruction targets: every member, the\nmembers of one profile, or one member. A target is a predicate over the\nroster: a profile or member that does not exist yet selects nobody until\nit does. A target refuses a field its kind does not have (`Mob` is a\nstruct variant for that: serde lets a unit variant ignore extra fields),\nso a member or profile name sent with the wrong kind never widens a\nwrite to every member.",
+        "description": "Which members of a mob an operator instruction targets: every member, the\nmembers of one profile, or one member (alone, or with the forks of its\nfork family). A target is a predicate over the roster: a profile or\nmember that does not exist yet selects nobody until it does. A target\nrefuses a field its kind does not have (`Mob` is a struct variant for\nthat: serde lets a unit variant ignore extra fields), so a member or\nprofile name sent with the wrong kind never widens a write to every\nmember.",
         "oneOf": [
           {
             "additionalProperties": false,
@@ -194828,6 +194832,10 @@
             "properties": {
               "agent_identity": {
                 "type": "string"
+              },
+              "include_forks": {
+                "description": "Whether the record follows the member's fork family from its\nroot. Absent or `false` keeps the record the member's alone.\n\nWritten for a member that is not itself a fork, the record\nselects that member and every fork below it, forks of forks\nincluded, for as long as each is seated. Written for a member\nthat is a fork, it selects that member only: a fork family\nfollows the records written for its first member. A fork under\nthe record follows its later revisions and its revoke as the\nmember does.\n\nThe family's root is a name, as a member target is. Its forks go\non following the records written for that name after the root's\nidentity ends, so there is one exception to \"that member only\":\nwhen the name of a family's first member is seated again later,\nas a fork or not, a record written for it and its forks still\nselects the forks the earlier member of that name left.\n\nLeft out of a response when `false`.",
+                "type": "boolean"
               },
               "kind": {
                 "const": "member",
@@ -195027,7 +195035,7 @@
   },
   "WireInstructionTarget": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Which members of a mob an operator instruction targets: every member, the\nmembers of one profile, or one member. A target is a predicate over the\nroster: a profile or member that does not exist yet selects nobody until\nit does. A target refuses a field its kind does not have (`Mob` is a\nstruct variant for that: serde lets a unit variant ignore extra fields),\nso a member or profile name sent with the wrong kind never widens a\nwrite to every member.",
+    "description": "Which members of a mob an operator instruction targets: every member, the\nmembers of one profile, or one member (alone, or with the forks of its\nfork family). A target is a predicate over the roster: a profile or\nmember that does not exist yet selects nobody until it does. A target\nrefuses a field its kind does not have (`Mob` is a struct variant for\nthat: serde lets a unit variant ignore extra fields), so a member or\nprofile name sent with the wrong kind never widens a write to every\nmember.",
     "oneOf": [
       {
         "additionalProperties": false,
@@ -195067,6 +195075,10 @@
         "properties": {
           "agent_identity": {
             "type": "string"
+          },
+          "include_forks": {
+            "description": "Whether the record follows the member's fork family from its\nroot. Absent or `false` keeps the record the member's alone.\n\nWritten for a member that is not itself a fork, the record\nselects that member and every fork below it, forks of forks\nincluded, for as long as each is seated. Written for a member\nthat is a fork, it selects that member only: a fork family\nfollows the records written for its first member. A fork under\nthe record follows its later revisions and its revoke as the\nmember does.\n\nThe family's root is a name, as a member target is. Its forks go\non following the records written for that name after the root's\nidentity ends, so there is one exception to \"that member only\":\nwhen the name of a family's first member is seated again later,\nas a fork or not, a record written for it and its forks still\nselects the forks the earlier member of that name left.\n\nLeft out of a response when `false`.",
+            "type": "boolean"
           },
           "kind": {
             "const": "member",

@@ -760,6 +760,39 @@ struct AdmittedDestroy {
     /// The host's release hook, run once the native destroy completed and
     /// the mob left the managed set.
     after_destroy: Option<MobAfterDestroy>,
+    /// The members the mob's host hides from this destroy's caller, read
+    /// before the destroy starts (their rows are gone after it): the report
+    /// the caller is answered, now or when it collects it later, names none
+    /// of them.
+    hidden_from_caller: BTreeSet<AgentIdentity>,
+}
+
+/// Cut `report` for a caller the mob's host hides the members `hidden`
+/// from: they leave its member lists, and an error text that names one of
+/// them is dropped. Nothing else changes; with no hidden member the report
+/// is untouched.
+fn cut_destroy_report_for_caller(
+    report: &mut meerkat_mob::MobDestroyReport,
+    hidden: &BTreeSet<AgentIdentity>,
+) {
+    if hidden.is_empty() {
+        return;
+    }
+    report
+        .force_destroyed_members
+        .retain(|member| !hidden.contains(member));
+    report
+        .orphaned_remote_members
+        .retain(|member| !hidden.contains(member));
+    report
+        .reloaded_members
+        .retain(|member| !hidden.contains(member));
+    report
+        .member_reload_refusals
+        .retain(|refusal| !hidden.contains(&refusal.member));
+    report
+        .errors
+        .retain(|error| !hidden.iter().any(|member| error.contains(member.as_str())));
 }
 
 impl AdmittedDestroy {
@@ -781,6 +814,7 @@ impl AdmittedDestroy {
             retired_mobs,
             mob_set_epoch,
             after_destroy,
+            hidden_from_caller,
         } = self;
         let incarnation = bound.incarnation();
         let destroy_result = bound.destroy().await;
@@ -788,9 +822,15 @@ impl AdmittedDestroy {
         // before the storage cleanup so this surface owns nothing of the
         // observer that cleanup drains.
         drop(bound);
+        // The report is cut for the caller before it is answered or
+        // recorded, so every answer of this destroy is the cut one.
         let report = match destroy_result {
-            Ok(report) => report,
-            Err(meerkat_mob::MobDestroyError::Incomplete { report }) => {
+            Ok(mut report) => {
+                cut_destroy_report_for_caller(&mut report, &hidden_from_caller);
+                report
+            }
+            Err(meerkat_mob::MobDestroyError::Incomplete { mut report }) => {
+                cut_destroy_report_for_caller(&mut report, &hidden_from_caller);
                 return Err(MobMcpDestroyError::Incomplete { report });
             }
             Err(meerkat_mob::MobDestroyError::Mob(error)) => {
@@ -6402,6 +6442,30 @@ impl MobMcpState {
         };
         #[cfg(target_arch = "wasm32")]
         let storage = None;
+        // What the mob's host hides from the caller's member tools, asked
+        // while the roster still holds every member's row: an agent's
+        // destroy is asked about as the member its session is bound to in
+        // this mob, if any. A host's own destroy is shown every member.
+        let hidden_from_caller = match &caller {
+            MobDestroyCaller::Agent {
+                owner_bridge_session_id,
+                ..
+            } => {
+                let roster = managed.handle.roster().await;
+                let member = roster
+                    .find_by_bridge_session_id(owner_bridge_session_id)
+                    .map(|entry| entry.agent_identity.clone());
+                let members = roster
+                    .list()
+                    .map(|entry| entry.agent_identity.clone())
+                    .collect::<Vec<_>>();
+                managed
+                    .handle
+                    .members_hidden_from(member.as_ref(), &members)
+                    .await
+            }
+            MobDestroyCaller::Console => BTreeSet::new(),
+        };
         let destroy = AdmittedDestroy {
             mob_id: mob_id.clone(),
             caller,
@@ -6420,6 +6484,7 @@ impl MobMcpState {
             retired_mobs: Arc::clone(&self.retired_mobs),
             mob_set_epoch: self.mob_set_epoch.clone(),
             after_destroy: self.after_destroy.get().cloned(),
+            hidden_from_caller,
         };
         drop(managed);
         // The destroy is the state's own task, so its caller holds nothing of
@@ -14680,6 +14745,56 @@ mod tests {
             Some(true)
         );
         assert!(data.get("destroy_report").is_some());
+    }
+
+    /// A destroy report cut for a caller names none of the members hidden
+    /// from it, in a member list or in an error text, and keeps every entry
+    /// of the members the caller is shown, the flags and the texts that
+    /// name no member. With no hidden member the report is untouched.
+    #[test]
+    fn a_cut_destroy_report_names_no_hidden_member() {
+        let id = AgentIdentity::from;
+        let full = || {
+            let mut report = meerkat_mob::MobDestroyReport::default();
+            report.force_destroyed_members = vec![id("cut-kept"), id("cut-shown")];
+            report.orphaned_remote_members = vec![id("cut-shown"), id("cut-kept")];
+            report.reloaded_members = vec![id("cut-kept")];
+            report.remote_cleanup_deadline_exceeded = true;
+            report.errors = vec![
+                "cut-kept: archive failed".to_string(),
+                "cut-shown: archive failed".to_string(),
+                "destroy marker append failed".to_string(),
+                "cleanup of the edge to 'cut-kept' failed".to_string(),
+            ];
+            report
+        };
+
+        let mut cut = full();
+        cut_destroy_report_for_caller(&mut cut, &BTreeSet::from([id("cut-kept")]));
+        assert_eq!(cut.force_destroyed_members, vec![id("cut-shown")]);
+        assert_eq!(cut.orphaned_remote_members, vec![id("cut-shown")]);
+        assert!(cut.reloaded_members.is_empty());
+        assert!(cut.remote_cleanup_deadline_exceeded);
+        assert_eq!(
+            cut.errors,
+            vec![
+                "cut-shown: archive failed".to_string(),
+                "destroy marker append failed".to_string(),
+            ]
+        );
+        let summary = destroy_report_summary(&cut);
+        assert!(
+            !summary.contains("cut-kept"),
+            "the refusal of an incomplete destroy is built from the cut report: {summary}"
+        );
+
+        let mut untouched = full();
+        cut_destroy_report_for_caller(&mut untouched, &BTreeSet::new());
+        assert_eq!(untouched.errors, full().errors);
+        assert_eq!(
+            untouched.force_destroyed_members,
+            full().force_destroyed_members
+        );
     }
 
     #[tokio::test]

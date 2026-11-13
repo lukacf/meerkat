@@ -23,6 +23,47 @@
 
 use serde_json::{Value, json};
 
+/// The `event_type` of a conflict signal
+/// ([`MemoryTimelineEvent::ConflictSignal`]).
+pub(crate) const CONFLICT_SIGNAL_EVENT_TYPE: &str = "memory.conflict.signal";
+
+/// The `event_type` of a write that landed quarantined
+/// ([`MemoryTimelineEvent::QuarantinedWrite`]).
+pub(crate) const QUARANTINED_WRITE_EVENT_TYPE: &str = "memory.write.quarantined";
+
+/// The `event_type` of a session's taint transition
+/// ([`MemoryTimelineEvent::TaintTransition`]).
+pub(crate) const TAINT_TRANSITION_EVENT_TYPE: &str = "memory.taint.transition";
+
+/// The `event_type` of a promoted record
+/// ([`MemoryTimelineEvent::RecordPromoted`]).
+pub(crate) const RECORD_PROMOTED_EVENT_TYPE: &str = "memory.record.promoted";
+
+/// The `event_type` of a promotion that awaits approval
+/// ([`MemoryTimelineEvent::PromotionPendingGate`]).
+pub(crate) const PROMOTION_PENDING_GATE_EVENT_TYPE: &str = "memory.promotion.pending_gate";
+
+/// Whether a console record of `event_type`, written under an identity that
+/// is no member's, speaks of memory records or of a member it does not name
+/// as its identity: a conflict signal, whose `entity`, `topic` and `reason`
+/// the memory steward writes from the records it compared; a write that
+/// landed quarantined, which names its author and what tainted the session;
+/// a taint transition, which names a session and the source that tainted
+/// it; a promoted record and a promotion that awaits approval, which name
+/// the scope the record came from. Nothing in such a record says who may
+/// read those records or know of that member, so the console decides it as
+/// a record with no member witness.
+pub(crate) fn carries_record_text_with_no_member(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        CONFLICT_SIGNAL_EVENT_TYPE
+            | QUARANTINED_WRITE_EVENT_TYPE
+            | TAINT_TRANSITION_EVENT_TYPE
+            | RECORD_PROMOTED_EVENT_TYPE
+            | PROMOTION_PENDING_GATE_EVENT_TYPE
+    )
+}
+
 /// One typed memory-plane timeline event. Payload fields are stable wire
 /// contract for the console Memory panel (P3b).
 #[derive(Debug, Clone, PartialEq)]
@@ -168,14 +209,14 @@ impl MemoryTimelineEvent {
             Self::DreamStarted { .. } => "memory.dream.started",
             Self::DreamCompleted { .. } => "memory.dream.completed",
             Self::DreamSkipped { .. } => "memory.dream.skipped",
-            Self::RecordPromoted { .. } => "memory.record.promoted",
+            Self::RecordPromoted { .. } => RECORD_PROMOTED_EVENT_TYPE,
             Self::QuarantineVerdict { .. } => "memory.quarantine.verdict",
             Self::QuarantineReleaseBlocked { .. } => "memory.quarantine.release_blocked",
-            Self::ConflictSignal { .. } => "memory.conflict.signal",
-            Self::QuarantinedWrite { .. } => "memory.write.quarantined",
-            Self::TaintTransition { .. } => "memory.taint.transition",
+            Self::ConflictSignal { .. } => CONFLICT_SIGNAL_EVENT_TYPE,
+            Self::QuarantinedWrite { .. } => QUARANTINED_WRITE_EVENT_TYPE,
+            Self::TaintTransition { .. } => TAINT_TRANSITION_EVENT_TYPE,
             Self::BudgetDenied { .. } => "memory.budget.denied",
-            Self::PromotionPendingGate { .. } => "memory.promotion.pending_gate",
+            Self::PromotionPendingGate { .. } => PROMOTION_PENDING_GATE_EVENT_TYPE,
             Self::HarvestCompleted { .. } => "memory.harvest.completed",
             Self::DistillationTimedOut { .. } => "memory.distill.timed_out",
             Self::HygieneProposed { .. } => "memory.hygiene.proposed",

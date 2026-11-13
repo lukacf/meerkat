@@ -90,9 +90,13 @@ to its connect timeout (`connect_timeout_secs`) plus at most 0.25 s (plus the
 TERM grace for a server that ignores SIGTERM), and its first turn starts
 after that. A member is constructed when the mob builds it. At the runtime's
 start the mob builds only the members `member_restore` names: under the
-default `on_demand`, the members that hold work, owe a kickoff, have a
-network transport endpoint or a host requirement; under `eager`, every
-member. The start restores `META_IDENTITY_RESTORE_CONCURRENCY` members at a
+default `on_demand`, the members that must be live: the members that hold
+recovery work, owe a kickoff, have a network transport endpoint, are wired
+to a placed member, are an orchestrator the mob notifies on resume, have no
+durable peer endpoint on record yet, or are required by the host (the full
+list is under `member_restore` in
+[Configuration](/reference/configuration#sdk-and-gateway-runtime-options));
+under `eager`, every member. The start restores `META_IDENTITY_RESTORE_CONCURRENCY` members at a
 time (16 by default, at most 16; 1 serializes them), so servers that never
 answer add about that timeout times ceil(built members / concurrency) to it.
 Every other member waits at its first wake. A failed connection completes

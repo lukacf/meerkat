@@ -36,7 +36,7 @@ async function stop(child) {
   if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
 }
 
-async function startFixture({ mode = "member", stateDir, liveImages = false, liveModel = false, routineTools = false, diagnoseStreams = false, sharedAssets = path.join(__dirname, ".tmp/acceptance"), allowExtraMembers = false, person = false } = {}) {
+async function startFixture({ mode = "member", stateDir, liveImages = false, liveModel = false, routineTools = false, diagnoseStreams = false, sharedAssets = path.join(__dirname, ".tmp/acceptance"), allowExtraMembers = false, person = false, identityPolicy = false, identityPreparation = false } = {}) {
   // Freeze the built production UI for this fixture lifetime. UI-only iterations
   // reuse the real Rust backend without recompiling its embedded asset bytes.
   const consoleAssets = new Map(await Promise.all([
@@ -50,6 +50,13 @@ async function startFixture({ mode = "member", stateDir, liveImages = false, liv
     env: { ...process.env, META_FIXTURE_ADDR: LOOPBACK_ANY_PORT, META_FIXTURE_MODE: mode,
       META_FIXTURE_LIVE_IMAGES: liveImages ? "1" : "0", META_FIXTURE_LIVE_MODEL: liveModel ? "1" : "0",
       META_FIXTURE_ROUTINE_TOOLS: routineTools ? "1" : "0",
+      // The fixture's identity policy (identity mode only): the runtime
+      // serves the changes of its long-term agents to the console.
+      META_FIXTURE_IDENTITY_POLICY: identityPolicy ? "1" : "0",
+      // A second profile, `prepared`, whose new agents the host prepares
+      // before their first use (the policy's `preparation`): a new one
+      // waits until the fixture's host settles it.
+      META_FIXTURE_IDENTITY_PREPARATION: identityPreparation ? "1" : "0",
       ...(stateDir ? { META_FIXTURE_STATE: stateDir } : {}) },
     stdio: ["ignore", "pipe", "pipe"],
   });

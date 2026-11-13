@@ -384,7 +384,9 @@ pub enum MemberWakeRefusal {
     /// on its own, a busy session, unavailable runtime authority, a hosting
     /// claim another owner holds, an external write authority that could not
     /// be checked without waiting, a provider credential whose source or
-    /// store cannot answer now or whose lookup is in flight).
+    /// store cannot answer now or whose lookup is in flight), or the mob's
+    /// identity store could not serve the row of a store-owned member for
+    /// its build, or holds a row of it this build cannot read.
     ResumeGateUnavailable,
     /// The mob's wake bound (`MobBuilder::with_member_wake_timeout`) ended
     /// before the member was ready. The member is dormant again.
@@ -2595,7 +2597,9 @@ pub(crate) fn comms_name_occupancy_holder(
 ) -> Option<meerkat_comms::PubKey> {
     // `RegistrationRejection` is `#[non_exhaustive]`: an `if let` states that
     // this seam recognises exactly one shape, where a wildcard match arm would
-    // look total and silently absorb a future rejection kind.
+    // look total and silently absorb a future rejection kind. `ZeroPubkey` and
+    // `InboxGone` (an inbox that already left the registry) are no occupancy
+    // facts: they answer `None`, and the caller reports the comms error as it is.
     if let meerkat_comms::CommsRuntimeError::InprocRegistrationRejected(
         meerkat_comms::RegistrationRejection::NameOccupied { holder_pubkey },
     ) = error
@@ -4050,6 +4054,14 @@ mod tests {
         assert!(
             comms_name_occupancy_holder(&zero_pubkey).is_none(),
             "a sibling registration rejection is not a name-occupancy fact"
+        );
+
+        let inbox_gone = meerkat_comms::CommsRuntimeError::InprocRegistrationRejected(
+            meerkat_comms::RegistrationRejection::InboxGone,
+        );
+        assert!(
+            comms_name_occupancy_holder(&inbox_gone).is_none(),
+            "an inbox that left the registry is not a name-occupancy fact"
         );
 
         let unrelated = meerkat_comms::CommsRuntimeError::AlreadyStarted;

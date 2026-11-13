@@ -1146,14 +1146,14 @@ untouched. Cancelling an idle member is not an error. The result is
 `{"mob_id": "...", "ok": true}`.
 
 <Warning>
-Known issue, noted 2026-11-13: on Meerkat releases through 0.9.14, if a
-client has a turn of its own queued on that member's session
+Known issue in 0.9.14 (earlier releases are being checked), noted 2026-11-13:
+if a client has a turn of its own queued on that member's session
 (`mob/turn_start`, or `turn/start` on the member's session id),
 `mob/cancel_all_work` also abandons it, and the mobs that member's session
-owns are then destroyed. See the
+owns are then destroyed. Work the mob itself admitted (member sends,
+submitted work) does not trigger this. See the
 [known issue on the 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14).
-Until you run a release with the fix, do not call it while such a turn is
-queued.
+Until a release with the fix, do not call it while such a turn is queued.
 </Warning>
 
 ## Flows

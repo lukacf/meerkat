@@ -117,6 +117,13 @@ repo-local `sdks/web` package, or from an installed `@rkat/web` package, into
 
 ## Usage
 
+The keys can be pre-filled for local work: the dev server (`npm --prefix web run dev`,
+on 127.0.0.1) reads `VITE_RKAT_ANTHROPIC_API_KEY`, `VITE_RKAT_OPENAI_API_KEY` and
+`VITE_RKAT_GEMINI_API_KEY`, or the same names without `RKAT_`, when they are set. A
+build never does: these variables are not exposed to `vite build`, so none of them is
+written into `web/dist` and a built page starts with no key. Keys typed into the page
+stay in the browser and go to the providers from there.
+
 1. Click **PRESS START**. If no key is configured, enter a key in the dialog and click **SAVE & START**.
 2. To select a model first, cancel the dialog, open **Settings** (gear), enter a key and select a model, then close Settings.
 3. Click the top-bar **Start** (or **Retry** after a startup failure). **LIVE** requires all 10 members, canonical peer targets, 26 comms wires and 10 event subscriptions. **Restart** tears down and recreates the office with the current settings.

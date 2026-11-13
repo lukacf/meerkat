@@ -1188,6 +1188,21 @@ them.
   that uses `xattr`, calls it only to set attributes while unpacking, so
   Meerkat's own use is not known to be affected.
 
+- Examples 031 (Mini Diplomacy Arena) and 033 (The Office): a build no
+  longer writes provider keys into its output. Both pages pre-fill their
+  key fields from `VITE_`-prefixed variables (`VITE_ANTHROPIC_API_KEY`,
+  `VITE_OPENAI_API_KEY`, `VITE_GEMINI_API_KEY`; 033 also the
+  `VITE_RKAT_*_API_KEY` forms), and Vite wrote every variable with that
+  prefix that was set at build time, in plain text, into
+  `web/dist/assets/`: 031 since 0.4.1 and 033 since 0.4.4, through 0.9.14
+  (read from the released sources; confirmed by a build of 0.9.14). The
+  READMEs did not mention these variables, so only a build made with them
+  set on purpose is affected. The prefix is now exposed only to the local
+  dev server; `vite build` exposes none of them, and each example has a
+  test that builds with marker values and fails if one reaches the output.
+  If you hosted or shared a `dist/` built with those variables set, rotate
+  those keys.
+
 ### Upgrade notes
 
 - A configuration document an earlier release wrote keeps its mode until

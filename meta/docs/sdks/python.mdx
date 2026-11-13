@@ -649,10 +649,11 @@ await rt.revoke_instruction("app.example", "tone", 2)
 
 A write returns once the record is durable; a refusal raises `RpcError` with
 `data["instruction_set_code"]` (for example `stale_revision`). A member
-target is for that member alone: `set_instruction` refuses a target that
-carries `include_forks`, and a record for a member and its forks is written
-by a Rust host that embeds Meta, through the mob handle's
-`set_operator_instruction` (`instruction_status` shows it). The status
+target is for that member alone. From 0.9.15 Meerkat has `include_forks`, a
+record for a member and its forks: `set_instruction` refuses a target that
+carries it, and such a record is written by a Rust host that embeds Meta,
+through the mob handle's `set_operator_instruction` (`instruction_status`
+shows it). The status
 read never wakes a member and names each member by its `identity`; its
 advisory values (a pending or blocked `reason`, `residency`) may be new to
 this SDK, so keep them as they are. These replace
@@ -1668,7 +1669,7 @@ from meerkat_meta.errors import (
     IdentityHostAdoptedError,          # A host adopted the identity, so Meta's verbs leave it alone (-32053)
     IdentityWakeHeldError,             # The wake is held until an operator acts (-32603): .kind names the hold
     ToolGrantRequestRefusedError,      # A refused meta/tool_grants/* request (-32602): .refusal_kind, .refusal
-    IdentityRefusedError,              # A refused meta/identity/* request (-32058): .kind, .field, .detail, .retryable, .details
+    IdentityRefusedError,              # From 0.9.15: a refused meta/identity/* request (-32058): .kind, .field, .detail, .retryable, .details
     RealmMcpRefusedError,              # A refused meta/realm_mcp/* request (-32602): .refusal_kind, .refusal
     RealmMcpUnavailableError,          # A realm MCP write could not be made now, or no credential store (-32004)
     RealmMcpOutcomeUnknownError,       # A realm MCP write began and its result is unknown (-32603)
@@ -1843,7 +1844,7 @@ from meerkat_meta import (
     AnnouncementFrontierError, AnnouncementRefusedError, AnnouncementNotFoundError,
     MOB_ANNOUNCEMENTS_UNAVAILABLE_CODE, ANNOUNCEMENT_CONFLICT_CODE,
     ANNOUNCEMENT_FRONTIER_CODE, ANNOUNCEMENT_REFUSED_CODE, ANNOUNCEMENT_NOT_FOUND_CODE,
-    # Long-term agents
+    # Long-term agents (from 0.9.15)
     IdentitiesHandle, AgentSpec, AgentSet, CreateAgents, UpdateAgent, AgentRef,
     SourceEvidence, AgentPage, AgentSummary, AgentRecord, AgentProvenance,
     AgentOutcome, InstructionOutcome, SchedulesFollowed, ScheduleRef,

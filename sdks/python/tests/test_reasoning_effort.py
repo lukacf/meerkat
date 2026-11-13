@@ -164,6 +164,28 @@ async def test_sdk_refuses_the_field_for_an_older_server_contract() -> None:
     assert [method for method, _ in calls] == ["session/create", "turn/start"]
 
 
+@pytest.mark.asyncio
+async def test_the_gate_is_the_first_contract_that_carries_the_option() -> None:
+    """A 0.9.15 server does not have the option and does not get the field;
+    a 0.9.16 server, the first contract that carries it, does."""
+    before, before_calls = fake_client("0.9.15")
+    refusal = r"reasoning_effort needs a server contract >= 0\.9\.16; this server reports 0\.9\.15"
+    with pytest.raises(CapabilityUnavailableError, match=refusal):
+        await before.create_session("hello", reasoning_effort="high")
+    with pytest.raises(CapabilityUnavailableError, match=refusal):
+        await session(before).turn("next", reasoning_effort="high")
+    with pytest.raises(CapabilityUnavailableError, match=refusal):
+        await before.mob_turn_start("mob-1", "worker", "next", reasoning_effort="high")
+    assert before_calls == [], "nothing is written to a 0.9.15 server"
+
+    carrier, carrier_calls = fake_client("0.9.16")
+    await carrier.create_session("hello", reasoning_effort="high")
+    await session(carrier).turn("next", reasoning_effort="low")
+    assert [method for method, _ in carrier_calls] == ["session/create", "turn/start"]
+    assert carrier_calls[0][1]["reasoning_effort"] == "high"
+    assert carrier_calls[1][1]["reasoning_effort"] == "low"
+
+
 # The refusal's data for a level the model does not accept.
 UNSUPPORTED = {
     "kind": "reasoning_effort_refused",

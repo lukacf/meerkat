@@ -178,6 +178,32 @@ describe("reasoningEffort on requests", () => {
       ["session/create", "turn/start"],
     );
   });
+
+  it("the gate is the first contract that carries the option", async () => {
+    // A 0.9.15 server does not have the option and does not get the field.
+    const before = recordingClient("0.9.15");
+    const refused = (error) =>
+      error instanceof CapabilityUnavailableError
+      && /reasoningEffort needs a server contract >= 0\.9\.16; this server reports 0\.9\.15/
+        .test(error.message);
+    const level = { reasoningEffort: "high" };
+    await assert.rejects(before.client.createSession("hello", level), refused);
+    await assert.rejects(session(before.client).turn("next", level), refused);
+    await assert.rejects(
+      before.client.mobTurnStart("mob-1", "worker", "next", level),
+      refused,
+    );
+    assert.deepEqual(before.sent, [], "nothing is written to a 0.9.15 server");
+
+    // A 0.9.16 server, the first contract that carries it, does.
+    const carrier = recordingClient("0.9.16");
+    await carrier.client.createSession("hello", level);
+    await session(carrier.client).turn("next", { reasoningEffort: "low" });
+    assert.deepEqual(
+      carrier.sent.map(({ method, params }) => [method, params.reasoning_effort]),
+      [["session/create", "high"], ["turn/start", "low"]],
+    );
+  });
 });
 
 // The refusal's data for a level the model does not accept.

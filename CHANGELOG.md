@@ -521,8 +521,11 @@ them.
     its own route; a custom wrapper must do the same, or the level is
     resolved without the wrapped client's default tag and compared with the
     wrong route.
-  The schema artifacts and the generated SDK types do not carry the new
-  members yet.
+  The schema artifacts carry the new event, the resolution and report types
+  and the `reasoning_effort` members of `run_started`, `run_resumed` and the
+  run result. The generated SDK types (Python, TypeScript, Web) carry the
+  event, the resolution type and the two run-start members; the SDKs' run
+  result type does not carry `reasoning_effort` yet.
 
 ### Changed
 

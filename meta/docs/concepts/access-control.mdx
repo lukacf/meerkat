@@ -44,7 +44,7 @@ There are no roles. Every check evaluates the caller's attributes (subject, grou
 | `workgraph.view` | Read WorkGraph snapshots, items, attention, events, and facts; observe the wake stream |
 | `workgraph.manage` | Mutate WorkGraph items, goals, links, and attention bindings |
 | `mob.observe` | Subscribe to whole-mob raw event streams |
-| `runtime.admin` | Routing tables, labels, wiring, reconcile, mob announcements |
+| `runtime.admin` | Routing tables, labels, wiring, reconcile, mob announcements; for the mob's long-term agents, the hold of their changes (`meta/identity/changes_hold`), a read of another requester's operation (`meta/identity/operation`), and the list of an agent's schedules that its archive, unarchive and removal and their plan answer (see [agent changes](/api/rpc#agent-changes)) |
 | `topology.view` | Inspect topology state for an agent; also requires `agent.view` |
 | `topology.connect` / `topology.disconnect` / `topology.reconnect` | Plan or apply the corresponding edge action; required independently on both endpoints |
 | `topology.bulk` | Submit more than one explicit topology operation in a bounded transaction |

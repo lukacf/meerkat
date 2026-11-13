@@ -327,11 +327,17 @@ fn change_call(
     Ok(IdentityChangeCall::new(operation_id, change))
 }
 
-/// The answer of a change: its typed outcome, or its refusal.
-fn outcome_answer(outcome: IdentityOutcome) -> Result<Value, IdentityRefusal> {
+/// The answer of a change: its typed outcome, or its refusal. A caller
+/// that is not given the lists of schedules
+/// ([`IdentityFamilySurface::lists_schedules`]) is answered without them.
+fn outcome_answer(
+    surface: &IdentityFamilySurface<'_>,
+    outcome: IdentityOutcome,
+) -> Result<Value, IdentityRefusal> {
     match outcome {
         IdentityOutcome::Refused(refusal) => Err(refusal),
-        outcome => Ok(outcome.to_json()),
+        outcome if surface.lists_schedules() => Ok(outcome.to_json()),
+        outcome => Ok(outcome.without_schedule_lists().to_json()),
     }
 }
 
@@ -344,6 +350,7 @@ async fn change_of<T: serde::de::DeserializeOwned>(
 ) -> Result<Value, IdentityRefusal> {
     let call = change_call(surface, spec(parse(params)?))?;
     outcome_answer(
+        surface,
         surface
             .family
             .change(surface.mob, &surface.requester, call)
@@ -388,6 +395,17 @@ impl IdentityFamilySurface<'_> {
         agent
             .open_operations
             .retain(|operation_id| self.reads_operation(operation_id));
+    }
+
+    /// Whether the caller is given the list of an agent's schedules, on
+    /// the answer of its archive, unarchive and removal and on their plan:
+    /// the stdio gateway's caller, and a Console caller that administers
+    /// the runtime. A schedule that targets an agent may be anybody's, so
+    /// every other caller is told what became of them and how many they
+    /// are, and no more.
+    fn lists_schedules(&self) -> bool {
+        self.access
+            .is_none_or(|view| view.allows(crate::access::ACTION_RUNTIME_ADMIN))
     }
 }
 
@@ -445,6 +463,7 @@ async fn settle_preparation(
     let request: SettlePreparation = parse(params)?;
     let operation_id = named_request(surface, request.request_id.as_deref())?;
     outcome_answer(
+        surface,
         surface
             .family
             .settle_preparation(
@@ -511,6 +530,14 @@ async fn operation(
         return Ok(operation_answer(&operation_id, &OperationState::Unknown));
     }
     match read(surface, IdentityRead::Operation(operation_id.clone())).await? {
+        IdentityReadAnswer::Operation(OperationState::Outcome(outcome))
+            if !surface.lists_schedules() =>
+        {
+            Ok(operation_answer(
+                &operation_id,
+                &OperationState::Outcome(outcome.without_schedule_lists()),
+            ))
+        }
         IdentityReadAnswer::Operation(state) => Ok(operation_answer(&operation_id, &state)),
         _ => Err(unexpected_answer()),
     }
@@ -581,7 +608,8 @@ async fn plan(
 ) -> Result<Value, IdentityRefusal> {
     let call = change_call(surface, planned_change(params)?)?;
     match read(surface, IdentityRead::Plan(Box::new(call))).await? {
-        IdentityReadAnswer::Plan(plan) => serialized(&plan),
+        IdentityReadAnswer::Plan(plan) if surface.lists_schedules() => serialized(&plan),
+        IdentityReadAnswer::Plan(plan) => serialized(&plan.without_schedule_list()),
         _ => Err(unexpected_answer()),
     }
 }

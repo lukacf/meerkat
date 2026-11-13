@@ -36294,6 +36294,16 @@ mod tests {
             );
             for probe in &probed {
                 assert_leveled_resolved(probe.as_ref(), ReasoningEffort::High, "a probe");
+                // A probe builds its request at once, on the client that
+                // resolved the level: it carries no route witness, so a
+                // route that changes between the two reads cannot fail the
+                // admission as a route change.
+                assert!(
+                    probe
+                        .as_ref()
+                        .is_some_and(|params| params.reasoning_route_witness.is_none()),
+                    "a probe carries no route witness: {probe:?}"
+                );
             }
         }
 
@@ -43883,6 +43893,597 @@ mod tests {
                 vec![budget_for("fixture-model")],
                 "the controller's summary is sized for the controller's window"
             );
+        }
+
+        /// The route of an account whose model list states `levels`.
+        fn account_route(
+            levels: &[crate::model_profile::capabilities::EffortLevel],
+        ) -> crate::ReasoningRouteObservation {
+            crate::ReasoningRouteObservation {
+                backend: crate::ReasoningBackend::OpenAi(
+                    crate::provider_matrix::OpenAiBackendKind::Copilot,
+                ),
+                api: crate::ModelApi::ChatCompletions,
+                account: crate::AccountLevelStatement::Stated(levels.to_vec()),
+                operator_levels: None,
+            }
+        }
+
+        /// What the retained controller's client may report of its route: no
+        /// route, which refuses every level as unknown; a route whose levels
+        /// are not the session's, which refuses the session's level as
+        /// unsupported; and a route that takes the session's level.
+        fn controller_routes() -> Vec<(&'static str, Option<crate::ReasoningRouteObservation>)> {
+            use crate::model_profile::capabilities::EffortLevel;
+            let routes = vec![
+                ("a controller that reports no route", None),
+                (
+                    "a controller route with other levels",
+                    Some(account_route(&[EffortLevel::Low])),
+                ),
+                (
+                    "a controller route that takes the level",
+                    Some(account_route(&[EffortLevel::High])),
+                ),
+            ];
+            let takes_the_level: Vec<bool> = routes
+                .iter()
+                .map(|(_, route)| {
+                    crate::supported_reasoning_levels(crate::Provider::OpenAI, route.as_ref(), None)
+                        .supported()
+                        .is_some_and(|levels| levels.contains(&EffortLevel::High))
+                })
+                .collect();
+            assert_eq!(
+                takes_the_level,
+                [false, false, true],
+                "the first two routes would refuse the session's level"
+            );
+            routes
+        }
+
+        /// The params of a session that holds the `high` reasoning effort
+        /// level and nothing else.
+        fn high_level_params() -> ProviderParamsOverride {
+            ProviderParamsOverride {
+                reasoning_effort: Some(crate::model_profile::capabilities::EffortLevel::High),
+                ..Default::default()
+            }
+        }
+
+        /// A client of the admitted controller selection that reports a
+        /// chosen reasoning route and records the provider params of every
+        /// request it is handed. Its own fixture client serves the model
+        /// requests; it writes a compaction summary itself.
+        struct RoutedController {
+            route: Option<crate::ReasoningRouteObservation>,
+            inner: Arc<FixtureClient>,
+            requests: Mutex<Vec<Option<ProviderParamsOverride>>>,
+            summaries: Mutex<Vec<Option<ProviderParamsOverride>>>,
+        }
+
+        impl RoutedController {
+            fn on(route: Option<crate::ReasoningRouteObservation>) -> Arc<Self> {
+                Arc::new(Self {
+                    route,
+                    inner: Arc::new(FixtureClient {
+                        requests: Mutex::new(Vec::new()),
+                        tool_first: false,
+                        authorizations: Mutex::new(Vec::new()),
+                        hosted_default: false,
+                    }),
+                    requests: Mutex::new(Vec::new()),
+                    summaries: Mutex::new(Vec::new()),
+                })
+            }
+
+            fn requests(&self) -> Vec<Option<ProviderParamsOverride>> {
+                self.requests.lock().unwrap().clone()
+            }
+
+            fn summaries(&self) -> Vec<Option<ProviderParamsOverride>> {
+                self.summaries.lock().unwrap().clone()
+            }
+        }
+
+        #[async_trait]
+        impl AgentLlmClient for RoutedController {
+            fn controller_model_selection(&self) -> Option<crate::ControllerModelSelection> {
+                Some(fixture_controller_selection())
+            }
+
+            fn reasoning_route(&self) -> Option<crate::ReasoningRouteObservation> {
+                self.route.clone()
+            }
+
+            fn prepare_request_attempt_authorized(
+                self: Arc<Self>,
+                messages: Arc<Vec<Message>>,
+                tools: Arc<[Arc<ToolDef>]>,
+                max_tokens: u32,
+                temperature: Option<f32>,
+                provider_params: Option<ProviderParamsOverride>,
+                authorization: Option<crate::LlmRequestAuthorization>,
+            ) -> Result<Arc<dyn AgentLlmRequestAttempt>, AgentError> {
+                self.requests.lock().unwrap().push(provider_params.clone());
+                Arc::clone(&self.inner).prepare_request_attempt_authorized(
+                    messages,
+                    tools,
+                    max_tokens,
+                    temperature,
+                    provider_params,
+                    authorization,
+                )
+            }
+
+            async fn stream_response(
+                &self,
+                _messages: &[Message],
+                _tools: &[Arc<ToolDef>],
+                _max_tokens: u32,
+                _temperature: Option<f32>,
+                _provider_params: Option<&ProviderParamsOverride>,
+            ) -> Result<crate::LlmStreamResult, AgentError> {
+                panic!("governed execution must not use the raw provider path")
+            }
+
+            async fn stream_response_authorized(
+                &self,
+                _messages: &[Message],
+                _tools: &[Arc<ToolDef>],
+                _max_tokens: u32,
+                _temperature: Option<f32>,
+                provider_params: Option<&ProviderParamsOverride>,
+                authorization: Option<crate::LlmRequestAuthorization>,
+            ) -> Result<crate::LlmStreamResult, AgentError> {
+                let authorization =
+                    authorization.expect("a governed compaction summary keeps its work");
+                assert!(authorization.usage() == ModelAuthorizationUse::Compaction);
+                self.summaries
+                    .lock()
+                    .unwrap()
+                    .push(provider_params.cloned());
+                authorization
+                    .prepare(fixture_model_facts(false))
+                    .map_err(AgentError::from)?
+                    .current()
+                    .map_err(AgentError::from)?;
+                Ok(crate::LlmStreamResult::new(
+                    vec![AssistantBlock::Text {
+                        text: "summary of the first input".into(),
+                        meta: None,
+                    }],
+                    StopReason::EndTurn,
+                    normalized_test_usage(self, Usage::default()),
+                ))
+            }
+
+            fn provider(&self) -> crate::Provider {
+                crate::Provider::OpenAI
+            }
+            fn model(&self) -> &'static str {
+                "fixture-model"
+            }
+        }
+
+        /// A session's own client on `route`, of no controller selection. It
+        /// records the provider params of every request it is handed. Its
+        /// first request is sent and answers with a tool call; each later one
+        /// is refused where it would be sent, so the run returns to the
+        /// retained controller.
+        struct RoutedSessionClient {
+            route: crate::ReasoningRouteObservation,
+            requests: Mutex<Vec<Option<ProviderParamsOverride>>>,
+            sent: AtomicUsize,
+        }
+
+        struct RoutedSessionAttempt(Arc<RoutedSessionClient>);
+
+        #[async_trait]
+        impl AgentLlmRequestAttempt for RoutedSessionAttempt {
+            fn request_pressure(
+                &self,
+            ) -> Result<Option<crate::ProviderRequestPressure>, AgentError> {
+                Ok(None)
+            }
+
+            async fn stream_response(
+                &self,
+                _assistant_message_id: crate::AssistantMessageId,
+            ) -> Result<crate::LlmStreamResult, AgentError> {
+                if self.0.sent.fetch_add(1, Ordering::Relaxed) > 0 {
+                    return Err(AgentError::OperationRefused {
+                        refusal: OperationRefused::new(OperationRefusalKind::Denied),
+                    });
+                }
+                Ok(crate::LlmStreamResult::new(
+                    vec![AssistantBlock::ToolUse {
+                        id: "session-call".into(),
+                        name: "lookup".into(),
+                        args: serde_json::value::RawValue::from_string("{}".into()).unwrap(),
+                        meta: None,
+                    }],
+                    StopReason::ToolUse,
+                    normalized_test_usage(self.0.as_ref(), Usage::default()),
+                ))
+            }
+        }
+
+        #[async_trait]
+        impl AgentLlmClient for RoutedSessionClient {
+            fn reasoning_route(&self) -> Option<crate::ReasoningRouteObservation> {
+                Some(self.route.clone())
+            }
+
+            fn prepare_request_attempt_authorized(
+                self: Arc<Self>,
+                _messages: Arc<Vec<Message>>,
+                _tools: Arc<[Arc<ToolDef>]>,
+                _max_tokens: u32,
+                _temperature: Option<f32>,
+                provider_params: Option<ProviderParamsOverride>,
+                authorization: Option<crate::LlmRequestAuthorization>,
+            ) -> Result<Arc<dyn AgentLlmRequestAttempt>, AgentError> {
+                let authorization =
+                    authorization.expect("governed context must reach the provider");
+                assert!(authorization.usage() == ModelAuthorizationUse::Inference);
+                self.requests.lock().unwrap().push(provider_params);
+                Ok(Arc::new(RoutedSessionAttempt(self)))
+            }
+
+            async fn stream_response(
+                &self,
+                _messages: &[Message],
+                _tools: &[Arc<ToolDef>],
+                _max_tokens: u32,
+                _temperature: Option<f32>,
+                _provider_params: Option<&ProviderParamsOverride>,
+            ) -> Result<crate::LlmStreamResult, AgentError> {
+                panic!("governed execution must not use the raw provider path")
+            }
+
+            fn provider(&self) -> crate::Provider {
+                crate::Provider::OpenAI
+            }
+            fn model(&self) -> &'static str {
+                "session-model"
+            }
+        }
+
+        /// Work under `policy` whose retained controller is `controller`.
+        fn routed_controller_work(
+            policy: Arc<dyn WorkAuthorization>,
+            controller: Arc<RoutedController>,
+        ) -> WorkAuthorizationContext {
+            WorkAuthorizationContext::new(
+                policy,
+                crate::exact_operation::OperationExecutionScope::Domain,
+            )
+            .with_controller_client(crate::ControllerModelClient::new(
+                fixture_controller_selection(),
+                controller,
+            ))
+            .expect("the controller client is of the admitted selection")
+        }
+
+        /// Every event a finished run published.
+        fn drained_events(
+            events: &mut mpsc::Receiver<crate::AgentEvent>,
+        ) -> Vec<crate::AgentEvent> {
+            let mut drained = Vec::new();
+            while let Ok(event) = events.try_recv() {
+                drained.push(event);
+            }
+            drained
+        }
+
+        /// The run of `events` completed once and neither failed nor retried.
+        fn assert_run_completed(events: &[crate::AgentEvent], what: &str) {
+            assert!(
+                !events.iter().any(|event| matches!(
+                    event,
+                    crate::AgentEvent::RunFailed { .. } | crate::AgentEvent::Retrying { .. }
+                )),
+                "{what}: the run neither failed nor retried"
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(event, crate::AgentEvent::RunCompleted { .. }))
+                    .count(),
+                1,
+                "{what}: the run completed"
+            );
+        }
+
+        /// The per-request reasoning effort reports among `events`, in order:
+        /// turn number, model and reported route.
+        fn request_effort_reports(
+            events: &[crate::AgentEvent],
+        ) -> Vec<(Option<u32>, String, crate::ReasoningRoute)> {
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    crate::AgentEvent::RequestReasoningEffortResolved {
+                        turn_number,
+                        resolution,
+                        ..
+                    } => Some((
+                        *turn_number,
+                        resolution.model.clone(),
+                        resolution.route.clone(),
+                    )),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// `params`, as a client was handed them, carry `high` resolved for
+        /// `route`: the route's own field, marked as resolved, no neutral
+        /// level, and `route` as the witness.
+        fn assert_high_resolved_for(
+            params: Option<&ProviderParamsOverride>,
+            route: &crate::ReasoningRouteObservation,
+            what: &str,
+        ) {
+            let params = params.unwrap_or_else(|| panic!("{what}: the request carries params"));
+            assert_eq!(
+                params.reasoning_effort, None,
+                "{what}: the neutral level never reaches a client"
+            );
+            let Some(ProviderTag::OpenAi(tag)) = params.provider_tag.as_ref() else {
+                panic!("{what}: the request carries the route's own field: {params:?}");
+            };
+            assert_eq!(
+                tag.reasoning_effort,
+                Some(crate::lifecycle::run_primitive::ReasoningEffort::High),
+                "{what}"
+            );
+            assert!(
+                tag.reasoning_effort_resolved,
+                "{what}: the level is marked as resolved for the route"
+            );
+            assert_eq!(
+                params.reasoning_route_witness.as_ref(),
+                Some(route),
+                "{what}: the witness is the route the level was resolved for"
+            );
+        }
+
+        /// `params`, as a client was handed them, carry nothing of a
+        /// reasoning effort level: no neutral level, no effort in a provider
+        /// tag, no resolved marker and no route witness.
+        fn assert_carries_no_level(params: Option<&ProviderParamsOverride>, what: &str) {
+            let Some(params) = params else {
+                return;
+            };
+            assert_eq!(
+                params.reasoning_effort, None,
+                "{what}: no neutral level: {params:?}"
+            );
+            assert_eq!(
+                crate::reasoning_effort::explicit_provider_effort(Some(params)),
+                None,
+                "{what}: no effort is written for the level: {params:?}"
+            );
+            assert!(
+                !matches!(
+                    params.provider_tag.as_ref(),
+                    Some(ProviderTag::OpenAi(tag)) if tag.reasoning_effort_resolved
+                ),
+                "{what}: nothing is marked as resolved: {params:?}"
+            );
+            assert_eq!(
+                params.reasoning_route_witness, None,
+                "{what}: no route was read for a level: {params:?}"
+            );
+        }
+
+        /// The session's reasoning effort level belongs to the session's own
+        /// model requests. A request the retained controller serves carries
+        /// none of it, whatever the controller's client reports of its route
+        /// (no route, and a route with other levels, would each refuse the
+        /// level): the run completes, the controller's client is handed no
+        /// neutral level, no effort written for one and no route witness, and
+        /// no request report is published for its request. The session's own
+        /// requests in the same run carry the level resolved for the
+        /// session's route, and the one that was sent is the run's only
+        /// report.
+        #[cfg(feature = "workspace-tests")]
+        #[tokio::test]
+        async fn a_controller_request_carries_no_session_reasoning_effort_level() {
+            use crate::model_profile::capabilities::EffortLevel;
+            let session_route = account_route(&[EffortLevel::High]);
+            for (what, controller_route) in controller_routes() {
+                let session_client = Arc::new(RoutedSessionClient {
+                    route: session_route.clone(),
+                    requests: Mutex::new(Vec::new()),
+                    sent: AtomicUsize::new(0),
+                });
+                let controller = RoutedController::on(controller_route);
+                let policy = Arc::new(FixturePolicy {
+                    hosted_denials: AtomicUsize::new(0),
+                    compaction_denials: AtomicUsize::new(0),
+                });
+                let mut agent = with_test_turn_state_handle(
+                    AgentBuilder::new()
+                        .model("session-model")
+                        .provider_params(high_level_params()),
+                )
+                .build_standalone(
+                    session_client.clone(),
+                    Arc::new(FullToolDispatcher::new(&["lookup"])),
+                    Arc::new(NoopStore),
+                )
+                .await;
+                let (tx, mut rx) = mpsc::channel(1024);
+                let result = agent
+                    .run_with_events_and_work_authorization(
+                        "look it up".to_string().into(),
+                        vec![],
+                        vec![],
+                        None,
+                        tx,
+                        Some(routed_controller_work(policy, controller.clone())),
+                    )
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "{what}: a controller request is never refused for the level: {error}"
+                        )
+                    });
+                let events = drained_events(&mut rx);
+                assert_run_completed(&events, what);
+                assert_eq!(
+                    result.text, "continued after local feedback",
+                    "{what}: the controller answered"
+                );
+
+                // The session's own requests: the tool turn's, which was
+                // sent, and the next one, which was refused where it would
+                // be sent. Both carry the level resolved for the session's
+                // route.
+                let session_requests = session_client.requests.lock().unwrap().clone();
+                assert_eq!(session_requests.len(), 2, "{what}");
+                for request in &session_requests {
+                    assert_high_resolved_for(request.as_ref(), &session_route, what);
+                }
+
+                // The controller's request carries nothing of the level.
+                assert!(
+                    matches!(
+                        controller.inner.authorizations.lock().unwrap().as_slice(),
+                        [ModelAuthorizationUse::ControllerInference]
+                    ),
+                    "{what}: one request, authorized as controller inference"
+                );
+                let controller_requests = controller.requests();
+                assert_eq!(controller_requests.len(), 1, "{what}");
+                assert_carries_no_level(controller_requests[0].as_ref(), what);
+
+                // Only the session's own sent request is reported.
+                assert_eq!(
+                    request_effort_reports(&events),
+                    vec![(Some(0), "session-model".to_string(), session_route.route())],
+                    "{what}: no report for the controller's request"
+                );
+                let report = result.reasoning_effort.unwrap_or_else(|| {
+                    panic!("{what}: the run reports the session's own sent request")
+                });
+                assert_eq!(
+                    report
+                        .sent
+                        .iter()
+                        .map(|row| (row.model.as_str(), row.requests))
+                        .collect::<Vec<_>>(),
+                    vec![("session-model", 1)],
+                    "{what}: the controller's request counts into no report"
+                );
+            }
+        }
+
+        /// A compaction summary the retained controller writes is not the
+        /// session's own model request either: it carries none of the
+        /// session's reasoning effort level, so a controller route that
+        /// would refuse the level cannot fail the compaction. The summary
+        /// reaches the controller's client with no level and no effort
+        /// written for one, the compaction completes, both runs complete,
+        /// and no request report is published for any of the controller's
+        /// requests.
+        #[cfg(feature = "workspace-tests")]
+        #[tokio::test]
+        async fn a_controller_summary_carries_no_session_reasoning_effort_level() {
+            use crate::model_profile::capabilities::EffortLevel;
+            for (what, controller_route) in controller_routes() {
+                // The session's own client is of the controller's selection
+                // and on a route that takes the session's level, so the
+                // retained controller serves every request of the session
+                // and writes its summary.
+                let session_client =
+                    RoutedController::on(Some(account_route(&[EffortLevel::High])));
+                let controller = RoutedController::on(controller_route);
+                let mut agent = with_test_turn_state_handle(
+                    AgentBuilder::new()
+                        .model("fixture-model")
+                        .provider_params(high_level_params()),
+                )
+                .compactor(Arc::new(DiscardingCompactor::new(1)))
+                .build_standalone(
+                    session_client.clone(),
+                    Arc::new(NoTools),
+                    Arc::new(NoopStore),
+                )
+                .await;
+                let work = routed_controller_work(
+                    ChurnPolicy::new([ChurnStep::Allow]),
+                    controller.clone(),
+                );
+                // The first run answers; the second compacts first.
+                let mut events = Vec::new();
+                for prompt in ["first retained input", "second input"] {
+                    let (tx, mut rx) = mpsc::channel(1024);
+                    let result = agent
+                        .run_with_events_and_work_authorization(
+                            prompt.to_string().into(),
+                            vec![],
+                            vec![],
+                            None,
+                            tx,
+                            Some(work.clone()),
+                        )
+                        .await;
+                    let run_events = drained_events(&mut rx);
+                    let failed_compactions: Vec<_> = run_events
+                        .iter()
+                        .filter(|event| matches!(event, crate::AgentEvent::CompactionFailed { .. }))
+                        .collect();
+                    assert!(
+                        failed_compactions.is_empty(),
+                        "{what}: the controller's summary is never refused for the level: \
+                         {failed_compactions:?}"
+                    );
+                    if let Err(error) = result {
+                        panic!("{what}: the run of {prompt:?} completes: {error}");
+                    }
+                    assert_run_completed(&run_events, what);
+                    events.extend(run_events);
+                }
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|event| matches!(
+                            event,
+                            crate::AgentEvent::CompactionCompleted { .. }
+                        ))
+                        .count(),
+                    1,
+                    "{what}: the compaction completed"
+                );
+
+                // The summary request reached the retained controller's
+                // client and carries nothing of the level.
+                let summaries = controller.summaries();
+                assert_eq!(summaries.len(), 1, "{what}");
+                assert_carries_no_level(summaries[0].as_ref(), what);
+                // Neither does a request of the controller's own turns.
+                let controller_requests = controller.requests();
+                assert!(
+                    controller_requests.len() >= 2,
+                    "{what}: the controller served both runs"
+                );
+                for request in &controller_requests {
+                    assert_carries_no_level(request.as_ref(), what);
+                }
+                assert!(
+                    session_client.requests().is_empty() && session_client.summaries().is_empty(),
+                    "{what}: nothing of the controller's work entered the session's own client"
+                );
+                let reports = request_effort_reports(&events);
+                assert!(
+                    reports.is_empty(),
+                    "{what}: no request was sent with the level: {reports:?}"
+                );
+            }
         }
 
         /// The work owner of one R3 action whose permission it can withdraw;

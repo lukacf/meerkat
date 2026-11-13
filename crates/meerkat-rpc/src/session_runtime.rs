@@ -17937,10 +17937,12 @@ mod tests {
     }
 
     /// [`HighStatingMockLlmClient`] that records the provider params of every
-    /// request it serves. While `states_levels` is off it reports no route,
-    /// as [`MockLlmClient`] does: no source states the levels it accepts.
+    /// request it serves and counts how often its route is read. While
+    /// `states_levels` is off it reports no route, as [`MockLlmClient`]
+    /// does: no source states the levels it accepts.
     struct RecordingHighStatingMockLlmClient {
         states_levels: AtomicBool,
+        route_reads: AtomicUsize,
         sent: StdMutex<Vec<Option<meerkat_core::lifecycle::run_primitive::ProviderTag>>>,
     }
 
@@ -17948,6 +17950,7 @@ mod tests {
         fn new() -> Arc<Self> {
             Arc::new(Self {
                 states_levels: AtomicBool::new(true),
+                route_reads: AtomicUsize::new(0),
                 sent: StdMutex::new(Vec::new()),
             })
         }
@@ -17974,6 +17977,7 @@ mod tests {
     #[async_trait]
     impl LlmClient for RecordingHighStatingMockLlmClient {
         fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+            self.route_reads.fetch_add(1, AtomicOrdering::SeqCst);
             if self.states_levels.load(AtomicOrdering::SeqCst) {
                 HighStatingMockLlmClient.reasoning_route()
             } else {
@@ -42348,6 +42352,497 @@ mod tests {
             1,
             "the refused turn made no provider request"
         );
+    }
+
+    /// A child mob the session owns, destroyed when its owner is archived.
+    #[cfg(feature = "mob")]
+    async fn insert_owned_child_mob(
+        mob_state: &Arc<meerkat_mob_mcp::MobMcpState>,
+        owner_session_id: &SessionId,
+    ) -> meerkat_mob::MobId {
+        let mob_id =
+            meerkat_mob::MobId::from(format!("owned-child-mob-{}", uuid::Uuid::new_v4().simple()));
+        let mut definition = meerkat_mob::MobDefinition::explicit(mob_id.clone());
+        definition.profiles.insert(
+            meerkat_mob::ProfileName::from("worker"),
+            meerkat_mob::ProfileBinding::Inline(Box::new(meerkat_mob::Profile {
+                model_fallback: None,
+                model: "claude-sonnet-4-5".to_string(),
+                provider: None,
+                self_hosted_server_id: None,
+                auth_binding: None,
+                image_generation_provider: None,
+                auto_compact_threshold: None,
+                resume_overrides: Vec::new(),
+                skills: Vec::new(),
+                tools: meerkat_mob::ToolConfig::default(),
+                peer_description: "worker".to_string(),
+                external_addressable: false,
+                backend: None,
+                runtime_mode: meerkat_mob::MobRuntimeMode::TurnDriven,
+                max_inline_peer_notifications: None,
+                output_schema: None,
+                provider_params: None,
+                durable: false,
+            })),
+        );
+        let handle = meerkat_mob::MobBuilder::new(definition, meerkat_mob::MobStorage::in_memory())
+            .with_owner_bridge_session_create_authority(owner_session_id.clone(), true, false)
+            .with_session_service(mob_state.session_service())
+            .allow_ephemeral_sessions(true)
+            .create()
+            .await
+            .expect("create a child mob the session owns");
+        mob_state.mob_insert_handle(mob_id.clone(), handle).await;
+        // The host has inserted every handle it holds: member lookups (the
+        // implicit mob's among them) are complete from here on.
+        mob_state.declare_mob_set_restored();
+        mob_id
+    }
+
+    /// A turn through the runtime whose level the session's route refuses
+    /// is the caller's one request, refused: it must not cost the session
+    /// anything else. The session owns a child mob that is destroyed when
+    /// its owner is archived, and holds an implicit mob and an MCP adapter.
+    /// After the refusal both mobs and the adapter are still there, the
+    /// session is still live under its runtime registration, and its next
+    /// turn runs.
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test]
+    async fn a_turn_level_the_route_refuses_costs_the_session_nothing_else() {
+        use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let temp = tempfile::tempdir().unwrap();
+        let calls = Arc::new(BlockingLlmCallWitness::default());
+        let release = Arc::new(Notify::new());
+        let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
+        let blocking: Arc<dyn LlmClient> = Arc::new(BlockingMockLlmClient {
+            calls: Arc::clone(&calls),
+            release: Arc::clone(&release),
+        });
+        runtime.set_default_llm_client(Some(Arc::clone(&blocking)));
+        let mob_state = Arc::new(
+            meerkat_mob_mcp::MobMcpState::new(
+                runtime.session_service(),
+                meerkat_mob::MobControlPrincipal::Owner,
+            )
+            .expect("construct runtime authority"),
+        );
+        runtime.set_mob_state(Arc::clone(&mob_state));
+        let session_id = runtime
+            .create_session(
+                AgentBuildConfig {
+                    llm_client_override: Some(blocking),
+                    ..AgentBuildConfig::new("claude-sonnet-4-5")
+                },
+                None,
+                None,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let spawn_turn =
+            |prompt: &'static str, overrides: Option<crate::handlers::turn::TurnOverrides>| {
+                let runtime = Arc::clone(&runtime);
+                let session_id = session_id.clone();
+                tokio::spawn(async move {
+                    let (event_tx, _event_rx) = mpsc::channel(100);
+                    runtime
+                        .start_turn_via_runtime(
+                            &session_id,
+                            prompt.into(),
+                            Vec::new(),
+                            event_tx,
+                            None,
+                            None,
+                            None,
+                            overrides,
+                        )
+                        .await
+                })
+            };
+        // The first turn materializes the session.
+        let first = spawn_turn("first", None);
+        wait_for_llm_calls(&calls, 1, "the first turn").await;
+        release.notify_one();
+        first.await.unwrap().expect("the first turn runs");
+
+        let child_mob = insert_owned_child_mob(&mob_state, &session_id).await;
+        let implicit_mob = mob_state
+            .get_or_create_implicit_mob_for_bridge_session(
+                &session_id.to_string(),
+                "claude-sonnet-4-5",
+            )
+            .await
+            .expect("the session's implicit mob");
+        let measure = || {
+            let runtime = Arc::clone(&runtime);
+            let mob_state = Arc::clone(&mob_state);
+            let session_id = session_id.clone();
+            let child_mob = child_mob.clone();
+            let implicit_mob = implicit_mob.clone();
+            async move {
+                (
+                    mob_state.handle_for(&child_mob).await.is_ok(),
+                    mob_state
+                        .find_implicit_mob_for_bridge_session(&session_id.to_string())
+                        .await
+                        == Some(implicit_mob),
+                    runtime.mcp_sessions.read().await.contains_key(&session_id),
+                    runtime.runtime_adapter.contains_session(&session_id).await,
+                    matches!(
+                        runtime.service.has_live_session(&session_id).await,
+                        Ok(true)
+                    ),
+                )
+            }
+        };
+        let untouched = (true, true, true, true, true);
+        assert_eq!(measure().await, untouched, "before the refused turn");
+
+        let refused = spawn_turn(
+            "refused",
+            Some(level_overrides(TurnMetadataOverride::Set(
+                EffortLevel::High,
+            ))),
+        )
+        .await
+        .unwrap()
+        .expect_err("a level the route does not accept is refused");
+        assert_eq!(refused.code, error::INVALID_PARAMS, "{refused:?}");
+
+        // What a failed start costs is taken after the caller is answered:
+        // give it time to show, and stop at the first loss.
+        let mut measured = measure().await;
+        for _ in 0..120 {
+            if measured != untouched {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            measured = measure().await;
+        }
+        assert_eq!(
+            measured, untouched,
+            "(child mob kept, implicit mob kept, MCP adapter kept, runtime registration kept, \
+             session still live)"
+        );
+
+        // The session keeps serving.
+        let next = spawn_turn("next", None);
+        wait_for_llm_calls(&calls, 2, "the next turn").await;
+        release.notify_one();
+        next.await.unwrap().expect("the next turn runs");
+    }
+
+    /// Every way a turn's target can carry a level its route refuses is
+    /// judged before the turn's input is admitted, on a live session: a
+    /// turn that names a level the route does not state, a turn whose new
+    /// provider params conflict with the level the session holds, and a
+    /// turn that names no level at all (a model-only switch) on a session
+    /// that holds one. Each is answered with the typed refusal; no input is
+    /// stored for it, the session's runtime registration and live identity
+    /// stay, and no provider request is made.
+    #[tokio::test]
+    async fn a_turn_whose_target_the_route_refuses_is_refused_before_admission() {
+        use meerkat_core::lifecycle::run_primitive::{
+            ProviderParamsOverride, TurnMetadataOverride,
+        };
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
+        let client = RecordingHighStatingMockLlmClient::new();
+        let session_client: Arc<dyn LlmClient> = client.clone();
+        runtime.set_default_llm_client(Some(Arc::clone(&session_client)));
+        let session_id = runtime
+            .create_session(
+                AgentBuildConfig {
+                    llm_client_override: Some(session_client),
+                    ..AgentBuildConfig::new("claude-sonnet-4-5")
+                },
+                None,
+                None,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let turn = |overrides: Option<crate::handlers::turn::TurnOverrides>| {
+            let runtime = Arc::clone(&runtime);
+            let session_id = session_id.clone();
+            async move {
+                let (event_tx, _event_rx) = mpsc::channel(100);
+                runtime
+                    .start_turn_via_runtime(
+                        &session_id,
+                        "Hello".into(),
+                        Vec::new(),
+                        event_tx,
+                        None,
+                        None,
+                        None,
+                        overrides,
+                    )
+                    .await
+            }
+        };
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
+        let stored_inputs = || {
+            let runtime = Arc::clone(&runtime);
+            let runtime_id = runtime_id.clone();
+            async move {
+                runtime
+                    .service
+                    .runtime_store()
+                    .load_input_states_strict(&runtime_id)
+                    .await
+                    .expect("the stored input rows are readable")
+                    .len()
+            }
+        };
+        // The live session's identity, or `None` when the session is not
+        // live any more.
+        let live_identity = || {
+            let runtime = Arc::clone(&runtime);
+            let session_id = session_id.clone();
+            async move {
+                runtime
+                    .service
+                    .export_live_session(&session_id)
+                    .await
+                    .ok()
+                    .and_then(|session| session.session_metadata())
+                    .map(|metadata| metadata.llm_identity())
+            }
+        };
+
+        // The session holds a level its route states.
+        turn(Some(level_overrides(TurnMetadataOverride::Set(
+            EffortLevel::High,
+        ))))
+        .await
+        .expect("a turn that sets a level the route states runs");
+        let inputs_before = stored_inputs().await;
+        let identity_before = live_identity().await;
+        assert!(identity_before.is_some(), "the session is live");
+        let requests_before = client.sent_efforts().len();
+
+        let budget_beside_the_level = crate::handlers::turn::TurnOverrides {
+            provider_params: Some(TurnMetadataOverride::Set(ProviderParamsOverride {
+                thinking_budget_tokens: Some(1024),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let model_only = crate::handlers::turn::TurnOverrides {
+            model: Some("claude-opus-4-5".to_string()),
+            ..Default::default()
+        };
+        for (trigger, overrides, route_states_levels, reason) in [
+            (
+                "a level the route does not state",
+                level_overrides(TurnMetadataOverride::Set(EffortLevel::Max)),
+                true,
+                "unsupported_level",
+            ),
+            (
+                "new provider params that conflict with the held level",
+                budget_beside_the_level,
+                true,
+                "conflicting_thinking_budget",
+            ),
+            (
+                "a model-only switch on a session that holds a level",
+                model_only,
+                false,
+                "supported_levels_unknown",
+            ),
+            (
+                "a level once no source states the route's levels",
+                level_overrides(TurnMetadataOverride::Set(EffortLevel::Low)),
+                false,
+                "supported_levels_unknown",
+            ),
+        ] {
+            client
+                .states_levels
+                .store(route_states_levels, AtomicOrdering::SeqCst);
+            let refused = turn(Some(overrides))
+                .await
+                .expect_err("a target the route refuses is refused");
+            assert_eq!(
+                refused.code,
+                error::INVALID_PARAMS,
+                "{trigger}: {refused:?}"
+            );
+            let data = refused.data.as_ref().expect("the typed refusal");
+            assert_eq!(data["kind"], "reasoning_effort_refused", "{trigger}");
+            assert_eq!(
+                data["reasoning_effort_refusal"]["reason"], reason,
+                "{trigger}: {refused:?}"
+            );
+            assert_eq!(
+                (
+                    stored_inputs().await,
+                    runtime.runtime_adapter.contains_session(&session_id).await,
+                    live_identity().await == identity_before,
+                    client.sent_efforts().len(),
+                ),
+                (inputs_before, true, true, requests_before),
+                "{trigger}: (stored inputs, runtime registered, live identity kept, provider \
+                 requests)"
+            );
+        }
+
+        // The session keeps serving at the level it holds.
+        client.states_levels.store(true, AtomicOrdering::SeqCst);
+        turn(None).await.expect("the session keeps serving");
+        assert_eq!(live_identity().await, identity_before);
+    }
+
+    /// A turn that names the level the session already holds changes
+    /// nothing, so it is no reconfiguration: the client's route is read
+    /// exactly as often as for a turn that names no level (no judgement, no
+    /// client built for a target), the live identity stays, and the request
+    /// is sent at the level. Naming the same level on every turn is the
+    /// plain use of the option. A turn that changes the level (here: clears
+    /// it) is still a reconfiguration. Directly and through the runtime.
+    #[tokio::test]
+    async fn a_turn_that_repeats_the_sessions_level_is_no_reconfiguration() {
+        use meerkat_core::lifecycle::run_primitive::{AnthropicEffort, TurnMetadataOverride};
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        for through_runtime in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let runtime = if through_runtime {
+                make_runtime_with_runtime_store(temp_factory(&temp), 10)
+            } else {
+                make_runtime(temp_factory(&temp), 10)
+            };
+            let client = RecordingHighStatingMockLlmClient::new();
+            let session_client: Arc<dyn LlmClient> = client.clone();
+            runtime.set_default_llm_client(Some(Arc::clone(&session_client)));
+            let session_id = runtime
+                .create_session(
+                    AgentBuildConfig {
+                        llm_client_override: Some(session_client),
+                        ..AgentBuildConfig::new("claude-sonnet-4-5")
+                    },
+                    None,
+                    None,
+                    Vec::new(),
+                )
+                .await
+                .unwrap();
+            let turn = |overrides: Option<crate::handlers::turn::TurnOverrides>| {
+                let runtime = Arc::clone(&runtime);
+                let session_id = session_id.clone();
+                async move {
+                    let (event_tx, _event_rx) = mpsc::channel(100);
+                    if through_runtime {
+                        runtime
+                            .start_turn_via_runtime(
+                                &session_id,
+                                "Hello".into(),
+                                Vec::new(),
+                                event_tx,
+                                None,
+                                None,
+                                None,
+                                overrides,
+                            )
+                            .await
+                    } else {
+                        runtime
+                            .start_turn(
+                                &session_id,
+                                "Hello".into(),
+                                event_tx,
+                                None,
+                                None,
+                                None,
+                                overrides,
+                            )
+                            .await
+                    }
+                }
+            };
+            let live_identity = || {
+                let runtime = Arc::clone(&runtime);
+                let session_id = session_id.clone();
+                async move {
+                    runtime
+                        .service
+                        .export_live_session(&session_id)
+                        .await
+                        .expect("live session")
+                        .session_metadata()
+                        .expect("live session metadata")
+                        .llm_identity()
+                }
+            };
+            let route_reads = || client.route_reads.load(AtomicOrdering::SeqCst);
+            let high = || level_overrides(TurnMetadataOverride::Set(EffortLevel::High));
+
+            // The session takes the level: a change, so a reconfiguration.
+            turn(Some(high())).await.expect("the level is set");
+            let identity = live_identity().await;
+            assert_eq!(
+                identity.provider_params,
+                Some(level_only_params(EffortLevel::High))
+            );
+
+            // What a turn that names no level costs in route reads.
+            let before = route_reads();
+            turn(None).await.expect("a plain turn runs");
+            let plain_reads = route_reads() - before;
+
+            // The same level again, twice: exactly a plain turn's reads.
+            for repeat in 0..2 {
+                let before = route_reads();
+                turn(Some(high())).await.expect("the same level runs");
+                assert_eq!(
+                    route_reads() - before,
+                    plain_reads,
+                    "through_runtime={through_runtime}, repeat {repeat}: a turn that repeats \
+                     the level reads the route as a plain turn does"
+                );
+                assert_eq!(
+                    live_identity().await,
+                    identity,
+                    "through_runtime={through_runtime}"
+                );
+            }
+            assert_eq!(
+                client.sent_efforts().last(),
+                Some(&Some(AnthropicEffort::High)),
+                "through_runtime={through_runtime}: the request is sent at the level"
+            );
+
+            // A turn that changes the level is a reconfiguration.
+            turn(Some(level_overrides(TurnMetadataOverride::Clear)))
+                .await
+                .expect("the level is cleared");
+            assert_eq!(
+                live_identity().await.provider_params,
+                None,
+                "through_runtime={through_runtime}"
+            );
+            // Clearing again asks for what the session already has.
+            let before = route_reads();
+            turn(Some(level_overrides(TurnMetadataOverride::Clear)))
+                .await
+                .expect("clearing no level runs");
+            let cleared_reads = route_reads() - before;
+            let before = route_reads();
+            turn(None).await.expect("a plain turn runs");
+            assert_eq!(
+                cleared_reads,
+                route_reads() - before,
+                "through_runtime={through_runtime}: clearing a level the session does not hold \
+                 reads the route as a plain turn does"
+            );
+        }
     }
 
     #[tokio::test]

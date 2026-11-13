@@ -2631,6 +2631,56 @@ mod tests {
             continue_session_properties.contains_key("enable_web_search"),
             "RestContinueSessionRequest schema missing live surface field enable_web_search"
         );
+        // The continue's `reasoning_effort` is described as its own type
+        // reads it: a bare level, the explicit set form whose value is a
+        // level, or clear. Its value is never another override's value type
+        // (the document merges components by name). Each documented form
+        // reads into the request type.
+        let level = serde_json::json!({ "$ref": "#/components/schemas/EffortLevel" });
+        assert_eq!(
+            continue_session_properties
+                .get("reasoning_effort")
+                .and_then(|schema| schema.get("anyOf")),
+            Some(&serde_json::json!([
+                level,
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "const": "set" },
+                        "value": level
+                    },
+                    "required": ["action", "value"]
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "const": "clear" }
+                    },
+                    "required": ["action"]
+                }
+            ])),
+            "the continue's reasoning_effort schema states the three forms of a level"
+        );
+        assert!(
+            components.contains_key("EffortLevel"),
+            "the level's own component is published"
+        );
+        for form in [
+            serde_json::json!("high"),
+            serde_json::json!({ "action": "set", "value": "high" }),
+            serde_json::json!({ "action": "clear" }),
+        ] {
+            let request: Result<crate::wire::RestContinueSessionRequest, _> =
+                serde_json::from_value(serde_json::json!({
+                    "session_id": "session",
+                    "prompt": "next",
+                    "reasoning_effort": form,
+                }));
+            assert!(
+                request.is_ok_and(|request| request.reasoning_effort.is_some()),
+                "the documented form {form} reads into the request type"
+            );
+        }
 
         let create_session = &rest_openapi["paths"]["/sessions"]["post"];
         assert_eq!(

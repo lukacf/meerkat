@@ -5448,4 +5448,460 @@ mod tests {
             panic!("expected MemberReset");
         }
     }
+
+    // --- A profile without a reasoning effort level keeps its stored shape ---
+
+    /// The provider params of a stored profile as the release before the
+    /// reasoning effort option read them: exactly these keys, any other
+    /// refused.
+    #[derive(Debug, Deserialize, PartialEq)]
+    #[serde(deny_unknown_fields)]
+    struct BeforeProviderParams {
+        #[serde(default)]
+        temperature: Option<f32>,
+        #[serde(default)]
+        top_p: Option<f32>,
+        #[serde(default)]
+        max_output_tokens: Option<u32>,
+        #[serde(default)]
+        reasoning: Option<Value>,
+        #[serde(default)]
+        thinking_budget_tokens: Option<u32>,
+        #[serde(default)]
+        provider_tag: Option<Value>,
+    }
+
+    /// The resume override vocabulary of the release before the reasoning
+    /// effort option: closed, exactly these three values.
+    #[derive(Debug, Deserialize, PartialEq)]
+    #[serde(rename_all = "snake_case")]
+    enum BeforeResumeOverrideField {
+        Model,
+        Provider,
+        ProviderParams,
+    }
+
+    /// The `provider_params` objects and `resume_overrides` arrays one
+    /// serialized record holds, as that release's strict types read them.
+    #[derive(Debug, Default, PartialEq)]
+    struct BeforeProfileParts {
+        provider_params: Vec<BeforeProviderParams>,
+        resume_overrides: Vec<Vec<BeforeResumeOverrideField>>,
+    }
+
+    /// The keys the reasoning effort option brought. None of them may sit
+    /// anywhere in a record whose profile names no level.
+    const REASONING_EFFORT_KEYS: [&str; 3] = [
+        "reasoning_effort",
+        "reasoning_route_witness",
+        "reasoning_effort_resolved",
+    ];
+
+    /// Every place in `value` where an object has a reasoning effort key.
+    fn reasoning_effort_key_paths(value: &Value, path: &str, found: &mut Vec<String>) {
+        match value {
+            Value::Object(map) => {
+                for (key, child) in map {
+                    let child_path = format!("{path}/{key}");
+                    if REASONING_EFFORT_KEYS.contains(&key.as_str()) {
+                        found.push(child_path.clone());
+                    }
+                    reasoning_effort_key_paths(child, &child_path, found);
+                }
+            }
+            Value::Array(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    reasoning_effort_key_paths(item, &format!("{path}/{index}"), found);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Every `resume_overrides` entry in `value` that is not one of the
+    /// three values the release before the option knew.
+    fn resume_override_values_outside_the_old_vocabulary(
+        value: &Value,
+        path: &str,
+        found: &mut Vec<String>,
+    ) {
+        match value {
+            Value::Object(map) => {
+                for (key, child) in map {
+                    let child_path = format!("{path}/{key}");
+                    if key == "resume_overrides" {
+                        match child.as_array() {
+                            Some(entries) => {
+                                for entry in entries {
+                                    let known = entry.as_str().is_some_and(|name| {
+                                        ["model", "provider", "provider_params"].contains(&name)
+                                    });
+                                    if !known {
+                                        found.push(format!("{child_path} holds {entry}"));
+                                    }
+                                }
+                            }
+                            None => found.push(format!("{child_path} is not an array: {child}")),
+                        }
+                    }
+                    resume_override_values_outside_the_old_vocabulary(child, &child_path, found);
+                }
+            }
+            Value::Array(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    resume_override_values_outside_the_old_vocabulary(
+                        item,
+                        &format!("{path}/{index}"),
+                        found,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Read every `provider_params` object and every `resume_overrides`
+    /// array of `value` through the strict types of the release before the
+    /// option. The first one they refuse is the error.
+    fn read_profile_parts_as_before(
+        value: &Value,
+        path: &str,
+        parts: &mut BeforeProfileParts,
+    ) -> Result<(), String> {
+        match value {
+            Value::Object(map) => {
+                for (key, child) in map {
+                    let child_path = format!("{path}/{key}");
+                    if key == "provider_params" && !child.is_null() {
+                        let params: BeforeProviderParams = serde_json::from_value(child.clone())
+                            .map_err(|error| format!("{child_path}: {error}"))?;
+                        parts.provider_params.push(params);
+                    }
+                    if key == "resume_overrides" {
+                        let fields: Vec<BeforeResumeOverrideField> =
+                            serde_json::from_value(child.clone())
+                                .map_err(|error| format!("{child_path}: {error}"))?;
+                        parts.resume_overrides.push(fields);
+                    }
+                    read_profile_parts_as_before(child, &child_path, parts)?;
+                }
+                Ok(())
+            }
+            Value::Array(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    read_profile_parts_as_before(item, &format!("{path}/{index}"), parts)?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// A profile whose provider params set a temperature and an output
+    /// limit, and whose resume overrides are the three older values.
+    fn profile_with_params_and_no_level() -> Profile {
+        Profile {
+            model_fallback: None,
+            model: "claude-sonnet-4-5".to_string(),
+            provider: Some(meerkat_core::Provider::Anthropic),
+            self_hosted_server_id: None,
+            auth_binding: None,
+            image_generation_provider: None,
+            auto_compact_threshold: None,
+            resume_overrides: vec![
+                crate::profile::ResumeOverrideField::Model,
+                crate::profile::ResumeOverrideField::Provider,
+                crate::profile::ResumeOverrideField::ProviderParams,
+            ],
+            skills: vec![],
+            tools: ToolConfig::default(),
+            peer_description: "A worker".to_string(),
+            external_addressable: false,
+            backend: None,
+            runtime_mode: MobRuntimeMode::AutonomousHost,
+            max_inline_peer_notifications: None,
+            output_schema: None,
+            provider_params: Some(
+                meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+                    temperature: Some(0.5),
+                    max_output_tokens: Some(512),
+                    ..Default::default()
+                },
+            ),
+            durable: false,
+        }
+    }
+
+    fn stored_event_value(kind: MobEventKind) -> Value {
+        let event = MobEvent {
+            cursor: 1,
+            timestamp: Utc::now(),
+            mob_id: MobId::from("test-mob"),
+            kind,
+        };
+        let encoded = encode_stored_mob_event(&event).expect("a mob event encodes");
+        serde_json::from_slice(&encoded).expect("a stored mob event is JSON")
+    }
+
+    /// One serialized record of a mob that embeds a profile.
+    struct StoredRecord {
+        name: &'static str,
+        /// The record holds the whole definition: the worker profile and the
+        /// plain one, which stores `provider_params: null` and an empty
+        /// `resume_overrides`. Any other record holds the worker profile only.
+        holds_definition: bool,
+        value: Value,
+    }
+
+    /// Every stored record of a mob that embeds `worker`: the definition
+    /// itself (with a second profile that has no provider params), the
+    /// stored events that hold the definition, the stored spawn event of a
+    /// member whose profile snapshot is `worker`, the portable profile made
+    /// from it, the identity intent row that holds that portable profile and
+    /// the member spec a placed spawn sends.
+    fn records_that_store(worker: &Profile) -> Vec<StoredRecord> {
+        use meerkat_contracts::wire::{
+            PortableDefinitionExtract, PortableMemberSpec, PortableSpawnOverlay,
+            PortableSystemPrompt, WireMobRuntimeMode,
+        };
+
+        let mut definition = sample_definition();
+        definition.profiles.insert(
+            ProfileName::from("worker"),
+            ProfileBinding::Inline(Box::new(worker.clone())),
+        );
+        let mut plain = worker.clone();
+        plain.provider_params = None;
+        plain.resume_overrides = Vec::new();
+        definition.profiles.insert(
+            ProfileName::from("plain"),
+            ProfileBinding::Inline(Box::new(plain)),
+        );
+
+        let identity = AgentIdentity::from("worker-1");
+        let mut spawned = MemberSpawnedEvent::new(
+            identity.clone(),
+            Generation::INITIAL,
+            FenceToken::new(7),
+            AgentRuntimeId::initial(identity.clone()),
+            ProfileName::from("worker"),
+        );
+        spawned.effective_profile_override = Some(worker.clone());
+
+        let portable = crate::portable_profile::project_portable_profile(
+            worker,
+            MobRuntimeMode::AutonomousHost,
+            &definition.models,
+            identity.as_str(),
+            "worker",
+            Vec::new(),
+        )
+        .expect("the profile has a portable form");
+
+        let (_, identity_intent) = crate::identity::identity_adoption_fixture_with(
+            MobId::from("test-mob"),
+            identity.clone(),
+            "adopt-1",
+            SessionId::new(),
+            |material| material.profile = portable.clone(),
+        );
+
+        let member_spec = PortableMemberSpec {
+            mob_id: "test-mob".to_string(),
+            profile_name: "worker".to_string(),
+            agent_identity: identity.as_str().to_string(),
+            profile: portable.clone(),
+            definition_extract: PortableDefinitionExtract::default(),
+            overlay: PortableSpawnOverlay {
+                context: None,
+                labels: None,
+                additional_instructions: None,
+                system_prompt: PortableSystemPrompt::Disable,
+                tool_access_policy: None,
+                tool_category_overrides: meerkat_core::ToolCategoryOverrides::default(),
+                application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
+                mob_tool_authority_context: None,
+                auth_binding: None,
+                budget_limits: None,
+                runtime_mode: WireMobRuntimeMode::AutonomousHost,
+                continuity_intent: Default::default(),
+            },
+            required_env_keys: Vec::new(),
+        };
+
+        let record = |name, holds_definition, value| StoredRecord {
+            name,
+            holds_definition,
+            value,
+        };
+        vec![
+            record(
+                "mob definition",
+                true,
+                serde_json::to_value(&definition).expect("a definition serializes"),
+            ),
+            record(
+                "stored mob-created event",
+                true,
+                stored_event_value(MobEventKind::MobCreated {
+                    definition: Box::new(definition.clone()),
+                }),
+            ),
+            record(
+                "stored definition-updated event",
+                true,
+                stored_event_value(MobEventKind::MobDefinitionUpdated {
+                    epoch: 2,
+                    definition: Box::new(definition),
+                }),
+            ),
+            record(
+                "stored member-spawned event",
+                false,
+                stored_event_value(MobEventKind::MemberSpawned(spawned)),
+            ),
+            record(
+                "portable profile",
+                false,
+                serde_json::to_value(&portable).expect("a portable profile serializes"),
+            ),
+            record(
+                "identity intent row",
+                false,
+                serde_json::to_value(&identity_intent).expect("an identity intent row serializes"),
+            ),
+            record(
+                "placed member spec",
+                false,
+                serde_json::to_value(&member_spec).expect("a member spec serializes"),
+            ),
+        ]
+    }
+
+    /// A mob whose profiles name no reasoning effort level, and whose resume
+    /// overrides do not claim it, stores what the release before the option
+    /// stored: no reasoning effort key anywhere, only the three older resume
+    /// override values, and provider params that release's strict type
+    /// takes, key for key. The same records with a level, or with the
+    /// resume override that claims it, are refused by those strict types, so
+    /// a level that reached the records without one would be seen here.
+    #[test]
+    fn a_definition_without_a_level_stores_no_key_the_older_strict_types_refuse() {
+        let worker = profile_with_params_and_no_level();
+        let records = records_that_store(&worker);
+        assert_eq!(records.len(), 7);
+
+        for StoredRecord {
+            name,
+            holds_definition,
+            value,
+        } in &records
+        {
+            let mut level_keys = Vec::new();
+            reasoning_effort_key_paths(value, "", &mut level_keys);
+            assert!(
+                level_keys.is_empty(),
+                "{name}: a record without a level has reasoning effort keys at {level_keys:?}: {value}"
+            );
+
+            let mut newer_values = Vec::new();
+            resume_override_values_outside_the_old_vocabulary(value, "", &mut newer_values);
+            assert!(
+                newer_values.is_empty(),
+                "{name}: resume overrides hold newer values: {newer_values:?}: {value}"
+            );
+
+            let mut parts = BeforeProfileParts::default();
+            read_profile_parts_as_before(value, "", &mut parts).unwrap_or_else(|error| {
+                panic!("{name}: the older strict types refuse the record: {error}: {value}")
+            });
+
+            let mut expected_overrides = vec![vec![
+                BeforeResumeOverrideField::Model,
+                BeforeResumeOverrideField::Provider,
+                BeforeResumeOverrideField::ProviderParams,
+            ]];
+            if *holds_definition {
+                // Profiles are stored in name order: "plain", then "worker".
+                expected_overrides.insert(0, Vec::new());
+            }
+            assert_eq!(
+                parts,
+                BeforeProfileParts {
+                    provider_params: vec![BeforeProviderParams {
+                        temperature: Some(0.5),
+                        top_p: None,
+                        max_output_tokens: Some(512),
+                        reasoning: None,
+                        thinking_budget_tokens: None,
+                        provider_tag: None,
+                    }],
+                    resume_overrides: expected_overrides,
+                },
+                "{name}: the older strict types read other profile parts: {value}"
+            );
+        }
+
+        // The stored provider params are, key for key, what that release
+        // wrote for the same profile.
+        let stored_worker = serde_json::to_value(&worker).expect("a profile serializes");
+        assert_eq!(
+            stored_worker["provider_params"],
+            json!({"temperature": 0.5, "max_output_tokens": 512})
+        );
+        assert_eq!(
+            stored_worker["resume_overrides"],
+            json!(["model", "provider", "provider_params"])
+        );
+
+        // Control: a level in the provider params is a key the older strict
+        // type refuses, in every record.
+        let mut leveled = worker.clone();
+        leveled
+            .provider_params
+            .as_mut()
+            .expect("the worker profile has provider params")
+            .reasoning_effort = Some(meerkat_core::model_profile::capabilities::EffortLevel::High);
+        for StoredRecord { name, value, .. } in records_that_store(&leveled) {
+            let mut level_keys = Vec::new();
+            reasoning_effort_key_paths(&value, "", &mut level_keys);
+            assert!(
+                level_keys
+                    .iter()
+                    .any(|path| path.ends_with("/provider_params/reasoning_effort")),
+                "{name}: a record with a level stores it in its provider params: {value}"
+            );
+            let refusal =
+                read_profile_parts_as_before(&value, "", &mut BeforeProfileParts::default())
+                    .expect_err("the older strict type refuses provider params with a level");
+            assert!(
+                refusal.contains("provider_params: unknown field `reasoning_effort`"),
+                "{name}: {refusal}"
+            );
+        }
+
+        // Control: the resume override that claims the level is a value the
+        // older closed vocabulary refuses, in every record.
+        let mut claiming = worker;
+        claiming
+            .resume_overrides
+            .push(crate::profile::ResumeOverrideField::ReasoningEffort);
+        for StoredRecord { name, value, .. } in records_that_store(&claiming) {
+            let mut newer_values = Vec::new();
+            resume_override_values_outside_the_old_vocabulary(&value, "", &mut newer_values);
+            assert!(
+                newer_values
+                    .iter()
+                    .any(|found| found.ends_with("/resume_overrides holds \"reasoning_effort\"")),
+                "{name}: a record that claims the level stores the claim: {value}"
+            );
+            let refusal =
+                read_profile_parts_as_before(&value, "", &mut BeforeProfileParts::default())
+                    .expect_err("the older closed vocabulary refuses the newer value");
+            assert!(
+                refusal.contains("resume_overrides: unknown variant `reasoning_effort`"),
+                "{name}: {refusal}"
+            );
+        }
+    }
 }

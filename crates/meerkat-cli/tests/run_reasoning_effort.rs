@@ -625,7 +625,8 @@ fn cli_refusal_prints_the_failure_document_and_exits_2() {
     assert!(text.stderr.contains("Error: "), "stderr:\n{}", text.stderr);
 
     // A level and a different level as a param are refused by the CLI
-    // itself, before anything runs.
+    // itself, before anything runs: an invalid request, exit status 2, as
+    // JSON-RPC and REST answer the same disagreement.
     let disagree = run_turn(
         &roots,
         DECLARED_MODEL,
@@ -636,7 +637,7 @@ fn cli_refusal_prints_the_failure_document_and_exits_2() {
             "reasoning_effort=low",
         ],
     );
-    assert_ne!(disagree.status, Some(0), "stderr:\n{}", disagree.stderr);
+    assert_eq!(disagree.status, Some(2), "stderr:\n{}", disagree.stderr);
     assert!(
         disagree.stderr.contains("reasoning_effort is 'high'")
             && disagree
@@ -645,6 +646,31 @@ fn cli_refusal_prints_the_failure_document_and_exits_2() {
         "stderr:\n{}",
         disagree.stderr
     );
+    assert!(
+        disagree.stdout.trim().is_empty(),
+        "stdout: {:?}",
+        disagree.stdout
+    );
+    // With JSON output the failure document names the same class: invalid
+    // params. The disagreement is not a route's refusal, so the document
+    // carries no refusal details.
+    let disagree = run_turn(
+        &roots,
+        DECLARED_MODEL,
+        &[
+            "--reasoning-effort",
+            "high",
+            "--param",
+            "reasoning_effort=low",
+            "--output",
+            "json",
+        ],
+    );
+    assert_eq!(disagree.status, Some(2), "stderr:\n{}", disagree.stderr);
+    let document = only_document(&disagree);
+    assert_eq!(document["error"]["code"], "INVALID_PARAMS", "{document}");
+    assert_eq!(document["error"]["category"], "validation", "{document}");
+    assert!(document["error"].get("details").is_none(), "{document}");
 
     assert_eq!(
         provider.request_count(),

@@ -1054,12 +1054,12 @@ async fn preference_on_a_copilot_route_uses_the_account_list() {
         (
             AccountLevelStatement::NotStated,
             EffortLevel::Low,
-            ReasoningLoweringOutcome::NotApplied(ReasoningNotAppliedReason::UnknownSupportedLevels),
+            ReasoningLoweringOutcome::NotApplied(ReasoningNotAppliedReason::NoCatalogFact),
         ),
         (
             AccountLevelStatement::ListUnavailable,
             EffortLevel::Low,
-            ReasoningLoweringOutcome::NotApplied(ReasoningNotAppliedReason::UnknownSupportedLevels),
+            ReasoningLoweringOutcome::NotApplied(ReasoningNotAppliedReason::NoCatalogFact),
         ),
     ] {
         let mut client = RouteClient::new(Some(copilot(account.clone())));

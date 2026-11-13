@@ -11945,6 +11945,63 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
         );
     }
 
+    /// A refused reasoning effort level is a typed tool error, as JSON-RPC
+    /// answers it: invalid params with the typed refusal as the error's
+    /// data, never an internal error whose text a host would have to read.
+    /// After the call created its session the data also names the session.
+    #[test]
+    fn test_a_refused_reasoning_effort_is_a_typed_tool_error() {
+        let session_id = meerkat::SessionId::new();
+        for (reason, retryable) in [
+            ("unsupported_level", false),
+            ("supported_levels_unavailable", true),
+        ] {
+            let document = json!({
+                "requested": "max", "provider": "anthropic", "model": "claude-opus-4-5",
+                "route": {"backend": "anthropic_api", "api": "messages"},
+                "reason": reason, "supported": null, "facts": null,
+            });
+            let refusal: meerkat_core::ReasoningEffortRefusal =
+                serde_json::from_value(document.clone()).expect("a refusal document reads");
+            let refused = || {
+                SessionError::Agent(meerkat::AgentError::ReasoningEffortRefused(Box::new(
+                    refusal.clone(),
+                )))
+            };
+            let typed = json!({
+                "kind": "reasoning_effort_refused",
+                "retryable": retryable,
+                "reasoning_effort_refusal": document,
+            });
+
+            let err = format_agent_result_tool(Err(refused()), &session_id)
+                .expect_err("a refused level is a tool error");
+            assert_eq!(err.code, -32602, "{reason}");
+            assert_eq!(err.message, format!("agent error: {refusal}"), "{reason}");
+            assert_eq!(err.data, Some(typed.clone()), "{reason}");
+
+            let err = post_commit_session_created_error(&session_id, &refused());
+            assert_eq!(err.code, -32602, "{reason}");
+            let data = err.data.expect("the typed data");
+            for (key, value) in typed.as_object().expect("an object") {
+                assert_eq!(&data[key], value, "{reason}: {key}");
+            }
+            assert_eq!(data["session_id"], session_id.to_string(), "{reason}");
+            assert_eq!(data["session_created"], true, "{reason}");
+            assert_eq!(data["resumable"], true, "{reason}");
+
+            // A reconfiguration's refusal reaches the same answer.
+            let from_driver = runtime_driver_error_to_session_error(
+                meerkat_runtime::RuntimeDriverError::ReasoningEffortRefused(Box::new(
+                    refusal.clone(),
+                )),
+            );
+            let err = format_agent_result_tool(Err(from_driver), &session_id)
+                .expect_err("a refused level is a tool error");
+            assert_eq!((err.code, err.data), (-32602, Some(typed)), "{reason}");
+        }
+    }
+
     #[test]
     fn test_format_agent_result_tool_preserves_cancelled_error_code() {
         let session_id = meerkat::SessionId::new();

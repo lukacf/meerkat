@@ -47,6 +47,17 @@ and must answer:
     differ per surface, so they are not asserted.
 (c) the project skill, which the capability filter drops when `sessions` is
     not registered.
+(d) rkat-rpc only: a mob member it spawns carries the built-in
+    `mob-communication` skill, which every member build preloads. A member
+    build drops a preload it cannot resolve with a warning in the server's
+    log and goes on, so on a binary without registrations a member runs
+    without its mob instructions and nothing fails. The check starts rkat-rpc
+    a second time, in the reserved `global` realm of a scratch home whose
+    configuration declares a self-hosted model on a loopback port the check
+    itself holds (auth method `none`, every request answered 500), creates a
+    mob, spawns one member whose profile enables comms only, and requires
+    the first heading of the registered skill's body file in the member's
+    stored prompt. No provider secret, and no request leaves the machine.
 
 The expected names come from the source, so a registration added to the
 source is expected of every binary from that commit on.
@@ -67,6 +78,7 @@ one init-array table, 2 = usage error or the binary did not answer.
 
 from __future__ import annotations
 
+import http.server
 import json
 import os
 import platform
@@ -173,6 +185,7 @@ def elf_init_array_tables(path: Path) -> int | None:
 SUBMIT = "inventory::submit!"
 SKILL_HEAD = re.compile(r"\s*\{\s*(?:[A-Za-z_]+::)*SkillRegistration\s*\{\s*id:\s*([^,\n]+),")
 SKILL_REQUIRES = re.compile(r"requires_capabilities:\s*&\[([^\]]*)\]")
+SKILL_BODY = re.compile(r'body:\s*include_str!\(\s*"([^"]+)"\s*\)')
 CAPABILITY_HEAD = re.compile(
     r"\s*\{\s*(?:[A-Za-z_]+::)*CapabilityRegistration\s*\{\s*id:\s*(?:[A-Za-z_]+::)*CapabilityId::([A-Za-z0-9]+)\s*,"
 )
@@ -208,8 +221,18 @@ def registered(source_root: Path) -> tuple[dict[str, str], dict[str, tuple[str, 
     """(capability id -> registering file, built-in skill id -> (registering
     file, required capabilities)) for every `inventory::submit!` under
     crates/*/src."""
+    capabilities, skills, _ = registrations(source_root)
+    return capabilities, skills
+
+
+def registrations(
+    source_root: Path,
+) -> tuple[dict[str, str], dict[str, tuple[str, list[str]]], dict[str, Path]]:
+    """`registered`, plus built-in skill id -> the file its registration
+    includes as the skill's body (`body: include_str!("...")`), where it does."""
     capabilities: dict[str, str] = {}
     skills: dict[str, tuple[str, list[str]]] = {}
+    bodies: dict[str, Path] = {}
     for texts in crate_sources(source_root):
         for path, text in texts.items():
             where = path.relative_to(source_root).as_posix()
@@ -235,13 +258,31 @@ def registered(source_root: Path) -> tuple[dict[str, str], dict[str, tuple[str, 
                 if key in skills:
                     raise NoAnswer(f"skill `{key}` is registered twice: {skills[key][0]} and {where}")
                 skills[key] = (where, re.findall(r'"([^"]+)"', requires.group(1)))
+                body = SKILL_BODY.search(block)
+                if body:
+                    bodies[key] = (path.parent / body.group(1)).resolve()
     if REQUIRED_CAPABILITY not in capabilities or not any(not needs for _, needs in skills.values()):
         raise NoAnswer(
             f"{source_root / 'crates'} registers {len(capabilities)} capabilities and {len(skills)} built-in "
             f"skills, without `{REQUIRED_CAPABILITY}` or without a skill that requires no capability: not a "
             "Meerkat checkout, or the registrations moved"
         )
-    return capabilities, skills
+    return capabilities, skills, bodies
+
+
+def skill_heading(skill: str, bodies: dict[str, Path]) -> str:
+    """The first Markdown heading of a registered skill's body: the line a
+    prompt that carries the body contains."""
+    body = bodies.get(skill)
+    if body is None or not body.is_file():
+        raise NoAnswer(
+            f"the source registers no `{skill}` skill with a body file (`body: include_str!(...)`): "
+            "the mob member check needs its text"
+        )
+    for line in body.read_text(encoding="utf-8").splitlines():
+        if line.startswith("# ") and line[2:].strip():
+            return line.strip()
+    raise NoAnswer(f"{body} has no Markdown heading to look for in a member's prompt")
 
 
 # ---------------------------------------------------------------------------
@@ -311,97 +352,103 @@ def ask_rkat(binary: Path, scratch: Path) -> tuple[dict, list]:
     return answers[0], answers[1]
 
 
-def stdio_exchange(binary: Path, scratch: Path, requests: list[dict], wanted: list[int]) -> dict[int, dict]:
-    """Send newline-delimited JSON-RPC requests, then read lines until every
-    wanted id has answered. Stdin stays open while reading: both servers stop
-    at end of input."""
-    process = subprocess.Popen(
-        [str(binary), *realm_args(scratch)],
-        cwd=scratch / "project",
-        env=clean_env(scratch),
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    answers: dict[int, dict] = {}
-    lines: queue.Queue = queue.Queue()
-    stderr_text: list[str] = []
+class StdioServer:
+    """A release binary that speaks newline-delimited JSON-RPC on stdio.
+    Stdin stays open until `close`: both servers stop at end of input."""
 
-    def read_stdout() -> None:
-        for line in process.stdout:
-            lines.put(line)
-        lines.put(None)
+    def __init__(self, binary: Path, scratch: Path, extra_args: tuple[str, ...] = ()):
+        self.process = subprocess.Popen(
+            [str(binary), *realm_args(scratch), *extra_args],
+            cwd=scratch / "project",
+            env=clean_env(scratch),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.lines: queue.Queue = queue.Queue()
+        self.stderr_text: list[str] = []
+        self.next_id = 0
+        self.readers = [
+            threading.Thread(target=self._read_stdout, daemon=True),
+            threading.Thread(target=self._read_stderr, daemon=True),
+        ]
+        for reader in self.readers:
+            reader.start()
 
-    def read_stderr() -> None:
-        stderr_text.append(process.stderr.read())
+    def _read_stdout(self) -> None:
+        for line in self.process.stdout:
+            self.lines.put(line)
+        self.lines.put(None)
 
-    readers = [
-        threading.Thread(target=read_stdout, daemon=True),
-        threading.Thread(target=read_stderr, daemon=True),
-    ]
-    for reader in readers:
-        reader.start()
-    try:
-        for request in requests:
-            process.stdin.write(json.dumps(request) + "\n")
-        process.stdin.flush()
+    def _read_stderr(self) -> None:
+        self.stderr_text.append(self.process.stderr.read())
+
+    def _send(self, message: dict) -> None:
+        try:
+            self.process.stdin.write(json.dumps(message) + "\n")
+            self.process.stdin.flush()
+        except OSError as err:
+            raise NoAnswer(f"stopped reading requests: {err}") from err
+
+    def notify(self, method: str) -> None:
+        self._send({"jsonrpc": "2.0", "method": method})
+
+    def call(self, method: str, params: dict | None = None) -> dict:
+        """The `result` of one request; an error answer or no answer in time
+        is `NoAnswer`."""
+        self.next_id += 1
+        request = {"jsonrpc": "2.0", "id": self.next_id, "method": method}
+        if params is not None:
+            request["params"] = params
+        self._send(request)
         deadline = time.monotonic() + ANSWER_TIMEOUT_SECS
-        while len(answers) < len(wanted):
+        while True:
             remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            try:
-                line = lines.get(timeout=remaining)
-            except queue.Empty:
-                break
+            line = None
+            if remaining > 0:
+                try:
+                    line = self.lines.get(timeout=remaining)
+                except queue.Empty:
+                    line = None
             if line is None:
-                break
+                self.close()
+                raise NoAnswer(f"no answer to `{method}`: {''.join(self.stderr_text).strip()[-600:]}")
             try:
                 message = json.loads(line)
             except ValueError:
                 continue
-            if isinstance(message, dict) and message.get("id") in wanted:
-                answers[message["id"]] = message
-    except OSError as err:
-        raise NoAnswer(f"stopped reading requests: {err}") from err
-    finally:
+            if not isinstance(message, dict) or message.get("id") != self.next_id:
+                continue
+            if message.get("error"):
+                raise NoAnswer(f"`{method}` failed: {json.dumps(message['error'])[:600]}")
+            result = message.get("result")
+            return result if isinstance(result, dict) else {}
+
+    def close(self) -> None:
         try:
-            process.stdin.close()
+            self.process.stdin.close()
         except OSError:
             pass
         try:
-            process.wait(timeout=20)
+            self.process.wait(timeout=20)
         except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
-        for reader in readers:
+            self.process.kill()
+            self.process.wait()
+        for reader in self.readers:
             reader.join(timeout=5)
-    missing = [request_id for request_id in wanted if request_id not in answers]
-    if missing:
-        raise NoAnswer(f"no answer to request {missing}: {''.join(stderr_text).strip()[-600:]}")
-    for request_id, message in answers.items():
-        if message.get("error"):
-            raise NoAnswer(f"request {request_id} failed: {json.dumps(message['error'])[:600]}")
-    return answers
 
 
 def ask_rkat_rpc(binary: Path, scratch: Path) -> tuple[dict, dict]:
-    answers = stdio_exchange(
-        binary,
-        scratch,
-        [
-            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
-            {"jsonrpc": "2.0", "id": 2, "method": "capabilities/get"},
-            {"jsonrpc": "2.0", "id": 3, "method": "skills/list"},
-        ],
-        [2, 3],
-    )
-    return answers[2]["result"], answers[3]["result"]
+    server = StdioServer(binary, scratch)
+    try:
+        server.call("initialize", {})
+        return server.call("capabilities/get"), server.call("skills/list")
+    finally:
+        server.close()
 
 
-def mcp_tool_payload(message: dict) -> dict:
-    result = message.get("result") or {}
+def mcp_tool_payload(result: dict) -> dict:
     if result.get("isError"):
         raise NoAnswer(f"tool call failed: {json.dumps(result)[:600]}")
     structured = result.get("structuredContent")
@@ -419,35 +466,124 @@ def mcp_tool_payload(message: dict) -> dict:
 
 
 def ask_rkat_mcp(binary: Path, scratch: Path) -> tuple[dict, dict]:
-    def call(request_id: int, tool: str, arguments: dict) -> dict:
-        return {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "method": "tools/call",
-            "params": {"name": tool, "arguments": arguments},
-        }
-
-    answers = stdio_exchange(
-        binary,
-        scratch,
-        [
+    server = StdioServer(binary, scratch)
+    try:
+        server.call(
+            "initialize",
             {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2025-06-18",
-                    "capabilities": {},
-                    "clientInfo": {"name": "check-release-binary-registrations", "version": "1"},
-                },
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "check-release-binary-registrations", "version": "1"},
             },
-            {"jsonrpc": "2.0", "method": "notifications/initialized"},
-            call(2, "meerkat_capabilities", {}),
-            call(3, "meerkat_skills", {"action": "list"}),
-        ],
-        [2, 3],
+        )
+        server.notify("notifications/initialized")
+        return (
+            mcp_tool_payload(server.call("tools/call", {"name": "meerkat_capabilities", "arguments": {}})),
+            mcp_tool_payload(server.call("tools/call", {"name": "meerkat_skills", "arguments": {"action": "list"}})),
+        )
+    finally:
+        server.close()
+
+
+# The one skill every mob member build preloads (crates/meerkat-mob/src/build.rs).
+MEMBER_SKILL = "mob-communication"
+# Binaries on which the check spawns a mob member: the server the SDKs start.
+MEMBER_SURFACES = ("rkat-rpc",)
+MEMBER_MODEL = "registration-check-model"
+MEMBER_CONFIG = """
+[self_hosted.servers.registration-check]
+transport = "openai_compatible"
+base_url = "http://127.0.0.1:{port}"
+api_style = "chat_completions"
+
+[self_hosted.models.{model}]
+server = "registration-check"
+remote_model = "{model}"
+display_name = "Registration check"
+family = "registration-check"
+tier = "supported"
+context_window = 32000
+max_output_tokens = 1024
+
+[realm.global]
+default_binding = "registration-check"
+
+[realm.global.backend.registration-check]
+provider = "self_hosted"
+backend_kind = "self_hosted"
+server = "registration-check"
+
+[realm.global.auth.registration-check-auth]
+provider = "self_hosted"
+auth_method = "none"
+source = {{ kind = "platform_default" }}
+
+[realm.global.binding.registration-check]
+backend_profile = "registration-check"
+auth_profile = "registration-check-auth"
+"""
+
+
+class _NoModel(http.server.BaseHTTPRequestHandler):
+    """The member's model server: it answers every request with HTTP 500."""
+
+    def _refuse(self) -> None:
+        self.rfile.read(int(self.headers.get("Content-Length", "0") or 0))
+        body = b'{"error":{"message":"registration check: no model is served here"}}'
+        self.send_response(500)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    do_GET = do_POST = _refuse
+
+    def log_message(self, *args) -> None:  # noqa: A003
+        pass
+
+
+def member_prompt(binary: Path, scratch: Path) -> str:
+    """Spawn one mob member on rkat-rpc and return its stored prompt.
+
+    No provider secret and no request off the machine: the member's model is
+    a self-hosted alias whose server is a loopback port this check holds and
+    whose auth method is `none`. The profile enables comms only, so the
+    member build preloads the built-in `mob-communication` skill and no other.
+    """
+    model_server = http.server.HTTPServer(("127.0.0.1", 0), _NoModel)
+    threading.Thread(target=model_server.serve_forever, daemon=True).start()
+    user_rkat = scratch / "home" / ".rkat"
+    user_rkat.mkdir(parents=True, exist_ok=True)
+    (user_rkat / "config.toml").write_text(
+        MEMBER_CONFIG.format(port=model_server.server_address[1], model=MEMBER_MODEL), encoding="utf-8"
     )
-    return mcp_tool_payload(answers[2]), mcp_tool_payload(answers[3])
+    (scratch / "project").mkdir(exist_ok=True)
+    server = StdioServer(binary, scratch, ("--realm", "global"))
+    try:
+        server.call("initialize", {})
+        mob = "registration-check"
+        profile = {
+            "model": MEMBER_MODEL,
+            "provider": "self_hosted",
+            "self_hosted_server_id": "registration-check",
+            "tools": {"comms": True},
+            "peer_description": "registration check member",
+        }
+        created = server.call("mob/create", {"definition": {"id": mob, "profiles": {"member": profile}}})
+        mob = str(created.get("mob_id") or mob)
+        server.call("mob/spawn", {"mob_id": mob, "profile": "member", "agent_identity": "member-1"})
+        deadline = time.monotonic() + ANSWER_TIMEOUT_SECS
+        while True:
+            history = json.dumps(server.call("mob/member_history", {"mob_id": mob, "agent_identity": "member-1"}))
+            if '"system"' in history:
+                return history
+            if time.monotonic() >= deadline:
+                raise NoAnswer(f"the spawned member stored no prompt within {ANSWER_TIMEOUT_SECS} s: {history[:300]}")
+            time.sleep(0.5)
+    finally:
+        server.close()
+        model_server.shutdown()
+        model_server.server_close()
 
 
 def free_loopback_port() -> int:
@@ -565,7 +701,7 @@ def check(name: str, binary: Path, source_root: Path, runnable_target: str) -> N
         print(f"{name}: {read}. {not_run}")
         return
 
-    registered_capabilities, registered_skills = registered(source_root)
+    registered_capabilities, registered_skills, skill_bodies = registrations(source_root)
     not_reported = NOT_REPORTED[surface]
     stale = sorted(set(not_reported) - set(registered_capabilities))
     if stale:
@@ -575,8 +711,10 @@ def check(name: str, binary: Path, source_root: Path, runnable_target: str) -> N
         )
     expected_capabilities = set(registered_capabilities) - set(not_reported)
     ungated = {skill for skill, (_, needs) in registered_skills.items() if not needs}
+    member_heading = skill_heading(MEMBER_SKILL, skill_bodies) if surface in MEMBER_SURFACES else ""
 
     scratch = Path(tempfile.mkdtemp(prefix="meerkat-registrations."))
+    member = None
     try:
         (scratch / "home").mkdir()
         probe = scratch / "project" / ".rkat" / "skills" / PROJECT_SKILL
@@ -585,6 +723,9 @@ def check(name: str, binary: Path, source_root: Path, runnable_target: str) -> N
         try:
             try:
                 capabilities_answer, skills_answer = ASK[surface](binary, scratch)
+                if member_heading:
+                    (scratch / "member" / "home").mkdir(parents=True)
+                    member = member_prompt(binary, scratch / "member")
             except subprocess.TimeoutExpired as err:
                 raise NoAnswer(f"no answer within {ANSWER_TIMEOUT_SECS} s: {err}") from err
             except OSError as err:
@@ -627,6 +768,12 @@ def check(name: str, binary: Path, source_root: Path, runnable_target: str) -> N
             f"(c) it does not list the project skill `{PROJECT_SKILL}`, which requires only "
             f"`{REQUIRED_CAPABILITY}` (project skills listed: {skills.get('project', [])})"
         )
+    if member is not None and json.dumps(member_heading)[1:-1] not in member:
+        problems.append(
+            f"(d) the mob member it spawned was built without the built-in `{MEMBER_SKILL}` skill: its "
+            f"stored prompt ({len(member)} bytes) does not carry the skill's body, heading "
+            f"`{member_heading}` ({registered_skills[MEMBER_SKILL][0]})"
+        )
     if problems or read_refusal:
         run = "RUN: the answers match the source registrations."
         if problems:
@@ -637,10 +784,12 @@ def check(name: str, binary: Path, source_root: Path, runnable_target: str) -> N
                 "match the checked-out source."
             )
         raise Refused(f"{read_refusal or read + '.'} {run}")
+    spawned = f"; the mob member it spawned carries the `{MEMBER_SKILL}` skill" if member is not None else ""
     print(
         f"{name}: {read}. RUN: {len(capabilities)} capabilities, equal to the source registrations; "
         f"{len(builtin)} built-in skills listed, among them the {len(ungated)} that require no capability "
         f"({', '.join(sorted(ungated))}); the project skill that requires `{REQUIRED_CAPABILITY}` is listed"
+        f"{spawned}"
     )
 
 

@@ -19,6 +19,8 @@ environment never skips the check. No network beyond loopback, no Rust build.
 
 from __future__ import annotations
 
+import importlib.machinery
+import importlib.util
 import json
 import os
 import stat
@@ -107,6 +109,32 @@ inventory::submit! {
 }
 """
 
+# The skill every mob member build preloads, registered with a body file.
+COMMS_LIB_RS = """\
+inventory::submit! {
+    meerkat_skills::SkillRegistration {
+        id: "mob-communication",
+        name: "Mob Communication",
+        requires_capabilities: &["comms"],
+        body: include_str!("../skills/mob-communication/SKILL.md"),
+        extensions: &[],
+    }
+}
+"""
+
+# Not the real skill's heading: the check must read it from the body file.
+MEMBER_HEADING = "# Working With Peers (fixture)"
+MOB_SKILL_MD = f"""---
+name: Mob Communication
+description: fixture
+requires_capabilities: [comms]
+---
+
+{MEMBER_HEADING}
+
+Body.
+"""
+
 NEW_CAPABILITY_RS = """\
 inventory::submit! {
     meerkat_capabilities::CapabilityRegistration {
@@ -136,6 +164,7 @@ from pathlib import Path
 
 CAPABILITIES = __CAPABILITIES__
 BUILTIN = __BUILTIN__
+MEMBER_SKILL_BODY = __MEMBER_SKILL_BODY__
 NAME = {"rkat_rpc_bin": "rkat-rpc"}.get(Path(sys.argv[0]).name, Path(sys.argv[0]).name)
 
 
@@ -194,12 +223,32 @@ if NAME == "rkat":
     else:
         sys.exit(64)
 elif NAME == "rkat-rpc":
+    def member_refusal():
+        # The member spawn needs what the check provides: the `global` realm
+        # and a self-hosted model with auth method `none` on a loopback port.
+        config = Path(os.environ["HOME"]) / ".rkat" / "config.toml"
+        text = config.read_text(encoding="utf-8") if config.is_file() else ""
+        if sys.argv[-2:] != ["--realm", "global"]:
+            return "the member spawn was not started in the global realm"
+        if 'auth_method = "none"' not in text or 'base_url = "http://127.0.0.1:' not in text:
+            return "the member's model is not a keyless self-hosted server on loopback"
+        return None
+
     def answer(request):
         method = request.get("method")
         if method == "capabilities/get":
             return capabilities()
         if method == "skills/list":
             return {"skills": skills()}
+        if method == "mob/create":
+            return {"mob_id": request["params"]["definition"]["id"], "claim_token": "stub"}
+        if method == "mob/spawn":
+            profile = request["params"]["profile"]
+            return {"mob_id": request["params"]["mob_id"], "agent_identity": request["params"]["agent_identity"], "profile": profile}
+        if method == "mob/member_history":
+            refusal = member_refusal()
+            prompt = refusal or ("# Inter-agent Communication\n\ntools\n\n" + MEMBER_SKILL_BODY)
+            return {"page": {"messages": [{"role": "system", "content": prompt}]}}
         return {"methods": []}
     serve_stdio(answer)
 elif NAME == "rkat-mcp":
@@ -235,12 +284,18 @@ else:
 '''
 
 
-def write_source(root: Path, extra_tools: str = "") -> Path:
-    for crate, files in {
+def write_source(root: Path, extra_tools: str = "", member_skill: bool = True) -> Path:
+    crates = {
         "meerkat": {"lib.rs": FACADE_LIB_RS, "help.rs": HELP_RS},
         "meerkat-tools": {"lib.rs": TOOLS_LIB_RS + extra_tools},
         "meerkat-capabilities": {"lib.rs": CAPABILITIES_LIB_RS},
-    }.items():
+    }
+    if member_skill:
+        crates["meerkat-comms"] = {"lib.rs": COMMS_LIB_RS}
+        skill = root / "crates" / "meerkat-comms" / "skills" / "mob-communication"
+        skill.mkdir(parents=True, exist_ok=True)
+        (skill / "SKILL.md").write_text(MOB_SKILL_MD, encoding="utf-8")
+    for crate, files in crates.items():
         src = root / "crates" / crate / "src"
         src.mkdir(parents=True, exist_ok=True)
         (root / "crates" / crate / "Cargo.toml").write_text('[package]\nname = "x"\n', encoding="utf-8")
@@ -249,11 +304,18 @@ def write_source(root: Path, extra_tools: str = "") -> Path:
     return root
 
 
-def write_stub(directory: Path, name: str, capabilities: list[str], builtin: list[str]) -> Path:
+def write_stub(
+    directory: Path, name: str, capabilities: list[str], builtin: list[str], member: bool | None = None
+) -> Path:
+    """A stub release binary. `member`: whether a mob member it spawns carries
+    the mob-communication body (default: when it has any built-in skill)."""
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / name
+    carries = bool(builtin) if member is None else member
     path.write_text(
-        STUB.replace("__CAPABILITIES__", json.dumps(capabilities)).replace("__BUILTIN__", json.dumps(builtin)),
+        STUB.replace("__CAPABILITIES__", json.dumps(capabilities))
+        .replace("__BUILTIN__", json.dumps(builtin))
+        .replace("__MEMBER_SKILL_BODY__", json.dumps(MOB_SKILL_MD if carries else "")),
         encoding="utf-8",
     )
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
@@ -279,6 +341,15 @@ def elf_with_init_array_tables(path: Path, tables: int, machine: int = 62) -> Pa
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(header + program + dynamic)
     return path
+
+
+def load_checker():
+    """The check as a module, for the cases that call it directly."""
+    loader = importlib.machinery.SourceFileLoader("check_release_binary_registrations", str(CHECK))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
 
 
 def run(binary: Path, source: Path, *flags: str, version: str | None = None) -> subprocess.CompletedProcess:
@@ -340,6 +411,39 @@ def main() -> int:
 
         good = work / "good" / "rkat"
         unregistered = work / "unregistered" / "rkat"
+        # (d): the mob member rkat-rpc spawns.
+        expect(
+            "rkat-rpc: the spawned mob member carries mob-communication",
+            run(work / "good" / "rkat-rpc", source),
+            0,
+            "the mob member it spawned carries the `mob-communication` skill",
+        )
+        expect(
+            "rkat-rpc: no constructor ran, so the member has no mob-communication",
+            run(work / "unregistered" / "rkat-rpc", source),
+            1,
+            "(d) the mob member it spawned was built without the built-in `mob-communication` skill",
+            f"heading `{MEMBER_HEADING}` (crates/meerkat-comms/src/lib.rs)",
+        )
+        expect(
+            "rkat-rpc: lists are whole, the member alone lacks mob-communication",
+            run(write_stub(work / "member-without", "rkat-rpc", CAPABILITIES, healthy, member=False), source),
+            1,
+            "RUN: (d) the mob member it spawned was built without the built-in `mob-communication` skill",
+        )
+        no_member_skill = write_source(work / "source-no-member-skill", member_skill=False)
+        expect(
+            "rkat-rpc: a source that registers no mob-communication body cannot be checked",
+            run(work / "good" / "rkat-rpc", no_member_skill),
+            2,
+            "the source registers no `mob-communication` skill with a body file",
+        )
+        expect(
+            "rkat: no mob member is spawned on the other binaries",
+            run(good, no_member_skill),
+            0,
+            "the project skill that requires `sessions` is listed",
+        )
         expect(
             "a gated built-in skill the surface leaves off is not demanded",
             run(write_stub(work / "ungated-only", "rkat", CAPABILITIES, UNGATED), source),
@@ -404,6 +508,13 @@ def main() -> int:
             0,
             "READ: not an ELF file, nothing to read. NOT RUN: built for no-such-target",
         )
+        checker = load_checker()
+        expect(
+            "the target this host runs is run",
+            run(unregistered, source, "--if-runnable-target", checker.host_target()),
+            1,
+            "(a) it reports 0 capabilities",
+        )
         expect(
             "the Bazel output name needs --surface",
             run(write_stub(work / "bazel-name", "rkat-rpc", CAPABILITIES, healthy).rename(work / "bazel-name" / "rkat_rpc_bin"), source),
@@ -411,10 +522,28 @@ def main() -> int:
             "pass --surface",
         )
         expect(
-            "two init-array tables are refused without running the file",
+            "two init-array tables are refused when the file cannot answer",
             run(elf_with_init_array_tables(work / "two-tables" / "rkat-rpc", 2), source),
             1,
             "READ: the file has 2 init-array tables",
+            "RUN: no answer",
+        )
+        # A file with two tables that does answer correctly (a process start
+        # that runs both) is still refused: the stub answers, the read is
+        # replaced.
+        checker.elf_init_array_tables = lambda path: 2
+        try:
+            checker.check("rkat", good, source, "")
+        except checker.Refused as refusal:
+            answered = subprocess.CompletedProcess([], 1, "", str(refusal))
+        else:
+            answered = subprocess.CompletedProcess([], 0, "accepted", "")
+        expect(
+            "two init-array tables are refused when the file answers correctly",
+            answered,
+            1,
+            "READ: the file has 2 init-array tables",
+            "RUN: the answers match the source registrations.",
         )
         expect(
             "two init-array tables are refused for a target the host does not run",

@@ -28,7 +28,7 @@ pub use lease::{
     AuthConstraints, AuthLease, AuthRefreshReason, HttpAuthorizationContent,
     HttpAuthorizationReceipt, HttpAuthorizationRequest, HttpAuthorizationResponse,
     HttpAuthorizationResponseAction, HttpAuthorizer, HttpRequestInitiator, ResolvedAuthEnvelope,
-    ResolvedAuthKind,
+    ResolvedAuthKind, SignedCredentials,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use lifecycle::{

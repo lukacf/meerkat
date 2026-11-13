@@ -660,6 +660,14 @@ const PEER_INGRESS_TERMINAL_OUTCOMES = {
  * with (`decision/notice`). This client has no listener for it and drops it.
  */
 const DECISION_NOTICE_NOTIFICATION = "decision/notice";
+/**
+ * The first server contract that takes the provider-neutral
+ * `reasoning_effort` parameter: the release that carries the option. This is
+ * the one place the SDK names that release: the gate
+ * (`requireReasoningEffortSupport`) and every doc comment refer to this
+ * constant, and if the option's release moves, this constant moves with it.
+ */
+const REASONING_EFFORT_MIN_CONTRACT: readonly number[] = [0, 9, 16];
 const MEERKAT_REPO = "lukacf/meerkat";
 const MEERKAT_RELEASE_BINARY = "rkat-rpc";
 const MEERKAT_BINARY_CACHE_ROOT = path.join(
@@ -1760,13 +1768,14 @@ export class MeerkatClient {
 
   /**
    * Refuse a reasoning effort level before sending it to a server that
-   * would drop it: before contract 0.9.15 `session/create` ignores
+   * would drop it: before the contract that carries the option
+   * (`REASONING_EFFORT_MIN_CONTRACT`) `session/create` ignores
    * `reasoning_effort` (the session then runs with no level, silently) and
    * `turn/start` and `mob/turn_start` refuse it.
    */
   private requireReasoningEffortSupport(reasoningEffort: unknown): void {
     if (reasoningEffort == null) return;
-    const minimum = [0, 9, 15];
+    const minimum = REASONING_EFFORT_MIN_CONTRACT;
     if (!this.serverContractAtLeast(minimum)) {
       throw new CapabilityUnavailableError(
         "CAPABILITY_UNAVAILABLE",

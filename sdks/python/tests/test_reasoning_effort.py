@@ -3,7 +3,7 @@
 ``session/create`` takes a level; ``turn/start`` and ``mob/turn_start`` take
 its tri-state (a level, ``{"action": "clear"}``, absent). An older server
 ignores the parameter on ``session/create`` and refuses it on a turn, so the
-SDK refuses to send it below contract 0.9.15. A level the model or route does
+SDK refuses to send it below contract 0.9.16. A level the model or route does
 not accept is refused with ``error.data.kind`` ``"reasoning_effort_refused"``
 (``SessionError`` in crates/meerkat-core/src/service/mod.rs), which
 ``reasoning_effort_refusal`` reads back.
@@ -48,7 +48,7 @@ RUN_RESULT = {
 
 
 def fake_client(
-    contract_version: str = "0.9.15",
+    contract_version: str = "0.9.16",
 ) -> tuple[MeerkatClient, list[tuple[str, dict[str, Any]]]]:
     client = MeerkatClient()
     client._server_contract_version = contract_version
@@ -128,7 +128,7 @@ async def test_a_turn_that_names_no_level_sends_none() -> None:
 
 
 OLDER_SERVER_REFUSAL = (
-    r"reasoning_effort needs a server contract >= 0\.9\.15; this server reports 0\.9\.14"
+    r"reasoning_effort needs a server contract >= 0\.9\.16; this server reports 0\.9\.14"
 )
 
 

@@ -523,10 +523,13 @@ _TURN_SESSION_EVENTS_OPT_OUT_MIN_CONTRACT = (0, 9, 5)
 _GRANT_GATED_TOOLS_MIN_CONTRACT = (0, 9, 9)
 
 # The first server contract that takes the provider-neutral `reasoning_effort`
-# parameter. An older server ignores it on session/create (the session then
-# runs with no level, silently) and refuses it on turn/start and
-# mob/turn_start, so the SDK refuses to send it to such a server.
-_REASONING_EFFORT_MIN_CONTRACT = (0, 9, 15)
+# parameter: the release that carries the option. An older server ignores it
+# on session/create (the session then runs with no level, silently) and
+# refuses it on turn/start and mob/turn_start, so the SDK refuses to send it
+# to such a server. This is the one place the SDK names that release: the
+# gate and every doc string refer to this constant, and if the option's
+# release moves, this constant moves with it.
+_REASONING_EFFORT_MIN_CONTRACT = (0, 9, 16)
 
 
 @contextmanager
@@ -1660,7 +1663,8 @@ class MeerkatClient:
         own field; a level the model or route does not accept is refused
         before any provider request (see
         :func:`meerkat.reasoning_effort_refusal`). It is sent only to a
-        server whose contract (0.9.15 or later) takes it.
+        server whose contract carries the option
+        (``_REASONING_EFFORT_MIN_CONTRACT`` in this module).
 
         Example::
 
@@ -4706,7 +4710,8 @@ class MeerkatClient:
         reasoning effort level for this turn and the turns after it (a level,
         for example ``"high"``), removes it (``{"action": "clear"}``), or
         keeps it (omitted). It is sent only to a server whose contract
-        (0.9.15 or later) takes it.
+        carries the option (``_REASONING_EFFORT_MIN_CONTRACT`` in this
+        module).
         """
         self._require_reasoning_effort_support(reasoning_effort)
         params = MobTurnStartParams(

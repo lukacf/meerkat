@@ -482,7 +482,7 @@ or `createDeferredSession(...)`.
 On `turn(...)`, `stream(...)`, `startTurn(...)` and `mobTurnStart(...)` it is
 the turn's tri-state: a level sets it from that turn on,
 `{ action: "clear" }` removes it, and leaving it out keeps it. The client
-sends it only to a server whose contract is 0.9.15 or later and throws
+sends it only to a server whose contract is 0.9.16 or later and throws
 `CapabilityUnavailableError` otherwise, before anything is written. A level
 the model or its route does not accept rejects the call with
 `INVALID_PARAMS`; `reasoningEffortRefusal(error)` returns the typed refusal

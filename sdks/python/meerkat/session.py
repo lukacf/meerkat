@@ -169,8 +169,8 @@ class Session:
         example ``"high"``), removes it
         (:data:`meerkat.REASONING_EFFORT_CLEAR`), or keeps it (omitted). It
         is its own setting: a turn that replaces ``provider_params`` keeps
-        the level. It is sent only to a server whose contract (0.9.15 or
-        later) takes it.
+        the level. It is sent only to a server whose contract carries the
+        option (``_REASONING_EFFORT_MIN_CONTRACT`` in ``meerkat.client``).
         """
         result = await self._client._start_turn(  # noqa: SLF001
             self._id,

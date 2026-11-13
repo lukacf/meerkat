@@ -745,7 +745,7 @@ export interface TurnOptions {
    * on: a level sets it, `{ action: "clear" }` removes it, and leaving the
    * option out keeps it. It is its own setting: a turn that replaces
    * `providerParams` keeps the level. Sent only to a server whose contract
-   * (0.9.15 or later) takes it.
+   * carries the option (`REASONING_EFFORT_MIN_CONTRACT` in `client.ts`).
    */
   readonly reasoningEffort?: ReasoningEffortTurnOverride;
   /**
@@ -1012,8 +1012,8 @@ export interface MobTurnStartOptions {
   /**
    * The member session's provider-neutral reasoning effort level from this
    * turn on: a level sets it, `{ action: "clear" }` removes it, and leaving
-   * the option out keeps it. Sent only to a server whose contract (0.9.15
-   * or later) takes it.
+   * the option out keeps it. Sent only to a server whose contract carries
+   * the option (`REASONING_EFFORT_MIN_CONTRACT` in `client.ts`).
    */
   readonly reasoningEffort?: ReasoningEffortTurnOverride;
   /**
@@ -1614,7 +1614,8 @@ export interface SessionOptions {
    * it against the model on the route that serves the request and writes
    * the provider's own field; a level the model or route does not accept is
    * refused before any provider request (see `reasoningEffortRefusal`).
-   * Sent only to a server whose contract (0.9.15 or later) takes it.
+   * Sent only to a server whose contract carries the option
+   * (`REASONING_EFFORT_MIN_CONTRACT` in `client.ts`).
    */
   reasoningEffort?: ReasoningEffortLevel;
   authBinding?: WireAuthBindingRef;

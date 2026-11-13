@@ -355,7 +355,7 @@ variants) sets the session's provider-neutral
 `client.mob_turn_start(...)` take the turn's tri-state: a level sets it from
 that turn on, `meerkat.REASONING_EFFORT_CLEAR` (`{"action": "clear"}`)
 removes it, and omitting it keeps it. The client sends the field only to a
-server whose contract is 0.9.15 or later and raises
+server whose contract is 0.9.16 or later and raises
 `CapabilityUnavailableError` otherwise, before anything is written: an older
 server ignores it on `session/create` and refuses it on a turn.
 

@@ -644,7 +644,7 @@ them.
   `supported` and `facts`.
 
   The Python and TypeScript SDKs send the field only to a server whose
-  contract is 0.9.15 or later and raise `CapabilityUnavailableError`
+  contract is 0.9.16 or later and raise `CapabilityUnavailableError`
   otherwise: an older server ignores it on `session/create` and refuses it
   on a turn. `reasoning_effort_refusal(error)` / `reasoningEffortRefusal(error)`
   (Python, TypeScript and Web) return the typed refusal with its eight

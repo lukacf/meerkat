@@ -1575,14 +1575,13 @@ Security, Upgrade and Changed.
   for each block to fill: a short run showed no event, a longer run showed
   its first events and not its last (usually `run_completed`) until later
   activity on the stream, and the ASGI routes sent no response at all,
-  because their response starts with the first event. Affects every
-  `meerkat-meta` release, 0.9.0 through 0.9.14 (by reading the source at
-  each release tag; by a run on 0.9.14), and the package under its earlier
-  name, `meerkat-mobkit`, from 0.4.8. The gateway and the TypeScript SDK
-  were not affected. On an affected release, read a run's end from
-  `member_status(...).progress.run_state` (`run_open`, then `idle`) or, on
-  an identity-first runtime, with `send_and_wait` or `wait_for_turn`. See
-  the Python SDK's CHANGELOG.
+  because their response starts with the first event. The gateway and the
+  TypeScript SDK were not affected. Affects every `meerkat-meta` release,
+  0.9.0 through 0.9.14 (by reading the source at each release tag; by a run
+  on 0.9.14), and the package under its earlier name, `meerkat-mobkit`, at
+  least from 0.4.8 (the oldest release read). For what to do on an affected
+  release, see the known issue on the Meta 0.9.14 release page:
+  https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.14
 
 ### Known limitations
 

@@ -99,37 +99,34 @@ without end. See the
 for the affected releases and what to do.
 </Warning>
 
-On an affected release, replace the watch loop with a wait on the run's
-state, then read the member's latest output:
+On an affected release, replace the send and the watch loop: read the
+member's `tokens_used` before the send, then wait until it is greater:
 
 ```python
-        # Wait for the run by its state, then read the member's latest output
+        # Read the member's token count before the send
+        before = (await handle.member_status("agent-1")).tokens_used
+        await handle.send("agent-1", "Hello")
+
+        # Wait until the count is greater: it grows when a run ends
         loop = asyncio.get_running_loop()
-        # Time limit on the wait for run_open: a very short run can be over
-        # between two polls
-        open_by = loop.time() + 5
-        # Time limit on the whole wait
         done_by = loop.time() + 120
-        seen_open = False
         while True:
             status = await handle.member_status("agent-1")
-            state = status.progress.run_state if status.progress else "unknown"
-            if state == "run_open":
-                seen_open = True
-            elif state == "idle" and (seen_open or loop.time() > open_by):
+            if status.tokens_used > before:
                 break
             if loop.time() > done_by:
-                raise TimeoutError("the run did not end within 120 seconds")
+                raise TimeoutError("no run of agent-1 ended within 120 seconds")
             await asyncio.sleep(0.5)
-        if not seen_open:
-            print("no run was seen: it was over between two polls, or it has not started")
         print(status.output_preview)
 ```
 
-`status.status` and `status.is_final` describe the member, not the run.
-`output_preview` is the member's latest output, not the answer to this send:
-when no run was seen, or the run failed, it can be an earlier output or
-`None`.
+`tokens_used` grows once per run, when the run ends, and only for a run that
+called the model and whose provider reported usage: a run that fails before
+that, or a provider that reports no usage, ends this wait in the
+`TimeoutError`. It counts every run of the member, whoever started it, so the
+wait shows that a run ended, not that yours did; in this sample nothing else
+sends to `agent-1`. `status.status` and `status.is_final` describe the
+member, not the run.
 
 ## Durable detached tools
 

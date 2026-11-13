@@ -20,6 +20,9 @@ meerkat-comms.workspace = true
 meerkat-providers.workspace = true
 meerkat-contracts.workspace = true
 meerkat-core.workspace = true
+# The live reasoning-effort matrix gate implements the provider client trait
+# (`live_reasoning_matrix::GatedClient`), which names its request types.
+meerkat-llm-core.workspace = true
 meerkat-live = { workspace = true }
 meerkat-models = { workspace = true }
 meerkat-machine-kernels = { workspace = true, features = ["test-oracle"] }

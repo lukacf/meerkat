@@ -1796,6 +1796,9 @@ FAILURE_EVIDENCE_SOURCES = (
     ("components/logs", ("*.stdout", "*.stderr")),
     ("cli-qualification", ("*.json",)), ("cli-qualification/conversation-run", ("transcript.txt",)),
     ("cli-qualification/official-run/install", ("*.stdout", "*.stderr")),
+    # npm's own debug logs of that install (its cache lies inside the destination): the cause of a failed
+    # `npm cache add` or `npm ci`, of which the installer's *.stderr holds only the summary.
+    ("cli-qualification/official-run/install/npm-cache/_logs", ("*.log",)),
     ("gateway-verification", ("manifest.json",)))
 MACOS_LANE = "connect-macos-arm64"
 MACOS_STEPS = ("preflight", "library", "resources", "build", "stage", "check-gateway", "check-cli",

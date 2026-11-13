@@ -435,7 +435,8 @@ anything, creates a release or a tag, or holds a provider key:
   from the dispatched commit, and such a stage is never assembled.
   No step of either job hides a failure. A stage one step that fails prints
   the end of the failed command's log, and the producer keeps
-  `failure-evidence` under the work root: its command records and logs, each
+  `failure-evidence` under the work root: its command records and logs (with
+  npm's debug logs of the official install), each
   cut to its end, under a total bound, and no product file. The last step of
   each job, the only conditional one, runs only after a failure and uploads
   that directory as `connect-macos-arm64-stage-build-failure-<run id>-<attempt>`

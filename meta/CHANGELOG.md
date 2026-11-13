@@ -14,9 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   keeps the profile's other declared params, and a draft's own level wins.
   The level is Meerkat's new provider-neutral setting
   (`ProviderParamsOverride.reasoning_effort`; see Meerkat's changelog):
-  Meerkat stores it but cannot resolve it for a provider route yet, so a
-  member whose params carry it has its turns refused before any provider
-  request.
+  Meerkat resolves it for the route that serves each of the member's
+  requests, and a level that route does not accept refuses the member's
+  build or its turn before any provider request.
 
 - A member's LLM client reports the reasoning route of the provider client
   it is built on (`AgentLlmClient::reasoning_route()` and

@@ -262,6 +262,7 @@ pub enum MobMachineCatalogInput {
     RestoreOwnedIdentityEdge,
     ResolveMemberDispatchAdmission,
     RecordMemberDispatchAdmissionLineage,
+    ResolveFlowRunObservationAdmission,
 }
 
 impl MobMachineCatalogInput {
@@ -524,6 +525,7 @@ impl MobMachineCatalogInput {
         Self::RestoreOwnedIdentityEdge,
         Self::ResolveMemberDispatchAdmission,
         Self::RecordMemberDispatchAdmissionLineage,
+        Self::ResolveFlowRunObservationAdmission,
     ];
 
     #[must_use]
@@ -789,6 +791,7 @@ impl MobMachineCatalogInput {
             Self::RestoreOwnedIdentityEdge => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::RestoreOwnedIdentityEdge,
             Self::ResolveMemberDispatchAdmission => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::ResolveMemberDispatchAdmission,
             Self::RecordMemberDispatchAdmissionLineage => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::RecordMemberDispatchAdmissionLineage,
+            Self::ResolveFlowRunObservationAdmission => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::ResolveFlowRunObservationAdmission,
         }
     }
 
@@ -1079,6 +1082,7 @@ impl MobMachineCatalogInput {
             Self::RestoreOwnedIdentityEdge => "RestoreOwnedIdentityEdge",
             Self::ResolveMemberDispatchAdmission => "ResolveMemberDispatchAdmission",
             Self::RecordMemberDispatchAdmissionLineage => "RecordMemberDispatchAdmissionLineage",
+            Self::ResolveFlowRunObservationAdmission => "ResolveFlowRunObservationAdmission",
         }
     }
 }

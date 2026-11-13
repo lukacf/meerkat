@@ -2438,6 +2438,14 @@ macro_rules! mob_catalog_machine_dsl {
             // records it in the same actor command as its seat commit, and
             // the replay of a spawn row that carries it records it again.
             RecordMemberDispatchAdmissionLineage { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId },
+            // Admission for reading ONE flow run's status and terminal outcome.
+            // The tool shell extracts two pure observations: manage scope over
+            // the current mob, and whether the run's durable observer binding
+            // names the calling member (the member a keyed explicit-target
+            // admission bound as the run's observer). MobMachine composes the
+            // disjunction and decides the verdict; the shell mirrors it
+            // (Deny -> access_denied).
+            ResolveFlowRunObservationAdmission { can_manage_mob: bool, caller_observes_run: bool },
         }
 
         surface_only [
@@ -3178,6 +3186,10 @@ macro_rules! mob_catalog_machine_dsl {
             // with the admission the host derived, build without one, or
             // refuse the build.
             MemberDispatchAdmissionResolved { lineage: Enum<MemberDispatchAdmissionLineage>, host_answer: Enum<MemberDispatchAdmissionHostAnswer>, verdict: Enum<MemberDispatchAdmissionVerdict> },
+            // Machine-owned flow-run observation verdict for `mob_flow_status`:
+            // manage scope, or the run's observer binding naming the caller.
+            // The tool shell mirrors it (Denied -> access_denied).
+            FlowRunObservationAdmissionResolved { admission: Enum<MobCurrentMobAdmissionKind> },
         }
 
         // One total, pure classifier over desired authority, lease ownership,
@@ -5073,6 +5085,7 @@ macro_rules! mob_catalog_machine_dsl {
         // that asked, which asks the host, builds with or without the
         // admission, or refuses.
         disposition MemberDispatchAdmissionResolved => local seam SurfaceResultAlignment,
+        disposition FlowRunObservationAdmissionResolved => local seam SurfaceResultAlignment,
 
         // =====================================================================
         // Invariants
@@ -38471,6 +38484,36 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_life_resets = resets;
             }
             to Running
+        }
+
+        // --- Flow-run observation admission ---
+        //
+        // Read one flow run's status and terminal outcome: manage scope over
+        // the mob, or the run's durable observer binding naming the caller.
+        // Pure classification across all phases, like owned-member
+        // admission: a finished, stopped or destroyed mob's runs stay
+        // readable by their observer.
+
+        transition ResolveFlowRunObservationAdmissionAllowed {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ResolveFlowRunObservationAdmission { can_manage_mob, caller_observes_run }
+            guard "manage_scope_or_observer_binding_allows" {
+                can_manage_mob == true || caller_observes_run == true
+            }
+            update {}
+            to Running
+            emit FlowRunObservationAdmissionResolved { admission: MobCurrentMobAdmissionKind::Allowed }
+        }
+
+        transition ResolveFlowRunObservationAdmissionDenied {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ResolveFlowRunObservationAdmission { can_manage_mob, caller_observes_run }
+            guard "neither_manage_scope_nor_observer_binding_denies" {
+                can_manage_mob == false && caller_observes_run == false
+            }
+            update {}
+            to Running
+            emit FlowRunObservationAdmissionResolved { admission: MobCurrentMobAdmissionKind::Denied }
         }
     }
         }

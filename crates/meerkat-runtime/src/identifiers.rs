@@ -208,7 +208,9 @@ impl LogicalRuntimeId {
         Self(session_id.to_string())
     }
 
-    pub(crate) fn session_id(&self) -> Option<SessionId> {
+    /// The session a session runtime's id names (`for_session`, or the
+    /// legacy bare session id); `None` for any other runtime id.
+    pub fn session_id(&self) -> Option<SessionId> {
         let raw = self
             .0
             .strip_prefix(Self::SESSION_RUNTIME_PREFIX)

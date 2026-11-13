@@ -12881,6 +12881,11 @@ pub mod inputs {
         pub agent_identity: AgentIdentity,
         pub agent_runtime_id: AgentRuntimeId,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveFlowRunObservationAdmission {
+        pub can_manage_mob: bool,
+        pub caller_observes_run: bool,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -13151,6 +13156,7 @@ pub enum Input {
     RestoreOwnedIdentityEdge(inputs::RestoreOwnedIdentityEdge),
     ResolveMemberDispatchAdmission(inputs::ResolveMemberDispatchAdmission),
     RecordMemberDispatchAdmissionLineage(inputs::RecordMemberDispatchAdmissionLineage),
+    ResolveFlowRunObservationAdmission(inputs::ResolveFlowRunObservationAdmission),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -13499,6 +13505,9 @@ impl Input {
             Self::RecordMemberDispatchAdmissionLineage(_) => {
                 InputKind::RecordMemberDispatchAdmissionLineage
             }
+            Self::ResolveFlowRunObservationAdmission(_) => {
+                InputKind::ResolveFlowRunObservationAdmission
+            }
         }
     }
 }
@@ -13762,6 +13771,7 @@ pub enum InputKind {
     RestoreOwnedIdentityEdge,
     ResolveMemberDispatchAdmission,
     RecordMemberDispatchAdmissionLineage,
+    ResolveFlowRunObservationAdmission,
 }
 
 pub mod signals {
@@ -15881,6 +15891,10 @@ pub mod effects {
         pub host_answer: MemberDispatchAdmissionHostAnswer,
         pub verdict: MemberDispatchAdmissionVerdict,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct FlowRunObservationAdmissionResolved {
+        pub admission: MobCurrentMobAdmissionKind,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -16094,6 +16108,7 @@ pub enum Effect {
     IdentityEnded(effects::IdentityEnded),
     DeclaredRosterSealRefused(effects::DeclaredRosterSealRefused),
     MemberDispatchAdmissionResolved(effects::MemberDispatchAdmissionResolved),
+    FlowRunObservationAdmissionResolved(effects::FlowRunObservationAdmissionResolved),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -16302,6 +16317,7 @@ pub enum EffectKind {
     IdentityEnded,
     DeclaredRosterSealRefused,
     MemberDispatchAdmissionResolved,
+    FlowRunObservationAdmissionResolved,
 }
 
 pub mod command_capabilities {
@@ -18009,6 +18025,14 @@ pub enum TransitionId {
     ResolveMemberCustodyRestoredUnrecordedStopped,
     ResolveMemberCustodyRestoredUnrecordedCompleted,
     ResolveMemberCustodyRestoredUnrecordedDestroyed,
+    ResolveFlowRunObservationAdmissionAllowedRunning,
+    ResolveFlowRunObservationAdmissionAllowedStopped,
+    ResolveFlowRunObservationAdmissionAllowedCompleted,
+    ResolveFlowRunObservationAdmissionAllowedDestroyed,
+    ResolveFlowRunObservationAdmissionDeniedRunning,
+    ResolveFlowRunObservationAdmissionDeniedStopped,
+    ResolveFlowRunObservationAdmissionDeniedCompleted,
+    ResolveFlowRunObservationAdmissionDeniedDestroyed,
     RetireMemberArchiveOnly,
     AdmitDestroyMemberRetireArchiveOnlyRunning,
     AdmitDestroyMemberRetireArchiveOnlyStopped,

@@ -28137,6 +28137,70 @@ RecoverIdentityLifeResetsDestroyed(resets) ==
     /\ UnchangedFrame_19a6f48afef0691d
 
 
+ResolveFlowRunObservationAdmissionAllowedRunning(can_manage_mob, caller_observes_run) ==
+    /\ phase = "Running"
+    /\ (IF (can_manage_mob = TRUE) THEN TRUE ELSE (caller_observes_run = TRUE))
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_ab743efccb6e9bcf
+
+
+ResolveFlowRunObservationAdmissionAllowedStopped(can_manage_mob, caller_observes_run) ==
+    /\ phase = "Stopped"
+    /\ (IF (can_manage_mob = TRUE) THEN TRUE ELSE (caller_observes_run = TRUE))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_ab743efccb6e9bcf
+
+
+ResolveFlowRunObservationAdmissionAllowedCompleted(can_manage_mob, caller_observes_run) ==
+    /\ phase = "Completed"
+    /\ (IF (can_manage_mob = TRUE) THEN TRUE ELSE (caller_observes_run = TRUE))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_ab743efccb6e9bcf
+
+
+ResolveFlowRunObservationAdmissionAllowedDestroyed(can_manage_mob, caller_observes_run) ==
+    /\ phase = "Destroyed"
+    /\ (IF (can_manage_mob = TRUE) THEN TRUE ELSE (caller_observes_run = TRUE))
+    /\ phase' = "Destroyed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_ab743efccb6e9bcf
+
+
+ResolveFlowRunObservationAdmissionDeniedRunning(can_manage_mob, caller_observes_run) ==
+    /\ phase = "Running"
+    /\ ((can_manage_mob = FALSE) /\ (caller_observes_run = FALSE))
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_ab743efccb6e9bcf
+
+
+ResolveFlowRunObservationAdmissionDeniedStopped(can_manage_mob, caller_observes_run) ==
+    /\ phase = "Stopped"
+    /\ ((can_manage_mob = FALSE) /\ (caller_observes_run = FALSE))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_ab743efccb6e9bcf
+
+
+ResolveFlowRunObservationAdmissionDeniedCompleted(can_manage_mob, caller_observes_run) ==
+    /\ phase = "Completed"
+    /\ ((can_manage_mob = FALSE) /\ (caller_observes_run = FALSE))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_ab743efccb6e9bcf
+
+
+ResolveFlowRunObservationAdmissionDeniedDestroyed(can_manage_mob, caller_observes_run) ==
+    /\ phase = "Destroyed"
+    /\ ((can_manage_mob = FALSE) /\ (caller_observes_run = FALSE))
+    /\ phase' = "Destroyed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_ab743efccb6e9bcf
+
+
 Next ==
     \/ (phase = "Running") /\ \E run_id \in RunIdValues : \E status \in FlowRunStatusValues : ClassifyFlowRunTerminalityTerminalRunning(run_id, status)
     \/ (phase = "Running") /\ \E run_id \in RunIdValues : \E status \in FlowRunStatusValues : ClassifyFlowRunTerminalityNonTerminalRunning(run_id, status)
@@ -30174,6 +30238,14 @@ Next ==
     \/ (phase = "Stopped") /\ \E resets \in 0..2 : RecoverIdentityLifeResetsStopped(resets)
     \/ (phase = "Completed") /\ \E resets \in 0..2 : RecoverIdentityLifeResetsCompleted(resets)
     \/ (phase = "Destroyed") /\ \E resets \in 0..2 : RecoverIdentityLifeResetsDestroyed(resets)
+    \/ (phase = "Running") /\ \E can_manage_mob \in BOOLEAN : \E caller_observes_run \in BOOLEAN : ResolveFlowRunObservationAdmissionAllowedRunning(can_manage_mob, caller_observes_run)
+    \/ (phase = "Stopped") /\ \E can_manage_mob \in BOOLEAN : \E caller_observes_run \in BOOLEAN : ResolveFlowRunObservationAdmissionAllowedStopped(can_manage_mob, caller_observes_run)
+    \/ (phase = "Completed") /\ \E can_manage_mob \in BOOLEAN : \E caller_observes_run \in BOOLEAN : ResolveFlowRunObservationAdmissionAllowedCompleted(can_manage_mob, caller_observes_run)
+    \/ (phase = "Destroyed") /\ \E can_manage_mob \in BOOLEAN : \E caller_observes_run \in BOOLEAN : ResolveFlowRunObservationAdmissionAllowedDestroyed(can_manage_mob, caller_observes_run)
+    \/ ResolveFlowRunObservationAdmissionDeniedRunning(FALSE, FALSE)
+    \/ ResolveFlowRunObservationAdmissionDeniedStopped(FALSE, FALSE)
+    \/ ResolveFlowRunObservationAdmissionDeniedCompleted(FALSE, FALSE)
+    \/ ResolveFlowRunObservationAdmissionDeniedDestroyed(FALSE, FALSE)
     \/ TerminalStutter
 
 stopped_mob_holds_member_run_starts == (IF (phase # "Stopped") THEN TRUE ELSE (member_run_starts_held = TRUE))

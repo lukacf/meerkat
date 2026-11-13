@@ -618,6 +618,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RestoreOwnedIdentityEdge`(edge: WiringEdge, owner: AgentIdentity)
 - `ResolveMemberDispatchAdmission`(agent_identity: AgentIdentity, lineage: MemberDispatchAdmissionLineage, host_answer: MemberDispatchAdmissionHostAnswer)
 - `RecordMemberDispatchAdmissionLineage`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId)
+- `ResolveFlowRunObservationAdmission`(can_manage_mob: Bool, caller_observes_run: Bool)
 
 ## Signals
 - `ObserveRuntimeReady`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, runtime_epoch_id: Option<RuntimeEpochId>)
@@ -933,6 +934,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `IdentityEnded`(agent_identity: AgentIdentity)
 - `DeclaredRosterSealRefused`
 - `MemberDispatchAdmissionResolved`(lineage: MemberDispatchAdmissionLineage, host_answer: MemberDispatchAdmissionHostAnswer, verdict: MemberDispatchAdmissionVerdict)
+- `FlowRunObservationAdmissionResolved`(admission: MobCurrentMobAdmissionKind)
 
 ## Helpers
 - `identity_reconcile_decision`(intent: IdentityAuthorityCondition, lease: IdentityLeaseCondition, replacement: IdentityReplacementCondition, external_binding_required: Bool, initial_delivery_required: Bool, session_creation_receipt: IdentityReceiptCondition, retirement_receipt: IdentityReceiptCondition, session: IdentitySessionCondition, runtime: IdentityResourceCondition, member: IdentityResourceCondition, external_binding_receipt: IdentityReceiptCondition, external_trust: IdentityExternalTrustCondition, external_ceremony: IdentityExternalCeremonyCondition, initial_delivery_receipt: IdentityReceiptCondition, initial_delivery: IdentityInitialDeliveryCondition, wiring: IdentityResourceCondition) -> `IdentityReconcileDecision`
@@ -21260,6 +21262,70 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RecoverIdentityLifeResets`(resets)
 - Guards:
   - `highwater_recovery_open`
+- To: `Destroyed`
+
+### `ResolveFlowRunObservationAdmissionAllowedRunning`
+- From: `Running`
+- On: `ResolveFlowRunObservationAdmission`(can_manage_mob, caller_observes_run)
+- Guards:
+  - `manage_scope_or_observer_binding_allows`
+- Emits: `FlowRunObservationAdmissionResolved`
+- To: `Running`
+
+### `ResolveFlowRunObservationAdmissionAllowedStopped`
+- From: `Stopped`
+- On: `ResolveFlowRunObservationAdmission`(can_manage_mob, caller_observes_run)
+- Guards:
+  - `manage_scope_or_observer_binding_allows`
+- Emits: `FlowRunObservationAdmissionResolved`
+- To: `Stopped`
+
+### `ResolveFlowRunObservationAdmissionAllowedCompleted`
+- From: `Completed`
+- On: `ResolveFlowRunObservationAdmission`(can_manage_mob, caller_observes_run)
+- Guards:
+  - `manage_scope_or_observer_binding_allows`
+- Emits: `FlowRunObservationAdmissionResolved`
+- To: `Completed`
+
+### `ResolveFlowRunObservationAdmissionAllowedDestroyed`
+- From: `Destroyed`
+- On: `ResolveFlowRunObservationAdmission`(can_manage_mob, caller_observes_run)
+- Guards:
+  - `manage_scope_or_observer_binding_allows`
+- Emits: `FlowRunObservationAdmissionResolved`
+- To: `Destroyed`
+
+### `ResolveFlowRunObservationAdmissionDeniedRunning`
+- From: `Running`
+- On: `ResolveFlowRunObservationAdmission`(can_manage_mob, caller_observes_run)
+- Guards:
+  - `neither_manage_scope_nor_observer_binding_denies`
+- Emits: `FlowRunObservationAdmissionResolved`
+- To: `Running`
+
+### `ResolveFlowRunObservationAdmissionDeniedStopped`
+- From: `Stopped`
+- On: `ResolveFlowRunObservationAdmission`(can_manage_mob, caller_observes_run)
+- Guards:
+  - `neither_manage_scope_nor_observer_binding_denies`
+- Emits: `FlowRunObservationAdmissionResolved`
+- To: `Stopped`
+
+### `ResolveFlowRunObservationAdmissionDeniedCompleted`
+- From: `Completed`
+- On: `ResolveFlowRunObservationAdmission`(can_manage_mob, caller_observes_run)
+- Guards:
+  - `neither_manage_scope_nor_observer_binding_denies`
+- Emits: `FlowRunObservationAdmissionResolved`
+- To: `Completed`
+
+### `ResolveFlowRunObservationAdmissionDeniedDestroyed`
+- From: `Destroyed`
+- On: `ResolveFlowRunObservationAdmission`(can_manage_mob, caller_observes_run)
+- Guards:
+  - `neither_manage_scope_nor_observer_binding_denies`
+- Emits: `FlowRunObservationAdmissionResolved`
 - To: `Destroyed`
 
 ## Coverage

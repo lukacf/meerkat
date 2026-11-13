@@ -7925,6 +7925,7 @@ struct RecordingRunStore {
     list_runs_calls: AtomicU64,
     /// The runs whose remote-turn intents were listed, in call order.
     listed_intent_runs: Mutex<Vec<RunId>>,
+    holds_no_run_observers: AtomicBool,
 }
 
 impl RecordingRunStore {
@@ -7935,11 +7936,18 @@ impl RecordingRunStore {
             snapshot_cas_history: RwLock::new(Vec::new()),
             list_runs_calls: AtomicU64::new(0),
             listed_intent_runs: Mutex::new(Vec::new()),
+            holds_no_run_observers: AtomicBool::new(false),
         }
     }
 
     fn fail_next_create_run(&self) {
         self.fail_create_run_once.store(true, Ordering::Relaxed);
+    }
+
+    /// Report from now on that this store holds no observer bindings, as a
+    /// store without them does.
+    fn hold_no_run_observers(&self) {
+        self.holds_no_run_observers.store(true, Ordering::Relaxed);
     }
 
     async fn snapshot_cas_history(&self) -> Vec<(RunId, MobRunStatus, MobRunStatus)> {
@@ -8310,6 +8318,32 @@ impl MobRunStore for RecordingRunStore {
                 authority_inputs,
             )
             .await
+    }
+
+    fn holds_run_observers(&self) -> bool {
+        !self.holds_no_run_observers.load(Ordering::Relaxed) && self.inner.holds_run_observers()
+    }
+
+    async fn put_run_observer(
+        &self,
+        binding: &crate::run::MobRunObserverBinding,
+    ) -> Result<bool, MobStoreError> {
+        self.inner.put_run_observer(binding).await
+    }
+
+    async fn get_run_observer(
+        &self,
+        run_id: &RunId,
+    ) -> Result<Option<crate::run::MobRunObserverBinding>, MobStoreError> {
+        self.inner.get_run_observer(run_id).await
+    }
+
+    async fn refresh_run_observer(
+        &self,
+        expected: &crate::run::MobRunObserverBinding,
+        next: &crate::run::MobRunObserverBinding,
+    ) -> Result<bool, MobStoreError> {
+        self.inner.refresh_run_observer(expected, next).await
     }
 }
 
@@ -93207,6 +93241,10 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
             "bound_flow_targets_unavailable".to_string()
         }
         MobError::FlowRunIdempotencyConflict { .. } => "flow_run_idempotency_conflict".to_string(),
+        MobError::FlowRunObserverConflict { .. } => "flow_run_observer_conflict".to_string(),
+        MobError::FlowRunObserverRefused { refusal, .. } => {
+            format!("flow_run_observer_refused:{refusal:?}")
+        }
         MobError::TopologyViolation { .. } => "topology_violation".to_string(),
         MobError::BridgeDeliveryRejected { cause, .. } => {
             format!("bridge_delivery_rejected:{cause}")
@@ -102747,6 +102785,10 @@ mod fence_gap_member;
 /// refusal and shortfall is typed.
 #[cfg(not(target_arch = "wasm32"))]
 mod flow_role_targets;
+/// A keyed explicit-target run reports to the member its admission or a
+/// later bind names; that member reads the run without manage scope.
+#[cfg(not(target_arch = "wasm32"))]
+mod flow_run_observer;
 /// A fork of a member whose build runs under a host's tool dispatch
 /// admission runs under one the host derives for it, at every build.
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]

@@ -801,6 +801,7 @@ test_suite(
         "//crates/meerkat-mob-mcp:delegate_identity_after_switch_test",
         "//crates/meerkat-mob-mcp:delegate_profile_family_clamp_test",
         "//crates/meerkat-mob-mcp:delegate_realm_custom_model_test",
+        "//crates/meerkat-mob-mcp:flow_run_wake_test",
         "//crates/meerkat-mob-mcp:fork_child_dispatch_admission_test",
         "//crates/meerkat-mob-mcp:fork_dispatch_admission_lineage_test",
         "//crates/meerkat-mob-mcp:fork_off_surface_test",

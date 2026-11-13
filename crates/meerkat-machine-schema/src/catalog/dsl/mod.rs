@@ -5505,6 +5505,9 @@ runtime_internal_inputs!(
         // by the replay of a spawn row that carries it. Not a surface
         // command.
         RecordMemberDispatchAdmissionLineage,
+        // The flow-run observation verdict is composed for `mob_flow_status`
+        // inside the tool shell's admission, never a standalone command.
+        ResolveFlowRunObservationAdmission,
     ]
 );
 

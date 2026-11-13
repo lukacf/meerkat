@@ -90,6 +90,39 @@ async def main():
 asyncio.run(main())
 ```
 
+<Warning>
+Known issue, noted 2026-11-13: on `meerkat-meta` releases through 0.9.14, the
+Python SDK's `subscribe_agent` and `subscribe_mob` deliver a run's events
+late or not at all, and a loop that waits for `run_completed` can wait
+without end. See the
+[known issue on the Meta 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.14)
+for the affected releases and what to do.
+</Warning>
+
+On an affected release, replace the watch loop with a wait on the run's
+state, then read the answer:
+
+```python
+        # Wait for the run by its state, then read the answer
+        loop = asyncio.get_running_loop()
+        # Time limit on the wait for run_open: a very short run can be over
+        # between two polls
+        open_by = loop.time() + 5
+        seen_open = False
+        while True:
+            status = await handle.member_status("agent-1")
+            state = status.progress.run_state if status.progress else "unknown"
+            if state == "run_open":
+                seen_open = True
+            elif state == "idle" and (seen_open or loop.time() > open_by):
+                break
+            await asyncio.sleep(0.5)
+        print(status.output_preview)
+```
+
+`status.status` and `status.is_final` describe the member, not the run, and
+do not change when a run ends.
+
 ## Durable detached tools
 
 Declare long-running host work explicitly instead of holding
@@ -696,6 +729,15 @@ async for event in handle.subscribe_mob():
 
 Observation is independent of delivery. Subscribe before or after sending — the stream is continuous.
 
+<Warning>
+Known issue, noted 2026-11-13: on `meerkat-meta` releases through 0.9.14, the
+Python SDK's `subscribe_agent` and `subscribe_mob` deliver a run's events
+late or not at all, and a loop that waits for `run_completed` can wait
+without end. See the
+[known issue on the Meta 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.14)
+for the affected releases and what to do.
+</Warning>
+
 ### Structural mob events — durable observability
 
 `MobHandle.query_mob_events()` and `subscribe_mob_events()` project
@@ -896,6 +938,15 @@ result = await runtime.send(f"personal:{user_id}", slack_message)
 async for event in runtime.mob_handle().subscribe_agent(f"personal:{user_id}"):
     forward_to_slack(event)
 ```
+
+<Warning>
+Known issue, noted 2026-11-13: on `meerkat-meta` releases through 0.9.14, the
+Python SDK's `subscribe_agent` and `subscribe_mob` deliver a run's events
+late or not at all, and a loop that waits for `run_completed` can wait
+without end. See the
+[known issue on the Meta 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.14)
+for the affected releases and what to do.
+</Warning>
 
 Reserve `ensure_member` for **ephemeral workers** (helpers a parent spawns
 and an idle-retire label reaps) — the worker plane. See the
@@ -1689,7 +1740,7 @@ from meerkat_meta.errors import (
 ## Advanced API
 
 These methods are available for power users and module-system internals.
-Most apps should use `send`, `subscribe_agent`/`subscribe_mob`, and `status`/`reconcile` instead.
+Most apps should use `send`, `subscribe_agent`/`subscribe_mob`, and `status`/`reconcile` instead. Known issue, noted 2026-11-13: on `meerkat-meta` releases through 0.9.14, the Python SDK's `subscribe_agent` and `subscribe_mob` deliver a run's events late or not at all, and a loop that waits for `run_completed` can wait without end. See the [known issue on the Meta 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.14) for the affected releases and what to do.
 
 | Method | Return type | Description |
 |--------|-------------|-------------|

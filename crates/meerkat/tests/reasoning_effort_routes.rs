@@ -1492,12 +1492,6 @@ async fn unsupported_level_is_refused_before_any_provider_request() {
     for param in PARAMS {
         let stub = Stub::spawn(&[Reply::Text]).await;
         let fixture = param.fixture(Stage::Stated, &stub.base).expect("staged");
-        // The first of the levels the row refuses on this route.
-        param.report_cell(
-            "unsupported_level_is_refused_before_any_provider_request",
-            &fixture.model,
-            fixture.unsupported_level(),
-        );
 
         let mut levels = vec![fixture.unsupported_level()];
         // Claude takes no `none`.
@@ -1524,6 +1518,12 @@ async fn unsupported_level_is_refused_before_any_provider_request() {
         levels.dedup();
 
         for level in levels {
+            // One line for each level the row refuses on this route.
+            param.report_cell(
+                "unsupported_level_is_refused_before_any_provider_request",
+                &fixture.model,
+                level,
+            );
             let refusal = refused(&fixture, level_params(level)).await;
             assert_eq!(
                 refusal,

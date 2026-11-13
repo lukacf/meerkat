@@ -256,20 +256,3 @@ pub(super) async fn council_frames_of_source(
             .any(|(mob_id, _)| mob_id.as_str() == source_mob_id);
     if holds { held } else { CouncilFrames::All }
 }
-
-/// Whether a stored frame with the captured `provenance` is decided as a
-/// council participant's while the console has no runtime registered: its
-/// last runtime was unregistered, and the frames it stored stay readable.
-///
-/// No council store and no mob set can be asked then, so the id's form
-/// decides, as it does for a mob the runtime no longer holds: a frame whose
-/// captured source mob has the council form stays unserved. The mob the
-/// frame captured as its runtime's primary mob is no council's.
-pub(super) fn frame_without_runtime_is_council_mob(
-    provenance: &ConsoleFrameMemberProvenance,
-) -> bool {
-    provenance
-        .source_mob_id
-        .starts_with(TEMPORARY_COUNCIL_MOB_ID_PREFIX)
-        && provenance.source_mob_id != provenance.primary_mob_id
-}

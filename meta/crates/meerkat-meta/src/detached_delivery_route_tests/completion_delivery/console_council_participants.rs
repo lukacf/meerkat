@@ -910,10 +910,11 @@ async fn frames_stored_for_a_council_participant_are_not_served() {
 /// runtime is registered either. A console keeps the frames it stored
 /// readable after its last runtime is unregistered (its host shut down);
 /// a participant's stay unserved then, whoever asks: with the council's
-/// record present before, and with the record lost. Nothing registered says
-/// which mob an id of a council mob's form names, so a frame of an ordinary
-/// nested mob with such an id is not served then either; a frame of a nested
-/// mob under any other id is served as before.
+/// record present before, and with the record lost. With no runtime
+/// registered no policy says whether nested members are shown, so the
+/// console serves no stored frame of a nested mob's member then, a council's
+/// or not; a frame of the runtime's own mob is served, also when that mob's
+/// id has a council mob's form.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn frames_stored_for_a_council_participant_are_not_served_with_no_runtime_registered() {
     let realm = Realm::start().await;
@@ -977,8 +978,8 @@ async fn frames_stored_for_a_council_participant_are_not_served_with_no_runtime_
             ),
         ),
         // A frame whose runtime's own primary mob had an id of the council
-        // form: with no runtime registered the captured primary mob is no
-        // council's, so it is served then.
+        // form: with no runtime registered a frame of the runtime's own mob
+        // is served, whatever the form of its id.
         (
             "primary-with-council-form",
             captured(
@@ -1025,26 +1026,25 @@ async fn frames_stored_for_a_council_participant_are_not_served_with_no_runtime_
     );
 
     aggregator.unregister_runtime(RUNTIME);
-    let ordinary = BTreeSet::from([
-        "nested-live".to_string(),
-        "nested-gone".to_string(),
-        "primary-with-council-form".to_string(),
-    ]);
+    // Only the runtime's own mob is served in this state: the two ordinary
+    // nested mobs' frames are unserved with the participants' frames.
+    let own_mob = BTreeSet::from(["primary-with-council-form".to_string()]);
     for deny in [deny_source_by_identity(), deny_source_by_role()] {
         let by_role = !deny.roles.is_empty();
         let controller = controller(deny);
         assert_eq!(
             served_seeds(&aggregator, &controller, ROOT, &names).await,
-            ordinary,
+            own_mob,
             "with no runtime registered the administrator reads no council participant's stored \
-             frame, and none of a mob whose id has a council mob's form"
+             frame, and no other nested mob's"
         );
-        // The role rule denies every `general` member, the nested ones
-        // included: the caller then reads none of the seeded frames.
+        // The role rule denies every `general` member, the one of the
+        // runtime's own mob included: the caller then reads none of the
+        // seeded frames.
         let expected = if by_role {
             BTreeSet::new()
         } else {
-            ordinary.clone()
+            own_mob.clone()
         };
         assert_eq!(
             served_seeds(&aggregator, &controller, CALLER, &names).await,

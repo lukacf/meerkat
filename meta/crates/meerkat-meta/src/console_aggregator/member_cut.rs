@@ -349,10 +349,12 @@ pub(super) async fn capture_member_lineage_in(
                 let roster_id = candidate.resolved.member.agent_identity.as_str();
                 let alias_name = crate::member_comms_id::runtime_alias_str(roster_id);
                 let alias: &str = alias_name.as_ref();
-                let durable = crate::member_comms_id::durable_identity_label(
+                let resolved_identity = crate::member_comms_id::resolve_member_identity(
+                    &candidate.resolved.handle,
+                    &candidate.resolved.member.agent_identity,
                     &candidate.resolved.member.labels,
-                )
-                .unwrap_or(alias);
+                );
+                let durable = resolved_identity.as_deref().unwrap_or(alias);
                 if roster_id != parent && alias != parent && durable != parent {
                     continue;
                 }

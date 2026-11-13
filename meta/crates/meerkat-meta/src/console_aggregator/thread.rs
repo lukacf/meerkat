@@ -239,7 +239,10 @@ impl MetaConsoleAggregator {
             return Ok(PrivateReplyAppend::ThreadGone);
         }
         let frame = self.kept_private_reply_frame(&thread.record, dedupe_key, text)?;
-        let outcome = super::append_frame(&self.inner, frame).await?;
+        // The reply is shown as its request is: by the request's own witness.
+        let witness =
+            super::FrameWitness::of_source_frame(thread.record.source.member_provenance.as_ref());
+        let outcome = super::append_frame(&self.inner, frame, witness).await?;
         if outcome.disposition == AppendDisposition::Existing {
             return Ok(PrivateReplyAppend::Existing(outcome.frame));
         }

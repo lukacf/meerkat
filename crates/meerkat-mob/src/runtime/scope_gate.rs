@@ -338,6 +338,9 @@ impl MobCommand {
             // feedback: the write it realizes was admitted at its verb.
             | Self::PrepareMemberInstructionDelivery { .. }
             | Self::SettleMemberInstructionDeliveries { .. }
+            // A durable fork's read of its child's operator instruction
+            // birth: the fork that asks was admitted at its own verb.
+            | Self::PrepareForkMemberInstructionBirth { .. }
             // Builder/test config seam; no principal caller today —
             // reclassify the moment a surface exposes it.
             | Self::SetSpawnPolicy { .. }
@@ -581,6 +584,7 @@ impl MobCommand {
             | Self::CloseDeclaredApply { .. }
             | Self::PrepareMemberInstructionDelivery { .. }
             | Self::SettleMemberInstructionDeliveries { .. }
+            | Self::PrepareForkMemberInstructionBirth { .. }
             | Self::SpawnProvisioned { .. }
             | Self::SpawnPreparationSettled { .. }
             | Self::MemberTurnAdmissionSettled { .. }
@@ -986,6 +990,9 @@ impl MobCommand {
                 let _ = reply_tx.send(Err(error));
             }
             Self::SettleMemberInstructionDeliveries { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::PrepareForkMemberInstructionBirth { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
             // Fenced remote-upcall handles also route their machine admission

@@ -33,14 +33,20 @@ const screenshotDir = fs.mkdtempSync(path.join(os.tmpdir(), "memory-e2e-"));
 const findings = [];
 
 // A quarantine decision is a signed-in person's, so the open-access flows
-// run as one: an HS256 token of the fixture's development issuer
+// run as one: the reviewer, who is no administrator (the open fixture names
+// none).
+const REVIEWER = "reviewer@memory-e2e.test";
+// The administrator the grant fixtures name (memory_console_reference.rs).
+const ADMINISTRATOR = "root@memory-e2e.test";
+
+// A person's token: HS256, of the fixture's development issuer
 // (memory_console_reference.rs), volunteered on every browser request.
-function reviewerToken() {
+function personToken(email) {
   const encode = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
   const now = Math.floor(Date.now() / 1000);
   const signed = `${encode({ alg: "HS256", typ: "JWT", kid: "kid-current" })}.${encode({
-    sub: "reviewer@memory-e2e.test",
-    email: "reviewer@memory-e2e.test",
+    sub: email,
+    email,
     provider: "google_oauth",
     iss: "https://trusted.meta.localhost",
     aud: "meerkat-console",
@@ -236,6 +242,64 @@ function assertNoRawJson(text, where) {
     !text.includes('{"') && !text.includes('":'),
     `raw JSON leaked into ${where}: ${text.slice(0, 600)}`,
   );
+}
+
+// Four of the eight seeded memory.* records are shown to an administrator
+// only: the quarantined write, the conflict signal, the taint transition
+// and the promotion that awaits approval. Each as its rail label, its rail
+// severity and its sentence in the Pipeline tab's live strip.
+const ADMINISTRATOR_ONLY_RECORDS = [
+  { label: "Memory write quarantined", severity: "warning", sentence: "was quarantined" },
+  { label: "Conflicting memories", severity: "warning", sentence: "Conflicting memories about" },
+  { label: "Session became untrusted", severity: "warning", sentence: "A session became untrusted" },
+  { label: "Memory record waiting to move", severity: "info", sentence: "waits for approval to move" },
+];
+
+function railSignal(page, label) {
+  return page
+    .getByTestId(T.SIGNALS_RAIL)
+    .locator('[data-testid^="signal:"]')
+    .filter({ hasText: label })
+    .first();
+}
+
+// The fixture writes its memory.* records before it serves, so the first
+// timeline read a page makes holds every one its caller may read: call this
+// once a seeded signal is on that page's rail.
+async function assertNoAdministratorOnlySignals(page, who) {
+  for (const { label } of ADMINISTRATOR_ONLY_RECORDS) {
+    assert.equal(
+      await railSignal(page, label).count(),
+      0,
+      `the "${label}" signal is for an administrator only: it must not reach ${who}`,
+    );
+  }
+}
+
+// The texts of the rows in the Pipeline tab's live strip, once it holds
+// `atLeast` of them.
+async function liveStripRows(page, atLeast) {
+  const strip = page.getByTestId(T.LIVE_STRIP);
+  await strip.waitFor({ timeout: 10_000 });
+  const rows = strip.locator('[data-testid^="memory-live-row:"]');
+  await rows.first().waitFor({ timeout: 15_000 });
+  // A timeout here is reported by the count below.
+  await page
+    .waitForFunction(
+      ([testid, count]) =>
+        document
+          .querySelector(`[data-testid="${testid}"]`)
+          ?.querySelectorAll('[data-testid^="memory-live-row:"]').length >= count,
+      [T.LIVE_STRIP, atLeast],
+      { timeout: 15_000 },
+    )
+    .catch(() => {});
+  const texts = await rows.allInnerTexts();
+  assert(
+    texts.length >= atLeast,
+    `expected at least ${atLeast} of the seeded memory.* frames in the ring, saw ${texts.length}`,
+  );
+  return texts;
 }
 
 // ── Flows against the open-access gateway ────────────────────────────────
@@ -622,26 +686,25 @@ const openAccessFlows = [
     run: async ({ page }) => {
       const rail = page.getByTestId(T.SIGNALS_RAIL);
       await rail.waitFor({ timeout: 10_000 });
-      const quarantineSignal = rail
-        .locator('[data-testid^="signal:"]')
-        .filter({ hasText: "Memory write quarantined" })
-        .first();
-      await quarantineSignal.waitFor({ timeout: 15_000 });
+      // The reviewer is signed in and is not an administrator (the open
+      // fixture names none), so the records that are for an administrator
+      // only never reach this caller. The warning-severity probe is the
+      // blocked release, which everyone who sees the system page reads.
+      const blockedSignal = railSignal(page, "Quarantine release blocked");
+      await blockedSignal.waitFor({ timeout: 15_000 });
       assert.equal(
-        await quarantineSignal.getAttribute("data-sev"),
+        await blockedSignal.getAttribute("data-sev"),
         "warning",
-        "quarantined write must be warning severity",
+        "blocked release must be warning severity",
       );
-      const verdictSignal = rail
-        .locator('[data-testid^="signal:"]')
-        .filter({ hasText: "Quarantine verdict" })
-        .first();
+      const verdictSignal = railSignal(page, "Quarantine verdict");
       await verdictSignal.waitFor({ timeout: 15_000 });
       const verdictText = await verdictSignal.innerText();
       assert(
         verdictText.includes("unverifiable"),
         `verdict signal copy should carry the verdict: ${verdictText}`,
       );
+      await assertNoAdministratorOnlySignals(page, "a signed-in person who is not an administrator");
       assertNoRawJson(await rail.innerText(), "signals rail");
     },
   },
@@ -676,12 +739,16 @@ const openAccessFlows = [
     run: async ({ page }) => {
       await openTab(page, "pipeline");
       const strip = page.getByTestId(T.LIVE_STRIP);
-      await strip.waitFor({ timeout: 10_000 });
-      await strip.locator('[data-testid^="memory-live-row:"]').first().waitFor({
-        timeout: 15_000,
-      });
-      const rows = await strip.locator('[data-testid^="memory-live-row:"]').count();
-      assert(rows >= 7, `expected the seeded memory.* frames in the ring, saw ${rows}`);
+      // Of the eight seeded memory.* frames the reviewer reads the four
+      // that are not for an administrator only: dream started and
+      // completed, the quarantine verdict, the blocked release.
+      const rows = await liveStripRows(page, 4);
+      for (const { label, sentence } of ADMINISTRATOR_ONLY_RECORDS) {
+        assert(
+          !rows.some((row) => row.includes(sentence)),
+          `the "${label}" record is for an administrator only: it must not reach the reviewer's live strip: ${JSON.stringify(rows)}`,
+        );
+      }
       await page.getByTestId(T.LIVE_SEAM).waitFor({ timeout: 10_000 });
       assertNoRawJson(await strip.innerText(), "live strip");
 
@@ -732,20 +799,18 @@ const grantFlows = [
         "nav:memory must not render without a memory read grant",
       );
       // Gate finding: the rail's "Open in Memory" pivot must not outrun the
-      // nav gate. The seeded memory.* frames (system-attributed, globally
-      // visible) still produce rail signals for this caller — wait for one,
-      // then assert NO pivot button rendered anywhere.
-      await page
-        .getByTestId(T.SIGNALS_RAIL)
-        .locator('[data-testid^="signal:"]')
-        .filter({ hasText: "Memory write quarantined" })
-        .first()
-        .waitFor({ timeout: 15_000 });
+      // nav gate. The seeded memory.* frames that are not for an
+      // administrator only still produce rail signals for this caller: wait
+      // for the quarantine verdict, the signal that carries the pivot for a
+      // caller with a memory read grant, then assert NO pivot button
+      // rendered anywhere.
+      await railSignal(page, "Quarantine verdict").waitFor({ timeout: 15_000 });
       assert.equal(
         await page.getByTestId("signal-memory-pivot").count(),
         0,
         "signal-memory-pivot must not render without experience.memory.can_read",
       );
+      await assertNoAdministratorOnlySignals(page, "a caller with no token");
 
       // access=reader: memory nav renders, records are readable, quarantine
       // review is withheld (no-grant note, no queue rows).
@@ -766,6 +831,61 @@ const grantFlows = [
         await page.locator('[data-testid^="memory-quarantine-record:"]').count(),
         0,
         "quarantine rows must not render without the review grant",
+      );
+    },
+  },
+
+  {
+    // The records that are for an administrator only, read by two callers
+    // of one console (access=reader, whose controller names an
+    // administrator): a caller with no token reads none of them, the
+    // administrator reads them all.
+    name: "administrator-only memory signals reach the administrator alone",
+    run: async ({ page, adminPage, readerBaseUrl }) => {
+      // The caller with no token loads first: once the administrator's
+      // page, loaded after it, shows the four signals, this caller's own
+      // read of that timeline has long been on its rail.
+      await gotoConsole(page, `${readerBaseUrl}/console`);
+      await railSignal(page, "Quarantine verdict").waitFor({ timeout: 15_000 });
+
+      await gotoConsole(adminPage, `${readerBaseUrl}/console`);
+      for (const { label, severity } of ADMINISTRATOR_ONLY_RECORDS) {
+        const signal = railSignal(adminPage, label);
+        await signal.waitFor({ timeout: 15_000 });
+        assert.equal(
+          await signal.getAttribute("data-sev"),
+          severity,
+          `the administrator's "${label}" signal severity`,
+        );
+      }
+      assertNoRawJson(
+        await adminPage.getByTestId(T.SIGNALS_RAIL).innerText(),
+        "the administrator's signals rail",
+      );
+      await assertNoAdministratorOnlySignals(page, "a caller with no token");
+
+      // The live strip, the same way: the administrator's holds all eight
+      // seeded frames, the other caller's only the four that are not for an
+      // administrator only.
+      await openMemoryPanel(adminPage);
+      await openTab(adminPage, "pipeline");
+      const adminRows = await liveStripRows(adminPage, 8);
+      await openMemoryPanel(page);
+      await openTab(page, "pipeline");
+      const rows = await liveStripRows(page, 4);
+      for (const { label, sentence } of ADMINISTRATOR_ONLY_RECORDS) {
+        assert(
+          adminRows.some((row) => row.includes(sentence)),
+          `the administrator's live strip must hold the "${label}" record: ${JSON.stringify(adminRows)}`,
+        );
+        assert(
+          !rows.some((row) => row.includes(sentence)),
+          `the "${label}" record is for an administrator only: it must not reach the live strip of a caller with no token: ${JSON.stringify(rows)}`,
+        );
+      }
+      assertNoRawJson(
+        await adminPage.getByTestId(T.LIVE_STRIP).innerText(),
+        "the administrator's live strip",
       );
     },
   },
@@ -926,7 +1046,7 @@ async function main() {
     const seed = await fetchSeedIds(gateway.baseUrl);
     browser = await launchBrowser();
     const reviewer = await browser.newContext({
-      extraHTTPHeaders: { authorization: `Bearer ${reviewerToken()}` },
+      extraHTTPHeaders: { authorization: `Bearer ${personToken(REVIEWER)}` },
     });
     const page = await reviewer.newPage();
     const context = { page, baseUrl: gateway.baseUrl, seed };
@@ -939,8 +1059,13 @@ async function main() {
     partialGateway = await startSeededGateway("partial");
     scopedGateway = await startSeededGateway("scoped");
     const grantPage = await browser.newPage();
+    const administrator = await browser.newContext({
+      extraHTTPHeaders: { authorization: `Bearer ${personToken(ADMINISTRATOR)}` },
+    });
+    const adminPage = await administrator.newPage();
     const grantContext = {
       page: grantPage,
+      adminPage,
       readerBaseUrl: readerGateway.baseUrl,
       noneBaseUrl: noneGateway.baseUrl,
       partialBaseUrl: partialGateway.baseUrl,

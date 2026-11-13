@@ -103,6 +103,9 @@ pub(super) struct SpawnPreparationCarry {
     /// The spawn's tool dispatch admission facts, for its row and the
     /// retention map.
     pub(super) dispatch_admission: super::super::fork_build::SpawnDispatchAdmissionFacts,
+    /// The spawn's fork lineage for operator instructions, resolved at its
+    /// admission: for its birth snapshot, its row and its seat's record.
+    pub(super) instruction_lineage: super::operator_instructions::SpawnInstructionLineage,
     /// Whether the spawn acts for the identity entry of its name.
     pub(super) entry_custody: bool,
     /// Whether the spawn acts for the store-owned entry of its name.

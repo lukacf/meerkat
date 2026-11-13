@@ -16,7 +16,7 @@ use std::time::Duration;
 use futures::stream;
 use meerkat::{AgentFactory, Config, build_ephemeral_service};
 use meerkat_client::{LlmClient, LlmError, LlmEvent, LlmRequest, TestClient};
-use meerkat_comms::{InprocRegistry, PeerMeta};
+use meerkat_comms::InprocRegistry;
 use meerkat_core::types::HandlingMode;
 use meerkat_core::{Message, Provider, StopReason};
 use meerkat_meta::{
@@ -1259,9 +1259,6 @@ async fn downstream_alias_failure_removes_attempt_state_and_allows_clean_retry()
         .into_iter()
         .find(|peer| peer.name == alice_name)
         .expect("alice canonical registration");
-    let alice_sender = registry
-        .get_by_pubkey_in_namespace(&left_namespace, &alice_registration.pubkey)
-        .expect("alice canonical sender");
     let bob_registration = registry
         .peers_in_namespace(&right_namespace)
         .into_iter()
@@ -1284,19 +1281,14 @@ async fn downstream_alias_failure_removes_attempt_state_and_allows_clean_retry()
         )
         .await
         .expect("pre-wire Bob to Alice");
-    let alias = registry.register_with_meta_in_namespace(
-        &right_namespace,
-        alice_name.clone(),
-        alice_registration.pubkey,
-        alice_sender,
-        PeerMeta::default(),
-    );
+    // `wire_local` owns the route of the half it wires: Bob's namespace
+    // reaches Alice without a registration by hand.
     assert!(
-        !alias.is_rejected()
-            && !matches!(
-                alias,
-                meerkat_comms::RegistrationOutcome::ReplacedPubkey { .. }
-            )
+        registry
+            .peers_in_namespace(&right_namespace)
+            .into_iter()
+            .any(|peer| peer.name == alice_name && peer.pubkey == alice_registration.pubkey),
+        "wire_local must install Bob's route to Alice with the trust"
     );
 
     // Remove Bob's canonical route only long enough to force alias
@@ -2599,4 +2591,115 @@ fn opening_a_journal_drops_reserved_prefix_entries_from_before_keys_were_scoped(
         .cloned()
         .collect::<Vec<_>>();
     assert_eq!(keys, vec!["apply-scoped:filed", "host-key"], "{persisted}");
+}
+
+/// Under an enforcing access controller the bilateral coordinator decides a
+/// principal's view on each runtime's agents as they are when it is asked:
+/// it reads them itself, and no Console request has to have read them
+/// before. A member private to a person is shown to an access administrator
+/// only, and a plan that names it is refused to everyone else exactly as a
+/// plan that names a member no agent holds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bilateral_views_decide_on_each_runtimes_agents_as_they_are_now() {
+    let _serial = TOPOLOGY_TEST_LOCK.lock().await;
+    let root = tempfile::tempdir().expect("root");
+    let journal = root.path().join("views-pair.json");
+    let mut left = build_runtime(root.path(), "views-a", "alice").await;
+    let mut right = build_runtime(root.path(), "views-b", "bob").await;
+    // A member of the left runtime that is private to a person. Its host
+    // writes it through the mob's own handle: the runtime's spawn refuses a
+    // caller the label that names the person.
+    left.mob_handle()
+        .spawn_spec(
+            SpawnMemberSpec::from_wire(
+                "worker".to_string(),
+                MeerkatId::from("carol").to_string(),
+                None,
+                Some(MobRuntimeMode::TurnDriven),
+                None,
+            )
+            .with_labels(BTreeMap::from([(
+                "console.private_to".to_string(),
+                "a-person-key".to_string(),
+            )])),
+        )
+        .await
+        .expect("spawn the private member");
+    let coordinator = SameProcessTopologyCoordinator::open(&journal).expect("coordinator");
+
+    // Access is enforced from here on, and nothing but the coordinator
+    // reads the runtimes' agents.
+    let granted = [
+        "agent.view",
+        "topology.view",
+        "topology.connect",
+        "topology.cross_authority",
+    ];
+    left.set_access_controller(topology_access(&granted));
+    right.set_access_controller(topology_access(&granted));
+
+    let names = |snapshot: &meerkat_meta::TopologyBilateralSnapshot| {
+        snapshot
+            .nodes
+            .iter()
+            .map(|node| node.endpoint.identity.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let shaped = coordinator
+        .query(&left, &right, Some("desktop-host"))
+        .await
+        .expect("the principal's query");
+    assert_eq!(
+        names(&shaped),
+        ["alice", "bob"].map(str::to_string).into(),
+        "the principal is not shown the private member"
+    );
+    let administrator = coordinator
+        .query(&left, &right, Some("root"))
+        .await
+        .expect("the administrator's query");
+    assert_eq!(
+        names(&administrator),
+        ["alice", "bob", "carol"].map(str::to_string).into(),
+        "an access administrator is shown every endpoint"
+    );
+
+    // A plan that names the private member is refused as one that names a
+    // member no agent holds.
+    let plan_of = |edge: &TopologyEdge| TopologyBilateralPlanRequest {
+        expected_revisions: shaped.authority_revisions.clone(),
+        operations: vec![mutation(TopologyAction::Connect, edge)],
+    };
+    let private = coordinator
+        .plan(
+            &left,
+            &right,
+            plan_of(&edge("views-a", "carol", "views-b", "bob")),
+            Some("desktop-host"),
+        )
+        .await
+        .expect_err("a plan on the private member is refused");
+    let unheld = coordinator
+        .plan(
+            &left,
+            &right,
+            plan_of(&edge("views-a", "nobody", "views-b", "bob")),
+            Some("desktop-host"),
+        )
+        .await
+        .expect_err("a plan on a member no agent holds is refused");
+    assert_eq!(private.kind(), unheld.kind(), "{private:?} / {unheld:?}");
+    // The twin: a plan on the members the principal is shown is answered.
+    coordinator
+        .plan(
+            &left,
+            &right,
+            plan_of(&edge("views-a", "alice", "views-b", "bob")),
+            Some("desktop-host"),
+        )
+        .await
+        .expect("a plan on the shown members");
+
+    shutdown(&left).await;
+    shutdown(&right).await;
 }

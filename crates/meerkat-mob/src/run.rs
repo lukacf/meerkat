@@ -707,6 +707,7 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::RestoreOwnedIdentityEdge { .. }
             | mob_dsl::MobMachineInput::ResolveMemberDispatchAdmission { .. }
             | mob_dsl::MobMachineInput::RecordMemberDispatchAdmissionLineage { .. }
+            | mob_dsl::MobMachineInput::RecordMemberInstructionLineage { .. }
             | mob_dsl::MobMachineInput::OpenDeclaredApply
             | mob_dsl::MobMachineInput::CloseDeclaredApply
             | mob_dsl::MobMachineInput::FinishExplicitResume { .. }
@@ -2025,6 +2026,7 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::RestoreOwnedIdentityEdge { .. }
             | mob_dsl::MobMachineInput::ResolveMemberDispatchAdmission { .. }
             | mob_dsl::MobMachineInput::RecordMemberDispatchAdmissionLineage { .. }
+            | mob_dsl::MobMachineInput::RecordMemberInstructionLineage { .. }
             | mob_dsl::MobMachineInput::OpenDeclaredApply
             | mob_dsl::MobMachineInput::CloseDeclaredApply
             | mob_dsl::MobMachineInput::FinishExplicitResume { .. }

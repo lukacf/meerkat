@@ -65,8 +65,10 @@
             "group": "Guides",
             "pages": [
               "guides/unified-runtime",
+              "guides/agents-create-agents",
               "guides/module-system",
               "guides/console",
+              "guides/long-term-agents",
               "guides/flow-editor",
               "guides/authentication",
               "guides/deployment",
@@ -121,6 +123,7 @@
             "group": "Governance",
             "pages": [
               "reference/decisions",
+              "reference/identity-policy",
               "reference/governance"
             ]
           }

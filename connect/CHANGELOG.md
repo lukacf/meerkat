@@ -39,6 +39,23 @@ guides give the conditional wording for Connect 0.9.14.
   supported on socket"; it now treats that answer like a pipe or socket with
   nothing to discard.
 
+### Security
+
+- `rustix` is updated from 1.1.5 to 1.1.6 for RUSTSEC-2026-0486. Releases
+  through 0.9.14 build with 1.1.5. `meerkat-connect` and `toolkit-package`
+  depend on `rustix` directly and now require exactly 1.1.6; it is also
+  taken through `cap-std`, `tempfile`, Meerkat Core and Meerkat Meta, and
+  `xattr` through `tar`. Meerkat Core and Meerkat Meta, which Connect
+  builds on, now require rustix 1.1.6 or later. The advisory is about the
+  `getxattr` and `listxattr` functions of `rustix::fs` (with their `l` and
+  `f` forms), which mark bytes they never wrote as initialized when they
+  are given a zero-length buffer. No Connect crate calls them. Of the
+  crates Connect builds with only `xattr` does, and `tar`, the one crate
+  that uses `xattr`, calls it only to set attributes while unpacking, so
+  Connect's own use is not known to be affected. The library kits built
+  through 0.9.14 hold tools built with `rustix` 1.1.5; the kits are rebuilt
+  at the next Connect release.
+
 ## [0.9.14] - 2026-11-11
 
 Meerkat Connect 0.9.14 is part of Meerkat 0.9.14 (Core 0.9.14, Meta 0.9.14

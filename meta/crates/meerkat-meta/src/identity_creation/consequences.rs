@@ -4,20 +4,23 @@
 //! A host states what a request means in its domain (a peer of a sensitive
 //! kind, a tool that reads private content) as consequence lines. They are
 //! rendered in their own section of `render_v1`, so the subject digest
-//! covers them and every complete presentation shows them. A host supplies
-//! them in one of two forms:
+//! covers them and every complete presentation shows them, ahead of
+//! anything the requester wrote.
 //!
-//! - an embedded host implements `GatewayHostComposition::identity_consequences`;
-//! - a gateway host declares the host callback `identity.consequences`
-//!   (`CONSEQUENCES_CALLBACK`) and answers it with `{"lines": [..]}`.
+//! A host supplies them from its Rust composition: an embedded host
+//! implements `GatewayHostComposition::identity_consequences`, and the
+//! launch hands it to the decisions it holds as a [`HostConsequences`]
+//! source. A host behind an SDK has no way to supply lines in this release:
+//! its decisions render with none. The name `identity.consequences`
+//! (`CONSEQUENCES_CALLBACK`) and the parameter and result forms below are
+//! the shape reserved for such a host; nothing sends them yet.
 //!
-//! Either form fails closed. When the host cannot answer (an error, a
-//! malformed or late answer), the request is refused
-//! `consequences_unavailable` (retryable) and nothing is rendered or held.
-//! The lines must be deterministic: the same request gives the same lines.
-//! At execution they are computed again; lines that differ change the
-//! rendering, and the executor refuses the operation `subject_widened` and
-//! closes the decision.
+//! The hook fails closed. When the host cannot answer (an error), the
+//! request is refused `consequences_unavailable` (retryable) and nothing is
+//! rendered or held. The lines must be deterministic: the same request
+//! gives the same lines. When the change is carried out they are asked for
+//! again; lines that differ change the rendering, and the decision's
+//! executor refuses the change `subject_widened` and closes the decision.
 
 use std::fmt;
 
@@ -26,7 +29,8 @@ use serde_json::{Value, json};
 
 use super::request::IdentityRequest;
 
-/// The host callback a gateway host declares to supply consequence lines.
+/// The name reserved for the call that asks a host behind an SDK for its
+/// consequence lines. Nothing sends it in this release.
 pub const CONSEQUENCES_CALLBACK: &str = "identity.consequences";
 
 const FORMAT_CONSEQUENCES: &str = "meerkat.identity.consequences.v1";
@@ -90,9 +94,47 @@ where
     }
 }
 
-/// The parameters of the `identity.consequences` callback for `request`:
-/// `{"format", "kind", "request"}`, where `kind` is the decision kind
-/// (`identity.create`, `identity.update` or `identity.remove`) and
+/// Where a host's consequence lines come from when a request is held and
+/// when it is carried out: the host is asked with the normalized request and
+/// answers its lines, or refuses with its reason. The answer may take a call
+/// to the host, so the source is asked before the rendering is made, and the
+/// rendering is made of the lines it gave.
+///
+/// An embedded host's `GatewayHostComposition::identity_consequences` is one
+/// ([`host_consequences_of`] of a closure over it); any [`ConsequenceHook`]
+/// that can be shared is one.
+#[async_trait::async_trait]
+pub trait HostConsequences: Send + Sync {
+    /// The host's lines for `request`, in any order. The same request must
+    /// give the same lines: lines that differ when the request is carried
+    /// out refuse it.
+    async fn lines(&self, request: &IdentityRequest) -> Result<Vec<ConsequenceLine>, HookRefusal>;
+}
+
+#[async_trait::async_trait]
+impl<H> HostConsequences for H
+where
+    H: ConsequenceHook + Send + Sync,
+{
+    async fn lines(&self, request: &IdentityRequest) -> Result<Vec<ConsequenceLine>, HookRefusal> {
+        self.consequences(request)
+    }
+}
+
+/// The source of the consequence lines `hook` gives: what a launch hands the
+/// decisions it holds for identity changes. A launch with an embedded host
+/// passes a closure over its `identity_consequences`.
+pub fn host_consequences_of<H>(hook: H) -> std::sync::Arc<dyn HostConsequences>
+where
+    H: ConsequenceHook + Send + Sync + 'static,
+{
+    std::sync::Arc::new(hook)
+}
+
+/// The parameters reserved for the `identity.consequences` call for
+/// `request`: `{"format", "kind", "request"}`, where `kind` is the decision
+/// kind (`identity.create`, `identity.update`, `identity.archive`,
+/// `identity.unarchive`, `identity.remove` or `identity.adopt`) and
 /// `request` the normalized request.
 pub fn consequences_callback_params(request: &IdentityRequest) -> Result<Value, serde_json::Error> {
     Ok(json!({
@@ -102,8 +144,9 @@ pub fn consequences_callback_params(request: &IdentityRequest) -> Result<Value, 
     }))
 }
 
-/// Read the `identity.consequences` callback's result, `{"lines": [..]}`
-/// with each line a string. Anything else is a hook refusal.
+/// Read the result reserved for the `identity.consequences` call,
+/// `{"lines": [..]}` with each line a string. Anything else is a hook
+/// refusal.
 pub fn parse_consequences_callback_result(
     result: &Value,
 ) -> Result<Vec<ConsequenceLine>, HookRefusal> {

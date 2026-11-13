@@ -242,7 +242,11 @@ impl<'de> Deserialize<'de> for MemberRef {
 // it, and the member reads there as an ordinary member. A stored
 // `MemberSpawned` may also carry the internal `dispatch_admission_lineage`
 // marker of a member whose lineage runs under a host's tool dispatch
-// admission; a reader that predates it ignores it.
+// admission; a reader that predates it ignores it. A stored `MemberSpawned`
+// may also carry the internal `instruction_lineage_root` of a fork-derived
+// member (the first member of its fork family, for operator instructions);
+// a reader that predates it ignores it, and the member reads there as one
+// that is not fork-derived.
 const CURRENT_STORED_MOB_EVENT_SCHEMA_VERSION: u32 = 9;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1289,6 +1293,18 @@ pub struct MemberSpawnedEvent {
     /// journals written before it decode it as `false`.
     #[serde(skip, default)]
     pub(crate) dispatch_admission_lineage: bool,
+    /// The fork lineage root of a fork-derived member, for operator
+    /// instructions: the first member of the fork family this incarnation
+    /// belongs to, exactly as its seat recorded it in MobMachine
+    /// (`member_instruction_lineage`), or as MobMachine held it for the
+    /// identity when a later seat of the same fork (a respawn, a reseat)
+    /// wrote its row. A record written for that member and its forks
+    /// selects this member. The replay of the row records the root in
+    /// MobMachine again, right after the row seated the member. Stored only
+    /// by the internal event codec; a reader that predates it ignores it,
+    /// and journals written before it decode it as `None`.
+    #[serde(skip, default)]
+    pub(crate) instruction_lineage_root: Option<AgentIdentity>,
 }
 
 impl MemberSpawnedEvent {
@@ -1332,6 +1348,7 @@ impl MemberSpawnedEvent {
             seat_session: None,
             approval_branch: None,
             dispatch_admission_lineage: false,
+            instruction_lineage_root: None,
         }
     }
 
@@ -1357,6 +1374,17 @@ impl MemberSpawnedEvent {
     /// admission.
     pub(crate) fn dispatch_admission_lineage(&self) -> bool {
         self.dispatch_admission_lineage
+    }
+
+    pub(crate) fn with_instruction_lineage_root(mut self, root: Option<AgentIdentity>) -> Self {
+        self.instruction_lineage_root = root;
+        self
+    }
+
+    /// The fork lineage root this row stores for its member, for operator
+    /// instructions, when the member is fork-derived.
+    pub(crate) fn instruction_lineage_root(&self) -> Option<&AgentIdentity> {
+        self.instruction_lineage_root.as_ref()
     }
 
     pub(crate) fn with_history_unavailable(
@@ -2183,6 +2211,15 @@ pub(crate) fn encode_stored_mob_event(event: &MobEvent) -> Result<Vec<u8>, serde
         kind.insert("dispatch_admission_lineage".to_string(), Value::Bool(true));
     }
     if let Some(member_spawned) = event.kind.member_spawned()
+        && let Some(root) = member_spawned.instruction_lineage_root()
+        && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
+    {
+        kind.insert(
+            "instruction_lineage_root".to_string(),
+            serde_json::to_value(root)?,
+        );
+    }
+    if let Some(member_spawned) = event.kind.member_spawned()
         && let Some(seat_build_inputs) = member_spawned.seat_build_inputs()
         && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
     {
@@ -2505,6 +2542,19 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
         .map(serde_json::from_value::<bool>)
         .transpose()?
         .unwrap_or(false);
+    let spawned_instruction_lineage_root = value
+        .get_mut("kind")
+        .and_then(Value::as_object_mut)
+        .and_then(|kind| {
+            if kind.get("type").and_then(Value::as_str) == Some("member_spawned") {
+                kind.remove("instruction_lineage_root")
+            } else {
+                None
+            }
+        })
+        .map(serde_json::from_value::<Option<AgentIdentity>>)
+        .transpose()?
+        .flatten();
     let spawned_seat_build_inputs = value
         .get_mut("kind")
         .and_then(Value::as_object_mut)
@@ -2807,6 +2857,11 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
         && let Some(member_spawned) = event.kind.member_spawned_mut()
     {
         member_spawned.dispatch_admission_lineage = true;
+    }
+    if let Some(root) = spawned_instruction_lineage_root
+        && let Some(member_spawned) = event.kind.member_spawned_mut()
+    {
+        member_spawned.instruction_lineage_root = Some(root);
     }
     if let Some(seat_build_inputs) = spawned_seat_build_inputs
         && let Some(member_spawned) = event.kind.member_spawned_mut()
@@ -3517,6 +3572,80 @@ mod tests {
         fn lineage_set(kind: &MobEventKind) -> bool {
             match kind {
                 MobEventKind::MemberSpawned(spawned) => spawned.dispatch_admission_lineage(),
+                other => panic!("unexpected kind {other:?}"),
+            }
+        }
+    }
+
+    /// The fork lineage root of a fork-derived member, for operator
+    /// instructions, is stored by the event codec only, absent from the
+    /// public event and from the stored row of a member that is not
+    /// fork-derived, and decoded as none from a journal written before it.
+    #[test]
+    fn test_stored_instruction_lineage_root_roundtrips_and_stays_internal() {
+        let sid = SessionId::from_uuid(Uuid::nil());
+        let identity = AgentIdentity::from("fork-child");
+        let root = AgentIdentity::from("first-member");
+        let row = |root: Option<AgentIdentity>| MobEvent {
+            cursor: 1,
+            timestamp: Utc::now(),
+            mob_id: MobId::from("test-mob"),
+            kind: MobEventKind::MemberSpawned(
+                MemberSpawnedEvent::new(
+                    identity.clone(),
+                    Generation::new(1),
+                    FenceToken::new(2),
+                    AgentRuntimeId::new(identity.clone(), Generation::new(1)),
+                    ProfileName::from("worker"),
+                )
+                .with_bridge_member_ref(Some(MemberRef::from_bridge_session_id(sid.clone())))
+                .with_instruction_lineage_root(root),
+            ),
+        };
+        let marker = "instruction_lineage_root";
+        let spawned = row(Some(root.clone()));
+        let public = serde_json::to_value(&spawned).expect("public event payload");
+        assert!(
+            public["kind"].get(marker).is_none(),
+            "the public event never carries {marker}"
+        );
+        let encoded = encode_stored_mob_event(&spawned).expect("encode");
+        let mut stored: serde_json::Value = serde_json::from_slice(&encoded).expect("parse");
+        assert_eq!(
+            stored["event"]["kind"][marker],
+            serde_json::Value::String("first-member".to_string())
+        );
+        let decoded = decode_stored_mob_event(&encoded).expect("decode");
+        assert_eq!(
+            root_of(&decoded.kind),
+            Some(root),
+            "{marker} survives the stored roundtrip"
+        );
+
+        let plain = encode_stored_mob_event(&row(None)).expect("encode");
+        let plain: serde_json::Value = serde_json::from_slice(&plain).expect("parse");
+        assert!(
+            plain["event"]["kind"].get(marker).is_none(),
+            "the row of a member that is not fork-derived stores no {marker}"
+        );
+
+        let removed = stored
+            .get_mut("event")
+            .and_then(|event| event.get_mut("kind"))
+            .and_then(serde_json::Value::as_object_mut)
+            .and_then(|kind| kind.remove(marker));
+        assert!(removed.is_some());
+        let legacy = serde_json::to_vec(&stored).expect("encode without the root");
+        let decoded = decode_stored_mob_event(&legacy).expect("decode");
+        assert_eq!(
+            root_of(&decoded.kind),
+            None,
+            "a journal written before {marker} decodes it as none"
+        );
+
+        fn root_of(kind: &MobEventKind) -> Option<AgentIdentity> {
+            match kind {
+                MobEventKind::MemberSpawned(spawned) => spawned.instruction_lineage_root().cloned(),
                 other => panic!("unexpected kind {other:?}"),
             }
         }

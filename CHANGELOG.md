@@ -729,6 +729,39 @@ them.
 
 ### Fixed
 
+- `meerkat-rpc`, `meerkat-rest`, `meerkat`: a turn that fails at its start no
+  longer destroys the agents its session created. When a turn failed while
+  it was being applied (after its input was admitted, before its run began),
+  the session's live runtime was retired, and with it every mob the session
+  owned was destroyed: the mobs its agent had created, with their members,
+  and the session's implicit mob, which holds its delegates and forks. The
+  session itself stayed, without them. That step belongs to archiving a
+  session and now runs only there. On JSON-RPC this happened when the next
+  turn of a stored session that was not live (after a restart or an
+  eviction) could not rebuild it, for example because the provider, a
+  credential, the account's model list or an MCP server was not available
+  right after a restart (measured by a test); and when a turn's `model`,
+  `provider`, `provider_params` or `auth_binding` override could not be
+  applied to a running session (measured by a test). On REST it happened
+  when a turn's apply failed before its run on a running session (measured
+  by a test); a stored REST session that cannot be rebuilt is refused before
+  its turn is admitted and was not affected. For Rust embedders that call
+  the JSON-RPC session runtime directly: a `SessionRuntime::start_turn`
+  whose recovery of a stored session failed on a runtime registration that
+  same call had created destroyed the mobs too (measured by a test); no
+  JSON-RPC method reaches that path. The MCP server, the `rkat` commands and
+  the browser runtime were not affected (by reading the source). A failed
+  start still retires the session's runtime registration and its live MCP
+  connections, which the next turn builds again (see Known limitations for
+  an input queued behind the failed turn). Affects 0.6.0 through 0.9.14 for
+  a stored session whose rebuild fails, and 0.7.0 through 0.9.14 for any
+  turn that fails while it is applied, a running session included, on
+  JSON-RPC and on REST (the version ranges are read from the released
+  sources). The same cleanup
+  after a result delivered to a stored session (a delegate, fork or job
+  result) is covered by reading the source only. Mobs that were destroyed
+  this way are not restored by upgrading.
+
 - `meerkat-core`: a turn that fails because a provider failure outlasted the
   retries now says what failed. Its typed turn error (`error.data.error` of
   a JSON-RPC turn, `details.error` of REST, the `error=` JSON of the CLI's
@@ -1372,6 +1405,15 @@ them.
   from then on.
 
 ### Known limitations
+
+- An input queued behind a turn that fails at its start is not run. The
+  failed start retires the session's runtime registration, and an input
+  that was queued on it (a peer message, a delegate, fork or job result, a
+  scheduled delivery) ends without a run: its sender is answered
+  `runtime terminated` or that the input was abandoned, and has to send it
+  again. Event streams that were pending on the session close with the
+  registration and have to be opened again. The session's next turn builds
+  the runtime again.
 
 - The owner-only rule of this release (see Security) covers the
   configuration documents, the comms binding file and `identity.key`. Two

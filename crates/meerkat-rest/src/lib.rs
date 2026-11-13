@@ -45,6 +45,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use futures::stream::Stream;
+use meerkat::session_runtime::runtime_state::RuntimeCleanupScope;
 use meerkat::surface::{
     RequestAdmissionError, RequestContext, RequestTerminal, RequestTerminalResolution,
     SurfaceRequestExecutor, SurfaceSessionRecoveryContext, SurfaceSessionRecoveryOverrides,
@@ -1758,10 +1759,14 @@ async fn cleanup_rest_runtime_after_completion_outcome(
             if runtime_termination_cleanup
                 && !state.runtime_adapter.contains_session(session_id).await =>
         {
+            // No cleanup authority was generated; the archive read above is
+            // the fact it would have been given. A session that is not
+            // archived keeps what it owns.
             cleanup_rest_runtime_after_verified_termination(
                 state,
                 session_id,
                 &runtime_termination_proof,
+                RuntimeCleanupScope::of_completion_cleanup(archived_now),
             )
             .await?;
             return Ok(true);
@@ -1773,6 +1778,13 @@ async fn cleanup_rest_runtime_after_completion_outcome(
         }
     };
     if cleanup_authority.requires_runtime_cleanup() {
+        // A cleanup the authority asks for is the session's archive only when
+        // the authority says the session is archived. A turn whose apply
+        // failed retires the session's live runtime, which its next turn
+        // builds again, and leaves the session what it owns: its mobs are
+        // destroyed by its archive, never by a failed turn.
+        let scope =
+            RuntimeCleanupScope::of_completion_cleanup(cleanup_authority.archived_by_authority);
         match state.session_service.discard_live_session(session_id).await {
             Ok(()) | Err(SessionError::NotFound { .. }) => {}
             Err(error) => return Err(error),
@@ -1783,10 +1795,11 @@ async fn cleanup_rest_runtime_after_completion_outcome(
                 state,
                 session_id,
                 &runtime_termination_proof,
+                scope,
             )
             .await?;
         } else {
-            cleanup_archived_session_runtime_until_terminal(state, session_id).await?;
+            cleanup_rest_session_runtime_until_terminal(state, session_id, scope).await?;
         }
     }
     Ok(cleanup_authority.releases_pre_admission())
@@ -8743,7 +8756,12 @@ async fn cleanup_archived_session_runtime(
     state: &AppState,
     session_id: &SessionId,
 ) -> Result<(), SessionError> {
-    cleanup_archived_session_runtime_until_terminal(state, session_id).await
+    cleanup_rest_session_runtime_until_terminal(
+        state,
+        session_id,
+        RuntimeCleanupScope::ArchivedSession,
+    )
+    .await
 }
 
 /// [`cleanup_archived_session_runtime`] for a completed turn's cleanup: join
@@ -8753,9 +8771,14 @@ async fn cleanup_archived_session_runtime(
 /// outcome); and once the outcome is delivered the runtime is gone, so a
 /// client reusing the session cannot race a half-torn-down registration. The
 /// wait ends on the saga's typed terminal result.
-async fn cleanup_archived_session_runtime_until_terminal(
+///
+/// `scope` says what became of the session: the cleanup of a session that
+/// stays (a turn whose apply failed) retires its live runtime and destroys
+/// none of its mobs.
+async fn cleanup_rest_session_runtime_until_terminal(
     state: &AppState,
     session_id: &SessionId,
+    scope: RuntimeCleanupScope,
 ) -> Result<(), SessionError> {
     if let Some(registration) = state
         .runtime_adapter
@@ -8776,7 +8799,7 @@ async fn cleanup_archived_session_runtime_until_terminal(
             Err(error) => return Err(runtime_driver_error_to_session_error(error)),
         }
     }
-    cleanup_rest_runtime_after_unregistered(state, session_id).await
+    cleanup_rest_runtime_after_unregistered(state, session_id, scope).await
 }
 
 /// Retire an archived REST session without erasing either required cleanup
@@ -8798,6 +8821,7 @@ async fn cleanup_rest_runtime_after_verified_termination(
     state: &AppState,
     session_id: &SessionId,
     cleanup_observation: &meerkat_runtime::CompletionCleanupObservation,
+    scope: RuntimeCleanupScope,
 ) -> Result<(), SessionError> {
     if !cleanup_observation.proves_runtime_termination_for(session_id) {
         return Err(SessionError::Unsupported(format!(
@@ -8809,23 +8833,32 @@ async fn cleanup_rest_runtime_after_verified_termination(
             "REST runtime termination cleanup for {session_id} expected an already-absent registration"
         )));
     }
-    cleanup_rest_runtime_after_unregistered(state, session_id).await
+    cleanup_rest_runtime_after_unregistered(state, session_id, scope).await
 }
 
+/// The surface steps that follow the runtime's unregister. The mobs the
+/// session owns are destroyed for an archived session only
+/// ([`RuntimeCleanupScope::ArchivedSession`]); the MCP and comms steps run
+/// for a session that stays too, and its next turn builds them again.
 async fn cleanup_rest_runtime_after_unregistered(
     state: &AppState,
     session_id: &SessionId,
+    scope: RuntimeCleanupScope,
 ) -> Result<(), SessionError> {
     #[cfg(feature = "mob")]
-    state
-        .mob_state
-        .destroy_bridge_session_mobs(&session_id.to_string())
-        .await
-        .map_err(|error| {
-            error.into_session_error(
-                "failed to destroy bridge session mobs during REST runtime cleanup",
-            )
-        })?;
+    if scope == RuntimeCleanupScope::ArchivedSession {
+        state
+            .mob_state
+            .destroy_bridge_session_mobs(&session_id.to_string())
+            .await
+            .map_err(|error| {
+                error.into_session_error(
+                    "failed to destroy bridge session mobs during REST runtime cleanup",
+                )
+            })?;
+    }
+    #[cfg(not(feature = "mob"))]
+    let _ = scope;
     #[cfg(feature = "mcp")]
     cleanup_mcp_session(state, session_id).await;
     #[cfg(feature = "comms")]

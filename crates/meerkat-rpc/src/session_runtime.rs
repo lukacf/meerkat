@@ -453,7 +453,7 @@ pub(crate) use meerkat::session_runtime::recovery::{
 
 pub(crate) use meerkat::session_runtime::runtime_state::{
     ArchiveRuntimeCleanup, ArchiveRuntimeMcpState, ArchiveRuntimeMobState,
-    PendingSessionEventStreamDrop, PendingSessionEventStreams,
+    PendingSessionEventStreamDrop, PendingSessionEventStreams, RuntimeCleanupScope,
 };
 
 /// RPC-side adapter implementing [`ArchiveRuntimeMcpState`] for the
@@ -5377,10 +5377,16 @@ impl SessionRuntime {
                     // observation plus independently observed absent live
                     // session is the narrow proof that lets the relay finish
                     // the remaining surface anchors without weakening
-                    // ordinary cleanup.
+                    // ordinary cleanup. The archive read above is the fact the
+                    // generated authority would have been given: a session
+                    // that is not archived keeps what it owns.
                     return match self
                         .archive_runtime_cleanup()
-                        .run_after_runtime_termination(session_id, &runtime_termination_proof)
+                        .run_after_runtime_termination_scoped(
+                            session_id,
+                            &runtime_termination_proof,
+                            RuntimeCleanupScope::of_completion_cleanup(archived_now),
+                        )
                         .await
                     {
                         Ok(()) => Ok(Some(true)),
@@ -5409,6 +5415,14 @@ impl SessionRuntime {
             }
         };
         if cleanup_authority.requires_runtime_cleanup() {
+            // A cleanup the authority asks for is the session's archive only
+            // when the authority says the session is archived. A turn start,
+            // a recovery or another apply step that failed retires the
+            // session's live runtime, which its next turn builds again, and
+            // leaves the session what it owns: its mobs are destroyed by its
+            // archive, never by a failed turn.
+            let scope =
+                RuntimeCleanupScope::of_completion_cleanup(cleanup_authority.archived_by_authority);
             let discard_error = match self.service.discard_live_session(session_id).await {
                 Ok(()) | Err(SessionError::NotFound { .. }) => None,
                 Err(error) => Some(error),
@@ -5417,11 +5431,18 @@ impl SessionRuntime {
                 && !self.runtime_adapter.contains_session(session_id).await
             {
                 self.archive_runtime_cleanup()
-                    .run_after_runtime_termination(session_id, &runtime_termination_proof)
+                    .run_after_runtime_termination_scoped(
+                        session_id,
+                        &runtime_termination_proof,
+                        scope,
+                    )
                     .await
                     .err()
             } else {
-                self.archive_runtime_cleanup().run(session_id).await.err()
+                self.archive_runtime_cleanup()
+                    .run_scoped(session_id, scope)
+                    .await
+                    .err()
             };
             if discard_error.is_some() || runtime_cleanup_error.is_some() {
                 let mut causes = Vec::new();
@@ -6158,6 +6179,9 @@ impl SessionRuntime {
         }
     }
 
+    /// Take back the runtime registration a failed recovery or create
+    /// registered itself. The session was not archived: it keeps what it
+    /// owns ([`RuntimeCleanupScope::KeptSession`]).
     async fn cleanup_recovered_runtime_if_new(
         &self,
         session_id: &SessionId,
@@ -6166,7 +6190,9 @@ impl SessionRuntime {
         if runtime_was_registered {
             return Ok(());
         }
-        self.archive_runtime_cleanup().run(session_id).await
+        self.archive_runtime_cleanup()
+            .run_scoped(session_id, RuntimeCleanupScope::KeptSession)
+            .await
     }
 
     async fn combine_with_recovered_runtime_cleanup(

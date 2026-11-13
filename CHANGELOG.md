@@ -1490,6 +1490,12 @@ them.
   stopped mob when it starts (the Meta gateways do) always meets this: retire
   the member, then restart the host.
 
+- `rkat run --skill <name>` with a name that matches no skill is accepted
+  without a message, and the run goes to the model without it. This is
+  confirmed by a run on a build with the Linux x86_64 release archive fix of
+  this release (see Fixed): that fix restores the built-in skills, it does
+  not make an unknown name an error. A fix is planned for a later release.
+
 ## [0.9.14] - 2026-11-11
 
 ### Highlights

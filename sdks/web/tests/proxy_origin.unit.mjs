@@ -1,4 +1,4 @@
-// The provider proxy's allowed origins (proxy/index.mjs, proxy/cli.mjs): which
+// The provider proxy's allowed origins and Host check (proxy/index.mjs, proxy/cli.mjs): which
 // requests it answers, which it refuses, and which reach the provider. The
 // provider is a stub: `fetch` is replaced before the proxy starts, so no row
 // sends a request off this process.
@@ -44,10 +44,11 @@ const FOREIGN_ORIGINS = [
   "null",
 ];
 
-function call(port, { method = "POST", path = "/anthropic/v1/messages", origin } = {}) {
+function call(port, { method = "POST", path = "/anthropic/v1/messages", origin, host } = {}) {
   return new Promise((resolve, reject) => {
     const headers = { connection: "close" };
     if (origin !== undefined) headers.origin = origin;
+    if (host !== undefined) headers.host = host;
     if (method === "POST") headers["content-type"] = "application/json";
     const req = request({ host: "127.0.0.1", port, method, path, headers }, (res) => {
       let body = "";
@@ -195,6 +196,91 @@ test("createProxyHandler compares the Origin before the provider is called", asy
   const any = await open(send("https://other.example"), "/v1/messages");
   assert.equal(any.status, 200);
   assert.equal(any.headers.get("access-control-allow-origin"), "*");
+  assert.equal(upstreamCalls.length, 1);
+});
+
+test("an Origin of null is refused unless every origin is allowed", async () => {
+  for (const opts of [{}, { allowOrigin: "https://app.example" }, { allowOrigin: "null" }]) {
+    await withProxy(opts, async (port) => {
+      for (const method of ["POST", "GET", "OPTIONS"]) {
+        const res = await call(port, { origin: "null", method });
+        assert.equal(res.status, 403, `${method} ${JSON.stringify(opts)}`);
+        assert.equal(res.headers["access-control-allow-origin"], undefined);
+      }
+      assert.deepEqual(upstreamCalls, []);
+    });
+  }
+  await withProxy({ allowOrigin: "*" }, async (port) => {
+    const res = await call(port, { origin: "null" });
+    assert.equal(res.status, 200);
+    assert.equal(res.headers["access-control-allow-origin"], "*");
+    assert.equal(upstreamCalls.length, 1);
+  });
+});
+
+test("bound to a loopback address, a request with another Host is refused", async () => {
+  await withProxy({}, async (port) => {
+    const hosts = [
+      "other.example",
+      `other.example:${port}`,
+      "localhost.other.example",
+      `127.0.0.1.other.example:${port}`,
+    ];
+    for (const host of hosts) {
+      for (const method of ["GET", "POST", "OPTIONS"]) {
+        const res = await call(port, { method, path: "/anthropic/v1/models", host });
+        assert.equal(res.status, 403, `${method} ${host}`);
+      }
+    }
+    assert.deepEqual(upstreamCalls, []);
+  });
+});
+
+test("bound to a loopback address, the loopback Host forms are served", async () => {
+  await withProxy({}, async (port) => {
+    const hosts = [
+      "localhost",
+      `localhost:${port}`,
+      "127.0.0.1",
+      `127.0.0.1:${port}`,
+      "[::1]",
+      `[::1]:${port}`,
+    ];
+    for (const host of hosts) {
+      upstreamCalls.length = 0;
+      const res = await call(port, { method: "GET", path: "/anthropic/v1/models", host });
+      assert.equal(res.status, 200, host);
+      assert.deepEqual(upstreamCalls, [
+        { url: "https://api.anthropic.com/v1/models", key: PLACEHOLDER_KEY },
+      ]);
+    }
+  });
+});
+
+test("bound to another address, the Host is not checked", async () => {
+  await withProxy({ host: "0.0.0.0" }, async (port) => {
+    const res = await call(port, { method: "GET", path: "/anthropic/v1/models", host: "other.example" });
+    assert.equal(res.status, 200);
+    assert.equal(upstreamCalls.length, 1);
+  });
+});
+
+test("createProxyHandler checks the Host only when asked to", async () => {
+  const get = (host) => new Request(`http://${host}/anthropic/v1/models`, { headers: { host } });
+
+  const checked = createProxyHandler("anthropic", { loopbackHostOnly: true });
+  upstreamCalls.length = 0;
+  const refused = await checked(get("other.example"), "/v1/models");
+  assert.equal(refused.status, 403);
+  assert.deepEqual(upstreamCalls, []);
+  const served = await checked(get("localhost:3100"), "/v1/models");
+  assert.equal(served.status, 200);
+  assert.equal(upstreamCalls.length, 1);
+
+  const unchecked = createProxyHandler("anthropic");
+  upstreamCalls.length = 0;
+  const any = await unchecked(get("other.example"), "/v1/models");
+  assert.equal(any.status, 200);
   assert.equal(upstreamCalls.length, 1);
 });
 

@@ -755,18 +755,26 @@ async fn member_provenance_for_identity(
 }
 
 /// The witness of the member a console send is addressed to, for a send to a
-/// member that has no session yet: the member seated under `identity` on
-/// `entry`'s rosters while the send is reserved, captured from its roster
-/// row. Only the send path reads it, inside the request that was authorized
-/// against that member. No projection of a retained or stored record does:
-/// by then another member can hold the identity. `None` when no member is
-/// seated under it.
+/// member that has no session yet: the identity's own member, captured from
+/// its row on the roster of `entry`'s own mob while the send is reserved.
+/// That is the member the send path resolved and delivers to, the row whose
+/// member id is the identity ([`row_names_itself`]). Any other row is
+/// another member, also when it carries the identity as its
+/// `agent_identity` label, or sits under the same member id in a mob the
+/// runtime's agents made: it is never the witness. Only the send path reads
+/// it, inside the request that was authorized against that member. No
+/// projection of a retained or stored record does: by then another member
+/// can hold the identity. `None` when the identity holds no row of its own:
+/// the send is then stored with no member witness.
 async fn member_witness_at_send(
     inner: &AggregatorInner,
     entry: &RuntimeEntry,
     identity: &str,
 ) -> Option<ConsoleFrameMemberProvenance> {
-    for resolved in Box::pin(member_sources_for_entry_including_hidden(entry)).await {
+    for resolved in Box::pin(primary_member_sources(entry)).await {
+        if !row_names_itself(&resolved) {
+            continue;
+        }
         let Some(record) = identity_record_for_resolved_member(&resolved).await else {
             continue;
         };
@@ -775,6 +783,20 @@ async fn member_witness_at_send(
         }
     }
     None
+}
+
+/// Whether a roster row is listed under its own member id: it carries no
+/// `agent_identity` label, or the label names the member id itself (as
+/// every identity-first spawn writes it). A row whose label names something
+/// else is listed under that name, and is not the member a send to that
+/// name is made to.
+fn row_names_itself(resolved: &ResolvedConsoleMember) -> bool {
+    crate::member_comms_id::durable_identity_label(&resolved.member.labels).is_none_or(|label| {
+        crate::member_comms_id::live_member_is_identity(
+            resolved.member.agent_identity.as_str(),
+            label,
+        )
+    })
 }
 
 /// The witness of a member frame, by what the frame itself names: the member

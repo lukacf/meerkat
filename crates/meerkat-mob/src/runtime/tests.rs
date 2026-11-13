@@ -62302,6 +62302,349 @@ async fn test_stop_fails_pending_spawns_and_cleans_up_provisioned_session() {
     );
 }
 
+/// The lifecycle step that cancels a spawn whose provision has finished and
+/// whose completion the mob has not taken yet.
+#[cfg(feature = "runtime-adapter")]
+#[derive(Clone, Copy, Debug)]
+enum ProvisionedSpawnDrain {
+    Stop,
+    Shutdown,
+    Destroy,
+}
+
+/// How long a provisioned spawn's completion is kept from the mob in the
+/// rows below: far longer than any of them runs, so the lifecycle step always
+/// finds the spawn provisioned and not yet settled.
+#[cfg(feature = "runtime-adapter")]
+const PROVISIONED_SPAWN_COMPLETION_DELAY_MS: u64 = 60_000;
+
+/// Wait until the spawn that builds on `session_id` has finished its
+/// provision: its session is live, and the rest of the provision (the
+/// attachment and the operation commit) has had time to return.
+#[cfg(feature = "runtime-adapter")]
+async fn wait_until_spawn_provisioned(service: &MockSessionService, session_id: &SessionId) {
+    tokio::time::timeout(WHOLE_CREW_LIFECYCLE_TIMEOUT, async {
+        loop {
+            if service
+                .has_live_session(session_id)
+                .await
+                .expect("read the provisioned session")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the spawn provisions its session");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+}
+
+/// A resume-mode spawn names a session that already exists. A lifecycle step
+/// that cancels the spawn after its provision finished, and before the mob
+/// took the completion, cancels the spawn only: the session is not archived,
+/// it reads as committed after a restart of the service, and a later spawn
+/// resumes it.
+#[cfg(feature = "runtime-adapter")]
+async fn a_cancelled_resumed_spawn_keeps_its_session(drain: ProvisionedSpawnDrain) {
+    let definition = with_unique_mob_id(sample_definition(), &format!("resumed-drain-{drain:?}"));
+    let (handle, service) = create_test_mob(definition.clone()).await;
+    let identity = AgentIdentity::from("w-resumed-drain");
+    let session_id = seed_existing_worker_session(&service, &definition.id, &identity).await;
+
+    let delay_guard = SpawnProvisionedCommandDelayGuard::set(PROVISIONED_SPAWN_COMPLETION_DELAY_MS);
+    let pending_spawn = {
+        let handle = handle.clone();
+        let identity = identity.clone();
+        let session_id = session_id.clone();
+        tokio::spawn(async move {
+            handle
+                .spawn_spec(
+                    SpawnMemberSpec::new("worker", identity.as_str())
+                        .with_resume_bridge_session_id(session_id),
+                )
+                .await
+        })
+    };
+    wait_until_spawn_provisioned(&service, &session_id).await;
+
+    match drain {
+        ProvisionedSpawnDrain::Stop => {
+            handle.stop().await.expect("stop the mob");
+        }
+        ProvisionedSpawnDrain::Shutdown => {
+            handle.shutdown().await.expect("shut the mob runtime down");
+        }
+        ProvisionedSpawnDrain::Destroy => {
+            handle.destroy().await.expect("destroy the mob");
+        }
+    }
+    drop(delay_guard);
+    let spawn_error = tokio::time::timeout(WHOLE_CREW_LIFECYCLE_TIMEOUT, pending_spawn)
+        .await
+        .expect("the cancelled spawn answers")
+        .expect("spawn join")
+        .expect_err("the lifecycle step cancels the pending spawn");
+    assert!(
+        matches!(spawn_error, MobError::SpawnCanceled { .. }),
+        "the pending spawn is cancelled typed: {spawn_error:?}"
+    );
+
+    assert_eq!(
+        service.archive_call_count(&session_id).await,
+        0,
+        "cancelling a spawn that resumed an existing session does not archive the session"
+    );
+    assert!(
+        matches!(
+            service.observe_live_durable_source(&session_id).await,
+            Ok(crate::LiveDurableSourceObservation::Committed { .. })
+        ),
+        "the existing session still reads as committed: {:?}",
+        service.observe_live_durable_source(&session_id).await
+    );
+
+    // A later spawn resumes the session: in the same mob after a stop, in a
+    // new mob over a restarted service after a shutdown or a destroy.
+    let (later_mob, later_service) = match drain {
+        ProvisionedSpawnDrain::Stop => {
+            handle.resume().await.expect("resume the stopped mob");
+            (handle, service)
+        }
+        ProvisionedSpawnDrain::Shutdown | ProvisionedSpawnDrain::Destroy => {
+            let restarted = Arc::new(service.cold_restart_preserving_durable_state().await);
+            let _ = restarted.enable_runtime_adapter();
+            assert!(
+                matches!(
+                    restarted.observe_live_durable_source(&session_id).await,
+                    Ok(crate::LiveDurableSourceObservation::Committed { .. })
+                ),
+                "the existing session reads as committed after a restart: {:?}",
+                restarted.observe_live_durable_source(&session_id).await
+            );
+            let later = MobBuilder::new(definition, MobStorage::in_memory())
+                .with_session_service(restarted.clone())
+                .create()
+                .await
+                .expect("create a mob over the restarted service");
+            (later, restarted)
+        }
+    };
+    let resumed = tokio::time::timeout(
+        WHOLE_CREW_LIFECYCLE_TIMEOUT,
+        later_mob.spawn_spec(
+            SpawnMemberSpec::new("worker", identity.as_str())
+                .with_resume_bridge_session_id(session_id.clone()),
+        ),
+    )
+    .await
+    .expect("the later spawn settles")
+    .expect("a later spawn resumes the kept session");
+    assert_eq!(
+        later_mob
+            .resolve_bridge_session_id(&resumed.agent_identity)
+            .await
+            .as_ref(),
+        Some(&session_id),
+        "the later member runs on the kept session"
+    );
+    assert_eq!(
+        later_service.archive_call_count(&session_id).await,
+        0,
+        "the kept session was never archived"
+    );
+    later_mob.shutdown().await.expect("shut the later mob down");
+}
+
+/// Seed a stored session a later resume-mode spawn of `identity` in the mob
+/// `mob_id` can name: created under the member's comms name, then dropped
+/// from the live set so only its stored form remains.
+#[cfg(feature = "runtime-adapter")]
+async fn seed_existing_worker_session(
+    service: &Arc<MockSessionService>,
+    mob_id: &MobId,
+    identity: &AgentIdentity,
+) -> SessionId {
+    let seeded = service
+        .create_session(CreateSessionRequest {
+            injected_context: Vec::new(),
+            model: "claude-sonnet-4-5".to_string(),
+            prompt: "seed".to_string().into(),
+            system_prompt: meerkat_core::SystemPromptOverride::Inherit,
+            max_tokens: Some(4096),
+            event_tx: None,
+            build: Some(meerkat_core::service::SessionBuildOptions {
+                comms_name: Some(
+                    super::actor::render_member_comms_name(
+                        mob_id.as_str(),
+                        "worker",
+                        identity.as_str(),
+                    )
+                    .expect("comms name"),
+                ),
+                ..Default::default()
+            }),
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            labels: None,
+        })
+        .await
+        .expect("seed the existing session");
+    let session_id = seeded.session_id.clone();
+    MobSessionService::discard_live_session(service.as_ref(), &session_id)
+        .await
+        .expect("keep only the stored session");
+    assert!(
+        matches!(
+            service.observe_live_durable_source(&session_id).await,
+            Ok(crate::LiveDurableSourceObservation::Committed { .. })
+        ),
+        "the session exists before the spawn"
+    );
+    session_id
+}
+
+/// The same for a spawn the mob refuses after its provision finished: an
+/// autonomous member whose session offers no interaction event injector is
+/// refused typed, and the session the spawn resumed is kept.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn a_refused_provisioned_resumed_spawn_keeps_the_resumed_session() {
+    let definition = with_unique_mob_id(sample_definition(), "resumed-refused-capability");
+    let (handle, service) = create_test_mob(definition.clone()).await;
+    let identity = AgentIdentity::from("w-resumed-refused");
+    let session_id = seed_existing_worker_session(&service, &definition.id, &identity).await;
+
+    service.disable_interaction_event_injector();
+    let error = tokio::time::timeout(
+        WHOLE_CREW_LIFECYCLE_TIMEOUT,
+        handle.spawn_spec(
+            SpawnMemberSpec::new("worker", identity.as_str())
+                .with_resume_bridge_session_id(session_id.clone()),
+        ),
+    )
+    .await
+    .expect("the refused spawn answers")
+    .expect_err("an autonomous member without an injector is refused");
+    assert!(
+        matches!(
+            error,
+            MobError::MissingMemberCapability {
+                capability: crate::error::MobMemberCapability::InteractionEventInjector,
+                ..
+            }
+        ),
+        "the spawn is refused for the missing capability: {error:?}"
+    );
+    assert_eq!(
+        service.archive_call_count(&session_id).await,
+        0,
+        "refusing a spawn that resumed an existing session does not archive the session"
+    );
+    assert!(
+        matches!(
+            service.observe_live_durable_source(&session_id).await,
+            Ok(crate::LiveDurableSourceObservation::Committed { .. })
+        ),
+        "the existing session still reads as committed: {:?}",
+        service.observe_live_durable_source(&session_id).await
+    );
+
+    service
+        .disable_interaction_event_injector
+        .store(false, Ordering::Relaxed);
+    let resumed = tokio::time::timeout(
+        WHOLE_CREW_LIFECYCLE_TIMEOUT,
+        handle.spawn_spec(
+            SpawnMemberSpec::new("worker", identity.as_str())
+                .with_resume_bridge_session_id(session_id.clone()),
+        ),
+    )
+    .await
+    .expect("the later spawn settles")
+    .expect("a later spawn resumes the kept session");
+    assert_eq!(
+        handle
+            .resolve_bridge_session_id(&resumed.agent_identity)
+            .await
+            .as_ref(),
+        Some(&session_id),
+        "the later member runs on the kept session"
+    );
+    handle.shutdown().await.expect("shut the mob down");
+}
+
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn stop_after_a_resumed_spawn_provisioned_keeps_the_resumed_session() {
+    a_cancelled_resumed_spawn_keeps_its_session(ProvisionedSpawnDrain::Stop).await;
+}
+
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn shutdown_after_a_resumed_spawn_provisioned_keeps_the_resumed_session() {
+    a_cancelled_resumed_spawn_keeps_its_session(ProvisionedSpawnDrain::Shutdown).await;
+}
+
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn destroy_after_a_resumed_spawn_provisioned_keeps_the_resumed_session() {
+    a_cancelled_resumed_spawn_keeps_its_session(ProvisionedSpawnDrain::Destroy).await;
+}
+
+/// The counterpart for a spawn that created its session: a stop that cancels
+/// it after its provision finished still cleans the new session up.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn stop_after_a_fresh_spawn_provisioned_cleans_up_the_new_session() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let identity = AgentIdentity::from("w-fresh-drain");
+    let comms_name = test_comms_name("worker", identity.as_str());
+
+    let delay_guard = SpawnProvisionedCommandDelayGuard::set(PROVISIONED_SPAWN_COMPLETION_DELAY_MS);
+    let pending_spawn = {
+        let handle = handle.clone();
+        let identity = identity.clone();
+        tokio::spawn(async move {
+            handle
+                .spawn(ProfileName::from("worker"), identity, None)
+                .await
+        })
+    };
+    let session_id = wait_for_session_id_for_comms_name(&service, &comms_name).await;
+    wait_until_spawn_provisioned(&service, &session_id).await;
+
+    handle.stop().await.expect("stop the mob");
+    drop(delay_guard);
+    let spawn_error = tokio::time::timeout(WHOLE_CREW_LIFECYCLE_TIMEOUT, pending_spawn)
+        .await
+        .expect("the cancelled spawn answers")
+        .expect("spawn join")
+        .expect_err("the stop cancels the pending spawn");
+    assert!(
+        matches!(spawn_error, MobError::SpawnCanceled { .. }),
+        "the pending spawn is cancelled typed: {spawn_error:?}"
+    );
+
+    assert_eq!(
+        service.archive_call_count(&session_id).await,
+        1,
+        "the session the cancelled spawn created is archived once"
+    );
+    assert!(
+        !service
+            .has_live_session(&session_id)
+            .await
+            .expect("read the cleaned-up session"),
+        "the session the cancelled spawn created is no longer live"
+    );
+    assert_eq!(
+        service.active_session_count().await,
+        0,
+        "the cancelled spawn leaves no session behind"
+    );
+}
+
 #[tokio::test]
 async fn test_stop_pending_spawn_archive_failure_retains_cleanup_anchor_for_retry() {
     let (handle, service) = create_test_mob(sample_definition()).await;

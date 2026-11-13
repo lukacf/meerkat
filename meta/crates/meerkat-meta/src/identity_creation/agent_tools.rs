@@ -169,6 +169,12 @@ const CONFIGURED_AGENT: &str = "An agent that the host's configuration declares 
 const READ_BACK_ONLY: &str = "`addressability` and `runtime_mode_override` are read back only: \
     the host sets them, and identity_create and identity_update do not take them.";
 
+const SCHEDULES_ANSWER: &str = "The first `done` answer says how they stand in \
+    `agents[0].schedules`: `effect` and `count` (how many), never which schedules they are. \
+    `incomplete: true` there means one could not be read or changed yet: the identical call \
+    with the same `request_id` follows the rest. Where the host connects no schedules to \
+    these changes, none is changed and the answer has no `schedules`.";
+
 /// The description of the identity tool `name`, as a model reads it.
 fn description(name: &str) -> String {
     match name {
@@ -249,6 +255,9 @@ fn description(name: &str) -> String {
              it has no running member, messages to it are refused, and \
              identity_unarchive brings it back on the same conversation. Use this when the \
              agent may be needed later; identity_remove is for good.\n\n\
+             The schedules that target the agent follow it: an archive pauses its active \
+             schedules (`effect` is `paused`, `count` is how many are paused for it), and \
+             identity_unarchive resumes exactly those. {SCHEDULES_ANSWER}\n\n\
              Send the agent's `name` and `expected_spec_digest` (its `spec_digest` from \
              identity_list; a changed agent answers `stale_spec` with `current_digest`). \
              {UNKNOWN_NAME} You cannot archive yourself (`self_change_refused`). \
@@ -260,6 +269,9 @@ fn description(name: &str) -> String {
         IDENTITY_UNARCHIVE => format!(
             "Bring an archived long-term agent back. It returns on the conversation it had, \
              with its name, memory and current instructions, and takes messages again.\n\n\
+             The schedules its archive paused are resumed (`effect` is `resumed`, `count` is \
+             how many of its schedules are active after the call); a schedule somebody \
+             paused by name stays paused. {SCHEDULES_ANSWER}\n\n\
              Send the agent's `name` and `expected_spec_digest` (its `spec_digest` from \
              identity_list with `include_archived: true`). An agent that is not archived \
              answers `not_archived`. {UNKNOWN_NAME} You cannot unarchive yourself \
@@ -273,6 +285,8 @@ fn description(name: &str) -> String {
              kept, and nothing can reach them; the agent's last conversation is harvested as \
              for any agent that leaves. This cannot be undone: use identity_archive \
              when the agent may be needed later.\n\n\
+             Every schedule that targets the agent is ended (`effect` is `ended`, `count` is \
+             how many). {SCHEDULES_ANSWER}\n\n\
              Send the agent's `name` and `expected_spec_digest` (its `spec_digest` from \
              identity_list; a changed agent answers `stale_spec` with `current_digest`). \
              {UNKNOWN_NAME} You cannot remove yourself (`self_change_refused`). \

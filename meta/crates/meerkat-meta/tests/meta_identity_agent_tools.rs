@@ -2160,11 +2160,57 @@ fn the_descriptions_say_what_a_model_must_know() {
         }
     }
     assert!(text(IDENTITY_DIRECTORY).contains("it never wakes an agent"));
+    // What becomes of the schedules that target an agent: the three tools
+    // whose change they follow say the effect and that the answer counts
+    // them, and never which schedules they are
+    // (`an_agent_is_told_what_became_of_an_agents_schedules_not_which`).
+    let follows_schedules = [
+        (
+            IDENTITY_ARCHIVE,
+            "an archive pauses its active schedules (`effect` is `paused`, `count` is how many \
+             are paused for it), and identity_unarchive resumes exactly those.",
+        ),
+        (
+            IDENTITY_UNARCHIVE,
+            "The schedules its archive paused are resumed (`effect` is `resumed`, `count` is how \
+             many of its schedules are active after the call); a schedule somebody paused by \
+             name stays paused.",
+        ),
+        (
+            IDENTITY_REMOVE,
+            "Every schedule that targets the agent is ended (`effect` is `ended`, `count` is how \
+             many).",
+        ),
+    ];
+    for (tool, own) in follows_schedules {
+        for sentence in [
+            own,
+            "The first `done` answer says how they stand in `agents[0].schedules`: `effect` and \
+             `count` (how many), never which schedules they are.",
+            "`incomplete: true` there means one could not be read or changed yet: the identical \
+             call with the same `request_id` follows the rest.",
+            "Where the host connects no schedules to these changes, none is changed and the \
+             answer has no `schedules`.",
+        ] {
+            assert!(text(tool).contains(sentence), "{tool} says: {sentence}");
+        }
+    }
     for tool in IDENTITY_TOOLS {
         let all = format!("{} {}", text(tool), schema_of(tool)).to_lowercase();
+        // No tool names a schedule's id, and no tool but those three names
+        // a schedule at all: no tool takes one or lists one.
+        assert!(
+            !all.contains("schedule_id"),
+            "{tool} names no schedule's id"
+        );
+        if !follows_schedules
+            .iter()
+            .any(|(follows, _)| follows == &tool)
+        {
+            assert!(!all.contains("schedule"), "{tool} does not say `schedule`");
+        }
         for absent in [
             "grants",
-            "schedule",
             "fork_from",
             "mob_id",
             "identity_reset",
@@ -3160,7 +3206,6 @@ impl AgentSchedules for TwoSchedules {
 /// schedules follow the agent: each answer's `agents[0].schedules` is the
 /// effect and the count, and no answer names a schedule.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "waits for the family to scope the schedules list by requester: until that change is on this branch the family answers every requester the per-schedule list"]
 async fn an_agent_is_told_what_became_of_an_agents_schedules_not_which() {
     let state = tempfile::tempdir().unwrap();
     let rig = boot(state.path(), &fresh_mob_id()).await;

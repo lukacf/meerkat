@@ -465,6 +465,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     conversation is harvested as for any agent that leaves: an archive and
     a removal owe an agent created at run time the retirement side effects
     a configured agent is owed.
+  - `identity_archive`, `identity_unarchive` and `identity_remove` say what
+    becomes of the schedules that target the agent (an archive pauses the
+    active ones, an unarchive resumes exactly those, a removal ends every
+    one) and that the first answer tells the effect and the count in
+    `agents[0].schedules`. An agent is never given the list of the
+    schedules: which they are is the host's to read.
   - The eight tools may wait behind the deferred tool catalog: in a session
     whose catalog is exact, their definitions are loaded on demand.
   - Rust API: `identity_creation::{IdentityAgentTools, IdentityToolCaller,

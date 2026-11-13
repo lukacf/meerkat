@@ -62,7 +62,7 @@ import {
   type RawRecord,
 } from "./gating-model";
 import { DecisionCardList } from "./DecisionCard";
-import type { DecisionCardView } from "./decision-cards";
+import type { DecisionCardView, OwnDecisionWithdrawal } from "./decision-cards";
 
 interface GatingInboxPanelProps {
   pending: unknown[];
@@ -109,6 +109,8 @@ interface GatingInboxPanelProps {
   onLoadMoreDecisions?: (after: string) => void;
   /** Whether a further page of decisions is being read. */
   decisionsLoadingMore?: boolean;
+  /** The withdrawal of this page's own requests from their decision cards. */
+  ownDecisions?: OwnDecisionWithdrawal;
   /** Whether a person is signed in to the console. The decision cards offer
    *  no decision either way. */
   signedIn?: boolean;
@@ -484,6 +486,7 @@ export function GatingInboxPanel({
   decisionsNextAfter,
   onLoadMoreDecisions,
   decisionsLoadingMore = false,
+  ownDecisions,
   signedIn = false,
 }: GatingInboxPanelProps): React.JSX.Element {
   const [tab, setTab] = React.useState<Tab>("pending");
@@ -562,6 +565,7 @@ export function GatingInboxPanel({
           nextAfter={decisionCursor}
           onLoadMore={onLoadMoreDecisions}
           loadingMore={decisionsLoadingMore}
+          own={ownDecisions}
         />
       ) : null}
       {replyItems.length ? (

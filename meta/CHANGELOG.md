@@ -419,8 +419,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `CoreIdentityEntry::is_archived` and `awaits_host_preparation`. An
   agent's spec digest and revision, who asked for it and its open
   operations are not on its status: `meta/identity/get` and
-  `meta/identity/list` answer them. The Console's own status answer is
-  unchanged.
+  `meta/identity/list` answer them. The Console's own status answer
+  carries the two members the same way (see the Console's
+  `meta/status_identity` entry below).
 - `meta/identity/get` and `meta/identity/list` name the operations open
   for an agent in `open_operations`: the create of an agent that waits for
   its host's preparation, until the host settles it, and each change of
@@ -461,6 +462,138 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   identity status type reads `roster_listing_superseded`
   (`rosterListingSuperseded`), `archived` and `preparation_pending`
   (`preparationPending`), each false when the gateway leaves it out.
+- Console: a person creates, edits, archives, unarchives and removes a
+  long-term agent from the Roster, where the launch offers such changes (its
+  identity creation policy is enabled and the console is not read-only).
+  - New agent takes a profile, a name, a display name, instructions, peers
+    and a first message. Each profile and peer is shown with what the host's
+    rules give a new agent of it: allowed, needs a decision (with the
+    decision's lines) or not allowed (with the rule's reason; it cannot be
+    picked).
+  - New agent and Edit list who reaches an agent (Reachability: it can
+    receive messages, or it is internal only) and how it runs (as its
+    profile says, on its own, or turn by turn), each choice in words with
+    what it means. A create writes `addressability` and
+    `runtime_mode_override` only where they are not the default, an edit
+    only where they changed, and a refusal that names one shows at its
+    field. An edit cannot hand the way an agent runs back to its profile,
+    so that choice is listed only for an agent whose record names no way.
+  - An agent's drawer and its details pane offer Edit (display name,
+    instructions, context, labels, profile, peers, reachability and how it
+    runs), Archive and Remove. Edit
+    sends only what changed, against the agent as it was read; an agent that
+    changed in the meantime is refused and read again on request, never
+    resent on its own. A profile change is judged by the gateway: the form
+    asks what the change would get (`meta/identity/plan`) and shows the
+    answer at the field.
+  - Remove asks first and says that the name can never be used again and
+    that archive is the reversible choice. The confirmation of an archive,
+    an unarchive and a removal is a dialog: it takes focus on Cancel, and
+    Escape or a click outside cancels it. The confirmation of an archive
+    and of a removal says that the agent's last conversation is harvested
+    and distilled, as for any agent that leaves the team, and the result
+    of an archive says it too, beside what the agent keeps. The removal of
+    an agent that is archived already says instead that its last
+    conversation was harvested and distilled when it was archived, and
+    names no archive as a choice.
+  - The confirmation of an archive, an unarchive and a removal says what
+    the change will do to the schedules that target the agent: how many
+    will be paused, will run again or will be ended, and which by name,
+    with a schedule the plan counts and does not list counted as one more.
+    The dialog reads the agent's record when it opens, asks the plan of the
+    change (`meta/identity/plan`, its `schedules`) and sends the change at
+    the record it read. A plan that lists no schedule, is refused or cannot
+    be read leaves the confirmation without a word of schedules; the change
+    is made all the same. A viewer without `runtime.admin` is given what
+    becomes of the schedules and how many, without the list: the
+    confirmation and the result then say the count and no name.
+  - The result of an archive, an unarchive and a removal says what became
+    of the schedules that target the agent, where the answer states it
+    (`schedules`): how many were paused, run again or were ended, and which
+    by name; a schedule without a name is counted, and ids are among the
+    technical details. An answer that counts schedules it does not list
+    reads by its count: the listed ones by name, the others as more. An
+    answer that is `incomplete` says so and offers
+    Try again, which sends the same request. Only a first answer states the
+    schedules, so the Console takes no later answer of the same request in
+    place of the first: what the first answer said stays.
+  - An agent whose record says `roster_listing_superseded`
+    (`meta/identity/get`) reads a note at its status in the details pane:
+    the host's configuration lists its name too, that entry is not applied,
+    and a change made in the Console changes the agent's record. The note
+    is read from the details answer too, where that says it.
+  - Archived agents are listed under the roster with Unarchive and Remove.
+    The same list ("Archived and waiting agents") shows an agent whose host
+    still prepares it, which has no member and so no row of the roster: by
+    name, with the state "Waiting for its host". Such an agent can be given
+    up: where the launch offers removals the row has Remove, whose
+    confirmation says that the agent never started (nothing is harvested,
+    and an archive is no choice for it). It has no other control. The list is
+    read when it is opened. Only the host settles an agent's preparation
+    (`meta/identity/settle_preparation`, which the Console neither lists nor
+    offers). A read that is refused because the team's open requests cannot
+    be read just then says so and to try again, in a sentence of its own.
+  - A move into a profile whose agents the host prepares before their
+    first use is refused by the gateway when it is asked; Edit says so at
+    the profile, in a sentence of its own, before anything is sent.
+  - The Record of an agent's details says how many requests wait for the
+    agent; their operation ids (`open_operations`) are among its technical
+    details.
+  - An outcome reads in words; an instructions change says when it reaches
+    the agent. A refusal reads in the console's own sentence for its kind,
+    at the form field it names when the form has one; the gateway's
+    sentence is under Details. Only a lost answer reads as no answer.
+  - A change that waits for a person's decision shows until when it is open
+    and offers its withdrawal. A request is withdrawn from the page that made
+    it (in the form, in the roster and on its decision card), or by the host
+    with its request id. After a reload the request stays visible to its
+    approvers in the decisions view, and its card keeps its words without the
+    withdrawal. A decision card of such a change says that a person cannot
+    approve their own request.
+  - Each action is sent under one request id, so trying again after a lost
+    answer makes nothing twice.
+  - The controls follow the experience read's `identity_changes` section
+    (`available`, `can_create`, `can_change`, `can_remove`) and each agent's
+    `affordances.can_change_identity` and `can_remove_identity`. The details
+    pane shows how an agent runs, and who asked for it and when, as its
+    record says (a person
+    by name, never by key), and the archived agents can be listed, wherever
+    the gateway serves those reads, with or without a control. Every agent
+    looks the same in the roster, whoever asked for it.
+- Console access: the permissions `agent.identity.create`,
+  `agent.identity.manage` and `agent.identity.remove` read in words and sit
+  with the lifecycle permissions in the Access panel.
+- Console command surface (`@console-core` and the stock console): the
+  commands `createAgent`, `updateAgent`, `archiveAgent`, `unarchiveAgent`,
+  `removeAgent`, `withdrawAgentChange`, `getAgentRecord`, `listAgentRecords`,
+  `getAgentChange`, `listAgentDirectory` and `planAgentChange` carry
+  `meta/identity/create`, `update`, `archive`, `unarchive`, `remove`,
+  `withdraw`, `get`, `list`, `operation`, `directory` and `plan` from the
+  roster and an agent's panes. The console contract
+  (`docs/rct/console-rest-sse-contract-v0.5.0.json`) documents the family's
+  fourteen methods, `adopt`, `changes_hold` and `settle_preparation`
+  included (the last is its host's operator's: the Console RPC refuses it
+  for every caller), and what a launch
+  without an identity policy answers: its reads are served, and a change or
+  a plan is refused `change_denied`. It names `addressability` and
+  `runtime_mode_override` on a create, an update and the reads, `schedules`
+  on the first answer and on the plan of an archive, an unarchive and a
+  removal, and the answer for an agent the caller may not view
+  (`identity_unknown`, as for a name no agent holds). It says what a create
+  that answers `pending_preparation` means and who settles it, what the
+  operation read says of an agent that waited, the refusal of a move into a
+  profile the host prepares, and `open_operations` on a get and a list with
+  the refusal of a read that cannot see the team's held changes. It names
+  `roster_listing_superseded` on a get and a list, `paused_for_target` on a
+  console schedule, and the refusal of a schedule for an archived agent
+  (`-32603`, `identity_archived`). The
+  console guide has a section on long-term agents.
+- The Console's `meta/status_identity` (`POST /console/rpc`) says what the
+  stdio gateway's answer says of an agent no member holds and of one the
+  host's roster also lists: `archived`, `preparation_pending` and
+  `roster_listing_superseded`, each written only when `true`, so the answer
+  of every other agent is unchanged. Before, the Console's answer carried
+  none of the three.
 
 ### Changed
 
@@ -635,6 +768,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (`GET /console/identities`, `meta/console/list_identities`) carries the
   label `role` with the agent's profile, unless the agent's declared
   labels name a role, as the record of a live member carries its role.
+
+- Console: the line of a broken agent, in the roster and in its details,
+  reads "Broken: it may need a respawn or a reset". It said that the agent
+  needs one of the two. An agent created at run time that was refused its
+  seat for a label its host requires needs neither: it runs again once an
+  edit puts the label in its record.
 
 - `meta/instruction_status` shows the fork scope of a record: a member
   target written for the member and the forks of its fork family (Meerkat's
@@ -847,6 +986,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Known limitations
 
+- An update cannot hand an agent's runtime mode back to its profile: to
+  change how such an agent runs, set the other explicit value
+  (`autonomous_host` or `turn_driven`); clearing an override is not offered
+  in this release.
 - Schedules of an archived agent: Meta's own doors (the agents' schedule
   tools, the Console) point no schedule at an archived agent. Meerkat's own
   schedule methods (`schedule/create`, `schedule/update`, REST) do not judge

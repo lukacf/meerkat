@@ -12226,6 +12226,12 @@ fn console_identity_status_json_from_identity_status(
     if let Some(member_id) = status.member_id.as_ref() {
         value["member_id"] = json!(member_id);
     }
+    // Why no member holds the identity, and that the host's roster also
+    // lists its name: each only when true, written by the one function the
+    // stdio gateway's status answer writes them with.
+    if let Value::Object(fields) = &mut value {
+        crate::rpc::insert_identity_status_marks(fields, status);
+    }
     value
 }
 
@@ -34527,6 +34533,58 @@ mod console_identity_row_keys_tests {
             },
             None,
         ));
+    }
+
+    /// The marks of an identity's status that are written only when true:
+    /// why no member holds it (`archived`, `preparation_pending`), and that
+    /// the host's roster also lists the name of an agent served from its
+    /// record (`roster_listing_superseded`).
+    const STATUS_MARKS: [&str; 3] = [
+        "archived",
+        "preparation_pending",
+        "roster_listing_superseded",
+    ];
+
+    /// The console's `meta/status_identity` answers each mark of the status
+    /// as the stdio gateway's answer does: only when true, in the status
+    /// record's own form, so the answer of an identity that sets none names
+    /// none.
+    #[test]
+    fn status_identity_row_answers_the_marks_of_the_status_only_when_true() {
+        let plain: crate::identity_first::IdentityStatus = serde_json::from_value(json!({
+            "identity": "console:identity-row",
+            "state": "active",
+            "addressability": "addressable",
+        }))
+        .expect("identity status");
+        let unset = console_identity_status_json_from_identity_status(&plain, None);
+        let stdio_unset = crate::rpc::identity_status_wire(&plain);
+        for mark in STATUS_MARKS {
+            assert!(unset.get(mark).is_none(), "{mark}: {unset}");
+            assert!(stdio_unset.get(mark).is_none(), "{mark}: {stdio_unset}");
+        }
+        for mark in STATUS_MARKS {
+            let mut read = json!({
+                "identity": "console:identity-row",
+                "state": "dormant",
+                "addressability": "addressable",
+            });
+            read[mark] = json!(true);
+            let status: crate::identity_first::IdentityStatus =
+                serde_json::from_value(read).expect("identity status");
+            let set = console_identity_status_json_from_identity_status(&status, None);
+            let record = serde_json::to_value(&status).expect("the status record serializes");
+            let stdio = crate::rpc::identity_status_wire(&status);
+            assert_eq!(set.get(mark), Some(&json!(true)), "{mark}: {set}");
+            assert_eq!(set.get(mark), record.get(mark), "{mark}: {set}");
+            for other in STATUS_MARKS {
+                // The two gateways answer every mark alike, set or not.
+                assert_eq!(set.get(other), stdio.get(other), "{other}: {set}");
+                if other != mark {
+                    assert!(set.get(other).is_none(), "{other}: {set}");
+                }
+            }
+        }
     }
 }
 

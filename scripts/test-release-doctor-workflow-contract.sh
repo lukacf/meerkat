@@ -1804,4 +1804,18 @@ if ! connect_log="$("$PYTHON" "${REPO_ROOT}/scripts/test_connect_release_workflo
     "${connect_log}"
 fi
 
+# 7. The check the `binary-registrations` contract above requires of every
+#    release job still refuses each defect. That contract only proves the
+#    workflows call scripts/check-release-binary-registrations; a check that
+#    passes whatever a binary answers would satisfy it. The check's own
+#    contract test (stub binaries on all four surfaces, no network, a few
+#    seconds) therefore runs here, with the contract it backs, rather than as
+#    a workflow step or a Makefile line of its own: this script already runs
+#    on every pull request and under `make release-doctor`, and a change to
+#    the check then plans no more of CI than a change to this script does.
+if ! registrations_log="$("$PYTHON" "${REPO_ROOT}/scripts/test_check_release_binary_registrations.py" 2>&1)"; then
+  fail "scripts/check-release-binary-registrations does not refuse each defect as scripts/test_check_release_binary_registrations.py requires" \
+    "${registrations_log}"
+fi
+
 echo "release doctor workflow contract holds"

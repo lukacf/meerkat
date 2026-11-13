@@ -3283,14 +3283,56 @@ pub(super) fn install_route_alias(
     name: &str,
     pubkey: PubKey,
     side: &str,
-) -> Result<bool, String> {
+) -> Result<bool, RouteNotInstalled> {
     let registry = InprocRegistry::global();
-    ensure_alias_slot(namespace, canonical_namespace, name, pubkey)?;
+    ensure_alias_slot(namespace, canonical_namespace, name, pubkey)
+        .map_err(RouteNotInstalled::Refused)?;
     let sender = registry
         .get_by_pubkey_in_namespace(canonical_namespace, &pubkey)
-        .ok_or_else(|| {
-            format!("{side} peer {name:?} is not registered in {canonical_namespace:?}")
-        })?;
+        .ok_or_else(|| member_not_there(side, name, canonical_namespace))?;
+    register_route_alias(namespace, canonical_namespace, name, pubkey, sender, side)
+}
+
+/// Why [`install_route_alias`] installed no route.
+pub(super) enum RouteNotInstalled {
+    /// The member is not registered in its own namespace now: it is not
+    /// built, or its inbox left while the route was being installed (the
+    /// registry refuses a route to an inbox that left). Nothing is wrong
+    /// with the installer: the member's next wake installs its route.
+    MemberNotThere(String),
+    /// The route would displace another entry, or the registry refused it
+    /// for another reason.
+    Refused(String),
+}
+
+impl RouteNotInstalled {
+    pub(super) fn into_message(self) -> String {
+        match self {
+            Self::MemberNotThere(message) | Self::Refused(message) => message,
+        }
+    }
+}
+
+fn member_not_there(side: &str, name: &str, canonical_namespace: &str) -> RouteNotInstalled {
+    RouteNotInstalled::MemberNotThere(format!(
+        "{side} peer {name:?} is not registered in {canonical_namespace:?}"
+    ))
+}
+
+/// The second step of [`install_route_alias`]: register `sender`, the inbox
+/// read for the member, as the route of `namespace`. The member can leave
+/// between the read and this step (it is released to rest, or replaced);
+/// the registry then refuses the route, and the answer is the one for a
+/// member that is not there.
+fn register_route_alias(
+    namespace: &str,
+    canonical_namespace: &str,
+    name: &str,
+    pubkey: PubKey,
+    sender: meerkat_comms::InboxSender,
+    side: &str,
+) -> Result<bool, RouteNotInstalled> {
+    let registry = InprocRegistry::global();
     // A route that is already there is re-pointed at the member's inbox of
     // now. The registry removes a route with the inbox it leads to when that
     // inbox leaves through its own runtime, so what is found here is the
@@ -3307,19 +3349,22 @@ pub(super) fn install_route_alias(
         sender,
         PeerMeta::default(),
     );
-    // 0.8.23: name-occupied displacement now fails closed as
-    // Rejected(NameOccupied) (caught by is_rejected); ReplacedPubkey is
-    // the one surviving displacement shape (same pubkey evicting its own
-    // old name) and keeps meta's fail-closed posture here.
-    if outcome.is_rejected()
-        || matches!(
-            outcome,
-            meerkat_comms::RegistrationOutcome::ReplacedPubkey { .. }
-        )
-    {
-        return Err(format!("{side} alias installation failed: {outcome:?}"));
+    match outcome {
+        meerkat_comms::RegistrationOutcome::Registered => Ok(!already_installed),
+        // The member's inbox left after it was read: the member is not
+        // there now, as when the read finds nothing.
+        meerkat_comms::RegistrationOutcome::Rejected {
+            reason: meerkat_comms::RegistrationRejection::InboxGone,
+        } => Err(member_not_there(side, name, canonical_namespace)),
+        // 0.8.23: name-occupied displacement fails closed as
+        // Rejected(NameOccupied); ReplacedPubkey is the one surviving
+        // displacement shape (same pubkey evicting its own old name) and
+        // keeps meta's fail-closed posture here. Any other refusal of the
+        // registry is not installed either.
+        outcome => Err(RouteNotInstalled::Refused(format!(
+            "{side} alias installation failed: {outcome:?}"
+        ))),
     }
-    Ok(!already_installed)
 }
 
 /// Install the routing aliases that make two isolated mob namespaces able to
@@ -3342,14 +3387,17 @@ fn register_cross_namespace_aliases(
         target_comms_name,
         target_pubkey,
         "target",
-    )?;
+    )
+    .map_err(RouteNotInstalled::into_message)?;
     if let Err(error) = install_route_alias(
         target_namespace,
         source_namespace,
         source_comms_name,
         source_pubkey,
         "source",
-    ) {
+    )
+    .map_err(RouteNotInstalled::into_message)
+    {
         if target_installed {
             InprocRegistry::global().unregister_in_namespace(source_namespace, &target_pubkey);
         }
@@ -3490,14 +3538,25 @@ pub(crate) fn install_local_wire_route(
             spec.name.as_str()
         )));
     }
-    let installed = install_route_alias(
+    let installed = match install_route_alias(
         &local_namespace,
         &peer_namespace,
         spec.name.as_str(),
         member.pubkey,
         "remote",
-    )
-    .map_err(CrossMobError::InprocAlias)?;
+    ) {
+        Ok(installed) => installed,
+        // The member left while its route was being installed (it was
+        // released to rest): the answer is the one for a member that is not
+        // built, above.
+        Err(RouteNotInstalled::MemberNotThere(_)) => {
+            if spec.pubkey == [0u8; 32] {
+                return Err(not_live_in_this_process(&spec));
+            }
+            return Ok((spec, None));
+        }
+        Err(RouteNotInstalled::Refused(error)) => return Err(CrossMobError::InprocAlias(error)),
+    };
     Ok((
         spec.with_pubkey(key),
         Some(LocalWireRoute {
@@ -3983,5 +4042,45 @@ mod tests {
                 .expect("spec");
         assert_eq!(with.address.endpoint(), "/tmp/x.sock");
         assert_eq!(without.address.endpoint(), "/tmp/x.sock");
+    }
+
+    /// The installer reads the member's inbox and registers the route in two
+    /// steps. A member that is released between them is a member that is
+    /// not there: no route is installed, the name stays free, and the answer
+    /// is `MemberNotThere`, the one a member that is not built gets.
+    #[test]
+    fn a_member_released_while_its_route_is_installed_is_a_member_that_is_not_there() {
+        let (namespace, canonical) = ("xm-late-route-a", "xm-late-route-b");
+        let name = "xm-late-route-b/worker/bob";
+        let runtime =
+            meerkat_comms::CommsRuntime::inproc_only_scoped(name, Some(canonical.to_string()))
+                .expect("bob's runtime publishes");
+        let key = runtime.public_key();
+        let registry = InprocRegistry::global();
+        // Step one of the installer.
+        let read = registry
+            .get_by_pubkey_in_namespace(canonical, &key)
+            .expect("bob is routed in his own namespace");
+        // Bob is released to rest.
+        assert!(runtime.retire_inproc_route());
+        // Step two.
+        let answer = register_route_alias(namespace, canonical, name, key, read, "remote");
+        assert!(
+            matches!(&answer, Err(RouteNotInstalled::MemberNotThere(_))),
+            "the answer must be the one for a member that is not there: {:?}",
+            answer.map_err(RouteNotInstalled::into_message)
+        );
+        assert!(
+            registry
+                .get_by_pubkey_in_namespace(namespace, &key)
+                .is_none(),
+            "a route to an inbox that left was installed"
+        );
+        assert!(registry.peer_names_in_namespace(namespace).is_empty());
+        // The whole installer afterwards finds nobody, with the same answer.
+        assert!(matches!(
+            install_route_alias(namespace, canonical, name, key, "remote"),
+            Err(RouteNotInstalled::MemberNotThere(_))
+        ));
     }
 }

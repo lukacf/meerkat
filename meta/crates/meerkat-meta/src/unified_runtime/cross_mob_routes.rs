@@ -92,7 +92,8 @@ use meerkat_mob::{MobError, MobHandle};
 
 use super::UnifiedRuntime;
 use super::cross_mob::{
-    CrossMobError, inproc_peer_namespace, install_route_alias, mob_inproc_namespace_for_id,
+    CrossMobError, RouteNotInstalled, inproc_peer_namespace, install_route_alias,
+    mob_inproc_namespace_for_id,
 };
 
 type WakeResult = Result<PeerWakeAnswer, PeerWakeDenial>;
@@ -443,8 +444,11 @@ impl CrossMobWakeRoutes {
             remote,
             remote_key,
             "remote",
-        ) {
-            // The send resolves the route again and answers a miss itself.
+        )
+        .map_err(RouteNotInstalled::into_message)
+        {
+            // The send resolves the route again and answers a miss itself:
+            // a member that left again meanwhile is woken once more.
             tracing::debug!(
                 member = %remote,
                 %error,

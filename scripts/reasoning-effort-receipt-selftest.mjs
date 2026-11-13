@@ -454,6 +454,11 @@ row("the reader of nextest's log takes the summary's counts and only the tests i
 });
 
 row("a leg result is refused when it contradicts itself", () => {
+  // What `record` writes is held to the leg result's schema as a whole.
+  refuses(() => routesResult({ commit: COMMIT.slice(0, 10) }), /the result of leg routes does not match its schema.*commit/, "a commit that is no full id");
+  refuses(() => routesResult({ command: "" }), /the result of leg routes does not match its schema.*command/, "no command");
+  refuses(() => routesResult({ exitStatus: 300 }), /the result of leg routes does not match its schema.*exit_status/, "an exit status no process has");
+  refuses(() => routesResult({ leg: "Routes" }), /does not match its schema.*leg/, "a leg id of another shape");
   refuses(() => routesResult({ exitStatus: 0 }), /exit status 0 and 1 failed/, "a green exit status beside a failed test");
   const result = routesResult();
   const change = (edit) => {

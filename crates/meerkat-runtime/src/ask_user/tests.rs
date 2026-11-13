@@ -553,7 +553,7 @@ fn a_hold_outside_its_bounds_holds_nothing() {
     // The bounds themselves are held.
     for (call_id, timeout) in [
         ("call-min", Duration::from_mins(1)),
-        ("call-max", Duration::from_secs(604_800)),
+        ("call-max", Duration::from_hours(7 * 24)),
     ] {
         let mut hold = hold_of(question_set(), &run_id, call_id);
         hold.timeout = timeout;

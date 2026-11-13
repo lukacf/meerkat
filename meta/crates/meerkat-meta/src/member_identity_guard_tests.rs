@@ -75,7 +75,7 @@ const ALLOWED_READERS: &[AllowedReader] = &[
     },
     AllowedReader {
         file: "console_aggregator/mod.rs",
-        reads: Some(2),
+        reads: Some(3),
         why: "`identity_record_prefer` reads a `ConsoleIdentityRecord`, a serialized \
               projection with no mob to ask, only to prefer a labelled roster row over a \
               durable row listed under the very same id (a member seated under the \
@@ -83,7 +83,10 @@ const ALLOWED_READERS: &[AllowedReader] = &[
               read: `live_record_realizes_durable_binding` and `dedupe_identity_records` \
               compare the row's roster id with Core's member id of the binding, which \
               the durable record carries, so an unlabelled store-owned row answers as a \
-              labelled one does",
+              labelled one does. `row_names_itself` asks whether the row's own label \
+              names the row's own member id, so that a row labelled for another identity \
+              is never the witness of a send; it resolves no identity: an unlabelled row \
+              passes, and the record's identity, which the resolver gives, decides next",
     },
 ];
 

@@ -1175,6 +1175,19 @@ them.
   a name the mob does not hold, and nothing is forked. Before, `council`
   was not held to the audience. Affects 0.9.11 through 0.9.14.
 
+- `rustix` is updated from 1.1.5 to 1.1.6 for RUSTSEC-2026-0486, in
+  Cargo.lock and in the example workspaces' lockfiles. Releases through
+  0.9.14 build with 1.1.5. `meerkat-core` depends on `rustix` directly and
+  now requires rustix 1.1.6 or later, so a build that resolves it with a
+  lock of its own moves too. `rustix` is also taken through `fs4`,
+  `tempfile`, `which`, and `xattr` through `tar`. The advisory is about the
+  `getxattr` and `listxattr` functions of `rustix::fs` (with their `l` and
+  `f` forms), which mark bytes they never wrote as initialized when they
+  are given a zero-length buffer. No Meerkat crate calls them. Of the
+  crates Meerkat builds with only `xattr` does, and `tar`, the one crate
+  that uses `xattr`, calls it only to set attributes while unpacking, so
+  Meerkat's own use is not known to be affected.
+
 ### Upgrade notes
 
 - A configuration document an earlier release wrote keeps its mode until

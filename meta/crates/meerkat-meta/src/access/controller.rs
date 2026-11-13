@@ -207,6 +207,10 @@ struct AccessControllerInner {
     /// aggregator serves the runtime
     /// ([`AccessController::keep_served_private_owner_records`]).
     unread_private_owner_records: RwLock<BTreeMap<PrivateOwnerRecordId, OwedReadFinders>>,
+    /// The runtimes a priming of this controller found with their first
+    /// read done, each by its record. A runtime in neither set has not
+    /// been primed here yet ([`AccessController::has_private_owner_record`]).
+    read_private_owner_records: RwLock<BTreeSet<PrivateOwnerRecordId>>,
     /// The runtime alias of each durable identity's current incarnation,
     /// keyed like `attributes` (console namespace included).
     current_runtime_aliases: RwLock<BTreeMap<String, String>>,
@@ -292,6 +296,7 @@ impl AccessController {
                 persist_path: RwLock::new(None),
                 attributes: RwLock::new(BTreeMap::new()),
                 unread_private_owner_records: RwLock::new(BTreeMap::new()),
+                read_private_owner_records: RwLock::new(BTreeSet::new()),
                 current_runtime_aliases: RwLock::new(BTreeMap::new()),
                 mutation: Mutex::new(()),
                 publication: OnceLock::new(),
@@ -768,6 +773,25 @@ impl AccessController {
         cache.insert(attributes.identity.clone(), Arc::new(attributes));
     }
 
+    /// Whether a priming of this controller has recorded the runtime whose
+    /// private-owner record is `record` before, as owing its first read or
+    /// as having read it. A runtime it has not recorded yet counts as owing
+    /// the read from the start of its first priming, until that priming has
+    /// recorded who the runtime's members are private to.
+    pub(crate) fn has_private_owner_record(&self, record: PrivateOwnerRecordId) -> bool {
+        self.inner
+            .unread_private_owner_records
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(&record)
+            || self
+                .inner
+                .read_private_owner_records
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains(&record)
+    }
+
     /// Record whether the runtime whose private-owner record is `record`
     /// still owes the first read of who its members are private to
     /// (`first_read_pending`), as the priming that reads that record found
@@ -785,6 +809,13 @@ impl AccessController {
         reader: PrivateOwnerRecordReader,
         first_read_pending: bool,
     ) {
+        if !first_read_pending {
+            self.inner
+                .read_private_owner_records
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(record);
+        }
         // Whether the runtime is recorded, and whether by this reading.
         let recorded = self
             .inner

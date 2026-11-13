@@ -167,7 +167,9 @@ const rt = await Meta.builder()
 ```
 
 `"on_demand"` (the gateway default when unset) materializes only the members
-that hold work; `"on_demand_verified"` also checks every other member once,
+that must be live, such as those that hold work (the full set is under
+`member_restore` in
+[Configuration](/reference/configuration#sdk-and-gateway-runtime-options)); `"on_demand_verified"` also checks every other member once,
 read-only, before ready, so a member whose session cannot be resumed reads
 broken at ready; `"eager"` materializes every member. Another value throws
 `RangeError`. A read never materializes a member:

@@ -953,6 +953,33 @@ def test_a_macos_command_that_timed_out_says_so_and_shows_its_log(tmp_path, caps
     assert said.splitlines()[-1] == "  | still working"
 
 
+@pytest.mark.parametrize("command,directory", (
+    ("library-components", "components/logs"),
+    ("official-playwright-install", "cli-qualification/official-run/install")))
+def test_a_failed_command_that_keeps_logs_of_its_own_also_shows_the_end_of_the_newest_one(
+        tmp_path, capsys, command, directory):
+    # The component build and the official installer answer a failure with one fixed line and keep what
+    # their own children said in files under the work root, which a hosted runner discards. The step
+    # shows the end of the newest of those files that says anything.
+    logs = tmp_path / directory
+    logs.mkdir(parents=True)
+    (logs / "build-1-agno-wheel.stderr").write_text("an earlier child, long finished\n")
+    os.utime(logs / "build-1-agno-wheel.stderr", (1_700_000_000, 1_700_000_000))
+    (logs / "build-1-activepieces-ci.stdout").write_text("")
+    (logs / "build-1-activepieces-ci.stderr").write_text("npm error code E503\nnpm error 503 Service Unavailable\n")
+    (logs / "unrelated.json").write_text("{}\n")
+    recorder = p.StepRecorder(tmp_path, "library")
+    script = "import sys\nsys.stderr.write('failed: read the logs under the output directory\\n')\nsys.exit(2)\n"
+    with pytest.raises(ValueError, match="command did not succeed: " + command):
+        recorder.run(command, [p.sys.executable, "-I", "-c", script], cwd=tmp_path)
+    lines = capsys.readouterr().err.splitlines()
+    assert "  | failed: read the logs under the output directory" in lines
+    heading = next(index for index, line in enumerate(lines)
+                   if directory + "/build-1-activepieces-ci.stderr" in line)
+    assert lines[heading + 1:] == ["  | npm error code E503", "  | npm error 503 Service Unavailable"]
+    assert not any("an earlier child" in line for line in lines)
+
+
 def test_the_dependency_lines_are_the_package_lines_of_the_merged_log():
     # The recorder keeps stdout and stderr in one log. Cargo's own status lines are left out by shape.
     said = ("    Updating crates.io index\n  Downloaded serde v1.0.228\nserde v1.0.228\n"

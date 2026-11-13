@@ -29,13 +29,15 @@ lists them in `meta/capabilities`. What they answer depends on the policy:
 | A policy with `enabled: true` and no rule that matches | Answer. The directory says what the rules give the caller | Refused `change_denied` by the default outcome, `deny` | Mounted | `true`, unless the Console is read-only |
 
 In the first two states every agent stays exactly as the host configured it,
-and no method answers method not found. A disabled policy is still checked
-at init.
+and no method answers method not found. The shape of a disabled policy is
+still checked at init.
 
-The policy is checked whole at init, and init is refused for any part of it
-that is malformed, names a profile the mob does not define, or names
+An enabled policy is checked whole at init, and init is refused for any part
+of it that is malformed, names a profile the mob does not define, or names
 something this release does not carry out. An unknown key is refused at
-every level.
+every level. A disabled policy is checked for its shape only: a malformed
+part or an unknown key refuses init, and the checks of the mob's profiles
+and of what this release carries out are not reached.
 
 ## Shape
 
@@ -75,7 +77,7 @@ every level.
 
 | Member | Meaning |
 |--------|---------|
-| `enabled` | Whether changes of agents are accepted at all. `false` by default; a disabled policy is still checked. |
+| `enabled` | Whether changes of agents are accepted at all. `false` by default; the shape of a disabled policy is still checked. |
 | `reserved_keys.labels` | Label keys a request sets only as an authority field. Every label key a selector of the policy reads is reserved too, without being listed. |
 | `authority_fields` | The reserved label keys a request may set, each with the values it may take (`{"values": [...]}`). An authority field is set only under a human decision. |
 | `peers` | Which agents a new or updated agent may list as peers: `rules` (each `{id, target, outcome, reason?}`) and `default`. A peer outcome is `allow`, `require_approval` or `deny` (the default). |

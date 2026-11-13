@@ -391,7 +391,9 @@ record written with `include_forks` reads there as its member's alone, see
 above), with two exceptions: a created agent's row that records an owed
 label restamp, and a mob whose operator instruction records are past what
 an earlier release holds in one mob. Check for both on 0.9.15, before the
-rollback.
+rollback. A third stored form is read without a refusal and is changed by
+what the earlier release writes: a schedule paused for its target, at the
+end of this subsection.
 
 **A created agent's row that records an owed label restamp.** The row of a
 store-owned identity carries the key `label_restamp_owed` while an update
@@ -426,7 +428,9 @@ file or `MobStorage::identity_record_rows` for a storage). While
   durable sessions) is settled by none of these: rotate it
   (`MobHandle::rotate_member`), or archive or remove its agent.
 
-`rkat storage doctor` and Meta's storage doctor do not report this count.
+`rkat storage doctor` and Meta's storage doctor do not report this count,
+and a host that uses only the SDKs has no read for it in 0.9.15: the Rust
+calls above are the read.
 
 **Operator instruction records past an earlier release's totals.** An
 earlier release bounds the mob as a whole at 64
@@ -476,6 +480,18 @@ record keeps its slot. For each listed mob, do one of these first:
   1 MiB in total;
 - destroy the mob, or move its database out of the mob root, as for a mob
   an earlier release refuses.
+
+**A schedule paused for its target.** Nothing is refused, and the pause is
+not lost. 0.9.14 has no such mark: it ignores `paused_for_target` and reads
+the schedule as paused, so the schedule stays paused while rolled back, and
+nothing on 0.9.14 resumes it when its target takes deliveries again. Any
+write of the schedule by the earlier release while it is paused (an update,
+a pause by name, a target snapshot sync, a late supersession
+acknowledgement) stores it without the mark; a schedule the earlier release
+did not write keeps the mark. After the return to 0.9.15 a schedule that
+kept its mark is resumed with its target, and one whose mark was dropped
+stays paused when its target comes back, until it is resumed by name. See
+[Schedules paused for their target, and a rollback](#schedules-paused-for-their-target%2C-and-a-rollback).
 
 ## Upgrading to 0.9.14
 

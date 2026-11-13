@@ -69,7 +69,14 @@ them.
   matches must add the new variants, code that builds
   `ScheduleLifecycleMachineState` or the kernel `State` literally must set
   the field, and a serialized kernel `State` without the field no longer
-  deserializes.
+  deserializes. Stored schedules load unchanged: the persisted form is the
+  schedule's own wire type (`ScheduleMachineStateWire` in
+  `crates/meerkat-schedule/src/types.rs`), where `paused_for_target` is read
+  as false when absent and left out when false, so a schedule that 0.9.14
+  stored reads as before and a schedule that is not paused for its target is
+  stored as 0.9.14 stores it. No Meerkat store holds the generated kernel
+  `State`: only an embedder that serializes it itself is affected. For a
+  rollback with schedules paused for their target, see the Upgrade notes.
 
 - Rust API of `meerkat-mob`: `DiagnosticCode` gains the variant
   `ProfileHeldByIdentity` (wire `profile_held_by_identity`), appended last,

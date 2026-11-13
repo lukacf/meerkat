@@ -35,13 +35,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   on the wire is unchanged while the member is `false`.
 
 - `runtime_options.identity_creation` (and the Rust form a native host
-  returns): a policy that names the approval outcome `notify` or `review`, or
-  the preparation mode `constructed`, is refused at init, with the policy
-  path and what to write instead. Before, such a policy was accepted and
-  nothing acted on it. No notice reaches an approver for `notify` yet, no
-  reviewer decides for `review` yet, and no method holds or activates a
-  construction yet: write `allow` or `require_approval`, and the preparation
-  mode `required`.
+  returns): an enabled policy that names the approval outcome `notify` or
+  `review`, or the preparation mode `constructed`, is refused at init, with
+  the policy path and what to write instead. A disabled policy
+  (`enabled: false`) that names one of them is not refused for it. Before,
+  such a policy was accepted and nothing acted on it, with one exception:
+  0.9.14 already refused the preparation mode `constructed` on a launch
+  without a native host composition. No notice reaches an approver for
+  `notify` yet, no reviewer decides for `review` yet, and no method holds or
+  activates a construction yet: write `allow` or `require_approval`, and the
+  preparation mode `required`.
 
 - Rust, source only: `CustomizerToolsSpawnCustomizer` no longer implements
   the auto traits `UnwindSafe` and `RefUnwindSafe`. It now holds a
@@ -97,6 +100,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   0.9.14 such an agent was built from its record at once.
   `UnifiedRuntimeBuilder` and both gateway binaries complete the bootstrap
   themselves.
+
+- The published 0.9.14 Meta Python and TypeScript SDKs (the source of tag
+  `meta-v0.9.14`) were run against a development build of this release's
+  gateway with no provider key: every row of their own suites that starts a
+  real gateway without a key passed (5 Python rows and 1 TypeScript row:
+  gateway init and its startup callbacks, lazy seating, agent memory, mob
+  announcement sources), the three Python rows that need a provider key
+  failed only on the missing key, and no wire incompatibility was found.
+  That coverage is thin: only the rows that start a gateway without a
+  provider key ran. No row that needs a model turn and none of the live
+  methods was exercised, and no control run was made against a 0.9.14
+  gateway.
 
 ### Added
 

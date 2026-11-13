@@ -15,6 +15,45 @@
     "level": { "enum": ["none", "minimal", "low", "medium", "high", "xhigh", "max"] },
     "model_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$", "maxLength": 128 },
     "route": { "type": "string", "pattern": "^[a-z][a-z0-9_]*/[a-z][a-z0-9_]*$", "maxLength": 96 },
+    "observation": {
+      "description": "One cell a row with observed cells saw: an item of a leg result's observations, and the JSON object of a line a row prints after the prefix `reasoning-effort-receipt-observation `. A failed cell may carry the HTTP status and an error code as typed fields its row emits; the code is one word of the row's own failure classes, never a provider's text.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["row", "provider_family", "backend", "api", "model", "requested_level", "outcome", "result"],
+      "properties": {
+        "row": { "$ref": "#/$defs/row_id" },
+        "provider_family": { "$ref": "#/$defs/provider_family" },
+        "backend": { "$ref": "#/$defs/token" },
+        "api": { "$ref": "#/$defs/api" },
+        "model": { "$ref": "#/$defs/model_id" },
+        "requested_level": { "$ref": "#/$defs/level" },
+        "outcome": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "level"],
+              "properties": {
+                "kind": { "const": "sent" },
+                "level": { "$ref": "#/$defs/level" }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "reason"],
+              "properties": {
+                "kind": { "const": "refused" },
+                "reason": { "$ref": "#/$defs/token" }
+              }
+            }
+          ]
+        },
+        "result": { "enum": ["pass", "fail", "skip"] },
+        "http_status": { "type": "integer", "minimum": 100, "maximum": 599 },
+        "error_code": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$", "maxLength": 64 }
+      }
+    },
     "cell_line": {
       "description": "What a row says it picked for one cell: the line it prints after the prefix `reasoning-effort-receipt-cell `, one JSON object. test is the row's function name, cell the manifest's cell id, route the route as reported (backend/api).",
       "type": "object",
@@ -308,46 +347,9 @@
           "items": { "$ref": "#/$defs/cell_line" }
         },
         "observations": {
-          "description": "The cells a row with observed cells saw, one item each. A failed cell may carry the HTTP status and the provider's error code, as typed fields its row emits; never a message.",
+          "description": "The cells a row with observed cells saw, one item each: given to `record` in a file, or read from the lines the rows print.",
           "type": "array",
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["row", "provider_family", "backend", "api", "model", "requested_level", "outcome", "result"],
-            "properties": {
-              "row": { "$ref": "#/$defs/row_id" },
-              "provider_family": { "$ref": "#/$defs/provider_family" },
-              "backend": { "$ref": "#/$defs/token" },
-              "api": { "$ref": "#/$defs/api" },
-              "model": { "$ref": "#/$defs/model_id" },
-              "requested_level": { "$ref": "#/$defs/level" },
-              "outcome": {
-                "oneOf": [
-                  {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": ["kind", "level"],
-                    "properties": {
-                      "kind": { "const": "sent" },
-                      "level": { "$ref": "#/$defs/level" }
-                    }
-                  },
-                  {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": ["kind", "reason"],
-                    "properties": {
-                      "kind": { "const": "refused" },
-                      "reason": { "$ref": "#/$defs/token" }
-                    }
-                  }
-                ]
-              },
-              "result": { "enum": ["pass", "fail", "skip"] },
-              "http_status": { "type": "integer", "minimum": 100, "maximum": 599 },
-              "error_code": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$", "maxLength": 64 }
-            }
-          }
+          "items": { "$ref": "#/$defs/observation" }
         }
       }
     }

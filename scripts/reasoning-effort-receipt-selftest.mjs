@@ -16,6 +16,7 @@ import {
   LEVELS,
   MANIFEST_PATH,
   MODES,
+  OBSERVATION_LINE_PREFIX,
   RECEIPT_JSON_NAME,
   RECEIPT_MARKDOWN_NAME,
   ReceiptError,
@@ -864,6 +865,110 @@ row("observed cells come from the leg result and from nowhere else", () => {
   refuses(() => liveResult([observation({ outcome: { kind: "refused", reason: "429 Too Many Requests" } })]), /does not match its schema/, "a refusal reason that is provider text");
 });
 
+row("the cells a live row prints are read from the run's output, each line exactly an observation", () => {
+  const line = (item) => `${OBSERVATION_LINE_PREFIX}${JSON.stringify(item)}`;
+  const sent = observation();
+  const refused = observation({ model: "listed-model-b", requested_level: "max", outcome: { kind: "refused", reason: "unsupported_level" } });
+  const failed = observation({ model: "listed-model-d", result: "fail", http_status: 429, error_code: "rate_limited" });
+  const name = "demo-facade::effort_routes$live_matrix";
+  // A run with --no-capture: the row's lines, the harness's and the row's other output, between the events.
+  const output = (printed, end = testEvent("ok", name)) =>
+    [suite("started", "demo-facade", "effort_routes", "test"), testEvent("started", name), "", "running 1 test", ...printed, CAPTURED, "test live_matrix ... ok", end]
+      .map((event) => (typeof event === "string" ? event : JSON.stringify(event)))
+      .join("\n");
+  const record = (text, extra = {}) =>
+    buildLegResult({ leg: "live", commit: COMMIT, command: "make e2e-copilot-live", exitStatus: 0, format: "nextest_libtest_json_plus", output: Buffer.from(text), host: HOST, ...extra });
+
+  assert.deepEqual(parseNextestJson(output([line(refused), line(sent), `  ${line(failed)}\r`])).observations, [refused, sent, failed]);
+  assert.deepEqual(parseNextestJson(output([])).observations, []);
+  // The members of a line in any order: the leg result has them in the schema's.
+  const reversed = Object.fromEntries(Object.entries(failed).reverse());
+  assert.notEqual(JSON.stringify(reversed), JSON.stringify(failed));
+  assert.equal(JSON.stringify(parseNextestJson(output([line(reversed)])).observations), JSON.stringify([failed]));
+  // Inside a failed test's captured output, and in a log that shows a test's output.
+  const captured = output([], testEvent("failed", name, { stdout: `${line(failed)}\n${CAPTURED}\n` }));
+  assert.deepEqual(parseNextestJson(captured).observations, [failed]);
+  assert.deepEqual(parseNextestLog(`  stdout ───\n    ${line(sent)}\n    ${CAPTURED}\n     Summary [   0.041s] 1 test run: 1 passed, 0 skipped\n`).observations, [sent]);
+
+  // The two lines the live rows' own test pins, byte for byte.
+  const written = [
+    'reasoning-effort-receipt-observation {"row":"live.copilot_matrix","provider_family":"openai","backend":"copilot","api":"responses","model":"model-a","requested_level":"low","outcome":{"kind":"sent","level":"low"},"result":"fail","http_status":429,"error_code":"rate_limited"}',
+    'reasoning-effort-receipt-observation {"row":"live.direct_providers","provider_family":"openai","backend":"openai_api","api":"responses","model":"model-a","requested_level":"max","outcome":{"kind":"refused","reason":"unsupported_level"},"result":"pass"}',
+  ];
+  assert.deepEqual(
+    parseNextestJson(output(written)).observations.map((item) => [item.row, item.outcome.kind, item.result, item.http_status ?? null, item.error_code ?? null]),
+    [
+      ["live.copilot_matrix", "sent", "fail", 429, "rate_limited"],
+      ["live.direct_providers", "refused", "pass", null, null],
+    ],
+  );
+
+  // The leg result holds them as it holds observations given in a file, and the receipt lists them.
+  const result = record(output([line(refused), line(sent), line(failed)]));
+  assert.deepEqual(result.observations, liveResult([sent, refused, failed]).observations);
+  assert.ok(!serialize(result).includes("quota"), "nothing else the row printed is kept");
+  const receipt = buildReceipt(withResult("live.json", result));
+  assert.deepEqual(
+    receipt.entries.filter((entry) => entry.row === "live.matrix").map((entry) => [entry.id, entry.model.id, entry.result, entry.failure]),
+    [
+      ["live.matrix/#1", "listed-model-a", "pass", null],
+      ["live.matrix/#2", "listed-model-b", "pass", null],
+      ["live.matrix/#3", "listed-model-d", "fail", { http_status: 429, error_code: "rate_limited" }],
+    ],
+  );
+  // Lines and a file together: one list; the same cell from both is one cell twice.
+  assert.equal(record(output([line(sent)]), { observations: [refused] }).observations.length, 2);
+  refuses(() => record(output([line(sent)]), { observations: [sent] }), /one observation twice/, "a cell in the file and in the output");
+  // The same line twice is one cell; two lines that disagree about a cell are refused.
+  assert.deepEqual(record(output([line(sent), line(sent)])).observations, [sent]);
+  refuses(() => record(output([line(sent), line({ ...sent, result: "fail" })])), /observation line at line 6 .* says another thing of a cell of live\.matrix/, "a cell that passed and failed");
+  refuses(
+    () => record(output([line(failed), line({ ...failed, error_code: "server_error" })])),
+    /says another thing of a cell of live\.matrix/,
+    "a failed cell with two codes",
+  );
+
+  // A line is exactly an observation: no other member, no other shape, no text.
+  for (const [what, text, pattern] of [
+    ["a member the schema does not know", line({ ...sent, login: "someone" }), /observation line at line 5 .* does not match its schema.*login/],
+    ["the provider's message", line({ ...failed, message: "You exceeded your current quota." }), /does not match its schema.*message/],
+    ["a code that is a sentence", line({ ...failed, error_code: "quota exceeded for the account" }), /does not match its schema.*error_code/],
+    ["a model the row redacted", line({ ...sent, model: "<redacted>" }), /does not match its schema.*model/],
+    ["a missing member", line({ row: "live.matrix", model: "listed-model-a" }), /does not match its schema.*has no provider_family/],
+    ["a level outside the set", line({ ...sent, requested_level: "x_high" }), /does not match its schema.*requested_level/],
+    ["a list", `${OBSERVATION_LINE_PREFIX}[]`, /does not match its schema/],
+    ["no object", `${OBSERVATION_LINE_PREFIX}PASS route=copilot/responses`, /observation line at line 5 .* is not JSON/],
+  ]) {
+    refuses(() => parseNextestJson(output([text])), pattern, what);
+  }
+  refuses(
+    () => parseNextestJson(output([], testEvent("failed", name, { stdout: `${line({ ...sent, account: "someone" })}\n` }))),
+    /observation line at line \d+ .*the test's output.* does not match its schema.*account/,
+    "a line with another member inside a failed test's output",
+  );
+  refuses(() => parseNextestLog(`    ${line({ ...sent, host: "somewhere" })}\n     Summary [   0.041s] 1 test run: 1 passed, 0 skipped\n`), /does not match its schema.*host/, "a line with another member in a log");
+  refuses(() => record(output([line({ ...sent, http_status: 200 })])), /on an observation that did not fail/, "a status on a cell that passed");
+  refuses(() => record(output([]), { observations: [{ ...sent, login: "someone" }] }), /observation 1 of the observations given does not match its schema.*login/, "a file item with another member");
+  // The prefix is the one the live rows print (their source is not in this
+  // tree to read it from). The two prefixes are two words: a cell line is no
+  // observation, and the reverse.
+  assert.equal(OBSERVATION_LINE_PREFIX, "reasoning-effort-receipt-observation ");
+  assert.notEqual(OBSERVATION_LINE_PREFIX, CELL_LINE_PREFIX);
+  refuses(() => parseNextestJson(output([`${CELL_LINE_PREFIX}${JSON.stringify(sent)}`])), /cell line at line 5 .* does not match its schema/, "an observation after the cell line's prefix");
+
+  // From the command line: the run's output is all `record` needs.
+  const work = scratchDirectory();
+  writeFileSync(join(work, "live.nextest.json"), output([line(refused), line(sent), line(failed)]));
+  const recorded = cli(["record", "--leg", "live", "--commit", COMMIT, "--command", "make e2e-copilot-live", "--exit-status", "0", "--nextest-json", join(work, "live.nextest.json"), "--output", join(work, "live.json")]);
+  assert.deepEqual([recorded.status, recorded.stdout], [0, "recorded leg live: 1 run, 1 passed, 0 failed, 0 skipped, 1 named, 0 cell lines, 3 observations\n"]);
+  assert.deepEqual(JSON.parse(readFileSync(join(work, "live.json"), "utf8")).observations, [sent, refused, failed]);
+  writeFileSync(join(work, "bad.nextest.json"), output([line({ ...sent, login: "someone" })]));
+  const refusedRecord = cli(["record", "--leg", "live", "--commit", COMMIT, "--command", "make e2e-copilot-live", "--exit-status", "0", "--nextest-json", join(work, "bad.nextest.json"), "--output", join(work, "bad.json")]);
+  assert.equal(refusedRecord.status, 1);
+  assert.ok(/^refused: the observation line at line 5 .* does not match its schema/u.test(refusedRecord.stdout), refusedRecord.stdout);
+  assert.equal(existsSync(join(work, "bad.json")), false, "a refused record writes nothing");
+});
+
 row("a failed live cell carries the typed status and code its row emitted, never a message", () => {
   const failed = observation({ model: "listed-model-d", result: "fail", http_status: 429, error_code: "rate_limited" });
   const receipt = buildReceipt(withResult("live.json", liveResult([failed, observation({ model: "listed-model-e", result: "fail" }), observation()])));
@@ -1271,6 +1376,10 @@ row("the committed manifest matches its schema, names tests the tree defines, an
     committed.rows.filter((item) => item.test?.source === routesSource).map((item) => item.test.name).sort(),
     "the tests that print their cells are the manifest's route rows",
   );
+  // The rows the live rows name in their observation lines are rows with observed cells.
+  for (const id of ["live.copilot_matrix", "live.direct_providers"]) {
+    assert.equal(committed.rows.find((item) => item.id === id)?.cells, "observed", `${id} is a row with observed cells`);
+  }
   // The one row with an entry for each level prints its line inside its loop
   // over the levels it refuses, and nowhere else.
   const refusing = "unsupported_level_is_refused_before_any_provider_request";
@@ -1325,7 +1434,7 @@ row("the command line records a run, generates both files from the commit, and v
   writeFileSync(output, routesJson());
   const recorded = cli(["record", "--leg", "routes", "--commit", head, "--command", COMMAND, "--exit-status", "100", "--nextest-json", output, "--output", join(results, "routes.json")], { env });
   assert.equal(recorded.status, 0, recorded.stdout + recorded.stderr);
-  assert.equal(recorded.stdout, "recorded leg routes: 4 run, 3 passed, 1 failed, 1 skipped, 5 named, 5 cell lines\n");
+  assert.equal(recorded.stdout, "recorded leg routes: 4 run, 3 passed, 1 failed, 1 skipped, 5 named, 5 cell lines, 0 observations\n");
   assert.equal(readFileSync(join(results, "routes.json"), "utf8"), serialize(routesResult({ commit: head })), "record writes the leg result as built");
   for (const [leg, reason] of [
     ["binary", "rows_not_built"],

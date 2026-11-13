@@ -2586,6 +2586,377 @@ async fn a_child_mob_restores_its_members_as_the_hosts_member_restore_says() {
 }
 
 // ---------------------------------------------------------------------------
+// A respawned identity keeps the mobs its session owns
+// ---------------------------------------------------------------------------
+
+/// A host customizer that refuses every build while `refuse` is set.
+#[derive(Default)]
+struct SwitchedCustomizer {
+    refuse: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait]
+impl AgentCustomizer for SwitchedCustomizer {
+    async fn customize_build(
+        &self,
+        _context: &AgentBuildContext,
+        _spec: &DurableAgentSpec,
+        _draft: &mut AgentBuildDraft,
+    ) -> Result<(), CustomizerError> {
+        if self.refuse.load(Ordering::SeqCst) {
+            return Err(CustomizerError::Io(
+                "the host refuses this build".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// [`boot_agent_spawn`] with a host customizer.
+async fn boot_agent_spawn_customized(
+    mob_id: &str,
+    state: &Path,
+    model: CreatorModel,
+    customizer: Arc<dyn AgentCustomizer>,
+) -> meerkat_meta::UnifiedRuntime {
+    Box::pin(
+        UnifiedRuntimeBuilder::default()
+            .definition(
+                MobDefinition::from_toml(&AGENT_SPAWN_MOB_TOML.replace("{MOB_ID}", mob_id))
+                    .expect("definition"),
+            )
+            .persistent_state(state)
+            .continuity_from_state_dir(state)
+            .await
+            .expect("open the state-dir identity substrate")
+            .roster_provider(Arc::new(ListedRoster(&[CREATOR])))
+            .agent_customizer(customizer)
+            .identity_runtime_instance_id(mob_id)
+            .comms(true)
+            .default_llm_client(Arc::new(model))
+            .build(),
+    )
+    .await
+    .expect("build the agent-spawn runtime")
+}
+
+/// What the creator's session owns in the respawn rows: the child mob it
+/// created, with one seated worker, and its implicit mob.
+struct OwnedMobs {
+    owner: meerkat_core::SessionId,
+    child: meerkat_mob::MobId,
+    implicit: meerkat_mob::MobId,
+}
+
+/// The worker seated in the child mob of the respawn rows.
+const OWNED_WORKER: &str = "child-worker";
+
+/// Commit one turn of the creator, then create for its session a child mob
+/// (as an agent's `mob_create` creates one) with one seated worker, and the
+/// session's implicit mob (as its first `delegate` creates it).
+async fn creator_owns_mobs(runtime: &meerkat_meta::UnifiedRuntime, child_name: &str) -> OwnedMobs {
+    let identities = runtime.identity_runtime().expect("identity runtime");
+    identities
+        .send_awaiting_commit(
+            &id(CREATOR),
+            &meerkat_core::ContentInput::Text("hello".to_string()),
+        )
+        .await
+        .expect("the creator's turn commits");
+    let owner = identities
+        .status(&id(CREATOR))
+        .await
+        .expect("the creator's status")
+        .session_id
+        .expect("the creator has a session");
+    let mobs = runtime
+        .mob_runtime()
+        .agent_mob_mcp_state()
+        .expect("the agent mob tools' state");
+    let child = mobs
+        .mob_create_definition_with_owner_bridge_session(
+            child_mob_definition(child_name),
+            owner.clone(),
+            true,
+            false,
+        )
+        .await
+        .expect("create the child mob");
+    mobs.mob_spawn(
+        &child,
+        ProfileName::from("worker"),
+        meerkat_mob::AgentIdentity::from(OWNED_WORKER),
+        Some(meerkat_mob::MobRuntimeMode::TurnDriven),
+        None,
+        None,
+    )
+    .await
+    .expect("seat the child mob's worker");
+    let implicit = mobs
+        .get_or_create_implicit_mob_for_bridge_session(&owner.to_string(), "gpt-5.5")
+        .await
+        .expect("create the session's implicit mob");
+    OwnedMobs {
+        owner,
+        child,
+        implicit,
+    }
+}
+
+/// What a runtime reads of the mobs the creator's session owns: whether the
+/// child mob is managed, whether its worker is seated in it, and whether the
+/// implicit mob is managed.
+async fn owned_mobs_read(
+    runtime: &meerkat_meta::UnifiedRuntime,
+    owned: &OwnedMobs,
+) -> (bool, bool, bool) {
+    let mobs = runtime
+        .mob_runtime()
+        .agent_mob_mcp_state()
+        .expect("the agent mob tools' state");
+    let worker = meerkat_mob::AgentIdentity::from(OWNED_WORKER);
+    let (child, seated) = match mobs.handle_for(&owned.child).await {
+        Ok(child) => (
+            true,
+            child
+                .list_members()
+                .await
+                .iter()
+                .any(|entry| entry.agent_identity == worker),
+        ),
+        Err(_) => (false, false),
+    };
+    let implicit = mobs.handle_for(&owned.implicit).await.is_ok();
+    (child, seated, implicit)
+}
+
+/// A respawn whose wake fails leaves the identity without a live member. A
+/// restart over the same state directory then still holds the child mob the
+/// identity's session owns, with its seated worker, and the session's
+/// implicit mob; and the identity's next delivery runs on the same session.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_respawn_whose_wake_fails_keeps_the_mobs_its_session_owns_across_a_restart() {
+    const MOB_ID: &str = "customizer-tools-restart-t";
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let state = temp.path().join("state");
+    let model = CreatorModel::new(MOB_ID);
+
+    // Every handle of the first lifetime stays in this block, as in the
+    // child-restore row.
+    let owned = {
+        let customizer = Arc::new(SwitchedCustomizer::default());
+        let runtime =
+            boot_agent_spawn_customized(MOB_ID, &state, model.clone(), customizer.clone()).await;
+        let owned = creator_owns_mobs(&runtime, &format!("{MOB_ID}-child")).await;
+        assert_eq!(
+            owned_mobs_read(&runtime, &owned).await,
+            (true, true, true),
+            "before the respawn the session's mobs are managed"
+        );
+
+        customizer.refuse.store(true, Ordering::SeqCst);
+        let respawn = runtime
+            .identity_runtime()
+            .expect("identity runtime")
+            .respawn(&id(CREATOR))
+            .await;
+        assert!(
+            respawn.is_err(),
+            "the respawn's wake is refused by the host's build: {respawn:?}"
+        );
+        // Read here, asserted with the restart's read below.
+        let seat_after_refused_wake = runtime.mob_handle().member_materialization_for_test(
+            &meerkat_meta::member_comms_id::roster_member_id_for_identity(CREATOR),
+        );
+        assert_eq!(
+            owned_mobs_read(&runtime, &owned).await,
+            (true, true, true),
+            "after the failed respawn, in the same process, the session's mobs are managed"
+        );
+        runtime.shutdown().await;
+        (owned, seat_after_refused_wake)
+    };
+    let (owned, seat_after_refused_wake) = owned;
+
+    let runtime = boot_agent_spawn_customized(
+        MOB_ID,
+        &state,
+        model.clone(),
+        Arc::new(SwitchedCustomizer::default()),
+    )
+    .await;
+    // For a failure's message: the mobs the restart holds or quarantines
+    // are not managed, and neither is a mob it tore down.
+    let unmanaged = match runtime
+        .mob_runtime()
+        .agent_mob_mcp_state()
+        .expect("the agent mob tools' state")
+        .mob_inventory()
+        .await
+    {
+        Ok(inventory) => format!(
+            "held {:?}, quarantined {}",
+            inventory.held,
+            inventory.quarantined.len()
+        ),
+        Err(error) => format!("inventory unread: {error}"),
+    };
+    assert_eq!(
+        (
+            seat_after_refused_wake,
+            owned_mobs_read(&runtime, &owned).await
+        ),
+        (
+            Some(meerkat_mob::machines::mob_machine::MemberMaterializationPhase::Dormant),
+            (true, true, true)
+        ),
+        "the identity stayed seated, not built, after the refused wake; and after the restart: \
+         (child mob managed, its worker seated, implicit mob managed); {unmanaged}"
+    );
+    let identities = runtime.identity_runtime().expect("identity runtime");
+    identities
+        .send_awaiting_commit(
+            &id(CREATOR),
+            &meerkat_core::ContentInput::Text("hello again".to_string()),
+        )
+        .await
+        .expect("the creator's next turn commits");
+    assert_eq!(
+        identities
+            .status(&id(CREATOR))
+            .await
+            .expect("the creator's status")
+            .session_id,
+        Some(owned.owner.clone()),
+        "the creator runs on the session it had"
+    );
+    assert_eq!(
+        owned_mobs_read(&runtime, &owned).await,
+        (true, true, true),
+        "after the creator's next turn"
+    );
+    runtime.shutdown().await;
+}
+
+/// A respawn whose wake fails, followed in the same process by a delivery
+/// that wakes the identity: a restart over the same state directory still
+/// holds the child mob the identity's session owns, with its seated worker,
+/// and the session's implicit mob.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_respawn_whose_wake_fails_and_a_later_wake_keep_the_mobs_its_session_owns_across_a_restart()
+ {
+    const MOB_ID: &str = "customizer-tools-restart-v";
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let state = temp.path().join("state");
+    let model = CreatorModel::new(MOB_ID);
+
+    let owned = {
+        let customizer = Arc::new(SwitchedCustomizer::default());
+        let runtime =
+            boot_agent_spawn_customized(MOB_ID, &state, model.clone(), customizer.clone()).await;
+        let owned = creator_owns_mobs(&runtime, &format!("{MOB_ID}-child")).await;
+        let identities = runtime.identity_runtime().expect("identity runtime");
+
+        customizer.refuse.store(true, Ordering::SeqCst);
+        let respawn = identities.respawn(&id(CREATOR)).await;
+        assert!(
+            respawn.is_err(),
+            "the respawn's wake is refused by the host's build: {respawn:?}"
+        );
+        customizer.refuse.store(false, Ordering::SeqCst);
+        identities
+            .send_awaiting_commit(
+                &id(CREATOR),
+                &meerkat_core::ContentInput::Text("hello again".to_string()),
+            )
+            .await
+            .expect("the creator's next turn wakes it and commits");
+        assert_eq!(
+            identities
+                .status(&id(CREATOR))
+                .await
+                .expect("the creator's status")
+                .session_id,
+            Some(owned.owner.clone()),
+            "the creator runs on the session it had"
+        );
+        runtime.shutdown().await;
+        owned
+    };
+
+    let runtime = boot_agent_spawn_customized(
+        MOB_ID,
+        &state,
+        model.clone(),
+        Arc::new(SwitchedCustomizer::default()),
+    )
+    .await;
+    assert_eq!(
+        owned_mobs_read(&runtime, &owned).await,
+        (true, true, true),
+        "after the restart: (child mob managed, its worker seated, implicit mob managed)"
+    );
+    runtime.shutdown().await;
+}
+
+/// A respawn that completes keeps the identity on its session, and a
+/// restart over the same state directory still holds the child mob the
+/// session owns, with its seated worker, and the session's implicit mob.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_respawn_that_completes_keeps_the_mobs_its_session_owns_across_a_restart() {
+    const MOB_ID: &str = "customizer-tools-restart-u";
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let state = temp.path().join("state");
+    let model = CreatorModel::new(MOB_ID);
+
+    let owned = {
+        let runtime = boot_agent_spawn_customized(
+            MOB_ID,
+            &state,
+            model.clone(),
+            Arc::new(SwitchedCustomizer::default()),
+        )
+        .await;
+        let owned = creator_owns_mobs(&runtime, &format!("{MOB_ID}-child")).await;
+        let identities = runtime.identity_runtime().expect("identity runtime");
+        identities
+            .respawn(&id(CREATOR))
+            .await
+            .expect("the respawn completes");
+        assert_eq!(
+            identities
+                .status(&id(CREATOR))
+                .await
+                .expect("the creator's status")
+                .session_id,
+            Some(owned.owner.clone()),
+            "the respawned creator runs on the session it had"
+        );
+        assert_eq!(
+            owned_mobs_read(&runtime, &owned).await,
+            (true, true, true),
+            "after the respawn, in the same process"
+        );
+        runtime.shutdown().await;
+        owned
+    };
+
+    let runtime = boot_agent_spawn_customized(
+        MOB_ID,
+        &state,
+        model.clone(),
+        Arc::new(SwitchedCustomizer::default()),
+    )
+    .await;
+    assert_eq!(
+        owned_mobs_read(&runtime, &owned).await,
+        (true, true, true),
+        "after the restart: (child mob managed, its worker seated, implicit mob managed)"
+    );
+    runtime.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
 // A member restored without its comms identity
 // ---------------------------------------------------------------------------
 

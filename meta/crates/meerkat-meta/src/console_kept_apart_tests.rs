@@ -1902,6 +1902,76 @@ async fn a_consoles_own_runtime_is_counted_by_the_routes_that_hold_it() -> TestR
     Ok(())
 }
 
+/// Two consoles over one access controller, each with an aggregator of its
+/// own that serves another runtime. A console reads only the runtimes it
+/// serves: while the runtime one console serves has not read who its
+/// members are private to, the other console's reading leaves the operator
+/// of a console that identifies nobody kept apart. Once the console that
+/// serves that runtime no longer does, the operator is kept apart no longer.
+#[tokio::test]
+async fn a_console_counts_no_runtime_out_that_another_console_of_its_controller_serves()
+-> TestResult {
+    let home_state = tempfile::tempdir()?;
+    let home =
+        persistent_gateway_runtime_in(home_state.path(), "kept-apart-two-consoles-home", "", "")
+            .await?;
+    let home_handle = home.handle();
+    assert!(home.private_owners().seeded(&home_handle).await.landed());
+    let team_state = tempfile::tempdir()?;
+    let team_mob =
+        persistent_gateway_runtime_in(team_state.path(), "kept-apart-two-consoles-team", "", "")
+            .await?;
+    let team = runtime_whose_first_read_failed(&team_mob).await;
+    let serving = |key: &str, runtime: &MobRuntime| {
+        let aggregator = MetaConsoleAggregator::in_memory();
+        aggregator.register_runtime_handles_with_policy(
+            key,
+            key,
+            runtime.clone(),
+            None,
+            crate::unified_runtime::ConsoleEventStore::new(),
+            Arc::new(AllowAllConsoleVisibilityPolicy),
+        );
+        aggregator
+    };
+    let console_home = serving("home", &home);
+    let console_team = serving("team", &team);
+    let operator = console_request_auth_context(
+        &console_that_identifies_nobody(&home),
+        &HeaderMap::new(),
+        &Uri::from_static("/console/timeline"),
+    )
+    .expect("the console admits its operator")
+    .audience;
+    // A request of the console that serves the runtime that owes its read.
+    prime_access_cache_from_aggregator(&console_team, &operator.controller()).await;
+    let after_its_own_reading = kept_apart_rules(&operator);
+    // A request of the other console, over the same controller.
+    prime_access_cache_from_aggregator(&console_home, &operator.controller()).await;
+    let after_the_other_consoles_reading = kept_apart_rules(&operator);
+    assert_eq!(
+        (after_its_own_reading, after_the_other_consoles_reading),
+        ((true, false, true), (true, false, true)),
+        "the runtime the first console serves still owes its read"
+    );
+
+    console_team.unregister_runtime("team");
+    prime_access_cache_from_aggregator(&console_home, &operator.controller()).await;
+    assert_eq!(
+        kept_apart_rules(&operator),
+        (true, false, true),
+        "the other console's reading does not end the wait either once the runtime is \
+         unregistered: only its own console's reading does"
+    );
+    prime_access_cache_from_aggregator(&console_team, &operator.controller()).await;
+    assert_eq!(
+        kept_apart_rules(&operator),
+        (false, true, false),
+        "once its console no longer serves it, the operator is kept apart no longer"
+    );
+    Ok(())
+}
+
 /// A member whose run is in flight is retired. The run ends on the console
 /// with a failure record that names the run's session: it carries the
 /// member's witness, so everyone who may view the member reads that the run

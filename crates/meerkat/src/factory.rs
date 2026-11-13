@@ -17148,12 +17148,18 @@ mod tests {
         const BASE_PROMPT: &str = "You answer for one desk.";
         const SECTION_ONE: &str = "Keep answers to one line.";
         const SECTION_TWO: &str = "Name the desk you answer for.";
-        /// A session document as Meerkat 0.9.4 persisted it: its build state
-        /// is `{}`, so it records no sections.
-        const V0_9_4_SESSION: &str = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/v0_9_4_staged_prompt_session/session.json"
-        );
+        /// The path of a session document as Meerkat 0.9.4 persisted it: its
+        /// build state is `{}`, so it records no sections. The manifest
+        /// directory is read at run time (cargo, nextest and the Bazel test
+        /// rule set it), so an archived test binary never carries the
+        /// builder's path.
+        fn v0_9_4_session_path() -> std::path::PathBuf {
+            std::path::PathBuf::from(
+                std::env::var_os("CARGO_MANIFEST_DIR")
+                    .expect("CARGO_MANIFEST_DIR is set for test processes"),
+            )
+            .join("tests/fixtures/v0_9_4_staged_prompt_session/session.json")
+        }
 
         fn sections() -> Vec<String> {
             vec![SECTION_ONE.to_string(), SECTION_TWO.to_string()]
@@ -17440,7 +17446,8 @@ mod tests {
         }
 
         fn v0_9_4_session() -> Session {
-            let document = std::fs::read_to_string(V0_9_4_SESSION).expect("the 0.9.4 fixture");
+            let document =
+                std::fs::read_to_string(v0_9_4_session_path()).expect("the 0.9.4 fixture");
             serde_json::from_str(&document).expect("a 0.9.4 session document")
         }
 
@@ -17483,7 +17490,8 @@ mod tests {
             let temp = tempfile::tempdir().expect("temp root");
             let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
 
-            let document = std::fs::read_to_string(V0_9_4_SESSION).expect("the 0.9.4 fixture");
+            let document =
+                std::fs::read_to_string(v0_9_4_session_path()).expect("the 0.9.4 fixture");
             let mut document: serde_json::Value =
                 serde_json::from_str(&document).expect("a 0.9.4 session document");
             document["metadata"][meerkat_core::SESSION_BUILD_STATE_KEY] =

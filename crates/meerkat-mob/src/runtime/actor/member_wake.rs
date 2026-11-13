@@ -1370,9 +1370,11 @@ impl MobActor {
 
     /// Close or reopen the live members' inproc routes for peer ingress, as
     /// a stop closed or a resume reopened it. A closed route makes a peer
-    /// send meet the member's wake route, whose `WakeMember` the stopped
-    /// machine answers `mob_not_running`, the same outcome a dormant member
-    /// of a stopped mob gives.
+    /// send of its own namespace meet the member's wake route, whose
+    /// `WakeMember` the stopped machine answers `mob_not_running`, the same
+    /// outcome a dormant member of a stopped mob gives. A route a host
+    /// registered to the member's inbox in another namespace is not closed:
+    /// a send from there is still admitted and waits for the resume.
     pub(in crate::runtime) async fn realize_member_peer_ingress_changes(&mut self) {
         while let Some(change) = self.member_wakes.ingress.pop_front() {
             let live: Vec<RosterEntry> = {

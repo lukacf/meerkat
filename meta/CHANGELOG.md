@@ -167,6 +167,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `unwire_local` on both gateways, each with the other member's current
   `peer_info`, then `wire_cross_mob` again.
 - With member socket endpoints, run one member per gateway today.
+- Between two mobs of one process, with the managed topology: after a
+  member is released to rest and built again by its own mob, a managed
+  connection from another mob to it reads as not active (the Console shows
+  it degraded and offers Reconnect, and a plain Connect answers that a
+  reconnect is required) until the other mob next sends to it or the
+  connection is applied again. A send from the other mob in that window
+  is delivered; a send by the rebuilt member's own mob does not change
+  the reading. If a Connect or Reconnect on that connection fails while
+  it reads as not active, both of its halves are unwired, and the two
+  members cannot message each other until the next apply that succeeds
+  (the connection stays desired).
 
 ## [0.9.14] - 2026-11-11
 

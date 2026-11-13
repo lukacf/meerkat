@@ -4801,12 +4801,14 @@ pub trait CommsRuntime: Send + Sync {
     }
 
     /// Close this runtime's in-process route for peer ingress while the
-    /// runtime lives on (its owner stopped admitting peer work): peers then
-    /// meet the route's wake owner, which answers typed, instead of an inbox
-    /// no drain claims. Generation-exact; the closed route keeps its name
-    /// free and its metadata for [`Self::reopen_inproc_route`]. Returns
-    /// whether this call closed a route. The default is for runtimes that
-    /// publish no in-process route.
+    /// runtime lives on (its owner stopped admitting peer work): senders of
+    /// its own namespace then meet the route's wake owner, which answers
+    /// typed, instead of an inbox no drain claims. A route a host registered
+    /// to this inbox in another namespace is not closed: a send from there
+    /// is still admitted and waits for the runtime's drain. Generation-exact;
+    /// the closed route keeps its name free and its metadata for
+    /// [`Self::reopen_inproc_route`]. Returns whether this call closed a
+    /// route. The default is for runtimes that publish no in-process route.
     fn close_inproc_route(&self) -> bool {
         false
     }

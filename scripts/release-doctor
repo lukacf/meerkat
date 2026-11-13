@@ -329,6 +329,12 @@ else
   bad "Intel macOS release binaries must build on the BuildBuddy lane when it is selected (release-build-macos-x86, for a macOS version every supported Intel Mac runs), be run and inspected on Apple silicon before the binary build gate succeeds, and trail the critical assets (${macos_x86_contract//$'\n'/; })"
 fi
 
+if registrations_contract="$(workflow_contract binary-registrations)"; then
+  pass "Every release binary is asked for its link-time registrations (capabilities, built-in skills) on a runner that runs it before it is published; the BuildBuddy lane's Linux aarch64 and macOS arm64 binaries on runners of their own, which the critical gate requires"
+else
+  bad "Every release binary must be asked for its link-time registrations (scripts/check-release-binary-registrations) on a runner that runs it before it is published, the BuildBuddy lane's Linux aarch64 and macOS arm64 binaries by one bounded job the critical gate requires (${registrations_contract//$'\n'/; })"
+fi
+
 if closures_contract="$(workflow_contract release-closures)"; then
   pass "The release binaries and the Web SDK runtime compile no package under another product's root"
 else

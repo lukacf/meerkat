@@ -37,6 +37,8 @@ NON_INPUTS_PASS="PASS No release build job, local action or script names a path 
 NON_INPUTS_FAIL="FAIL A release build job, local action or script names a path a reused prebuild may differ in"
 MACOS_X86_PASS="PASS Intel macOS release binaries build on the BuildBuddy lane when it is selected, for a macOS version every supported Intel Mac runs, are run and inspected on Apple silicon, and trail the critical assets; the hosted cross-build builds them only on the GitHub-hosted backend"
 MACOS_X86_FAIL="FAIL Intel macOS release binaries must build on the BuildBuddy lane when it is selected"
+REGISTRATIONS_PASS="PASS Every release binary is asked for its link-time registrations (capabilities, built-in skills) on a runner that runs it before it is published; the BuildBuddy lane's Linux aarch64 and macOS arm64 binaries on runners of their own, which the critical gate requires"
+REGISTRATIONS_FAIL="FAIL Every release binary must be asked for its link-time registrations (scripts/check-release-binary-registrations) on a runner that runs it before it is published"
 CLOSURES_PASS="PASS The release binaries and the Web SDK runtime compile no package under another product's root"
 CLOSURES_FAIL="FAIL A release binary or the Web SDK runtime compiles a package under another product's root"
 BASELINE_PASS="PASS Semver baseline rustdoc builds alongside the release and gates nothing; it attaches only to a published release, never replacing an attached one"
@@ -548,14 +550,57 @@ elif name == "macos-x86-hosted-on-buildbuddy":
 elif name == "macos-x86-gates-critical":
     # The critical gate waits for the BuildBuddy Intel macOS lane.
     replace_once(
-        "    needs: [build_binaries, build_binaries_buildbuddy, release_prebuild]\n",
-        "    needs: [build_binaries, build_binaries_buildbuddy, build_binaries_buildbuddy_macos_x86, release_prebuild]\n",
+        "    needs: [build_binaries, build_binaries_buildbuddy, verify_critical_native_binaries, release_prebuild]\n",
+        "    needs: [build_binaries, build_binaries_buildbuddy, verify_critical_native_binaries, build_binaries_buildbuddy_macos_x86, release_prebuild]\n",
     )
 elif name == "macos-x86-unverified":
     # Nothing runs or inspects the BuildBuddy Intel macOS binaries.
     replace_once(
         '.release-tooling/scripts/check-macos-x86-release-binary "${binary}" "${VERSION}"',
         "true",
+    )
+elif name == "registrations-publisher-unchecked":
+    # The critical publisher no longer asks the archives it publishes (a
+    # prebuild's included) for their registrations.
+    replace_once(
+        "            python3 scripts/check-release-binary-registrations \\\n"
+        '              --if-runnable-target "${target}" "${unpacked}/${bin}"\n',
+        "            true\n",
+    )
+elif name == "registrations-native-unrequired":
+    # The critical gate no longer waits for the job that runs the BuildBuddy
+    # lane's arm64 binaries on runners of their own.
+    replace_once(
+        "    needs: [build_binaries, build_binaries_buildbuddy, verify_critical_native_binaries, release_prebuild]\n",
+        "    needs: [build_binaries, build_binaries_buildbuddy, release_prebuild]\n",
+    )
+    replace_once(
+        '          native_result="${{ needs.verify_critical_native_binaries.result }}"\n',
+        '          native_result="success"\n',
+    )
+elif name == "registrations-native-result-ignored":
+    # The critical gate waits for the job and ignores its result.
+    replace_once(
+        '"${buildbuddy_result}" == "success" && "${native_result}" == "success" && "${github_result}" == "skipped"',
+        '"${buildbuddy_result}" == "success" && "${github_result}" == "skipped"',
+    )
+elif name == "registrations-native-read-only":
+    # The arm64 job only reads the files, as the packaging runner does.
+    replace_once(
+        "            python3 .release-tooling/scripts/check-release-binary-registrations \\\n"
+        '              --source-root release-tree "${unpacked}/${bin}/${bin}"\n'
+        "          done\n"
+        '          echo "ran the four ${TARGET} binaries and found their registrations"\n',
+        "            python3 .release-tooling/scripts/check-release-binary-registrations \\\n"
+        '              --if-runnable-target "${TARGET}" --source-root release-tree "${unpacked}/${bin}/${bin}"\n'
+        "          done\n"
+        '          echo "ran the four ${TARGET} binaries and found their registrations"\n',
+    )
+elif name == "registrations-native-unbounded":
+    # The arm64 job has no time bound of its own.
+    replace_once(
+        "    runs-on: ${{ matrix.runs-on }}\n    timeout-minutes: 15\n",
+        "    runs-on: ${{ matrix.runs-on }}\n",
     )
 elif name == "prebuild-any-backend":
     # The request no longer checks the backend, so a GitHub-hosted prebuild
@@ -1460,7 +1505,7 @@ run_doctor() {
 }
 
 run_doctor "$WORKFLOW" "${TEST_ROOT}/doctor-committed.log"
-for line in "$SEMVER_PASS" "$SLO_PASS" "$DISPATCH_PASS" "$TAG_VALIDATION_PASS" "$PREBUILD_PASS" "$NON_INPUTS_PASS" "$MACOS_X86_PASS" "$CLOSURES_PASS" "$BASELINE_PASS" "$TRAILING_PASS" "$WINDOWS_PASS" "$TOKEN_PASS" "$WEB_TOOLS_PASS" "$CACHES_PASS"; do
+for line in "$SEMVER_PASS" "$SLO_PASS" "$DISPATCH_PASS" "$TAG_VALIDATION_PASS" "$PREBUILD_PASS" "$NON_INPUTS_PASS" "$MACOS_X86_PASS" "$REGISTRATIONS_PASS" "$CLOSURES_PASS" "$BASELINE_PASS" "$TRAILING_PASS" "$WINDOWS_PASS" "$TOKEN_PASS" "$WEB_TOOLS_PASS" "$CACHES_PASS"; do
   if ! grep -Fxq "$line" "${TEST_ROOT}/doctor-committed.log"; then
     fail "doctor does not report \`${line}\` for the committed workflow" \
       "$(cat "${TEST_ROOT}/doctor-committed.log")"
@@ -1521,6 +1566,30 @@ expect_fail_named macos-x86-gates-critical "${TEST_ROOT}/doctor-macos-x86-gates-
   "job \`build_binaries_critical_gate\` waits for \`build_binaries_buildbuddy_macos_x86\`" buildbuddy-macos-x86
 expect_fail_named macos-x86-unverified "${TEST_ROOT}/doctor-macos-x86-unverified.yml" \
   "0 macOS runner jobs run \`scripts/check-macos-x86-release-binary\`" buildbuddy-macos-x86
+
+# Every release binary is asked for its link-time registrations before it is
+# published: by the critical publisher on the archives it publishes, and, for
+# the arm64 targets the BuildBuddy lane cannot run where it packages them, by
+# one bounded job on runners of their own that the critical gate requires.
+for fixture in registrations-publisher-unchecked registrations-native-unrequired \
+  registrations-native-result-ignored registrations-native-read-only registrations-native-unbounded; do
+  mutate "${fixture}" "${TEST_ROOT}/doctor-${fixture}.yml"
+  run_doctor "${TEST_ROOT}/doctor-${fixture}.yml" "${TEST_ROOT}/doctor-${fixture}.log"
+  if ! grep -Fq "$REGISTRATIONS_FAIL" "${TEST_ROOT}/doctor-${fixture}.log"; then
+    fail "doctor does not report \`${REGISTRATIONS_FAIL}\` for the \`${fixture}\` workflow" \
+      "$(cat "${TEST_ROOT}/doctor-${fixture}.log")"
+  fi
+done
+expect_fail_named registrations-publisher-unchecked "${TEST_ROOT}/doctor-registrations-publisher-unchecked.yml" \
+  "job \`publish_critical_release_assets\` does not run \`scripts/check-release-binary-registrations\` on its binaries" binary-registrations
+expect_fail_named registrations-native-unrequired "${TEST_ROOT}/doctor-registrations-native-unrequired.yml" \
+  "job \`build_binaries_critical_gate\` does not wait for \`verify_critical_native_binaries\`" binary-registrations
+expect_fail_named registrations-native-result-ignored "${TEST_ROOT}/doctor-registrations-native-result-ignored.yml" \
+  "job \`build_binaries_critical_gate\` does not require \`needs.verify_critical_native_binaries.result\` to be \`success\`" binary-registrations
+expect_fail_named registrations-native-read-only "${TEST_ROOT}/doctor-registrations-native-read-only.yml" \
+  "0 jobs run \`scripts/check-release-binary-registrations\` on job \`build_binaries_buildbuddy\`'s" binary-registrations
+expect_fail_named registrations-native-unbounded "${TEST_ROOT}/doctor-registrations-native-unbounded.yml" \
+  "job \`verify_critical_native_binaries\` has no \`timeout-minutes\` bound" binary-registrations
 # The lane targets a macOS version the inspection accepts.
 mutate_tree macos-x86-minimum-unset "${TEST_ROOT}/macos-x86-minimum-unset"
 expect_tree_fail_named macos-x86-minimum-unset "${TEST_ROOT}/macos-x86-minimum-unset" \

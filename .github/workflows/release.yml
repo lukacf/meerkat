@@ -1337,6 +1337,7 @@ jobs:
             .github/actions/setup-rust-ci/action.yml
             scripts/ci-pin-rust-toolchain-env
             scripts/check-release-binary-markers
+            scripts/check-release-binary-registrations
             scripts/check-release-binary-sqlite-profile
           sparse-checkout-cone-mode: false
 
@@ -1475,6 +1476,10 @@ jobs:
             if [[ "${bin}" == rkat ]]; then
               .release-tooling/scripts/check-release-binary-sqlite-profile "$src"
             fi
+            # The binary's link-time registrations run: it reports the
+            # capabilities and lists the built-in skills this tree
+            # registers. Each runner is native to its target.
+            python3 .release-tooling/scripts/check-release-binary-registrations "$src"
 
             tar -czf "dist/${artifact_name}" -C "$(dirname "$src")" "$(basename "$src")"
             echo "packaged=${bin} -> dist/${artifact_name}"
@@ -1680,6 +1685,30 @@ jobs:
     runs-on: windows-2025-vs2026
     timeout-minutes: 20
     steps:
+      # The registration check and what it compares a binary's answer with:
+      # the script from the workflow's commit, the crates' sources of the
+      # release tree.
+      - name: Checkout release tooling
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          path: .release-tooling
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/check-release-binary-registrations
+          sparse-checkout-cone-mode: false
+
+      - name: Checkout the release tree's registrations
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.prebuild_release_artifacts == 'true' && github.sha || github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '' && github.event.inputs.release_tag || github.ref }}
+          path: release-tree
+          persist-credentials: false
+          sparse-checkout: |
+            crates/*/Cargo.toml
+            crates/*/src/
+          sparse-checkout-cone-mode: false
+
       - name: Download Windows artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -1732,6 +1761,17 @@ jobs:
               throw "rkat.exe runs SQLite with a process-wide lock (the build did not set LIBSQLITE3_FLAGS): $($lockProfile | ConvertTo-Json -Compress)"
             }
             Write-Host "rkat.exe: SQLite runs without process-wide locks (allocator statistics already off)"
+          }
+
+      # Each binary's link-time registrations run: it reports the capabilities
+      # and lists the built-in skills the release tree registers.
+      - name: Require the registrations of each binary
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($bin in @('rkat', 'rkat-rpc', 'rkat-rest', 'rkat-mcp')) {
+            & python .release-tooling/scripts/check-release-binary-registrations --source-root release-tree (Join-Path extracted "$bin.exe")
+            if ($LASTEXITCODE -ne 0) { throw "$bin.exe: the registration check exited $LASTEXITCODE" }
           }
 
   # Intel macOS is a trailing platform: its archives may reach the release
@@ -1800,6 +1840,7 @@ jobs:
             scripts/ci-pin-rust-toolchain-env
             scripts/check-release-binary-markers
             scripts/check-macos-x86-release-binary
+            scripts/check-release-binary-registrations
             scripts/check-release-binary-sqlite-profile
           sparse-checkout-cone-mode: false
 
@@ -1852,6 +1893,10 @@ jobs:
           if [[ "${bin}" == rkat ]]; then
             .release-tooling/scripts/check-release-binary-sqlite-profile "$src"
           fi
+          # The binary's link-time registrations run (under Rosetta): it
+          # reports the capabilities and lists the built-in skills this tree
+          # registers.
+          python3 .release-tooling/scripts/check-release-binary-registrations "$src"
           tar -czf "dist/${artifact_name}" -C "$(dirname "$src")" "$(basename "$src")"
           echo "packaged=${bin} -> dist/${artifact_name}"
 
@@ -1976,6 +2021,7 @@ jobs:
           sparse-checkout: |
             .github/actions/setup-buildbuddy-ci/action.yml
             scripts/check-release-binary-markers
+            scripts/check-release-binary-registrations
             scripts/check-release-binary-sqlite-profile
             scripts/ci-pin-rust-toolchain-env
             scripts/install-buildbuddy-cli
@@ -2097,6 +2143,15 @@ jobs:
               .release-tooling/scripts/check-release-binary-sqlite-profile \
                 --if-runnable-target "${TARGET}" "${stage_dir}/${payload_name}"
             fi
+            # The binary's link-time registrations run: it reports the
+            # capabilities and lists the built-in skills this tree
+            # registers. One runner packages every target: the target it
+            # runs is asked; of another, an ELF file is read for a second
+            # init-array table (the link defect of the Linux x86_64 lane
+            # through 0.9.14), and verify_critical_native_binaries runs it
+            # on a runner of its own.
+            python3 .release-tooling/scripts/check-release-binary-registrations \
+              --if-runnable-target "${TARGET}" "${stage_dir}/${payload_name}"
             archive_path="${PWD}/dist/${artifact_name}"
 
             if [[ "$ARCHIVE_EXT" == "zip" ]]; then
@@ -2425,7 +2480,21 @@ jobs:
           sparse-checkout: |
             scripts/check-macos-x86-release-binary
             scripts/check-release-binary-markers
+            scripts/check-release-binary-registrations
             scripts/check-release-binary-sqlite-profile
+          sparse-checkout-cone-mode: false
+
+      # The registration check compares a binary's answer with what the
+      # release tree registers: the crates' sources, nothing else.
+      - name: Checkout the release tree's registrations
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.prebuild_release_artifacts == 'true' && github.sha || github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '' && github.event.inputs.release_tag || github.ref }}
+          path: release-tree
+          persist-credentials: false
+          sparse-checkout: |
+            crates/*/Cargo.toml
+            crates/*/src/
           sparse-checkout-cone-mode: false
 
       - name: Download the Intel macOS archives
@@ -2454,8 +2523,80 @@ jobs:
             if [[ "${bin}" == rkat ]]; then
               .release-tooling/scripts/check-release-binary-sqlite-profile "${binary}"
             fi
+            python3 .release-tooling/scripts/check-release-binary-registrations \
+              --source-root release-tree "${binary}"
           done
           echo "ran and inspected the four Intel macOS binaries under Rosetta"
+
+  # The BuildBuddy lane packages its Linux aarch64 and macOS arm64 binaries
+  # on an x86_64 Linux runner, which cannot run them: there the registration
+  # check only reads an ELF file for a second init-array table. Here each of
+  # those binaries is run on a runner of its own target and asked for its
+  # capabilities and skills (scripts/check-release-binary-registrations), so
+  # no critical target is published without having run. The critical gate
+  # requires this job; nothing here changes an archive. The GitHub-hosted
+  # lane builds each target on its own runner and runs the check there.
+  verify_critical_native_binaries:
+    name: Run the BuildBuddy binaries on a runner of their target (${{ matrix.target }})
+    needs: [require_ci_green, build_binaries_buildbuddy]
+    if: always() && needs.build_binaries_buildbuddy.result == 'success'
+    runs-on: ${{ matrix.runs-on }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-unknown-linux-gnu
+            runs-on: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            runs-on: macos-15
+    steps:
+      - name: Checkout release tooling
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          path: .release-tooling
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/check-release-binary-registrations
+          sparse-checkout-cone-mode: false
+
+      - name: Checkout the release tree's registrations
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.prebuild_release_artifacts == 'true' && github.sha || github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '' && github.event.inputs.release_tag || github.ref }}
+          path: release-tree
+          persist-credentials: false
+          sparse-checkout: |
+            crates/*/Cargo.toml
+            crates/*/src/
+          sparse-checkout-cone-mode: false
+
+      - name: Download the archives of this target
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: meerkat-${{ matrix.target }}-buildbuddy
+          path: archives
+
+      - name: Require the registrations of each binary
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.prebuild_release_artifacts == 'true' && needs.require_ci_green.outputs.prebuild_tag || github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${VERSION#v}"
+          VERSION="${VERSION//\//-}"
+          unpacked="$(mktemp -d)"
+          for bin in rkat rkat-rpc rkat-rest rkat-mcp; do
+            archive="archives/${bin}-${VERSION}-${TARGET}.tar.gz"
+            [[ -f "${archive}" ]] || { echo "missing ${archive}" >&2; exit 1; }
+            mkdir -p "${unpacked}/${bin}"
+            tar -xzf "${archive}" -C "${unpacked}/${bin}"
+            python3 .release-tooling/scripts/check-release-binary-registrations \
+              --source-root release-tree "${unpacked}/${bin}/${bin}"
+          done
+          echo "ran the four ${TARGET} binaries and found their registrations"
 
   # Linux (x86_64, aarch64) and macOS arm64 archives publish as soon as the
   # critical gate passes, on either lane: they are what the CLI install, the
@@ -2592,6 +2733,37 @@ jobs:
           done
           [[ "${checked}" -eq 12 ]] || { echo "expected 12 critical archives, checked ${checked}" >&2; exit 1; }
           echo "Every binary in ${checked} critical archives embeds ${version} and passes the test-code marker guard"
+
+      # Each critical binary's link-time registrations run, whichever run
+      # built the archive (a prebuild's included, which no job of this run
+      # built). This runner runs the four Linux x86_64 binaries: each must
+      # report the capabilities and list the built-in skills the tag's tree
+      # registers. Of the Linux aarch64 ones the file is read for a second
+      # init-array table; those and the macOS arm64 ones were run by
+      # verify_critical_native_binaries (BuildBuddy lane) or by their build
+      # job (GitHub-hosted lane) in the run that built them.
+      - name: Require the registrations of every critical binary
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          version="${version//\//-}"
+          ran=0
+          for archive in critical-release-artifacts/*.tar.gz; do
+            name="$(basename "${archive}" .tar.gz)"
+            bin="${name%-"${version}"-*}"
+            target="${name#*-"${version}"-}"
+            unpacked="$(mktemp -d)"
+            tar -xzf "${archive}" -C "${unpacked}"
+            python3 scripts/check-release-binary-registrations \
+              --if-runnable-target "${target}" "${unpacked}/${bin}"
+            if [[ "${target}" == x86_64-unknown-linux-gnu ]]; then
+              ran=$((ran + 1))
+            fi
+          done
+          [[ "${ran}" -eq 4 ]] || { echo "expected to run 4 Linux x86_64 binaries, ran ${ran}" >&2; exit 1; }
+          echo "The four Linux x86_64 binaries register their capabilities and built-in skills"
 
       # The archives just verified were compiled from the tag's tree, or from
       # an earlier commit's whose changes since touch none of their inputs
@@ -2957,7 +3129,7 @@ jobs:
        (github.event_name == 'workflow_dispatch' &&
         (github.event.inputs.publish_release_assets_only == 'true' ||
          github.event.inputs.prebuild_release_artifacts == 'true')))
-    needs: [build_binaries, build_binaries_buildbuddy, release_prebuild]
+    needs: [build_binaries, build_binaries_buildbuddy, verify_critical_native_binaries, release_prebuild]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -2970,6 +3142,7 @@ jobs:
           set -euo pipefail
           github_result="${{ needs.build_binaries.result }}"
           buildbuddy_result="${{ needs.build_binaries_buildbuddy.result }}"
+          native_result="${{ needs.verify_critical_native_binaries.result }}"
           source_run="${PREBUILD_RUN_ID:-${ASSETS_RUN_ID}}"
           if [[ -n "${source_run}" ]]; then
             [[ "${github_result}" == "skipped" && "${buildbuddy_result}" == "skipped" ]] || {
@@ -2981,8 +3154,11 @@ jobs:
           fi
           bb_selected="${{ github.actor == 'lukacf' && ((github.event_name == 'workflow_dispatch' && github.event.inputs.release_backend == 'buildbuddy') || (github.event_name != 'workflow_dispatch' && (vars.MEERKAT_RELEASE_BUILDBUDDY == 'true' || vars.MEERKAT_RELEASE_BUILDBUDDY == '1'))) }}"
           if [[ "${bb_selected}" == "true" ]]; then
-            echo "BuildBuddy critical-platform build selected: ${buildbuddy_result}; GitHub-hosted fallback: ${github_result}"
-            [[ "${buildbuddy_result}" == "success" && "${github_result}" == "skipped" ]]
+            # The BuildBuddy lane packages Linux aarch64 and macOS arm64 on a
+            # runner that cannot run them: the lane counts only once
+            # verify_critical_native_binaries ran them on their own targets.
+            echo "BuildBuddy critical-platform build selected: ${buildbuddy_result}; run on native runners: ${native_result}; GitHub-hosted fallback: ${github_result}"
+            [[ "${buildbuddy_result}" == "success" && "${native_result}" == "success" && "${github_result}" == "skipped" ]]
             exit $?
           fi
           echo "GitHub-hosted critical-platform build selected: ${github_result}; BuildBuddy: ${buildbuddy_result}"

@@ -1117,10 +1117,10 @@ class IdentityStatus:
     customizer_tools_pending: dict[str, Any] | None = None
     #: ``True`` when Core drives the identity itself, so Meta's lifecycle
     #: verbs refuse it: a host intent declaration in Core manages it (the
-    #: verbs raise :class:`~meerkat_meta.errors.IdentityHostAdoptedError`), or
-    #: it is store-owned, created at runtime or adopted into store custody
-    #: (they raise a plain :class:`~meerkat_meta.errors.RpcError`, ``-32603``
-    #: with ``data["kind"] == "identity_store_owned"``).
+    #: verbs raise :class:`~meerkat_meta.errors.IdentityHostAdoptedError`).
+    #: ``False`` for every other identity: one created at run time, or
+    #: adopted into the mob's identity store, is served by the verbs as a
+    #: configured one is (it read ``True`` through 0.9.13).
     intent_managed: bool = False
     #: Core's convergence status, when :attr:`intent_managed` is set and Core
     #: could read it.
@@ -1143,6 +1143,20 @@ class IdentityStatus:
     #: :attr:`session_id`; ``None`` when Core holds no binding for the
     #: identity.
     member_id: str | None = None
+    #: ``True`` when the host's roster lists this name while the agent is
+    #: served from its record (an adopted agent whose roster still lists
+    #: it, for one): the roster's entry for the name is not applied, and
+    #: a change of the agent is a change of its record. Written by the
+    #: gateway only when it is so.
+    roster_listing_superseded: bool = False
+    #: ``True`` when the agent is archived: it has no member, and
+    #: deliveries to it are refused until its unarchive. Written by the
+    #: gateway only when it is so.
+    archived: bool = False
+    #: ``True`` when the agent waits for its host's preparation: it has no
+    #: member yet, and ``runtime.identities.settle_preparation`` seats it.
+    #: Written by the gateway only when it is so.
+    preparation_pending: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -1178,6 +1192,12 @@ class IdentityStatus:
             result["delivery_scope"] = self.delivery_scope.to_dict()
         if self.delivery_scope_unavailable is not None:
             result["delivery_scope_unavailable"] = dict(self.delivery_scope_unavailable)
+        if self.roster_listing_superseded:
+            result["roster_listing_superseded"] = True
+        if self.archived:
+            result["archived"] = True
+        if self.preparation_pending:
+            result["preparation_pending"] = True
         return result
 
     @classmethod
@@ -1221,6 +1241,9 @@ class IdentityStatus:
             replaced_session=_view_part(data, "replaced_session", ReplacedSession),
             delivery_scope=delivery_scope,
             delivery_scope_unavailable=delivery_scope_unavailable,
+            roster_listing_superseded=data.get("roster_listing_superseded") is True,
+            archived=data.get("archived") is True,
+            preparation_pending=data.get("preparation_pending") is True,
         )
 
 

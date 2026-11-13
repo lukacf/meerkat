@@ -51,6 +51,43 @@ const SEED_PAGE: usize = 512;
 /// The longest wait between two tries of a durable read that failed.
 const SEED_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// The longest a reader waits for a first read that is still on its first
+/// attempt ([`PrivateOwners::first_attempts_settled`]).
+pub(crate) const FIRST_READ_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How far the first reads a record owes have come: the seed, and each
+/// read of the private retirements a memory store recorded.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct FirstReads {
+    /// Owed reads still on their first attempt.
+    in_flight: usize,
+    /// Owed reads whose first attempt failed, or outlasted a reader's wait:
+    /// they are tried again, and nobody waits for them.
+    overdue: usize,
+}
+
+/// The stage of the seed among the first reads a record owes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum SeedStage {
+    /// No seed was started: a record nothing reads owes none.
+    #[default]
+    NotOwed,
+    /// The seed is on its first attempt.
+    InFlight,
+    /// The seed failed, or outlasted a reader's wait, and has not landed.
+    Overdue,
+    Landed,
+}
+
+/// The first reads' progress, watched by the readers that wait for it.
+struct FirstReadsSignal(tokio::sync::watch::Sender<FirstReads>);
+
+impl Default for FirstReadsSignal {
+    fn default() -> Self {
+        Self(tokio::sync::watch::Sender::new(FirstReads::default()))
+    }
+}
+
 /// A member, keyed as its mob's roster names it: (mob id, roster member id).
 type MemberKey = (String, String);
 
@@ -100,6 +137,20 @@ impl MemberSpawnLog for meerkat_mob::MobHandle {
     }
 }
 
+/// Which private-owner record of this process a value names: one per
+/// runtime, the same through every clone of it, never the same for two
+/// records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct PrivateOwnerRecordId(u64);
+
+impl Default for PrivateOwnerRecordId {
+    /// The id of a new record: each call answers one no record holds.
+    fn default() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        Self(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
 /// The owner of each member of one runtime's mobs (see the module docs).
 /// Cheap to clone; clones share the record.
 #[derive(Clone, Default)]
@@ -120,6 +171,8 @@ enum MobOwner {
 
 #[derive(Default)]
 struct Inner {
+    /// Which record this is among the records of the process.
+    id: PrivateOwnerRecordId,
     /// What each member build recorded: the member's owner, or `None` for a
     /// member private to no one. The newest truth about a member.
     built: RwLock<BTreeMap<MemberKey, Option<String>>>,
@@ -135,6 +188,10 @@ struct Inner {
     mob_owners: RwLock<BTreeMap<String, MobOwner>>,
     /// Set once the seed landed: every event log and creation record read.
     seeded: tokio::sync::OnceCell<()>,
+    /// The seed's stage among the first reads this record owes.
+    seed_stage: std::sync::Mutex<SeedStage>,
+    /// How far the first reads this record owes have come.
+    first_reads: FirstReadsSignal,
     /// The agent mob tool state of the runtime, whose mobs the seed reads.
     child_mobs: RwLock<Option<Weak<meerkat_mob_mcp::MobMcpState>>>,
 }
@@ -364,7 +421,8 @@ impl PrivateOwners {
     /// lands the seed, and a read that fails is tried again by the next
     /// call ([`Self::landed`] tells which).
     pub(crate) async fn seeded(&self, log: &dyn MemberSpawnLog) -> &Self {
-        if let Err(error) = self
+        self.owe_seed();
+        let read = self
             .inner
             .seeded
             .get_or_try_init(|| async {
@@ -374,8 +432,9 @@ impl PrivateOwners {
                 }
                 Ok::<(), String>(())
             })
-            .await
-        {
+            .await;
+        self.seed_attempt_ended(read.is_ok());
+        if let Err(error) = read {
             tracing::warn!(
                 %error,
                 "who the members this process did not build are private to could not be read \
@@ -390,10 +449,107 @@ impl PrivateOwners {
         self.inner.seeded.initialized()
     }
 
+    /// Which record this is: what a console counts this record's owed
+    /// first read under, the same through every clone of its runtime.
+    pub(crate) fn record_id(&self) -> PrivateOwnerRecordId {
+        self.inner.id
+    }
+
+    /// Whether a first read this record owes has not succeeded yet: the
+    /// seed, once anything started it, or a read of the private retirements
+    /// a memory store recorded. Until every such read has succeeded this
+    /// record cannot tell an ended private member from any other name, so
+    /// a console keeps every caller who is not an admin apart meanwhile. A
+    /// record nothing ever read (a runtime taken over a bare mob handle)
+    /// owes no read and is never pending.
+    pub(crate) fn first_read_pending(&self) -> bool {
+        let reads = *self.inner.first_reads.0.borrow();
+        reads.in_flight + reads.overdue > 0
+    }
+
+    /// Wait while an owed first read is still on its first attempt, at
+    /// most `bound`. The waiters watch the reads' progress and start no
+    /// read themselves. A read that fails is waited for no longer, and one
+    /// that outlasts a waiter's bound is overdue from then on: later
+    /// readers do not wait for it, and [`Self::first_read_pending`] holds
+    /// until it succeeds.
+    pub(crate) async fn first_attempts_settled(&self, bound: std::time::Duration) {
+        let mut reads = self.inner.first_reads.0.subscribe();
+        if tokio::time::timeout(bound, reads.wait_for(|reads| reads.in_flight == 0))
+            .await
+            .is_err()
+        {
+            let mut stage = self
+                .inner
+                .seed_stage
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if *stage == SeedStage::InFlight {
+                *stage = SeedStage::Overdue;
+            }
+            self.inner.first_reads.0.send_modify(|reads| {
+                reads.overdue += reads.in_flight;
+                reads.in_flight = 0;
+            });
+        }
+    }
+
+    /// Note that this record owes its seed, if nothing noted it before.
+    fn owe_seed(&self) {
+        let mut stage = self
+            .inner
+            .seed_stage
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if *stage == SeedStage::NotOwed {
+            *stage = SeedStage::InFlight;
+            self.inner
+                .first_reads
+                .0
+                .send_modify(|reads| reads.in_flight += 1);
+        }
+    }
+
+    /// Note how an attempt of the seed ended.
+    fn seed_attempt_ended(&self, landed: bool) {
+        let mut stage = self
+            .inner
+            .seed_stage
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        match (*stage, landed) {
+            (SeedStage::InFlight, true) => {
+                *stage = SeedStage::Landed;
+                self.inner
+                    .first_reads
+                    .0
+                    .send_modify(|reads| reads.in_flight = reads.in_flight.saturating_sub(1));
+            }
+            (SeedStage::Overdue, true) => {
+                *stage = SeedStage::Landed;
+                self.inner
+                    .first_reads
+                    .0
+                    .send_modify(|reads| reads.overdue = reads.overdue.saturating_sub(1));
+            }
+            (SeedStage::InFlight, false) => {
+                *stage = SeedStage::Overdue;
+                self.inner.first_reads.0.send_modify(|reads| {
+                    reads.in_flight = reads.in_flight.saturating_sub(1);
+                    reads.overdue += 1;
+                });
+            }
+            _ => {}
+        }
+    }
+
     /// Seed in the background until the seed lands, waiting longer after
     /// each failure, up to [`SEED_RETRY_MAX`]. The task holds an observer of
     /// the mob, which keeps no mob open, and ends with the seed.
     pub(crate) fn seed_in_background(&self, handle: &meerkat_mob::MobHandle) {
+        // Owed from this moment, before the task first runs: a reader that
+        // comes first finds the read in flight.
+        self.owe_seed();
         let owners = self.clone();
         let handle = handle.observer();
         tokio::spawn(async move {
@@ -413,8 +569,14 @@ impl PrivateOwners {
         realm: String,
     ) {
         let owners = self.clone();
+        // One more first read is owed from this moment.
+        self.inner
+            .first_reads
+            .0
+            .send_modify(|reads| reads.in_flight += 1);
         tokio::spawn(async move {
             let mut wait = std::time::Duration::from_millis(250);
+            let mut failed = false;
             loop {
                 match store.private_retired_identities(&realm).await {
                     Ok(identities) => {
@@ -424,9 +586,27 @@ impl PrivateOwners {
                             .write()
                             .unwrap_or_else(PoisonError::into_inner)
                             .extend(identities);
+                        owners.inner.first_reads.0.send_modify(|reads| {
+                            // On its first attempt unless it failed or a
+                            // reader's wait made every read in flight overdue.
+                            if !failed && reads.in_flight > 0 {
+                                reads.in_flight -= 1;
+                            } else {
+                                reads.overdue = reads.overdue.saturating_sub(1);
+                            }
+                        });
                         return;
                     }
                     Err(error) => {
+                        if !failed {
+                            failed = true;
+                            owners.inner.first_reads.0.send_modify(|reads| {
+                                if reads.in_flight > 0 {
+                                    reads.in_flight -= 1;
+                                    reads.overdue += 1;
+                                }
+                            });
+                        }
                         tracing::warn!(
                             %error,
                             retry_in_ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX),
@@ -770,21 +950,37 @@ impl crate::memory::steward::PrivateMemberSource for StewardPrivateMembers {
     }
 }
 
-/// [`PrivateOwners::member_tool_audience`].
+/// [`PrivateOwners::member_tool_audience`]. Whom a member is private to is
+/// said by its own roster row, the labels Meerkat hands in. This record of
+/// the members the process built or read adds to that on the side that can
+/// only hide more: for the target it is asked whenever the row names
+/// nobody or there is no row, so a member the record knows as private
+/// stays hidden; for the caller it is asked only when the caller has no
+/// row, so a caller whose row names nobody is never taken for a person's
+/// member on the record's word.
 impl meerkat_mob::MemberToolAudience for PrivateOwners {
     fn hides(
         &self,
         mob_id: &meerkat_mob::MobId,
         caller: Option<&meerkat_mob::AgentIdentity>,
+        caller_labels: Option<&BTreeMap<String, String>>,
         target: &meerkat_mob::AgentIdentity,
+        target_labels: Option<&BTreeMap<String, String>>,
     ) -> bool {
-        let Some(owner) = self.owner_of(mob_id.as_str(), target.as_str()) else {
+        let named = |labels: &BTreeMap<String, String>| {
+            crate::access::private_owner(labels).map(str::to_string)
+        };
+        let Some(owner) = target_labels
+            .and_then(named)
+            .or_else(|| self.owner_of(mob_id.as_str(), target.as_str()))
+        else {
             return false;
         };
-        caller
-            .and_then(|caller| self.owner_of(mob_id.as_str(), caller.as_str()))
-            .as_deref()
-            != Some(owner.as_str())
+        let callers = caller.and_then(|caller| match caller_labels {
+            Some(labels) => named(labels),
+            None => self.owner_of(mob_id.as_str(), caller.as_str()),
+        });
+        callers != Some(owner)
     }
 }
 
@@ -900,6 +1096,82 @@ mod tests {
             }),
             CreatingMember::Undecidable,
             "a record of several rosters does not say which member created the mob"
+        );
+    }
+
+    /// The audience of the members' own operator tools reads whom a member
+    /// is private to from the roster labels it is handed, with a record
+    /// that knows no member: a member whose row names a person is hidden
+    /// from a caller whose row names nobody, from one whose row names
+    /// another person and from a call no member made, and not from a caller
+    /// whose row names the same person; a member whose row names nobody is
+    /// hidden from no one. The record only adds: a member it knows as
+    /// private stays hidden when its row names nobody, or it has no row.
+    #[test]
+    fn the_member_tool_audience_reads_the_owner_from_the_roster_labels() {
+        use meerkat_mob::MemberToolAudience as _;
+        let mob = meerkat_mob::MobId::from("mob");
+        let member = |name: &str| meerkat_mob::AgentIdentity::from(name);
+        let private = private_labels();
+        let shared = BTreeMap::new();
+        let other = BTreeMap::from([(
+            crate::access::PRIVATE_TO_LABEL.to_string(),
+            "console-caller:v1:bb".to_string(),
+        )]);
+
+        let unread = PrivateOwners::default();
+        let hides = |caller: Option<&BTreeMap<String, String>>,
+                     target: Option<&BTreeMap<String, String>>| {
+            unread.hides(
+                &mob,
+                caller.map(|_| member("caller")).as_ref(),
+                caller,
+                &member("target"),
+                target,
+            )
+        };
+        assert!(hides(Some(&shared), Some(&private)), "a shared caller");
+        assert!(hides(Some(&other), Some(&private)), "another person's");
+        assert!(hides(None, Some(&private)), "a call no member made");
+        assert!(!hides(Some(&private), Some(&private)), "the same person's");
+        assert!(!hides(Some(&shared), Some(&shared)), "a shared target");
+        assert!(!hides(Some(&private), Some(&shared)), "a shared target");
+        assert!(!hides(Some(&shared), None), "a target with no row");
+
+        let knows = PrivateOwners::default();
+        knows.record("mob", "target", Some(&private));
+        knows.record("mob", "caller", Some(&private));
+        for target in [Some(&shared), None] {
+            assert!(
+                knows.hides(
+                    &mob,
+                    Some(&member("other")),
+                    Some(&shared),
+                    &member("target"),
+                    target
+                ),
+                "the record adds: a member it knows as private stays hidden"
+            );
+        }
+        assert!(
+            !knows.hides(
+                &mob,
+                Some(&member("caller")),
+                None,
+                &member("target"),
+                Some(&shared)
+            ),
+            "the record speaks for a caller that has no row"
+        );
+        assert!(
+            knows.hides(
+                &mob,
+                Some(&member("caller")),
+                Some(&shared),
+                &member("target"),
+                Some(&private)
+            ),
+            "a caller whose row names nobody is no person's member on the record's word"
         );
     }
 
@@ -1036,6 +1308,125 @@ mod tests {
             Some(OWNER),
             "a later seed reads the log again"
         );
+    }
+
+    /// A record owes its first read from the moment anything starts its seed
+    /// until a read succeeds; one nothing reads owes none. Nobody waits for
+    /// a read that has failed.
+    #[tokio::test]
+    async fn a_record_owes_its_first_read_until_a_read_succeeds() {
+        let owners = PrivateOwners::default();
+        assert!(
+            !owners.first_read_pending(),
+            "a record nothing reads owes no read"
+        );
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            owners.first_attempts_settled(std::time::Duration::from_hours(1)),
+        )
+        .await
+        .expect("nothing to wait for");
+
+        let log = FlakyLog::default();
+        owners.seeded(&log).await;
+        assert!(
+            !owners.landed() && owners.first_read_pending(),
+            "a first read that failed is still owed"
+        );
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            owners.first_attempts_settled(std::time::Duration::from_hours(1)),
+        )
+        .await
+        .expect("nobody waits for a read that failed");
+        owners.seeded(&log).await;
+        assert!(owners.landed() && !owners.first_read_pending());
+    }
+
+    /// A log whose read waits until its gate opens, then holds nothing.
+    struct HeldLog(tokio::sync::watch::Receiver<bool>);
+
+    #[async_trait::async_trait]
+    impl MemberSpawnLog for HeldLog {
+        async fn spawns_after(
+            &self,
+            _cursor: u64,
+            _limit: usize,
+        ) -> Result<Option<MemberSpawnPage>, String> {
+            let mut gate = self.0.clone();
+            let _ = gate.wait_for(|open| *open).await;
+            Ok(None)
+        }
+    }
+
+    /// The seed of `owners` started as a background read behind a gate;
+    /// returns once the read is owed.
+    async fn read_in_flight(
+        owners: &PrivateOwners,
+    ) -> (
+        tokio::sync::watch::Sender<bool>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (open, gate) = tokio::sync::watch::channel(false);
+        let reading = owners.clone();
+        let task = tokio::spawn(async move {
+            let log = HeldLog(gate);
+            reading.seeded(&log).await;
+        });
+        while !owners.first_read_pending() {
+            tokio::task::yield_now().await;
+        }
+        (open, task)
+    }
+
+    /// Readers wait for a first read that is on its first attempt and go on
+    /// when it lands. A reader's wait ends at its bound; the read is overdue
+    /// from then on, so no later reader waits for it, and it stays owed
+    /// until it succeeds.
+    #[tokio::test]
+    async fn readers_wait_a_bounded_time_for_a_first_read_in_flight() {
+        // The read lands while readers wait: each goes on, nothing is owed.
+        let owners = PrivateOwners::default();
+        let (open, task) = read_in_flight(&owners).await;
+        let waiters: Vec<_> = (0..4)
+            .map(|_| {
+                let owners = owners.clone();
+                tokio::spawn(async move {
+                    owners
+                        .first_attempts_settled(std::time::Duration::from_hours(1))
+                        .await;
+                    owners.first_read_pending()
+                })
+            })
+            .collect();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(waiters.iter().all(|waiter| !waiter.is_finished()));
+        open.send(true).expect("the read is waiting");
+        task.await.expect("the read ends");
+        for waiter in waiters {
+            assert!(
+                !waiter.await.expect("the reader goes on"),
+                "a reader that waited finds the read landed"
+            );
+        }
+
+        // The read does not return: a reader's wait ends at its bound.
+        let owners = PrivateOwners::default();
+        let (open, task) = read_in_flight(&owners).await;
+        let bound = std::time::Duration::from_millis(200);
+        let asked = std::time::Instant::now();
+        owners.first_attempts_settled(bound).await;
+        assert!(asked.elapsed() >= bound, "the reader waited its bound");
+        assert!(owners.first_read_pending(), "the read is still owed");
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            owners.first_attempts_settled(std::time::Duration::from_hours(1)),
+        )
+        .await
+        .expect("nobody waits for an overdue read");
+        open.send(true).expect("the read is waiting");
+        task.await.expect("the read ends");
+        assert!(owners.landed() && !owners.first_read_pending());
     }
 
     /// A prompt-context fork of a private member takes the fork source's

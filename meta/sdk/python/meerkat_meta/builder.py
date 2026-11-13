@@ -1,6 +1,7 @@
 """Meta builder chain for composing and booting a Meta runtime."""
 from __future__ import annotations
 
+import copy
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -34,6 +35,8 @@ class MetaBuilderConfig:
     gating_config_path: str | None = None
     access_config_path: str | None = None
     meerkat_config_path: str | None = None
+    # ``runtime_options.member_comms_address``; ``None`` sends nothing.
+    member_comms_address: str | None = None
     provider_credentials_root: str | None = None
     # ``runtime_options.native_realm``; ``None`` sends nothing.
     native_realm: NativeRealm | None = None
@@ -45,6 +48,8 @@ class MetaBuilderConfig:
     fork_instruction_policy: str | None = None
     # ``runtime_options.decisions`` ingresses; ``None`` sends nothing.
     decision_ingresses: list[dict[str, Any]] | None = None
+    # ``runtime_options.identity_creation``, sent as given; ``None`` sends nothing.
+    identity_creation: dict[str, Any] | None = None
     routing_config_path: str | None = None
     host_runnables: list[str] = field(default_factory=list)
     installed_artifacts: list[ToolArtifactRef] | None = None
@@ -299,6 +304,30 @@ class MetaBuilder:
         self._config.meerkat_config_path = text
         return self
 
+    def member_comms_tcp(self, address: str = "127.0.0.1:0") -> MetaBuilder:
+        """Give locally hosted mob members signed TCP comms endpoints.
+
+        A member of another gateway runs in another process and cannot reach
+        the default in-process endpoints. With this, each local member binds
+        a TCP port on ``address`` (port ``0``: one the system picks), and
+        ``MobHandle.peer_info`` reports it as ``dialable_address``, which is
+        what ``MobHandle.wire_cross_mob`` wires two gateways by. Pass a
+        concrete externally reachable interface address for peers on another
+        host. Emitted as ``runtime_options.member_comms_address``.
+
+        The default address (port ``0``) is for a mob that does not outlive
+        its process: on persistent state a restarted member binds another
+        port, is restored broken, and its wires to members of other
+        gateways are dead (``MobHandle.wire_cross_mob`` says how to wire
+        them again). Give a mob with persistent state a fixed address, a
+        port of your choice. With member socket endpoints, run one member
+        per gateway today.
+        """
+        if not address.strip():
+            raise ValueError("member_comms_tcp address must not be empty")
+        self._config.member_comms_address = address
+        return self
+
     def provider_credentials_root(self, path: str | Path) -> MetaBuilder:
         """Keep every agent's provider credentials under ``path``.
 
@@ -491,6 +520,36 @@ class MetaBuilder:
         an ingress not declared here.
         """
         self._config.decision_ingresses = [dict(entry) for entry in ingresses]
+        return self
+
+    def identity_creation(self, policy: Mapping[str, Any]) -> MetaBuilder:
+        """Launch with the host's policy for changes of long-term agents.
+
+        Emitted as ``runtime_options.identity_creation``, sent unchanged: the
+        gateway owns the policy's shape and refuses the init for one it
+        cannot read. Without a policy, and with one whose ``enabled`` is
+        false, every change of ``runtime.identities`` is refused
+        ``change_denied``. A rule selects by the change, the requester and
+        the target, and gives an outcome; this SDK's calls are the host on
+        the ``rpc`` surface::
+
+            Meta.builder().identity_creation({
+                "enabled": True,
+                "approval": {"rules": [{
+                    "change": ["adopt"],
+                    "requester": {"kind": "host", "surface": "rpc"},
+                    "outcome": {"kind": "allow"},
+                }]},
+            })
+
+        The outcomes of this release are ``allow``, ``require_approval``
+        (with an ``approver``) and ``deny``; a policy that names ``notify``
+        or ``review`` is refused at init. The policy needs a persistent
+        launch (``persistent_state``). Omitted entirely when never called.
+        """
+        if not isinstance(policy, Mapping):
+            raise TypeError("identity_creation takes the policy as a mapping")
+        self._config.identity_creation = copy.deepcopy(dict(policy))
         return self
 
     def routing(self, config_path: str) -> MetaBuilder:

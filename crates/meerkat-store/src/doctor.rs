@@ -195,6 +195,21 @@ pub const FINDING_OPERATOR_INSTRUCTION_ENVELOPE: &str = "operator-instruction-en
 /// listed mob or moves its database out of the mob root. Informational.
 /// The census reads the per-mob databases on disk (`mobs/<name>.db`).
 pub const FINDING_OPERATOR_INSTRUCTION_MOB_EVENTS: &str = "operator-instruction-mob-events";
+/// Mob journals whose operator instruction records are past what a release
+/// before 0.9.15 serves: more than 64 records, or more than 1 MiB of Active
+/// bodies, in the mob as a whole. Since 0.9.15 a mob's limits bound one
+/// member's snapshot (the shared records plus the member's own), so a mob
+/// holds a member-targeted record for each of any number of members. A
+/// release before 0.9.15 bounds the mob as a whole and puts every record in
+/// every member's snapshot. Its release build replays such a journal
+/// without a refusal and then cannot serve the mob: every step that
+/// validates the mob's recovered state is refused (every spawn, every flow
+/// run), and past 64 records every member's delivery is refused by its
+/// session and a member that needs a new session fails to build. Before a
+/// downgrade an operator keeps each listed mob on 0.9.15 or later, resets
+/// it, or destroys it. Informational, with the two totals. The census reads
+/// the per-mob databases on disk (`mobs/<name>.db`).
+pub const FINDING_OPERATOR_INSTRUCTION_MOB_TOTALS: &str = "operator-instruction-mob-totals";
 /// A mob store's identity-store rows of schema version 2 and later: the rows
 /// of store-owned identities (present, pending their host's preparation or
 /// archived), the tombstones of removed names of either custody, and rows
@@ -894,6 +909,7 @@ fn diagnose_realm_dir(
                 .databases
                 .push(inspect_database(&db_path, &["mob"], realm, diagnosis));
             census_operator_instruction_mob_events(&db_path, realm, diagnosis);
+            census_operator_instruction_mob_totals(&db_path, realm, diagnosis);
         }
     }
 
@@ -1983,6 +1999,158 @@ fn census_operator_instruction_mob_events(
                  until a roll-forward, and Core 0.9.7 and 0.9.8 stop restoring every mob of this \
                  realm at this journal: destroy the mob or move this database out of the mob root \
                  before a downgrade"
+            ),
+        )
+        .with_path(db_path.to_path_buf())
+        .with_realm(realm),
+    );
+}
+
+/// The most operator instruction records of one mob a release before 0.9.15
+/// serves: such a release bounds the mob as a whole at this many, and puts
+/// every record of the mob in every member's snapshot, which a member
+/// session bounds at this many too.
+const OPERATOR_INSTRUCTION_RECORDS_BEFORE_0_9_15: u64 = 64;
+
+/// The most bytes of Active operator instruction bodies of one mob a
+/// release before 0.9.15 serves: such a release bounds the mob as a whole
+/// at this many.
+const OPERATOR_INSTRUCTION_ACTIVE_BYTES_BEFORE_0_9_15: u64 = 1024 * 1024;
+
+/// Stored mob event lens: its kind's type tag and, for an operator
+/// instruction record, its slot, its effect and the bytes of its body.
+#[derive(Deserialize)]
+struct StoredMobEventKindLens {
+    event: MobEventKindEnvelopeLens,
+}
+
+#[derive(Deserialize)]
+struct MobEventKindEnvelopeLens {
+    kind: MobEventKindLens,
+}
+
+#[derive(Deserialize)]
+struct MobEventKindLens {
+    #[serde(rename = "type")]
+    kind_type: String,
+    #[serde(default)]
+    slot: Option<MobInstructionSlotLens>,
+    #[serde(default)]
+    effect: Option<String>,
+    #[serde(default)]
+    body_bytes: u64,
+}
+
+#[derive(Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+struct MobInstructionSlotLens {
+    namespace: String,
+    key: String,
+}
+
+/// The operator instruction records one mob database's journal holds, in
+/// the mob as a whole.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OperatorInstructionMobTotals {
+    /// The slots its committed records name since its last reset (a reset
+    /// clears the records; a revoked record keeps its slot).
+    pub records: u64,
+    /// The body bytes of the records that are Active at their last
+    /// committed revision.
+    pub active_bytes: u64,
+}
+
+/// The totals of one mob database's operator instruction records: the
+/// census behind [`FINDING_OPERATOR_INSTRUCTION_MOB_TOTALS`], over a
+/// connection the caller opened read-only. A database without a journal
+/// holds none, and an event that does not decode as a stored mob event is
+/// not counted. It only reads.
+pub fn operator_instruction_mob_totals(
+    conn: &Connection,
+) -> Result<OperatorInstructionMobTotals, rusqlite::Error> {
+    let mut active_bytes_by_slot = BTreeMap::new();
+    if table_exists(conn, "mob_events")? {
+        let mut statement = conn.prepare("SELECT event_json FROM mob_events ORDER BY cursor")?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let event: JsonColumnBytes = row.get(0)?;
+            let Ok(lens) = serde_json::from_slice::<StoredMobEventKindLens>(&event.into_bytes())
+            else {
+                continue;
+            };
+            let kind = lens.event.kind;
+            match (kind.kind_type.as_str(), kind.slot) {
+                ("mob_reset", _) => active_bytes_by_slot.clear(),
+                ("operator_instruction_committed", Some(slot)) => {
+                    let active = kind.effect.as_deref() == Some("active");
+                    active_bytes_by_slot.insert(slot, if active { kind.body_bytes } else { 0 });
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(OperatorInstructionMobTotals {
+        records: active_bytes_by_slot.len() as u64,
+        active_bytes: active_bytes_by_slot
+            .values()
+            .fold(0_u64, |total, bytes| total.saturating_add(*bytes)),
+    })
+}
+
+/// Census of one mob database's operator instruction records: a mob whose
+/// records are past [`OPERATOR_INSTRUCTION_RECORDS_BEFORE_0_9_15`] or whose
+/// Active bodies are past [`OPERATOR_INSTRUCTION_ACTIVE_BYTES_BEFORE_0_9_15`]
+/// in total (possible since 0.9.15, whose limits bound one member's
+/// snapshot) cannot be served by an earlier release.
+fn census_operator_instruction_mob_totals(
+    db_path: &Path,
+    realm: &str,
+    diagnosis: &mut StorageDiagnosis,
+) {
+    let Ok(conn) = meerkat_sqlite::open(db_path, meerkat_sqlite::ConnectionProfile::ReadOnly)
+    else {
+        return;
+    };
+    let totals = match operator_instruction_mob_totals(&conn) {
+        Ok(totals) => totals,
+        Err(error) => {
+            diagnosis.findings.push(
+                StorageFinding::new(
+                    FindingSeverity::Warning,
+                    FINDING_STORAGE_CENSUS_UNMEASURED,
+                    format!("could not count the mob's operator instruction records: {error}"),
+                )
+                .with_path(db_path.to_path_buf())
+                .with_realm(realm),
+            );
+            return;
+        }
+    };
+    let OperatorInstructionMobTotals {
+        records,
+        active_bytes,
+    } = totals;
+    let past_records = records > OPERATOR_INSTRUCTION_RECORDS_BEFORE_0_9_15;
+    if !past_records && active_bytes <= OPERATOR_INSTRUCTION_ACTIVE_BYTES_BEFORE_0_9_15 {
+        return;
+    }
+    let deliveries = if past_records {
+        ", every member's operator instruction delivery is refused by its session and retried \
+         without end, and a member that needs a new session fails to build"
+    } else {
+        ""
+    };
+    diagnosis.findings.push(
+        StorageFinding::new(
+            FindingSeverity::Info,
+            FINDING_OPERATOR_INSTRUCTION_MOB_TOTALS,
+            format!(
+                "the mob holds {records} operator instruction records with {active_bytes} bytes \
+                 of Active bodies, past the {OPERATOR_INSTRUCTION_RECORDS_BEFORE_0_9_15} records \
+                 or {OPERATOR_INSTRUCTION_ACTIVE_BYTES_BEFORE_0_9_15} bytes a release before \
+                 0.9.15 serves in one mob: such a release starts the mob without a refusal, and \
+                 then every spawn and every flow run of the mob is refused{deliveries}; before \
+                 a downgrade keep this mob on 0.9.15 or later, reset it and write records \
+                 within those totals again, or destroy it (a revoke keeps the record's slot)"
             ),
         )
         .with_path(db_path.to_path_buf())
@@ -5308,6 +5476,116 @@ mod tests {
             ) && listed.message.contains("before a downgrade"),
             "the finding names the realm-wide refusal and the step before a downgrade: {}",
             listed.message
+        );
+    }
+
+    /// A mob journal whose operator instruction records are past what a
+    /// release before 0.9.15 serves in one mob is listed with its totals:
+    /// more than 64 records, or more than 1 MiB of Active bodies over all
+    /// of them. A revoked record keeps its slot and holds no bytes, a new
+    /// revision of a slot counts once at its last bytes, a reset clears the
+    /// totals, and a mob at 64 records and exactly 1 MiB is not listed.
+    #[tokio::test]
+    async fn mobs_past_the_operator_instruction_totals_of_earlier_releases_are_listed() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("realms");
+        let realm_dir = write_manifest(&root, "mob-records", "sqlite");
+        let mobs = realm_dir.join("mobs");
+        std::fs::create_dir_all(&mobs).unwrap();
+        let committed = |key: &str, revision: u64, body_bytes: u64| {
+            let effect = if body_bytes == 0 { "absent" } else { "active" };
+            format!(
+                r#"{{"schema_version":10,"event":{{"cursor":0,"mob_id":"mob","kind":{{"type":"operator_instruction_committed","slot":{{"namespace":"agents","key":"{key}"}},"revision":{revision},"effect":"{effect}","body_bytes":{body_bytes},"target":{{"kind":"member","agent_identity":"{key}"}},"generation":1}}}}}}"#
+            )
+        };
+        let reset = r#"{"schema_version":9,"event":{"kind":{"type":"mob_reset"}}}"#.to_string();
+        let write_events = |path: &Path, events: &[String]| {
+            let conn = Connection::open(path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE mob_events (
+                    cursor INTEGER PRIMARY KEY, mob_id TEXT, event_json BLOB NOT NULL)",
+            )
+            .unwrap();
+            for (index, stored) in events.iter().enumerate() {
+                conn.execute(
+                    "INSERT INTO mob_events (cursor, mob_id, event_json) VALUES (?1, 'mob', ?2)",
+                    rusqlite::params![index as i64 + 1, stored.as_bytes()],
+                )
+                .unwrap();
+            }
+        };
+        let records = |count: usize, revision: u64, body_bytes: u64| {
+            (0..count)
+                .map(|index| committed(&format!("agent-{index:03}"), revision, body_bytes))
+                .collect::<Vec<_>>()
+        };
+        // 70 records of 10 bytes; ten of them written again at 20 bytes and
+        // one of those then revoked.
+        let many = mobs.join("many.db");
+        let mut events = records(70, 1, 10);
+        events.extend(records(10, 2, 20));
+        events.push(committed("agent-000", 3, 0));
+        write_events(&many, &events);
+        // Exactly 64 records and exactly 1 MiB of Active bodies.
+        let at_limit = mobs.join("at-limit.db");
+        write_events(&at_limit, &records(64, 1, 16_384));
+        // 70 records, a reset, then 3.
+        let reset_mob = mobs.join("reset.db");
+        let mut events = records(70, 1, 10);
+        events.push(reset);
+        events.extend(records(3, 1, 10));
+        write_events(&reset_mob, &events);
+        // Five records whose Active bodies pass 1 MiB together.
+        let heavy = mobs.join("heavy.db");
+        write_events(&heavy, &records(5, 1, 262_144));
+
+        let diagnosis = diagnose_disk_roots(&scope(&[&root])).await;
+
+        let mut listed = diagnosis
+            .findings
+            .iter()
+            .filter(|finding| finding.code == FINDING_OPERATOR_INSTRUCTION_MOB_TOTALS)
+            .collect::<Vec<_>>();
+        listed.sort_by_key(|finding| finding.path.clone());
+        assert_eq!(
+            listed
+                .iter()
+                .map(|finding| finding.path.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some(heavy.as_path()), Some(many.as_path())],
+            "only the mob past 64 records and the mob past 1 MiB: {diagnosis:?}"
+        );
+        for finding in &listed {
+            assert_eq!(finding.severity, FindingSeverity::Info);
+            assert_eq!(finding.realm.as_deref(), Some("mob-records"));
+            assert!(
+                finding.message.contains("a release before 0.9.15")
+                    && finding.message.contains("every spawn and every flow run")
+                    && finding.message.contains("before a downgrade"),
+                "the finding names the releases, what they refuse and the step before a \
+                 downgrade: {}",
+                finding.message
+            );
+        }
+        let (heavy_finding, many_finding) = (listed[0], listed[1]);
+        // 69 Active records: 9 at 20 bytes, 60 at 10 bytes; one revoked.
+        assert!(
+            many_finding.message.contains(
+                "the mob holds 70 operator instruction records with 780 bytes of Active bodies"
+            ) && many_finding
+                .message
+                .contains("delivery is refused by its session"),
+            "past 64 records the deliveries are refused too: {}",
+            many_finding.message
+        );
+        assert!(
+            heavy_finding.message.contains(
+                "the mob holds 5 operator instruction records with 1310720 bytes of Active bodies"
+            ) && !heavy_finding
+                .message
+                .contains("delivery is refused by its session"),
+            "within 64 records the member sessions still take their snapshots: {}",
+            heavy_finding.message
         );
     }
 

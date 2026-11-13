@@ -17,8 +17,23 @@ use meerkat_mob::{MemberBuildPreparationRefusal, MemberBuildPrepared};
 
 use super::super::bridge::{BridgeAdmissionError, BridgeError};
 use super::super::build_preparer::IdentityBuildPreparer;
-use super::super::types::{AgentBuildContext, AgentIdentity, CustomizerToolsPending};
+use super::super::types::{
+    AgentBuildContext, AgentBuildDraft, AgentIdentity, CustomizerToolsPending, DurableAgentSpec,
+};
 use super::{IdentityRuntime, IdentityRuntimeError};
+
+/// How far the host's build step of one build got
+/// ([`IdentityRuntime::compose_identity_build`]).
+enum ComposedIdentityBuild {
+    /// The runtime composes no customizer: there is no host build step.
+    NoCustomizer,
+    /// The identity is not registered (it left the roster since the
+    /// preparer read it).
+    Unregistered,
+    /// The customizer ran and its tools are published: the identity's
+    /// registered spec and the draft the customizer composed from it.
+    Composed(Box<(DurableAgentSpec, AgentBuildDraft)>),
+}
 
 impl IdentityRuntime {
     /// Install the preparer the mob was built with: the composition
@@ -54,19 +69,139 @@ impl IdentityRuntime {
         &self,
         identity: &AgentIdentity,
     ) -> Result<MemberBuildPrepared, MemberBuildPreparationRefusal> {
-        let Some(customizer) = self.customizer.read().await.clone() else {
-            return Ok(MemberBuildPrepared::Prepared);
-        };
-        let Some(spec) = self
-            .entries
-            .read()
-            .await
-            .get(identity)
-            .map(|entry| entry.spec.clone())
-        else {
+        Ok(match self.compose_identity_build(identity, None).await? {
+            ComposedIdentityBuild::NoCustomizer => MemberBuildPrepared::Prepared,
             // The identity left the roster since the preparer read it: the
             // roster pass retires its member, which holds no run until then.
-            return Ok(MemberBuildPrepared::HoldUntilReleased);
+            ComposedIdentityBuild::Unregistered => MemberBuildPrepared::HoldUntilReleased,
+            ComposedIdentityBuild::Composed(_) => self.composed_build_answer(),
+        })
+    }
+
+    /// What Core is answered for a build whose customizer tools were just
+    /// published: it may run, except on a candidate launch, which holds the
+    /// member (its runs belong to the authoritative launch).
+    fn composed_build_answer(&self) -> MemberBuildPrepared {
+        if self.is_candidate_launch() {
+            MemberBuildPrepared::HoldUntilReleased
+        } else {
+            MemberBuildPrepared::Prepared
+        }
+    }
+
+    /// Compose `seat`, the seat Core lowered for a build of registered
+    /// `identity`'s member, an identity whose record is its row: run the
+    /// host's `customize_build` once for this build, publish its tools into
+    /// the identity's stable dispatcher, and lower the rest of the draft
+    /// onto the seat through the lowering a configured identity's seat is
+    /// composed with
+    /// ([`super::super::bridge::SessionBridge::lower_store_owned_seat_build`]).
+    /// Core decides what the build takes of it: the model and the provider
+    /// parameters at every build, the context, the instructions and the
+    /// system prompt at the first build of the member's session.
+    ///
+    /// `row` is the spec the identity's row holds now, when it reads: the
+    /// customizer composes from it, so the draft follows a row Core changed
+    /// since the identity was registered. Without it the registered spec
+    /// stands in.
+    ///
+    /// The draft's labels must be exactly the seat's. What decides on a
+    /// member's labels reads its seat, and the seat of such an identity
+    /// carries its row's labels and no others, so a label the customizer
+    /// sets that the seat lacks cannot be honoured: the composition is
+    /// refused for good
+    /// (`MemberBuildPreparationRefusal::store_owned_seat_labels`, naming
+    /// the label keys and never a value), the member is not built, and the
+    /// reason is recorded for the identity's status. Core refuses such an
+    /// answer itself: the draft's labels are lowered onto the seat, so the
+    /// refusal does not rest on this check.
+    ///
+    /// `Ok(Some(answer))` is what this build's preparation answers, the
+    /// customizer having run for it already; `Ok(None)` when nothing was
+    /// composed (the runtime composes no customizer, or the identity left
+    /// the registration) and the seat is as Core lowered it. A failed
+    /// customizer, and a draft that does not lower, refuse the build
+    /// retryable, with the failure recorded for the identity's status and
+    /// the typed answer to a refused delivery.
+    pub(crate) async fn compose_store_owned_seat(
+        &self,
+        identity: &AgentIdentity,
+        row: Option<DurableAgentSpec>,
+        seat: &mut meerkat_mob::SpawnMemberSpec,
+    ) -> Result<Option<MemberBuildPrepared>, MemberBuildPreparationRefusal> {
+        let Some(bridge) = self.bridge() else {
+            return Ok(None);
+        };
+        let ComposedIdentityBuild::Composed(composed) =
+            self.compose_identity_build(identity, row).await?
+        else {
+            return Ok(None);
+        };
+        let (spec, draft) = *composed;
+        if let Some(refusal) =
+            MemberBuildPreparationRefusal::store_owned_seat_labels(seat, &draft.labels)
+        {
+            tracing::warn!(
+                %identity,
+                reason = refusal.reason(),
+                "the member's build was refused: its host's customizer answers labels its seat                  does not carry"
+            );
+            self.record_customizer_failure(
+                identity,
+                CustomizerToolsPending {
+                    reason: refusal.reason().to_string(),
+                    artifact_refusal: None,
+                },
+            );
+            return Err(refusal);
+        }
+        if let Err(error) = bridge.lower_store_owned_seat_build(&spec, &draft, seat) {
+            let reason = format!("the host's build did not lower onto the member's seat: {error}");
+            tracing::warn!(
+                %identity,
+                %reason,
+                "the member's build was refused: it stays dormant until its build preparation \
+                 is retried"
+            );
+            self.record_customizer_failure(
+                identity,
+                CustomizerToolsPending {
+                    reason: reason.clone(),
+                    artifact_refusal: None,
+                },
+            );
+            return Err(MemberBuildPreparationRefusal::Retryable { reason });
+        }
+        Ok(Some(self.composed_build_answer()))
+    }
+
+    /// Run the host's `customize_build` for the build of registered
+    /// `identity`'s member Core is about to perform, with the runtime's
+    /// real context, and publish its tools into the identity's stable
+    /// dispatcher, unreleased: the one host build step of a build, whose
+    /// draft the caller lowers further or drops. The customizer composes
+    /// from `row`, the spec the identity's row holds now, when the caller
+    /// read one, else from the registered spec. A failed customizer is
+    /// refused retryable, its failure recorded.
+    async fn compose_identity_build(
+        &self,
+        identity: &AgentIdentity,
+        row: Option<DurableAgentSpec>,
+    ) -> Result<ComposedIdentityBuild, MemberBuildPreparationRefusal> {
+        let Some(customizer) = self.customizer.read().await.clone() else {
+            return Ok(ComposedIdentityBuild::NoCustomizer);
+        };
+        let registered = match row {
+            Some(row) => Some(row),
+            None => self
+                .entries
+                .read()
+                .await
+                .get(identity)
+                .map(|entry| entry.spec.clone()),
+        };
+        let Some(spec) = registered else {
+            return Ok(ComposedIdentityBuild::Unregistered);
         };
         let context = AgentBuildContext {
             identity: identity.clone(),
@@ -99,10 +234,7 @@ impl IdentityRuntime {
             Ok(()) => {
                 self.publish_customizer_tools_unreleased(identity, &mut draft)
                     .await;
-                if self.is_candidate_launch() {
-                    return Ok(MemberBuildPrepared::HoldUntilReleased);
-                }
-                Ok(MemberBuildPrepared::Prepared)
+                Ok(ComposedIdentityBuild::Composed(Box::new((spec, draft))))
             }
             Err(error) => {
                 let reason = format!("customize_build failed: {error}");
@@ -130,6 +262,52 @@ impl IdentityRuntime {
         }
     }
 
+    /// Ask Core, once, to seat every identity whose record is its row that
+    /// is owed its seat
+    /// (`SessionBridge::seat_created_identities_owed_their_seat`, the pass
+    /// the mob's start runs), now that the host's build step of such a seat
+    /// is decided. Two callers, each once:
+    ///
+    /// - the runtime's first composition ([`Self::compose_member_builds`]).
+    ///   The start embodies such a seat (one whose spec owes a kickoff)
+    ///   before this runtime is composed, and the preparer refuses that
+    ///   build, retryable, because the host's build step cannot run yet;
+    ///   the identity then stays owed its seat. Seated now, its member is
+    ///   built from the host's inputs as any build of it is, and its
+    ///   kickoff runs once;
+    /// - the identity bootstrap of a composition that learns only there
+    ///   that it composes no agent customizer
+    ///   (`gateway_wiring::MemberBuildWiring::bind_at_identity_bootstrap`).
+    ///   Its preparer refused such a build while that was undecided; seated
+    ///   now, the member is built from its row, and its kickoff runs once.
+    ///   A mob the bootstrap has not lifted yet seats nothing here: its
+    ///   lift runs the pass.
+    ///
+    /// It never fails its caller: an identity Core could not seat stays
+    /// owed its seat, which Core's entry of its name and its delivery doors
+    /// say, and the next start or the next change of the mob's identities
+    /// seats it.
+    pub(crate) async fn seat_created_identities_owed_their_seat(&self) {
+        let Some(bridge) = self.bridge.as_ref() else {
+            return;
+        };
+        match bridge.seat_created_identities_owed_their_seat().await {
+            Ok(still_owed) if still_owed.is_empty() => {}
+            Ok(still_owed) => tracing::warn!(
+                identities = ?still_owed,
+                "identities whose record is their row stay owed their seat after the host's \
+                 bootstrap asked Core to seat them; Core's next start, or the next change of \
+                 the mob's identities, seats them"
+            ),
+            Err(BridgeError::Unsupported { .. }) => {}
+            Err(error) => tracing::warn!(
+                %error,
+                "the identities owed their seat could not be seated when the host's bootstrap \
+                 asked Core to seat them; they stay owed their seat"
+            ),
+        }
+    }
+
     /// The runtime is composed: its roster is registered, and its customizer,
     /// customizer tool registry and services are installed. From now on the
     /// preparer prepares each registered identity's build inline. Every
@@ -142,6 +320,12 @@ impl IdentityRuntime {
     /// composition and reports after it is published at its report
     /// ([`Self::publish_held_member_build`]).
     ///
+    /// The first composition also asks Core, once, to seat the identities
+    /// whose record is their row that are owed their seat
+    /// ([`Self::seat_created_identities_owed_their_seat`]): the mob's start
+    /// embodied such a seat before this runtime was composed, and its build
+    /// was refused then, since no host build step could run.
+    ///
     /// The publications run with no lifecycle lock held, at most
     /// [`super::super::orchestrator::identity_restore_concurrency`] at once.
     /// A failed one records its reason: its member stays held until a later
@@ -150,9 +334,12 @@ impl IdentityRuntime {
         let Some(preparer) = self.member_build_preparer() else {
             return;
         };
-        preparer.compose();
+        let first_composition = preparer.compose();
         if !preparer.publishes_tools() {
             return;
+        }
+        if first_composition {
+            self.seat_created_identities_owed_their_seat().await;
         }
         let held = match self.members_core_holds_for_unpublished_tools() {
             Ok(held) => held,

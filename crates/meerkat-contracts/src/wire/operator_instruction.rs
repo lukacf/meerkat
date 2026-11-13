@@ -196,12 +196,13 @@ impl WireInstructionPendingReason {
 // ---------------------------------------------------------------------------
 
 /// Which members of a mob an operator instruction targets: every member, the
-/// members of one profile, or one member. A target is a predicate over the
-/// roster: a profile or member that does not exist yet selects nobody until
-/// it does. A target refuses a field its kind does not have (`Mob` is a
-/// struct variant for that: serde lets a unit variant ignore extra fields),
-/// so a member or profile name sent with the wrong kind never widens a
-/// write to every member.
+/// members of one profile, or one member (alone, or with the forks of its
+/// fork family). A target is a predicate over the roster: a profile or
+/// member that does not exist yet selects nobody until it does. A target
+/// refuses a field its kind does not have (`Mob` is a struct variant for
+/// that: serde lets a unit variant ignore extra fields), so a member or
+/// profile name sent with the wrong kind never widens a write to every
+/// member.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -211,7 +212,36 @@ pub enum WireInstructionTarget {
     /// The members of one profile.
     Profile { profile: String },
     /// One member.
-    Member { agent_identity: String },
+    Member {
+        agent_identity: String,
+        /// Whether the record follows the member's fork family from its
+        /// root. Absent or `false` keeps the record the member's alone.
+        ///
+        /// Written for a member that is not itself a fork, the record
+        /// selects that member and every fork below it, forks of forks
+        /// included, for as long as each is seated. Written for a member
+        /// that is a fork, it selects that member only: a fork family
+        /// follows the records written for its first member. A fork under
+        /// the record follows its later revisions and its revoke as the
+        /// member does.
+        ///
+        /// The family's root is a name, as a member target is. Its forks go
+        /// on following the records written for that name after the root's
+        /// identity ends, so there is one exception to "that member only":
+        /// when the name of a family's first member is seated again later,
+        /// as a fork or not, a record written for it and its forks still
+        /// selects the forks the earlier member of that name left.
+        ///
+        /// Left out of a response when `false`.
+        #[serde(default, skip_serializing_if = "is_false")]
+        include_forks: bool,
+    },
+}
+
+/// `skip_serializing_if` for a flag whose default is `false`.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(flag: &bool) -> bool {
+    !*flag
 }
 
 /// Request payload for `mob/set_instruction`: one slot's body at a revision,
@@ -871,7 +901,8 @@ mod tests {
         assert_eq!(
             params.target,
             WireInstructionTarget::Member {
-                agent_identity: "worker-1".to_string()
+                agent_identity: "worker-1".to_string(),
+                include_forks: false,
             }
         );
         assert_eq!(params.slot().key.as_str(), "tone");
@@ -932,5 +963,67 @@ mod tests {
             meerkat_core::SessionInstructionChange::Revoke
         );
         assert_eq!(revoke.write().revision.get(), 3);
+    }
+
+    /// A member target's fork scope is one optional member: absent or
+    /// `false` is the member alone, and the wire form of such a target is
+    /// what it was before the scope existed; `true` is written and read
+    /// back; and the scope belongs to a member target only.
+    #[test]
+    fn a_member_targets_fork_scope_is_optional_and_omitted_when_false() {
+        let alone = WireInstructionTarget::Member {
+            agent_identity: "worker-1".to_string(),
+            include_forks: false,
+        };
+        assert_eq!(
+            serde_json::to_string(&alone).unwrap(),
+            r#"{"kind":"member","agent_identity":"worker-1"}"#,
+            "a target without the scope is byte for byte the earlier wire form"
+        );
+        for earlier in [
+            json!({ "kind": "member", "agent_identity": "worker-1" }),
+            json!({ "kind": "member", "agent_identity": "worker-1", "include_forks": false }),
+        ] {
+            assert_eq!(
+                serde_json::from_value::<WireInstructionTarget>(earlier).unwrap(),
+                alone
+            );
+        }
+
+        let family = WireInstructionTarget::Member {
+            agent_identity: "worker-1".to_string(),
+            include_forks: true,
+        };
+        let written = serde_json::to_value(&family).unwrap();
+        assert_eq!(
+            written,
+            json!({ "kind": "member", "agent_identity": "worker-1", "include_forks": true })
+        );
+        assert_eq!(
+            serde_json::from_value::<WireInstructionTarget>(written).unwrap(),
+            family
+        );
+        let params: MobSetInstructionParams = serde_json::from_value(json!({
+            "mob_id": "team",
+            "namespace": "app.example",
+            "key": "tone",
+            "revision": 1,
+            "body": "Answer formally.",
+            "target": { "kind": "member", "agent_identity": "worker-1", "include_forks": true }
+        }))
+        .unwrap();
+        assert_eq!(params.target, family);
+
+        for target in [
+            json!({ "kind": "mob", "include_forks": true }),
+            json!({ "kind": "profile", "profile": "worker", "include_forks": true }),
+            json!({ "kind": "member", "agent_identity": "worker-1", "include_forks": "yes" }),
+            json!({ "kind": "member", "agent_identity": "worker-1", "include_fork": true }),
+        ] {
+            assert!(
+                serde_json::from_value::<WireInstructionTarget>(target.clone()).is_err(),
+                "the scope is a member target's boolean only: {target}"
+            );
+        }
     }
 }

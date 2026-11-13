@@ -646,24 +646,35 @@ impl ConsoleEventStore {
             && let Some(image_result) = parse_generate_image_tool_result(&projected_data)
         {
             for (idx, image) in image_result.images.iter().enumerate() {
+                let mut data = json!({
+                    "source_event_type": event_type,
+                    "identity": projected_data.get("identity"),
+                    "run_id": projected_data.get("run_id"),
+                    "tool_call_id": projected_data.get("id").cloned().unwrap_or(Value::Null),
+                    "image_id": image.image_id.0.to_string(),
+                    "blob_id": image.blob_ref.blob_id,
+                    "media_type": image.media_type.as_str(),
+                    "width": image.width,
+                    "height": image.height,
+                    "revised_prompt": image_result.revised_prompt.clone(),
+                });
+                // The image record names the session of the result event it
+                // is projected from, so the console witnesses it by that
+                // session's member, as it witnesses the result itself.
+                if let Some(session_id) = projected_data
+                    .get("session_id")
+                    .filter(|session| session.is_string())
+                    && let Some(object) = data.as_object_mut()
+                {
+                    object.insert("session_id".to_string(), session_id.clone());
+                }
                 self.append_envelope(ConsoleIdentityEventEnvelope {
                     event_id: format!("{}#assistant_image:{idx}", event.event_id),
                     interaction_id: interaction_id.clone(),
                     identity: identity.clone(),
                     event_type: "assistant_image".to_string(),
                     timestamp_ms: event.timestamp_ms,
-                    data: json!({
-                        "source_event_type": event_type,
-                        "identity": projected_data.get("identity"),
-                        "run_id": projected_data.get("run_id"),
-                        "tool_call_id": projected_data.get("id").cloned().unwrap_or(Value::Null),
-                        "image_id": image.image_id.0.to_string(),
-                        "blob_id": image.blob_ref.blob_id,
-                        "media_type": image.media_type.as_str(),
-                        "width": image.width,
-                        "height": image.height,
-                        "revised_prompt": image_result.revised_prompt.clone(),
-                    }),
+                    data,
                 })
                 .await;
             }
@@ -2355,6 +2366,36 @@ mod tests {
             );
             assert_eq!(images[0]["tool_call_id"], json!("call-image"));
             assert_eq!(images[0]["blob_id"], json!("sha256:test-generated-image"));
+        }
+    }
+
+    /// A generated image record names the session of the tool result event
+    /// it is projected from, and none when that event names none.
+    #[tokio::test]
+    async fn a_generated_image_record_names_the_result_events_session() {
+        for session in [Some("pilot-session"), None] {
+            let store = ConsoleEventStore::new();
+            store.register_runtime_identity("rt:pilot:1", "pilot").await;
+            let mut received = generate_image_payload(true);
+            if let Some(session) = session {
+                received["session_id"] = json!(session);
+            }
+            store
+                .project_unified_event(&agent_event_with_payload(
+                    "evt-received",
+                    "rt:pilot:1",
+                    "tool_result_received",
+                    received,
+                ))
+                .await;
+
+            let images = assistant_image_frames(&store).await;
+            assert_eq!(images.len(), 1);
+            assert_eq!(
+                images[0].get("session_id").and_then(Value::as_str),
+                session,
+                "the image record names the result event's session"
+            );
         }
     }
 

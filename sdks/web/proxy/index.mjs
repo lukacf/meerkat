@@ -52,10 +52,10 @@ const PROVIDERS = {
   },
 };
 
-// ─── CORS headers ───────────────────────────────────────────────
+// ─── CORS headers and allowed origins ───────────────────────────
 
 /**
- * Default CORS headers. Override `allowOrigin` for production.
+ * CORS response headers that allow one origin value (`*` allows any).
  * @param {string} [allowOrigin='*']
  */
 export function corsHeaders(allowOrigin = '*') {
@@ -68,6 +68,45 @@ export function corsHeaders(allowOrigin = '*') {
   };
 }
 
+// `localhost`, an address of 127.0.0.0/8, or `[::1]`.
+const LOOPBACK_NAME = String.raw`(localhost|127(\.\d{1,3}){3}|\[::1\])`;
+const LOOPBACK_ORIGIN = new RegExp(`^https?://${LOOPBACK_NAME}(:\\d+)?$`);
+const LOOPBACK_HOST = new RegExp(`^${LOOPBACK_NAME}(:\\d+)?$`, 'i');
+
+/**
+ * Decide a request by its Origin header.
+ *
+ * `allowOrigin` names the one origin a request may come from, or is `*` for
+ * any origin. Without it only loopback origins are allowed: `localhost`, a
+ * 127.0.0.0/8 address or `[::1]`, http or https, any port. An Origin of
+ * `null` is allowed by `*` only. A request without an Origin header is
+ * allowed whatever the setting.
+ *
+ * @param {string | undefined} allowOrigin
+ * @param {string | null | undefined} origin - The request's Origin header
+ * @returns {{ allowed: boolean, headers: Record<string, string> }} The CORS
+ *   headers of the answer; a refused request gets no allow header.
+ */
+function checkOrigin(allowOrigin, origin) {
+  if (allowOrigin === '*') return { allowed: true, headers: corsHeaders('*') };
+  if (allowOrigin) {
+    const allowed = !origin || (origin === allowOrigin && origin !== 'null');
+    return { allowed, headers: allowed ? corsHeaders(allowOrigin) : {} };
+  }
+  if (!origin) return { allowed: true, headers: { vary: 'origin' } };
+  if (!LOOPBACK_ORIGIN.test(origin)) return { allowed: false, headers: { vary: 'origin' } };
+  return { allowed: true, headers: { ...corsHeaders(origin), vary: 'origin' } };
+}
+
+function isLoopbackHost(host) {
+  return typeof host === 'string' && LOOPBACK_HOST.test(host);
+}
+
+const REFUSED = {
+  origin: JSON.stringify({ error: 'origin_not_allowed', message: 'This origin is not allowed to call the proxy.' }),
+  host: JSON.stringify({ error: 'host_not_allowed', message: 'The proxy answers loopback host names only.' }),
+};
+
 // ─── Proxy handler ──────────────────────────────────────────────
 
 /**
@@ -76,8 +115,21 @@ export function corsHeaders(allowOrigin = '*') {
  * Returns a function `(req: Request, pathPrefix: string) => Promise<Response>`
  * compatible with any framework that uses the Web Fetch API Request/Response.
  *
+ * The handler compares a request's Origin header with `allowOrigin` before it
+ * calls the provider, and answers 403 when the origin is not allowed (see
+ * `checkOrigin` above: loopback origins only when `allowOrigin` is not given,
+ * one named origin, or `*` for any). It answers an allowed preflight itself.
+ * It does not check who calls it in any other way: a request without an
+ * Origin header is forwarded, so a server that embeds the handler puts its
+ * own authentication in front of it.
+ *
+ * `loopbackHostOnly` makes the handler refuse (403) a request whose Host
+ * header is not a loopback name or address. It is off by default, since the
+ * embedding server owns its bind address and host names; turn it on for a
+ * server that listens on a loopback address.
+ *
  * @param {keyof PROVIDERS} provider - Provider name ('anthropic', 'openai', 'gemini')
- * @param {{ apiKey?: string, allowOrigin?: string }} [opts]
+ * @param {{ apiKey?: string, allowOrigin?: string, loopbackHostOnly?: boolean }} [opts]
  */
 export function createProxyHandler(provider, opts = {}) {
   const config = PROVIDERS[provider];
@@ -86,14 +138,26 @@ export function createProxyHandler(provider, opts = {}) {
   const apiKey = opts.apiKey || process.env[config.envKey];
   if (!apiKey) throw new Error(`Missing API key for ${provider}: set ${config.envKey} env var or pass opts.apiKey`);
 
-  const allowOrigin = opts.allowOrigin || '*';
-  const cors = corsHeaders(allowOrigin);
+  const { allowOrigin, loopbackHostOnly = false } = opts;
 
   /**
    * @param {Request} req - Incoming request
    * @param {string} strippedPath - URL path with provider prefix removed (e.g. '/v1/messages')
    */
   return async function proxyHandler(req, strippedPath) {
+    // Refuse before anything is sent to the provider.
+    const json = { 'content-type': 'application/json' };
+    if (loopbackHostOnly && !isLoopbackHost(req.headers.get('host') ?? new URL(req.url).host)) {
+      return new Response(REFUSED.host, { status: 403, headers: json });
+    }
+    const origin = checkOrigin(allowOrigin, req.headers.get('origin'));
+    if (!origin.allowed) {
+      return new Response(REFUSED.origin, { status: 403, headers: { ...json, ...origin.headers } });
+    }
+    if (req.method === 'OPTIONS') {
+      return new Response(null, { status: 204, headers: origin.headers });
+    }
+
     // Build target URL
     let targetUrl = `${config.target}${strippedPath}`;
     // Preserve query string
@@ -129,12 +193,16 @@ export function createProxyHandler(provider, opts = {}) {
     // Build response headers: upstream headers + CORS
     const respHeaders = new Headers();
     for (const [key, value] of upstream.headers) {
+      const name = key.toLowerCase();
       // Strip encoding headers — we don't forward compression negotiation
-      if (['content-encoding', 'transfer-encoding'].includes(key.toLowerCase())) continue;
+      if (['content-encoding', 'transfer-encoding'].includes(name)) continue;
+      // The proxy answers for its own allowed origins, not the provider's
+      if (name.startsWith('access-control-')) continue;
       respHeaders.set(key, value);
     }
-    for (const [key, value] of Object.entries(cors)) {
-      respHeaders.set(key, value);
+    for (const [key, value] of Object.entries(origin.headers)) {
+      if (key === 'vary') respHeaders.append(key, value);
+      else respHeaders.set(key, value);
     }
 
     return new Response(upstream.body, {
@@ -157,7 +225,13 @@ function isLoopbackAddress(address) {
  * Start a standalone proxy server.
  *
  * Listens on the loopback interface (127.0.0.1) unless `host` names another
- * address. The proxy does not check who calls it.
+ * address. Every user and process of the machine reaches a loopback address,
+ * and the proxy does not check who calls it: it only compares a request's
+ * Origin header with `allowOrigin` (loopback origins when not given, see
+ * `createProxyHandler`) and, while it is bound to a loopback address, refuses
+ * a request whose Host header is not a loopback name or address. Bound to
+ * another address it does not check the Host, and forwards any caller on the
+ * network that sends no Origin header: put it behind your own authentication.
  *
  * @param {{ port?: number, host?: string, allowOrigin?: string }} [opts]
  */
@@ -165,8 +239,7 @@ export function startProxy(opts = {}) {
   // Port 0 asks the system for a free port.
   const port = Number.isInteger(opts.port) ? opts.port : parseInt(process.env.PORT || '3100', 10);
   const host = opts.host || DEFAULT_HOST;
-  const allowOrigin = opts.allowOrigin || '*';
-  const cors = corsHeaders(allowOrigin);
+  const allowOrigin = opts.allowOrigin;
 
   // Build handlers for each provider that has a key configured
   const handlers = {};
@@ -185,7 +258,23 @@ export function startProxy(opts = {}) {
   console.log(`Proxy providers: ${Object.keys(handlers).join(', ')}`);
 
   const server = createServer(async (nodeReq, nodeRes) => {
+    let cors = {};
     try {
+      // Refuse by Host and Origin first, whatever the method and path
+      const json = { 'content-type': 'application/json' };
+      if (isLoopbackAddress(server.address().address) && !isLoopbackHost(nodeReq.headers.host)) {
+        nodeRes.writeHead(403, json);
+        nodeRes.end(REFUSED.host);
+        return;
+      }
+      const origin = checkOrigin(allowOrigin, nodeReq.headers.origin);
+      if (!origin.allowed) {
+        nodeRes.writeHead(403, { ...json, ...origin.headers });
+        nodeRes.end(REFUSED.origin);
+        return;
+      }
+      cors = origin.headers;
+
       // CORS preflight
       if (nodeReq.method === 'OPTIONS') {
         nodeRes.writeHead(204, cors);
@@ -263,7 +352,7 @@ export function startProxy(opts = {}) {
     const shown = bound.address.includes(':') ? `[${bound.address}]` : bound.address;
     console.log(`@rkat/web proxy listening on http://${shown}:${bound.port}`);
     if (!isLoopbackAddress(bound.address)) {
-      console.warn(`Warning: ${bound.address} is not a loopback address. The proxy does not check who calls it.`);
+      console.warn(`Warning: ${bound.address} is not a loopback address. The proxy does not check who calls it: put it behind your own authentication.`);
     }
   });
 

@@ -754,7 +754,7 @@ impl WorkSpec {
 
     /// How the host attested the requester this work carries, if it said so.
     pub fn requester_origin(&self) -> Option<meerkat_core::RequesterOrigin> {
-        self.requester_origin
+        self.requester_origin.clone()
     }
 
     /// Carry the label naming the person who sent this work, for the

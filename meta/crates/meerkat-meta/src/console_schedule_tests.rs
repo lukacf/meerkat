@@ -1576,7 +1576,7 @@ async fn turn_requester(
                 .expect("history read");
             if let Some((requester, fired)) = page.messages.iter().find_map(|message| match message {
                 meerkat_core::Message::User(user) if user.text_content() == content => {
-                    // TR-S1b, kept as a regression (R2): a schedule's fire
+                    // TR-S1b, kept as a regression: a schedule's fire
                     // names the schedule's person as requester but is no
                     // person's typed input. Its conversational row carries no
                     // typed-text stamp and no attestation origin.
@@ -1600,8 +1600,7 @@ async fn turn_requester(
                 }
                 _ => None,
             }) {
-                // Cross-check on the local merge with the taint branch, (c):
-                // the real fired row carries the same facts as a live person's
+                // The real fired row carries the same facts as a live person's
                 // send except the attested origin, so it is not rule-3 clean
                 // and its fact after a tainted peer message QUARANTINES.
                 assert!(

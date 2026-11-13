@@ -243,7 +243,7 @@ impl Input {
             }
             None => self.header().requester.clone().map(|principal| {
                 meerkat_core::types::TurnRequester::direct(principal)
-                    .with_origin(self.header().requester_origin)
+                    .with_origin(self.header().requester_origin.clone())
             }),
         }
     }

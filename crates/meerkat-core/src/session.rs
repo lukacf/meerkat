@@ -10943,8 +10943,8 @@ mod tests {
         Ok(())
     }
 
-    /// Delta read 3 item 4: how a requester was attested is session-owned
-    /// provenance recorded by the admitting door. A caller-authored rewrite
+    /// How a requester was attested is session-owned provenance recorded by
+    /// the admitting door. A caller-authored rewrite
     /// that claims an attested origin on its replacement rows commits them
     /// with the requester kept and the origin CLEARED (fail closed), on user
     /// and assistant rows alike.

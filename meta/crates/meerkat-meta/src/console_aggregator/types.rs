@@ -841,7 +841,7 @@ mod console_turn_origin_tests {
     }
 }
 
-/// Delta read 3 item 3: what a redispatch reads from a recorded frame. Only a
+/// What a redispatch reads from a recorded frame. Only a
 /// person's live operator kind (or no kind recorded) is a signed-in send; an
 /// operator probe, an internal emitter's kind, and a kind this build cannot
 /// read are not.

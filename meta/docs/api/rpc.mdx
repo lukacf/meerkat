@@ -2562,9 +2562,11 @@ bridge.
 in turn and transcript events) gains an `origin` field when one was
 recorded. The field is open: its wire schema is a string, the Python and
 TypeScript SDK types are `str` and `string`, and a Rust reader loads any value
-it does not know as `RequesterOrigin::Unknown`. A value a reader does not know
-is "not attested" (never clean), so a row carrying one still loads but its
-content is not trusted, and a later third origin is not a breaking change.
+it does not know as `RequesterOrigin::Unknown` carrying the exact text, which
+it writes back unchanged (so a stored session holding a newer value reloads
+intact). A value a reader does not know is "not attested" (never clean), so a
+row carrying one still loads but its content is not trusted, and a later third
+origin is not a breaking change.
 
 `meta/capabilities` advertises the feature capability
 `send_host_attested_requester`. A gateway without it ignores the field, so a

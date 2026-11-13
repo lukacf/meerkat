@@ -2527,7 +2527,7 @@ async fn the_console_gateway_profile_keeps_requests_and_replies_across_restarts(
     Ok(())
 }
 
-/// Item 7 of the Core lead's delta read 2: a console send never names its
+/// A console send never names its
 /// requester (the console records its own signed-in person, origin
 /// `console_signed_in`). A body that names one, even `null`, is REFUSED on
 /// `POST /console/send` (it used to be ignored) and on `meta/console/send`,

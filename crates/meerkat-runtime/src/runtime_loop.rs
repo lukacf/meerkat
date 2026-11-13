@@ -13362,7 +13362,7 @@ mod tests {
         ] {
             let mut input = make_prompt("a person's typed text");
             input.header_mut().requester = Some(requester_principal("person-7"));
-            input.header_mut().requester_origin = origin;
+            input.header_mut().requester_origin = origin.clone();
             let stamped = for_input(&input, admission_semantics(&input));
             let requester = stamped
                 .transcript_identity
@@ -13371,7 +13371,7 @@ mod tests {
                 .expect("the turn names its requester");
             assert_eq!(
                 requester,
-                TurnRequester::direct(requester_principal("person-7")).with_origin(origin)
+                TurnRequester::direct(requester_principal("person-7")).with_origin(origin.clone())
             );
             assert_eq!(requester.origin(), origin);
             assert!(requester.direct_principal().is_some(), "still direct");

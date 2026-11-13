@@ -3994,6 +3994,120 @@ mod tests {
         );
     }
 
+    /// A session holding a row whose requester origin is a value this build
+    /// does not know (a newer host wrote it) saves and loads THROUGH the
+    /// continuity store intact: the row decodes as `RequesterOrigin::Unknown`
+    /// carrying its exact text, is re-encoded to the same bytes, so the
+    /// store's commitment check holds, and a second save and load is
+    /// unchanged. The row is never attested.
+    #[tokio::test]
+    async fn a_session_with_an_unknown_requester_origin_round_trips_through_the_store() {
+        const NEWER: &str = "a_door_from_a_newer_host";
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("continuity.sqlite3");
+        let store = Arc::new(LocalContinuityStore::open(&db_path).expect("store"));
+        let adapter = ContinuitySessionStoreAdapter::new(store.clone());
+        // The row as a newer host committed it: decoded from its stored JSON.
+        let mut row = serde_json::to_value(meerkat_core::Message::User({
+            let mut user = meerkat_core::types::UserMessage::text("My appointment is on Friday.");
+            user.identity.requester = Some(
+                meerkat_core::TurnRequester::direct(
+                    meerkat_core::PrincipalRef::new(meerkat_core::PrincipalKind::Human, "person-1")
+                        .expect("principal"),
+                )
+                .with_origin(Some(meerkat_core::RequesterOrigin::ConsoleSignedIn)),
+            );
+            user
+        }))
+        .expect("encode row");
+        *row.pointer_mut("/identity/requester/origin")
+            .expect("origin field") = serde_json::json!(NEWER);
+        let row: meerkat_core::Message = serde_json::from_value(row).expect("the row decodes");
+        let mut session = meerkat_core::Session::new();
+        session.push(row);
+        let identity = AgentIdentity::parse("agent:unknown-origin").expect("identity");
+        let token = FencingToken::new(1);
+        store
+            .upsert_continuity_record(
+                &ContinuityRecord {
+                    identity: identity.clone(),
+                    agent_runtime_id: AgentRuntimeId::parse("rt:agent:unknown-origin:0")
+                        .expect("runtime id"),
+                    session_id: session.id().clone(),
+                    generation: ContinuityGeneration::new(0),
+                    checkpoint_version: CheckpointVersion::new(0),
+                },
+                token,
+            )
+            .await
+            .expect("seed record");
+        adapter
+            .register_session(
+                session.id(),
+                SessionRuntimeState {
+                    identity,
+                    generation: ContinuityGeneration::new(0),
+                    fencing_token: token,
+                    checkpoint_version: CheckpointVersion::new(0),
+                },
+            )
+            .await
+            .expect("register");
+        meerkat::SessionStore::save(&adapter, &session)
+            .await
+            .expect("the session with an unknown origin saves");
+        let loaded = meerkat::SessionStore::load(&adapter, session.id())
+            .await
+            .expect("the store reloads it without a commitment mismatch")
+            .expect("session present");
+        assert_eq!(
+            loaded.messages(),
+            session.messages(),
+            "the reloaded transcript is the saved one"
+        );
+        let meerkat_core::Message::User(user) = &loaded.messages()[0] else {
+            panic!("the row is a user row");
+        };
+        let origin = user
+            .identity
+            .requester
+            .as_ref()
+            .and_then(meerkat_core::TurnRequester::origin);
+        assert_eq!(
+            origin,
+            Some(meerkat_core::RequesterOrigin::from_wire(NEWER)),
+            "the unknown origin keeps its own text"
+        );
+        assert_eq!(
+            serde_json::to_value(&loaded.messages()[0]).expect("encode")["identity"]["requester"]["origin"],
+            serde_json::json!(NEWER),
+            "and is written back as that text"
+        );
+        assert!(
+            !matches!(
+                origin,
+                Some(
+                    meerkat_core::RequesterOrigin::ConsoleSignedIn
+                        | meerkat_core::RequesterOrigin::HostAttested
+                )
+            ),
+            "an unknown origin is never an attestation"
+        );
+        // A second turn of the same session saves and reloads unchanged.
+        let mut next = loaded;
+        next.push(meerkat_core::Message::User(
+            meerkat_core::types::UserMessage::text("second turn"),
+        ));
+        meerkat::SessionStore::save(&adapter, &next)
+            .await
+            .expect("the second save");
+        let reloaded = meerkat::SessionStore::load(&adapter, session.id())
+            .await
+            .expect("the second reload")
+            .expect("session present");
+        assert_eq!(reloaded.messages(), next.messages());
+    }
+
     /// Released 0.8.10 ZERO-REWRITE history (the universal mob-supervisor
     /// shape: a transcript graph with one revision and zero commits) is
     /// REFUSED TYPED by the shipping 0.8.11 strict importer, through our

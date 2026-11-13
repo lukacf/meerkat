@@ -784,7 +784,7 @@ mod tests {
         }
     }
 
-    /// Ruling R1 of the Meta host-requester delta read: a person's send that
+    /// The voice mirror keeps voicing attested sends: a person's send that
     /// records an attested requester origin (a signed-in console send,
     /// `console_signed_in`, or a host-relayed send, `host_attested`) is not a
     /// typed-text turn. Its rows carry the origin and no `TypedText` stamp,
@@ -803,7 +803,7 @@ mod tests {
                     meerkat_core::PrincipalRef::new(meerkat_core::PrincipalKind::Human, "person-1")
                         .expect("principal"),
                 )
-                .with_origin(Some(origin)),
+                .with_origin(Some(origin.clone())),
             );
             let mut reply =
                 meerkat_core::types::BlockAssistantMessage::snapshot(vec![AssistantBlock::Text {

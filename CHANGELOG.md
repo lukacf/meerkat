@@ -62,7 +62,8 @@ them.
 ### Added
 
 - `meerkat-core`: `RequesterOrigin` (`ConsoleSignedIn`, `HostAttested`, and
-  `Unknown`, which a value this build does not know loads as) and
+  `Unknown(String)`, which a value this build does not know loads as, keeping
+  its exact text so it is written back unchanged; `as_str`, `from_wire`) and
   `TurnRequester::{with_origin, origin}`: the turn's requester records how its
   ingress attested it. Core carries the value and never interprets it; an
   `Unknown` origin is never an attestation. Its wire schema is an open

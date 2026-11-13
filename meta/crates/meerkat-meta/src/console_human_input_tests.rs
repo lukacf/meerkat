@@ -379,7 +379,7 @@ comms = true
             .await
             .unwrap()
             .unwrap();
-        // Cross-check on the local merge, (d): this replays an already
+        // This replays an already
         // delivered send. It commits no second row, so nothing new can be
         // proven clean: the one row is the send's own first delivery.
         if let Some(session) = replayed_session {
@@ -1662,10 +1662,9 @@ async fn console_human_redispatch_carries_the_requester_its_frame_recorded() {
         "the redispatched turn names the requester the frame recorded, as the \
          signed-in person who sent it"
     );
-    // TR-S1, inverted (the reader's finding, fixed): a signed-in person's
-    // console send is conversational, names that person as its direct
-    // requester with origin console_signed_in (asserted above), so the
-    // distiller's rule 3 holds for it. Ruling R1: it carries no typed-text
+    // TR-S1: a signed-in person's console send is conversational, names that
+    // person as its direct requester with origin console_signed_in (asserted
+    // above), so the distiller's rule 3 holds for it. It carries no typed-text
     // stamp, so the voice mirror keeps its behaviour.
     assert!(
         row.identity
@@ -1677,11 +1676,11 @@ async fn console_human_redispatch_carries_the_requester_its_frame_recorded() {
     );
     assert_eq!(
         row.identity.turn_input, None,
-        "TR-S1: a console person's send carries no typed-text stamp (R1)"
+        "TR-S1: a console person's send carries no typed-text stamp"
     );
-    // Cross-check, (a) and (d): this is the first delivery, after a restart,
+    // This is the first delivery, after a restart,
     // of a recorded console send the person made (its origin comes from what
-    // the send's frame recorded, ruling R3). The real committed row is rule-3
+    // the send's frame recorded). The real committed row is rule-3
     // clean, and its fact after a tainted peer message is stored ACTIVE.
     assert!(
         crate::memory::distiller::proven_clean_row(&history[position]),
@@ -2839,9 +2838,8 @@ async fn a_self_hosted_vision_model_takes_an_image_through_meta_send_message() {
 }
 
 // ---------------------------------------------------------------------------
-// End-to-end rows to the stored record for the two attested doors (item 4 of
-// the Core lead's delta read 2; started from the reader's probes E2E-A..C).
-// Ruling R1: the clean class reads the recorded requester origin; neither
+// End-to-end rows to the stored record for the two attested doors (E2E-A..C).
+// The clean class reads the recorded requester origin; neither
 // door stamps typed text, so the voice mirror (which reads that stamp as
 // quiet text chat) keeps its behaviour.
 // ---------------------------------------------------------------------------
@@ -2965,7 +2963,7 @@ async fn e2e_a_live_console_person_send_is_rule3_clean_probe_and_anonymous_are_n
 
     e2e_console_send_as(
         &h,
-        h.request("tr2-a-typed", TYPED),
+        h.request("e2e-a-typed", TYPED),
         scope.clone(),
         sender.clone(),
     )
@@ -2994,7 +2992,7 @@ async fn e2e_a_live_console_person_send_is_rule3_clean_probe_and_anonymous_are_n
 
     let probe_request = ConsoleSendRequest {
         origin_kind: Some(crate::console_aggregator::ConsoleTurnOrigin::OperatorProbe),
-        ..h.request("tr2-a-probe", PROBE)
+        ..h.request("e2e-a-probe", PROBE)
     };
     e2e_console_send_as(&h, probe_request, scope.clone(), sender.clone()).await;
     let probe = e2e_row_holding(&h, PROBE).await;
@@ -3009,7 +3007,7 @@ async fn e2e_a_live_console_person_send_is_rule3_clean_probe_and_anonymous_are_n
         model_label: None,
         ..sender
     };
-    e2e_console_send_as(&h, h.request("tr2-a-anon", ANON), scope, anonymous).await;
+    e2e_console_send_as(&h, h.request("e2e-a-anon", ANON), scope, anonymous).await;
     let anon = e2e_row_holding(&h, ANON).await;
     assert!(
         !proven_clean_row(&anon),
@@ -3081,7 +3079,7 @@ async fn e2e_b_host_attested_send_commits_a_rule3_clean_row_through_the_real_bri
     h.stop().await;
 }
 
-/// E2E-C (item 2): a signed-in person's console send that SELECTS A SKILL
+/// E2E-C: a signed-in person's console send that SELECTS A SKILL
 /// commits one conversational user row holding the skill body (a
 /// `SkillContext` block) next to the typed text. The row is rule-3 clean, but
 /// the Distiller's projection of it, which is what the clean extraction call
@@ -3097,7 +3095,7 @@ async fn e2e_c_a_selected_skill_body_stays_out_of_the_clean_extraction() {
     let (_alice, scope, sender) = e2e_console_person();
     let request = ConsoleSendRequest {
         skill_refs: vec![SkillRef::Structured(chosen)],
-        ..h.request("tr2-c-skill", TYPED)
+        ..h.request("e2e-c-skill", TYPED)
     };
     e2e_console_send_as(&h, request, scope, sender).await;
     let message = e2e_row_holding(&h, TYPED).await;

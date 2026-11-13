@@ -1050,7 +1050,7 @@ fn rule_iii_each_condition_is_required() {
     );
 }
 
-/// Item 2 of the delta read: a console send that selected a skill commits ONE
+/// A console send that selected a skill commits ONE
 /// row holding the skill's rendered body and the person's typed text. The
 /// row is clean (it carries the attested origin), but the Distiller's
 /// projection of it, which is what the clean extraction call reads, holds
@@ -1721,8 +1721,8 @@ async fn row_persisted_taint_declaration_classes_tainted_after_a_restart()
 // -- cross-check with the host requester route ---------------------------------
 //
 // The rows below have exactly the shapes the real surfaces commit, as the
-// end-to-end rows assert them (ruling R1: no typed-text stamp on either door;
-// the recorded origin is the fact):
+// end-to-end rows assert them (no typed-text stamp on either door; the
+// recorded origin is the fact):
 // - a signed-in person's console send (console_human_input_tests TR-S1):
 //   no turn-input stamp, direct Human requester, origin console_signed_in;
 // - a host meta/send with a requester (host_human_input
@@ -1857,9 +1857,9 @@ async fn cross_check_schedule_fire_is_quarantined() -> Result<(), Box<dyn Error>
     Ok(())
 }
 
-/// Delta read 3 item 2: an origin value this build does not know (a newer
+/// An origin value this build does not know (a newer
 /// host wrote it) still LOADS the stored transcript row, as
-/// `RequesterOrigin::Unknown`, but the row is not attested: it is not
+/// `RequesterOrigin::Unknown` carrying that text, but the row is not attested: it is not
 /// rule-3 clean, and its fact after a tainted peer message is QUARANTINED.
 #[tokio::test]
 async fn row_unknown_origin_loads_the_row_but_its_content_is_not_trusted()
@@ -1881,8 +1881,15 @@ async fn row_unknown_origin_loads_the_row_but_its_content_is_not_trusted()
             .requester
             .as_ref()
             .and_then(meerkat_core::TurnRequester::origin),
-        Some(meerkat_core::RequesterOrigin::Unknown),
-        "an unknown origin loads as Unknown"
+        Some(meerkat_core::RequesterOrigin::from_wire(
+            "a_door_from_a_newer_host"
+        )),
+        "an unknown origin loads as Unknown with its own text"
+    );
+    assert_eq!(
+        serde_json::to_value(&row)?["identity"]["requester"]["origin"],
+        serde_json::json!("a_door_from_a_newer_host"),
+        "and is written back as that text"
     );
     assert!(
         !crate::memory::distiller::proven_clean_row(&row),

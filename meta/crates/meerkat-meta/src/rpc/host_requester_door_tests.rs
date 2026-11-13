@@ -4,7 +4,7 @@
 //! and forks. Each row reads the door's sources and requires that none of
 //! them names the host-attested send, its work-spec setter or its origin; a
 //! final row requires that the only callers are the host route itself.
-//! Ruling R1 of delta read 2: the attested doors record a requester origin
+//! The attested doors record a requester origin
 //! and never the typed-text turn stamp (the voice mirror's fact); a row pins
 //! that no Meta or mob source stamps it.
 #![allow(
@@ -43,7 +43,41 @@ fn names_a_forwarding_setter(text: &str) -> Option<&'static str> {
     {
         return Some(token);
     }
+    if sets_requester_origin_field(text) {
+        return Some("requester_origin field");
+    }
     (text.contains("TurnRequester") && text.contains(".with_origin(")).then_some(".with_origin(")
+}
+
+/// Whether `text` sets or moves a `requester_origin` field to something other
+/// than the literal `None`: `requester_origin: value` (not `: None`, and not
+/// a type such as `: Option<...>`) or the shorthand `requester_origin,` /
+/// `requester_origin }` in a struct literal or pattern.
+fn sets_requester_origin_field(text: &str) -> bool {
+    const FIELD: &str = "requester_origin";
+    let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    text.match_indices(FIELD).any(|(at, _)| {
+        if text[..at].chars().next_back().is_some_and(is_ident) {
+            return false;
+        }
+        let rest = &text[at + FIELD.len()..];
+        if rest.chars().next().is_some_and(is_ident) {
+            return false;
+        }
+        let rest = rest.trim_start();
+        if let Some(value) = rest.strip_prefix(':') {
+            if value.starts_with(':') {
+                return false; // a path, `requester_origin::...`
+            }
+            let value = value.trim_start();
+            return !(value.starts_with("None") || value.starts_with("Option<"));
+        }
+        if rest.starts_with(',') || rest.starts_with('}') {
+            let before = text[..at].trim_end();
+            return before.ends_with('{') || before.ends_with(',') || before.ends_with('(');
+        }
+        false
+    })
 }
 
 fn repo_root() -> PathBuf {
@@ -247,9 +281,14 @@ fn only_the_host_route_names_a_host_attested_requester() {
         "crates/meerkat-mob/src/runtime/actor.rs",
         // Core's turn semantics carry the origin from the host to the turn.
         "crates/meerkat-core/src/service/mod.rs",
-        // The runtime stamps the admitted input's origin onto the requester.
+        // The runtime stamps the admitted input's origin onto the requester,
+        // and carries it on the input through its state transitions.
         "crates/meerkat-runtime/src/input.rs",
+        "crates/meerkat-runtime/src/input_state.rs",
         "crates/meerkat-runtime/src/runtime_loop.rs",
+        // Mob carries the work spec's origin onto the member's runtime input.
+        "crates/meerkat-mob/src/runtime/handle.rs",
+        "crates/meerkat-mob/src/runtime/provisioner.rs",
         // The Console's live person send (its recorded origin).
         "meta/crates/meerkat-meta/src/mob_handle_runtime.rs",
         // The Distiller's rule 3 reads the recorded origin (never sets it).
@@ -320,6 +359,26 @@ fn the_workspace_scan_skips_inline_tests_and_matches_whole_tokens() {
         None,
         "another type's with_origin is not the requester's"
     );
+    for set in [
+        "Header { requester_origin: spec.requester_origin, x }",
+        "Header { requester, requester_origin, x }",
+        "let Header { requester_origin } = header;",
+        "work(a, requester_origin, b)",
+    ] {
+        assert_eq!(
+            names_a_forwarding_setter(set),
+            Some("requester_origin field"),
+            "{set}"
+        );
+    }
+    for unset in [
+        "Header { requester_origin: None, x }",
+        "pub requester_origin: Option<meerkat_core::RequesterOrigin>,",
+        "fn f(requester_origin: Option<RequesterOrigin>) {}",
+        "let tool_requester_origin = 1;",
+    ] {
+        assert_eq!(names_a_forwarding_setter(unset), None, "{unset}");
+    }
     let out_of_line = "#[cfg(test)]\nmod door_tests;\nfn shipped() { send_host_attested(); }\n";
     assert!(names_token(
         &without_inline_test_modules(out_of_line),
@@ -327,7 +386,7 @@ fn the_workspace_scan_skips_inline_tests_and_matches_whole_tokens() {
     ));
 }
 
-/// Ruling R1: the attested doors never stamp a turn as typed text. That stamp
+/// The attested doors never stamp a turn as typed text. That stamp
 /// is the live voice mirror's fact (a typed-text turn is quiet text chat), so
 /// stamping it from a signed-in console send or a host-attested send would
 /// silently mute those turns on a live voice channel. No non-test Meta or mob
@@ -351,7 +410,7 @@ fn no_meta_or_mob_door_stamps_typed_text() {
     assert!(read > 0, "read the Meta and mob sources");
 }
 
-/// Item 7: every console send surface refuses a `requester` it is given, from
+/// Every console send surface refuses a `requester` it is given, from
 /// one refusal: the three `meta/console/send` handlers and `POST /console/send`.
 #[test]
 fn every_console_send_surface_refuses_a_requester() {

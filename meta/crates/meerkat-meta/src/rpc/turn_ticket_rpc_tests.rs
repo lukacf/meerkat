@@ -171,7 +171,7 @@ impl TicketBridge {
             interaction_id: delivery.interaction_id.clone(),
             idempotency_key: key.clone(),
             requester: delivery.requester.clone(),
-            requester_origin: delivery.requester_origin,
+            requester_origin: delivery.requester_origin.clone(),
         });
         let session = self.current_session().to_string();
         key.is_some_and(|key| {

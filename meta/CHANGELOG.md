@@ -89,9 +89,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   one (`console_signed_in` or `host_attested`). The field is open: the wire
   schema is a string, the SDK types are `str` (Python) and `string`
   (TypeScript), and Rust loads a value it does not know as
-  `RequesterOrigin::Unknown`. An unknown value is not attested and never
-  clean: the row loads, its content is not trusted, and a later third value
-  is not a breaking change.
+  `RequesterOrigin::Unknown` carrying the exact text, written back unchanged,
+  so a stored session holding a newer value reloads intact through the
+  continuity store. An unknown value is not attested and never clean: the row
+  loads, its content is not trusted, and a later third value is not a
+  breaking change.
 
 ### Added
 

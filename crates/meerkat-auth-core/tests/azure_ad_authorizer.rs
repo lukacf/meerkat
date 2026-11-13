@@ -703,3 +703,67 @@ async fn token_endpoint_error_propagates_as_refresh_failed() {
         "got {err:?}"
     );
 }
+
+/// Run every echo of the request `authorizer` just signed (each header it
+/// added, as sent, in a header line and alone; each credential bare and in
+/// a URL) through its redaction: none of `credentials` is left, and the
+/// text around them is.
+fn assert_echoes_are_redacted(
+    authorizer: &dyn HttpAuthorizer,
+    headers: &[(String, String)],
+    credentials: &[&str],
+) {
+    let mut echoes = Vec::new();
+    for credential in credentials {
+        echoes.push(format!(
+            "upstream echo: credential {credential} was refused"
+        ));
+        echoes.push(format!(
+            "upstream echo: GET http://upstream.invalid/v1/models?session={credential}&page=2"
+        ));
+    }
+    for (name, value) in headers {
+        echoes.push(format!(
+            r#"{{"error":{{"message":"upstream echo: rejected request with header {name}: {value}","type":"invalid_request_error"}}}}"#
+        ));
+        echoes.push(format!("upstream echo: value {value} was refused"));
+    }
+    for echo in echoes {
+        let mut diagnostic = echo;
+        authorizer.redact_response_diagnostic(&mut diagnostic);
+        for credential in credentials {
+            assert!(
+                !diagnostic.contains(credential),
+                "{} left a credential in: {diagnostic}",
+                authorizer.label()
+            );
+        }
+        assert!(
+            diagnostic.contains("upstream echo"),
+            "the text around the credential is kept: {diagnostic}"
+        );
+    }
+}
+
+/// A response that repeats the Azure AD access token loses it in the
+/// authorizer's redaction.
+#[tokio::test]
+async fn redacts_the_access_token_it_signed_with() {
+    let token = format!("azure-{}", "madeupaccesstoken".repeat(3));
+    let mock = start_mock(&token, 3600).await;
+    let (authorizer, _, _) = with_runtime_auth_lease(
+        AzureAdAuthorizer::new(
+            "https://cognitiveservices.azure.com/.default",
+            creds(&mock.base_url),
+        )
+        .with_token_url_override(format!("{}/tenant-id/oauth2/v2.0/token", mock.base_url)),
+    );
+    let mut headers = Vec::new();
+    let mut req = HttpAuthorizationRequest {
+        method: "POST",
+        url: "https://example.foundry.azure.com/v1/messages",
+        headers: &mut headers,
+    };
+    authorizer.authorize(&mut req).await.unwrap();
+    assert_echoes_are_redacted(&authorizer, &headers, &[&token]);
+}

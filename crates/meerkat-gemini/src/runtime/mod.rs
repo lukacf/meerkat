@@ -63,6 +63,9 @@ struct ManagedGoogleOauthAuthorizer {
     metadata: AuthMetadata,
     runtime: oauth::GoogleCodeAssistOAuthRuntime,
     cached: std::sync::Mutex<Option<ManagedGoogleOauthCredential>>,
+    /// The access tokens requests were signed with, a refreshed-out one
+    /// included.
+    signed_tokens: meerkat_core::auth::SignedCredentials,
 }
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
@@ -93,6 +96,7 @@ impl ManagedGoogleOauthAuthorizer {
             metadata: metadata.clone(),
             runtime,
             cached: std::sync::Mutex::new(None),
+            signed_tokens: meerkat_core::auth::SignedCredentials::new(),
         };
         let lease = authorizer.lease_key();
         // Unattended setup never waits behind an operating-system credential
@@ -306,9 +310,14 @@ impl meerkat_core::HttpAuthorizer for ManagedGoogleOauthAuthorizer {
         req: &mut meerkat_core::HttpAuthorizationRequest<'_>,
     ) -> Result<(), AuthError> {
         let (_guard, access_token) = self.current_credential().await?;
+        self.signed_tokens.record(&access_token);
         req.headers
             .push(("Authorization".into(), format!("Bearer {access_token}")));
         Ok(())
+    }
+
+    fn visit_signed_credentials(&self, visit: &mut dyn FnMut(&str)) {
+        self.signed_tokens.visit(visit);
     }
 
     fn label(&self) -> &'static str {
@@ -663,8 +672,11 @@ async fn post_code_assist_json<T: serde::de::DeserializeOwned>(
             status.as_u16(),
         )));
     }
-    let text = response.text().await.unwrap_or_default();
+    let mut text = response.text().await.unwrap_or_default();
     if !status.is_success() {
+        // The endpoint, or a gateway in front of it, can repeat the
+        // request's bearer in its refusal.
+        meerkat_core::redact::redact_credentials(&mut text, |visit| visit(access_token));
         return Err(ProviderAuthError::SourceResolutionFailed(format!(
             "Google Code Assist setup request failed: status={} body={}",
             status.as_u16(),
@@ -698,8 +710,11 @@ async fn get_code_assist_json<T: serde::de::DeserializeOwned>(
             status.as_u16(),
         )));
     }
-    let text = response.text().await.unwrap_or_default();
+    let mut text = response.text().await.unwrap_or_default();
     if !status.is_success() {
+        // The endpoint, or a gateway in front of it, can repeat the
+        // request's bearer in its refusal.
+        meerkat_core::redact::redact_credentials(&mut text, |visit| visit(access_token));
         return Err(ProviderAuthError::SourceResolutionFailed(format!(
             "Google Code Assist operation request failed: status={} body={}",
             status.as_u16(),
@@ -2017,6 +2032,70 @@ mod tests {
         assert!(!rendered.contains("bearer-secret"));
         assert_eq!(target_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
+
+    /// A Code Assist setup endpoint, or a gateway in front of it, that
+    /// refuses a request with a body repeating the request's access token
+    /// (the bare value, the header as sent) is reported by status and body
+    /// without the token, for the setup request and for the operation poll.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+    #[tokio::test]
+    #[allow(clippy::unwrap_used, clippy::panic)]
+    async fn code_assist_setup_refusal_carries_no_access_token() {
+        let token = format!("codeassist-{}", "madeupaccesstoken".repeat(3));
+        let app = axum::Router::new().fallback(|headers: axum::http::HeaderMap| async move {
+            let authorization = headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default();
+            let bare = authorization
+                .strip_prefix("Bearer ")
+                .unwrap_or(authorization);
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                axum::Json(serde_json::json!({
+                    "error": {
+                        "code": 400,
+                        "message": format!(
+                            "upstream echo: credential {bare} was refused; header \
+                             authorization: {authorization}"
+                        ),
+                        "status": "INVALID_ARGUMENT",
+                    },
+                })),
+            )
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let http = meerkat_auth_core::auth_oauth::credential_http_client().unwrap();
+        let url = format!("http://{addr}/v1internal:loadCodeAssist");
+        let posted = post_code_assist_json::<serde_json::Value>(
+            &http,
+            &token,
+            url.clone(),
+            serde_json::json!({}),
+        )
+        .await;
+        let polled = get_code_assist_json::<serde_json::Value>(&http, &token, url).await;
+        server.abort();
+        for (request, result) in [("setup request", posted), ("operation poll", polled)] {
+            let error = match result {
+                Err(error) => error,
+                Ok(_) => panic!("{request}: a refusal is an error"),
+            };
+            let rendered = format!("{error} {error:?}");
+            assert!(
+                !rendered.contains(&token),
+                "{request}: the error leaked the access token: {rendered}"
+            );
+            assert!(
+                rendered.contains("status=400") && rendered.contains("upstream echo"),
+                "{request}: the refusal is reported by status and body: {rendered}"
+            );
+        }
+    }
     #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
     use std::sync::Mutex;
 
@@ -2291,6 +2370,50 @@ mod tests {
             assert!(headers.is_empty());
             assert_eq!(fixture.store.calls.load(Ordering::SeqCst), calls);
             assert_eq!(fixture.owner.snapshot(&fixture.lease), released);
+        }
+
+        #[tokio::test]
+        async fn redacts_the_access_token_it_signed_with() {
+            use meerkat_core::HttpAuthorizer as _;
+            let fixture = fixture("echo", None).await;
+            let mut headers = Vec::new();
+            let mut request = meerkat_core::HttpAuthorizationRequest {
+                method: "POST",
+                url: "http://127.0.0.1:9/model",
+                headers: &mut headers,
+            };
+            fixture.authorizer.authorize(&mut request).await.unwrap();
+            let bearer = headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                .map(|(_, value)| value.clone())
+                .unwrap();
+            let token = bearer.strip_prefix("Bearer ").unwrap();
+            assert!(!token.is_empty());
+            // A response that repeats the access token (its header as sent,
+            // the bare value, a URL carrying it) loses it in the
+            // authorizer's redaction.
+            for echo in [
+                format!("upstream echo: rejected request with header authorization: {bearer}"),
+                format!("upstream echo: value {bearer} was refused"),
+                format!("upstream echo: credential {token} was refused"),
+                format!(
+                    "upstream echo: GET http://upstream.invalid/v1/models?session={token}&page=2"
+                ),
+            ] {
+                let mut diagnostic = echo;
+                fixture
+                    .authorizer
+                    .redact_response_diagnostic(&mut diagnostic);
+                assert!(
+                    !diagnostic.contains(token),
+                    "a credential is left in: {diagnostic}"
+                );
+                assert!(
+                    diagnostic.contains("upstream echo"),
+                    "the text around the credential is kept: {diagnostic}"
+                );
+            }
         }
 
         #[tokio::test]

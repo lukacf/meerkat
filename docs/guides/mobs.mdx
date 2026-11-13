@@ -1166,8 +1166,8 @@ untouched. Cancelling an idle member is not an error. On success the result
 is `{"mob_id": "...", "ok": true}`.
 
 <Warning>
-Known issue in 0.9.5 through 0.9.14 (0.8.51 through 0.9.4 not determined),
-noted 2026-11-13, confirmed by a test for `turn/start` on the member's
+Known issue in 0.9.5 through 0.9.14 (the range read from the source; 0.8.51
+through 0.9.4 not determined), noted 2026-11-13, confirmed by a test for `turn/start` on the member's
 session id (`mob/turn_start` reaches the same path, read from the source):
 if a client has a turn of its own queued on that member's session,
 `mob/cancel_all_work` also abandons it, and the mobs that member's session

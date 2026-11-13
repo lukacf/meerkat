@@ -14,6 +14,20 @@
     "api": { "enum": ["responses", "chat_completions", "messages", "generate_content", "realtime"] },
     "level": { "enum": ["none", "minimal", "low", "medium", "high", "xhigh", "max"] },
     "model_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$", "maxLength": 128 },
+    "route": { "type": "string", "pattern": "^[a-z][a-z0-9_]*/[a-z][a-z0-9_]*$", "maxLength": 96 },
+    "cell_line": {
+      "description": "What a row says it picked for one cell: the line it prints after the prefix `reasoning-effort-receipt-cell `, one JSON object. test is the row's function name, cell the manifest's cell id, route the route as reported (backend/api).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["test", "cell", "model", "level", "route"],
+      "properties": {
+        "test": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$", "maxLength": 200 },
+        "cell": { "$ref": "#/$defs/token" },
+        "model": { "$ref": "#/$defs/model_id" },
+        "level": { "$ref": "#/$defs/level" },
+        "route": { "$ref": "#/$defs/route" }
+      }
+    },
     "by_rule": {
       "type": "object",
       "additionalProperties": false,
@@ -208,7 +222,8 @@
             "credential_unavailable",
             "request_budget_not_agreed",
             "stopped_on_provider_status",
-            "infrastructure_failure"
+            "infrastructure_failure",
+            "ran_at_another_commit"
           ]
         }
       }
@@ -228,6 +243,7 @@
         "counts",
         "tests_complete",
         "tests",
+        "cell_lines",
         "observations"
       ],
       "properties": {
@@ -282,8 +298,13 @@
             }
           }
         },
+        "cell_lines": {
+          "description": "The model and level each row says it picked for a cell, read from the lines the rows print. Empty when the run's output shows none.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/cell_line" }
+        },
         "observations": {
-          "description": "The cells a row with observed cells saw, one item each.",
+          "description": "The cells a row with observed cells saw, one item each. A failed cell may carry the HTTP status and the provider's error code, as typed fields its row emits; never a message.",
           "type": "array",
           "items": {
             "type": "object",
@@ -318,7 +339,9 @@
                   }
                 ]
               },
-              "result": { "enum": ["pass", "fail", "skip"] }
+              "result": { "enum": ["pass", "fail", "skip"] },
+              "http_status": { "type": "integer", "minimum": 100, "maximum": 599 },
+              "error_code": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$", "maxLength": 64 }
             }
           }
         }

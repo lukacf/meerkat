@@ -12,6 +12,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  CELL_LINE_PREFIX,
   MANIFEST_PATH,
   MODES,
   RECEIPT_JSON_NAME,
@@ -21,6 +22,7 @@ import {
   buildLegResult,
   buildNotRunResult,
   buildReceipt,
+  checkReceipt,
   definesTest,
   generate,
   parseNextestJson,
@@ -76,7 +78,10 @@ function manifest() {
   return {
     schema_version: 1,
     kind: "reasoning_effort_receipt_manifest",
-    rules: [{ id: "catalog_model", text: "A model of the catalog that states levels." }],
+    rules: [
+      { id: "catalog_model", text: "A model of the catalog that states levels." },
+      { id: "accepted_level", text: "A level the route accepts." },
+    ],
     cells: [
       { id: "direct", provider_family: "openai", backend: "openai_api", api: "responses" },
       { id: "copilot", provider_family: "openai", backend: "copilot", api: "responses" },
@@ -114,7 +119,7 @@ function manifest() {
         test: routesTest("resumed_level_is_sent"),
         outcome: { kind: "sent" },
         model: { rule: "catalog_model" },
-        requested_level: { level: "high" },
+        requested_level: { rule: "accepted_level" },
         cells: [{ cell: "direct" }],
       },
       {
@@ -151,27 +156,42 @@ function testEvent(event, name, extra = {}) {
   return { type: "test", event, name, ...extra };
 }
 
-/// A `libtest-json-plus` run of the route rows: a pass, a failure with
-/// captured output, an ignored test, a pass on the second try, and a
-/// library test of another crate.
-function routesJson() {
+function cellLine(test, cell, model, level, route) {
+  return `${CELL_LINE_PREFIX}${JSON.stringify({ test, cell, model, level, route })}`;
+}
+
+/// A `libtest-json-plus` run of the route rows with `--no-capture`: a pass,
+/// a failure with captured output, an ignored test, a pass on the second
+/// try, and a library test of another crate. The rows' cell lines are whole
+/// lines between the events; the failed test's line is in its output.
+function routesJson({ cellLines = true } = {}) {
+  const printed = cellLines
+    ? [
+        cellLine("supported_level_is_sent", "direct", "catalog-model-9", "high", "openai_api/responses"),
+        cellLine("supported_level_is_sent", "copilot", "fixture-model-1", "low", "copilot/responses"),
+        cellLine("resumed_level_is_sent", "direct", "catalog-model-9", "low", "openai_api/responses"),
+      ]
+    : [];
+  const failedOutput = cellLines ? `${cellLine("unsupported_level_is_refused", "direct", "catalog-model-9", "max", "openai_api/responses")}\n${CAPTURED}\n` : CAPTURED;
   return [
     suite("started", "demo-facade", "effort_routes", "test"),
     testEvent("started", "demo-facade::effort_routes$supported_level_is_sent"),
     testEvent("ignored", "demo-facade::effort_routes$live_matrix"),
+    ...printed,
     testEvent("ok", "demo-facade::effort_routes$supported_level_is_sent", { exec_time: 0.2 }),
-    testEvent("failed", "demo-facade::effort_routes$unsupported_level_is_refused", { exec_time: 0.1, stdout: CAPTURED }),
+    testEvent("failed", "demo-facade::effort_routes$unsupported_level_is_refused", { exec_time: 0.1, stdout: failedOutput }),
     testEvent("ok", "demo-facade::effort_routes$resumed_level_is_sent#2", { exec_time: 0.1 }),
     { type: "suite", event: "failed", passed: 2, failed: 1, ignored: 1, nextest: { crate: "demo-facade", test_binary: "effort_routes", kind: "test" } },
     suite("started", "demo-core", "demo_core", "lib"),
     testEvent("ok", "demo-core::demo_core$resolve::tests::table_is_total", { exec_time: 0.01 }),
     suite("ok", "demo-core", "demo_core", "lib"),
   ]
-    .map((event) => JSON.stringify(event))
+    .map((event) => (typeof event === "string" ? event : JSON.stringify(event)))
     .join("\n");
 }
 
-/// The human log of a run that shows every status line.
+/// The human log of a run that shows every status line, and with
+/// `--success-output final` what a passing test printed.
 function routesLog({ quiet = false } = {}) {
   const shown = quiet
     ? []
@@ -181,6 +201,11 @@ function routesLog({ quiet = false } = {}) {
         "  stdout ───",
         `    ${CAPTURED}`,
         "        PASS [   0.005s] (3/3) demo-facade::effort_routes supported_level_is_sent",
+        "  stdout ───",
+        "",
+        "    running 1 test",
+        `    ${cellLine("supported_level_is_sent", "direct", "catalog-model-9", "high", "openai_api/responses")}`,
+        "    test supported_level_is_sent ... ok",
       ];
   return [
     "   Compiling demo-facade v1.4.2 (/home/operator/src/demo/crates/demo-facade)",
@@ -352,7 +377,7 @@ row("the reader of nextest's JSON output names every test and reads no captured 
   assert.ok(!JSON.stringify(parsed).includes("quota"), "captured output is not read");
 
   refuses(() => parseNextestJson(""), /no suite event/, "an empty output is no run");
-  refuses(() => parseNextestJson("not json"), /is not JSON/, "a line that is not JSON");
+  refuses(() => parseNextestJson("not json"), /no suite event/, "an output that holds no event");
   refuses(
     () => parseNextestJson(JSON.stringify({ type: "suite", event: "started", test_count: 1 })),
     /libtest-json-plus/,
@@ -365,9 +390,15 @@ row("the reader of nextest's JSON output names every test and reads no captured 
   const odd = [suite("started", "demo-facade", "effort_routes", "test"), testEvent("timeout", "demo-facade::effort_routes$a")];
   refuses(() => parseNextestJson(odd.map((event) => JSON.stringify(event)).join("\n")), /test event this reader does not know/, "an unknown test event");
   const opening = JSON.stringify(suite("started", "demo-facade", "effort_routes", "test"));
-  refuses(() => parseNextestJson(`${opening}\n${JSON.stringify({ type: "bench", event: "ok", name: "demo-facade::effort_routes$a" })}`), /unknown type/, "an event of another type");
+  const printedJson = parseNextestJson(`${opening}\n${JSON.stringify({ type: "bench", event: "ok", name: "demo-facade::effort_routes$a" })}\n{"type":"response.output_text.delta","delta":"what a test printed"}`);
+  assert.deepEqual([printedJson.tests, printedJson.cell_lines], [[], []], "JSON a test prints is its output, not an event of nextest's");
   refuses(() => parseNextestJson(`${opening}\n${JSON.stringify(testEvent("ok", "a_test_without_its_binary"))}`), /names its test in a form/, "a test name without its binary");
-  refuses(() => parseNextestJson(`${opening}\n7`), /is not an event/, "a line that is JSON and no event");
+  refuses(() => parseNextestJson(`${opening}\n{"type":"test","event":"ok","name":"demo-facade::effort_rou`), /line 2 of the nextest JSON output is not JSON/, "an event that is cut short");
+  refuses(
+    () => parseNextestJson(`${opening}\nrunning 1 test${JSON.stringify(testEvent("ok", "demo-facade::effort_routes$a"))}`),
+    /line 2 of the nextest JSON output holds an event after other text/,
+    "an event that shares its line with a test's output",
+  );
 });
 
 row("the reader of nextest's log takes the summary's counts and only the tests it shows", () => {
@@ -710,7 +741,11 @@ row("an entry is executed only on its own recorded result at the product commit"
   assert.deepEqual(direct.result_file, { name: "routes.json", sha256: digest }, "the entry points at the result file and its digest");
   assert.deepEqual(direct.test, { ...routesTest("supported_level_is_sent"), source_sha256: sha256(Buffer.from(SOURCES.get(ROUTES_SOURCE))) });
   assert.deepEqual([direct.provider_family, direct.api, direct.route], ["openai", "responses", "openai_api/responses"]);
-  assert.deepEqual([direct.model, direct.requested_level, direct.outcome], [{ rule: "catalog_model" }, { level: "high" }, { kind: "sent", level: { level: "high" } }]);
+  assert.deepEqual(
+    [direct.model, direct.requested_level, direct.outcome, direct.values_basis],
+    [{ id: "catalog-model-9" }, { level: "high" }, { kind: "sent", level: { level: "high" } }, "row_output"],
+    "the row's own line names the model its rule picked",
+  );
   const copilot = entryOf(receipt, "routes.supported/copilot");
   assert.deepEqual([copilot.route, copilot.model, copilot.requested_level], ["copilot/responses", { id: "fixture-model-1" }, { level: "low" }], "a cell's own model and level win");
 
@@ -814,6 +849,190 @@ row("observed cells come from the leg result and from nowhere else", () => {
   refuses(() => liveResult([observation({ outcome: { kind: "refused", reason: "429 Too Many Requests" } })]), /does not match its schema/, "a refusal reason that is provider text");
 });
 
+row("a failed live cell carries the typed status and code its row emitted, never a message", () => {
+  const failed = observation({ model: "listed-model-d", result: "fail", http_status: 429, error_code: "rate_limited" });
+  const receipt = buildReceipt(withResult("live.json", liveResult([failed, observation({ model: "listed-model-e", result: "fail" }), observation()])));
+  assert.deepEqual(
+    receipt.entries.filter((entry) => entry.row === "live.matrix").map((entry) => [entry.model.id, entry.result, entry.failure]),
+    [
+      ["listed-model-a", "pass", null],
+      ["listed-model-d", "fail", { http_status: 429, error_code: "rate_limited" }],
+      ["listed-model-e", "fail", null],
+    ],
+  );
+  assert.ok(renderMarkdown(receipt).includes("| fail (HTTP 429, code `rate_limited`) |"));
+  const onlyStatus = buildReceipt(withResult("live.json", liveResult([observation({ result: "fail", http_status: 503 })])));
+  assert.deepEqual(entryOf(onlyStatus, "live.matrix/#1").failure, { http_status: 503, error_code: null });
+  for (const entry of receipt.entries) assert.equal(entry.failure !== null && entry.result !== "fail", false, `${entry.id}: only a failure carries one`);
+
+  refuses(() => liveResult([observation({ http_status: 200 })]), /on an observation that did not fail/, "a status on a cell that passed");
+  refuses(() => liveResult([observation({ result: "skip", error_code: "not_listed" })]), /on an observation that did not fail/, "a code on a cell that was skipped");
+  for (const [what, extra] of [
+    ["the provider's message", { message: "You exceeded your current quota." }],
+    ["an error text member", { error: "quota exceeded" }],
+    ["a code that is a sentence", { error_code: "quota exceeded for the account" }],
+    ["a status that is no HTTP status", { http_status: 42 }],
+    ["a status written as text", { http_status: "429 Too Many Requests" }],
+  ]) {
+    refuses(() => liveResult([observation({ result: "fail", ...extra })]), /does not match its schema/, what);
+  }
+  const { receipt: schema } = schemas();
+  const copy = structuredClone(receipt);
+  copy.entries.find((entry) => entry.failure !== null).failure.message = "text";
+  assert.notDeepEqual(schemaErrors(schema, schema, copy), [], "the receipt schema has no place for a message either");
+});
+
+row("the rows' cell lines name the model and level a row picked, and are the only output read", () => {
+  const direct = { test: "supported_level_is_sent", cell: "direct", model: "catalog-model-9", level: "high", route: "openai_api/responses" };
+  const copilot = { test: "supported_level_is_sent", cell: "copilot", model: "fixture-model-1", level: "low", route: "copilot/responses" };
+  const refused = { test: "unsupported_level_is_refused", cell: "direct", model: "catalog-model-9", level: "max", route: "openai_api/responses" };
+  // Whole lines of a run with --no-capture, and the line inside a failed test's output; sorted.
+  const resumed = { test: "resumed_level_is_sent", cell: "direct", model: "catalog-model-9", level: "low", route: "openai_api/responses" };
+  assert.deepEqual(parseNextestJson(routesJson()).cell_lines, [resumed, copilot, direct, refused]);
+  assert.deepEqual(parseNextestJson(routesJson({ cellLines: false })).cell_lines, []);
+  // The log of a run that shows a passing test's output, indented as nextest prints it.
+  assert.deepEqual(parseNextestLog(routesLog()).cell_lines, [direct]);
+  assert.deepEqual(parseNextestLog(routesLog({ quiet: true })).cell_lines, []);
+  const result = routesResult();
+  assert.deepEqual(result.cell_lines, [resumed, copilot, direct, refused]);
+  assert.ok(!serialize(result).includes("quota"), "the rest of a failed test's output is not kept");
+
+  // In the receipt: the picked values replace the rule, on executed entries only.
+  const receipt = buildReceipt(input());
+  const entry = (id) => {
+    const found = entryOf(receipt, id);
+    return [found.model, found.requested_level, found.outcome, found.values_basis];
+  };
+  assert.deepEqual(entry("routes.supported/direct"), [{ id: "catalog-model-9" }, { level: "high" }, { kind: "sent", level: { level: "high" } }, "row_output"]);
+  assert.deepEqual(entry("routes.supported/copilot"), [{ id: "fixture-model-1" }, { level: "low" }, { kind: "sent", level: { level: "low" } }, "row_output"]);
+  assert.deepEqual(entry("routes.unsupported/direct"), [{ id: "catalog-model-9" }, { level: "max" }, { kind: "refused", reason: "unsupported_level" }, "row_output"]);
+  assert.deepEqual(entry("routes.unsupported/copilot"), [{ rule: "catalog_model" }, { level: "max" }, { kind: "refused", reason: "unsupported_level" }, "manifest"], "a cell without a line keeps the manifest's rule");
+  assert.deepEqual(entry("routes.resumed/direct"), [{ id: "catalog-model-9" }, { level: "low" }, { kind: "sent", level: { level: "low" } }, "row_output"], "a level the row picks by rule is the level it printed");
+  assert.deepEqual(entry("binary.supported/direct"), [null, null, { kind: "sent", level: null }, null]);
+  assert.deepEqual(entryOf(receipt, "live.matrix/-").values_basis, null);
+  const without = buildReceipt(withResult("routes.json", routesResult({ output: Buffer.from(routesJson({ cellLines: false })) })));
+  assert.deepEqual([entryOf(without, "routes.supported/direct").model, entryOf(without, "routes.supported/direct").values_basis], [{ rule: "catalog_model" }, "manifest"]);
+  assert.deepEqual([entryOf(without, "routes.resumed/direct").requested_level, entryOf(without, "routes.resumed/direct").outcome], [{ rule: "accepted_level" }, { kind: "sent", level: { rule: "accepted_level" } }]);
+  // Lines of a run at another commit, and of a row that has no result of its own, name nothing.
+  const elsewhere = buildReceipt(withResult("routes.json", routesResult({ commit: OTHER_COMMIT })));
+  assert.deepEqual([entryOf(elsewhere, "routes.supported/direct").model, entryOf(elsewhere, "routes.supported/direct").values_basis], [{ rule: "catalog_model" }, "manifest"]);
+  // That run is not held to this commit's manifest either: its rows may be other rows.
+  const otherRows = structuredClone(routesResult({ commit: OTHER_COMMIT }));
+  otherRows.cell_lines.push({ ...direct, test: "a_row_of_that_commit" });
+  assert.equal(buildReceipt(withResult("routes.json", otherRows)).totals.entries.executed, 0);
+  const logOnly = buildLegResult({ leg: "routes", commit: COMMIT, command: COMMAND, exitStatus: 100, format: "nextest_human_log", output: Buffer.from(routesLog({ quiet: true }).replace("────────────\n", `────────────\n    ${cellLine("supported_level_is_sent", "direct", "catalog-model-9", "high", "openai_api/responses")}\n`)), host: HOST });
+  assert.equal(logOnly.cell_lines.length, 1);
+  assert.deepEqual([entryOf(buildReceipt(withResult("routes.json", logOnly)), "routes.supported/direct").status, entryOf(buildReceipt(withResult("routes.json", logOnly)), "routes.supported/direct").model], ["source_only", { rule: "catalog_model" }]);
+
+  // A line is exactly its five members, in the shapes the schema gives them.
+  const opening = JSON.stringify(suite("started", "demo-facade", "effort_routes", "test"));
+  const withLine = (line) => () => parseNextestJson(`${opening}\n${line}`);
+  assert.deepEqual(withLine(`  ${cellLine("a_row", "direct", "m-1", "low", "openai_api/responses")}\r`)().cell_lines.length, 1, "leading and trailing white space is not part of a line");
+  assert.deepEqual(withLine(`${cellLine("a_row", "direct", "m-1", "low", "openai_api/responses")}\n${cellLine("a_row", "direct", "m-1", "low", "openai_api/responses")}`)().cell_lines.length, 1, "the same line twice is one line");
+  refuses(withLine(`${cellLine("a_row", "direct", "m-1", "low", "openai_api/responses")}\n${cellLine("a_row", "direct", "m-2", "low", "openai_api/responses")}`), /says another thing of a_row, cell direct/, "two lines that disagree");
+  refuses(withLine(`${CELL_LINE_PREFIX}not json`), /cell line at line 2 .* is not JSON/, "a prefix and no object");
+  refuses(withLine(`${CELL_LINE_PREFIX}${JSON.stringify({ ...direct, account: "someone" })}`), /does not match its schema.*account/, "a line with another member");
+  refuses(withLine(`${CELL_LINE_PREFIX}${JSON.stringify({ ...direct, level: "x_high" })}`), /does not match its schema.*level/, "a level outside the set");
+  refuses(withLine(`${CELL_LINE_PREFIX}${JSON.stringify({ ...direct, model: "a model the provider refused: quota" })}`), /does not match its schema.*model/, "a model that is a phrase");
+  refuses(withLine(`${CELL_LINE_PREFIX}${JSON.stringify({ ...direct, route: "https://example.invalid/v1" })}`), /does not match its schema.*route/, "a route that is a URL");
+  refuses(withLine(`${CELL_LINE_PREFIX}${JSON.stringify({ test: direct.test, cell: direct.cell })}`), /has no model/, "a line without its values");
+  // With --no-capture the test harness and the tests print between the
+  // events. None of it is read but the cell lines.
+  const uncaptured = parseNextestJson(
+    [
+      opening,
+      JSON.stringify(testEvent("started", "demo-facade::effort_routes$a_row")),
+      "",
+      "running 1 test",
+      CAPTURED,
+      '{"model":"what a test printed for itself"}',
+      cellLine("a_row", "direct", "m-1", "low", "openai_api/responses"),
+      "test a_row ... ok",
+      "",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.05s",
+      JSON.stringify(testEvent("ok", "demo-facade::effort_routes$a_row")),
+    ].join("\n"),
+  );
+  assert.deepEqual([uncaptured.counts, uncaptured.cell_lines.length], [{ run: 1, passed: 1, failed: 0, skipped: 0 }, 1]);
+  assert.ok(!JSON.stringify(uncaptured).includes("quota") && !JSON.stringify(uncaptured).includes("printed for itself"), "a test's other output is not kept");
+  refuses(
+    () => parseNextestJson(`${opening}\n${JSON.stringify(testEvent("failed", "demo-facade::effort_routes$a_row", { stdout: `${CELL_LINE_PREFIX}{"test":1}\n` }))}`),
+    /cell line at line 2 .*the test's output.* does not match its schema/,
+    "a malformed line inside a failed test's output",
+  );
+  refuses(() => parseNextestLog(`    ${CELL_LINE_PREFIX}{}\n     Summary [   0.041s] 1 test run: 1 passed, 0 skipped\n`), /does not match its schema/, "a malformed line in a log");
+
+  // A line must be of a cell the manifest lists, and agree with what the manifest fixes.
+  const edited = (edit) => {
+    const copy = structuredClone(result);
+    edit(copy.cell_lines);
+    return withResult("routes.json", copy);
+  };
+  refuses(() => buildReceipt(edited((lines) => lines.push({ ...direct, test: "a_row_the_manifest_lacks" }))), /cell line of a_row_the_manifest_lacks, cell direct, which is not a cell of exactly one row/, "a line of a test no row names");
+  refuses(() => buildReceipt(edited((lines) => lines.push({ ...direct, test: "resumed_level_is_sent", cell: "copilot" }))), /cell line of resumed_level_is_sent, cell copilot, which is not a cell/, "a line of a cell the row does not list");
+  refuses(() => buildReceipt(edited((lines) => lines.push({ ...direct, test: "live_matrix" }))), /which is not a cell of exactly one row/, "a line of a row with observed cells");
+  refuses(() => buildReceipt(edited((lines) => (lines[2].route = "openai_api/chat_completions"))), /row routes\.supported reports the route openai_api\/chat_completions for the cell direct, and the manifest says openai_api\/responses/, "another route than the manifest's cell");
+  refuses(() => buildReceipt(edited((lines) => (lines[1].model = "fixture-model-2"))), /reports the model fixture-model-2 for the cell copilot, and the manifest says fixture-model-1/, "another model than the manifest fixes");
+  refuses(() => buildReceipt(edited((lines) => (lines[2].level = "low"))), /reports the level low for the cell direct, and the manifest says high/, "another level than the manifest fixes");
+  refuses(() => buildReceipt(edited((lines) => lines.push(lines[0]))), /two cell lines of one cell of one test/, "one cell twice in a result file");
+  const twoRows = manifest();
+  twoRows.rows.push({ ...twoRows.rows[0], id: "routes.supported_again" });
+  refuses(() => buildReceipt(input({ manifestText: serialize(twoRows) })), /which is not a cell of exactly one row/, "a line two rows would claim");
+});
+
+row("--check fails on a failed entry and on a gap of the offline legs, never on a gap of a live leg", () => {
+  // The fixture as it stands: two failed entries, one in-process entry its
+  // log did not name, the built-binary row without a test; the live gaps.
+  const receipt = buildReceipt(input());
+  assert.deepEqual(checkReceipt(receipt), [
+    "entry routes.unsupported/direct failed",
+    "entry routes.unsupported/copilot failed",
+    "leg binary is a gap of the offline legs: rows_not_built",
+    "entry binary.supported/direct is a gap of the offline legs: no_test_row",
+  ]);
+  assert.ok(receipt.gaps.some((gap) => gap.scope === "leg" && gap.id === "live") && receipt.gaps.some((gap) => gap.id === "live.matrix/-"), "the live gaps are in the receipt");
+
+  // Every offline entry executed and passed: the live gaps alone pass the check.
+  const offline = manifest();
+  offline.rows = offline.rows.filter((item) => item.leg !== "binary");
+  offline.legs = offline.legs.filter((leg) => leg.id !== "binary");
+  const green = routesJson().replace('"event":"failed","name":"demo-facade::effort_routes$unsupported_level_is_refused"', '"event":"ok","name":"demo-facade::effort_routes$unsupported_level_is_refused"');
+  const passing = input({ manifestText: serialize(offline) });
+  passing.results.delete("binary.json");
+  passing.results.set("routes.json", file(routesResult({ output: Buffer.from(green), exitStatus: 0 })));
+  const clean = buildReceipt(passing);
+  assert.deepEqual([clean.totals.entries.failed, clean.gaps.map((gap) => `${gap.scope} ${gap.id} ${gap.reason}`)], [0, ["leg live credential_unavailable", "entry live.matrix/- leg_not_run", "entry live.cli/- no_test_row"]]);
+  assert.deepEqual(checkReceipt(clean), [], "gaps of a live leg do not fail the check");
+
+  // Each offline gap class fails it; a live failure fails it; a live skip does not.
+  const kinds = (change) => checkReceipt(buildReceipt(change)).map((problem) => problem.replace(/^.*: /u, "").replace(/^entry .* failed$/u, "failed"));
+  const withRoutes = (result) => {
+    const change = input({ manifestText: serialize(offline) });
+    change.results.delete("binary.json");
+    change.results.set("routes.json", file(result));
+    return change;
+  };
+  assert.deepEqual([...new Set(kinds(withRoutes(buildNotRunResult({ leg: "routes", reason: "not_scheduled" }))))], ["not_scheduled", "leg_not_run"]);
+  assert.deepEqual([...new Set(kinds(withRoutes(buildNotRunResult({ leg: "routes", reason: "ran_at_another_commit" }))))], ["ran_at_another_commit", "leg_not_run"]);
+  assert.deepEqual([...new Set(kinds(withRoutes(routesResult({ output: Buffer.from(green), exitStatus: 0, commit: OTHER_COMMIT }))))], ["ran_at_another_commit"]);
+  const quiet = buildLegResult({ leg: "routes", commit: COMMIT, command: COMMAND, exitStatus: 100, format: "nextest_human_log", output: Buffer.from(routesLog({ quiet: true })), host: HOST });
+  assert.deepEqual([...new Set(kinds(withRoutes(quiet)))], ["no_per_test_result"]);
+  const skipping = green.replace('"event":"ok","name":"demo-facade::effort_routes$supported_level_is_sent"', '"event":"ignored","name":"demo-facade::effort_routes$supported_level_is_sent"');
+  assert.deepEqual([...new Set(kinds(withRoutes(routesResult({ output: Buffer.from(skipping), exitStatus: 0 }))))], ["test_skipped"]);
+  const live = (observations) => {
+    const change = withRoutes(routesResult({ output: Buffer.from(green), exitStatus: 0 }));
+    change.results.set("live.json", file(liveResult(observations)));
+    return change;
+  };
+  assert.deepEqual(kinds(live([observation({ result: "skip" })])), [], "a cell a live leg skipped is a live gap");
+  assert.deepEqual(kinds(live([observation(), observation({ model: "listed-model-b", result: "fail" })])), ["failed"], "a failed live cell fails the check");
+  assert.deepEqual(kinds(live([])), [], "a live leg that recorded no cell is a live gap");
+  // A gap the check cannot place is held against the receipt, not passed over.
+  const stray = structuredClone(clean);
+  stray.gaps.push({ scope: "entry", id: "routes.supported/elsewhere", reason: "leg_not_run" });
+  assert.deepEqual(checkReceipt(stray), ["the gap of entry routes.supported/elsewhere names no entry of the receipt"]);
+});
+
 row("forbidden fields are absent: nothing of an account, a credential, a host or a run's text is written", () => {
   const result = routesResult();
   const { json, markdown } = generate(input());
@@ -897,6 +1116,23 @@ row("the committed manifest matches its schema, names tests the tree defines, an
   assert.ok(receipt.entries.some((entry) => entry.status === "source_only") && receipt.entries.some((entry) => entry.status === "not_run"));
   assert.deepEqual(verifyReceipt({ jsonText: json, markdownText: markdown, results, host: HOST }), []);
   assert.equal(`scripts/${receipt.manifest.name}`, MANIFEST_PATH);
+  // The route rows print their cells under the manifest's own names, and
+  // every route row of the manifest prints them.
+  const routesSource = "crates/meerkat/tests/reasoning_effort_routes.rs";
+  const routes = read(routesSource).toString("utf8");
+  const naming = /fn receipt_cell\(self\) -> &'static str \{([\s\S]*?)\n {4}\}/u.exec(routes);
+  assert.ok(naming !== null, "the route rows name their cells");
+  assert.deepEqual(
+    [...naming[1].matchAll(/=> "([a-z0-9_]+)"/gu)].map((match) => match[1]).sort(),
+    committed.cells.map((cell) => cell.id).sort(),
+    "the cell names the route rows print are the manifest's cells",
+  );
+  assert.ok(routes.includes(`"${CELL_LINE_PREFIX}{}"`), "the route rows print the prefix the generator reads");
+  assert.deepEqual(
+    [...new Set([...routes.matchAll(/report_cell\(\s*"([A-Za-z0-9_]+)"/gu)].map((match) => match[1]))].sort(),
+    committed.rows.filter((item) => item.test?.source === routesSource).map((item) => item.test.name).sort(),
+    "the tests that print their cells are the manifest's route rows",
+  );
   // Every route of the matrix has a row that sends a level and a row that refuses one.
   for (const cell of committed.cells) {
     for (const kind of ["sent", "refused"]) {
@@ -939,7 +1175,7 @@ row("the command line records a run, generates both files from the commit, and v
   writeFileSync(output, routesJson());
   const recorded = cli(["record", "--leg", "routes", "--commit", head, "--command", COMMAND, "--exit-status", "100", "--nextest-json", output, "--output", join(results, "routes.json")], { env });
   assert.equal(recorded.status, 0, recorded.stdout + recorded.stderr);
-  assert.equal(recorded.stdout, "recorded leg routes: 4 run, 3 passed, 1 failed, 1 skipped, 5 named\n");
+  assert.equal(recorded.stdout, "recorded leg routes: 4 run, 3 passed, 1 failed, 1 skipped, 5 named, 4 cell lines\n");
   assert.equal(readFileSync(join(results, "routes.json"), "utf8"), serialize(routesResult({ commit: head })), "record writes the leg result as built");
   for (const [leg, reason] of [
     ["binary", "rows_not_built"],
@@ -970,6 +1206,39 @@ row("the command line records a run, generates both files from the commit, and v
   const verified = cli(["verify", join(out, RECEIPT_JSON_NAME), "--markdown", join(out, RECEIPT_MARKDOWN_NAME), "--results", results], { env });
   assert.deepEqual([verified.status, verified.stdout], [0, "the receipt holds\n"]);
   assert.equal(cli(["render", join(out, RECEIPT_JSON_NAME)], { env }).stdout, markdown);
+
+  // --check judges the same receipt: it is written first, whatever the check says.
+  const checkedOut = join(work, "checked");
+  const checked = cli(["generate", "--results", results, "--output-dir", checkedOut, "--repo", repo, "--commit", head, "--check"], { env });
+  assert.equal(checked.status, 3, checked.stdout + checked.stderr);
+  assert.deepEqual(checked.stdout.split("\n").slice(1), [
+    "check: entry routes.unsupported/direct failed",
+    "check: entry routes.unsupported/copilot failed",
+    "check: leg binary is a gap of the offline legs: rows_not_built",
+    "check: entry binary.supported/direct is a gap of the offline legs: no_test_row",
+    "check failed: 4 failed entries or gaps of the offline legs",
+    "",
+  ]);
+  assert.equal(readFileSync(join(checkedOut, RECEIPT_JSON_NAME), "utf8"), json, "the receipt a failed check leaves is the receipt");
+  assert.equal(readFileSync(join(checkedOut, RECEIPT_MARKDOWN_NAME), "utf8"), markdown);
+  const verifiedAndChecked = cli(["verify", join(out, RECEIPT_JSON_NAME), "--check"], { env });
+  assert.deepEqual([verifiedAndChecked.status, verifiedAndChecked.stdout.split("\n")[0], verifiedAndChecked.stdout.split("\n").at(-2)], [3, "the receipt holds", "check failed: 4 failed entries or gaps of the offline legs"]);
+  // A receipt whose only gaps are live passes it.
+  const liveOnly = manifest();
+  liveOnly.rows = liveOnly.rows.filter((item) => item.leg === "live");
+  liveOnly.legs = liveOnly.legs.filter((leg) => leg.id === "live");
+  const liveManifest = join(work, "live-rows.json");
+  writeFileSync(liveManifest, serialize(liveOnly));
+  const liveResults = join(work, "live-results");
+  mkdirSync(liveResults);
+  assert.equal(cli(["record", "--leg", "live", "--not-run", "ran_at_another_commit", "--output", join(liveResults, "live.json")], { env }).status, 0, "a leg may be recorded as run at another commit");
+  const passed = cli(["generate", "--results", liveResults, "--output-dir", join(work, "live-out"), "--repo", repo, "--commit", head, "--manifest", liveManifest, "--check"], { env });
+  assert.deepEqual([passed.status, passed.stdout.split("\n")[1]], [0, "check passed: no failed entry and no gap in the offline legs"], passed.stdout);
+  const liveMarkdown = readFileSync(join(work, "live-out", RECEIPT_MARKDOWN_NAME), "utf8");
+  assert.ok(liveMarkdown.includes("| `live` | live | not run here: it ran at another commit |") && liveMarkdown.includes("- Leg `live`: it ran at another commit."));
+  // A receipt that does not hold is refused before it is judged.
+  writeFileSync(join(checkedOut, RECEIPT_JSON_NAME), json.replace('"schema_version": 1', '"schema_version": 4'));
+  assert.equal(cli(["verify", join(checkedOut, RECEIPT_JSON_NAME), "--check"], { env }).status, 1);
   writeFileSync(join(out, RECEIPT_MARKDOWN_NAME), markdown.replace("6 | 4 | 2", "6 | 6 | 0"));
   const edited = cli(["verify", join(out, RECEIPT_JSON_NAME), "--markdown", join(out, RECEIPT_MARKDOWN_NAME)], { env });
   assert.deepEqual([edited.status, edited.stdout], [1, "refused: the Markdown file is not the rendering of the receipt\n"]);
@@ -1004,7 +1273,7 @@ row("the command line records a run, generates both files from the commit, and v
   const leaking = cli(["record", "--leg", "routes", "--commit", head, "--command", `bash ${work}/run.sh`, "--exit-status", "100", "--nextest-json", output, "--output", unrecorded], { env });
   assert.deepEqual([leaking.status, leaking.stdout], [1, "refused: the result of leg routes holds an absolute path at $.command\n"]);
   assert.equal(existsSync(unrecorded), false, "a refused record writes nothing");
-  for (const args of [[], ["generate"], ["generate", "--results", results], ["record", "--leg", "routes", "--output", unrecorded], ["record", "--leg", "routes", "--not-run", "not_scheduled", "--commit", head, "--output", unrecorded], ["render"], ["verify"], ["publish"]]) {
+  for (const args of [[], ["generate"], ["generate", "--results", results], ["generate", "--results", results, "--output-dir", out, "--check", "--check"], ["record", "--leg", "routes", "--output", unrecorded], ["record", "--leg", "routes", "--not-run", "not_scheduled", "--commit", head, "--output", unrecorded], ["record", "--leg", "routes", "--not-run", "not_scheduled", "--check", "--output", unrecorded], ["render"], ["verify"], ["publish"]]) {
     assert.equal(cli(args, { env }).status, 2, `usage: ${args.join(" ")}`);
   }
 });

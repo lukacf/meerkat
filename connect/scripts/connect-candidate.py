@@ -1771,6 +1771,12 @@ WORKSPACE = ROOT.parent
 CODESIGN = "/usr/bin/codesign"
 # macOS allows 104 bytes for a Unix socket path; the installed checks keep theirs under the work root.
 MACOS_WORK_ROOT_LIMIT = 24
+# The library's installer keeps the Playwright endpoint's sockets at
+# <process parent>/p-<16 hex>/sockets/dashboard/<16 characters>.sock and refuses a socket path over 103
+# bytes before it creates anything (install-library-consumer.py, playwright_process). The check's process
+# parent is therefore this one short name directly under the work root: at most 94 bytes with the longest
+# work root. A test asks the installer's own rule for the stage jobs' work root and for the longest one.
+MACOS_PLAYWRIGHT_PROCESS = "playwright"
 MACOS_BUILD_SECONDS = 5 * 3600
 # How much of a failed command's log a macOS step shows on stderr (the whole log stays in the records).
 FAILED_LOG_TAIL_BYTES = 16 * 1024
@@ -2930,8 +2936,11 @@ def macos_check_official_install(work, chrome=None):
     manifest = read_json(closure / "resources.json")
     python, node, npm, archive = (closure / relative(manifest[key]) for key in ("python", "node", "npm_cli", "archive"))
     directory = work / "cli-qualification/official-run"
-    for leaf in ("hm", "tmp", "process", "library"):
-        (directory / leaf).mkdir(parents=True)
+    # Outside the installation and the unpacked library, as the installer requires, and short (see
+    # MACOS_PLAYWRIGHT_PROCESS): the installer creates its own p-<hex> directory in it.
+    process_parent = work / MACOS_PLAYWRIGHT_PROCESS
+    for path in (directory / "hm", directory / "tmp", directory / "library", process_parent):
+        path.mkdir(parents=True)
     result = work / "cli-qualification/official-playwright.json"
     chrome = Path(MACOS_CHROME) if chrome is None else chrome
     common = {"schema_version": 1, "kind": "meerkat_connect_official_install_check", "route": "official-playwright",
@@ -2950,7 +2959,7 @@ def macos_check_official_install(work, chrome=None):
     configuration, profile = directory / "selected.json", directory / "playwright-host.json"
     write_new(configuration, PLAYWRIGHT_CONFIGURATION)
     write_new(profile, {"schema_version": 1, "chrome_executable": str(chrome), "chrome_sha256": digest(chrome),
-                        "process_parent": str(directory / "process")})
+                        "process_parent": str(process_parent)})
     destination = directory / "install"
     argv = [python, "-I", "-B", installer, "--official-bundle", official,
             "--contents-sha256", digest(official / "CONTENTS.json"), "--component", "playwright",
@@ -2974,10 +2983,19 @@ def macos_check_official_install(work, chrome=None):
                 "the install left no installation receipt")
     except (ValueError, OSError) as failure:
         # The first run of this route with the closure's npm: say which route failed and what npm it saw.
+        # The installer answers every refusal with one fixed line; it creates the destination only after it
+        # accepted its inputs, the host profile, the runtimes, the configuration and the layout. So whether
+        # a destination exists tells a reader of the step's output how far the installer got.
+        created = destination.is_dir()
+        logs = sorted(path.name for path in destination.glob("*.std*")) if created else []
+        reached = (f"the installer created its destination and kept {len(logs)} log{'' if len(logs) == 1 else 's'} "
+                   "of its own there" if created else
+                   "the installer created no destination: it refused its inputs or its layout before it "
+                   "installed anything")
         write_new(result.with_name("official-playwright.refused.json"), {**common, "status": "refused",
-            "reason": str(failure), "npm_version": observed_npm(),
-            "installer_logs": sorted(path.name for path in destination.glob("*.std*")) if destination.is_dir() else []})
-        raise ValueError("the official-playwright install route failed: " + str(failure)) from failure
+            "reason": str(failure), "npm_version": observed_npm(), "destination_created": created,
+            "installer_logs": logs})
+        raise ValueError(f"the official-playwright install route failed: {failure} ({reached})") from failure
     evidence = [binding(record.records / "official-playwright-install.json"), binding(log),
                 binding(destination / "ready/installed.json"), binding(destination / "ready/mcp.json"),
                 binding(configuration), binding(profile)]

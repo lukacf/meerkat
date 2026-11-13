@@ -1118,17 +1118,6 @@ required for internal flow dispatch or ordinary peer messaging.
       }
     }
     ```
-
-    ```json
-    {
-      "jsonrpc": "2.0",
-      "id": 7,
-      "method": "mob/cancel_all_work",
-      "params": {
-        "member_ref": "member_ref_from_spawn_or_members"
-      }
-    }
-    ```
   </Tab>
 </Tabs>
 
@@ -1139,14 +1128,7 @@ to work-lane APIs as-is instead of constructing it from `mob_id` and
 
 ### Cancel work
 
-Cancellation is per member, not per unit. `mob/cancel_all_work` takes the
-`member_ref` and cancels the work that member had admitted when the cancel
-was taken: its current run is cancelled at the run's next boundary, and the
-input it held queued is abandoned. Input admitted after the cancel is
-untouched. Cancelling an idle member is not an error. The result is
-`{"mob_id": "...", "ok": true}`.
-
-`mob/cancel_work` does not cancel anything. The host lists the method, and
+One submitted unit cannot be cancelled. The host lists `mob/cancel_work`, and
 every call is refused with `-32602`:
 
 ```text
@@ -1155,6 +1137,21 @@ per-unit work cancellation is unsupported for <work_ref>: no work-tracking ledge
 
 The submitted unit runs on. A `work_ref` that is not a UUID is refused one
 step earlier, also with `-32602` (`work_ref must be a valid UUID: ...`).
+
+`mob/cancel_all_work` is a different call. It takes a `member_ref` and
+cancels the work that member had admitted when the cancel was taken, not one
+unit: the member's current run is cancelled at the run's next boundary, and
+the input it held queued is abandoned. Input admitted after the cancel is
+untouched. Cancelling an idle member is not an error. The result is
+`{"mob_id": "...", "ok": true}`.
+
+<Warning>
+Known issue, noted 2026-11-13: on Meerkat releases through 0.9.14, cancelling
+a request that is still queued can permanently destroy the mobs its session
+owns. Whether `mob/cancel_all_work` can do the same is not established. See
+the [known issue on the 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14)
+for the affected releases, the cases and what to do.
+</Warning>
 
 ## Flows
 
@@ -1453,7 +1450,7 @@ command. `rkat run --export-atif` writes a trajectory for a single-session run.
 | Watch events | `mob/events`, SDK event subscriptions |
 | Manage lifecycle | `mob/lifecycle`, `mob/retire`, `mob/respawn`, `mob/destroy` |
 | Manage flows | `mob/flows`, `mob/flow_run`, `mob/flow_status`, `mob/flow_cancel` |
-| Manage work | `mob/submit_work`, `mob/conclude_objective`, `mob/cancel_all_work` (`mob/cancel_work` is listed and always refused; see [Cancel work](#cancel-work)) |
+| Manage work | `mob/submit_work`, `mob/conclude_objective`, `mob/cancel_all_work`, `mob/cancel_work` (listed and always refused; see [Cancel work](#cancel-work)) |
 | Wait for startup | `mob/wait_kickoff`, `mob/wait_ready` |
 | Manage profiles | `mob/profile/create`, `mob/profile/get`, `mob/profile/list`, `mob/profile/update`, `mob/profile/delete` |
 

@@ -109,6 +109,8 @@ struct RouteClient {
     replies: Mutex<VecDeque<LlmStreamResult>>,
     served: Mutex<Vec<Served>>,
     fallback_proposals: AtomicUsize,
+    route_reads: AtomicUsize,
+    default_tag_reads: AtomicUsize,
 }
 
 impl RouteClient {
@@ -120,6 +122,8 @@ impl RouteClient {
             replies: Mutex::new(VecDeque::new()),
             served: Mutex::new(Vec::new()),
             fallback_proposals: AtomicUsize::new(0),
+            route_reads: AtomicUsize::new(0),
+            default_tag_reads: AtomicUsize::new(0),
         }
     }
 
@@ -136,15 +140,25 @@ impl RouteClient {
     fn served(&self) -> Vec<Served> {
         self.served.lock().unwrap().clone()
     }
+
+    /// How often the agent read this client's route and its default tag.
+    fn reads(&self) -> (usize, usize) {
+        (
+            self.route_reads.load(Ordering::SeqCst),
+            self.default_tag_reads.load(Ordering::SeqCst),
+        )
+    }
 }
 
 #[async_trait]
 impl AgentLlmClient for RouteClient {
     fn reasoning_route(&self) -> Option<ReasoningRouteObservation> {
+        self.route_reads.fetch_add(1, Ordering::SeqCst);
         self.route.lock().unwrap().clone()
     }
 
     fn default_provider_tag(&self) -> Option<ProviderTag> {
+        self.default_tag_reads.fetch_add(1, Ordering::SeqCst);
         self.default_tag.clone()
     }
 
@@ -1138,4 +1152,49 @@ async fn preference_on_a_copilot_route_uses_the_account_list() {
         // A preference alone is no neutral level: nothing is reported as one.
         assert!(request_reports(&events).is_empty());
     }
+}
+
+/// A request copy that carries no level asks the client nothing: neither
+/// its route nor its default tag is read, for the first request of a turn
+/// and for the request after a tool call. The route here would refuse
+/// every level, and the session runs. With a level, both are read.
+#[tokio::test]
+async fn a_request_without_a_level_asks_the_client_for_nothing() {
+    for params in [None, Some(ProviderParamsOverride::default())] {
+        let client = Arc::new(
+            RouteClient::new(Some(operator_route(&[])))
+                .with_replies(vec![tool_call("call-1"), text("done")]),
+        );
+        let builder = match params.clone() {
+            Some(params) => base_builder(params),
+            None => AgentBuilder::new().with_turn_state_handle(Arc::new(
+                crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
+            )),
+        };
+        let mut agent = build(&client, builder).await;
+        let (result, events) = run_collecting(&mut agent, "go").await;
+        result.expect("a session without a level runs");
+        assert_eq!(client.served().len(), 2, "two requests were made");
+        assert_eq!(
+            client.reads(),
+            (0, 0),
+            "(route reads, default tag reads) without a level, params {params:?}"
+        );
+        assert!(request_reports(&events).is_empty());
+    }
+
+    let client = Arc::new(
+        RouteClient::new(Some(operator_route(&[EffortLevel::High])))
+            .with_replies(vec![text("done")]),
+    );
+    let mut agent = build(&client, base_builder(level_params(EffortLevel::High))).await;
+    run_collecting(&mut agent, "go")
+        .await
+        .0
+        .expect("a session at a level its route states runs");
+    let (route_reads, default_tag_reads) = client.reads();
+    assert!(
+        route_reads > 0 && default_tag_reads > 0,
+        "with a level the client is asked: ({route_reads}, {default_tag_reads})"
+    );
 }

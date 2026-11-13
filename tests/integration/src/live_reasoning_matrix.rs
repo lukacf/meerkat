@@ -1067,7 +1067,10 @@ impl ReceiptObservation {
     /// The observation as its line: the prefix and one JSON object, members
     /// in the order above.
     pub fn line(&self) -> String {
-        String::new()
+        // Fixed words, two strings and a number: this cannot fail to
+        // serialize.
+        let object = serde_json::to_string(self).unwrap_or_default();
+        format!("{RECEIPT_OBSERVATION_PREFIX}{object}")
     }
 }
 
@@ -1282,7 +1285,9 @@ impl Emitter<'_> {
     /// Hand out one cell of the run as its receipt line. It passes the
     /// redactor like every other line.
     fn observe(&mut self, observation: &ReceiptObservation) {
-        let _ = observation.line();
+        let text = self.run.redactor.redact(&observation.line());
+        (self.sink)(&text);
+        self.summary.lines.push(text);
     }
 }
 

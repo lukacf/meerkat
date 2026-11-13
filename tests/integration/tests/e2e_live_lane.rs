@@ -106,9 +106,12 @@ live_suite!(
 /// counted by a gate in front of the client; the run ends at the first 401,
 /// 403, 429, exhausted quota or policy stop and sends nothing after it; a
 /// line carries a failure's class and HTTP status, never the provider's
-/// text. A run sends at most one request per provider with a key, three at
-/// most, and asks for nothing else: a direct route has no account lookup,
-/// and a direct client sends nothing a second time on its own.
+/// text; every cell the run reaches is also printed on stdout as one
+/// `reasoning-effort-receipt-observation` line of typed fields for the
+/// reasoning effort execution receipt. A run sends at most one request per
+/// provider with a key, three at most, and asks for nothing else: a direct
+/// route has no account lookup, and a direct client sends nothing a second
+/// time on its own.
 ///
 /// ```text
 /// repo-cargo test -p meerkat-integration-tests --test e2e_live_lane \
@@ -234,7 +237,7 @@ async fn direct_provider_live_reasoning_effort() {
         max_tokens: 512,
         max_retries: 0,
     };
-    let summary = matrix::run_matrix(&run, &cells, &|line: &str| eprintln!("{line}")).await;
+    let summary = matrix::run_matrix(&run, &cells, &matrix::print_line).await;
 
     assert!(
         summary.stopped.is_none(),

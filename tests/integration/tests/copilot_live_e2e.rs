@@ -1769,6 +1769,15 @@ async fn copilot_live_openai_continuity_across_services() {
 // host. The account's model list is never printed: a line names the one
 // catalog model its cell used.
 //
+// Beside the lines people read (stderr), every cell the run reaches is
+// printed on stdout as one line for the reasoning effort execution receipt:
+// `reasoning-effort-receipt-observation ` and one JSON object of typed
+// fields (row, provider family, backend, API, model, requested level,
+// outcome, result). A failed cell also carries `http_status`, the HTTP
+// status of its failure class when the class has one, and `error_code`, the
+// failure class itself: one of the harness's fixed words, never a provider's
+// text or code.
+//
 // What a run costs is in the row's doc comment.
 
 /// The provider API of an account endpoint.
@@ -2000,7 +2009,7 @@ async fn copilot_live_reasoning_effort_matrix() {
         max_tokens,
         max_retries: 0,
     };
-    let summary = matrix::run_matrix(&run, &cells, &|line: &str| eprintln!("{line}")).await;
+    let summary = matrix::run_matrix(&run, &cells, &matrix::print_line).await;
 
     assert!(
         summary.stopped.is_none(),

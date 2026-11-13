@@ -1034,6 +1034,28 @@ def test_a_refused_stage_one_step_keeps_bounded_failure_evidence_and_no_product_
     assert not p.step_path(work, "build").exists()
 
 
+def test_failure_evidence_keeps_the_official_installs_logs_and_npms_debug_logs_and_no_package(tmp_path):
+    # The official install is the one check whose children are npm runs. The installer's own *.stderr
+    # holds npm's summary; npm writes the cause (which request missed its cache, the stack) to a debug
+    # log under its cache, and the installer puts that cache inside the destination. Both are logs and
+    # are kept; the packages the cache holds beside them are not.
+    work = tmp_path
+    (work / "records").mkdir()
+    install = work / "cli-qualification/official-run/install"
+    (install / "npm-cache/_logs").mkdir(parents=True)
+    (install / "npm-cache/_cacache/content-v2").mkdir(parents=True)
+    (install / "npm-install.stderr").write_text("npm error code ENOTCACHED\n")
+    (install / "npm-cache/_logs/2026-01-01T00_00_00_000Z-debug-0.log").write_text("verbose stack inert\n")
+    (install / "npm-cache/_logs/not-a-log.bin").write_bytes(b"\0" * 64)
+    (install / "npm-cache/_cacache/content-v2/blob").write_bytes(b"\0" * 64)
+    evidence = p.macos_failure_evidence(work, "check-official-install", "ValueError: refused")
+    rows = {row["path"]: row for row in p.read_json(evidence / "FAILURE.json")["files"]}
+    assert set(rows) == {"cli-qualification/official-run/install/npm-install.stderr",
+                         "cli-qualification/official-run/install/npm-cache/_logs/2026-01-01T00_00_00_000Z-debug-0.log"}
+    assert (evidence / "cli-qualification/official-run/install/npm-cache/_logs"
+            / "2026-01-01T00_00_00_000Z-debug-0.log").read_text() == "verbose stack inert\n"
+
+
 def test_failure_evidence_stops_at_its_total_bound_and_says_what_it_left_out(tmp_path, monkeypatch):
     work = tmp_path / "cw"
     (work / "records").mkdir(parents=True)

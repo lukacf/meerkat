@@ -20,7 +20,9 @@ What it does
      numbered names, so that no path allowlist skips them for the path of their archive; one
      that starts with a binary signature is read by its printable runs, like a compiled file
      (item 3). None of them is ever unread. A path allowlist that matches one of the numbered
-     files the scan writes for the builds (these, the runs of item 3) stops the scan. A member
+     files the scan writes for the builds (these, the files of item 2 that are read once more,
+     the runs of item 3) stops the scan, and so does one of the lines that item 2 removes: the
+     build's embedded default has them. A member
      whose name holds "!", or a member file whose
      name ends with "#strings", would print like another path: it is not written out, which
      refuses.
@@ -31,7 +33,9 @@ What it does
      gitleaks.toml beside the build, or the file given with --default-config-...; a run with the
      build's embedded default must give the same result over every directory a build reads of
      every payload (the scan root, the bytes outside members, the runs of compiled files, the
-     runs read alone), or the scan stops. The
+     runs read alone), or the scan stops. The embedded default passes over the paths of the
+     removed lines, so the files the scan reads only for their removal are given to the build
+     once more for this, from a directory of their own under numbered names. The
      builds always run with --redact and --ignore-gitleaks-allow, from an empty working directory,
      with the payload one level below the scan root: no comment, ignore file or rules file inside
      a payload can switch a finding off.
@@ -566,7 +570,10 @@ class Build:
         self.dir_mode = False
         self.cfg = self.default_copy = None
         self.removed = 0
+        # The global path allowlist of the rules the build scans with (the removed lines left out), and of
+        # its default rules file as it is: what the build's own default passes over.
         self.patterns = []
+        self.default_patterns = []
 
 
 def run_detector(build, source, config, report, logdir, tag, empty_cwd):
@@ -689,9 +696,10 @@ class Scan:
     def default_rules_proved(self, b, root, rdir, tag):
         """The default rules file given for a build must be the build's own default: over root, a run
         with the embedded default and a run with the given file must report the same. It is asked of
-        every directory a build reads with the given rules (a payload's scan root, the runs of its
+        every directory a build reads with the given rules (a payload's scan root, the files of it
+        that only the removed allowlist lines would skip, the bytes outside members, the runs of its
         compiled files, the runs read alone): a file that lacks a rule gives the default's result
-        wherever that rule has no hit."""
+        wherever that rule has no hit, and wherever both runs pass over the file that holds it."""
         def keyset(items):
             return collections.Counter((str(x.get("RuleID")), str(x.get("File")), x.get("StartLine")) for x in items)
         d1 = run_detector(b, root, None, os.path.join(rdir, "%s%s-embedded-default.report.json" % (b.role, tag)), rdir,
@@ -701,12 +709,33 @@ class Scan:
         if keyset(d1) != keyset(d2):
             raise Failure("the default rules file given for the %s build does not reproduce its embedded default" % b.role)
 
+    def removed_paths(self, b, paths, pdir):
+        """The files of the tree that a build reads only because the scan removed path allowlist lines
+        (vendor, dist-info, lock files) from the rules it scans with. The build's own default passes
+        over them where they lie, with the embedded default and with the given file alike, so the two
+        runs of default_rules_proved over the scan root agree about them whatever the given file
+        lacks. Here they are given to the build once more from a directory of their own, under
+        numbered names that none of those lines matches (own_file stops the scan when one does), for
+        default_rules_proved to ask there. paths are the files the build is handed. Returns the
+        directory, or None when there is no such file. The names are links: the same bytes, no second
+        copy on the disk."""
+        only = [path for path in paths if any(rx.search(path) for rx in b.default_patterns)]
+        if not only:
+            return None
+        root = os.path.join(pdir, "removed-paths-" + b.role)
+        os.makedirs(os.path.join(root, "t"), mode=0o700)
+        for number_, path in enumerate(only):
+            os.link(path, self.own_file(os.path.join(root, "t", "%05d.txt" % number_)))
+        return root
+
     def own_file(self, place):
         """The place of a file the scan writes for the builds under a numbered name of its own (bytes
-        outside members, the runs of a compiled file, a run that is read alone). A build's path
-        allowlist that matches it would leave the file read by no build, and nothing would say so:
-        every such place is asked about, and a match stops the scan."""
-        if any(rx.search(place) for b in self.builds for rx in b.patterns):
+        outside members, the runs of a compiled file, a run that is read alone, a file of a removed
+        allowlist line). A build's path allowlist that matches it would leave the file read by no
+        build, and nothing would say so: every such place is asked about, and a match stops the scan.
+        The removed lines are asked too: the build's embedded default has them, and a run with it
+        that passes over the file proves nothing about the rules file."""
+        if any(rx.search(place) for b in self.builds for rx in b.patterns + b.default_patterns):
             raise Usage("a detector path-allowlist pattern matches a file of the scan's own in the work directory")
         return place
 
@@ -888,7 +917,7 @@ class Scan:
         # nothing of a payload; other such bytes wait in a third while the builds run (below).
         oroot, held = os.path.join(pdir, "outside"), os.path.join(pdir, "outside-held")
         for b in builds:
-            if any(rx.search(tree + "/x") for rx in b.patterns):
+            if any(rx.search(tree + "/x") for rx in b.patterns + b.default_patterns):
                 raise Usage("the work directory matches a detector path-allowlist pattern; choose another --work")
         try:
             stats = D.expand_file(payload, tree)
@@ -1040,6 +1069,11 @@ class Scan:
         for b in builds:
             data = self.reading(b, scan_root, rdir, "", names=tree_names)
             self.default_rules_proved(b, scan_root, rdir, "")
+            # The build's own default passes over the paths of the removed allowlist lines, in both runs
+            # of that comparison: the files the scan reads there are proved from a directory of their own.
+            aside = self.removed_paths(b, sorted(path for path, readers in handed.items() if b in readers), pdir)
+            if aside:
+                self.default_rules_proved(b, aside, rdir, "-removed-paths")
             more = self.reading(b, oroot, rdir, "-outside") if apart else []
             if apart:
                 self.default_rules_proved(b, oroot, rdir, "-outside")
@@ -1248,6 +1282,7 @@ def main():
             write_new(b.default_copy, text)
             write_new(b.cfg, stripped)
             b.patterns = global_paths(stripped)
+            b.default_patterns = global_paths(text)
             b.dir_mode = subprocess.run([b.exe, "dir", "--help"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                         stdin=subprocess.DEVNULL, cwd=scan.empty_cwd, check=False).returncode == 0
         for i, payload in enumerate(payloads):

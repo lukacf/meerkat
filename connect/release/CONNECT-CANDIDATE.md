@@ -293,7 +293,12 @@ python3 scripts/connect-candidate.py credential-scan \
   result as a run with the file, over every directory a build reads of every
   payload file (the scan root, the bytes outside archive members, the runs of
   compiled files, the runs read alone): a rules file that lacks a rule gives
-  the default's result wherever that rule finds nothing.
+  the default's result wherever that rule finds nothing. A build's embedded
+  default passes over the paths of the removed lines, so the files the scan
+  reads only because it removed them are given to the build once more for
+  this comparison, from a directory of their own under numbered names. The
+  scan stops when one of the removed lines matches a numbered file of its
+  own or its work directory: choose a work directory that no such line names.
 - The builds always run redacted and with allow comments ignored, from an
   empty working directory, with the payload one level below the scan root. No
   comment, ignore file or rules file inside a payload switches a finding off.

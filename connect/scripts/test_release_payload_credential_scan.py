@@ -2222,6 +2222,19 @@ class NumberedFilesOfTheScan(Scans):
         result = self.scan(self.product({"bin/tool": self.ELF + run + b"\x00" * 16}), **self.builds("numbered-none", r"/t/00007\.txt$"))
         self.assertEqual((result.code, [(row["rule"], row["path"]) for row in result.listing["positions"]]), (1, [(RULE, "bin/tool#strings")]))
 
+    def test_a_removed_allowlist_line_that_skips_a_numbered_file_stops_the_scan(self):
+        # A line the scan removes from the rules it scans with (here one that names a lock file) is
+        # still a line of the build's embedded default. When it matches a numbered file, the run with
+        # the embedded default passes over that file, and the comparison with the given rules file
+        # says nothing about it: the scan stops.
+        product = self.product({"notes.txt": b"plain\n"})
+        result = self.scan(product, **self.builds("removed-numbered", r"/t/00000\.txt$|(^|/)zq-lock\.json$"))
+        self.assertEqual((result.code, result.receipt), (2, None))
+        self.assertIn("path-allowlist pattern", result.stderr)
+        # Such a line that matches no file of the scan's own stops nothing.
+        result = self.scan(product, **self.builds("removed-none", r"/t/00007\.txt$|(^|/)zq-lock\.json$"))
+        self.assertEqual((result.code, [row["allowlist_lines_removed"] for row in result.report["detector_builds"]]), (0, [4, 4]))
+
 
 class ProofOfRead(Scans):
     """No list of the scan decides whether a build read a file. While a build runs, every file handed to
@@ -3364,6 +3377,64 @@ class DefaultRulesOfEveryPayload(Scans):
                 self.assertEqual((result.code, result.receipt is None), (3, True))
                 self.assertTrue(result.stderr.startswith("CREDENTIAL-LEG REFUSED tool-failure: "), result.stderr)
                 self.assertIn("embedded default", result.stderr)
+
+    def embedded_roots(self, build):
+        """The directories a stand-in read without a rules file (with its embedded default), by name,
+        and how often each directory of the removed lines' files was read at all."""
+        scans = [argv for argv in calls(build) if "--report-path" in argv]
+
+        def root(argv):
+            return os.path.basename(argv[1] if argv[0] == "dir" else argv[3])
+        embedded = sorted(root(argv) for argv in scans if "--config" not in argv)
+        return embedded, sum(root(argv).startswith("removed-paths-") for argv in scans)
+
+    def test_the_files_of_removed_allowlist_lines_are_given_to_a_build_once_more_under_numbered_names(self):
+        product = self.product({"vendor/a.txt": b"plain\n", "demo-1.0.dist-info/RECORD": b"plain\n", "web/package-lock.json": b"plain\n",
+                                "notes.txt": b"plain\n"})
+        pinned, current = write_builds(self.root / "builds")
+        result = self.scan(product, pinned=pinned, current=current)
+        self.assertEqual((result.code, self.counts(result, "findings", "unread")), (0, (0, 0)))
+        for build in (pinned, current):
+            # One directory more is read with the embedded default, and it is read twice in all: with
+            # the embedded default and with the given file. The scan itself reads the files where they lie.
+            self.assertEqual(self.embedded_roots(build), (["outside", "removed-paths-" + build.parent.name, "scan"], 2))
+        # A payload without such a path has no such directory.
+        pinned, current = write_builds(self.root / "builds-plain")
+        self.scan(self.product({"notes.txt": b"plain\n"}), pinned=pinned, current=current)
+        for build in (pinned, current):
+            self.assertEqual(self.embedded_roots(build), (["outside", "scan"], 0))
+        # Each build by its own lines: a build whose default rules have no such line skips no such path
+        # with its embedded default, so nothing is given to it once more.
+        without = DEFAULT_RULES.replace("    '''(^|/)vendor/''',\n", "")
+        self.assertNotEqual(without, DEFAULT_RULES)
+        pinned = write_build(self.root / "builds-own" / "pinned", "0.0.1", False, RULES[:1], without)
+        current = write_build(self.root / "builds-own" / "current", "0.0.2", True, RULES)
+        result = self.scan(self.product({"vendor/a.txt": b"plain\n"}), pinned=pinned, current=current)
+        self.assertEqual((result.code, [row["allowlist_lines_removed"] for row in result.report["detector_builds"]]), (0, [2, 3]))
+        self.assertEqual(self.embedded_roots(pinned), (["outside", "scan"], 0))
+        self.assertEqual(self.embedded_roots(current), (["outside", "removed-paths-current", "scan"], 2))
+
+    def test_the_rules_file_of_either_build_is_proved_at_a_path_of_a_removed_allowlist_line(self):
+        # The pinned build knows the first marker alone. With a rules file that lacks that rule it
+        # reports nothing; the current build still does, but the scan stops for the pinned build's file.
+        lacking = self.root / "lacking-pinned.toml"
+        lacking.write_text(DEFAULT_RULES + '\n[[rules]]\nid = "%s"\n' % TAG_RULE)
+        product = self.product({"vendor/notes.txt": MARK + b"\n"})
+        result = self.scan(product)
+        self.assertEqual((result.code, [(row["rule"], row["path"]) for row in result.listing["positions"]]), (1, [(RULE, "vendor/notes.txt")]))
+        result = self.scan(product, extra=["--default-config-pinned", lacking])
+        self.assertEqual((result.code, result.receipt is None), (3, True))
+        self.assertIn("the pinned build does not reproduce its embedded default", result.stderr)
+
+    def test_a_work_directory_at_a_path_of_a_removed_allowlist_line_stops_the_scan(self):
+        # Below such a directory a build's embedded default passes over every file of the scan, its own
+        # numbered files too, and no run with it could differ from a run with a rules file that lacks a rule.
+        work = self.root / "vendor" / "work"
+        work.mkdir(parents=True)
+        result = self.scan(self.product({"notes.txt": b"plain\n"}), extra=["--work", work])
+        self.assertEqual((result.code, result.receipt), (2, None))
+        self.assertIn("choose another --work", result.stderr)
+        self.assertEqual(list(work.iterdir()), [])
 
 
 class MemberNames(Scans):

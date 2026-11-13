@@ -9,15 +9,16 @@
 //! records every request, so a row can say which provider field carried the
 //! level, and that a refused level never reached the provider.
 //!
-//! One cell per provider family:
+//! Three rows, each over one cell per provider family:
 //!
 //! - a level the model's catalog row lists completes with a workspace tool
 //!   call, a schema and streaming; every provider request carries the level
 //!   in the route's own field; the run result reports what was requested
 //!   and sent;
-//! - a level outside the catalog row, and a model no catalog row is written
-//!   for, are refused before any provider request: exit status 2 and one
-//!   failure document.
+//! - a level outside the catalog row is refused before any provider
+//!   request: exit status 2 and one failure document;
+//! - a level asked of a configured model no catalog row is written for is
+//!   refused the same way.
 //!
 //! The models are picked from the catalog by the test; no model id is part
 //! of what the rows pin.
@@ -128,6 +129,31 @@ impl Family {
         json!({"backend": self.backend(), "api": self.api().name()})
     }
 
+    /// The name of the route's cell in a record of a run.
+    fn cell(self) -> &'static str {
+        match self {
+            Self::OpenAi => "openai_direct",
+            Self::Claude => "claude_direct",
+            Self::Gemini => "gemini_direct",
+        }
+    }
+
+    /// Says which model and level the row `test` uses on this route, one
+    /// line on stdout. The rows pick both when they run, so whatever records
+    /// a run reads them from this line. It asserts nothing.
+    fn report_cell(self, test: &str, model: &str, level: &str) {
+        println!(
+            "reasoning-effort-receipt-cell {}",
+            json!({
+                "test": test,
+                "cell": self.cell(),
+                "model": model,
+                "level": level,
+                "route": format!("{}/{}", self.backend(), self.api().name()),
+            })
+        );
+    }
+
     /// The wire path the route writes a level to.
     fn field(self) -> &'static str {
         match self {
@@ -213,10 +239,6 @@ fn unsupported_level(supported: &[EffortLevel]) -> EffortLevel {
         .find(|level| *level >= EffortLevel::Low && outside(level))
         .or_else(|| LADDER.into_iter().find(outside))
         .expect("a level outside the set")
-}
-
-fn wire(levels: &[EffortLevel]) -> Vec<&'static str> {
-    levels.iter().map(|level| level.as_wire_str()).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -766,148 +788,167 @@ fn assert_on_the_route(family: Family, model: &str, requests: &[Recorded]) {
 // The rows
 // ---------------------------------------------------------------------------
 
+const FAMILIES: [Family; 3] = [Family::OpenAi, Family::Claude, Family::Gemini];
+
 /// A level the catalog row lists completes with a workspace tool call, a
 /// schema and streaming; every provider request carries the level in the
 /// route's own field; the run result reports what was requested and sent.
-fn supported_run_reports_requested_and_sent(family: Family) {
+#[test]
+fn cli_supported_run_reports_requested_and_sent_on_direct_routes() {
+    for family in FAMILIES {
+        let provider = Loopback::start();
+        let roots = roots(family, provider.port);
+        let (model, supported) = family.catalog_model();
+        let level = supported_level(&supported).as_wire_str();
+        family.report_cell(
+            "cli_supported_run_reports_requested_and_sent_on_direct_routes",
+            &model,
+            level,
+        );
+        let schema = roots.home.join("schema.json");
+        std::fs::write(
+            &schema,
+            r#"{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]}"#,
+        )
+        .unwrap();
+
+        let finished = run_turn(
+            &roots,
+            &model,
+            &[
+                "--reasoning-effort",
+                level,
+                "--tools",
+                "workspace",
+                "--schema",
+                schema.to_str().unwrap(),
+                "--stream",
+                "--output",
+                "json",
+            ],
+        );
+        assert_ok(&finished, "a run at a level the catalog row lists");
+
+        let requests = provider.requests();
+        assert_eq!(
+            requests.len(),
+            3,
+            "{family:?}: the tool call, the answer and the extraction: {requests:#?}"
+        );
+        assert_on_the_route(family, &model, &requests);
+        for request in &requests {
+            assert_eq!(
+                family.carried_level(&request.body),
+                Some(level),
+                "{family:?}: every provider request carries the level in the route's field: {}",
+                request.body
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(roots.project.join("effect.txt"))
+                .ok()
+                .as_deref(),
+            Some("written by the tool\n"),
+            "{family:?}: the tool call's effect exists in the working directory"
+        );
+
+        let (streamed, result) = text_then_document(&finished);
+        assert!(
+            streamed.contains(&STREAMED_ANSWER.concat()),
+            "{family:?}: streamed text precedes the result: {:?}",
+            finished.stdout
+        );
+        assert_eq!(
+            result["structured_output"],
+            json!({"answer": "ok"}),
+            "{family:?}"
+        );
+        assert_eq!(
+            result["reasoning_effort"],
+            json!({
+                "requested": level,
+                "sent": [{
+                    "level": level,
+                    "provider": family.provider_name(),
+                    "model": model,
+                    "route": family.route(),
+                    "fields": [family.field()],
+                    "facts": "catalog",
+                    "decided_by": "request",
+                    "requests": 3
+                }]
+            }),
+            "{family:?}: the result reports the requested level and what was sent: {result}"
+        );
+
+        // A run without the flag reports nothing about a level. The
+        // Responses client of a model that takes reasoning sends an effort
+        // of its own; that default is the client's and is left alone here.
+        let before = provider.request_count();
+        let plain = run_turn(&roots, &model, &["--output", "json"]);
+        assert_ok(&plain, "a run without a level");
+        let requests = provider.requests();
+        assert!(requests.len() > before, "{family:?}");
+        assert_on_the_route(family, &model, &requests[before..]);
+        if family != Family::OpenAi {
+            for request in &requests[before..] {
+                assert_eq!(
+                    family.carried_level(&request.body),
+                    None,
+                    "{family:?}: {}",
+                    request.body
+                );
+            }
+        }
+        let (_, result) = text_then_document(&plain);
+        assert!(
+            result.get("reasoning_effort").is_none(),
+            "{family:?}: {result}"
+        );
+    }
+}
+
+/// One refused run of `model` at `level` on the family's route, with the
+/// workspace tools on offer: nothing reaches the provider, the exit status
+/// is 2, stdout is one failure document whose typed parts say a reasoning
+/// effort level was refused for `reason` on this route, no session is
+/// created and no tool runs. A control run of the same model without the
+/// flag then reaches the provider, so the recorder would have seen a request
+/// of the refused run.
+fn refused_before_any_provider_request(family: Family, model: &str, level: &str, reason: &str) {
     let provider = Loopback::start();
     let roots = roots(family, provider.port);
-    let (model, supported) = family.catalog_model();
-    let level = supported_level(&supported).as_wire_str();
-    eprintln!(
-        "cell {family:?}: route {} model {model} level {level} (the row lists {:?})",
-        family.route(),
-        wire(&supported)
-    );
-    let schema = roots.home.join("schema.json");
-    std::fs::write(
-        &schema,
-        r#"{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]}"#,
-    )
-    .unwrap();
+    let sessions_before = rkat(&roots, &["session", "list"]).stdout;
 
-    let finished = run_turn(
+    let refused = run_turn(
         &roots,
-        &model,
+        model,
         &[
             "--reasoning-effort",
             level,
             "--tools",
             "workspace",
-            "--schema",
-            schema.to_str().unwrap(),
             "--stream",
             "--output",
             "json",
         ],
     );
-    assert_ok(&finished, "a run at a level the catalog row lists");
-
-    let requests = provider.requests();
-    eprintln!(
-        "cell {family:?}: request paths {:?}",
-        requests
-            .iter()
-            .map(|request| request.path.as_str())
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(
-        requests.len(),
-        3,
-        "{family:?}: the tool call, the answer and the extraction: {requests:#?}"
-    );
-    assert_on_the_route(family, &model, &requests);
-    for request in &requests {
-        assert_eq!(
-            family.carried_level(&request.body),
-            Some(level),
-            "{family:?}: every provider request carries the level in the route's field: {}",
-            request.body
-        );
-    }
-    assert_eq!(
-        std::fs::read_to_string(roots.project.join("effect.txt"))
-            .ok()
-            .as_deref(),
-        Some("written by the tool\n"),
-        "{family:?}: the tool call's effect exists in the working directory"
-    );
-
-    let (streamed, result) = text_then_document(&finished);
-    assert!(
-        streamed.contains(&STREAMED_ANSWER.concat()),
-        "{family:?}: streamed text precedes the result: {:?}",
-        finished.stdout
-    );
-    assert_eq!(
-        result["structured_output"],
-        json!({"answer": "ok"}),
-        "{family:?}"
-    );
-    assert_eq!(
-        result["reasoning_effort"],
-        json!({
-            "requested": level,
-            "sent": [{
-                "level": level,
-                "provider": family.provider_name(),
-                "model": model,
-                "route": family.route(),
-                "fields": [family.field()],
-                "facts": "catalog",
-                "decided_by": "request",
-                "requests": 3
-            }]
-        }),
-        "{family:?}: the result reports the requested level and what was sent: {result}"
-    );
-
-    // A run without the flag reports nothing about a level. The Responses
-    // client of a model that takes reasoning sends an effort of its own;
-    // that default is the client's and is left alone here.
-    let before = provider.request_count();
-    let plain = run_turn(&roots, &model, &["--output", "json"]);
-    assert_ok(&plain, "a run without a level");
-    let requests = provider.requests();
-    assert!(requests.len() > before, "{family:?}");
-    assert_on_the_route(family, &model, &requests[before..]);
-    if family != Family::OpenAi {
-        for request in &requests[before..] {
-            assert_eq!(
-                family.carried_level(&request.body),
-                None,
-                "{family:?}: {}",
-                request.body
-            );
-        }
-    }
-    let (_, result) = text_then_document(&plain);
-    assert!(
-        result.get("reasoning_effort").is_none(),
-        "{family:?}: {result}"
-    );
-}
-
-/// The refusal a refused run reports, after checking that the run sent
-/// nothing, exited 2 and printed one failure document whose typed parts
-/// say a reasoning effort level was refused.
-fn refusal_of(family: Family, provider: &Loopback, finished: &Finished) -> Value {
     assert_eq!(
         provider.request_count(),
         0,
         "{family:?}: a refused run reaches no provider: {:#?}\nstdout:\n{}\nstderr:\n{}",
         provider.requests(),
-        finished.stdout,
-        finished.stderr
+        refused.stdout,
+        refused.stderr
     );
     assert_eq!(
-        finished.status,
+        refused.status,
         Some(2),
         "{family:?}: a refused level exits 2; stdout:\n{}\nstderr:\n{}",
-        finished.stdout,
-        finished.stderr
+        refused.stdout,
+        refused.stderr
     );
-    let document = only_document(finished);
+    let document = only_document(&refused);
     let object = document
         .as_object()
         .expect("the failure document is an object");
@@ -922,55 +963,10 @@ fn refusal_of(family: Family, provider: &Loopback, finished: &Finished) -> Value
         error["details"]["kind"], "reasoning_effort_refused",
         "{family:?}: {document}"
     );
-    error["details"]["reasoning_effort_refusal"].clone()
-}
-
-/// A level outside the catalog row, and a model no catalog row is written
-/// for, are refused before any provider request: exit status 2 and one
-/// failure document. No session is created.
-fn refusals_exit_2_before_any_provider_request(family: Family) {
-    let provider = Loopback::start();
-    let roots = roots(family, provider.port);
-    let (model, supported) = family.catalog_model();
-    let sessions_before = rkat(&roots, &["session", "list"]).stdout;
-
-    // Unsupported: a level the catalog row of the model does not list.
-    let level = unsupported_level(&supported).as_wire_str();
-    eprintln!(
-        "cell {family:?}: route {} model {model} refused level {level} (the row lists {:?}); \
-         model without a row {UNCATALOGUED}",
-        family.route(),
-        wire(&supported)
-    );
-    let refused = run_turn(
-        &roots,
-        &model,
-        &["--reasoning-effort", level, "--output", "json"],
-    );
-    let refusal = refusal_of(family, &provider, &refused);
-    assert_eq!(refusal["reason"], "unsupported_level", "{family:?}");
-    assert_eq!(refusal["requested"], level, "{family:?}");
-    assert_eq!(refusal["route"], family.route(), "{family:?}");
-
-    // Unknown: no catalog row is written for the model.
-    let level = supported_level(&supported).as_wire_str();
-    let refused = run_turn(
-        &roots,
-        UNCATALOGUED,
-        &[
-            "--reasoning-effort",
-            level,
-            "--tools",
-            "workspace",
-            "--stream",
-            "--output",
-            "json",
-        ],
-    );
-    let refusal = refusal_of(family, &provider, &refused);
-    assert_eq!(refusal["reason"], "supported_levels_unknown", "{family:?}");
-    assert_eq!(refusal["requested"], level, "{family:?}");
-    assert_eq!(refusal["route"], family.route(), "{family:?}");
+    let refusal = &error["details"]["reasoning_effort_refusal"];
+    assert_eq!(refusal["reason"], reason, "{family:?}: {document}");
+    assert_eq!(refusal["requested"], level, "{family:?}: {document}");
+    assert_eq!(refusal["route"], family.route(), "{family:?}: {document}");
 
     assert_eq!(
         rkat(&roots, &["session", "list"]).stdout,
@@ -982,47 +978,49 @@ fn refusals_exit_2_before_any_provider_request(family: Family) {
         "{family:?}: a refused run calls no tool"
     );
 
-    // Control: the same route answers the same models without the flag, so
-    // the recorder would have seen a request of a refused run.
-    for model in [model.as_str(), UNCATALOGUED] {
-        let before = provider.request_count();
-        let control = run_turn(&roots, model, &["--output", "json"]);
-        assert_ok(&control, "a control run without the flag");
-        let requests = provider.requests();
-        assert!(
-            requests.len() > before,
-            "{family:?}: the control run of {model} reaches the provider"
+    let control = run_turn(&roots, model, &["--output", "json"]);
+    assert_ok(&control, "a control run without the flag");
+    let requests = provider.requests();
+    assert!(
+        !requests.is_empty(),
+        "{family:?}: the control run of {model} reaches the provider"
+    );
+    assert_on_the_route(family, model, &requests);
+}
+
+/// A level the catalog row of the model does not list is refused before any
+/// provider request: exit status 2 and one failure document.
+#[test]
+fn cli_unsupported_level_is_refused_on_direct_routes() {
+    for family in FAMILIES {
+        let (model, supported) = family.catalog_model();
+        let level = unsupported_level(&supported).as_wire_str();
+        family.report_cell(
+            "cli_unsupported_level_is_refused_on_direct_routes",
+            &model,
+            level,
         );
-        assert_on_the_route(family, model, &requests[before..]);
+        refused_before_any_provider_request(family, &model, level, "unsupported_level");
     }
 }
 
+/// A level asked of a configured model that no catalog row is written for
+/// is refused before any provider request: exit status 2 and one failure
+/// document.
 #[test]
-fn openai_supported_run_reports_requested_and_sent() {
-    supported_run_reports_requested_and_sent(Family::OpenAi);
-}
-
-#[test]
-fn claude_supported_run_reports_requested_and_sent() {
-    supported_run_reports_requested_and_sent(Family::Claude);
-}
-
-#[test]
-fn gemini_supported_run_reports_requested_and_sent() {
-    supported_run_reports_requested_and_sent(Family::Gemini);
-}
-
-#[test]
-fn openai_refusals_exit_2_before_any_provider_request() {
-    refusals_exit_2_before_any_provider_request(Family::OpenAi);
-}
-
-#[test]
-fn claude_refusals_exit_2_before_any_provider_request() {
-    refusals_exit_2_before_any_provider_request(Family::Claude);
-}
-
-#[test]
-fn gemini_refusals_exit_2_before_any_provider_request() {
-    refusals_exit_2_before_any_provider_request(Family::Gemini);
+fn cli_unknown_support_is_refused_on_direct_routes() {
+    for family in FAMILIES {
+        let level = EffortLevel::High.as_wire_str();
+        family.report_cell(
+            "cli_unknown_support_is_refused_on_direct_routes",
+            UNCATALOGUED,
+            level,
+        );
+        refused_before_any_provider_request(
+            family,
+            UNCATALOGUED,
+            level,
+            "supported_levels_unknown",
+        );
+    }
 }

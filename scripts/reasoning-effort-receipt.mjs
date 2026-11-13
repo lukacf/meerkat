@@ -88,6 +88,9 @@ export const CELL_LINE_PREFIX = "reasoning-effort-receipt-cell ";
 // The legs that need no credential and no network: they can always run, so
 // `--check` takes a gap there for a defect of the run.
 export const OFFLINE_MODES = ["in_process", "built_binary"];
+// The levels, lowest first: the order the entries of one cell are listed in
+// where a row has an entry for each level it asks for.
+export const LEVELS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 /// A refusal: an input the generator will not read a result from.
 export class ReceiptError extends Error {}
@@ -317,13 +320,14 @@ function countsOf(tests, skipped) {
 }
 
 function byCellLine(a, b) {
-  return compare(a.test, b.test) || compare(a.cell, b.cell);
+  return compare(a.test, b.test) || compare(a.cell, b.cell) || LEVELS.indexOf(a.level) - LEVELS.indexOf(b.level);
 }
 
 /// The cell lines of a run's output, each once. A line is the prefix and one
 /// JSON object of exactly the `cell_line` members; a line with the prefix
-/// and anything else is refused, and so are two lines that say different
-/// things of one cell of one test.
+/// and anything else is refused. A row may print several lines of one cell,
+/// one per level it asks for there; two lines that say different things of
+/// one level of one cell of one test are refused.
 function cellLines() {
   const lines = new Map();
   return {
@@ -334,10 +338,10 @@ function cellLines() {
       const item = parseJson(line.slice(CELL_LINE_PREFIX.length), `the cell line at ${place}`);
       assertValid(schemas().inputs, "cell_line", item, `the cell line at ${place}`);
       const picked = { test: item.test, cell: item.cell, model: item.model, level: item.level, route: item.route };
-      const key = `${picked.test}\n${picked.cell}`;
+      const key = `${picked.test}\n${picked.cell}\n${picked.level}`;
       const earlier = lines.get(key);
       if (earlier !== undefined && JSON.stringify(earlier) !== JSON.stringify(picked)) {
-        throw new ReceiptError(`the cell line at ${place} says another thing of ${picked.test}, cell ${picked.cell}, than an earlier line`);
+        throw new ReceiptError(`the cell line at ${place} says another thing of ${picked.test}, cell ${picked.cell}, level ${picked.level}, than an earlier line`);
       }
       lines.set(key, picked);
       return true;
@@ -484,8 +488,8 @@ function checkLegResult(result, what) {
       throw new ReceiptError(`${what} holds an HTTP status or an error code on an observation that did not fail`);
     }
   }
-  const lines = new Set(result.cell_lines.map((item) => `${item.test}\n${item.cell}`));
-  if (lines.size !== result.cell_lines.length) throw new ReceiptError(`${what} holds two cell lines of one cell of one test`);
+  const lines = new Set(result.cell_lines.map((item) => `${item.test}\n${item.cell}\n${item.level}`));
+  if (lines.size !== result.cell_lines.length) throw new ReceiptError(`${what} holds two cell lines of one level of one cell of one test`);
 }
 
 function observationKey(item) {
@@ -563,6 +567,11 @@ function checkManifest(manifest) {
       if (row.test !== null && (model === null || level === null)) {
         throw new ReceiptError(`row ${row.id} of the manifest has a test and no model or no level for the cell ${item.cell}`);
       }
+      // A row with an entry per level takes its levels from what it prints:
+      // one level fixed here would be one of several.
+      if (row.lines === "per_level" && level?.level !== undefined) {
+        throw new ReceiptError(`row ${row.id} of the manifest has an entry for each level and fixes one level for the cell ${item.cell}`);
+      }
     }
   }
   return { cells, legs };
@@ -625,14 +634,20 @@ export function buildReceipt({ manifestText, manifestName = basename(MANIFEST_PA
     const atCommit = ran && result.commit === commit;
     // What the rows printed of their cells, by entry. Only a run at the
     // product commit is held to the manifest: every line must be of a cell
-    // the manifest lists, or the manifest is behind the rows.
+    // the manifest lists, or the manifest is behind the rows; and a cell has
+    // one line, unless its row has an entry for each level it asks for.
     const picked = new Map();
-    for (const line of atCommit ? result.cell_lines : []) {
+    for (const line of atCommit ? [...result.cell_lines].sort(byCellLine) : []) {
       const owners = manifest.rows.filter((row) => row.leg === leg.id && row.cells !== "observed" && row.test?.name === line.test);
       if (owners.length !== 1 || !owners[0].cells.some((item) => item.cell === line.cell)) {
         throw new ReceiptError(`the result file ${name} holds a cell line of ${line.test}, cell ${line.cell}, which is not a cell of exactly one row of this leg in the manifest`);
       }
-      picked.set(`${owners[0].id}/${line.cell}`, line);
+      const key = `${owners[0].id}/${line.cell}`;
+      const lines = picked.get(key) ?? [];
+      if (lines.length > 0 && owners[0].lines !== "per_level") {
+        throw new ReceiptError(`the result file ${name} holds two cell lines of ${line.test}, cell ${line.cell}, and row ${owners[0].id} of the manifest has one entry for a cell`);
+      }
+      picked.set(key, [...lines, line]);
     }
     states.set(leg.id, { result, ran, atCommit, picked, file: { name, sha256: sha256(bytes) } });
   }
@@ -755,37 +770,42 @@ export function buildReceipt({ manifestText, manifestName = basename(MANIFEST_PA
     for (const item of row.cells) {
       const cell = cells.get(item.cell);
       const route = `${cell.backend}/${cell.api}`;
-      let model = item.model ?? row.model;
-      let level = item.requested_level ?? row.requested_level;
-      let valuesBasis = model === null ? null : "manifest";
-      // The row's own line for this cell, when the row ran here: the values
-      // it picked replace the manifest's rule, and must agree with whatever
-      // the manifest fixes.
-      const line = own.status === "executed" ? state.picked.get(`${row.id}/${cell.id}`) : undefined;
-      if (line !== undefined) {
-        const differs = (what, said, fixed) => new ReceiptError(`row ${row.id} reports the ${what} ${said} for the cell ${cell.id}, and the manifest says ${fixed}`);
-        if (line.route !== route) throw differs("route", line.route, route);
-        if (model.id !== undefined && model.id !== line.model) throw differs("model", line.model, model.id);
-        if (level.level !== undefined && level.level !== line.level) throw differs("level", line.level, level.level);
-        model = { id: line.model };
-        level = { level: line.level };
-        valuesBasis = "row_output";
-      }
-      entries.push(
+      const fixedModel = item.model ?? row.model;
+      const fixedLevel = item.requested_level ?? row.requested_level;
+      const declared = (fields) =>
         entry({
-          id: `${row.id}/${cell.id}`,
           cell: cell.id,
           provider_family: cell.provider_family,
-          model,
           api: cell.api,
           route,
-          requested_level: level,
-          outcome: row.outcome.kind === "sent" ? { kind: "sent", level } : { kind: "refused", reason: row.outcome.reason },
+          outcome: row.outcome.kind === "sent" ? { kind: "sent", level: fields.requested_level } : { kind: "refused", reason: row.outcome.reason },
           outcome_basis: "test_assertion",
-          values_basis: valuesBasis,
+          ...fields,
           ...own,
-        }),
-      );
+        });
+      // The row's own lines for this cell, when the row ran here: the values
+      // it picked replace the manifest's rule, and must agree with whatever
+      // the manifest fixes. A row with an entry for each level has one line,
+      // and so one entry, per level, lowest level first.
+      const lines = own.status === "executed" ? (state.picked.get(`${row.id}/${cell.id}`) ?? []) : [];
+      if (lines.length === 0) {
+        entries.push(declared({ id: `${row.id}/${cell.id}`, model: fixedModel, requested_level: fixedLevel, values_basis: fixedModel === null ? null : "manifest" }));
+        continue;
+      }
+      for (const line of lines) {
+        const differs = (what, said, fixed) => new ReceiptError(`row ${row.id} reports the ${what} ${said} for the cell ${cell.id}, and the manifest says ${fixed}`);
+        if (line.route !== route) throw differs("route", line.route, route);
+        if (fixedModel.id !== undefined && fixedModel.id !== line.model) throw differs("model", line.model, fixedModel.id);
+        if (fixedLevel.level !== undefined && fixedLevel.level !== line.level) throw differs("level", line.level, fixedLevel.level);
+        entries.push(
+          declared({
+            id: row.lines === "per_level" ? `${row.id}/${cell.id}:${line.level}` : `${row.id}/${cell.id}`,
+            model: { id: line.model },
+            requested_level: { level: line.level },
+            values_basis: "row_output",
+          }),
+        );
+      }
     }
   }
 

@@ -712,9 +712,12 @@ attaches its output to a release yet.
   `--no-capture`, or in the log of a run with `--success-output final`. On
   an executed entry the printed model and level replace the manifest's
   rule; a line of a cell the manifest does not list, or one that disagrees
-  with a value the manifest fixes, is an error. A failed live cell may carry
-  the HTTP status and the provider's error code as typed fields, never a
-  message.
+  with a value the manifest fixes, is an error. The row that refuses levels
+  outside a route's set refuses several on some routes: it prints one line
+  per refused level (the manifest marks it `lines: per_level`), and an
+  executed cell of it has one entry per level, `row/cell:level`, the lowest
+  level first. A failed live cell may carry the HTTP status and the
+  provider's error code as typed fields, never a message.
 - `make reasoning-effort-receipt RESULTS=<directory> OUT=<directory>` (or
   the script's `generate`) reads the version, the manifest and the test
   sources from the commit and writes both files. An entry is `executed` only

@@ -69,6 +69,13 @@ them.
   stream ends with through any redaction, for a client that signs with a
   key of its own.
 
+- `meerkat-contracts`: `WireRunFailure`, the failure document
+  `rkat run --output json` writes (`{"error": WireError}`, emitted in
+  `artifacts/schemas/errors.json`), and `error::turn_failure_error_code`,
+  the `ErrorCode` of a failed turn's typed terminal cause. JSON-RPC and the
+  `rkat run` failure document read a failed turn's code from that one
+  mapping; the JSON-RPC codes are unchanged.
+
 - `meerkat-mob`: `MobSessionService::recorded_build_instructions(session_id)`
   (a provided trait method) reads the instruction sections a session was
   built with (`additional_instructions`), from the session's committed build
@@ -127,6 +134,28 @@ them.
   that begins with a token prefix (`sk-learn-compatible`). Text outside
   those positions is unchanged. A rejection is classified from the body as
   received and then redacted, so the rules do not change an error's class.
+
+- `rkat run --output json` (and `--json`, with or without `--resume`): a
+  failed run now writes a JSON failure document to stdout (stdout was empty
+  before). The document is `{"error": {code, category, message, details}}`,
+  the error envelope the other surfaces use, and it is the last document on
+  stdout, after any `--stream` text. `code` is the failure's public error
+  code and `message` the text of stderr's `Error:` line. For a turn that
+  ended in failure, `details.error` is the typed turn error (`kind`,
+  `retryable`, `provider`, `model`, `reason`), and `code` follows its
+  `kind` as on JSON-RPC (`PROVIDER_ERROR`, `BUDGET_EXHAUSTED`, `HOOK_DENIED`
+  or `INTERNAL_ERROR`), so a caller can tell a transient provider failure
+  (`retryable` `true`, which a turn that outlasted the retries, `kind`
+  `retry_exhausted`, carries) from a permanent one without reading text.
+  One turn's code differs from JSON-RPC: a turn abandoned on a refused
+  scoped tool grant gate stays a failed turn (`INTERNAL_ERROR`, exit status
+  1, the typed refusal inside the turn error), where JSON-RPC answers
+  invalid params. A typed error before the turn prints its own code
+  and data; a check made by the CLI itself prints `INTERNAL_ERROR`. Exit
+  statuses and the stderr text are unchanged (a failed turn still exits 1),
+  text and HTML output print no document, an argument the parser refuses
+  prints none, and no other command prints one. See "JSON failure
+  document" in `docs/cli/configuration.mdx`.
 
 ### Fixed
 
@@ -398,6 +427,14 @@ them.
     write (`chmod`, or an ACL on the file): the file is a new one every
     time, so a grant on the older file does not carry over. The descriptor
     file of `rkat mob host --descriptor-out` is owner-only in the same way.
+
+- A script that runs `rkat run --output json` (or `--json`) must not read
+  non-empty stdout as success, nor parse the last stdout document as a run
+  result without looking at it: a failed run now ends stdout with
+  `{"error": {...}}`. Decide by the exit status, which is unchanged, or by
+  the document's top-level key: `error` is a failure, `status`
+  (`"pending_tool_call"`) a run waiting for an external tool result, and
+  anything else the run result. Text and HTML output are unchanged.
 
 ### Known limitations
 

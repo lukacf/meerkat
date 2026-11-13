@@ -97,8 +97,8 @@
     },
     {
       "path": "guides/host-composition.mdx",
-      "source_sha256": "8aa812fab101d6962701b093f093691cb85b5e2d65569b0f5689055baffc152b",
-      "rendered_sha256": "61044da132f284bd6294aec9ffc88c9ff25a2182b03b7af1869c88982b91ddc8"
+      "source_sha256": "e4ed1d3f6e4c1af69fb1c61c94859edc4edc0ac03d0b7829a2e381aaefe222cf",
+      "rendered_sha256": "9ccd5d1c460cf095af15731a66c09d343083d053d6249700b6d57d654f842a2c"
     },
     {
       "path": "guides/manage-connections.mdx",
@@ -192,8 +192,8 @@
     },
     {
       "path": "reference/access-control.mdx",
-      "source_sha256": "76cfea0637564190eb63ebd33599acca11fd2e764910d0b6a17960a942956b36",
-      "rendered_sha256": "76cfea0637564190eb63ebd33599acca11fd2e764910d0b6a17960a942956b36"
+      "source_sha256": "c09757b8544cf470a922d8b646913054c00ec5d6179378721d2e4afdc55742ad",
+      "rendered_sha256": "c09757b8544cf470a922d8b646913054c00ec5d6179378721d2e4afdc55742ad"
     },
     {
       "path": "reference/architecture.mdx",

@@ -16432,24 +16432,13 @@ fn rpc_error_to_session_error(err: RpcError, session_id: &SessionId) -> SessionE
     }
 }
 
-/// The JSON-RPC code of a failed turn's typed terminal cause: the code
-/// [`session_error_to_rpc`] gives the equivalent agent error, so a turn that
-/// fails through the runtime reports the same class as one that fails
-/// through the session service.
+/// The JSON-RPC code of a failed turn's typed terminal cause: the shared
+/// turn-failure code ([`meerkat_contracts::error::turn_failure_error_code`]),
+/// which is the code [`session_error_to_rpc`] gives the equivalent agent
+/// error, so a turn that fails through the runtime reports the same class as
+/// one that fails through the session service.
 fn turn_failure_rpc_code(turn_error: &meerkat_core::TurnErrorMetadata) -> i32 {
-    use meerkat_core::TurnTerminalCauseKind as Cause;
-    match turn_error.kind {
-        Cause::LlmFailure | Cause::RetryExhausted => error::PROVIDER_ERROR,
-        Cause::BudgetExhausted | Cause::TimeBudgetExceeded => error::BUDGET_EXHAUSTED,
-        Cause::HookDenied => error::HOOK_DENIED,
-        Cause::Unknown
-        | Cause::HookFailure
-        | Cause::ToolFailure
-        | Cause::StructuredOutputValidationFailed
-        | Cause::TurnLimitReached
-        | Cause::RuntimeApplyFailure
-        | Cause::FatalFailure => error::INTERNAL_ERROR,
-    }
+    meerkat_contracts::error::turn_failure_error_code(turn_error).jsonrpc_code()
 }
 
 /// The JSON-RPC answer of an abandoned turn. A turn whose session's build

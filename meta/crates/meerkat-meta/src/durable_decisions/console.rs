@@ -240,8 +240,9 @@ pub(crate) fn advertised_methods(
 /// The answer to a Console decision request, or `None` when the Console
 /// serves no such method (it then answers it as any other method: not
 /// found). The withdraw is a console change, checked by `change`; its
-/// refusals are decided before any store read, and are the same for every
-/// decision id.
+/// refusals of the caller are decided before any store read, and are the
+/// same for every decision id. A decision the caller may not see at all is
+/// then answered as an id that names no decision.
 pub(crate) fn handle_console_decision_rpc(
     decisions: &RuntimeDecisions,
     caller: &ConsoleDecisionCaller<'_>,
@@ -292,7 +293,7 @@ fn withdraw_change(
     if let Err(refusal) = (change.caller_current)() {
         return caller_refused(id, refusal);
     }
-    withdraw(decisions, id, params)
+    withdraw(decisions, caller, id, params)
 }
 
 /// The refusal of a console change for its caller, as the Console's other
@@ -509,8 +510,16 @@ fn rendering(
     }
 }
 
-/// The administrator withdraws an open decision as the host.
-fn withdraw(decisions: &RuntimeDecisions, id: &Value, params: Value) -> Value {
+/// The administrator withdraws an open decision as the host. A decision
+/// the caller may not see at all (for an administrator: the question set of
+/// a member hidden from them) is not there to withdraw: its id is answered
+/// as an id that names no decision, as the reads answer it.
+fn withdraw(
+    decisions: &RuntimeDecisions,
+    caller: &ConsoleDecisionCaller<'_>,
+    id: &Value,
+    params: Value,
+) -> Value {
     let params: DecisionWithdrawParams = match parse(id, params) {
         Ok(params) => params,
         Err(answer) => return answer,
@@ -523,6 +532,16 @@ fn withdraw(decisions: &RuntimeDecisions, id: &Value, params: Value) -> Value {
     };
     if !decisions.is_available() {
         return wire::no_decision_store(id);
+    }
+    // The read records nothing: the withdraw's own touch still answers
+    // what it records (the expiry of a decision past its deadline).
+    let hidden = decisions
+        .owner()
+        .for_candidate_launch()
+        .get(&decision_id)
+        .is_ok_and(|row| Viewer::of(caller).sight(&row) == Sight::Nothing);
+    if hidden {
+        return wire::not_found(id);
     }
     match decisions
         .owner()

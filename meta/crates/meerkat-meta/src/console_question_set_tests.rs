@@ -2314,3 +2314,57 @@ async fn a_decisions_administrator_cannot_withdraw_a_set_of_a_member_hidden_from
     assert!(admin_withdraws["error"].is_null(), "{admin_withdraws}");
     assert_eq!(phases, [DecisionPhase::Withdrawn; 3]);
 }
+
+/// The withdraw's look at what its caller may see records nothing: an
+/// administrator's withdraw of a set past its deadline is still answered by
+/// the touch that records the expiry (`expired`), as a withdraw was before
+/// it looked.
+#[tokio::test]
+async fn a_withdraw_past_the_deadline_still_answers_the_expiry_it_records() {
+    let state_dir = tempfile::tempdir().expect("state directory");
+    let now_ms = now_seconds() * 1000;
+    let clock = Arc::new(RowClock(AtomicU64::new(now_ms)));
+    let owner = DurableDecisionService::with_clock(
+        Arc::new(meerkat_store::SqliteDecisionStore::in_store_path(
+            state_dir.path(),
+        )),
+        clock.clone(),
+    );
+    let decisions =
+        decisions_in(state_dir.path(), "questions-late-withdraw", true).with_owner_for_test(owner);
+    let console = QuestionConsole::start(
+        "questions-late-withdraw",
+        Setup::enforced().access(crate::access::AccessControlConfig {
+            enabled: true,
+            admins: vec![BOB.to_string()],
+            ..crate::access::AccessControlConfig::default()
+        }),
+        decisions.clone(),
+    )
+    .await;
+    console.runtime.ask_user_slot().fill(
+        AskUserSurface::new(decisions, console.doors.served(), "questions-late-withdraw")
+            .with_clock(clock.clone()),
+    );
+    let late = ask(&console.host(ASKER), "late", 60)
+        .await
+        .request_id
+        .expect("asked");
+    clock.0.store(now_ms + 61_000, Ordering::SeqCst);
+    let withdrawal = console_rpc_as(
+        &console.app,
+        Some(&bob()),
+        "meta/decisions/withdraw",
+        json!({ "decision_id": late }),
+    )
+    .await;
+    let phase = console.row(&late).state.phase;
+    console.stop().await;
+
+    assert_eq!(
+        withdrawal["error"]["data"],
+        refused("expired"),
+        "a withdraw past the deadline answers the expiry it records: {withdrawal}"
+    );
+    assert_eq!(phase, DecisionPhase::Expired);
+}

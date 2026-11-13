@@ -8869,8 +8869,8 @@ impl IdentityRuntime {
     /// Cancellation-safe identity-first respawn for RPC and console boundaries.
     ///
     /// A durable identity already owns an authoritative Meerkat session. Its
-    /// respawn retires the member and wakes it onto that same session (Core
-    /// resumes it under a new generation). It must not call the raw
+    /// respawn replaces the member by its successor on that same session
+    /// (at a new Core generation) and wakes it. It must not call the raw
     /// member-plane respawn convenience: that operation creates a new session
     /// and would silently turn a non-destructive identity recovery into a
     /// destructive reset.
@@ -9825,8 +9825,9 @@ impl IdentityRuntime {
     ///   machine; a refused wake keeps its kind). One attempt, and the door's
     ///   one retry of a wake Core refused for a cause the door ends
     ///   ([`Self::door_retries`]); no loop.
-    ///   A member the seat built (its archived session's revival, as after a
-    ///   respawn's own retirement, or a declared role migration's restamp) is
+    ///   A member the seat revived on its archived session (a retired
+    ///   identity's) is seated Dormant, and this wake builds it, once. A
+    ///   member a seat step built (a declared role migration's restamp) is
     ///   live already: Core answers the wake so, and builds nothing again.
     async fn embody_identity_transaction(
         &self,
@@ -14327,8 +14328,8 @@ impl IdentityRuntime {
     }
 
     /// Change a maintenance build input and rebuild only the captured owner.
-    /// The existing retire and embodiment doors share one lifecycle lock.
-    /// The retire ends the member's wiring, so the rebuild wires the
+    /// The step that ends the incarnation for its successor and the
+    /// embodiment door share one lifecycle lock. The rebuild wires the
     /// identity's managed edges again once the wake answers.
     pub(crate) async fn rebuild_compaction_owner(
         &self,
@@ -14352,10 +14353,11 @@ impl IdentityRuntime {
         let (before, _) = self
             .live_delivery_target(identity, "compact_member")
             .await?;
-        // The floor reaches the member through its next seat: the roster's
-        // declaration lowers it into the build that seats the identity again
-        // at the wake below, and Core's same-session successor of an identity
-        // whose record is its row is seated with it.
+        // The floor reaches the member through its next seat: Core's
+        // same-session successor is seated with it. Where no such successor
+        // serves a roster identity's member, the roster's declaration lowers
+        // the floor into the build that seats the identity again at the wake
+        // below.
         let successor_seated = self
             .retire_locked_with_intent(
                 identity,
@@ -14532,10 +14534,11 @@ impl IdentityRuntime {
     /// Core's member registration reload (`reload_member_registration`)
     /// quiesces, discards and re-registers the executor for the SAME session
     /// and can tell a healthy registration apart (`not_degraded`). A bridge
-    /// without that primitive falls back to retire then wake under the
-    /// identity's lifecycle lock: the same session is resumed, Core's
-    /// generation advances, and the identity's managed edges, which Core's
-    /// retirement ended, are wired again.
+    /// without that primitive falls back, under the identity's lifecycle
+    /// lock, to the member's successor on the same session
+    /// ([`Self::end_incarnation_for_successor_locked`]) and its wake: the
+    /// same session is kept, Core's generation advances, and the identity's
+    /// managed edges are wired again.
     ///
     /// Contrast reset and `delete_identity`: a fresh session. This verb never
     /// starts one. An identity Core holds no member for returns `not_current`
@@ -15051,22 +15054,35 @@ impl IdentityRuntime {
         self.respawn_locked(identity).await
     }
 
-    /// Respawn: retire the identity's Core member, then wake it
-    /// onto the same session (Core's `Resume` from the member history) in one
-    /// verb under the lifecycle lock. The transcript is kept and Core's
-    /// generation ADVANCES, so a delivery scope captured before the respawn
-    /// refuses as stale. A crash between the two halves leaves the identity
-    /// retired with its history; the next wake resumes it. An identity Core
+    /// Respawn: replace the identity's Core member by its successor on the
+    /// same session, then wake it, in one verb under the lifecycle lock. The
+    /// transcript is kept and Core's generation ADVANCES, so a delivery
+    /// scope captured before the respawn refuses as stale. An identity Core
     /// holds no member for is simply woken.
     ///
-    /// Core keeps a built member's session archived once it retired it, so
-    /// the wake's declaration seats the identity again on it, Dormant and
-    /// building nothing, and Core's wake then builds the member once on that
-    /// session; the customizer's `after_create` is told of the session
-    /// once. A member Core never built (its session unborn) is seated again
-    /// unborn, and the wake builds it as a first build does.
+    /// The host composes the successor's seat first (its `customize_build`,
+    /// once; a build it refuses refuses the respawn before anything
+    /// changes), and Core seats the successor Dormant with it in the same
+    /// step that ends the incarnation
+    /// ([`Self::end_incarnation_for_successor_locked`]): the identity is
+    /// never without a member and its session is never archived. The wake's
+    /// declaration keeps that seat and builds nothing, and Core's wake then
+    /// builds the member once on the session; the customizer's
+    /// `after_create` is told of the session once. A wake that fails, or a
+    /// process that ends before it, leaves the identity seated Dormant on
+    /// the session it had, with everything that session owns; its next wake
+    /// builds it.
     ///
-    /// Core's retirement ends every edge of the member it retires, so once
+    /// Only a roster identity's member that no one-step successor serves (a
+    /// bridge without the transition, a placed member) is retired first.
+    /// Core keeps such a member's session archived, so the wake's
+    /// declaration seats the identity again on it, Dormant and building
+    /// nothing, and Core's wake builds the member once on that session. A
+    /// member Core never built (its session unborn) is seated again unborn,
+    /// and the wake builds it as a first build does.
+    ///
+    /// A successor under the member's own profile keeps its wiring; a
+    /// retirement ends every edge of the member it retires. Either way, once
     /// the wake answers, the respawn wires the identity's managed edges
     /// again, as a reset's rotation does.
     async fn respawn_locked(
@@ -15074,18 +15090,19 @@ impl IdentityRuntime {
         identity: &AgentIdentity,
     ) -> Result<Option<meerkat_mob::MemberDeliveryScope>, IdentityRuntimeError> {
         // An identity this runtime does not hold is refused before Core's
-        // member is touched: the wake below would refuse it only after the
-        // retire had already happened.
+        // member is touched: the wake below would refuse it only after its
+        // incarnation had already ended.
         if !self.entries.read().await.contains_key(identity) {
             return Err(IdentityRuntimeError::UnknownIdentity(identity.clone()));
         }
         self.refuse_host_adopted(identity).await?;
         let mut successor_seated = false;
         if let Some(live) = self.core_live_member(identity).await? {
-            // The retire below ends the member, and the wake after it resumes
-            // the session from what Core keeps of it. When Core keeps nothing
-            // beyond the member (sessions in memory only), nothing could
-            // resume it again: refuse before anything is retired.
+            // The step below ends the incarnation, and the wake after it
+            // builds the successor on the session from what Core keeps of
+            // it. When Core keeps nothing beyond the member (sessions in
+            // memory only), nothing could resume it again: refuse before
+            // anything ends.
             if let Some(session_id) = live.session_id.as_ref() {
                 self.refuse_respawn_without_durable_copy(identity, session_id)
                     .await?;
@@ -15109,9 +15126,10 @@ impl IdentityRuntime {
                     .await;
             }
             // A replacement on the same session owes no lifecycle side
-            // effect, as a reload's. How the successor's seat is requested
-            // depends on the record that holds the identity's spec: the one
-            // selection of this runtime.
+            // effect, as a reload's. Core seats the successor in the step
+            // that ends the incarnation; what it is seated with depends on
+            // the record that holds the identity's spec: the one selection
+            // of this runtime.
             successor_seated = self
                 .end_incarnation_for_successor_locked(
                     identity,
@@ -15143,11 +15161,11 @@ impl IdentityRuntime {
         )
         .await;
         result?;
-        // Core's retirement ended the identity's wiring with the member it
-        // retired: its managed and topology-controlled edges are wired again
-        // now, bounded, as a reset's rotation wires them. The reconcile takes
-        // no lifecycle lock. A failed reconcile is logged; the next reconcile
-        // retries it.
+        // A successor under another profile, and a member that was retired,
+        // lost the identity's wiring: its managed and topology-controlled
+        // edges are wired again now, bounded, as a reset's rotation wires
+        // them. The reconcile takes no lifecycle lock. A failed reconcile is
+        // logged; the next reconcile retries it.
         if let Err(error) = self.reconcile_target_topology_for_wake(identity).await {
             tracing::warn!(
                 %identity,
@@ -15159,11 +15177,10 @@ impl IdentityRuntime {
         self.core_live_scope(identity).await
     }
 
-    /// Refuse a respawn whose retire would end the only copy of the live
-    /// member's session: Core keeps it nowhere beyond the member (sessions
-    /// in memory only). A bridge that cannot say keeps the retire-then-wake
-    /// path; one that fails to answer refuses retryable. Nothing is retired
-    /// either way.
+    /// Refuse a respawn that would end the only copy of the live member's
+    /// session: Core keeps it nowhere beyond the member (sessions in memory
+    /// only). A bridge that cannot say is not refused; one that fails to
+    /// answer refuses retryable. Nothing ends either way.
     async fn refuse_respawn_without_durable_copy(
         &self,
         identity: &AgentIdentity,

@@ -173,6 +173,26 @@ struct SeatCore {
     /// Core's session service keeps sessions in memory only: no session
     /// outlives its member. Otherwise the double cannot say.
     sessions_in_memory: bool,
+    /// Core has the one-step same-session successor, and keeps each session
+    /// beyond its member: each successor asked for is recorded and answered
+    /// done. Otherwise the double answers that it has no such step.
+    one_step_successor: bool,
+    /// Core keeps each session beyond its member, whether or not it has
+    /// the one-step successor.
+    sessions_outlive_members: bool,
+    /// Core refuses each same-session successor as one it cannot serve,
+    /// before anything starts, with this detail.
+    successor_unsupported_for_mode: Option<String>,
+    /// Each same-session successor Core was asked for: the identity, the
+    /// seat's build the host composed for it (none for a row's identity),
+    /// and the compaction floor change.
+    successors: StdMutex<
+        Vec<(
+            AgentIdentity,
+            Option<AgentBuildDraft>,
+            Option<Option<std::num::NonZeroU64>>,
+        )>,
+    >,
     /// Core's rotation fails with this error after it started: Core
     /// journaled the start of the live incarnation's retirement, and ended
     /// neither the retirement nor the rotation.
@@ -854,6 +874,9 @@ impl SessionBridge for SeatCore {
         if self.sessions_in_memory {
             return Ok(false);
         }
+        if self.one_step_successor || self.sessions_outlive_members {
+            return Ok(true);
+        }
         Err(BridgeError::Unsupported {
             operation: "session_outlives_member",
         })
@@ -965,6 +988,29 @@ impl SessionBridge for SeatCore {
         Err(BridgeError::Mob(format!(
             "{runtime_id}: a seat checkpoints nothing"
         )))
+    }
+
+    async fn respawn_member_on_own_session(
+        &self,
+        identity: &AgentIdentity,
+        _spec: &DurableAgentSpec,
+        composed: Option<&AgentBuildDraft>,
+        compaction_floor: Option<Option<std::num::NonZeroU64>>,
+    ) -> Result<(), BridgeError> {
+        if let Some(detail) = &self.successor_unsupported_for_mode {
+            return Err(BridgeError::UnsupportedForMode {
+                identity: crate::member_comms_id::roster_member_id_for_identity(identity.as_str()),
+                mode: meerkat_mob::MobRuntimeMode::TurnDriven,
+                detail: detail.clone(),
+            });
+        }
+        if !self.one_step_successor {
+            return Err(BridgeError::Unsupported {
+                operation: "respawn_member_on_own_session",
+            });
+        }
+        lock(&self.successors).push((identity.clone(), composed.cloned(), compaction_floor));
+        Ok(())
     }
 
     async fn retire_member(&self, runtime_id: &AgentRuntimeId) -> Result<(), BridgeError> {
@@ -3354,6 +3400,341 @@ async fn a_respawn_of_a_built_member_tells_after_create_once_of_the_session_it_k
         [(alice, session)],
         "the respawn tells after_create once, of the session it keeps: {told:?}"
     );
+}
+
+/// A host customizer that answers every build with one model, temperature,
+/// label, context and additional instruction, or refuses it.
+struct AnswersBuilds {
+    refuse: AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl AgentCustomizer for AnswersBuilds {
+    async fn customize_build(
+        &self,
+        _context: &AgentBuildContext,
+        _spec: &DurableAgentSpec,
+        draft: &mut AgentBuildDraft,
+    ) -> Result<(), crate::identity_first::CustomizerError> {
+        if self.refuse.load(Ordering::SeqCst) {
+            return Err(crate::identity_first::CustomizerError::BuildFailed(
+                "the host refuses the build".to_string(),
+            ));
+        }
+        draft.model = Some("answered-model".to_string());
+        draft.provider_params = Some(
+            meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+                temperature: Some(0.75),
+                ..Default::default()
+            },
+        );
+        draft
+            .labels
+            .insert("answer".to_string(), "current".to_string());
+        draft.app_context = Some(serde_json::json!({ "answer": "current" }));
+        draft.additional_instructions = vec!["the current answer".to_string()];
+        Ok(())
+    }
+}
+
+/// The step that ends a roster identity's incarnation for its successor on
+/// the same session composes the seat's build with the host's customizer
+/// and asks Core for its one-step successor with it, whatever the cause: a
+/// respawn, a reload's fallback, and a maintenance rebuild, which names its
+/// compaction floor change. Core is handed the customizer's current answer
+/// (its model, provider parameters, labels, context and additional
+/// instructions), and nothing is retired: Core seated the successor. A build
+/// the host refuses refuses the step before Core is asked. Over a bridge
+/// without the step the incarnation is retired, and the caller's wake seats
+/// the identity.
+#[tokio::test]
+async fn a_roster_identitys_incarnation_ends_through_cores_one_step_successor() {
+    let alice = identity("personal:alice");
+    let floor = std::num::NonZeroU64::new(4096).expect("a non-zero floor");
+    for (cause, floor_change) in [
+        (created::SuccessorCause::Respawn, None),
+        (created::SuccessorCause::Reload, None),
+        (
+            created::SuccessorCause::CompactionFloor(Some(floor)),
+            Some(Some(floor)),
+        ),
+        (created::SuccessorCause::CompactionFloor(None), Some(None)),
+    ] {
+        let core = Arc::new(SeatCore {
+            one_step_successor: true,
+            ..SeatCore::default()
+        });
+        let runtime = runtime_over(None, &core);
+        runtime
+            .set_agent_customizer(Some(Arc::new(AnswersBuilds {
+                refuse: AtomicBool::new(false),
+            }) as Arc<dyn AgentCustomizer>))
+            .await;
+        register_live(&runtime, &core.core, spec(&alice), 0, SessionId::new())
+            .await
+            .expect("registered live");
+        let live = runtime
+            .core_live_member(&alice)
+            .await
+            .expect("Core's live member reads")
+            .expect("the identity has a live member");
+
+        let seated = runtime
+            .end_incarnation_for_successor_locked(&alice, &live, cause, "row")
+            .await
+            .expect("the incarnation ends");
+
+        assert!(seated, "{cause:?}: Core seated the successor");
+        let successors = lock(&core.successors).clone();
+        let [(asked, Some(draft), asked_floor)] = successors.as_slice() else {
+            panic!("{cause:?}: one successor, with the host's composed build: {successors:?}");
+        };
+        assert_eq!(asked, &alice, "{cause:?}");
+        assert_eq!(
+            asked_floor, &floor_change,
+            "{cause:?}: the cause's floor change"
+        );
+        assert_eq!(
+            draft.model.as_deref(),
+            Some("answered-model"),
+            "{cause:?}: model"
+        );
+        assert_eq!(
+            draft
+                .provider_params
+                .as_ref()
+                .and_then(|params| params.temperature),
+            Some(0.75),
+            "{cause:?}: provider parameters"
+        );
+        assert_eq!(
+            draft.labels.get("answer").map(String::as_str),
+            Some("current"),
+            "{cause:?}: labels"
+        );
+        assert_eq!(
+            draft.app_context,
+            Some(serde_json::json!({ "answer": "current" })),
+            "{cause:?}: context"
+        );
+        assert_eq!(
+            draft.additional_instructions,
+            vec!["the current answer".to_string()],
+            "{cause:?}: additional instructions"
+        );
+        assert!(
+            core.core
+                .live_member(&alice)
+                .expect("the double's member reads")
+                .is_some(),
+            "{cause:?}: nothing was retired"
+        );
+    }
+
+    // A build the host refuses: the step is refused before Core is asked.
+    let core = Arc::new(SeatCore {
+        one_step_successor: true,
+        ..SeatCore::default()
+    });
+    let runtime = runtime_over(None, &core);
+    runtime
+        .set_agent_customizer(Some(Arc::new(AnswersBuilds {
+            refuse: AtomicBool::new(true),
+        }) as Arc<dyn AgentCustomizer>))
+        .await;
+    register_live(&runtime, &core.core, spec(&alice), 0, SessionId::new())
+        .await
+        .expect("registered live");
+    let live = runtime
+        .core_live_member(&alice)
+        .await
+        .expect("Core's live member reads")
+        .expect("the identity has a live member");
+    let refused = runtime
+        .end_incarnation_for_successor_locked(
+            &alice,
+            &live,
+            created::SuccessorCause::Respawn,
+            "row",
+        )
+        .await;
+    assert!(
+        refused.is_err(),
+        "the host's refused build refuses the step: {refused:?}"
+    );
+    assert!(
+        lock(&core.successors).is_empty()
+            && core
+                .core
+                .live_member(&alice)
+                .expect("the double's member reads")
+                .is_some(),
+        "Core was asked for nothing, and the member is as it was"
+    );
+
+    // A bridge without the step.
+    let core = Arc::new(SeatCore::default());
+    let runtime = runtime_over(None, &core);
+    register_live(&runtime, &core.core, spec(&alice), 0, SessionId::new())
+        .await
+        .expect("registered live");
+    let live = runtime
+        .core_live_member(&alice)
+        .await
+        .expect("Core's live member reads")
+        .expect("the identity has a live member");
+
+    let seated = runtime
+        .end_incarnation_for_successor_locked(
+            &alice,
+            &live,
+            created::SuccessorCause::Respawn,
+            "row",
+        )
+        .await
+        .expect("the incarnation ends");
+
+    assert!(
+        !seated,
+        "a bridge without the step: the caller's wake seats the identity"
+    );
+    assert!(
+        core.core
+            .live_member(&alice)
+            .expect("the double's member reads")
+            .is_none(),
+        "the incarnation was retired"
+    );
+}
+
+/// The `cause` field of each warning this thread logs that a roster
+/// identity's member is retired and then woken.
+#[derive(Clone, Default)]
+struct RetiredForSuccessorCauses(Arc<StdMutex<Vec<String>>>);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RetiredForSuccessorCauses {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _context: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        #[derive(Default)]
+        struct Fields {
+            message: String,
+            cause: Option<String>,
+        }
+        impl tracing::field::Visit for Fields {
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                if field.name() == "cause" {
+                    self.cause = Some(value.to_string());
+                }
+            }
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.message = format!("{value:?}");
+                }
+            }
+        }
+        if *event.metadata().level() != tracing::Level::WARN {
+            return;
+        }
+        let mut fields = Fields::default();
+        event.record(&mut fields);
+        if fields
+            .message
+            .contains("no same-session successor serves the identity's member")
+            && let Some(cause) = fields.cause
+        {
+            lock(&self.0).push(cause);
+        }
+    }
+}
+
+/// A roster identity's member that no one-step successor serves is retired
+/// and then woken, and each such step logs one warning that names its
+/// cause: a bridge that does not say its sessions outlive their members, a
+/// bridge without the step, and a member Core's step refuses as one it
+/// cannot serve (here, a session whose creation record cannot be read). A
+/// served member's step logs none. This test runs on one thread, so a
+/// thread-local subscriber sees every event.
+#[tokio::test]
+async fn a_roster_member_no_successor_serves_is_retired_with_a_warning_that_names_the_cause() {
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    let causes = RetiredForSuccessorCauses::default();
+    let _logging =
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(causes.clone()));
+    let alice = identity("personal:alice");
+    const UNREADABLE: &str = "unsupported for runtime mode turn_driven: the creation the \
+                              member's session recorded cannot be read";
+    for (core, cause) in [
+        (
+            SeatCore::default(),
+            Some("its session bridge does not say whether the session outlives its member"),
+        ),
+        (
+            SeatCore {
+                sessions_outlive_members: true,
+                ..SeatCore::default()
+            },
+            Some("this session bridge does not implement respawn_member_on_own_session"),
+        ),
+        (
+            SeatCore {
+                sessions_outlive_members: true,
+                successor_unsupported_for_mode: Some(UNREADABLE.to_string()),
+                ..SeatCore::default()
+            },
+            Some(UNREADABLE),
+        ),
+        (
+            SeatCore {
+                one_step_successor: true,
+                ..SeatCore::default()
+            },
+            None,
+        ),
+    ] {
+        lock(&causes.0).clear();
+        let core = Arc::new(core);
+        let runtime = runtime_over(None, &core);
+        register_live(&runtime, &core.core, spec(&alice), 0, SessionId::new())
+            .await
+            .expect("registered live");
+        let live = runtime
+            .core_live_member(&alice)
+            .await
+            .expect("Core's live member reads")
+            .expect("the identity has a live member");
+
+        let seated = runtime
+            .end_incarnation_for_successor_locked(
+                &alice,
+                &live,
+                created::SuccessorCause::Respawn,
+                "row",
+            )
+            .await
+            .expect("the incarnation ends");
+
+        let warned = lock(&causes.0).clone();
+        match cause {
+            Some(cause) => {
+                assert!(!seated, "{cause}: the member was retired");
+                assert!(
+                    matches!(warned.as_slice(), [warned] if warned.contains(cause)),
+                    "one warning that names the cause '{cause}': {warned:?}"
+                );
+            }
+            None => {
+                assert!(seated, "Core seated the successor");
+                assert!(
+                    warned.is_empty(),
+                    "a served member's step warns of nothing: {warned:?}"
+                );
+            }
+        }
+    }
 }
 
 /// A delivery to an identity whose built member Core retired: the

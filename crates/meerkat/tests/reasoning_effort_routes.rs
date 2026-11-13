@@ -2053,3 +2053,332 @@ async fn a_resumed_session_resolves_and_reports_its_level() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// A client wrapper that answers for the route itself
+// ---------------------------------------------------------------------------
+
+/// What a [`ReportedRoute`] answers a route read with, given its client's
+/// own answer.
+type RouteReport =
+    dyn Fn(Option<ReasoningRouteObservation>) -> Option<ReasoningRouteObservation> + Send + Sync;
+
+/// Forwards everything to the route's client except what it reports about
+/// its route: once armed, `report` decides the answer from the client's own.
+/// Until then the client's answer is passed on unchanged.
+struct ReportedRoute {
+    inner: Arc<dyn LlmClient>,
+    armed: AtomicBool,
+    report: Box<RouteReport>,
+}
+
+impl ReportedRoute {
+    fn new(
+        inner: Arc<dyn LlmClient>,
+        report: impl Fn(Option<ReasoningRouteObservation>) -> Option<ReasoningRouteObservation>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            armed: AtomicBool::new(false),
+            report: Box::new(report),
+        })
+    }
+
+    fn arm(&self) {
+        self.armed.store(true, Ordering::SeqCst);
+    }
+
+    fn reported(
+        &self,
+        answer: Option<ReasoningRouteObservation>,
+    ) -> Option<ReasoningRouteObservation> {
+        if self.armed.load(Ordering::SeqCst) {
+            (self.report)(answer)
+        } else {
+            answer
+        }
+    }
+}
+
+#[async_trait]
+impl LlmClient for ReportedRoute {
+    async fn prepare_controller_credential(&self) -> Result<(), meerkat_core::auth::AuthError> {
+        self.inner.prepare_controller_credential().await
+    }
+
+    fn controller_model_selection(&self) -> Option<meerkat_core::ControllerModelSelection> {
+        self.inner.controller_model_selection()
+    }
+
+    fn plain_model_route(
+        &self,
+        logical_model: &str,
+    ) -> Result<meerkat_llm_core::PlainModelRoute, meerkat_core::ControllerFactsUnavailable> {
+        self.inner.plain_model_route(logical_model)
+    }
+
+    fn reasoning_route(&self) -> Option<ReasoningRouteObservation> {
+        self.reported(self.inner.reasoning_route())
+    }
+
+    fn reasoning_route_of(
+        &self,
+        projection: &LlmReplayProjection,
+    ) -> Option<ReasoningRouteObservation> {
+        self.reported(self.inner.reasoning_route_of(projection))
+    }
+
+    fn project_replay_request(
+        &self,
+        messages: &[meerkat_core::Message],
+    ) -> Result<LlmReplayProjection, LlmError> {
+        self.inner.project_replay_request(messages)
+    }
+
+    fn project_replay_messages(
+        &self,
+        messages: &[meerkat_core::Message],
+    ) -> Result<Vec<meerkat_core::Message>, LlmError> {
+        self.inner.project_replay_messages(messages)
+    }
+
+    fn output_token_limit(&self) -> Option<u32> {
+        self.inner.output_token_limit()
+    }
+
+    fn prompt_token_limit(&self, output_budget: u32) -> Option<u32> {
+        self.inner.prompt_token_limit(output_budget)
+    }
+
+    fn request_pressure(
+        &self,
+        request: &LlmRequest,
+    ) -> Result<Option<meerkat_core::ProviderRequestPressure>, LlmError> {
+        self.inner.request_pressure(request)
+    }
+
+    fn prepared_request_pressure(
+        &self,
+        request: &PreparedLlmRequest,
+    ) -> Result<Option<meerkat_core::ProviderRequestPressure>, LlmError> {
+        self.inner.prepared_request_pressure(request)
+    }
+
+    fn authored_cache_breakpoints(
+        &self,
+        request: &LlmRequest,
+        messages: &[meerkat_core::Message],
+    ) -> Result<Vec<meerkat_core::ProviderCacheBreakpointClaim>, LlmError> {
+        self.inner.authored_cache_breakpoints(request, messages)
+    }
+
+    fn prepared_cache_breakpoints(
+        &self,
+        request: &PreparedLlmRequest,
+        messages: &[meerkat_core::Message],
+    ) -> Result<Vec<meerkat_core::ProviderCacheBreakpointClaim>, LlmError> {
+        self.inner.prepared_cache_breakpoints(request, messages)
+    }
+
+    fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
+        self.inner.stream(request)
+    }
+
+    fn stream_prepared<'a>(&'a self, request: &'a PreparedLlmRequest) -> LlmStream<'a> {
+        self.inner.stream_prepared(request)
+    }
+
+    fn provider(&self) -> Provider {
+        self.inner.provider()
+    }
+
+    async fn health_check(&self) -> Result<(), LlmError> {
+        self.inner.health_check().await
+    }
+
+    fn compile_schema(
+        &self,
+        output_schema: &OutputSchema,
+    ) -> Result<meerkat_core::schema::CompiledSchema, meerkat_core::schema::SchemaError> {
+        self.inner.compile_schema(output_schema)
+    }
+}
+
+/// A session that sets no level sends the request its client sends by
+/// itself, on every route. Two pins: the request body is the same whether
+/// or not the client reports a route (the same turn goes through a wrapper
+/// that reports none), and on the three Responses routes of a model that
+/// takes reasoning, whose clients send an effort of their own, that default
+/// is exactly the one written here. Nothing is reported for either run.
+#[tokio::test]
+async fn a_session_without_a_level_sends_its_clients_own_request() {
+    for param in PARAMS {
+        let stub = Stub::spawn(&[Reply::Text]).await;
+        let fixture = param.fixture(Stage::Stated, &stub.base).expect("staged");
+
+        // The route's client as it is.
+        let mut agent = build(&fixture, Build::default())
+            .await
+            .unwrap_or_else(|error| panic!("{param:?}: the agent builds: {error}"));
+        let (result, events) = run(&mut agent, "Hello.").await;
+        let result = result.unwrap_or_else(|error| panic!("{param:?}: the run completes: {error}"));
+        assert_eq!(result.reasoning_effort, None, "{param:?}");
+        assert!(request_reports(&events).is_empty(), "{param:?}");
+        assert_eq!(run_started_reports(&events), [None], "{param:?}");
+
+        // The same turn through a client that reports no route at all.
+        let no_route = ReportedRoute::new(Arc::clone(&fixture.client), |_| None);
+        no_route.arm();
+        let mut agent = build(
+            &fixture,
+            Build {
+                client: Some(no_route),
+                ..Build::default()
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{param:?}: the agent builds without a route: {error}"));
+        let (result, events) = run(&mut agent, "Hello.").await;
+        let result = result.unwrap_or_else(|error| {
+            panic!("{param:?}: the run without a route completes: {error}")
+        });
+        assert_eq!(result.reasoning_effort, None, "{param:?}");
+        assert!(request_reports(&events).is_empty(), "{param:?}");
+
+        let recorded = stub.recorded();
+        assert_eq!(recorded.len(), 2, "{param:?}: {recorded:?}");
+        assert_eq!(recorded[0].path, recorded[1].path, "{param:?}");
+        assert_eq!(
+            recorded[0].body, recorded[1].body,
+            "{param:?}: a request without a level does not depend on the route the client reports"
+        );
+
+        // The Responses clients of a model that takes reasoning send this
+        // effort by themselves; no other route's client writes an effort
+        // field of its own.
+        let body = &recorded[0].body;
+        if matches!(
+            param,
+            Param::OpenAiDirect | Param::SelfHostedResponses | Param::CopilotResponses
+        ) {
+            assert_eq!(
+                body["reasoning"],
+                json!({"effort": "medium", "summary": "auto"}),
+                "{param:?}: the client's own default: {body}"
+            );
+        } else {
+            for field in [
+                &body["reasoning"],
+                &body["reasoning_effort"],
+                &body["output_config"],
+                &body["generationConfig"]["thinkingConfig"],
+            ] {
+                assert!(field.is_null(), "{param:?}: {body}");
+            }
+        }
+    }
+}
+
+/// The routes outside Copilot: a level the session was built with and has
+/// sent is refused by the RUN, not by the build, once the route stops
+/// taking it. The client first stops reporting a route (the level's support
+/// is then unknown), and on the self-hosted routes the operator's declared
+/// levels change (the level is then unsupported, with the new set). The
+/// turn fails with the typed refusal and nothing is sent for it.
+#[tokio::test]
+async fn a_level_the_route_stops_taking_is_refused_by_the_run() {
+    for param in [
+        Param::OpenAiDirect,
+        Param::ClaudeDirect,
+        Param::GeminiDirect,
+        Param::SelfHostedChat,
+        Param::SelfHostedResponses,
+    ] {
+        let self_hosted = matches!(param, Param::SelfHostedChat | Param::SelfHostedResponses);
+        // What the client reports once armed: no route, and on a
+        // self-hosted route also the operator's levels without the level.
+        let mut cases: Vec<(&str, Option<Vec<EffortLevel>>)> = vec![("no route", None)];
+        if self_hosted {
+            cases.push(("other operator levels", Some(Vec::new())));
+        }
+        for (case, operator_levels) in cases {
+            let context = format!("{param:?} ({case})");
+            let stub = Stub::spawn(&[Reply::Text]).await;
+            let fixture = param.fixture(Stage::Stated, &stub.base).expect("staged");
+            let level = fixture.level();
+            let remaining: Vec<EffortLevel> = fixture
+                .supported
+                .iter()
+                .copied()
+                .filter(|stated| *stated != level)
+                .collect();
+            let declared = operator_levels.map(|_| remaining.clone());
+            let reported = declared.clone();
+            let client = ReportedRoute::new(Arc::clone(&fixture.client), move |observation| {
+                let levels = reported.clone()?;
+                let mut observation = observation?;
+                observation.operator_levels = Some(levels);
+                Some(observation)
+            });
+            let mut agent = build(
+                &fixture,
+                Build {
+                    client: Some(client.clone()),
+                    ..Build::level(level)
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{context}: the build accepts the level: {error}"));
+
+            // The level is live: the first turn sends it.
+            let (result, events) = run(&mut agent, "Hello.").await;
+            result.unwrap_or_else(|error| panic!("{context}: the first turn completes: {error}"));
+            assert_eq!(
+                request_reports(&events),
+                [fixture.resolution(level)],
+                "{context}"
+            );
+            let sent = stub.recorded();
+            assert_eq!(sent.len(), 1, "{context}");
+            fixture.assert_requests(&sent, level);
+
+            client.arm();
+            let refusal = refused_run(&mut agent, &context).await;
+            let expected = match declared {
+                // No route is reported: nothing states the level's support.
+                None => ReasoningEffortRefusal {
+                    requested: level,
+                    provider: fixture.provider,
+                    model: fixture.model.clone(),
+                    route: None,
+                    reason: ReasoningEffortRefusalReason::SupportedLevelsUnknown,
+                    supported: None,
+                    facts: None,
+                    conflicting_param: None,
+                    conflicting_level: None,
+                },
+                // The operator now declares the other levels only.
+                Some(remaining) => ReasoningEffortRefusal {
+                    requested: level,
+                    provider: fixture.provider,
+                    model: fixture.model.clone(),
+                    route: Some(fixture.route.clone()),
+                    reason: ReasoningEffortRefusalReason::UnsupportedLevel,
+                    supported: Some(remaining),
+                    facts: Some(fixture.facts),
+                    conflicting_param: None,
+                    conflicting_level: None,
+                },
+            };
+            assert_eq!(refusal, expected, "{context}");
+            assert_eq!(
+                stub.recorded().len(),
+                1,
+                "{context}: nothing is sent for the refused turn"
+            );
+        }
+    }
+}

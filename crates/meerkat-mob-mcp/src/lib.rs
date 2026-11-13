@@ -763,7 +763,7 @@ struct AdmittedDestroy {
     /// The members this destroy's caller is shown, read before the destroy
     /// starts (their rows are gone after it): the report the caller is
     /// answered, now or when it collects it later, and the refusal of a
-    /// destroy that did not start name no other member.
+    /// destroy refused by the mob name no other member.
     shown_to_caller: DestroyMemberView,
 }
 
@@ -15159,8 +15159,6 @@ mod tests {
         )
     }
 
-    /// Whether `answered` is the fixed text `fixed` and nothing else: an
-    /// internal error with no structured data.
     /// Whether `answered` is the one fixed text an agent is answered in
     /// place of a refusal, and nothing else: an internal error with no
     /// structured data.
@@ -15380,6 +15378,108 @@ mod tests {
             report.errors
         );
         assert!(report.remote_cleanup_deadline_exceeded);
+    }
+
+    /// What the log wrote, kept for a test to read.
+    #[derive(Clone, Default)]
+    struct CapturedLog(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl CapturedLog {
+        fn text(&self) -> String {
+            let bytes = self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            String::from_utf8_lossy(&bytes).into_owned()
+        }
+    }
+
+    impl std::io::Write for CapturedLog {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLog {
+        type Writer = CapturedLog;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// The fixed text sends its reader to the host's log, so the log holds
+    /// the cause: a refusal an agent caller is answered the fixed text for
+    /// is written there whole, at warn, with the mob's id. A refusal
+    /// answered whole, and the host's own destroy, write nothing.
+    #[test]
+    fn a_destroy_refusal_answered_as_the_fixed_text_is_logged_whole_at_warn() {
+        let id = AgentIdentity::from;
+        let mob_id = MobId::from("logged-mob");
+        let session = SessionId::new();
+        let view = DestroyMemberView::of_agent(
+            vec![id("logged-kept"), id("logged-shown")],
+            BTreeSet::from([id("logged-kept")]),
+        );
+        // What a host that logs warnings and nothing below them keeps of
+        // one answer.
+        let logged = |error: MobError, view: &DestroyMemberView| {
+            let log = CapturedLog::default();
+            let subscriber = tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::WARN)
+                .with_ansi(false)
+                .with_writer(log.clone())
+                .finish();
+            let answered = tracing::subscriber::with_default(subscriber, || {
+                destroy_refusal_for_caller(&mob_id, error, view)
+            });
+            (answered, log.text())
+        };
+
+        let (answered, log) = logged(custody_deferred("logged-kept", &session), &view);
+        assert!(is_fixed_refusal(&answered), "{answered:?}");
+        let session_text = session.to_string();
+        for held in [
+            "WARN",
+            "logged-mob",
+            "logged-kept",
+            session_text.as_str(),
+            STORE_CANNOT_SERVE,
+        ] {
+            assert!(
+                log.contains(held),
+                "the host's log holds {held:?} of a refusal answered as the fixed text: {log:?}"
+            );
+        }
+
+        let (answered, log) = logged(
+            MobError::Internal("destroy marker append failed".into()),
+            &view,
+        );
+        assert!(is_fixed_refusal(&answered), "{answered:?}");
+        assert!(
+            log.contains("WARN") && log.contains("destroy marker append failed"),
+            "the host's log holds a free text answered as the fixed text: {log:?}"
+        );
+
+        let (answered, log) = logged(custody_deferred("logged-shown", &session), &view);
+        assert!(!is_fixed_refusal(&answered), "{answered:?}");
+        assert!(log.is_empty(), "a refusal answered whole: {log:?}");
+
+        let (answered, log) = logged(
+            custody_deferred("logged-kept", &session),
+            &DestroyMemberView::Every,
+        );
+        assert!(!is_fixed_refusal(&answered), "{answered:?}");
+        assert!(log.is_empty(), "the host's own destroy: {log:?}");
     }
 
     #[tokio::test]
@@ -23770,8 +23870,9 @@ mod tests {
         member: AgentIdentity,
         /// That member's session.
         session: SessionId,
-        /// The session of the other member the mob seats, if it seats one.
-        peer_session: Option<SessionId>,
+        /// The sessions of the other members the mob seats, in the order
+        /// they were given.
+        peer_sessions: Vec<SessionId>,
     }
 
     /// The labels of a member's row that names `keeper` as the one it is
@@ -23790,7 +23891,7 @@ mod tests {
         member: &str,
         keeper: Option<&str>,
     ) -> MobWithDeferredCustody {
-        restart_with_a_members_custody_deferred_beside(mob_id, member, keeper, None).await
+        restart_with_a_members_custody_deferred_beside(mob_id, member, keeper, &[]).await
     }
 
     /// Restart a mob whose member `member` is Retiring (its retirement's
@@ -23799,13 +23900,13 @@ mod tests {
     /// custody and runs, and the store keeps failing, so every re-attempt
     /// leaves it deferred. The host's member tool audience is
     /// [`HideKeptMembers`], and the member's row names `keeper` as the one
-    /// it is kept for, if any. With `peer`, the mob seats that other member
-    /// too, with the keeper its own row names.
+    /// it is kept for, if any. The mob seats each of `peers` too, with the
+    /// keeper its own row names.
     async fn restart_with_a_members_custody_deferred_beside(
         mob_id: &str,
         member: &str,
         keeper: Option<&str>,
-        peer: Option<(&str, Option<&str>)>,
+        peers: &[(&str, Option<&str>)],
     ) -> MobWithDeferredCustody {
         const STEP: Duration = Duration::from_secs(10);
         let identity = AgentIdentity::from(member);
@@ -23834,8 +23935,8 @@ mod tests {
             .resolve_bridge_session_id(&identity)
             .await
             .expect("the member's session");
-        let mut peer_session = None;
-        if let Some((peer, peer_keeper)) = peer {
+        let mut peer_sessions = Vec::new();
+        for (peer, peer_keeper) in peers.iter().copied() {
             let peer = AgentIdentity::from(peer);
             let spec = SpawnMemberSpec::new("worker", peer.clone())
                 .with_runtime_mode(MobRuntimeMode::TurnDriven)
@@ -23844,7 +23945,7 @@ mod tests {
                 .await
                 .expect("the spawn answers")
                 .expect("spawn the other member");
-            peer_session = Some(
+            peer_sessions.push(
                 first
                     .resolve_bridge_session_id(&peer)
                     .await
@@ -23915,7 +24016,7 @@ mod tests {
             handle,
             member: identity,
             session,
-            peer_session,
+            peer_sessions,
         }
     }
 
@@ -24122,29 +24223,32 @@ mod tests {
     /// An agent's destroy is judged as the member its session is bound to in
     /// the destroyed mob. In one mob, a caller seated there whose own row
     /// the host's rule shows the deferred member to is answered the typed
-    /// deferral whole, and a session bound to no member of the mob, which
-    /// the same member is hidden from, is answered the fixed text.
+    /// deferral whole. A caller seated there whose own row the rule does
+    /// not show that member to, and a session bound to no member of the
+    /// mob, which the same member is hidden from, are answered the fixed
+    /// text: a seat in the mob alone shows a caller nothing.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_agent_destroy_by_a_member_of_the_mob_is_judged_as_that_member() {
         let mob = restart_with_a_members_custody_deferred_beside(
             "deferred-seated",
             "kept-worker",
             Some("ann"),
-            Some(("ann-peer", Some("ann"))),
+            &[("ann-peer", Some("ann")), ("bob-peer", Some("bob"))],
         )
         .await;
-        let seated = mob
-            .peer_session
-            .clone()
-            .expect("the seated caller's session");
-        assert!(
-            mob.handle
-                .roster()
-                .await
-                .find_by_bridge_session_id(&seated)
-                .is_some_and(|entry| entry.agent_identity == "ann-peer"),
-            "the caller's session is bound to a member of the destroyed mob"
-        );
+        let [seated, seated_apart] = mob.peer_sessions.as_slice() else {
+            panic!("the two seated callers' sessions: {:?}", mob.peer_sessions);
+        };
+        let (seated, seated_apart) = (seated.clone(), seated_apart.clone());
+        let roster = mob.handle.roster().await;
+        for (session, member) in [(&seated, "ann-peer"), (&seated_apart, "bob-peer")] {
+            assert!(
+                roster
+                    .find_by_bridge_session_id(session)
+                    .is_some_and(|entry| entry.agent_identity == member),
+                "the session of {member} is bound to that member of the destroyed mob"
+            );
+        }
 
         let as_member = mob.agent_tool_refusal_from(seated).await;
         let data = as_member
@@ -24153,6 +24257,15 @@ mod tests {
         assert_eq!(data["kind"], "mob_member_custody_deferred", "{as_member:?}");
         assert_eq!(data["member_id"], mob.member.as_str(), "{as_member:?}");
         assert_eq!(data["session_id"], mob.session.to_string(), "{as_member:?}");
+
+        let as_member_apart = mob.agent_tool_refusal_from(seated_apart).await;
+        let told = mob.told_of_the_member(&tool_error_surfaces(&as_member_apart));
+        assert!(
+            told.is_empty() && as_member_apart.to_string().contains(DESTROY_REFUSED),
+            "a caller seated in the mob that the member is hidden from is answered the \
+             fixed text:\n{}\n{as_member_apart}",
+            told.join("\n")
+        );
 
         let as_outsider = mob.agent_tool_refusal().await;
         let told = mob.told_of_the_member(&tool_error_surfaces(&as_outsider));

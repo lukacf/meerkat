@@ -36,7 +36,9 @@
 //     output. Of what a test prints it reads only two kinds of line. A cell
 //     line: a row says which model and level it picked for a cell, the
 //     prefix `reasoning-effort-receipt-cell ` and one JSON object of exactly
-//     test, cell, model, level and route. An observation line: a row whose
+//     test, cell, model, level and route (and case, where the line is of a
+//     second thing the test asserts, which the manifest lists as a row of
+//     its own with that case). An observation line: a row whose
 //     cells only its run knows (the models of a live account) says each cell
 //     it reached, the prefix `reasoning-effort-receipt-observation ` and one
 //     JSON object that is exactly an `observation` of the inputs schema; an
@@ -45,6 +47,10 @@
 //     row's own failure classes), never a message. Any string that looks like a credential, an e-mail address, a
 //     URL, an absolute path, or this host's name or home directory is
 //     refused, in a leg result and again in the finished receipt.
+//   - A model id a live row withheld (it prints the constant `<redacted>`
+//     in its place) is recorded as observed with its id withheld, never as
+//     an id. Such a cell shows no model the manifest names for the row
+//     (`named_models`): that model is then a gap, not proven.
 //   - The same inputs give the same bytes: no clock, no environment, fixed
 //     key and entry order. The Markdown file is rendered from the parsed
 //     JSON text and from nothing else.
@@ -52,7 +58,7 @@
 //     is written like any other. `--check` judges it: it fails on any failed
 //     entry and on any gap of the in-process and built-binary legs, which
 //     need no credential and can always run. Gaps of the live legs are
-//     listed and never fail it.
+//     named by it, each with its reason, and never fail it.
 //
 // Usage:
 //   reasoning-effort-receipt.mjs record --leg ID --commit SHA --command TEXT
@@ -94,6 +100,11 @@ export const CELL_LINE_PREFIX = "reasoning-effort-receipt-cell ";
 // What a row with observed cells prints before the JSON object of one cell
 // it saw (the `observation` of the inputs schema).
 export const OBSERVATION_LINE_PREFIX = "reasoning-effort-receipt-observation ";
+// What a row with observed cells prints for a model id it withheld (the
+// `withheld_model_id` of the inputs schema). It is no model id: the receipt
+// says the cell was observed with its id withheld, and the cell shows no
+// model the manifest names.
+export const WITHHELD_MODEL_ID = "<redacted>";
 // The legs that need no credential and no network: they can always run, so
 // `--check` takes a gap there for a defect of the run.
 export const OFFLINE_MODES = ["in_process", "built_binary"];
@@ -329,14 +340,24 @@ function countsOf(tests, skipped) {
 }
 
 function byCellLine(a, b) {
-  return compare(a.test, b.test) || compare(a.cell, b.cell) || LEVELS.indexOf(a.level) - LEVELS.indexOf(b.level);
+  return compare(a.test, b.test) || compare(a.case ?? "", b.case ?? "") || compare(a.cell, b.cell) || LEVELS.indexOf(a.level) - LEVELS.indexOf(b.level);
+}
+
+/// What one line is about: a level of a cell of a test, or of one case of it.
+function cellLineKey(line) {
+  return [line.test, line.case ?? "", line.cell, line.level].join("\n");
+}
+
+/// The test of a line as a message names it, with the line's case.
+function testOfLine(line) {
+  return line.case === undefined ? line.test : `${line.test} (case ${line.case})`;
 }
 
 /// The cell lines of a run's output, each once. A line is the prefix and one
 /// JSON object of exactly the `cell_line` members; a line with the prefix
 /// and anything else is refused. A row may print several lines of one cell,
 /// one per level it asks for there; two lines that say different things of
-/// one level of one cell of one test are refused.
+/// one level of one cell of one test, or of one case of it, are refused.
 function cellLines() {
   const lines = new Map();
   return {
@@ -346,11 +367,11 @@ function cellLines() {
       if (!line.startsWith(CELL_LINE_PREFIX)) return false;
       const item = parseJson(line.slice(CELL_LINE_PREFIX.length), `the cell line at ${place}`);
       assertValid(schemas().inputs, "cell_line", item, `the cell line at ${place}`);
-      const picked = { test: item.test, cell: item.cell, model: item.model, level: item.level, route: item.route };
-      const key = `${picked.test}\n${picked.cell}\n${picked.level}`;
+      const picked = { test: item.test, ...(item.case === undefined ? {} : { case: item.case }), cell: item.cell, model: item.model, level: item.level, route: item.route };
+      const key = cellLineKey(picked);
       const earlier = lines.get(key);
       if (earlier !== undefined && JSON.stringify(earlier) !== JSON.stringify(picked)) {
-        throw new ReceiptError(`the cell line at ${place} says another thing of ${picked.test}, cell ${picked.cell}, level ${picked.level}, than an earlier line`);
+        throw new ReceiptError(`the cell line at ${place} says another thing of ${testOfLine(picked)}, cell ${picked.cell}, level ${picked.level}, than an earlier line`);
       }
       lines.set(key, picked);
       return true;
@@ -546,7 +567,7 @@ function checkLegResult(result, what) {
       throw new ReceiptError(`${what} holds an HTTP status or an error code on an observation that did not fail`);
     }
   }
-  const lines = new Set(result.cell_lines.map((item) => `${item.test}\n${item.cell}\n${item.level}`));
+  const lines = new Set(result.cell_lines.map((item) => cellLineKey(item)));
   if (lines.size !== result.cell_lines.length) throw new ReceiptError(`${what} holds two cell lines of one level of one cell of one test`);
 }
 
@@ -621,7 +642,15 @@ function checkManifest(manifest) {
   };
   for (const row of manifest.rows) {
     if (!legs.has(row.leg)) throw new ReceiptError(`row ${row.id} of the manifest names the leg ${row.leg}, which it does not define`);
-    if (row.cells === "observed") continue;
+    if (row.cells === "observed") {
+      // The models the row is to show: one for a cell, each cell defined.
+      const named = row.named_models ?? [];
+      unique(named.map((item) => `${row.id}/${item.cell}`), "the entry");
+      for (const item of named) {
+        if (cells.get(item.cell) === undefined) throw new ReceiptError(`row ${row.id} of the manifest names the cell ${item.cell}, which it does not define`);
+      }
+      continue;
+    }
     unique(row.cells.map((item) => `${row.id}/${item.cell}`), "the entry");
     for (const item of row.cells) {
       if (!cells.has(item.cell)) throw new ReceiptError(`row ${row.id} of the manifest names the cell ${item.cell}, which it does not define`);
@@ -700,17 +729,19 @@ export function buildReceipt({ manifestText, manifestName = basename(MANIFEST_PA
     // What the rows printed of their cells, by entry. Only a run at the
     // product commit is held to the manifest: every line must be of a cell
     // the manifest lists, or the manifest is behind the rows; and a cell has
-    // one line, unless its row has an entry for each level it asks for.
+    // one line, unless its row has an entry for each level it asks for. A
+    // line's row is the row of its test and of its case: a line without a
+    // case is a line of the test's row without one.
     const picked = new Map();
     for (const line of atCommit ? [...result.cell_lines].sort(byCellLine) : []) {
-      const owners = manifest.rows.filter((row) => row.leg === leg.id && row.cells !== "observed" && row.test?.name === line.test);
+      const owners = manifest.rows.filter((row) => row.leg === leg.id && row.cells !== "observed" && row.test?.name === line.test && row.case === line.case);
       if (owners.length !== 1 || !owners[0].cells.some((item) => item.cell === line.cell)) {
-        throw new ReceiptError(`the result file ${name} holds a cell line of ${line.test}, cell ${line.cell}, which is not a cell of exactly one row of this leg in the manifest`);
+        throw new ReceiptError(`the result file ${name} holds a cell line of ${testOfLine(line)}, cell ${line.cell}, which is not a cell of exactly one row of this leg in the manifest`);
       }
       const key = `${owners[0].id}/${line.cell}`;
       const lines = picked.get(key) ?? [];
       if (lines.length > 0 && owners[0].lines !== "per_level") {
-        throw new ReceiptError(`the result file ${name} holds two cell lines of ${line.test}, cell ${line.cell}, and row ${owners[0].id} of the manifest has one entry for a cell`);
+        throw new ReceiptError(`the result file ${name} holds two cell lines of ${testOfLine(line)}, cell ${line.cell}, and row ${owners[0].id} of the manifest has one entry for a cell`);
       }
       picked.set(key, [...lines, line]);
     }
@@ -787,7 +818,6 @@ export function buildReceipt({ manifestText, manifestName = basename(MANIFEST_PA
             ...(unexecuted ?? { status: "source_only", gap: "no_cells_observed" }),
           }),
         );
-        continue;
       }
       [...seen]
         .sort((a, b) => compare(observationKey(a), observationKey(b)))
@@ -798,7 +828,8 @@ export function buildReceipt({ manifestText, manifestName = basename(MANIFEST_PA
               id: `${row.id}/#${index + 1}`,
               cell: null,
               provider_family: item.provider_family,
-              model: { id: item.model },
+              // A withheld id is stated as that. It is never written as an id.
+              model: item.model === WITHHELD_MODEL_ID ? { observed: "id_withheld" } : { id: item.model },
               api: item.api,
               route: `${item.backend}/${item.api}`,
               requested_level: { level: item.requested_level },
@@ -818,6 +849,31 @@ export function buildReceipt({ manifestText, manifestName = basename(MANIFEST_PA
             }),
           );
         });
+      // The models the manifest names for the row. A cell shows one only
+      // when it names that id on the named cell's route, whatever became of
+      // the cell (its own entry says that). A cell whose id was withheld
+      // shows none: the named model is then not proven, and is listed as a
+      // gap of its own, as is one no cell could be.
+      for (const named of row.named_models ?? []) {
+        const cell = cells.get(named.cell);
+        const onRoute = seen.filter((item) => item.provider_family === cell.provider_family && item.backend === cell.backend && item.api === cell.api);
+        if (onRoute.some((item) => item.model === named.model.id)) continue;
+        entries.push(
+          entry({
+            id: `${row.id}/${cell.id}`,
+            cell: cell.id,
+            provider_family: cell.provider_family,
+            model: { id: named.model.id },
+            api: cell.api,
+            route: `${cell.backend}/${cell.api}`,
+            requested_level: null,
+            outcome: null,
+            outcome_basis: null,
+            values_basis: "manifest",
+            ...(unexecuted ?? { status: "source_only", gap: onRoute.some((item) => item.model === WITHHELD_MODEL_ID) ? "model_not_proven" : "model_not_observed" }),
+          }),
+        );
+      }
       continue;
     }
 
@@ -943,6 +999,8 @@ const GAP_TEXT = {
   test_skipped: "its leg skipped the test",
   no_cells_observed: "its leg ran and recorded no cell",
   cell_skipped: "its leg saw the cell and skipped it",
+  model_not_proven: "its leg saw a cell of this route with its model id withheld: the named model is not proven",
+  model_not_observed: "its leg ran and recorded no cell of the named model on this route",
 };
 
 function code(text) {
@@ -965,6 +1023,7 @@ function table(header, rows) {
 
 function modelText(model) {
   if (model === null) return "-";
+  if (model.observed !== undefined) return "observed, id withheld";
   return model.id !== undefined ? code(model.id) : `by rule ${code(model.rule)}`;
 }
 
@@ -996,17 +1055,34 @@ function resultText(entry) {
 /// What `--check` holds against a receipt: every failed entry, and every
 /// gap of the legs that can always run (in process and built binary: no
 /// credential, no network). A gap of a live leg is listed in the receipt
-/// and never fails the check.
+/// and never fails the check; `liveGaps` names those.
 export function checkReceipt(receipt) {
-  const offlineLegs = new Set(receipt.legs.filter((leg) => OFFLINE_MODES.includes(leg.mode)).map((leg) => leg.id));
-  const entries = new Map(receipt.entries.map((entry) => [entry.id, entry]));
   const problems = receipt.entries.filter((entry) => entry.result === "fail").map((entry) => `entry ${entry.id} failed`);
-  for (const gap of receipt.gaps) {
-    const leg = gap.scope === "leg" ? gap.id : entries.get(gap.id)?.leg;
+  for (const { gap, leg, offline } of placedGaps(receipt)) {
     if (leg === undefined) problems.push(`the gap of ${gap.scope} ${gap.id} names no entry of the receipt`);
-    else if (offlineLegs.has(leg)) problems.push(`${gap.scope} ${gap.id} is a gap of the offline legs: ${gap.reason}`);
+    else if (offline) problems.push(`${gap.scope} ${gap.id} is a gap of the offline legs: ${gap.reason}`);
   }
   return problems;
+}
+
+/// The gaps `--check` names without holding them against the receipt: those
+/// of the live legs, each with its reason. A model the manifest names for a
+/// live row that the run did not prove (`model_not_proven`) is one of them.
+export function liveGaps(receipt) {
+  return placedGaps(receipt)
+    .filter(({ leg, offline }) => leg !== undefined && !offline)
+    .map(({ gap }) => `${gap.scope} ${gap.id} is a gap of the live legs: ${gap.reason}`);
+}
+
+/// Every gap of a receipt with the leg it is a gap of (none when it names no
+/// entry of the receipt) and whether that leg is one that can always run.
+function placedGaps(receipt) {
+  const offlineLegs = new Set(receipt.legs.filter((leg) => OFFLINE_MODES.includes(leg.mode)).map((leg) => leg.id));
+  const entries = new Map(receipt.entries.map((entry) => [entry.id, entry]));
+  return receipt.gaps.map((gap) => {
+    const leg = gap.scope === "leg" ? gap.id : entries.get(gap.id)?.leg;
+    return { gap, leg, offline: offlineLegs.has(leg) };
+  });
 }
 
 /// The Markdown rendering of a receipt document, from that document alone.
@@ -1097,7 +1173,8 @@ export function renderMarkdown(receipt) {
     "",
     "A model or a level shown as a value is fixed by the row's fixture or was printed by the row",
     "when it ran here; one shown as a rule is picked by the row when it runs, and no line of that",
-    "pick was recorded.",
+    "pick was recorded. A model shown as observed, id withheld is a cell its row saw and withheld",
+    "the id of: the entry is that cell's result and proves no model by name.",
     "",
     "## Gaps",
     "",
@@ -1227,11 +1304,13 @@ function options(args, known, flags = []) {
   return { values, positional, flags: set };
 }
 
-/// Runs `--check` over a receipt and prints what it found. Exit status 3
-/// when it holds something against the receipt.
+/// Runs `--check` over a receipt and prints what it found: what it holds
+/// against the receipt, then the gaps of the live legs by name, which it
+/// does not. Exit status 3 when it holds something against the receipt.
 function checkCommand(receipt) {
   const problems = checkReceipt(receipt);
   for (const problem of problems) console.log(`check: ${problem}`);
+  for (const gap of liveGaps(receipt)) console.log(`check: named, not held against the receipt: ${gap}`);
   if (problems.length === 0) {
     console.log("check passed: no failed entry and no gap in the offline legs");
     return 0;

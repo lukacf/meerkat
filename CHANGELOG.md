@@ -1037,8 +1037,8 @@ them.
   that declares `requires_capabilities` was dropped. Mob members, and the
   members a session creates with `delegate`, were spawned and worked without
   their `mob-communication` instructions and without their `task-workflow`
-  or `workgraph-workflow` instructions; the only signs were a warning in the
-  server's log and a `skill_resolution_failed` event. The skill text was in
+  or `workgraph-workflow` instructions; the only sign was a warning in the
+  server's log. The skill text was in
   the binaries and the registrations never ran: the lane that builds those
   archives linked with a linker that leaves the constructors of link-time
   registrations out of the table a process runs at start. That lane now

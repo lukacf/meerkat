@@ -2569,8 +2569,12 @@ for (const path of [
   // case's TOOLKIT_D5_TEST_PYTHON. The tests see them only when the shell
   // that runs nextest exported them first: in that step, before the nextest
   // command.
+  // The integration job runs those lib tests too, in reader rows (a change
+  // of the reader inventory selects every reader, meerkat-toolkit's lib among
+  // them, and a push without a main unit lane gets the lib rows of
+  // meerkat-connect and toolkit-mobkit), so it selects the Python the same way.
   const unitJobs = readFileSync(resolve(root, ".github/workflows/ci.yml"), "utf8");
-  for (const job of ["unit", "main-unit", "main-unit-rest"]) {
+  for (const job of ["unit", "main-unit", "main-unit-rest", "integration"]) {
     const jobBody = jobLines(unitJobs, job);
     assert.match(
       jobBody.join("\n"),
@@ -2622,6 +2626,30 @@ for (const path of [
     const prepared = connectPython(flags);
     assert.equal(prepared.status, 2, `the Connect test Python for ${flags.join(" ")}: ${prepared.stderr}`);
     assert.match(prepared.stderr, /DIR must be an absolute path/, `the Connect test Python for ${flags.join(" ")}`);
+  }
+  // The integration job passes the script its row's package flags, so the
+  // reader rows of those packages reach the preparation too: the ones a
+  // change of the reader inventory selects in a pull request (meerkat-toolkit's
+  // lib; the rows that compile meerkat-mob wait for the push), and on a push
+  // with no main unit lane the lib rows of all three.
+  const connectPythonReaders = ["meerkat-connect", "meerkat-toolkit", "toolkit-mobkit"];
+  for (const [extra, expected] of [
+    [["--event", "pull_request"], ["meerkat-toolkit"]],
+    [[], connectPythonReaders],
+  ]) {
+    const rows = planFor(["scripts/ci-non-rust-readers.json"], extra).reader_rows.filter((row) =>
+      row.packages.some((name) => connectPythonReaders.includes(name)),
+    );
+    assert.deepEqual(
+      [...new Set(rows.flatMap((row) => row.packages))].sort(),
+      expected,
+      `the packages whose reader rows read the selected Python (${extra.join(" ") || "push"})`,
+    );
+    for (const row of rows) {
+      const prepared = connectPython(row.package_flags.split(" "));
+      assert.equal(prepared.status, 2, `the Connect test Python for ${row.name}: ${prepared.stderr}`);
+      assert.match(prepared.stderr, /DIR must be an absolute path/, `the Connect test Python for ${row.name}`);
+    }
   }
   // Its packages are an exact, hash-pinned closure: every requirement names
   // one version and its wheel's sha256, mcp==2.2.0 among them, and the script

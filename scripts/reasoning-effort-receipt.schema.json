@@ -261,7 +261,7 @@
       "enum": ["manifest", "row_output", "observation"]
     },
     "failure": {
-      "description": "What a failed live cell's row reported as typed fields: the HTTP status and the provider's error code. Never a message.",
+      "description": "What a failed live cell's row reported as typed fields: the HTTP status and an error code, one word of the row's own failure classes. Never a provider's code, text or message.",
       "type": "object",
       "additionalProperties": false,
       "required": ["http_status", "error_code"],

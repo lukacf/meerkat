@@ -10,9 +10,11 @@ bundle.
 
 <Note>
 A mobpack is not a VM, container, or complete host image. It carries a mob
-definition and reviewed runtime assets. It does not carry the Meerkat binary,
-OS packages, provider credentials, secret environment values, or operator
-network policy.
+definition and the files of its mob directory. It does not carry the Meerkat
+binary, OS packages, or operator network policy. It should not carry provider
+credentials or secret environment values either, but nothing removes them:
+`rkat mob pack` archives every file under the mob directory (see
+[What is packed](#what-is-packed)).
 </Note>
 
 ## What this guide is for
@@ -55,6 +57,27 @@ digest, but the runtime does not interpret them as assets. Paths are
 canonicalized and unsafe or duplicate entries fail closed. Required capability
 tokens and surface selectors use closed typed vocabularies, so an unknown
 token fails instead of silently downgrading execution.
+
+### What is packed
+
+`rkat mob pack` archives every regular file under the mob directory, at any
+depth. It prints no warning and no list of them. Hidden files are included:
+an env file placed there (`.env`, `.env.local`) is in the pack with its
+contents, and so is the whole `.git` directory when the mob directory is a
+repository of its own. Only the output file and the signing key are left out
+when they lie inside the directory.
+
+A pack is a gzip-compressed tar archive: anyone who has the file can read
+every file in it. A web build copies the pack into its bundle as
+`mobpack.bin`, so everyone who can load the hosted page can download it.
+
+Before you share a pack or host a bundle:
+
+- Keep env files, keys and repository metadata out of the mob directory.
+- List what the pack holds: `rkat mob inspect <pack>` prints one `file` line
+  for each archived file. It also reads the `mobpack.bin` of a built bundle.
+- Move out everything that is not the manifest, the definition and the assets
+  you meant to ship, then pack again.
 
 ### Manifest contract
 
@@ -126,7 +149,8 @@ operator-owned truth.
 
 The definition also cannot smuggle realm references. Optional hook and MCP
 assets are declarations that still require compatible host capabilities and
-host-local resources. Keep secrets outside the archive.
+host-local resources. Keep secrets outside the archive: nothing removes them
+at pack time (see [What is packed](#what-is-packed)).
 
 ## Signed packs and trust policy
 
@@ -258,7 +282,7 @@ user-supplied key or your authenticated proxy. Serve the directory
 - `meerkat-bootstrap.js` — reusable ES module exporting `bootMobpack(opts)`; import it from your own app
 - `meerkat_web_runtime.js` — the wasm-bindgen glue
 - `meerkat_web_runtime_bg.wasm` — the compiled meerkat agent stack
-- `mobpack.bin` — the packed mob artifact (loaded via the runtime's `init_runtime`)
+- `mobpack.bin` — the packed mob artifact (loaded via the runtime's `init_runtime`): the pack itself, unchanged, so anyone who can load the page can download every file in it (see [What is packed](#what-is-packed))
 - `manifest.web.toml` — derived web manifest
 
 The generated `bootMobpack` bakes in the trust policy this bundle was built with

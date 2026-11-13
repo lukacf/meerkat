@@ -1378,17 +1378,23 @@ async fn seeds_served_to(
 /// member private to one person that holds its captured member attributes
 /// is served to that person and to no other signed-in person, by the
 /// captured private-owner rule. The same member's frame without captured
-/// attributes is served to neither of them: under this deny rule a frame of
-/// any other member is undecidable on its bare name (the denied agent could
-/// be its spawn ancestor). That is this rule's shape, not a property of
-/// every deny rule: with allow rules only such a frame is decided on the
-/// bare name. A frame of the denied agent itself is served to no
-/// non-administrator. What the registered runtime's visibility policy alone
-/// hides (here a nested member, on a console that hides nested members) is
-/// printed for both states.
+/// attributes is served to neither of them: a console that can identify a
+/// person serves a frame stored without member attributes to an
+/// administrator only, whatever the rules. A frame of the denied agent
+/// itself is served to no non-administrator. What the registered runtime's
+/// visibility policy alone hides (here a nested member, on a console that
+/// hides nested members) is printed for both states.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stored_frames_with_no_runtime_registered_keep_each_callers_access_rules() {
     stored_frames_keep_access_rules(Some(deny_source_by_identity())).await;
+}
+
+/// The same with allow rules only: without a deny rule the private member's
+/// frame is still served to its person alone, and its frame without captured
+/// member attributes to neither signed-in person.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stored_frames_with_no_runtime_registered_keep_access_rules_under_allow_rules_only() {
+    stored_frames_keep_access_rules(None).await;
 }
 
 async fn stored_frames_keep_access_rules(deny: Option<AccessRule>) {

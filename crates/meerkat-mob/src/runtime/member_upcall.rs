@@ -788,7 +788,7 @@ pub(crate) fn remote_operator_tool_defs() -> Vec<Arc<ToolDef>> {
     ));
     defs.push(tool_def(
         TOOL_LIST_MEMBERS,
-        "List all active mob members. Response includes identity-native lifecycle and runtime fields.",
+        "List the active mob members. A member the mob's host keeps from this caller's member tools is not listed. Response includes identity-native lifecycle and runtime fields.",
         json!({
             "type": "object",
             "properties": {}

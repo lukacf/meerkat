@@ -10662,6 +10662,14 @@ fn identity_record_for_status(
     // access decisions while the identity has no live member.
     let mut labels = status.labels.clone();
     crate::console_spawn::sanitize_unverified_lineage_labels(&mut labels);
+    // The record's role is the identity's profile, as the record of a
+    // live member carries the member's role: a rule that names a role
+    // decides both. A `role` the declaration names stays.
+    if let Some(profile) = status.profile.as_ref() {
+        labels
+            .entry("role".to_string())
+            .or_insert_with(|| profile.to_string());
+    }
     ConsoleIdentityRecord {
         identity,
         display_name,

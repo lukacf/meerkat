@@ -462,6 +462,7 @@ fn entry_with(profile: &str, authority: &[(&str, &str)]) -> IdentityEntryFacts {
             .iter()
             .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
             .collect(),
+        labels: BTreeMap::new(),
     }
 }
 

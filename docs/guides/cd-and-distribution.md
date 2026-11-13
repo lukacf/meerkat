@@ -275,8 +275,10 @@ run.
   jobs that run the Windows and Intel macOS archives.
 - The BuildBuddy lane packages its Linux aarch64 and macOS arm64 binaries on an
   x86_64 Linux runner. `verify_critical_native_binaries` runs them on
-  `ubuntu-24.04-arm` and `macos-15` (15 minutes at most per target), and the
-  critical gate requires it.
+  `ubuntu-24.04-arm` and `macos-15` (15 minutes at most per target), and both
+  build gates require it: the critical gate, and the full gate, which is all
+  the trailing publisher waits for while it publishes every archive the
+  release still lacks.
 - `publish_critical_release_assets` runs the check again on the Linux x86_64
   archives it is about to publish, whichever run built them (a
   [prebuild](#pre-tag-prebuild)'s included).

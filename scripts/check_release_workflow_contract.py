@@ -4531,10 +4531,14 @@ def check_buildbuddy_macos_x86(text: str) -> list[str]:
             "verify_windows_binaries": "success",
             PREBUILD_LOOKUP_JOB: "success",
         }
+        # verify_critical_native_binaries runs the BuildBuddy lane's Linux
+        # aarch64 and macOS arm64 binaries: it succeeds on that lane and is
+        # skipped with it (check_binary_registrations holds the gate to it).
         buildbuddy_ok = {
             **common,
             "build_binaries": "skipped",
             "build_binaries_buildbuddy": "success",
+            "verify_critical_native_binaries": "success",
             HOSTED_MACOS_X86_JOB: "skipped",
             builder: "success",
             verifier: "success",
@@ -4543,6 +4547,7 @@ def check_buildbuddy_macos_x86(text: str) -> list[str]:
             **common,
             "build_binaries": "success",
             "build_binaries_buildbuddy": "skipped",
+            "verify_critical_native_binaries": "skipped",
             HOSTED_MACOS_X86_JOB: "success",
             builder: "skipped",
             verifier: "skipped",
@@ -4731,13 +4736,16 @@ def check_binary_registrations(text: str) -> list[str]:
     about to publish, whichever run built them. The BuildBuddy lane packages
     its Linux aarch64 and macOS arm64 binaries on a runner that cannot run
     them, so exactly one bounded job runs those two targets on runners of
-    their own from that lane's artifacts, and the critical gate requires it
-    whenever that lane built the archives.
+    their own from that lane's artifacts, and both build gates require it
+    whenever that lane built the archives: the critical gate, which the
+    critical publisher waits for, and the full gate, which is all the
+    trailing publisher waits for while it publishes every archive the
+    release still lacks, the critical ones included.
     """
     violations: list[str] = []
     names = _job_names(text)
     script = REGISTRATION_CHECK_SCRIPT.split("/")[-1]
-    for job in (*REGISTRATION_CHECK_JOBS, CRITICAL_GATE_JOB):
+    for job in (*REGISTRATION_CHECK_JOBS, CRITICAL_GATE_JOB, FULL_BUILD_GATE_JOB):
         if job not in names:
             return [f"job `{job}` is not defined in the workflow"]
     for job in REGISTRATION_CHECK_JOBS:
@@ -4766,18 +4774,19 @@ def check_binary_registrations(text: str) -> list[str]:
         violations.append(f"job `{verifier}` has no `timeout-minutes` bound")
     if "matrix.runs-on" not in parse_mapping(verifier_block, 4).get("runs-on", ""):
         violations.append(f"job `{verifier}` must run each target on the runner its matrix names for it")
-    if verifier not in _job_needs(text, CRITICAL_GATE_JOB):
-        violations.append(
-            f"job `{CRITICAL_GATE_JOB}` does not wait for `{verifier}`, so the BuildBuddy lane's "
-            f"{' and '.join(NATIVE_RUN_TARGETS)} archives could publish without having run"
-        )
-    else:
-        gate_run = "\n".join(step.run for step in job_steps(job_block(text, CRITICAL_GATE_JOB)))
-        result = f"needs.{verifier}.result"
+    result = f"needs.{verifier}.result"
+    for gate in (CRITICAL_GATE_JOB, FULL_BUILD_GATE_JOB):
+        if verifier not in _job_needs(text, gate):
+            violations.append(
+                f"job `{gate}` does not wait for `{verifier}`, so the BuildBuddy lane's "
+                f"{' and '.join(NATIVE_RUN_TARGETS)} archives could publish without having run"
+            )
+            continue
+        gate_run = "\n".join(step.run for step in job_steps(job_block(text, gate)))
         variables = re.findall(r'(\w+)="\$\{\{ ' + re.escape(result) + r' \}\}"', gate_run)
         if not any(f'"${{{variable}}}" == "success"' in gate_run for variable in variables):
             violations.append(
-                f"job `{CRITICAL_GATE_JOB}` does not require `{result}` to be `success` when the "
+                f"job `{gate}` does not require `{result}` to be `success` when the "
                 "BuildBuddy lane built the archives"
             )
     return violations

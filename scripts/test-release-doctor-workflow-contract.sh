@@ -575,14 +575,40 @@ elif name == "registrations-native-unrequired":
         "    needs: [build_binaries, build_binaries_buildbuddy, release_prebuild]\n",
     )
     replace_once(
-        '          native_result="${{ needs.verify_critical_native_binaries.result }}"\n',
-        '          native_result="success"\n',
+        '          native_result="${{ needs.verify_critical_native_binaries.result }}"\n'
+        '          source_run="${PREBUILD_RUN_ID:-${ASSETS_RUN_ID}}"\n',
+        '          native_result="success"\n'
+        '          source_run="${PREBUILD_RUN_ID:-${ASSETS_RUN_ID}}"\n',
     )
 elif name == "registrations-native-result-ignored":
     # The critical gate waits for the job and ignores its result.
     replace_once(
-        '"${buildbuddy_result}" == "success" && "${native_result}" == "success" && "${github_result}" == "skipped"',
-        '"${buildbuddy_result}" == "success" && "${github_result}" == "skipped"',
+        '"${buildbuddy_result}" == "success" && "${native_result}" == "success" && "${github_result}" == "skipped" ]]',
+        '"${buildbuddy_result}" == "success" && "${github_result}" == "skipped" ]]',
+    )
+elif name == "registrations-full-gate-native-unrequired":
+    # The full gate, all the trailing publisher waits for, no longer waits
+    # for that job: a failed native run would let the trailing publisher
+    # publish the arm64 archives the critical publisher held back.
+    replace_once(
+        "    needs: [build_binaries, build_binaries_buildbuddy, build_binaries_windows_cross, "
+        "verify_windows_binaries, verify_critical_native_binaries, build_binaries_macos_x86_cross, "
+        "build_binaries_buildbuddy_macos_x86, verify_macos_x86_binaries, release_prebuild]\n",
+        "    needs: [build_binaries, build_binaries_buildbuddy, build_binaries_windows_cross, "
+        "verify_windows_binaries, build_binaries_macos_x86_cross, "
+        "build_binaries_buildbuddy_macos_x86, verify_macos_x86_binaries, release_prebuild]\n",
+    )
+    replace_once(
+        '          macos_x86_verify_result="${{ needs.verify_macos_x86_binaries.result }}"\n'
+        '          native_result="${{ needs.verify_critical_native_binaries.result }}"\n',
+        '          macos_x86_verify_result="${{ needs.verify_macos_x86_binaries.result }}"\n'
+        '          native_result="success"\n',
+    )
+elif name == "registrations-full-gate-native-result-ignored":
+    # The full gate waits for the job and ignores its result.
+    replace_once(
+        '"${buildbuddy_result}" == "success" && "${native_result}" == "success" && "${github_result}" == "skipped" &&\n',
+        '"${buildbuddy_result}" == "success" && "${github_result}" == "skipped" &&\n',
     )
 elif name == "registrations-native-read-only":
     # The arm64 job only reads the files, as the packaging runner does.
@@ -1570,9 +1596,13 @@ expect_fail_named macos-x86-unverified "${TEST_ROOT}/doctor-macos-x86-unverified
 # Every release binary is asked for its link-time registrations before it is
 # published: by the critical publisher on the archives it publishes, and, for
 # the arm64 targets the BuildBuddy lane cannot run where it packages them, by
-# one bounded job on runners of their own that the critical gate requires.
+# one bounded job on runners of their own that both build gates require: the
+# critical gate, and the full gate, which is all the trailing publisher waits
+# for while it publishes every archive the release still lacks.
 for fixture in registrations-publisher-unchecked registrations-native-unrequired \
-  registrations-native-result-ignored registrations-native-read-only registrations-native-unbounded; do
+  registrations-native-result-ignored registrations-full-gate-native-unrequired \
+  registrations-full-gate-native-result-ignored registrations-native-read-only \
+  registrations-native-unbounded; do
   mutate "${fixture}" "${TEST_ROOT}/doctor-${fixture}.yml"
   run_doctor "${TEST_ROOT}/doctor-${fixture}.yml" "${TEST_ROOT}/doctor-${fixture}.log"
   if ! grep -Fq "$REGISTRATIONS_FAIL" "${TEST_ROOT}/doctor-${fixture}.log"; then
@@ -1586,6 +1616,10 @@ expect_fail_named registrations-native-unrequired "${TEST_ROOT}/doctor-registrat
   "job \`build_binaries_critical_gate\` does not wait for \`verify_critical_native_binaries\`" binary-registrations
 expect_fail_named registrations-native-result-ignored "${TEST_ROOT}/doctor-registrations-native-result-ignored.yml" \
   "job \`build_binaries_critical_gate\` does not require \`needs.verify_critical_native_binaries.result\` to be \`success\`" binary-registrations
+expect_fail_named registrations-full-gate-native-unrequired "${TEST_ROOT}/doctor-registrations-full-gate-native-unrequired.yml" \
+  "job \`build_binaries_gate\` does not wait for \`verify_critical_native_binaries\`" binary-registrations
+expect_fail_named registrations-full-gate-native-result-ignored "${TEST_ROOT}/doctor-registrations-full-gate-native-result-ignored.yml" \
+  "job \`build_binaries_gate\` does not require \`needs.verify_critical_native_binaries.result\` to be \`success\`" binary-registrations
 expect_fail_named registrations-native-read-only "${TEST_ROOT}/doctor-registrations-native-read-only.yml" \
   "0 jobs run \`scripts/check-release-binary-registrations\` on job \`build_binaries_buildbuddy\`'s" binary-registrations
 expect_fail_named registrations-native-unbounded "${TEST_ROOT}/doctor-registrations-native-unbounded.yml" \

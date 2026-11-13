@@ -431,6 +431,33 @@ under `## [0.9.15]`.
   The methods for agents created at run time (meta/identity) need a 0.9.15
   gateway: upgrade the gateway before the SDKs that call them. **Do:**
   upgrade the SDKs with the gateway.
+- Spawns into a mob an agent created: Meta refuses a spawn while it cannot
+  say for certain who that mob is private to. The caller (an agent's spawn
+  tool, an SDK or RPC spawn, a schedule delivery) gets the spawn's wiring
+  error. When the agent that created the mob is not seated in a hosted mob
+  and no record of it was read (its own mob did not restore and is held or
+  quarantined, say), the error reads `who mob '<id>' is private to is not
+  known: the member that created it is not seated in a hosted mob, and no
+  record of it was read; the spawn can be made again once that member's mob
+  is hosted`. It clears when that agent's mob is hosted again, with no
+  restart: a spawn made after that is refused, now with `who mob '<id>' is
+  private to is not known yet (the private-owner record is still being
+  read); retry the spawn`, until Meta has read the mob again, and a spawn
+  made after that read is seated. **Do:** bring the mob of the agent that
+  created the mob back (`meta/status` lists a mob that did not restore),
+  then make the spawn again, and once more if it is refused as retryable.
+  When the mob of the agent that created it will not be hosted again,
+  destroy the created mob and create it again.
+- Members seated in a mob an agent created while 0.9.11 through 0.9.14 ran
+  keep the audience they were seated with: the upgrade decides only spawns
+  made after it. A member's audience is its `console.private_to` label,
+  written once when it is seated. Meta logs one warning per mob that is
+  private to a person and seats members without that label, with the mob's
+  id and the two counts. **Do:** where the agent that created a mob carries
+  the label and a member of the mob does not, retire the member and have it
+  spawned again, or destroy the mob and have it created again; the same
+  where a member carries the label and the agent that created its mob
+  carries none.
 
 ### Rolling back to 0.9.14
 

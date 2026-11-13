@@ -153,6 +153,13 @@ Security, Upgrade and Changed.
   who are not administrators.
 - With no runtime registered, a console serves no stored frame whose member
   sat in a nested mob (a mob other than its runtime's own).
+- The members of a mob an agent creates at run time are private to the
+  person the agent that created the mob is private to, or to no one when
+  that agent is shared. In 0.9.11 through 0.9.14 such a mob's members could
+  be given another audience, so members that should have been private to
+  one person could be shown to other people. While Meta cannot yet say who
+  such a mob is private to, a spawn into it is refused as retryable, as a
+  spawn right after a restart is (see Upgrade and Changed).
 
 - `rustix` is updated from 1.1.5 to 1.1.6 for RUSTSEC-2026-0486. Releases
   through 0.9.14 build with 1.1.5. `meerkat-meta` depends on `rustix`
@@ -168,6 +175,19 @@ Security, Upgrade and Changed.
   affected.
 
 ### Upgrade
+
+- Members that were seated in a mob an agent created while 0.9.11 through
+  0.9.14 ran keep the audience they were seated with: the upgrade decides
+  only spawns made after it. A member's audience is its
+  `console.private_to` label, written once when it is seated. Meta logs
+  one warning per mob that is private to a person and seats members
+  without that label, with the mob's id and the two counts. Where the
+  agent that created a mob carries the label and a member of the mob
+  seated before the upgrade does not, the member is shown to people it
+  should be private from: retire it and have it spawned again, or destroy
+  the mob and have it created again. A member that carries the label while
+  the agent that created its mob carries none is hidden from people who
+  should see it; the same remedy applies.
 
 - A Rust host that composes its runtime through `UnifiedRuntime::bootstrap`
   or the `bootstrap_with_*` family must complete the bootstrap before an
@@ -932,6 +952,20 @@ Security, Upgrade and Changed.
   does: what a member of another gateway needs to reach them.
 
 ### Changed
+
+- A spawn into a mob an agent created is refused while Meta cannot say for
+  certain who the mob is private to, and is never seated as private to no
+  one meanwhile. The caller (an agent's spawn tool, an SDK or RPC spawn, a
+  schedule delivery) gets the spawn's wiring error. When the agent that
+  created the mob is not seated in a hosted mob and no record of it was
+  read, the error reads `who mob '<id>' is private to is not known: the
+  member that created it is not seated in a hosted mob, and no record of it
+  was read; the spawn can be made again once that member's mob is hosted`,
+  and it stands until that agent's mob is hosted. When Meta has to read who
+  created the mob first, the error reads `who mob '<id>' is private to is
+  not known yet (the private-owner record is still being read); retry the
+  spawn`: that spawn is refused, the read decides the spawns made after it,
+  and a schedule delivery that makes the refused spawn fails that once.
 
 - A host that labels its members in its customizer must put those labels
   in the row of an agent created at run time (an identity whose record is

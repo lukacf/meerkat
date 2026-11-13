@@ -11317,16 +11317,13 @@ impl MobRuntime {
                 .set_before_activation(Arc::clone(callback))
                 .map_err(|error| MobRuntimeError::InvalidConfig(error.to_string()))?;
         }
-        #[cfg(feature = "extension-state")]
-        if let (Some(state), Some(hook)) = (&spec.agent_mob_mcp_state, &spec.after_destroy) {
-            state
-                .set_after_destroy(Arc::clone(hook))
-                .map_err(|error| MobRuntimeError::InvalidConfig(error.to_string()))?;
-        }
         // The agent mob tools' create admission: the host's own decides
         // first, when there is one, then every mob a member creates records
         // its creator's private owner, which the members seated in it take
         // ([`crate::private_owners::PrivateOwners::before_create_hook`]).
+        // Their destroy release drops that record with the mob, then runs
+        // the host's own, when there is one
+        // ([`crate::private_owners::PrivateOwners::after_destroy_hook`]).
         if let Some(state) = &spec.agent_mob_mcp_state {
             #[cfg(feature = "extension-state")]
             let host_hook = spec.before_create.clone();
@@ -11337,6 +11334,13 @@ impl MobRuntime {
                     spec.private_owners
                         .before_create_hook(Arc::downgrade(state), host_hook),
                 )
+                .map_err(|error| MobRuntimeError::InvalidConfig(error.to_string()))?;
+            #[cfg(feature = "extension-state")]
+            let host_release = spec.after_destroy.clone();
+            #[cfg(not(feature = "extension-state"))]
+            let host_release = None;
+            state
+                .set_after_destroy(spec.private_owners.after_destroy_hook(host_release))
                 .map_err(|error| MobRuntimeError::InvalidConfig(error.to_string()))?;
             spec.private_owners.bind_child_mobs(state);
         }

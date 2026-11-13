@@ -40,6 +40,12 @@ a built page starts with empty key fields. Keys typed into the page stay in
 the browser and go to the providers from there, so host a build only where
 its users are meant to enter their own keys.
 
+In Meerkat 0.4.2 through 0.9.14 the build also wrote the values of
+`ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and `GEMINI_API_KEY` into
+`dist/assets/` when it ran in a shell that held them. If you hosted or shared
+a `dist/` built that way, rotate those keys; see the
+[known issue on the 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/v0.9.14).
+
 Use `./examples.sh --clean` to force a fresh download/rebuild.
 The download cache is reused only when both WebCM files are nonempty; failed
 downloads remain unpromoted and a subsequent launch retries the pair.

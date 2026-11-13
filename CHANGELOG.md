@@ -1024,6 +1024,15 @@ them.
 
 ### Security
 
+- Examples: a build of `examples/032-wasm-webcm-agent` no longer contains
+  provider keys. Its Vite config inlined `ANTHROPIC_API_KEY`,
+  `OPENAI_API_KEY` and `GEMINI_API_KEY` from the environment for `vite build`
+  as well as for the dev server, so `npm run build` in a shell that held them
+  wrote them in plain text into `web/dist/assets/`. They are now inlined only
+  by the local dev server. Affects every release that ships the example,
+  0.4.2 through 0.9.14. For what to do if you hosted or shared such a build,
+  see the known issue on the 0.9.14 release page:
+  https://github.com/lukacf/meerkat/releases/tag/v0.9.14
 - `meerkat-core`, `rkat`: the configuration documents the engine writes are
   owner-only on Unix, whatever the process umask. They are a config document
   (`~/.rkat/config.toml`, a project's `.rkat/config.toml`, a realm's own

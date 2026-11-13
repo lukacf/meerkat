@@ -1826,6 +1826,82 @@ async fn each_of_two_runtimes_under_one_namespace_keeps_callers_apart_until_it_i
     Ok(())
 }
 
+/// A console's own runtime is counted by the routes that hold it, whatever
+/// the console's aggregator serves. While the console's own runtime has not
+/// read who its members are private to, reading the runtimes the aggregator
+/// serves does not end the wait for it. And when the aggregator serves the
+/// console's own runtime as well, it is one runtime: though the reading of
+/// the served runtimes found its read owed, the operator is kept apart no
+/// longer once a route that holds the runtime finds its record read.
+#[tokio::test]
+async fn a_consoles_own_runtime_is_counted_by_the_routes_that_hold_it() -> TestResult {
+    let own_state = tempfile::tempdir()?;
+    let own_mob =
+        persistent_gateway_runtime_in(own_state.path(), "kept-apart-own-runtime", "", "").await?;
+    let own = runtime_whose_first_read_failed(&own_mob).await;
+    let home_state = tempfile::tempdir()?;
+    let home =
+        persistent_gateway_runtime_in(home_state.path(), "kept-apart-own-home", "", "").await?;
+    let home_handle = home.handle();
+    assert!(home.private_owners().seeded(&home_handle).await.landed());
+    // The one operator of a console that identifies nobody and holds `own`
+    // as its own runtime.
+    let operator_of_a_console = || {
+        console_request_auth_context(
+            &console_that_identifies_nobody(&own),
+            &HeaderMap::new(),
+            &Uri::from_static("/console/rpc"),
+        )
+        .expect("the console admits its operator")
+        .audience
+    };
+    let serving = |key: &str, namespace: &str, runtime: &MobRuntime| {
+        let aggregator = MetaConsoleAggregator::in_memory();
+        aggregator.register_runtime_handles_with_policy(
+            key,
+            namespace,
+            runtime.clone(),
+            None,
+            crate::unified_runtime::ConsoleEventStore::new(),
+            Arc::new(AllowAllConsoleVisibilityPolicy),
+        );
+        aggregator
+    };
+
+    // One console's aggregator serves another runtime, whose record is read.
+    let operator = operator_of_a_console();
+    let others = serving("home", "home", &home);
+    prime_access_cache_from_runtime(&own, &operator.controller()).await;
+    prime_access_cache_from_aggregator(&others, &operator.controller()).await;
+    assert_eq!(
+        kept_apart_rules(&operator),
+        (true, false, true),
+        "the console's own runtime owes its read: reading the runtimes its aggregator serves \
+         leaves the operator kept apart"
+    );
+
+    // Another console's aggregator serves the console's own runtime, and the
+    // reading of the served runtimes is the one that finds the read owed.
+    let operator = operator_of_a_console();
+    let itself = serving("default", "", &own);
+    prime_access_cache_from_aggregator(&itself, &operator.controller()).await;
+    assert_eq!(
+        kept_apart_rules(&operator),
+        (true, false, true),
+        "the runtime owes its read, as the reading of the served runtimes found it"
+    );
+    // The read succeeds, and a route that holds the runtime reads it alone.
+    let own_handle = own.handle();
+    assert!(own.private_owners().seeded(&own_handle).await.landed());
+    prime_access_cache_from_runtime(&own, &operator.controller()).await;
+    assert_eq!(
+        kept_apart_rules(&operator),
+        (false, true, false),
+        "the runtime's record is read: the operator is kept apart no longer"
+    );
+    Ok(())
+}
+
 /// A member whose run is in flight is retired. The run ends on the console
 /// with a failure record that names the run's session: it carries the
 /// member's witness, so everyone who may view the member reads that the run

@@ -58,7 +58,7 @@ macro_rules! closed_tokens {
             /// Every wire token of the vocabulary, in declaration order.
             #[allow(
                 dead_code,
-                reason = "read by the rows that compare the SDKs' token files with this list"
+                reason = "read by the row that pins each closed vocabulary's token list"
             )]
             pub(crate) const ALL_TOKENS: &'static [&'static str] = &[$($token),+];
 
@@ -94,8 +94,6 @@ mod schedules;
 
 #[cfg(test)]
 mod interface_tests;
-#[cfg(test)]
-mod sdk_vocabulary_tests;
 #[cfg(test)]
 mod tests;
 

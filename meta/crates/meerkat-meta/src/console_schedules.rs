@@ -536,6 +536,29 @@ impl ConsoleScheduleDoorSlot {
     fn downgrade(&self) -> Weak<DoorSender> {
         Arc::downgrade(&self.0)
     }
+
+    /// Whether the runtime serves a Console, as this slot knows it: read
+    /// through the returned probe, which holds the slot weakly.
+    pub(crate) fn served(&self) -> ConsoleServed {
+        ConsoleServed(self.downgrade())
+    }
+}
+
+/// Whether a runtime serves a Console now: a console router build installed
+/// its send path ([`ConsoleScheduleDoorSlot::install`]) and it still stands
+/// (it is cleared when the console projection is replaced and at shutdown).
+/// Held weakly, so a holder never keeps a stopped runtime's Console alive;
+/// a runtime that is gone serves none.
+#[derive(Clone)]
+pub(crate) struct ConsoleServed(Weak<DoorSender>);
+
+impl ConsoleServed {
+    /// Whether the runtime serves a Console now.
+    pub(crate) fn is_served(&self) -> bool {
+        self.0
+            .upgrade()
+            .is_some_and(|doors| doors.borrow().is_some())
+    }
 }
 
 /// The host runnable of every console schedule: a fire sends the

@@ -2154,6 +2154,21 @@ impl AuthenticatedConsoleHuman {
         format!("sha256:{:x}", Sha256::digest(scope.as_bytes()))
     }
 
+    /// The host authentication scope of an event this human made: the
+    /// signed login association ([`Self::login_scope`]), or, for a token
+    /// that carries none, its unpadded base64url digest (one login per
+    /// token). Its digest is [`Self::login_scope_digest`]; a record keeps
+    /// that digest and never the scope.
+    pub(crate) fn authentication_scope(
+        &self,
+    ) -> meerkat_core::approval::consent::HostAuthenticationScope {
+        use base64::Engine as _;
+        meerkat_core::approval::consent::HostAuthenticationScope::new(match &self.login_scope {
+            Some(scope) => scope.clone(),
+            None => base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(self.token_digest),
+        })
+    }
+
     /// The human's qualified principal: a `Human` whose id is the verified
     /// `sub`, in the trust domain of the verified issuer
     /// ([`CONSOLE_HUMAN_TRUST_DOMAIN_PREFIX`] + issuer). This is the one

@@ -7635,6 +7635,11 @@ pub struct MobBootstrapSpec {
     /// private member's owner to the members it asks for
     /// ([`crate::private_owners::PrivateOwners`]).
     pub(crate) private_owners: crate::private_owners::PrivateOwners,
+    /// The late-bound surface every member's `ask_user` tool reads (see
+    /// [`crate::ask_user`]): each member build of this spec mounts the tool
+    /// over it, and the runtime fills it once it can show a person a
+    /// question; unfilled, every call answers that no person can be asked.
+    pub(crate) ask_user_slot: crate::ask_user::AskUserSlot,
     /// The registry of the agent schedule tools a stock constructor attached
     /// over an injected schedule store, which the runtime adopts once its
     /// mobs exist, as a gateway composition adopts its own
@@ -7735,10 +7740,15 @@ impl MobBootstrapSpec {
         let personal_accounts_slot =
             crate::personal_accounts::build::PersonalAccountsSlot::default();
         let private_owners = crate::private_owners::PrivateOwners::default();
+        // The `ask_user` tool is mounted last, over the tools every other
+        // hook left on the build.
+        let ask_user_slot = crate::ask_user::AskUserSlot::default();
         let session_service = Arc::new(PreBuildMobSessionService {
             inner: session_service,
-            hook: personal_accounts_slot
-                .after_hook(private_owners.after_hook(side_chat_memory_slot.after_hook(hook))),
+            hook: ask_user_slot.after_hook(
+                personal_accounts_slot
+                    .after_hook(private_owners.after_hook(side_chat_memory_slot.after_hook(hook))),
+            ),
             dispatch_taint: Some(dispatch_taint_slot.clone()),
             after_create_hook: None,
             runtime_adapter_override: None,
@@ -7819,6 +7829,7 @@ impl MobBootstrapSpec {
             side_chat_memory_slot,
             personal_accounts_slot,
             private_owners,
+            ask_user_slot,
             schedule_target_registry: None,
             fork_instruction_policy: meerkat_core::ForkInstructionPolicy::default(),
             #[cfg(test)]
@@ -10855,6 +10866,9 @@ pub struct MobRuntime {
     /// Who each member of this runtime's mob is private to, shared by every
     /// clone (see [`crate::private_owners::PrivateOwners`]).
     private_owners: crate::private_owners::PrivateOwners,
+    /// The surface the members' `ask_user` tool reads, shared by every clone
+    /// (see [`crate::ask_user::AskUserSlot`]).
+    ask_user_slot: crate::ask_user::AskUserSlot,
     /// The schedule service the Console's schedule editor writes, once the
     /// gateway's schedule host attached it, shared by every clone (see
     /// [`crate::console_schedules::ConsoleSchedules`]).
@@ -11864,6 +11878,7 @@ impl MobRuntime {
             side_chat_lineages: Arc::default(),
             run_members: Arc::default(),
             private_owners: spec.private_owners,
+            ask_user_slot: spec.ask_user_slot,
             console_schedules: crate::console_schedules::ConsoleSchedules::default(),
             personal_accounts: spec.personal_accounts_slot,
         };
@@ -11933,6 +11948,7 @@ impl MobRuntime {
             side_chat_lineages: Arc::default(),
             run_members: Arc::default(),
             private_owners: crate::private_owners::PrivateOwners::default(),
+            ask_user_slot: crate::ask_user::AskUserSlot::default(),
             console_schedules: crate::console_schedules::ConsoleSchedules::default(),
             personal_accounts: crate::personal_accounts::build::PersonalAccountsSlot::default(),
         }
@@ -11980,6 +11996,13 @@ impl MobRuntime {
     /// the runtime's start, and no caller waits for it.
     pub(crate) fn private_owners(&self) -> &crate::private_owners::PrivateOwners {
         &self.private_owners
+    }
+
+    /// The surface the `ask_user` tool of this runtime's members reads, and
+    /// the durable decisions their question sets are held in once the
+    /// runtime filled it (see [`crate::ask_user::AskUserSlot`]).
+    pub(crate) fn ask_user_slot(&self) -> &crate::ask_user::AskUserSlot {
+        &self.ask_user_slot
     }
 
     /// The Steward's source of the members of this runtime's mob private to

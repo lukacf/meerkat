@@ -43,12 +43,13 @@ mod stdio;
 mod wire;
 
 pub use approvers::INGRESS_TRUST_DOMAIN_PREFIX;
-pub(crate) use approvers::MapApproverCurrentness;
+pub(crate) use approvers::{MapApproverCurrentness, local_operator_principal};
 pub use executors::DecisionExecutorDriver;
 pub use ingress::{
     DecisionIngressDeclaration, DecisionIngressDeclarations, DecisionIngressError,
     check_approver_ingresses,
 };
+pub(crate) use owner::DecisionEventBinding;
 pub use owner::RuntimeDecisions;
 pub use stdio::{DecisionNoticeSink, StdioDecisionConnection};
 pub use wire::{

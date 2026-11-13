@@ -2,6 +2,7 @@
 
 pub(crate) mod audit;
 mod mcp_apps;
+mod question_sets;
 pub(crate) mod schedules;
 mod shared_panels;
 pub use mcp_apps::ConsoleToolApplicationIngress;
@@ -4081,6 +4082,10 @@ mod console_decision_caller_tests;
 mod console_approver_tests;
 
 #[cfg(test)]
+#[path = "console_question_set_tests.rs"]
+mod console_question_set_tests;
+
+#[cfg(test)]
 async fn console_send_identity_first(
     aggregator: &MetaConsoleAggregator,
     identity_runtime: Arc<crate::identity_first::IdentityRuntime>,
@@ -6256,7 +6261,9 @@ fn console_rpc_access_requirements(
             one(ACTION_AGENT_SPAWN, None)
         }
         "meta/gating/decide" => one(ACTION_GATING_DECIDE, None),
-        "meta/gating/pending" | "meta/gating/audit" => one(ACTION_GATING_VIEW, None),
+        "meta/gating/pending" | "meta/gating/audit" | "meta/gating/questions" => {
+            one(ACTION_GATING_VIEW, None)
+        }
         crate::rpc::CONSOLE_AUDIT_METHOD => one(ACTION_AUDIT_VIEW, None),
         "meta/mob_events/query" | "meta/mob_events/subscribe" => one(ACTION_MOB_OBSERVE, None),
         "meta/reconcile_edges"
@@ -6602,6 +6609,7 @@ pub(crate) fn console_method_member_fields(method: &str) -> Option<&'static [Con
         | "meta/delivery/history"
         | "meta/routing/routes/list"
         | "meta/gating/pending"
+        | "meta/gating/questions"
         | "meta/gating/audit"
         | "meta/gating/decide"
         | "meta/storage/doctor"
@@ -13167,6 +13175,48 @@ impl ConsoleDecideRefusal {
     }
 }
 
+/// The decision a `meta/gating/decide` request names: `approve`, `reject`
+/// (or `deny`), or `escalate`. Any other word is refused with the returned
+/// sentence.
+fn console_gating_decision(raw_decision: &str) -> Result<GatingDecision, String> {
+    match raw_decision {
+        "approve" => Ok(GatingDecision::Approve),
+        "reject" | "deny" => Ok(GatingDecision::Reject),
+        "escalate" => Ok(GatingDecision::Escalate),
+        _ => Err(format!("unsupported decision: {raw_decision}")),
+    }
+}
+
+/// The checks a Console decision of an approval or a question set passes
+/// right before it is applied, under the access fence when there is one:
+/// the person is still current; while access control is enforced they still
+/// hold `gating.decide`; and the origin, when the decision has one, is
+/// still an agent they may view (as the person's audience sees it: an
+/// origin private to someone else is not one they may decide for).
+fn console_decide_fenced(
+    decider: &ConsoleApprovalDecider,
+    fence: Option<&crate::access::AccessDecisionFence<'_>>,
+    origin: Option<&str>,
+) -> Result<(), ConsoleDecideRefusal> {
+    if !decider.still_current() {
+        return Err(ConsoleDecideRefusal::NotCurrent);
+    }
+    let Some(fence) = fence else {
+        return Ok(());
+    };
+    if fence.enforced() && !fence.allows(ACTION_GATING_DECIDE) {
+        return Err(ConsoleDecideRefusal::AccessDenied(
+            "access denied to gating decisions",
+        ));
+    }
+    if origin.is_some_and(|identity| !fence.can_view_agent(identity)) {
+        return Err(ConsoleDecideRefusal::AccessDenied(
+            "access denied to approval origin",
+        ));
+    }
+    Ok(())
+}
+
 /// Test hook: holds a Console decision right before its last step, until the
 /// test releases it: a gating decide once it holds the gating owner, a
 /// WorkGraph goal confirmation, a memory quarantine review or a durable
@@ -13595,6 +13645,7 @@ async fn handle_console_runtime_rpc_with_visibility(
                     "meta/routing/routes/list",
                     "meta/delivery/history",
                     "meta/gating/pending",
+                    "meta/gating/questions",
                     "meta/gating/audit",
                 ]);
                 if can_mutate && decides {
@@ -15850,6 +15901,21 @@ async fn handle_console_runtime_rpc_with_visibility(
             response_value(response_id, Some(json!({ "pending": pending })), None)
         })
         .await,
+        "meta/gating/questions" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
+            if module_runtime.is_none() {
+                return response_value(
+                    response_id,
+                    None,
+                    Some(JsonRpcError {
+                        code: -32601,
+                        message: "Method not found".to_string(),
+                        data: None,
+                    }),
+                );
+            }
+            question_sets::list(runtime, access_view, response_id)
+        })
+        .await,
         "meta/gating/audit" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
             let Some(module_runtime) = &module_runtime else {
                 return response_value(
@@ -15937,6 +16003,23 @@ async fn handle_console_runtime_rpc_with_visibility(
                     "approver_id is not accepted: the console decides as the signed-in person",
                 );
             }
+            // A pending id that names a question set (`crate::ask_user`) is
+            // decided by the same person under the same checks, and handed
+            // to the decision owner. Any other id, a decision of another
+            // kind included, is the gating owner's.
+            if let Some((decisions, set)) = question_sets::named(runtime, pending_id) {
+                return question_sets::decide(
+                    decisions,
+                    set,
+                    &request.params,
+                    response_id,
+                    access,
+                    access_view,
+                    governance,
+                    authenticated_principal,
+                )
+                .await;
+            }
             if let Some(view) = access_view {
                 let pending = module_runtime.lock().await.list_gating_pending();
                 if pending.iter().any(|entry| {
@@ -15960,16 +16043,9 @@ async fn handle_console_runtime_rpc_with_visibility(
             let Some(raw_decision) = request.params.get("decision").and_then(Value::as_str) else {
                 return invalid_params(response_id, "decision required");
             };
-            let decision = match raw_decision {
-                "approve" => GatingDecision::Approve,
-                "reject" | "deny" => GatingDecision::Reject,
-                "escalate" => GatingDecision::Escalate,
-                _ => {
-                    return invalid_params(
-                        response_id,
-                        format!("unsupported decision: {raw_decision}"),
-                    );
-                }
+            let decision = match console_gating_decision(raw_decision) {
+                Ok(decision) => decision,
+                Err(message) => return invalid_params(response_id, message),
             };
             let reason = request
                 .params
@@ -16002,31 +16078,21 @@ async fn handle_console_runtime_rpc_with_visibility(
             });
             let (decided, notices) =
                 owner.decide_gating_action_attested(request, &decider.evidence(), |entry| {
-                    if !decider.still_current() {
-                        return Err(ConsoleDecideRefusal::NotCurrent);
-                    }
-                    let Some(fence) = &fence else {
-                        return Ok(crate::runtime::GatingDecider {
-                            principal: decider.principal.clone(),
-                            held_approver_ids: BTreeSet::new(),
-                        });
-                    };
-                    if fence.enforced() && !fence.allows(ACTION_GATING_DECIDE) {
-                        return Err(ConsoleDecideRefusal::AccessDenied(
-                            "access denied to gating decisions",
-                        ));
-                    }
-                    if entry
-                        .and_then(|entry| entry.origin.as_ref())
-                        .is_some_and(|origin| !fence.can_view_agent(&origin.identity))
-                    {
-                        return Err(ConsoleDecideRefusal::AccessDenied(
-                            "access denied to approval origin",
-                        ));
+                    if let Err(refusal) = console_decide_fenced(
+                        &decider,
+                        fence.as_ref(),
+                        entry
+                            .and_then(|entry| entry.origin.as_ref())
+                            .map(|origin| origin.identity.as_str()),
+                    ) {
+                        return Err(refusal);
                     }
                     Ok(crate::runtime::GatingDecider {
                         principal: decider.principal.clone(),
-                        held_approver_ids: fence.held_approver_ids(),
+                        held_approver_ids: fence
+                            .as_ref()
+                            .map(|fence| fence.held_approver_ids())
+                            .unwrap_or_default(),
                     })
                 });
             drop(fence);

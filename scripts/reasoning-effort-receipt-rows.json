@@ -337,7 +337,7 @@
     {
       "id": "live.copilot_matrix",
       "leg": "live_copilot",
-      "title": "Every model a real Copilot account lists with stated levels, on the endpoint the account serves it on: stated levels are sent, a level outside them is refused.",
+      "title": "One catalog model per provider family and endpoint a real Copilot account serves: one stated level is sent in one request; a level outside the stated set and a model with no stated levels are refused without a request.",
       "test": {
         "package": "meerkat-integration-tests",
         "target": "copilot_live_e2e",

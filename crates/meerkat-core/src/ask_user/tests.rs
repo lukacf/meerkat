@@ -330,16 +330,22 @@ async fn each_bound_broken_alone_is_refused_as_invalid_arguments_and_reaches_no_
     let dispatcher = AskUserDispatcher::new(Arc::clone(&host) as Arc<dyn AskUserHost>);
     let context = in_run(&RunId::new());
 
+    // Every case is tried, and every case that is not refused for its own
+    // reason is reported.
+    let mut not_refused = Vec::new();
     for (case, args, names) in out_of_bounds_calls() {
-        let error = match call(&dispatcher, &context, "call-1", &args).await {
-            Err(error) => error,
-            Ok(outcome) => panic!("{case}: answered {}", outcome.result.text_content()),
-        };
-        let ToolError::InvalidArguments { reason, .. } = &error else {
-            panic!("{case}: {error:?}");
-        };
-        assert!(reason.contains(names), "{case}: {reason}");
+        match call(&dispatcher, &context, "call-1", &args).await {
+            Err(ToolError::InvalidArguments { reason, .. }) if reason.contains(names) => {}
+            Err(error) => not_refused.push(format!("{case}: {error:?}")),
+            Ok(outcome) => {
+                not_refused.push(format!(
+                    "{case}: answered {}",
+                    outcome.result.text_content()
+                ));
+            }
+        }
     }
+    assert_eq!(not_refused, Vec::<String>::new());
     assert_eq!(host.asked(), Vec::new(), "no refused call reached the host");
 
     // The control: the call every case changes is taken.
@@ -872,13 +878,16 @@ fn answers_are_valid_for_their_set_one_rule_per_case() {
             },
         ),
     ];
+    // Every case is tried, and every case that is not refused for its own
+    // reason is reported.
+    let mut not_refused = Vec::new();
     for (case, answers, refusal) in cases {
-        assert_eq!(
-            AskUserAnswers::for_set(&set, answers),
-            Err(refusal),
-            "{case}"
-        );
+        let answered = AskUserAnswers::for_set(&set, answers);
+        if answered.as_ref() != Err(&refusal) {
+            not_refused.push(format!("{case}: {answered:?}, not {refusal:?}"));
+        }
     }
+    assert_eq!(not_refused, Vec::<String>::new());
 
     // The controls: one answered question is enough, a written answer of
     // 280 bytes is taken where it is accepted, and it is kept trimmed.

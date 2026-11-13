@@ -6,10 +6,9 @@ from "Hello World" to production-shaped multi-agent systems.
 ## Quick Start
 
 ```bash
-# Set API keys: 010 checks ANTHROPIC_API_KEY, but its fresh unpinned run
-# uses OpenAI's gpt-6-astra and needs access to that model.
+# Set the API key. The quick-start examples below (002, 003, 010) select
+# claude-sonnet-4-6 and need only the Anthropic key.
 export ANTHROPIC_API_KEY=sk-...
-export OPENAI_API_KEY=sk-...
 
 # Build the repo-local CLI/RPC binaries used by shell and SDK examples
 ./scripts/repo-cargo build -p rkat --bin rkat
@@ -39,11 +38,13 @@ npm --prefix sdks/typescript run build
 (cd examples/010-mcp-tool-server-sh && ./setup.sh)
 ```
 
-Setting an API key does not select its provider. Fresh, unpinned CLI runs in
-004 and 010 select `gpt-6-astra`. Explicit model/provider configuration can
-change the credentials needed, but must apply to the roots used by the script:
-010 redirects its roots into `.work/`, and 004 includes an `--isolated` run.
-An ordinary-realm-only model pin is not sufficient for every run.
+Setting an API key does not select its provider. The CLI examples 004 and 010
+pass `--model claude-sonnet-4-6` on every command that starts a session, so
+they need the Anthropic key. A `rkat run` without `--model` on a fresh
+configuration selects `gpt-6-astra` and needs an OpenAI key. Both scripts keep
+their state, context and user-config roots under their own `.work/`
+directory, so a model pinned in your own project, user or realm configuration
+does not apply to them.
 
 Most numbered Rust examples are registered in `crates/meerkat/Cargo.toml`; 017-019
 are registered in `crates/meerkat-mob/Cargo.toml` and use `-p meerkat-mob`. Examples
@@ -248,7 +249,7 @@ export MEERKAT_BIN_PATH="$(./scripts/repo-cargo --print-env | sed -n 's/^CARGO_T
 ### API Keys
 ```bash
 export ANTHROPIC_API_KEY=sk-...     # Required for most examples
-export OPENAI_API_KEY=sk-...        # 004/010 fresh defaults; also 021, 034, 035 live suite, 036
+export OPENAI_API_KEY=sk-...        # Required for 036 and 037; optional for 021, 034, 035 live suite
 export GEMINI_API_KEY=...           # Optional (examples 021, 034, 035 live suite)
 ```
 

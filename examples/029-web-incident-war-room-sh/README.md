@@ -49,17 +49,37 @@ Python 3 is required to emit the inline definition. No provider credentials are
 needed for packaging; an integrated host needs credentials for model calls.
 All CLI roots are example-local under `.work/`.
 
-The script uses `sdks/web/wasm/meerkat_web_runtime_bg.wasm` by default. To
-rebuild that artifact after Rust changes, install Node.js and `wasm-pack`, then
-run:
+The script reads the browser runtime from
+`sdks/web/wasm/meerkat_web_runtime_bg.wasm`, with its `meerkat_web_runtime.js`
+beside it. That directory is a build output and is not in a checkout, so
+provide the pair first. The quickest way is the released `@rkat/web` package,
+which carries both. From the repository root, this fetches the version this
+checkout names into a scratch directory, so nothing is left in the checkout:
+
+```bash
+WEB_VERSION="$(node -p "require('./sdks/web/package.json').version")"
+SCRATCH="$(mktemp -d)"
+PACKED="$(cd "$SCRATCH" && npm pack --loglevel=error "@rkat/web@$WEB_VERSION")"
+tar -xzf "$SCRATCH/$PACKED" -C "$SCRATCH" package/wasm
+export MEERKAT_WASM="$SCRATCH/package/wasm/meerkat_web_runtime_bg.wasm"
+```
+
+That is the runtime of a release. It matches a released `rkat` of the same
+version; a `rkat` built from a checkout that has changed since that release
+can differ from it, and then the runtime should be built from the checkout
+too. So should it when `npm pack` finds no such version, because the checkout
+names a release that is not published yet.
+
+To build it from this checkout instead (also after Rust changes), install
+Node.js and `wasm-pack`, then run:
 
 ```bash
 npm --prefix sdks/web install
 npm --prefix sdks/web run build:wasm
 ```
 
-Set `MEERKAT_WASM=/path/to/meerkat_web_runtime_bg.wasm` to use another
-prebuilt runtime.
+`MEERKAT_WASM=/path/to/meerkat_web_runtime_bg.wasm` selects any other
+prebuilt runtime; its `meerkat_web_runtime.js` must be in the same directory.
 
 If you are running from this repo checkout instead of a global install, the
 script will automatically prefer repo-local binaries built by

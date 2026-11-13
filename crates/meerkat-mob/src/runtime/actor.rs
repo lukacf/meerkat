@@ -68847,17 +68847,18 @@ mod runtime_observation_tests {
             epoch: 7,
             binding_generation: 2,
         };
+        let duplicated = vec![
+            event(1, started.clone()),
+            event(2, started.clone()),
+            event(3, confirmed.clone()),
+            event(4, confirmed.clone()),
+            event(5, completed.clone()),
+            event(6, completed.clone()),
+        ];
         assert!(
-            pending_host_revoke_anchors(&[
-                event(1, started.clone()),
-                event(2, started.clone()),
-                event(3, confirmed.clone()),
-                event(4, confirmed.clone()),
-                event(5, completed.clone()),
-                event(6, completed.clone()),
-            ])
-            .expect("exact same-phase duplicates are idempotent")
-            .is_empty()
+            pending_host_revoke_anchors(&duplicated)
+                .expect("exact same-phase duplicates are idempotent")
+                .is_empty()
         );
 
         for malformed in [

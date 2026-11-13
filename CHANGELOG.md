@@ -297,9 +297,8 @@ them.
 - `meerkat-core`, `meerkat-contracts`, `meerkat-runtime`, `meerkat-session`,
   `meerkat-mob`, `meerkat-rpc`, `meerkat-llm-core`: a session can store a
   provider-neutral reasoning effort level, `reasoning_effort`, and a turn
-  can set or clear it. It is stored and carried here; nothing resolves it
-  for a provider route yet, so a request that carries it is refused, never
-  sent (see the last paragraph).
+  can set or clear it. It is stored and carried here; it is resolved for
+  the provider route right before each request (see the last paragraph).
 
   The level is one of `none`, `minimal`, `low`, `medium`, `high`, `xhigh`
   and `max` (`EffortLevel`), with one spelling each: `x_high` is refused
@@ -449,26 +448,6 @@ them.
   target's provider (`request_reasoning_lowered`); the per-request
   resolution event is the record of what was sent.
 
-### Changed
-
-- `meerkat-core`: a turn's reasoning-effort preference is judged by the
-  route of the client that serves the request, where the client reports
-  one. On a GitHub Copilot route that is the account's model list: the
-  preferred level is applied where the model's entry states it (also for a
-  model no catalog row describes), and is not applied where the entry does
-  not state it (`unsupported_level`) or where the account states nothing for
-  the model or its list is not loaded (`unknown_supported_levels`). It was
-  judged by the levels of the provider's direct API before, which a Copilot
-  route can refuse. On a self-hosted route the operator's declared levels
-  decide. A client that reports no route is judged as before. When the
-  session also sets the provider-neutral `reasoning_effort` level, a
-  preferred level the route takes is sent in its place for that turn and
-  reported with `decided_by: preference`; otherwise the session's level is
-  sent.
-- `meerkat-core`: a compaction summary request of a session that sets the
-  provider-neutral `reasoning_effort` level is sent with that level,
-  resolved for the summary client's route.
-
 - `meerkat-core`, `meerkat-contracts`, `meerkat`, `meerkat-runtime`,
   `meerkat-rpc`, `meerkat-rest`, `meerkat-mob`: a reasoning effort level the
   model's route does not accept is refused when the agent is built or a
@@ -487,9 +466,11 @@ them.
   as it was, and a refused reconfiguration leaves the live session's
   identity, client and stored params as they were. The stored params are
   never rewritten: the level stays in the neutral field. A build or a
-  target that carries no level is not judged. A supported level passes this
-  check and is still refused at its first request until the level is
-  resolved for requests (see the entry above this one).
+  target that carries no level is not judged. A level that passes this
+  check is resolved again for the route that serves each request (see the
+  entry above this one): a level that route takes is sent, and a level it
+  does not take, or a route whose levels no source states, is refused
+  there with the same typed refusal.
 
   The refusal is `ReasoningEffortRefusal`, raised as
   `AgentError::ReasoningEffortRefused` (from a build:
@@ -528,6 +509,26 @@ them.
   keep the session's level, and a level their target's route does not
   accept is then refused at each request until it is changed or cleared.
   The default accepts every target; the facade's host judges the level.
+
+### Changed
+
+- `meerkat-core`: a turn's reasoning-effort preference is judged by the
+  route of the client that serves the request, where the client reports
+  one. On a GitHub Copilot route that is the account's model list: the
+  preferred level is applied where the model's entry states it (also for a
+  model no catalog row describes), and is not applied where the entry does
+  not state it (`unsupported_level`) or where the account states nothing for
+  the model or its list is not loaded (`unknown_supported_levels`). It was
+  judged by the levels of the provider's direct API before, which a Copilot
+  route can refuse. On a self-hosted route the operator's declared levels
+  decide. A client that reports no route is judged as before. When the
+  session also sets the provider-neutral `reasoning_effort` level, a
+  preferred level the route takes is sent in its place for that turn and
+  reported with `decided_by: preference`; otherwise the session's level is
+  sent.
+- `meerkat-core`: a compaction summary request of a session that sets the
+  provider-neutral `reasoning_effort` level is sent with that level,
+  resolved for the summary client's route.
 
 ### Fixed
 

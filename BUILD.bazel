@@ -1049,6 +1049,7 @@ test_suite(
         "//crates/meerkat:persistence_contract_test",
         "//crates/meerkat:predicate_schedule_test",
         "//crates/meerkat:realm_config_write_lock_test",
+        "//crates/meerkat:reasoning_effort_routes_test",
         "//crates/meerkat:run_requester_test",
         "//crates/meerkat:runtime_delivery_callback_hold_test",
         "//crates/meerkat:runtime_delivery_hosting_test",

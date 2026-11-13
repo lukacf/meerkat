@@ -2014,39 +2014,22 @@ async fn a_brain_swap_keeps_the_level_and_requests_are_refused_until_it_is_clear
         calls_before,
         "the refused request reached no provider"
     );
-    match &refused {
-        CompletionOutcome::Completed(run) => {
-            panic!("a request whose level the route refuses must not run: {run:?}")
-        }
-        CompletionOutcome::AbandonedWithError { error, .. }
-            if matches!(
-                error.reason,
-                Some(meerkat_core::event::AgentErrorReason::ReasoningEffortRefused { .. })
-            ) =>
-        {
-            // The per-request check names the level and the route.
-            let Some(meerkat_core::event::AgentErrorReason::ReasoningEffortRefused { refusal }) =
-                &error.reason
-            else {
-                unreachable!("matched above");
-            };
-            assert_eq!(refusal.requested, EffortLevel::High);
-            assert_eq!(refusal.model, route.model_b);
-            assert_eq!(
-                refusal.route.as_ref().map(ToString::to_string).as_deref(),
-                Some("copilot/responses")
-            );
-        }
-        other => {
-            // Before the per-request resolution exists, the request is
-            // refused by the guard that lets no unresolved level through.
-            let text = format!("{other:?}");
-            assert!(
-                text.contains("reasoning_effort cannot be resolved by this build"),
-                "the request must be refused for its level: {text}"
-            );
-        }
-    }
+    // The per-request check refuses it typed and names the level and the
+    // route: no other outcome passes.
+    let CompletionOutcome::AbandonedWithError { error, .. } = &refused else {
+        panic!("a request whose level the route refuses must fail typed: {refused:?}");
+    };
+    let Some(meerkat_core::event::AgentErrorReason::ReasoningEffortRefused { refusal }) =
+        &error.reason
+    else {
+        panic!("the request must be refused for its level, typed: {refused:?}");
+    };
+    assert_eq!(refusal.requested, EffortLevel::High);
+    assert_eq!(refusal.model, route.model_b);
+    assert_eq!(
+        refusal.route.as_ref().map(ToString::to_string).as_deref(),
+        Some("copilot/responses")
+    );
 
     // Clearing the level makes the next request run, on B.
     harness

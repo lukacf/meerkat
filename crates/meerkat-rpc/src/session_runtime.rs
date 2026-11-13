@@ -17932,6 +17932,81 @@ mod tests {
         }
     }
 
+    /// [`HighStatingMockLlmClient`] that records the provider params of every
+    /// request it serves. While `states_levels` is off it reports no route,
+    /// as [`MockLlmClient`] does: no source states the levels it accepts.
+    struct RecordingHighStatingMockLlmClient {
+        states_levels: AtomicBool,
+        sent: StdMutex<Vec<Option<meerkat_core::lifecycle::run_primitive::ProviderTag>>>,
+    }
+
+    impl RecordingHighStatingMockLlmClient {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                states_levels: AtomicBool::new(true),
+                sent: StdMutex::new(Vec::new()),
+            })
+        }
+
+        /// The route's own effort field of each request served, in order:
+        /// `None` for a request sent without one.
+        fn sent_efforts(
+            &self,
+        ) -> Vec<Option<meerkat_core::lifecycle::run_primitive::AnthropicEffort>> {
+            self.sent
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .map(|params| match params {
+                    Some(meerkat_core::lifecycle::run_primitive::ProviderTag::Anthropic(tag)) => {
+                        tag.effort
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+    }
+
+    #[async_trait]
+    impl LlmClient for RecordingHighStatingMockLlmClient {
+        fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+            if self.states_levels.load(AtomicOrdering::SeqCst) {
+                HighStatingMockLlmClient.reasoning_route()
+            } else {
+                None
+            }
+        }
+
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            MockLlmClient.project_replay_messages(messages)
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a meerkat_client::LlmRequest,
+        ) -> Pin<
+            Box<dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>> + Send + 'a>,
+        > {
+            static MOCK: MockLlmClient = MockLlmClient;
+            self.sent
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(request.provider_params.clone());
+            MOCK.stream(request)
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
     /// [`MockLlmClient`] that reports no route and counts how often its
     /// route is read and how many requests it serves.
     struct CountingNoRouteMockLlmClient {
@@ -41779,20 +41854,33 @@ mod tests {
     }
 
     /// A direct turn on a live session whose only override is the level: the
-    /// hot swap runs, the session's identity carries the level, and the turn
-    /// is refused before any provider request because nothing resolves the
-    /// level yet. The level is sticky until a turn clears it. The session's
-    /// client states the level for its route, so the swap is accepted.
+    /// hot swap runs (the session's client states the level for its route,
+    /// so the swap is accepted), the session's identity carries the level,
+    /// and the turn's request is sent with the route's own effort field. The
+    /// level is sticky: the next turn, with no override, is sent with it
+    /// too. Once no source states the route's levels, the next turn is
+    /// refused before any provider request with the refusal's text, and the
+    /// level stays on the session until a turn clears it.
     #[tokio::test]
-    async fn turn_reasoning_effort_hot_swaps_a_live_session_and_is_refused_unresolved() {
-        use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+    async fn turn_reasoning_effort_hot_swaps_a_live_session_and_sends_a_stated_level() {
+        use meerkat_core::lifecycle::run_primitive::{AnthropicEffort, TurnMetadataOverride};
         use meerkat_core::model_profile::capabilities::EffortLevel;
 
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
-        runtime.set_default_llm_client(Some(Arc::new(HighStatingMockLlmClient)));
+        let client = RecordingHighStatingMockLlmClient::new();
+        let session_client: Arc<dyn LlmClient> = client.clone();
+        runtime.set_default_llm_client(Some(Arc::clone(&session_client)));
         let session_id = runtime
-            .create_session(mock_build_config(), None, None, Vec::new())
+            .create_session(
+                AgentBuildConfig {
+                    llm_client_override: Some(session_client),
+                    ..AgentBuildConfig::new("claude-sonnet-4-5")
+                },
+                None,
+                None,
+                Vec::new(),
+            )
             .await
             .unwrap();
         let turn = |overrides: Option<crate::handlers::turn::TurnOverrides>| {
@@ -41828,28 +41916,55 @@ mod tests {
             }
         };
         turn(None).await.expect("the first turn runs");
+        assert_eq!(client.sent_efforts(), vec![None]);
 
-        let refused = turn(Some(level_overrides(TurnMetadataOverride::Set(
+        turn(Some(level_overrides(TurnMetadataOverride::Set(
             EffortLevel::High,
         ))))
         .await
-        .expect_err("a turn that sets a level no source states for the route is refused");
+        .expect("a turn that sets a level the route states runs");
+        assert_eq!(
+            live_params().await,
+            Some(level_only_params(EffortLevel::High))
+        );
+        assert_eq!(
+            client.sent_efforts(),
+            vec![None, Some(AnthropicEffort::High)],
+            "the turn's request carries the level as the route's own field"
+        );
+
+        // Sticky: the next turn, with no override, is sent at the level too.
+        turn(None).await.expect("the level stays on the session");
+        assert_eq!(
+            client.sent_efforts(),
+            vec![
+                None,
+                Some(AnthropicEffort::High),
+                Some(AnthropicEffort::High)
+            ]
+        );
+
+        // No source states the route's levels any more: the next turn's
+        // request is refused before it reaches the provider, and the level
+        // stays on the session. This entry answers with the failed run's
+        // own error; the typed answer a caller of `turn/start` gets comes
+        // through the runtime and is the next row's.
+        client.states_levels.store(false, AtomicOrdering::SeqCst);
+        let refused = turn(None)
+            .await
+            .expect_err("a level no source states for the route is refused");
         assert!(
             refused.message.contains(REASONING_EFFORT_LEVELS_UNKNOWN),
             "{refused:?}"
         );
         assert_eq!(
+            client.sent_efforts().len(),
+            3,
+            "the refused turn made no provider request"
+        );
+        assert_eq!(
             live_params().await,
             Some(level_only_params(EffortLevel::High))
-        );
-
-        // Sticky: the next turn, with no override, is refused too.
-        let refused = turn(None)
-            .await
-            .expect_err("the level stays on the session");
-        assert!(
-            refused.message.contains(REASONING_EFFORT_LEVELS_UNKNOWN),
-            "{refused:?}"
         );
 
         // A turn that clears the level runs, and the session has no params
@@ -41858,20 +41973,34 @@ mod tests {
             .await
             .expect("a turn that clears the level runs");
         assert_eq!(live_params().await, None);
+        assert_eq!(client.sent_efforts().last(), Some(&None));
     }
 
     /// The same through the runtime: the level travels on the accepted
-    /// input's metadata to the executor, which hot swaps before the turn.
+    /// input's metadata to the executor, which hot swaps before the turn,
+    /// and the turn's request is sent with the route's own effort field.
+    /// Once no source states the route's levels, the next turn is refused
+    /// before any provider request and answers the same typed refusal.
     #[tokio::test]
     async fn turn_reasoning_effort_reaches_the_executor_through_the_runtime() {
-        use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+        use meerkat_core::lifecycle::run_primitive::{AnthropicEffort, TurnMetadataOverride};
         use meerkat_core::model_profile::capabilities::EffortLevel;
 
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
-        runtime.set_default_llm_client(Some(Arc::new(HighStatingMockLlmClient)));
+        let client = RecordingHighStatingMockLlmClient::new();
+        let session_client: Arc<dyn LlmClient> = client.clone();
+        runtime.set_default_llm_client(Some(Arc::clone(&session_client)));
         let session_id = runtime
-            .create_session(mock_build_config(), None, None, Vec::new())
+            .create_session(
+                AgentBuildConfig {
+                    llm_client_override: Some(session_client),
+                    ..AgentBuildConfig::new("claude-sonnet-4-5")
+                },
+                None,
+                None,
+                Vec::new(),
+            )
             .await
             .unwrap();
         let turn = |overrides: Option<crate::handlers::turn::TurnOverrides>| {
@@ -41893,43 +42022,73 @@ mod tests {
                     .await
             }
         };
+        let live_params = || {
+            let runtime = Arc::clone(&runtime);
+            let session_id = session_id.clone();
+            async move {
+                runtime
+                    .service
+                    .export_live_session(&session_id)
+                    .await
+                    .expect("live session")
+                    .session_metadata()
+                    .expect("live session metadata")
+                    .provider_params
+            }
+        };
         turn(None).await.expect("the first turn runs");
+        assert_eq!(client.sent_efforts(), vec![None]);
 
-        let refused = turn(Some(level_overrides(TurnMetadataOverride::Set(
+        turn(Some(level_overrides(TurnMetadataOverride::Set(
             EffortLevel::High,
         ))))
         .await
-        .expect_err("a turn that sets a level no source states for the route is refused");
+        .expect("a turn that sets a level the route states runs");
+        assert_eq!(
+            live_params().await,
+            Some(level_only_params(EffortLevel::High))
+        );
+        assert_eq!(
+            client.sent_efforts(),
+            vec![None, Some(AnthropicEffort::High)],
+            "the turn's request carries the level as the route's own field"
+        );
+
+        // No source states the route's levels any more: the next turn's
+        // request is refused before it reaches the provider, and the level
+        // stays on the session.
+        client.states_levels.store(false, AtomicOrdering::SeqCst);
+        let refused = turn(None)
+            .await
+            .expect_err("a level no source states for the route is refused");
+        assert_eq!(refused.code, error::INVALID_PARAMS, "{refused:?}");
         assert!(
             refused.message.contains(REASONING_EFFORT_LEVELS_UNKNOWN),
             "{refused:?}"
         );
-        let live = runtime
-            .service
-            .export_live_session(&session_id)
-            .await
-            .expect("live session");
         assert_eq!(
-            live.session_metadata()
-                .expect("live session metadata")
-                .provider_params,
+            refused
+                .data
+                .as_ref()
+                .map(|data| data["reasoning_effort_refusal"]["reason"].clone()),
+            Some(serde_json::json!("supported_levels_unknown")),
+            "{refused:?}"
+        );
+        assert_eq!(
+            client.sent_efforts().len(),
+            2,
+            "the refused turn made no provider request"
+        );
+        assert_eq!(
+            live_params().await,
             Some(level_only_params(EffortLevel::High))
         );
 
         turn(Some(level_overrides(TurnMetadataOverride::Clear)))
             .await
             .expect("a turn that clears the level runs");
-        let live = runtime
-            .service
-            .export_live_session(&session_id)
-            .await
-            .expect("live session");
-        assert_eq!(
-            live.session_metadata()
-                .expect("live session metadata")
-                .provider_params,
-            None
-        );
+        assert_eq!(live_params().await, None);
+        assert_eq!(client.sent_efforts().last(), Some(&None));
     }
 
     /// A turn whose level the session's route does not accept is refused

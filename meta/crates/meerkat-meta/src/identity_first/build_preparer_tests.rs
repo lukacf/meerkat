@@ -69,12 +69,14 @@ fn management(
 }
 
 /// A host customizer that counts its builds, records the context of each,
-/// and fails when `refuse` is set.
+/// sets `label` on the draft when it has one, and fails when `refuse` is
+/// set.
 #[derive(Default)]
 struct CountingCustomizer {
     builds: AtomicUsize,
     contexts: Mutex<Vec<AgentBuildContext>>,
     refuse: Option<fn() -> CustomizerError>,
+    label: Option<(&'static str, &'static str)>,
 }
 
 #[async_trait::async_trait]
@@ -83,9 +85,12 @@ impl AgentCustomizer for CountingCustomizer {
         &self,
         context: &AgentBuildContext,
         _spec: &DurableAgentSpec,
-        _draft: &mut AgentBuildDraft,
+        draft: &mut AgentBuildDraft,
     ) -> Result<(), CustomizerError> {
         self.builds.fetch_add(1, Ordering::SeqCst);
+        if let Some((key, value)) = self.label {
+            draft.labels.insert(key.to_string(), value.to_string());
+        }
         self.contexts
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -107,6 +112,9 @@ struct HoldingCore {
     released: Mutex<Vec<String>>,
     /// The members whose run starts Core holds for unpublished tools.
     held: Mutex<std::collections::BTreeSet<String>>,
+    /// How many times the identity runtime asked Core to seat the
+    /// identities owed their seat.
+    owed_seat_asks: std::sync::atomic::AtomicUsize,
 }
 
 impl HoldingCore {
@@ -129,6 +137,13 @@ impl HoldingCore {
 
 #[async_trait::async_trait]
 impl SessionBridge for HoldingCore {
+    async fn seat_created_identities_owed_their_seat(
+        &self,
+    ) -> Result<Vec<AgentIdentity>, BridgeError> {
+        self.owed_seat_asks.fetch_add(1, Ordering::SeqCst);
+        Ok(Vec::new())
+    }
+
     async fn create_session(
         &self,
         identity: &AgentIdentity,
@@ -388,6 +403,203 @@ async fn r109_after_the_composition_a_registered_identity_is_prepared_inline_and
         "an inline preparation holds nothing"
     );
     assert!(runtime.customizer_tools_pending_for(&alice)?.is_none());
+    Ok(())
+}
+
+/// The seat of an identity whose record is its row is composed from the
+/// host's build step once per build, and only once the identity runtime is
+/// composed. Before that every build is refused retryable, a fresh spawn's
+/// (a seat the mob's start owes the identity) as a wake's: the seat is left
+/// untouched, the customizer does not run, and nothing is built from the
+/// row alone. The preparer's composition reports itself once.
+/// After it the customizer runs once, the draft is lowered onto the seat
+/// (its context and instructions; its labels, which are the seat's own),
+/// and the build's preparation that follows answers without running the
+/// customizer again. A failed customizer refuses the seat retryable. A
+/// customizer that sets a label the seat does not carry refuses it for
+/// good: the refusal names the label key and the remedy, never the value,
+/// and the identity's status holds the reason.
+#[tokio::test]
+async fn a_store_owned_seat_is_composed_once_per_build_once_the_runtime_is_composed() -> TestResult
+{
+    let alice = identity("personal:alice");
+    let core = Arc::new(HoldingCore::default());
+    let customizer = Arc::new(CountingCustomizer::default());
+    let (runtime, _registry) = runtime_with(&core, Some(Arc::clone(&customizer))).await?;
+    let preparer = IdentityBuildPreparer::new(true);
+    preparer.bind(&runtime, None).await;
+    let lowered = || {
+        let mut seat = meerkat_mob::SpawnMemberSpec::host_root("personal", member_of(&alice))
+            .with_created_custody(true);
+        seat.labels = Some(BTreeMap::from([(
+            "custody".to_string(),
+            "store".to_string(),
+        )]));
+        seat.context = Some(serde_json::json!({"row": "context"}));
+        seat.model_override = Some("an-earlier-build".to_string());
+        seat
+    };
+    let resumed = || {
+        let mut seat = lowered();
+        seat.launch_mode = meerkat_mob::launch::MemberLaunchMode::Resume {
+            bridge_session_id: SessionId::new(),
+            resume_from_role: None,
+        };
+        seat
+    };
+
+    // Bound, not composed yet: there is no host step to run, so no build
+    // of the member is admitted, fresh or resumed.
+    let mut fresh = lowered();
+    assert_eq!(
+        preparer.compose_store_owned_seat(&mut fresh).await,
+        Err(MemberBuildPreparationRefusal::Retryable {
+            reason: super::SEAT_COMPOSED_ONCE_COMPOSED.to_string(),
+        }),
+        "a fresh spawn's seat is refused for now: the identity stays owed its seat"
+    );
+    assert_eq!(
+        (fresh.context.clone(), fresh.model_override.clone()),
+        (lowered().context, lowered().model_override),
+        "the refused seat is left as Core lowered it"
+    );
+    let mut wake = resumed();
+    assert!(
+        matches!(
+            preparer.compose_store_owned_seat(&mut wake).await,
+            Err(MemberBuildPreparationRefusal::Retryable { .. })
+        ),
+        "a wake's seat is refused for now"
+    );
+    assert_eq!(customizer.builds.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        core.owed_seat_asks.load(Ordering::SeqCst),
+        0,
+        "nothing asks Core to seat an owed identity before the composition"
+    );
+
+    runtime
+        .register(DurableAgentSpec {
+            labels: BTreeMap::from([("custody".to_string(), "store".to_string())]),
+            context: Some(serde_json::json!({"host": "context"})),
+            additional_instructions: vec!["Answer for the desk.".to_string()],
+            ..spec(&alice)
+        })
+        .await
+        .expect("the identity registers");
+    runtime.compose_member_builds().await;
+    assert!(
+        !preparer.compose(),
+        "the runtime's composition composed the preparer: a later one is not the first"
+    );
+    runtime.compose_member_builds().await;
+    assert_eq!(
+        core.owed_seat_asks.load(Ordering::SeqCst),
+        1,
+        "the first composition asks Core once to seat the identities owed their seat, and \
+         a later one does not ask again"
+    );
+
+    let mut seat = resumed();
+    assert_eq!(preparer.compose_store_owned_seat(&mut seat).await, Ok(()));
+    assert_eq!(customizer.builds.load(Ordering::SeqCst), 1);
+    assert_eq!(seat.context, Some(serde_json::json!({"host": "context"})));
+    assert_eq!(
+        seat.additional_instructions,
+        Some(vec!["Answer for the desk.".to_string()])
+    );
+    assert_eq!(
+        seat.model_override, None,
+        "no override is kept from an earlier build: the draft names no model"
+    );
+    assert_eq!(
+        seat.labels,
+        lowered().labels,
+        "the draft's labels are the seat's own"
+    );
+    let prepared = preparer
+        .prepare_identity_member(
+            &member_of(&alice),
+            alice.clone(),
+            Some(Arc::clone(&runtime)),
+            management(MemberIdentityManagement::CommandDriven),
+        )
+        .await;
+    assert_eq!(prepared, Ok(MemberBuildPrepared::Prepared));
+    assert_eq!(
+        customizer.builds.load(Ordering::SeqCst),
+        1,
+        "the build's preparation does not run the customizer again"
+    );
+
+    // A build whose seat was not composed first is prepared as before.
+    let prepared = preparer
+        .prepare_identity_member(
+            &member_of(&alice),
+            alice.clone(),
+            Some(Arc::clone(&runtime)),
+            management(MemberIdentityManagement::CommandDriven),
+        )
+        .await;
+    assert_eq!(prepared, Ok(MemberBuildPrepared::Prepared));
+    assert_eq!(customizer.builds.load(Ordering::SeqCst), 2);
+
+    // A failed customizer refuses the seat, retryable.
+    runtime
+        .set_agent_customizer(Some(Arc::new(CountingCustomizer {
+            refuse: Some(|| CustomizerError::BuildFailed("the host is down".to_string())),
+            ..CountingCustomizer::default()
+        }) as Arc<dyn AgentCustomizer>))
+        .await;
+    let mut seat = resumed();
+    let refused = preparer.compose_store_owned_seat(&mut seat).await;
+    let Err(MemberBuildPreparationRefusal::Retryable { reason }) = refused else {
+        return Err(format!("expected a retryable refusal, got {refused:?}").into());
+    };
+    assert!(reason.contains("the host is down"), "{reason}");
+
+    // A customizer that sets a label the seat does not carry refuses the
+    // seat for good, and the seat is left as Core lowered it.
+    let labelling = Arc::new(CountingCustomizer {
+        label: Some(("host_tier", "host-secret-gold")),
+        ..CountingCustomizer::default()
+    });
+    runtime
+        .set_agent_customizer(Some(Arc::clone(&labelling) as Arc<dyn AgentCustomizer>))
+        .await;
+    let mut seat = resumed();
+    let refused = preparer.compose_store_owned_seat(&mut seat).await;
+    let Err(MemberBuildPreparationRefusal::Final { reason }) = refused else {
+        return Err(format!("expected a refusal for good, got {refused:?}").into());
+    };
+    assert!(
+        reason.contains("added [host_tier]")
+            && reason.contains("row")
+            && !reason.contains("host-secret-gold"),
+        "the refusal names the label key and the remedy, never the value: {reason}"
+    );
+    assert_eq!(labelling.builds.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        runtime
+            .customizer_tools_pending_for(&alice)?
+            .map(|pending| pending.reason),
+        Some(reason),
+        "the identity's status holds the refusal's reason"
+    );
+    let prepared = preparer
+        .prepare_identity_member(
+            &member_of(&alice),
+            alice.clone(),
+            Some(Arc::clone(&runtime)),
+            management(MemberIdentityManagement::CommandDriven),
+        )
+        .await;
+    assert_eq!(prepared, Ok(MemberBuildPrepared::Prepared));
+    assert_eq!(
+        labelling.builds.load(Ordering::SeqCst),
+        2,
+        "a refused composition leaves no answer for a later preparation to take"
+    );
     Ok(())
 }
 
@@ -796,6 +1008,225 @@ async fn the_composition_releases_the_members_core_holds_for_unpublished_tools()
         core.released().len(),
         1,
         "a later composition releases nothing"
+    );
+    Ok(())
+}
+
+/// A fresh seat of the member of `identity`, an identity whose record is its
+/// row, as Core lowers it for a spawn.
+fn fresh_store_owned_seat(identity: &AgentIdentity) -> meerkat_mob::SpawnMemberSpec {
+    let mut seat = meerkat_mob::SpawnMemberSpec::host_root("personal", member_of(identity))
+        .with_created_custody(true);
+    seat.labels = Some(BTreeMap::from([(
+        "custody".to_string(),
+        "store".to_string(),
+    )]));
+    seat.context = Some(serde_json::json!({"row": "context"}));
+    seat
+}
+
+/// A deferred preparer (a composition that learns only when its host
+/// completes the bootstrap whether it composes an agent customizer) has
+/// three states. Undecided, it refuses every build of the member of an
+/// identity whose record is its row, a fresh spawn's seat as a wake's,
+/// retryable, with a reason that names the two calls that complete the
+/// bootstrap, and leaves the seat untouched. Decided without a customizer,
+/// by the one call that makes that decision, it lets every seat through as
+/// Core lowered it. Decided with a customizer afterwards, by a later
+/// identity bootstrap that finds one, it is the preparer of a composition
+/// that composes one: bound and not composed yet, it refuses the seat until
+/// the composition. A preparer created decided is never undecided.
+#[tokio::test]
+async fn a_deferred_preparer_refuses_a_store_owned_seat_until_its_composition_decides() -> TestResult
+{
+    let alice = identity("personal:alice");
+    let preparer = IdentityBuildPreparer::deferred();
+
+    // Undecided: the host has not completed the bootstrap.
+    let mut fresh = fresh_store_owned_seat(&alice);
+    let refused = preparer.compose_store_owned_seat(&mut fresh).await;
+    assert_eq!(
+        refused,
+        Err(MemberBuildPreparationRefusal::Retryable {
+            reason: super::SEAT_COMPOSED_ONCE_BOOTSTRAP_COMPLETED.to_string(),
+        }),
+        "an undecided preparer refuses a fresh seat for now: the identity stays owed its seat"
+    );
+    assert!(
+        super::SEAT_COMPOSED_ONCE_BOOTSTRAP_COMPLETED
+            .contains("UnifiedRuntime::install_and_bootstrap_identity_first_context")
+            && super::SEAT_COMPOSED_ONCE_BOOTSTRAP_COMPLETED
+                .contains("UnifiedRuntime::activate_without_identity_context"),
+        "the refusal names the two calls that complete the bootstrap"
+    );
+    assert_eq!(
+        (fresh.context.clone(), fresh.labels.clone()),
+        (
+            fresh_store_owned_seat(&alice).context,
+            fresh_store_owned_seat(&alice).labels
+        ),
+        "the refused seat is left as Core lowered it"
+    );
+    let mut wake = fresh_store_owned_seat(&alice);
+    wake.launch_mode = meerkat_mob::launch::MemberLaunchMode::Resume {
+        bridge_session_id: SessionId::new(),
+        resume_from_role: None,
+    };
+    assert_eq!(
+        preparer.compose_store_owned_seat(&mut wake).await,
+        Err(MemberBuildPreparationRefusal::Retryable {
+            reason: super::SEAT_COMPOSED_ONCE_BOOTSTRAP_COMPLETED.to_string(),
+        }),
+        "an undecided preparer refuses a wake's seat for now too: the member stays dormant"
+    );
+
+    // Decided without a customizer, once.
+    assert!(
+        preparer.decide_without_customizer(),
+        "the first decision is made by this call"
+    );
+    assert!(
+        !preparer.decide_without_customizer(),
+        "a second decision is not the first: its caller seats nothing again"
+    );
+    let mut fresh = fresh_store_owned_seat(&alice);
+    assert_eq!(
+        preparer.compose_store_owned_seat(&mut fresh).await,
+        Ok(()),
+        "a composition with no customizer lets the fresh seat through as Core lowered it"
+    );
+    assert_eq!(fresh.context, fresh_store_owned_seat(&alice).context);
+    let mut wake = fresh_store_owned_seat(&alice);
+    wake.launch_mode = meerkat_mob::launch::MemberLaunchMode::Resume {
+        bridge_session_id: SessionId::new(),
+        resume_from_role: None,
+    };
+    assert_eq!(
+        preparer.compose_store_owned_seat(&mut wake).await,
+        Ok(()),
+        "a composition with no customizer lets a wake's seat through too"
+    );
+
+    // A later identity bootstrap that finds a customizer decides for it.
+    let core = Arc::new(HoldingCore::default());
+    let customizer = Arc::new(CountingCustomizer::default());
+    let (runtime, _registry) = runtime_with(&core, Some(Arc::clone(&customizer))).await?;
+    preparer.bind_publishing(&runtime, None).await;
+    assert!(preparer.publishes_tools());
+    assert!(
+        !preparer.decide_without_customizer(),
+        "a preparer decided for a customizer is not decided without one"
+    );
+    let mut fresh = fresh_store_owned_seat(&alice);
+    assert_eq!(
+        preparer.compose_store_owned_seat(&mut fresh).await,
+        Err(MemberBuildPreparationRefusal::Retryable {
+            reason: super::SEAT_COMPOSED_ONCE_COMPOSED.to_string(),
+        }),
+        "bound and not composed yet, the seat waits for the composition"
+    );
+    assert_eq!(customizer.builds.load(Ordering::SeqCst), 0);
+
+    // A preparer created decided is never undecided.
+    for publishes in [false, true] {
+        let decided = IdentityBuildPreparer::new(publishes);
+        assert!(
+            !decided.decide_without_customizer(),
+            "a preparer created decided keeps its decision"
+        );
+    }
+    let mut fresh = fresh_store_owned_seat(&alice);
+    assert_eq!(
+        IdentityBuildPreparer::new(false)
+            .compose_store_owned_seat(&mut fresh)
+            .await,
+        Ok(()),
+        "a composition that knew from the start that it has no customizer refuses nothing"
+    );
+    Ok(())
+}
+
+/// The identity bootstrap of a composition that learns only there whether
+/// it composes an agent customizer
+/// (`MemberBuildWiring::bind_at_identity_bootstrap` over a deferred wiring).
+/// Before it the wiring's preparer refuses a fresh seat of an identity
+/// whose record is its row. A bootstrap that finds no customizer decides
+/// that there is none and asks Core once to seat the identities owed their
+/// seat; a second one decides nothing and asks nothing again. A later
+/// bootstrap that finds a customizer makes the preparer publishing and asks
+/// nothing itself: the runtime's first composition asks, once, as on any
+/// composition with a customizer.
+#[tokio::test]
+async fn a_deferred_wiring_decides_once_and_asks_core_once_to_seat_the_owed_identities()
+-> TestResult {
+    let alice = identity("personal:alice");
+    let core = Arc::new(HoldingCore::default());
+    let (runtime, _registry) = runtime_with(&core, None).await?;
+    let context = crate::identity_first::IdentityFirstRuntimeContext::new(
+        Arc::clone(&runtime),
+        Arc::new(crate::identity_first::MutableRosterProvider::new(Vec::new())),
+        None,
+        None,
+        None,
+    );
+    let wiring = crate::gateway_wiring::MemberBuildWiring::deferred();
+    let preparer = Arc::clone(
+        wiring
+            .preparer()
+            .ok_or("a deferred wiring has a preparer")?,
+    );
+
+    let mut fresh = fresh_store_owned_seat(&alice);
+    assert!(
+        matches!(
+            preparer.compose_store_owned_seat(&mut fresh).await,
+            Err(MemberBuildPreparationRefusal::Retryable { .. })
+        ),
+        "before the identity bootstrap the fresh seat is refused for now"
+    );
+    assert_eq!(core.owed_seat_asks.load(Ordering::SeqCst), 0);
+
+    // No customizer is declared, installed or carried by the context.
+    wiring.bind_at_identity_bootstrap(&context, None).await?;
+    assert_eq!(
+        core.owed_seat_asks.load(Ordering::SeqCst),
+        1,
+        "the bootstrap that decides there is no customizer asks Core once to seat the identities \
+         owed their seat"
+    );
+    assert!(!preparer.publishes_tools());
+    let mut fresh = fresh_store_owned_seat(&alice);
+    assert_eq!(preparer.compose_store_owned_seat(&mut fresh).await, Ok(()));
+    wiring.bind_at_identity_bootstrap(&context, None).await?;
+    assert_eq!(
+        core.owed_seat_asks.load(Ordering::SeqCst),
+        1,
+        "a second identity bootstrap with no customizer asks nothing again"
+    );
+
+    // A later identity bootstrap finds a customizer installed on the
+    // runtime.
+    runtime
+        .set_agent_customizer(Some(
+            Arc::new(CountingCustomizer::default()) as Arc<dyn AgentCustomizer>
+        ))
+        .await;
+    wiring.bind_at_identity_bootstrap(&context, None).await?;
+    assert!(
+        preparer.publishes_tools(),
+        "a later identity bootstrap that finds a customizer decides for it"
+    );
+    assert_eq!(
+        core.owed_seat_asks.load(Ordering::SeqCst),
+        1,
+        "that bootstrap asks nothing itself"
+    );
+    runtime.compose_member_builds().await;
+    runtime.compose_member_builds().await;
+    assert_eq!(
+        core.owed_seat_asks.load(Ordering::SeqCst),
+        2,
+        "the runtime's first composition asks once, and a later one does not"
     );
     Ok(())
 }

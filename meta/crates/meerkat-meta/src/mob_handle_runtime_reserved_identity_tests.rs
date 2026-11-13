@@ -204,6 +204,7 @@ async fn a_legacy_runtime_plane_member_comes_up_and_the_console_records_none_of_
             labels: entry.labels.clone(),
             spawned_by: None,
             spawned_by_session: None,
+            session_id: Some(format!("legacy-session-{index}")),
             via_tool: "spawn_member".to_string(),
         })
         .await;

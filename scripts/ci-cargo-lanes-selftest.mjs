@@ -2283,7 +2283,7 @@ for (const path of [
   // meerkat-core: a pull request keeps its caps, a push or dispatch gets
   // caps sized from the cold runs (the comments beside each job).
   for (const [job, pullRequest, push] of [
-    ["integration", 30, 70],
+    ["integration", 30, 110],
     ["example-web", 25, 50],
     ["mcp-confinement-positive", 40, 50],
   ]) {

@@ -26,6 +26,7 @@
         "target": "test:host_launch_sites",
         "scope": "target",
         "tests": [
+          "every_mob_session_service_impl_answers_the_recorded_sections_read",
           "every_process_launch_in_shipped_code_is_confined_or_a_typed_exemption",
           "the_mob_incarnation_witness_has_one_constructor",
           "the_mob_incarnation_witness_is_made_only_at_the_listed_sites"

@@ -13,7 +13,7 @@
 //! | Journal fact | Side effects |
 //! |---|---|
 //! | the seat of an identity's member, while Core still holds that incarnation | the customizer's `after_create`, with the session the seat names |
-//! | a retirement the roster's unlisting asked for, or Core's seal unlisted | the harvest of the compactions the retired session holds, the distillation of the retired session, the exit interview (`retire`), the retirement hook (`unlisted`) |
+//! | a retirement the roster's unlisting asked for, or Core's seal unlisted, or one an archive or a removal of an identity whose record is its row in the mob's identity store ended | the harvest of the compactions the retired session holds, the distillation of the retired session, the exit interview (`retire`), the retirement hook (`unlisted`) |
 //! | a reset's rotation onto a fresh session (online, or a first-boot `Fresh` row's) | the harvest of the compactions the retired session holds and the distillation of the retired session, both behind its reset boundary, the retirement hook (`reset`) |
 //! | a delete's rotation onto a fresh session | the harvest of the compactions the retired session holds, then the drop of its semantic-memory scope, the exit interview (`delete`), the retirement hook (`delete`) |
 //! | a role move's rotation onto a fresh session, or one no Meta verb asked for (a host's legacy respawn included) that seated another role | the harvest of the compactions the retired session holds, the distillation of the retired session as a retirement's (no reset boundary), the retirement hook (`role_move`) |
@@ -1370,8 +1370,15 @@ enum RetirementOwes {
 /// - a rotation on the member's own session (a reload, a respawn), or one
 ///   whose target this build does not know, owes nothing;
 /// - a plain retirement owes the unlisting's side effects when the roster's
-///   unlisting asked for it, or when Core's seal unlisted the identity (the
-///   retirement's own cause, never its start's); any other owes nothing.
+///   unlisting asked for it, or when Core's facts say the retirement ended
+///   the agent's place among the mob's agents (the retirement's own cause,
+///   never its start's): Core's seal unlisted the identity, or an archive
+///   or a removal ended the member of an identity whose record is its row
+///   in the mob's identity store. Such an agent is owed what a configured
+///   one that leaves the roster is owed. A removal of an archived agent
+///   retires no member, so no fact of it reaches here and it owes nothing
+///   more. Any other plain retirement owes nothing (a host's adoption of
+///   the identity among them: the identity goes on).
 fn retirement_owes(
     rotation: Option<&meerkat_mob::RetiredRotation>,
     role: &meerkat_mob::ProfileName,
@@ -1395,9 +1402,14 @@ fn retirement_owes(
             (Some(RetiredIdentityCause::Unlisted), _) => {
                 RetirementOwes::Verb(RetiredIdentityCause::Unlisted)
             }
-            (_, Some(meerkat_mob::MemberRetirementCause::Unlisted)) => {
-                RetirementOwes::Facts(RetiredIdentityCause::Unlisted)
-            }
+            (
+                _,
+                Some(
+                    meerkat_mob::MemberRetirementCause::Unlisted
+                    | meerkat_mob::MemberRetirementCause::Archived
+                    | meerkat_mob::MemberRetirementCause::Removed,
+                ),
+            ) => RetirementOwes::Facts(RetiredIdentityCause::Unlisted),
             _ => RetirementOwes::Nothing,
         },
     }
@@ -2923,8 +2935,9 @@ impl IdentityRuntime {
     /// before that retirement ends it, as for a retire Meta asks for. The
     /// step holds these identities' lifecycle locks, so the projection takes
     /// what is kept once the step answered. Nothing is read when no
-    /// retirement hook is installed, and nothing for an identity created at
-    /// runtime, which Core's seal never unlists.
+    /// retirement hook is installed, and nothing for an identity the roster
+    /// does not hold: a roster pass acts only on the names the roster
+    /// declares.
     pub(super) async fn keep_unlisting_incarnations(
         &self,
         specs: &[DurableAgentSpec],
@@ -2940,10 +2953,11 @@ impl IdentityRuntime {
             .entries
             .read()
             .await
-            .iter()
-            .filter(|(identity, entry)| !entry.created && !listed.contains(identity))
-            .map(|(identity, _)| identity.clone())
+            .keys()
+            .filter(|identity| !listed.contains(identity))
+            .cloned()
             .collect::<Vec<_>>();
+        let unlisted = self.roster_held(unlisted).await;
         let mut kept = Vec::new();
         for identity in unlisted {
             match self
@@ -4935,6 +4949,27 @@ mod tests {
                 RetirementOwes::Verb(Cause::Unlisted),
             ),
             (None, unlisted, None, RetirementOwes::Facts(Cause::Unlisted)),
+            // An archive or a removal that ended the member of an identity
+            // whose record is its row owes what the unlisting owes.
+            (
+                None,
+                Some(meerkat_mob::MemberRetirementCause::Archived),
+                None,
+                RetirementOwes::Facts(Cause::Unlisted),
+            ),
+            (
+                None,
+                Some(meerkat_mob::MemberRetirementCause::Removed),
+                None,
+                RetirementOwes::Facts(Cause::Unlisted),
+            ),
+            // A host's adoption ends the entry, not the identity.
+            (
+                None,
+                Some(meerkat_mob::MemberRetirementCause::HostAdopted),
+                None,
+                RetirementOwes::Nothing,
+            ),
             (
                 None,
                 unlisted,

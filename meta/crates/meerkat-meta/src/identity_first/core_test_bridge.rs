@@ -565,6 +565,12 @@ pub(crate) struct CoreReadsBridge {
     /// The identities Core holds as created entries, whose records the mob's
     /// identity store owns, each with its row's spec ([`Self::hold_created`]).
     created: Mutex<BTreeMap<AgentIdentity, DurableAgentSpec>>,
+    /// How many rows of the mob's identity store were read
+    /// ([`SessionBridge::created_identity`]).
+    pub(crate) row_reads: std::sync::atomic::AtomicUsize,
+    /// How many pages of rows of the mob's identity store were read
+    /// ([`SessionBridge::created_identities_of`]).
+    pub(crate) row_page_reads: std::sync::atomic::AtomicUsize,
     /// The names Core holds as removed identities ([`Self::hold_removed`]).
     removed: Mutex<BTreeSet<AgentIdentity>>,
     /// The names Core reserves as unreadable ([`Self::hold_unreadable`]).
@@ -780,6 +786,16 @@ impl CoreReadsBridge {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(identity.clone());
+    }
+
+    /// Core removed `identity`, which it held as a created entry: its row
+    /// carries no spec any more, and its name is a removed identity's.
+    pub(crate) fn remove_created(&self, identity: &AgentIdentity) {
+        self.created
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(identity);
+        self.hold_removed(identity);
     }
 
     /// Core reserves `identity`'s name as one whose record it cannot read.
@@ -1016,6 +1032,24 @@ impl SessionBridge for CoreReadsBridge {
             .collect())
     }
 
+    /// The names of the created entries Core holds ([`Self::hold_created`]),
+    /// in identity order: Core's entry pages, which read no row.
+    async fn created_identity_names(&self) -> Result<Vec<AgentIdentity>, BridgeError> {
+        if self.entry_reads_refused.load(Ordering::SeqCst) {
+            return Err(BridgeError::Unsupported {
+                operation: "created_identity_names",
+            });
+        }
+        self.take_entry_read()?;
+        Ok(self
+            .created
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .keys()
+            .cloned()
+            .collect())
+    }
+
     async fn created_identity(
         &self,
         identity: &AgentIdentity,
@@ -1026,7 +1060,29 @@ impl SessionBridge for CoreReadsBridge {
             });
         }
         self.take_entry_read()?;
+        self.row_reads.fetch_add(1, Ordering::SeqCst);
         Ok(self.created_row(identity))
+    }
+
+    async fn created_identities_of(
+        &self,
+        names: &[AgentIdentity],
+    ) -> Result<BTreeMap<AgentIdentity, DurableAgentSpec>, BridgeError> {
+        if self.entry_reads_refused.load(Ordering::SeqCst) {
+            return Err(BridgeError::Unsupported {
+                operation: "created_identities_of",
+            });
+        }
+        self.take_entry_read()?;
+        // One store read per page of names, as Core reads them.
+        self.row_page_reads.fetch_add(
+            names.len().div_ceil(meerkat_mob::IDENTITY_ENTRY_PAGE_MAX),
+            Ordering::SeqCst,
+        );
+        Ok(names
+            .iter()
+            .filter_map(|name| self.created_row(name).map(|row| (name.clone(), row)))
+            .collect())
     }
 
     /// A created entry is Core's MobMachine's to drive; every other identity

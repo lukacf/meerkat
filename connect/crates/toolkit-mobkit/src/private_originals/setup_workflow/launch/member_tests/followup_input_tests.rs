@@ -174,6 +174,9 @@ async fn second_host_input_keeps_dedicated_g_and_refuses_foreign_and_cancelled_p
         let f = &c.f;
         let a = f.submit().await;
         f.finish(&a).await.unwrap();
+        // A's custody settles in the background after its turn: P's first
+        // send starts once it is promoted.
+        custody_promoted(f, f.original_reference()).await;
         let dispatch = f.probe.as_ref().unwrap().captured();
         let original = f.source.acquisition_original(&dispatch).await.unwrap();
         let p = f
@@ -182,6 +185,9 @@ async fn second_host_input_keeps_dedicated_g_and_refuses_foreign_and_cancelled_p
             .await
             .unwrap();
         finish(f, "planning_parent", &p).await;
+        // P's custody settles in the background too: the planning
+        // preparation does not wait, and starts once P is promoted.
+        custody_promoted(f, &c.parent.original).await;
         let planning = f
             .source
             .prepare_workflow_planning(

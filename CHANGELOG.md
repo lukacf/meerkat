@@ -71,6 +71,11 @@ them.
   `publish_wake_route` is marked, so nothing changes for existing
   publishers.
 
+- `meerkat-comms`: `RegistrationRejection::InboxGone`, the answer of a
+  registration whose inbox already left the registry through its own
+  runtime (see Changed). Nothing is registered. `RegistrationRejection` is
+  non-exhaustive, so code that matches it compiles unchanged.
+
 ### Changed
 
 - `meerkat-comms`: for a sender with no namespace, two live registrations
@@ -94,7 +99,12 @@ them.
   released to rest was never built by a peer message from the other
   namespace. Registrations of other inboxes are not touched, and
   `InprocRegistry::unregister_in_namespace` still removes exactly the one
-  registration it names.
+  registration it names. The rule holds at registration too: registering an
+  inbox that already left installs nothing and is refused
+  (`RegistrationRejection::InboxGone`), so a host that read a member's
+  inbox just before the member left cannot put a route to it back. An
+  inbox that is only closed for peer ingress has not left and still
+  registers.
 
 ### Fixed
 

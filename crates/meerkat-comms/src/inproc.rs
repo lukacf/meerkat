@@ -47,6 +47,15 @@
 //! ([`InprocRegistry::unregister_in_namespace`]) is a host taking back its
 //! own registration while the inbox lives: it removes that one registration
 //! and nothing else.
+//!
+//! The rule holds at registration too. The registry records that an inbox
+//! left (a private mark on the inbox, set in the write in which it leaves
+//! and never cleared: a runtime publishes its inbox once). A registration
+//! of such an inbox, in any namespace, installs nothing and is refused
+//! ([`RegistrationRejection::InboxGone`]). So a host that reads a
+//! participant's inbox and then registers a route to it cannot install a
+//! route to an inbox that left between its two steps. An inbox that is only
+//! closed for peer ingress has not left and still registers.
 
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
@@ -135,6 +144,17 @@ pub enum RegistrationRejection {
     /// `InprocRegistry::replace_sender_in_namespace`. A registrant that can do
     /// neither has not proved the incumbent is gone.
     NameOccupied { holder_pubkey: PubKey },
+    /// The supplied inbox has already left the registry through its own
+    /// runtime: the runtime released its route, was dropped, or a successor
+    /// replaced it. A route never outlives its inbox, so nothing is
+    /// registered.
+    ///
+    /// A host that reads a participant's inbox in one namespace and
+    /// registers a route to it in another gets this when the participant
+    /// left between its two steps. It means "the participant is not there
+    /// now", exactly as when the read finds no inbox: resolve the
+    /// participant again (a seated member is woken through its wake route).
+    InboxGone,
 }
 
 impl std::fmt::Display for RegistrationRejection {
@@ -156,6 +176,11 @@ impl std::fmt::Display for RegistrationRejection {
                  of who holds the name, not a key or trust failure; it may well be this \
                  registrant's own earlier generation",
                 holder_pubkey.to_pubkey_string()
+            ),
+            Self::InboxGone => f.write_str(
+                "the inbox has left the registry (its runtime released its route, was dropped \
+                 or was replaced), so a route to it would deliver to nobody; the participant is \
+                 not there now: resolve its current inbox and register that",
             ),
         }
     }
@@ -498,6 +523,9 @@ impl InprocRegistry {
     ///   registrant's own rename ([`RegistrationOutcome::ReplacedPubkey`]). The
     ///   claimed name was unbound, so the one rule is satisfied.
     /// - a zero pubkey is refused ([`RegistrationRejection::ZeroPubkey`]).
+    /// - an inbox that already left the registry through its own runtime is
+    ///   refused ([`RegistrationRejection::InboxGone`]): a route never
+    ///   outlives its inbox.
     ///
     /// Callers must observe the outcome rather than assume a clean success.
     pub fn register_with_meta_in_namespace(
@@ -527,6 +555,18 @@ impl InprocRegistry {
         };
 
         let mut state = self.state.write();
+        // A route never outlives its inbox: an inbox that left (marked under
+        // this lock by the path it left through) is registered nowhere.
+        if peer.sender.has_left() {
+            tracing::debug!(
+                inproc_namespace = %namespace,
+                peer_name = %name,
+                "refusing inproc registration of an inbox that has left the registry"
+            );
+            return RegistrationOutcome::Rejected {
+                reason: RegistrationRejection::InboxGone,
+            };
+        }
         let namespace_state = state.namespace_mut(namespace);
 
         // Fail closed before any mutation, on occupancy alone. A live route
@@ -625,6 +665,7 @@ impl InprocRegistry {
         namespace_state
             .names
             .insert(name.to_string(), replacement_pubkey);
+        current_sender.mark_left();
         state.forget_inbox_outside(namespace, current_sender);
         Ok(())
     }
@@ -667,6 +708,7 @@ impl InprocRegistry {
         sender: &InboxSender,
     ) -> bool {
         let mut state = self.state.write();
+        sender.mark_left();
         state.forget_inbox_outside(namespace, sender);
         let Some(namespace_state) = state.namespaces.get_mut(namespace) else {
             return false;

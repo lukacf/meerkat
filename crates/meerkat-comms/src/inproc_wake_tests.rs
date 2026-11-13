@@ -1596,9 +1596,12 @@ fn a_registration_of_an_inbox_that_left_installs_nothing() {
         read.clone(),
         PeerMeta::default(),
     );
-    assert!(
-        outcome.is_rejected(),
-        "a route to an inbox that left was installed: {outcome:?}"
+    assert_eq!(
+        outcome,
+        RegistrationOutcome::Rejected {
+            reason: RegistrationRejection::InboxGone
+        },
+        "a route to an inbox that left was installed"
     );
     assert!(
         registry
@@ -1667,9 +1670,12 @@ fn a_registration_of_an_inbox_that_was_replaced_installs_nothing() {
         read,
         PeerMeta::default(),
     );
-    assert!(
-        outcome.is_rejected(),
-        "a route to an inbox that was replaced was installed: {outcome:?}"
+    assert_eq!(
+        outcome,
+        RegistrationOutcome::Rejected {
+            reason: RegistrationRejection::InboxGone
+        },
+        "a route to an inbox that was replaced was installed"
     );
     assert!(
         registry

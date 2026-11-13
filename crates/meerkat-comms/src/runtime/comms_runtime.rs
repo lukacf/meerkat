@@ -4082,10 +4082,17 @@ impl CommsRuntime {
     }
 
     /// Close this runtime's published inproc route for peer ingress while the
-    /// runtime lives on: peers no longer reach this inbox, and a peer send
-    /// meets the route's wake owner instead (a stopped mob refuses it typed,
-    /// rather than leaving it on a queue no drain claims). The closed route
-    /// occupies no name and keeps its metadata for [`Self::reopen_inproc_route`].
+    /// runtime lives on: senders of its own namespace no longer reach this
+    /// inbox, and such a send meets the route's wake owner instead (a stopped
+    /// mob refuses it typed, rather than leaving it on a queue no drain
+    /// claims). The closed route occupies no name and keeps its metadata for
+    /// [`Self::reopen_inproc_route`].
+    ///
+    /// A close is not a leave: the inbox lives on and is not marked as gone.
+    /// A route a host registered to this inbox in ANOTHER namespace is not
+    /// closed and not removed, so a send from there is still admitted to the
+    /// inbox and waits there for the runtime's drain (for a stopped mob:
+    /// until it resumes).
     /// Generation-exact, like [`Self::retire_inproc_route`]. Returns whether
     /// this call closed the route.
     pub fn close_inproc_route(&self) -> bool {

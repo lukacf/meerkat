@@ -20231,6 +20231,8 @@ async fn prime_access_cache_from_runtime_in_namespace(
         &known_members,
     )
     .await;
+    #[cfg(test)]
+    unseated_read_hold::wait(runtime.handle().mob_id().as_str()).await;
     let mut recorded = record_live_and_registered_attributes(
         access,
         members,
@@ -20248,6 +20250,44 @@ async fn prime_access_cache_from_runtime_in_namespace(
         access.record_agent_attributes(attributes);
     }
     recorded
+}
+
+/// Test hold: a priming of a mob named here stops right after its read of
+/// the agents no member is seated for, as it does while that read is under
+/// way, until the gate opens.
+#[cfg(test)]
+mod unseated_read_hold {
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, LazyLock, Mutex, PoisonError};
+
+    type Hold = (tokio::sync::watch::Receiver<bool>, Arc<AtomicBool>);
+
+    static HOLDS: LazyLock<Mutex<BTreeMap<String, Hold>>> =
+        LazyLock::new(|| Mutex::new(BTreeMap::new()));
+
+    /// Hold the primings of `mob_id` until `gate` opens. The answer turns
+    /// true once a priming waits at the hold.
+    pub(super) fn hold(mob_id: &str, gate: tokio::sync::watch::Receiver<bool>) -> Arc<AtomicBool> {
+        let reached = Arc::new(AtomicBool::new(false));
+        HOLDS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(mob_id.to_string(), (gate, Arc::clone(&reached)));
+        reached
+    }
+
+    pub(super) async fn wait(mob_id: &str) {
+        let hold = HOLDS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(mob_id)
+            .cloned();
+        if let Some((mut gate, reached)) = hold {
+            reached.store(true, Ordering::SeqCst);
+            let _ = gate.wait_for(|open| *open).await;
+        }
+    }
 }
 
 /// The access attributes of every structural roster row of `handle`,

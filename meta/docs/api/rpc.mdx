@@ -1101,9 +1101,6 @@ bootstrap status treat it as a configured identity:
 | `meta/reset`, `meta/respawn_member` | A fresh session at the next generation, seated with the current spec; the name, the record and the peer edges the record declares stay |
 | `meta/delete_identity` | The same fresh life as a reset, with the old session's memory scope dropped and its exit interview owed. The agent keeps its name, its record and its listing: this verb never removes an agent. Removing one for good is a separate change of the identity |
 
-`meta/respawn` keeps the agent's conversation and `meta/respawn_member`
-starts a fresh one, for every identity alike.
-
 <Warning>
 Known issue, noted 2026-11-13: on Meta releases through 0.9.14, respawning an
 identity on a gateway or embedding host that keeps its state on disk can destroy the
@@ -1111,6 +1108,9 @@ mobs it created and its delegates. See the
 [known issue on the Meta 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.14)
 for the affected releases, how it happens and what to do.
 </Warning>
+
+`meta/respawn` keeps the agent's conversation and `meta/respawn_member`
+starts a fresh one, for every identity alike.
 
 A respawn or a reset of an archived identity answers `identity_archived`.
 

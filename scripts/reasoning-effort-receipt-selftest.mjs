@@ -614,6 +614,78 @@ row("missing input: a row's test must be in the source at the commit", () => {
   assert.ok(!definesTest("// fn a_row() in a comment\nlet a_row = 1;", "a_row"));
 });
 
+row("a test the manifest marks as awaited may be missing at the commit: its cells are not run, and say why", () => {
+  const awaitedSource = "crates/demo-cli/tests/run_rows.rs";
+  const awaiting = manifest();
+  const binary = awaiting.rows.find((item) => item.id === "binary.supported");
+  binary.test = { package: "demo-cli", target: "run_rows", name: "cli_level_is_sent", source: awaitedSource, awaited: true };
+  binary.model = { rule: "catalog_model" };
+  binary.requested_level = { level: "high" };
+  const change = (text) =>
+    input({
+      manifestText: serialize(awaiting),
+      readSource: (path) => (path === awaitedSource ? (text === null ? null : Buffer.from(text)) : SOURCES.has(path) ? Buffer.from(SOURCES.get(path)) : null),
+    });
+  const build = (text) => buildReceipt(change(text));
+  const other = "#[test]\nfn cli_another_row() {}\n";
+  const defined = "#[test]\nfn cli_level_is_sent() {}\n";
+
+  // The file is not at the commit, or it is and does not define the test: not run, for that reason. The entry names no test.
+  for (const [what, text] of [
+    ["no source file", null],
+    ["a file without the test", other],
+  ]) {
+    const receipt = build(text);
+    const entry = entryOf(receipt, "binary.supported/direct");
+    assert.deepEqual([entry.status, entry.gap, entry.test, entry.result, entry.result_file], ["not_run", "test_not_at_commit", null, null, null], what);
+    assert.deepEqual(
+      [entry.model, entry.requested_level, entry.outcome, entry.values_basis],
+      [{ rule: "catalog_model" }, { level: "high" }, { kind: "sent", level: { level: "high" } }, "manifest"],
+      `${what}: what the manifest says of the row is listed`,
+    );
+    assert.ok(receipt.gaps.some((gap) => gap.id === "binary.supported/direct" && gap.reason === "test_not_at_commit"), what);
+    assert.ok(checkReceipt(receipt).includes("entry binary.supported/direct is a gap of the offline legs: test_not_at_commit"), `${what}: a gap of an offline leg like any other`);
+    const markdown = renderMarkdown(receipt);
+    assert.ok(markdown.includes("- `binary.supported`: The built binary sends an accepted level. (no test at this commit)"), what);
+    assert.ok(markdown.includes("- Row `binary.supported`: 1 entry, the test the manifest names for it is not in the source at this commit yet."), what);
+  }
+  // Once the commit defines the test the row is like any other: source only until its leg runs here, executed when it does.
+  const landed = entryOf(build(defined), "binary.supported/direct");
+  assert.deepEqual([landed.status, landed.gap, landed.test.name, landed.test.source_sha256], ["source_only", "leg_not_run", "cli_level_is_sent", sha256(Buffer.from(defined))]);
+  const ran = buildLegResult({
+    leg: "binary",
+    commit: COMMIT,
+    command: "make e2e-system",
+    exitStatus: 0,
+    format: "nextest_libtest_json_plus",
+    output: Buffer.from([suite("started", "demo-cli", "run_rows", "test"), testEvent("ok", "demo-cli::run_rows$cli_level_is_sent")].map((event) => JSON.stringify(event)).join("\n")),
+    host: HOST,
+  });
+  const withRun = (text) => {
+    const withBinary = change(text);
+    withBinary.results.set("binary.json", file(ran));
+    return entryOf(buildReceipt(withBinary), "binary.supported/direct");
+  };
+  assert.deepEqual([withRun(defined).status, withRun(defined).result, withRun(defined).test.name], ["executed", "pass", "cli_level_is_sent"]);
+  // A result that names the test executes nothing while the commit does not define it.
+  assert.deepEqual([withRun(null).status, withRun(null).gap, withRun(null).result_file], ["not_run", "test_not_at_commit", null]);
+  assert.deepEqual([withRun(other).status, withRun(other).gap], ["not_run", "test_not_at_commit"]);
+
+  // Without the mark both are errors, as for every other row.
+  delete binary.test.awaited;
+  refuses(() => build(null), /row binary\.supported of the manifest names crates\/demo-cli\/tests\/run_rows\.rs, which the commit does not have/, "an unmarked test whose file the commit lacks");
+  refuses(() => build(other), /row binary\.supported of the manifest names the test cli_level_is_sent, which .* does not define/, "an unmarked test the file does not define");
+  assert.equal(entryOf(build(defined), "binary.supported/direct").status, "source_only");
+  // The mark is true or absent.
+  binary.test.awaited = false;
+  refuses(() => build(defined), /manifest does not match its schema/, "a mark that is not true");
+  // A row with observed cells may await its test the same way.
+  const live = manifest();
+  live.rows.find((item) => item.id === "live.cli").test = { package: "demo-cli", target: "run_rows", name: "cli_live_matrix", source: awaitedSource, awaited: true };
+  const awaitedLive = entryOf(buildReceipt(input({ manifestText: serialize(live) })), "live.cli/-");
+  assert.deepEqual([awaitedLive.status, awaitedLive.gap, awaitedLive.test], ["not_run", "test_not_at_commit", null]);
+});
+
 row("missing input: the manifest's references must resolve", () => {
   const broken = (edit) => {
     const copy = manifest();
@@ -1094,6 +1166,24 @@ row("a model id a live row withheld is a form of its own, and never the model a 
   const shown = renderMarkdown(hidden);
   assert.ok(shown.includes("| `live.matrix/copilot` | openai | `listed-model-a` | responses | `copilot/responses` | - | - | source only: its leg saw a cell of this route with its model id withheld: the named model is not proven | - |"));
   assert.ok(shown.includes("- Row `live.matrix`: 1 entry, its leg saw a cell of this route with its model id withheld: the named model is not proven."));
+  // The totals count the named models no cell shows on their own line, apart from the rows that did not run.
+  assert.deepEqual(hidden.totals.named_models, { not_proven: 1, not_observed: 0 });
+  assert.ok(shown.includes("\nModels named for a live row that no observed cell shows: 1 not proven (a cell of the route had its model id withheld), 0 not observed. "));
+  assert.deepEqual(named(result).totals.named_models, { not_proven: 0, not_observed: 0 }, "a named model a cell shows is counted nowhere");
+  assert.deepEqual(named(liveResult([observation({ model: "listed-model-b" })])).totals.named_models, { not_proven: 0, not_observed: 1 });
+  const two = manifest();
+  two.rows.find((item) => item.id === "live.matrix").named_models = [
+    { cell: "copilot", model: { id: "listed-model-a" } },
+    { cell: "direct", model: { id: "listed-model-a" } },
+  ];
+  const twoNamed = named(liveResult([withheld]), two);
+  assert.deepEqual(twoNamed.totals.named_models, { not_proven: 1, not_observed: 1 });
+  assert.ok(renderMarkdown(twoNamed).includes("that no observed cell shows: 1 not proven (a cell of the route had its model id withheld), 1 not observed."));
+  assert.deepEqual(named(buildNotRunResult({ leg: "live", reason: "credential_unavailable" }), two).totals.named_models, { not_proven: 0, not_observed: 0 }, "a named model of a row that did not run carries the row's gap and is a row not run");
+  assert.ok(renderMarkdown(buildReceipt(input())).includes("that no observed cell shows: 0 not proven (a cell of the route had its model id withheld), 0 not observed."), "the line is there when no model is named");
+  const uncounted = structuredClone(hidden);
+  delete uncounted.totals.named_models;
+  assert.notDeepEqual(schemaErrors(schema, schema, uncounted), [], "a receipt without the count does not match the schema");
   // Another model, and a cell of another route (the named id or a withheld one), show nothing of this cell.
   assert.deepEqual(live(named(liveResult([observation({ model: "listed-model-b" })]))).at(-1), ["live.matrix/copilot", "source_only", "model_not_observed"]);
   for (const elsewhere of [{ backend: "openai_api" }, { api: "chat_completions" }, { provider_family: "anthropic" }]) {
@@ -1603,6 +1693,38 @@ row("the committed manifest matches its schema, names tests the tree defines, an
   assert.ok(receipt.entries.some((entry) => entry.status === "source_only") && receipt.entries.some((entry) => entry.status === "not_run"));
   assert.deepEqual(verifyReceipt({ jsonText: json, markdownText: markdown, results, host: HOST }), []);
   assert.equal(`scripts/${receipt.manifest.name}`, MANIFEST_PATH);
+  // A test the manifest marks as awaited is one the tree does not define, and
+  // its row's cells are the not-run cells that say so. When the test lands,
+  // the mark goes.
+  const awaitedRows = committed.rows.filter((item) => item.test?.awaited === true);
+  for (const item of awaitedRows) {
+    const source = read(item.test.source);
+    assert.equal(source !== null && definesTest(source.toString("utf8"), item.test.name), false, `${item.id}: its test is in the tree now, so the awaited mark must leave the manifest`);
+  }
+  assert.deepEqual(
+    [...new Set(receipt.entries.filter((entry) => entry.gap === "test_not_at_commit").map((entry) => entry.row))],
+    awaitedRows.map((item) => item.id),
+    "the cells that wait for their test are the cells of the rows marked so",
+  );
+  // The built-binary rows name their tests, one test a row: the three of the
+  // direct routes over the three direct cells, and the supported row of the
+  // self-hosted server. Its two refusal rows name none yet.
+  assert.deepEqual(
+    committed.rows.filter((item) => item.leg === "binary" && item.test !== null).map((item) => [item.id, item.test.package, item.test.target, item.test.name, item.cells.map((cell) => cell.cell).join(" ")]),
+    [
+      ["binary.supported", "rkat", "run_reasoning_effort_families", "cli_supported_run_reports_requested_and_sent_on_direct_routes", "openai_direct claude_direct gemini_direct"],
+      ["binary.unsupported", "rkat", "run_reasoning_effort_families", "cli_unsupported_level_is_refused_on_direct_routes", "openai_direct claude_direct gemini_direct"],
+      ["binary.unknown", "rkat", "run_reasoning_effort_families", "cli_unknown_support_is_refused_on_direct_routes", "openai_direct claude_direct gemini_direct"],
+      ["binary.self_hosted_supported", "rkat", "run_reasoning_effort", "cli_supported_run_reports_requested_and_sent", "self_hosted_chat"],
+    ],
+  );
+  assert.deepEqual(
+    committed.rows.filter((item) => item.leg === "binary" && item.test === null).map((item) => [item.id, item.cells.map((cell) => cell.cell).join(" ")]),
+    [
+      ["binary.self_hosted_unsupported", "self_hosted_chat"],
+      ["binary.self_hosted_unknown", "self_hosted_chat"],
+    ],
+  );
   // The route rows print their cells under the manifest's own names, and
   // every route row of the manifest prints them.
   const routesSource = "crates/meerkat/tests/reasoning_effort_routes.rs";

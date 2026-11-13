@@ -17,6 +17,14 @@
     {
       "id": "levels_outside_the_set",
       "text": "Every level the row refuses on the route: the lowest active level the route does not accept for the model; none on a Claude model; minimal on the Copilot Gemini route; and on a Copilot route a level the model's catalog row lists and the account's entry does not."
+    },
+    {
+      "id": "catalog_model_missing_an_active_level",
+      "text": "A model of the provider's catalog whose row states two reasoning effort levels or more and not every level, one whose row leaves out an active level (low or above) first, the provider's default model first."
+    },
+    {
+      "id": "lowest_level_outside_the_set",
+      "text": "The lowest active level (low or above) the model's catalog row does not list; where it lists every active level, the lowest level it does not list."
     }
   ],
   "cells": [
@@ -246,46 +254,85 @@
       "id": "binary.supported",
       "leg": "binary",
       "title": "The built binary completes a run at an accepted level with workspace tools, a schema and streaming, and reports the level sent.",
-      "test": null,
+      "test": {
+        "package": "rkat",
+        "target": "run_reasoning_effort_families",
+        "name": "cli_supported_run_reports_requested_and_sent_on_direct_routes",
+        "source": "crates/meerkat-cli/tests/run_reasoning_effort_families.rs",
+        "awaited": true
+      },
       "outcome": { "kind": "sent" },
-      "model": null,
-      "requested_level": null,
-      "cells": [
-        { "cell": "openai_direct" },
-        { "cell": "claude_direct" },
-        { "cell": "gemini_direct" },
-        { "cell": "self_hosted_chat" }
-      ]
+      "model": { "rule": "catalog_model_missing_an_active_level" },
+      "requested_level": { "rule": "accepted_level" },
+      "cells": [{ "cell": "openai_direct" }, { "cell": "claude_direct" }, { "cell": "gemini_direct" }]
     },
     {
       "id": "binary.unsupported",
       "leg": "binary",
       "title": "The built binary refuses a level outside the accepted set: exit status 2, one failure document, no request.",
-      "test": null,
+      "test": {
+        "package": "rkat",
+        "target": "run_reasoning_effort_families",
+        "name": "cli_unsupported_level_is_refused_on_direct_routes",
+        "source": "crates/meerkat-cli/tests/run_reasoning_effort_families.rs",
+        "awaited": true
+      },
       "outcome": { "kind": "refused", "reason": "unsupported_level" },
-      "model": null,
-      "requested_level": null,
-      "cells": [
-        { "cell": "openai_direct" },
-        { "cell": "claude_direct" },
-        { "cell": "gemini_direct" },
-        { "cell": "self_hosted_chat" }
-      ]
+      "model": { "rule": "catalog_model_missing_an_active_level" },
+      "requested_level": { "rule": "lowest_level_outside_the_set" },
+      "cells": [{ "cell": "openai_direct" }, { "cell": "claude_direct" }, { "cell": "gemini_direct" }]
     },
     {
       "id": "binary.unknown",
       "leg": "binary",
       "title": "The built binary refuses a level nothing states the accepted set for: exit status 2, one failure document, no request.",
+      "test": {
+        "package": "rkat",
+        "target": "run_reasoning_effort_families",
+        "name": "cli_unknown_support_is_refused_on_direct_routes",
+        "source": "crates/meerkat-cli/tests/run_reasoning_effort_families.rs",
+        "awaited": true
+      },
+      "outcome": { "kind": "refused", "reason": "supported_levels_unknown" },
+      "model": { "id": "fixture-reasoner-1" },
+      "requested_level": { "level": "high" },
+      "cells": [{ "cell": "openai_direct" }, { "cell": "claude_direct" }, { "cell": "gemini_direct" }]
+    },
+    {
+      "id": "binary.self_hosted_supported",
+      "leg": "binary",
+      "title": "The built binary on a self-hosted server completes a run at an accepted level and reports the level sent.",
+      "test": {
+        "package": "rkat",
+        "target": "run_reasoning_effort",
+        "name": "cli_supported_run_reports_requested_and_sent",
+        "source": "crates/meerkat-cli/tests/run_reasoning_effort.rs",
+        "awaited": true
+      },
+      "outcome": { "kind": "sent" },
+      "model": { "id": "loopback-declared" },
+      "requested_level": { "level": "high" },
+      "cells": [{ "cell": "self_hosted_chat" }]
+    },
+    {
+      "id": "binary.self_hosted_unsupported",
+      "leg": "binary",
+      "title": "The built binary on a self-hosted server refuses a level outside the accepted set: exit status 2, one failure document, no request.",
+      "test": null,
+      "outcome": { "kind": "refused", "reason": "unsupported_level" },
+      "model": null,
+      "requested_level": null,
+      "cells": [{ "cell": "self_hosted_chat" }]
+    },
+    {
+      "id": "binary.self_hosted_unknown",
+      "leg": "binary",
+      "title": "The built binary on a self-hosted server refuses a level nothing states the accepted set for: exit status 2, one failure document, no request.",
       "test": null,
       "outcome": { "kind": "refused", "reason": "supported_levels_unknown" },
       "model": null,
       "requested_level": null,
-      "cells": [
-        { "cell": "openai_direct" },
-        { "cell": "claude_direct" },
-        { "cell": "gemini_direct" },
-        { "cell": "self_hosted_chat" }
-      ]
+      "cells": [{ "cell": "self_hosted_chat" }]
     },
     {
       "id": "live.copilot_matrix",

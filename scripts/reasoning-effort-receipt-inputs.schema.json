@@ -122,6 +122,10 @@
           "type": "string",
           "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*\\.rs$",
           "maxLength": 200
+        },
+        "awaited": {
+          "description": "Set while the test is written and not yet in the tree this manifest is committed to. A commit that does not define the test then lists the row's cells as not run (test_not_at_commit); without the mark a test the commit does not define is an error. The mark goes when the test lands: the selftest fails while a marked test is defined in the tree.",
+          "const": true
         }
       }
     },

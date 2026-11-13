@@ -31,9 +31,19 @@
     "totals": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["entries", "leg_tests", "by_mode", "gaps"],
+      "required": ["entries", "leg_tests", "by_mode", "gaps", "named_models"],
       "properties": {
         "entries": { "$ref": "#/$defs/entry_counts" },
+        "named_models": {
+          "description": "The models the manifest names for a row with observed cells that no cell its leg observed here shows, counted on their own: not_proven where a cell of the route had its id withheld, not_observed where none could be it. Each is also an entry and a gap. A named model of a row that has no result here is not counted: it carries that row's gap.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["not_proven", "not_observed"],
+          "properties": {
+            "not_proven": { "$ref": "#/$defs/count" },
+            "not_observed": { "$ref": "#/$defs/count" }
+          }
+        },
         "leg_tests": {
           "description": "The test counts of the legs that ran at the product commit, summed. A leg that ran at another commit adds nothing.",
           "$ref": "#/$defs/test_counts"
@@ -288,6 +298,7 @@
         "infrastructure_failure",
         "leg_not_run",
         "no_test_row",
+        "test_not_at_commit",
         "ran_at_another_commit",
         "no_per_test_result",
         "test_not_in_leg_result",
@@ -463,7 +474,7 @@
       }
     },
     "entry_not_run": {
-      "description": "A cell with no row in the source at the product commit, or a cell its leg saw and skipped.",
+      "description": "A cell with no row in the source at the product commit (no test is named for it, or the test the manifest names and marks as awaited is not there yet), or a cell its leg saw and skipped.",
       "type": "object",
       "additionalProperties": false,
       "required": [

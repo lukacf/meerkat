@@ -687,6 +687,42 @@ backend.
 `.github/workflows/buildbuddy.yml` is `workflow_call`-only; `nightly.yml` and
 `release.yml` call it, `ci.yml` never does.
 
+### Reasoning effort execution receipt
+
+`scripts/reasoning-effort-receipt.mjs` writes, for one commit, what was
+executed for the provider-neutral reasoning effort level and what was not:
+one JSON document (`scripts/reasoning-effort-receipt.schema.json`, schema
+version 1) and a Markdown file rendered from it. No workflow runs it or
+attaches its output to a release yet.
+
+- The row manifest `scripts/reasoning-effort-receipt-rows.json` lists the
+  cells (provider family, backend, provider API), the legs (in process,
+  built binary, live) and the rows with the test that covers each. A row
+  whose model or level is picked when it runs names the rule, not a value.
+- Each leg has one result file, `<leg>.json`: `record` writes it from the
+  run's output (`cargo nextest run --message-format libtest-json-plus`, which
+  names every test, or the human log, which gives the summary's counts and
+  the tests whose status lines it shows), or records that the leg did not run
+  and why. A leg result holds counts, test names and typed cells, never the
+  run's text.
+- `make reasoning-effort-receipt RESULTS=<directory> OUT=<directory>` (or
+  the script's `generate`) reads the version, the manifest and the test
+  sources from the commit and writes both files. An entry is `executed` only
+  when its leg ran at that commit and reported the entry's own result; it
+  then names the result file and its digest. A row in the source without
+  such a result is `source_only`, a cell no test covers is `not_run`, and
+  each is listed again under `gaps`. A leg without a result file, a result
+  of no leg, a file that does not match its schema, and a row whose test the
+  commit does not define are errors.
+- The output is the same bytes for the same inputs, and holds no path, host
+  name, URL, credential or e-mail address: such a string in an input is
+  refused. `verify` checks a written receipt against its schema, its
+  Markdown file and its result files' digests.
+
+`make ci-lanes-selftest` runs `scripts/reasoning-effort-receipt-selftest.mjs`,
+which also fails when the committed manifest names a test the tree does not
+define.
+
 ## Doctor
 
 Run:

@@ -1145,7 +1145,7 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             ),
             RpcMethodDescriptor::typed(
                 "mob/cancel_work",
-                "Cancel a previously submitted unit of work",
+                "Always refused: per-unit cancellation is unsupported and nothing is cancelled",
                 "MobCancelWorkParams",
                 "MobCancelWorkResult",
             ),

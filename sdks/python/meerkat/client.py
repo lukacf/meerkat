@@ -5326,9 +5326,13 @@ class MeerkatClient:
         )
 
     async def mob_cancel_work(self, mob_id: str, work_ref: str) -> dict[str, Any]:
-        """Cancel a previously submitted unit of work.
+        """Always refused: the server does not cancel one unit of work.
 
-        Wraps the ``mob/cancel_work`` RPC (DELETE_ME C4).
+        Wraps the ``mob/cancel_work`` RPC. The server refuses every call and
+        cancels nothing; the submitted unit runs on. The refusal is raised as
+        ``MeerkatError``, with ``code`` ``"-32602"`` for an otherwise valid
+        call. To cancel all of a member's work, use
+        :meth:`mob_cancel_all_work`.
         """
         result = await self._request(
             "mob/cancel_work", {"mob_id": mob_id, "work_ref": work_ref}

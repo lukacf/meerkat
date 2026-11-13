@@ -1021,6 +1021,13 @@ them.
   is built again when its declaration changes, when a member of the mob is
   retired, or when a spawn in the mob is rolled back. Its convergence status
   carries the refusal.
+- `meerkat-contracts`, Python and TypeScript SDKs: the method catalog and
+  the documentation of the SDKs' `mob_cancel_work` / `mobCancelWork` no
+  longer say that `mob/cancel_work` cancels a unit of work. The method is
+  always refused and cancels nothing: an otherwise valid call is refused
+  with `-32602`, which the SDKs raise as `MeerkatError`.
+  `mob/cancel_all_work` cancels all of a member's work. Only the texts
+  changed; the method, its types and its error codes are as before.
 
 ### Security
 

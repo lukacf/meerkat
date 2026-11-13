@@ -4328,8 +4328,12 @@ export class MeerkatClient {
   }
 
   /**
-   * Cancel a previously submitted unit of work.
-   * Wraps the `mob/cancel_work` RPC (DELETE_ME C4).
+   * Always refused: the server does not cancel one unit of work.
+   * Wraps the `mob/cancel_work` RPC. The server refuses every call and
+   * cancels nothing; the submitted unit runs on. The returned promise
+   * rejects with a `MeerkatError`, with `code` `"-32602"` for an otherwise
+   * valid call. To cancel all of a member's work, use
+   * {@link mobCancelAllWork}.
    */
   async mobCancelWork(mobId: string, workRef: string): Promise<{ ok: boolean }> {
     const result = await this.request("mob/cancel_work", {

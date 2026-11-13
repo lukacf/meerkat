@@ -882,6 +882,99 @@ async fn a_send_to_a_member_with_no_session_is_not_witnessed_by_another_member_o
     Ok(())
 }
 
+/// A send to a member that has no session yet and holds no row on its
+/// runtime's own roster carries no member. A mob the runtime's agents made
+/// can hold a member under the same name, by its member id or by its
+/// `agent_identity` label: neither is the member the send was made to, so
+/// neither is recorded with the send. The send is stored without member
+/// attributes: an administrator reads it, and no other person does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_send_to_a_member_with_no_row_is_not_witnessed_by_a_member_of_another_mob() -> TestResult
+{
+    let (_state, runtime, aggregator) = runtime_and_aggregator("witness-other-mob").await?;
+    // A mob the worker made, as the agent mob tools make one, with two
+    // shared members: one whose member id is a name that no member of the
+    // runtime's own mob holds, and one that carries such a name as its
+    // label.
+    let owner = runtime
+        .mob_handle()
+        .resolve_bridge_session_id(&AgentIdentity::from("alpha"))
+        .await
+        .ok_or("the worker has a session")?;
+    let tools = runtime
+        .mob_runtime()
+        .agent_mob_mcp_state()
+        .ok_or("the runtime carries agent mob tools")?;
+    let team: meerkat_mob::MobDefinition = serde_json::from_value(json!({
+        "id": "witness-other-mob-team",
+        "profiles": { "worker": {
+            "model": "gpt-5.5",
+            "runtime_mode": "turn_driven",
+            "tools": { "comms": true }
+        } }
+    }))?;
+    let team_id =
+        Box::pin(tools.mob_create_definition_with_owner_bridge_session(team, owner, true, false))
+            .await
+            .map_err(|error| error.to_string())?;
+    let team = Box::pin(tools.handle_for(&team_id))
+        .await
+        .map_err(|error| error.to_string())?;
+    for (member, labels) in [
+        ("resting-own", BTreeMap::new()),
+        (
+            "aide",
+            BTreeMap::from([("agent_identity".to_string(), "resting-too".to_string())]),
+        ),
+    ] {
+        let mut spec =
+            SpawnMemberSpec::new("worker", AgentIdentity::from(member)).with_labels(labels);
+        spec.runtime_mode = Some(meerkat_mob::MobRuntimeMode::TurnDriven);
+        team.ensure_member(spec).await?;
+    }
+
+    let readers = readers();
+    for (identity, content) in [
+        ("resting-own", "send-to-no-row"),
+        ("resting-too", "send-to-no-row-too"),
+    ] {
+        let reserved = aggregator
+            .reserve_identity_first_interaction(send_request(identity, content), None)
+            .await;
+        assert!(
+            reserved.is_ok(),
+            "the send to {identity} is reserved with no session"
+        );
+        let sent = stored_frame(&aggregator, identity, content)
+            .await
+            .ok_or("the send is stored")?;
+        let witness = sent
+            .source
+            .member_provenance
+            .as_ref()
+            .map(|witness| witness.member.agent_identity.clone());
+        assert_eq!(
+            (
+                witness.as_deref(),
+                timeline_frame_visible_to(&readers.bob, &sent)
+            ),
+            (None, false),
+            "the send to {identity} carries no member, and is not served to a person who is \
+             not an administrator"
+        );
+        assert!(
+            !timeline_frame_visible_to(&readers.alice, &sent),
+            "the send to {identity} is served to no other person either"
+        );
+        assert!(
+            timeline_frame_visible_to(&readers.root, &sent),
+            "the send to {identity} is served to an administrator"
+        );
+    }
+    let _ = runtime.shutdown().await;
+    Ok(())
+}
+
 /// A member a spawn made shows its first message on its own page from its
 /// own session history, with its own witness, on a console log that holds
 /// nothing else of it: no kickoff record is needed for it. And every frame

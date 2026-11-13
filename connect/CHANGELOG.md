@@ -33,6 +33,8 @@ guides give the conditional wording for Connect 0.9.14.
 
 ## [Unreleased]
 
+## [0.9.15] - 2026-11-13
+
 Meerkat Connect 0.9.15 is part of Meerkat 0.9.15 and is published after
 Core 0.9.15 and Meta 0.9.15: GitHub release `connect-v0.9.15`, a full
 release that is never the repository's latest. Until it is published,

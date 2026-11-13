@@ -37,6 +37,19 @@ them.
 
 ### Breaking
 
+- Behaviour-only (not measured by the gate): `meerkat-core`, `rkat`: on Unix
+  a config document the engine writes is readable by its owner only, so an
+  account that read one through group permissions loses that access at the
+  document's next write unless its directory has the setgid bit. See
+  Security and the Upgrade notes.
+
+- Behaviour-only (not measured by the gate): `rkat`: `--comms-binding-out`
+  replaces what is at its path with a new owner-only file instead of writing
+  into it. A named pipe, a socket, a device or a directory at the path, a
+  symbolic link to one of them, and any path in `/proc` or in `/dev` outside
+  `/dev/shm` (`/dev/stdout`) is refused, and another account can no longer
+  read the binding file. See Security and the Upgrade notes.
+
 - `meerkat-core`: `OpenAiProviderTag` gains the public field
   `reasoning_effort_resolved: bool`, a request-local marker for the
   provider-neutral `reasoning_effort` option (see Added). Code that builds
@@ -46,6 +59,30 @@ them.
   unknown field.
 
 ### Added
+
+- `meerkat-core`, `meerkat-llm-core`: for embedders that sign provider
+  requests themselves (see Security).
+  `meerkat_core::redact::redact_credentials` removes credentials from text
+  read from a response: the values it is given, by exact match (as sent and
+  as an encoder rewrites them), then values that look like credentials in
+  known positions;
+  `redact::MIN_REDACTED_CREDENTIAL_BYTES` is the shortest value it replaces
+  by exact match. `HttpAuthorizer::visit_signed_credentials` is a provided
+  method through which an authorizer names the secret values it signs with;
+  the default `redact_response_diagnostic` now removes them, and an
+  authorizer that overrides `redact_response_diagnostic` behaves as before.
+  `meerkat_core::auth::SignedCredentials` keeps the last values an
+  authorizer with a rotating token signed with.
+  `meerkat_llm_core::streaming::redact_stream_errors` redacts the error a
+  stream ends with through any redaction, for a client that signs with a
+  key of its own.
+
+- `meerkat-contracts`: `WireRunFailure`, the failure document
+  `rkat run --output json` writes (`{"error": WireError}`, emitted in
+  `artifacts/schemas/errors.json`), and `error::turn_failure_error_code`,
+  the `ErrorCode` of a failed turn's typed terminal cause. JSON-RPC and the
+  `rkat run` failure document read a failed turn's code from that one
+  mapping; the JSON-RPC codes are unchanged.
 
 - `meerkat-core`, `meerkat-llm-core`: the vocabulary of a provider-neutral
   `reasoning_effort` option, as types only. Nothing reads them yet: no
@@ -69,6 +106,55 @@ them.
   `AgentLlmClient::reasoning_route()` and `LlmClient::reasoning_route()`
   are a request-free accessor with a `None` default, so existing clients
   compile unchanged; `LlmClientAdapter` forwards its client's answer.
+
+### Changed
+
+- Provider error text (see Security): in the errors of the OpenAI
+  Responses, OpenAI-compatible, Anthropic and Gemini clients, of the OpenAI
+  realtime clients (the text client for realtime-capable models and live
+  sessions) and of the Google Code Assist setup requests (GitHub Copilot
+  routes keep their error text as before), a value that looks like a
+  credential (at least 8 credential characters with a digit among them, or
+  at least 32) is now replaced by `[REDACTED]` where it follows `Bearer` or
+  `Basic`, is the value of an `authorization` header, or is assigned to a
+  secret-looking key (`api_key=`, `x-api-key:`, `token:`); so are tokens
+  with a well-known prefix (`sk-`, `ghp_`, `AKIA` and similar), JSON web
+  tokens, URL userinfo and PEM private-key blocks. A JSON web token is
+  replaced where it ends at a separator; one directly followed by `.`, `/`,
+  `+` or `=` (the full stop of a sentence, a path) is not, which is how the
+  rule already read a process's stderr.
+  The value is replaced and the text around it is kept, with two
+  exceptions: a private-key block goes with its lines, so a block inside a
+  one-line body takes that line, and in a SigV4 `Authorization` value the
+  scheme word (`AWS4-HMAC-SHA256`) is replaced along with the `Credential=`
+  scope. The rules read positions, not meaning, so a value in such a
+  position that is no secret is replaced too: a cache or idempotency key
+  (`prompt_cache_key: <value>`), a model id written after `key:`, a word
+  that begins with a token prefix (`sk-learn-compatible`). Text outside
+  those positions is unchanged. A rejection is classified from the body as
+  received and then redacted, so the rules do not change an error's class.
+
+- `rkat run --output json` (and `--json`, with or without `--resume`): a
+  failed run now writes a JSON failure document to stdout (stdout was empty
+  before). The document is `{"error": {code, category, message, details}}`,
+  the error envelope the other surfaces use, and it is the last document on
+  stdout, after any `--stream` text. `code` is the failure's public error
+  code and `message` the text of stderr's `Error:` line. For a turn that
+  ended in failure, `details.error` is the typed turn error (`kind`,
+  `retryable`, `provider`, `model`, `reason`), and `code` follows its
+  `kind` as on JSON-RPC (`PROVIDER_ERROR`, `BUDGET_EXHAUSTED`, `HOOK_DENIED`
+  or `INTERNAL_ERROR`), so a caller can tell a transient provider failure
+  (`retryable` `true`, which a turn that outlasted the retries, `kind`
+  `retry_exhausted`, carries) from a permanent one without reading text.
+  One turn's code differs from JSON-RPC: a turn abandoned on a refused
+  scoped tool grant gate stays a failed turn (`INTERNAL_ERROR`, exit status
+  1, the typed refusal inside the turn error), where JSON-RPC answers
+  invalid params. A typed error before the turn prints its own code
+  and data; a check made by the CLI itself prints `INTERNAL_ERROR`. Exit
+  statuses and the stderr text are unchanged (a failed turn still exits 1),
+  text and HTML output print no document, an argument the parser refuses
+  prints none, and no other command prints one. See "JSON failure
+  document" in `docs/cli/configuration.mdx`.
 
 ### Fixed
 
@@ -97,6 +183,240 @@ them.
   event are unchanged, and no field is new: a stored turn error without the
   three fields still reads, and an earlier release reads one that has them.
   Affects 0.8.0 through 0.9.14.
+
+- `meerkat-core`: a configuration write that failed at the write itself was
+  reported as saved and replaced the document with an empty file. When the
+  filesystem refused the bytes of a config document or of its
+  `config_state.json` (a full disk on a filesystem that allocates at write
+  time, a quota, a file size limit, an I/O error), the store synced and
+  renamed its temporary file without the write's result, so the empty file
+  took the document's place and the caller (`rkat config set` and `patch`,
+  JSON-RPC `config/set` and `config/patch`, the REST and MCP config writes)
+  saw success. The write now fails with the filesystem's error, publishes
+  nothing and removes its temporary file: the document it could not replace
+  stays as it was, the contract the credential, realm, blob, task and
+  trajectory file writes have since 0.9.14. A write that fails at
+  its sync or its rename removes its temporary file too, where it left a
+  `.config.tmp.<id>` or `.config_state.tmp.<id>` file behind on every
+  attempt, and so does a failed `mcp.toml` write. Affects 0.3.3 through
+  0.9.14.
+
+### Security
+
+- `meerkat-core`, `rkat`: the configuration documents the engine writes are
+  owner-only on Unix, whatever the process umask. They are a config document
+  (`~/.rkat/config.toml`, a project's `.rkat/config.toml`, a realm's own
+  `config.toml`), the `config_state.json` beside it, and `mcp.toml`
+  (`~/.rkat/mcp.toml`, a project's `.rkat/mcp.toml`). Every write gave them
+  the umask's mode (0644 under the common 022, 0664 under 002), and so did
+  the temporary file of the write before it was renamed into place, so every
+  local user could read them. A document can hold credential material by
+  documented configuration: an auth profile's
+  `source = { kind = "inline_secret", ... }`, the `env` values of a
+  `command` source, and the literal `args`, `env` and `headers` of an MCP
+  server (a realm's `[[tools.mcp_servers]]`, or `mcp.toml`). One rule now
+  decides the mode, and the file has it from its creation, before any byte
+  is written: 0640, readable by the directory's group, when the document's
+  directory has the setgid bit (a directory shared through its group on
+  purpose), and 0600 in every other directory. A document is never
+  group-writable and never readable by others, and a rewrite never adds a
+  permission the file lacked: a document its owner made 0400 stays 0400.
+  `rkat init` writes the project document it copies from the user document
+  by the same rule, and only into a file it creates: a symbolic link at the
+  document's path now fails the command, where a link to nothing was
+  followed. The engine changes the mode of no directory. The
+  documents have had the umask's mode since 0.3.0, and the inline secret
+  source since 0.6.0. Affects 0.3.0 through 0.9.14.
+
+- `rkat`: `--comms-binding-out` wrote its binding file, which carries the
+  comms runtime's bootstrap token, with the umask's mode (0644 under the
+  common 022) and into whatever was at its path: a file already there kept
+  its own mode, and a symbolic link was followed. The binding file is now a
+  new file that takes the place of the one at its path, with three limits:
+  - The path is replaced, never written through. A regular file at the path
+    is removed. A symbolic link at the path is never followed: a link to a
+    regular file or to nothing is replaced by the binding file (the file it
+    pointed to stays as it was, and nothing is created where it pointed),
+    and a link to a named pipe, a socket, a device or a directory is
+    refused, as those things themselves are. A path in `/proc`, or in `/dev`
+    other than under `/dev/shm` (a memory file system for ordinary files),
+    is refused whatever it holds: `/dev/stdout`, for one, also when standard
+    output is redirected to a file. A refusal comes before anything is
+    removed or created, with an error that names what is there. The
+    directory of the path must allow the removal and the creation of a file.
+  - On Unix the file is 0600 from its creation, whatever the umask and
+    whatever mode the file before it had.
+  - A supervisor that runs under another account than `rkat` cannot read
+    it.
+
+  Affects 0.6.33 through 0.9.14.
+
+- `meerkat-comms`: `Keypair::save` created `identity.key` with the umask's
+  mode and made it 0600 only after it had written the key, so the secret
+  key was readable by every local user for a moment, and stayed so when the
+  save failed in between. The file is now 0600 on Unix from its creation,
+  and a key file that already exists is made 0600 before the key is written
+  to it. `Keypair::load_or_generate`, which the stock hosts use, already
+  created the file 0600. Affects 0.3.0 through 0.9.14.
+
+- `meerkat-openai`, `meerkat-anthropic`, `meerkat-gemini`,
+  `meerkat-auth-core`, `meerkat-core`: when a provider, or a proxy or
+  gateway in front of one, answered a request with an error that repeated
+  the request's credential (its `Authorization` or API-key header, or the
+  bare value), the credential stayed in the error text. It reached the turn
+  failure message (`rkat run` prints it on stderr), the typed turn error's
+  `detail` and `reason.provider_error.message` in RPC error data and events,
+  retry events, and whatever stores or shows them. Since 0.9.9 the clients
+  ask the route's authorizer to remove it, but only the GitHub Copilot
+  authorizers did; a route whose client signs with a key of its own (an API
+  key, a self-hosted server's static bearer) asked no one, and the Gemini
+  client had no such step.
+
+  What is removed now: the credential a request was signed with, by exact
+  value, from the error text of that request. That covers the API-key and
+  static-bearer routes of the OpenAI, OpenAI-compatible (self-hosted),
+  Anthropic and Gemini clients; routes signed by the static-bearer,
+  static-header, AWS, Azure AD, Google and managed OAuth authorizers (with
+  the last four values of a token that refreshes); the failure of an
+  OpenAI or Gemini image request, the Gemini Files API registration
+  included; the Google Code Assist setup requests; and the OpenAI realtime
+  clients: the errors of the text client for realtime-capable models and,
+  for a live session, an error's message, code and param, a failed
+  response's reason and error, and the opt-in frame trace. The value is
+  matched as sent, without its `Bearer` or `Basic` scheme, and as an
+  encoder rewrites it: `/` as `\/`, a character as its JSON `\u00XX`
+  escape, or percent-encoded (`%XX`), alone or mixed. A second step then
+  replaces values that look like credentials in known positions (see
+  Changed).
+
+  What is not removed:
+
+  - A value shorter than 8 bytes (a placeholder such as `none`) is not
+    matched by value. A placeholder of 8 bytes or more (`not-needed`,
+    `lm-studio`) is the route's credential: the word is replaced wherever
+    an error uses it.
+  - A value the response repeats in another form: base64 of it, the
+    decoded user and password of a `Basic` pair, a copy cut short or
+    masked, an HTML entity, a doubly escaped copy.
+  - Two named values that overlap without one containing the other (the
+    end of one is the start of the other) are replaced independently,
+    longest first: where a response runs them together, what the second
+    holds beyond the overlap stays.
+  - The second step is a second line only. It leaves a secret no route
+    names when the secret stands outside the positions listed under
+    Changed, is made of letters only and shorter than 32 bytes, is a JSON
+    web token directly followed by `.`, `/`, `+` or `=`, stands in a
+    quoted header dump without a `Bearer` or `Basic` scheme
+    (`{"authorization":"<value>"}`, `"authorization":"Token <value>"`), or
+    stands in JSON nested inside a JSON string (`{\"api_key\":\"<value>\"}`).
+  - URL userinfo is replaced up to the `@` of its URL. Text that quotes a
+    URL closes it, so in a response the second step reads a quoting byte
+    (`'`, `"`, `\`, `<` or `>`) as the end of a URL when what stands before
+    it is a bare host (not empty, and no `:` or a `:` followed by one or
+    more digits and nothing else) and a second quoting byte follows before
+    the `@`. Userinfo of that shape is left: one that starts like a host
+    with a port (`app:1234're'st@db`), or one with no `:` before its first
+    quoting byte (`o'bri'en:pass@db`). A password or a user name wrapped
+    in quotes (`app:'pass'@db`, `'root':'pass'@db`) is replaced.
+  - The same rule replaces some text that is no userinfo, which costs
+    readability only: a bare host followed by one quoting byte and a later
+    `@` (`'https://host',help@host`), and a bracketed IPv6 host followed
+    by a later `@`.
+  - A static-header route names the value of `authorization`,
+    `proxy-authorization` and `cookie`, and of a header whose name contains
+    `key`, `token`, `secret`, `auth`, `password`, `credential`, `signature`
+    or `session`. A secret under any other header name is left to the
+    second step.
+  - SigV4: the session token and the signed `Authorization` value and
+    signature of the two most recent requests are removed. With more
+    requests in flight, the `Signature=` of an older one can stay; it is
+    bound to its request and expires in minutes.
+  - GitHub Copilot routes keep their own redaction, as before: the last
+    four bearers by exact value as sent, shown as `<redacted>`, without the
+    encoded forms and without the second step.
+  - Requests that obtain a credential are not covered: a refused token,
+    device-code, cloud identity or API-key provisioning request reports the
+    body as received at sign-in and when a route resolves.
+
+  Affects 0.3.0 through 0.9.14.
+
+### Upgrade notes
+
+- A configuration document an earlier release wrote keeps its mode until
+  the engine next rewrites it. To make the existing ones owner-only now, run
+  `chmod 600` on each that exists: `~/.rkat/config.toml`,
+  `~/.rkat/config_state.json` and `~/.rkat/mcp.toml`; a project's
+  `.rkat/config.toml` and `.rkat/mcp.toml`; and each realm's `config.toml`
+  and `config_state.json` in its realm directory
+  (`<project-root>/.rkat/realms/<realm>/` for the CLI, or
+  `<state-root>/<realm>/`). A binding file `--comms-binding-out` wrote
+  earlier keeps its mode until it is written again: `chmod 600` it, or
+  delete it once the supervisor has read it.
+
+- A configuration document that several local accounts read through group
+  permissions (a project checkout or a realm directory shared by a group,
+  or an install that runs a helper or a verifier under another account) is
+  no longer readable by the group after a rewrite, unless its directory has
+  the setgid bit. Set it once on each shared directory, `chmod g+s <dir>`
+  (the `.rkat` directory of a shared project, a shared realm directory),
+  and the documents written there are 0640 with the directory's group. A
+  document the engine already rewrote as 0600 stays 0600: `chmod g+r` it
+  once. An install that cannot set the bit grants the read itself after each
+  write, with `chmod g+r` or an ACL on the document: a write replaces the
+  file, so a grant on the file before it does not carry over, and a default
+  ACL on the directory does not reach a file that is created 0600. Other
+  accounts never get write access through the document's mode, and nothing
+  is readable by others. The admission fence file keeps its own rule:
+  `admission.lock` is 0640 with its directory's group in every directory.
+
+- `rkat run --comms-binding-out <PATH>` no longer writes into what is
+  already at the path: it removes the file there and creates a new one that
+  only its owner can read (0600 on Unix), whatever the umask and whatever
+  mode the older file had. What changes for an install that relied on the
+  old write:
+  - A symbolic link at the path is replaced by a regular file, whether it
+    pointed to a regular file or to nothing. Before, the binding was written
+    through the link into the file it named; now that file is left as it
+    was, or not created, and does not receive the binding. Give the flag
+    the path of the file itself.
+  - A named pipe, a socket, a device or a directory at the path, and a
+    symbolic link to one of them, is refused and left untouched. So is any
+    path in `/proc` or in `/dev`, whatever it holds; `/dev/shm`, a memory
+    file system for ordinary files, is the one exception.
+    `--comms-binding-out /dev/stdout`, or a named pipe a
+    supervisor reads the binding from, worked before and is now an error:
+    write the binding to a regular file (one under `/dev/shm` will do) and
+    have the supervisor read that.
+  - The directory of the path must let `rkat` remove and create a file in
+    it. A binding file that was created for `rkat` in a directory it cannot
+    write could be rewritten in place before, and now fails.
+  - A supervisor that runs under another account than `rkat` can no longer
+    read the binding file (under the common umask 022 it could). Run the
+    supervisor under the same account, or grant it the read after each
+    write (`chmod`, or an ACL on the file): the file is a new one every
+    time, so a grant on the older file does not carry over. The descriptor
+    file of `rkat mob host --descriptor-out` is owner-only in the same way.
+
+- A script that runs `rkat run --output json` (or `--json`) must not read
+  non-empty stdout as success, nor parse the last stdout document as a run
+  result without looking at it: a failed run now ends stdout with
+  `{"error": {...}}`. Decide by the exit status, which is unchanged, or by
+  the document's top-level key: `error` is a failure, `status`
+  (`"pending_tool_call"`) a run waiting for an external tool result, and
+  anything else the run result. Text and HTML output are unchanged.
+
+### Known limitations
+
+- The owner-only rule of this release (see Security) covers the
+  configuration documents, the comms binding file and `identity.key`. Two
+  other files that can hold a token still take their mode from the umask
+  alone: the mob store's database file, which stores the bootstrap token of
+  an external member's binding, and Meta's composition manifest beside a
+  persistent mob's storage, which records the mob definition with its MCP
+  servers' arguments, environment and headers (also when the adoption of
+  pre-0.9 state rewrites it: that second writer gives the file the
+  permissions the manifest had). Keep the directories that hold them closed
+  to other accounts, or run under a umask of 077.
 
 ## [0.9.14] - 2026-11-11
 

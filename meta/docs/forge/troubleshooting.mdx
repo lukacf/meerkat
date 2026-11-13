@@ -343,6 +343,45 @@ installed in one of those folders earlier is not moved.
   and do not send another Stop just to clear the error.
 - A running application's UI link is missing: choose **Retry UI links**.
 
+### A start runs out of time
+
+```text
+The application did not finish native startup verification in time. Rebuild a package with the current host if it lacks Forge readiness reporting.
+```
+
+Forge waits 240 seconds for an application it starts to report that its
+agent team has started, and fails the start when no report arrives. The
+installed package reports the same limit in its own words:
+
+```text
+Native startup did not report readiness before exit or the time limit.
+```
+
+The application gives its own gateway the same 240 seconds to finish
+starting. When that limit ends the start, the application's output has the
+reason after `Deployment needs attention:`, with the last startup phase the
+gateway reported (`restore` in this example):
+
+```text
+meta/init outcome unknown (init_id=..., last phase: restore): the init deadline of 240.0s ran out before init settled; native state may have changed
+```
+
+After the first report, while agents are still being admitted, Forge shows
+`Waiting for agent admission to finish. Your application is not ready yet.`
+and waits up to 30 seconds for each further report. It then waits up to 30
+seconds for the application's Console.
+
+None of these limits is a setting. What to do:
+
+- Choose **Stop and verify cleanup** when offered, wait until Forge confirms
+  that the installation is stopped, and start the same installation again.
+- If the package was built by an earlier Forge, rebuild it with the current
+  one, as the first message says: a package without readiness reporting
+  cannot send the report.
+- Which agents a start builds before it reports ready is described under
+  `member_restore` in
+  [Configuration](/reference/configuration#sdk-and-gateway-runtime-options).
+
 ### The Console password is forgotten
 
 For an installation on this computer, stop it in Forge and wait for cleanup.

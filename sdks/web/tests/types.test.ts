@@ -564,6 +564,12 @@ function handleEvent(event: AgentEvent): string {
       // compaction's snapshot, with the whole active set after it. The
       // session's instruction status read is the authority.
       return `${event.type}:${event.session_id}:${event.entry_sequence}:${event.kind}:${event.run_id ?? 'none'}:${(event.active ?? []).length}:${(event.changes ?? []).length}`;
+    case 'request_reasoning_effort_resolved':
+      // One provider request was sent with the session's reasoning effort
+      // level: what it was sent with on the route that served it, the turn
+      // (absent for a compaction summary request) and the model fallback
+      // attempt when the request was one.
+      return `${event.type}:${event.turn_number ?? 'none'}:${event.fallback_attempt ?? 'none'}:${event.resolution.requested}:${event.resolution.level}:${event.resolution.route.backend}/${event.resolution.route.api}:${event.resolution.decided_by}:${event.resolution.fields.join(',')}`;
     default: {
       const _exhaustive: never = event;
       return _exhaustive;

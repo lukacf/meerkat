@@ -65,7 +65,10 @@ them.
   `ResumeForTargetPausedForTarget`, `ResumeForTargetPausedByName`,
   `ResumeForTargetActive` and `ResumeForTargetDeleted`, and `State` gains
   the public field `paused_for_target: bool`. Every new variant is appended
-  last, so no existing variant's implicit discriminant moves. Exhaustive
+  last, so no existing variant's implicit discriminant moves. A transition
+  id is Rust source only: no store, journal, digest or snapshot carries
+  one, so the variants appended here and in the entries below make no
+  stored state unreadable in either direction. Exhaustive
   matches must add the new variants, code that builds
   `ScheduleLifecycleMachineState` or the kernel `State` literally must set
   the field, and a serialized kernel `State` without the field no longer

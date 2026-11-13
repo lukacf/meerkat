@@ -60,6 +60,24 @@ Meerkat is pre-1.0, and patch releases can carry declared breaking changes.
 This section is for systems running 0.9.14 or 0.9.13. The full list of
 changes is in the CHANGELOG under `## [0.9.15]`.
 
+State that 0.9.14 or 0.9.13 persisted loads under 0.9.15 as it is. What
+that rests on differs by store:
+
+- **Core's stores** (the mob, schedule, session and runtime stores: the
+  SQLite stores and, for a realm kept in the host's own database, the stores
+  the host store SPI carries): no migration and no adoption step. No store
+  schema, journal, session or machine state version changes, and each stored
+  field 0.9.15 adds is written only when it is set and read as unset when
+  absent. This rests on a comparison of the stored forms of the two releases
+  and on the tests of the forms that gained a field, not on loading state
+  that a 0.9.14 binary wrote.
+- **Meta's own stores:** no change was found in the serialized form or the
+  schema version of a stored Meta type. This rests on a read of this
+  release's changes to Meta, not on an audit of each stored form.
+- **A store the host implements itself** (a host-supplied schedule store,
+  for example) holds Core's serialized forms, so the same holds for it
+  provided it stores them whole and keeps the keys it does not know.
+
 ### Configuration documents are readable by their owner only
 
 On Unix the engine writes every configuration document readable by its
@@ -246,7 +264,9 @@ records and 1 MiB of Active bodies) now bound one member's snapshot, the
 shared records plus the member-targeted records that name the member, not
 the mob as a whole. A mob can hold a member-targeted record for each of any
 number of members, and a member's session and status row no longer list
-other members' member-targeted records. Shared records (targeted at every
+other members' member-targeted records. For a session that 0.9.14 wrote,
+this holds from the mob's next write of the member's snapshot: until then
+the session keeps the slots it was given. Shared records (targeted at every
 member or at a profile) keep the bound they had. See
 [Operator instructions](/guides/mobs#operator-instructions).
 
@@ -386,6 +406,10 @@ under `## [0.9.15]`.
 
 ### Rolling back to 0.9.14
 
+What this subsection says an earlier release does was established by
+reading the 0.9.14 source, not by running a 0.9.14 binary over state that
+0.9.15 wrote.
+
 0.9.14 and earlier releases read what 0.9.15 writes without a refusal (a
 record written with `include_forks` reads there as its member's alone, see
 above), with two exceptions: a created agent's row that records an owed
@@ -456,9 +480,9 @@ mob's recovered state against the earlier bounds is refused:
   is also refused by the member's session (`slot_limit_exceeded`) and
   retried without end: the status read shows the member `owed` with that
   `last_failure`, and no later write reaches it. What a member's session
-  already applied stays in effect. A member that needs a new session (a
-  rotation, the first wake of an unborn seat) fails to build, because the
-  mob cannot carry its snapshot into the session.
+  already applied stays in effect. A member whose build mints a new session
+  fails to build, because the mob cannot carry its snapshot into the
+  session.
 
 Turns of the members that are already seated, the roster and the journal
 are not affected, and 0.9.15 serves the mob again without a repair. A mob
@@ -467,7 +491,13 @@ targets.
 
 Before a rollback, run `rkat storage doctor` on 0.9.15: it lists each such
 mob database (`operator-instruction-mob-totals`, with its record count and
-its Active bytes). A revoke lowers the bytes but not the count: a revoked
+its Active bytes). The doctor reads mob databases on disk. For a mob kept
+in a host store, read `mob/instruction_status`
+(`MobHandle::operator_instruction_status`) without `namespace` and `key`:
+`desired` lists every record of the mob, revoked ones included, with each
+one's effect and, while it is Active, its `body_bytes`; count the records
+and add up the bytes of the Active ones. A revoke lowers the bytes but not
+the count: a revoked
 record keeps its slot. For each listed mob, do one of these first:
 
 - keep the processes that serve that mob on 0.9.15;

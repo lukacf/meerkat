@@ -720,7 +720,7 @@ them.
   from the caller either. Hosts with no audience see no change.
 
 - Mob: the wire tools keep to the host's member tool audience
-  (`MobBuilder::with_member_tool_audience`) too. In a running mob,
+  (`MobBuilder::with_member_tool_audience`) too.
   `wire_members`, `unwire_members`, `mob_wire` and `mob_unwire` answer a
   call that names a member the audience hides from the caller, beside
   another member or an external peer, exactly as the same call with a name
@@ -995,19 +995,15 @@ them.
   `spawn_many_members` keep to the host's member tool audience
   (`MobBuilder::with_member_tool_audience`). A fork launch (a placed
   member's included) answers a source the audience hides from the caller
-  as a source the mob does not hold, where a member with manage scope over
-  the mob could before start a member of its own from the conversation of
-  a member hidden from it. A resume launch that names a session bound to
-  such a member is refused exactly as a resume of a session nobody holds,
-  where the refusal before told a member with manage scope over the mob
-  which member the session is bound to. Affects 0.9.11 through 0.9.14.
+  as a source the mob does not hold. A resume launch that names a session
+  bound to such a member is refused exactly as a resume of a session
+  nobody holds. Before, these launches were not held to the audience.
+  Affects 0.9.11 through 0.9.14.
 
 - Mob: `council` keeps to the host's member tool audience too: a
   participant the audience hides from the convener is answered exactly as
-  a name the mob does not hold, and nothing is forked. Before, a member
-  that may create mobs and holds manage scope over the mob could convene a
-  member hidden from it and be answered from that member's conversation.
-  Affects 0.9.11 through 0.9.14.
+  a name the mob does not hold, and nothing is forked. Before, `council`
+  was not held to the audience. Affects 0.9.11 through 0.9.14.
 
 ### Upgrade notes
 

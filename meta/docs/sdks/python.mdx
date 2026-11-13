@@ -238,9 +238,17 @@ status = await alice.status()          # state, session_id, generation, labels
 
 # Lifecycle
 await alice.reset()                    # Destructive: new generation, new session
-await rt.agent("domain:calendar").respawn()  # Non-destructive recovery
+await rt.agent("domain:calendar").respawn()  # Recovery: same identity, history and memory
 await rt.reconcile()                  # In-process roster reconciliation
 ```
+
+<Warning>
+Known issue, noted 2026-11-13: on Meta releases through 0.9.14, respawning an
+identity on a gateway or embedding host that keeps its state on disk can destroy the
+mobs it created and its delegates. See the
+[known issue on the Meta 0.9.14 release page](https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.14)
+for the affected releases, how it happens and what to do.
+</Warning>
 
 `send_and_wait`, `dispatch_and_wait` and `dispatch_text_and_wait` are
 per-admission: the runtime mints a turn ticket for the delivery and keeps the

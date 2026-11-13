@@ -187,7 +187,8 @@ export function parseReasoningEffortRefusal(
  * The typed refusal of a request whose `reasoning_effort` level the model
  * or route does not accept.
  *
- * Such a request fails with `INVALID_PARAMS` and `error.data`
+ * Such a request fails with the JSON-RPC code `-32602` (invalid params; the
+ * error's `code` is the string `"-32602"`) and `error.data`
  * `{kind: "reasoning_effort_refused", retryable, reasoning_effort_refusal}`,
  * which the SDK keeps as `details`. Branch on it, never on the error text.
  * `undefined` for any other error, or when the data does not parse (a

@@ -173,7 +173,8 @@ def parse_reasoning_effort_refusal(
 def reasoning_effort_refusal(error: BaseException) -> ReasoningEffortRefusal | None:
     """The typed refusal of a request whose level the model or route does not accept.
 
-    Such a request fails with ``INVALID_PARAMS`` and ``error.data``
+    Such a request fails with the JSON-RPC code ``-32602`` (invalid params;
+    ``MeerkatError.code`` is the string ``"-32602"``) and ``error.data``
     ``{"kind": "reasoning_effort_refused", "retryable", "reasoning_effort_refusal"}``,
     which the SDK keeps as ``MeerkatError.details``. Branch on it, never on
     the error text. ``None`` for any other error, or when the data does not

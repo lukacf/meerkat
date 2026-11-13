@@ -21,7 +21,6 @@ export type {
   ReasoningEffortReport,
   ReasoningEffortResolution,
   ReasoningEffortSent,
-  ReasoningEffortTurnOverride,
   ReasoningRoute,
 } from './reasoning-effort.js';
 export { MeerkatError, Session } from './session.js';

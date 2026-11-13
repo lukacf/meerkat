@@ -20212,16 +20212,21 @@ async fn prime_access_cache_from_runtime_in_namespace(
     // waited for, a bounded time; whether a read is still owed is taken
     // before the record itself, so a record read as complete is complete.
     // While a read is owed the controller keeps every caller who is not
-    // an admin apart: an ended private member is not known as one yet.
+    // an admin apart: an ended private member is not known as one yet. A
+    // read found done is recorded only at the end, once this priming has
+    // recorded who the members are private to. Until then the runtime
+    // counts as owing the read: as the last priming left it, and from the
+    // start of the first priming of a runtime the controller has not
+    // recorded yet. A priming of a runtime it has recorded with its read
+    // done records nothing here.
     let owners = runtime.private_owners();
     owners
         .first_attempts_settled(crate::private_owners::FIRST_READ_WAIT)
         .await;
-    access.record_private_owner_record(
-        owners.record_id(),
-        first_read_reader,
-        owners.first_read_pending(),
-    );
+    let first_read_pending = owners.first_read_pending();
+    if first_read_pending || !access.has_private_owner_record(owners.record_id()) {
+        access.record_private_owner_record(owners.record_id(), first_read_reader, true);
+    }
     let mut known_members = owners.memory_members();
     known_members.retain(|identity, _| !live_rows.contains(identity));
     let unseated = unseated_agent_access_attributes(
@@ -20248,6 +20253,9 @@ async fn prime_access_cache_from_runtime_in_namespace(
         let attributes = namespace_console_attributes(attributes, namespace);
         recorded.insert(attributes.identity.clone());
         access.record_agent_attributes(attributes);
+    }
+    if !first_read_pending {
+        access.record_private_owner_record(owners.record_id(), first_read_reader, false);
     }
     recorded
 }
@@ -37829,6 +37837,8 @@ mod console_access_priming_tests {
         }
         let (controller, publication) = joined_controller()?;
         prime_access_cache_from_handle(&runtime.handle(), &controller).await;
+        // The first priming from the runtime records the runtime itself.
+        prime_access_cache_from_runtime(&runtime, &controller).await;
         console_experience(&runtime, &controller).await;
         let quiet = publication
             .observe(|| ())

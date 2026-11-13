@@ -5,8 +5,27 @@ and can use either an installed/downloaded runtime binary or the repo-local
 binary built from this checkout.
 
 ## Prerequisites
+
+The quickest way is the released SDK in a directory of its own. On first use
+it downloads the `rkat-rpc` runtime of its own version and checks it against
+a digest pinned in the package, so there is nothing else to install:
+
 ```bash
-# From the repository root when running from a checkout
+mkdir hello-meerkat && cd hello-meerkat
+npm init -y
+npm install @rkat/sdk tsx
+cp /path/to/meerkat/examples/003-hello-meerkat-ts/main.ts .
+ANTHROPIC_API_KEY=sk-... npx tsx main.ts
+```
+
+This example follows the main branch. If it uses something newer than the SDK
+you installed, copy `main.ts` from that release's tag instead.
+
+To run against this checkout, build the SDK and the runtime from the
+repository root. The SDK built from source pins no runtime digest and refuses
+to download one, so it needs `MEERKAT_BIN_PATH`:
+
+```bash
 npm --prefix sdks/typescript install
 npm --prefix sdks/typescript run build
 (cd examples && npm install)
@@ -21,6 +40,9 @@ export MEERKAT_BIN_PATH="$(./scripts/repo-cargo --print-env | sed -n 's/^CARGO_T
 - `Session` — typed session handle with `.text`, `.usage`, `.id`
 
 ## Run
+
+From the checkout, after the build above:
+
 ```bash
 ANTHROPIC_API_KEY=sk-... npx tsx examples/003-hello-meerkat-ts/main.ts
 ```

@@ -444,6 +444,22 @@
               "refusal"
             ],
             "type": "object"
+          },
+          {
+            "properties": {
+              "reason_type": {
+                "const": "reasoning_effort_refused",
+                "type": "string"
+              },
+              "refusal": {
+                "$ref": "#/components/schemas/ReasoningEffortRefusal"
+              }
+            },
+            "required": [
+              "reason_type",
+              "refusal"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -485,6 +501,17 @@
               "input": {
                 "$ref": "#/components/schemas/RunInput",
                 "description": "Typed run input: caller content, or the pending tool-results\ncontinuation variant (no fabricated empty prompt)."
+              },
+              "reasoning_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ReasoningEffortResolution"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The session's provider-neutral `reasoning_effort` level as it\nresolves on the session's route when the run starts, before any\nprovider request; absent when the session sets no level. What\neach request was sent with is reported per request by\n`request_reasoning_effort_resolved`."
               },
               "request_reasoning": {
                 "anyOf": [
@@ -2013,6 +2040,17 @@
           {
             "description": "A durable run resumed from its run cursor, in place of `run_started`:\nafter a restart, or in the same process once a store fence gap that\nsuspended it ended. The same run continues under its run id, and its\nterminal follows as for any run.\n\nAt `tools_pending` the run takes the round's staged assistant message\nas the model's response and dispatches its tool calls again under\ntheir call ids; nothing is published again for the staged message (no\n`tool_call_requested`, no `turn_completed`). At `awaiting_model` the\nrun continues with its next model call, after the last committed\nround.",
             "properties": {
+              "reasoning_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ReasoningEffortResolution"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The session's provider-neutral `reasoning_effort` level as it\nresolves on the session's route when the run resumes; absent\nwhen the session sets no level (see `run_started`)."
+              },
               "resume_point": {
                 "$ref": "#/components/schemas/RunResumePointKind"
               },
@@ -2146,6 +2184,42 @@
               "session_id",
               "entry_sequence",
               "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "One provider request was sent with the session's provider-neutral\n`reasoning_effort` level: the level the request named, the level\nsent, the model, the route and the provider fields it was written\nto. Published once for each request that was handed to the provider\n(a turn's request, an extraction request, a compaction summary\nrequest, a controller request, a model-fallback attempt), after the\nrequest settled; a request refused before it was sent reports\nnothing. Requests of a session that sets no level report nothing.\nThe event states what was sent, never what was planned: a request\nthat is prepared again (after a route change, say) reports the\nresolution of the preparation that was sent.\n\nAppended after every released variant: declaration order is the\nimplicit discriminant (the xtask `released_enum_ordinals` test).",
+            "properties": {
+              "fallback_attempt": {
+                "description": "Set when the request is a model-fallback attempt: the failed\nattempt it replaces.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "resolution": {
+                "$ref": "#/components/schemas/ReasoningEffortResolution",
+                "description": "What the request was sent with."
+              },
+              "turn_number": {
+                "description": "The provider turn the request belongs to; absent for a request\noutside a turn (a compaction summary).",
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "request_reasoning_effort_resolved",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "resolution"
             ],
             "type": "object"
           }
@@ -11378,6 +11452,17 @@
               }
             ]
           },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReasoningEffortReport"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The provider-neutral `reasoning_effort` level the run's requests\nnamed and what the run sent; see `RunResult::reasoning_effort`."
+          },
           "request_usage": {
             "description": "One row per provider request this run made, in order; see\n`RunResult::request_usage`.",
             "items": {
@@ -14739,6 +14824,36 @@
         "title": "MobWireMembersBatchResult",
         "type": "object"
       },
+      "ModelApi": {
+        "description": "The provider API a request is sent on.",
+        "oneOf": [
+          {
+            "const": "responses",
+            "description": "The OpenAI Responses API.",
+            "type": "string"
+          },
+          {
+            "const": "chat_completions",
+            "description": "The OpenAI Chat Completions API and endpoints compatible with it.",
+            "type": "string"
+          },
+          {
+            "const": "messages",
+            "description": "The Anthropic Messages API.",
+            "type": "string"
+          },
+          {
+            "const": "generate_content",
+            "description": "The Gemini `generateContent` API.",
+            "type": "string"
+          },
+          {
+            "const": "realtime",
+            "description": "The OpenAI realtime API.",
+            "type": "string"
+          }
+        ]
+      },
       "ModelFallbackConfig": {
         "additionalProperties": false,
         "description": "Ordered model failover policy used when a turn reaches a recoverable LLM\nfailure boundary.\n\nFallback is off unless explicitly enabled with a nonempty chain. A present\ntable replaces the inherited policy as a whole; a chain never enables it.",
@@ -17257,6 +17372,289 @@
         ],
         "type": "string"
       },
+      "ReasoningEffortDecidedBy": {
+        "description": "Who decided the level a request was sent with.",
+        "oneOf": [
+          {
+            "const": "request",
+            "description": "The level the request named.",
+            "type": "string"
+          },
+          {
+            "const": "preference",
+            "description": "A reasoning preference replaced the level.",
+            "type": "string"
+          }
+        ]
+      },
+      "ReasoningEffortRefusal": {
+        "description": "A refused `reasoning_effort` level: what was requested, for which model\nand route, and why. Raised before any provider request is sent.\n\n`route`, `supported` and `facts` are always serialized, as `null` when\nabsent (`facts` is absent exactly when `supported` is). The two\n`conflicting_*` fields are serialized only when present. The `Display`\ntext is for people and is not a contract; read the fields.",
+        "properties": {
+          "conflicting_level": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EffortLevel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "For a conflict whose conflicting setting is itself a level: that\nlevel."
+          },
+          "conflicting_param": {
+            "description": "For a conflict: the path of the conflicting setting, for example\n`provider_params.provider_tag.effort`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "facts": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReasoningFactsSource"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The source of `supported`."
+          },
+          "model": {
+            "description": "The model the request would use.",
+            "type": "string"
+          },
+          "provider": {
+            "$ref": "#/components/schemas/Provider",
+            "description": "The provider family of the model."
+          },
+          "reason": {
+            "$ref": "#/components/schemas/ReasoningEffortRefusalReason",
+            "description": "Why the level is refused."
+          },
+          "requested": {
+            "$ref": "#/components/schemas/EffortLevel",
+            "description": "The level the request named."
+          },
+          "route": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReasoningRoute"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The route the request would be served on. `None` when the client\nthat serves the request reports no route: a route nobody observed\nis never guessed."
+          },
+          "supported": {
+            "description": "The levels the route accepts for the model: `None` when unknown or\nunavailable, empty when the route or the model takes no effort.",
+            "items": {
+              "$ref": "#/components/schemas/EffortLevel"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "requested",
+          "provider",
+          "model",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "ReasoningEffortRefusalReason": {
+        "description": "Why a requested `reasoning_effort` level is refused.\n\nA closed set: every reader matches it exhaustively, so adding a variant\nis a breaking change. The variants serialize as the snake_case strings\nbelow and keep this order.",
+        "oneOf": [
+          {
+            "const": "unsupported_level",
+            "description": "A source states the levels the route accepts for the model and the\nrequested level is not among them (an empty set: the route or the\nmodel takes no effort).",
+            "type": "string"
+          },
+          {
+            "const": "supported_levels_unknown",
+            "description": "No source states the levels the route accepts for the model.",
+            "type": "string"
+          },
+          {
+            "const": "supported_levels_unavailable",
+            "description": "The source of the levels exists and cannot be read now (an account's\nmodel list that is not loaded). The one reason an identical later\nrequest can succeed without a configuration change.",
+            "type": "string"
+          },
+          {
+            "const": "conflicting_provider_effort",
+            "description": "The request also sets a provider-specific effort that differs from\nthe level.",
+            "type": "string"
+          },
+          {
+            "const": "conflicting_thinking_budget",
+            "description": "The request also sets a thinking budget: a budget and a level are two\ncontrols.",
+            "type": "string"
+          },
+          {
+            "const": "conflicting_thinking_type",
+            "description": "The request also sets a thinking type the model does not accept\ntogether with the level on the route.",
+            "type": "string"
+          },
+          {
+            "const": "conflicting_reasoning_body",
+            "description": "The request also carries a raw provider reasoning body, which may\ncarry an effort of its own.",
+            "type": "string"
+          },
+          {
+            "const": "conflicting_reasoning_mode",
+            "description": "The request also turns reasoning off.",
+            "type": "string"
+          }
+        ]
+      },
+      "ReasoningEffortReport": {
+        "description": "The run result block: the level a run's requests named and the distinct\nresolutions the run sent, in first-use order. A run that continues a\ncallback suspension keeps its report; a run resumed from its durable run\ncursor after a restart reports the requests it sends from the resume on.",
+        "properties": {
+          "requested": {
+            "$ref": "#/components/schemas/EffortLevel",
+            "description": "The level the run's requests named."
+          },
+          "sent": {
+            "description": "The distinct resolutions sent, in first-use order.",
+            "items": {
+              "$ref": "#/components/schemas/ReasoningEffortSent"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "requested",
+          "sent"
+        ],
+        "type": "object"
+      },
+      "ReasoningEffortResolution": {
+        "description": "A resolved `reasoning_effort` level: what one provider request is sent\nwith, for which model and route.",
+        "properties": {
+          "decided_by": {
+            "$ref": "#/components/schemas/ReasoningEffortDecidedBy",
+            "description": "Who decided `level`."
+          },
+          "facts": {
+            "$ref": "#/components/schemas/ReasoningFactsSource",
+            "description": "The source of the levels the route accepts for the model."
+          },
+          "fields": {
+            "description": "The wire paths the level is written to, for example\n`reasoning.effort`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "level": {
+            "$ref": "#/components/schemas/EffortLevel",
+            "description": "The level sent."
+          },
+          "model": {
+            "description": "The model the request uses.",
+            "type": "string"
+          },
+          "provider": {
+            "$ref": "#/components/schemas/Provider",
+            "description": "The provider family of the model."
+          },
+          "requested": {
+            "$ref": "#/components/schemas/EffortLevel",
+            "description": "The level the request named."
+          },
+          "route": {
+            "$ref": "#/components/schemas/ReasoningRoute",
+            "description": "The route the request is served on."
+          }
+        },
+        "required": [
+          "requested",
+          "level",
+          "provider",
+          "model",
+          "route",
+          "fields",
+          "facts",
+          "decided_by"
+        ],
+        "type": "object"
+      },
+      "ReasoningEffortSent": {
+        "description": "One distinct resolution a run sent, with the number of provider requests\nthat carried it. It has no `requested` of its own: the report holds it.",
+        "properties": {
+          "decided_by": {
+            "$ref": "#/components/schemas/ReasoningEffortDecidedBy",
+            "description": "Who decided `level`."
+          },
+          "facts": {
+            "$ref": "#/components/schemas/ReasoningFactsSource",
+            "description": "The source of the levels the route accepts for the model."
+          },
+          "fields": {
+            "description": "The wire paths the level was written to.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "level": {
+            "$ref": "#/components/schemas/EffortLevel",
+            "description": "The level sent."
+          },
+          "model": {
+            "description": "The model the requests used.",
+            "type": "string"
+          },
+          "provider": {
+            "$ref": "#/components/schemas/Provider",
+            "description": "The provider family of the model."
+          },
+          "requests": {
+            "description": "The number of provider requests sent with this resolution.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "route": {
+            "$ref": "#/components/schemas/ReasoningRoute",
+            "description": "The route the requests were served on."
+          }
+        },
+        "required": [
+          "level",
+          "provider",
+          "model",
+          "route",
+          "fields",
+          "facts",
+          "decided_by",
+          "requests"
+        ],
+        "type": "object"
+      },
+      "ReasoningFactsSource": {
+        "description": "The source of the effort levels a route accepts for a model. Each\nbackend kind names its own (`reasoning_levels_source()` on the\nprovider-matrix kinds, [`ReasoningBackend::levels_source`]); a refusal\nand a resolution report it as `facts`.",
+        "oneOf": [
+          {
+            "const": "catalog",
+            "description": "The model's catalog row: the backend forwards the provider's own API\nto the provider's own validation.",
+            "type": "string"
+          },
+          {
+            "const": "account",
+            "description": "The account's model list entry for the model: the backend answers\nfor itself, and the catalog row is never a source of its levels.",
+            "type": "string"
+          },
+          {
+            "const": "operator",
+            "description": "The levels the operator declared in the model's configuration.",
+            "type": "string"
+          }
+        ]
+      },
       "ReasoningLoweringBaseline": {
         "description": "What one provider attempt's baseline request already said about effort,\nbefore any preference was considered.",
         "oneOf": [
@@ -17390,6 +17788,24 @@
             "type": "string"
           }
         ]
+      },
+      "ReasoningRoute": {
+        "description": "The route a request is served on, in its reported form:\n`{\"backend\": \"<provider-matrix string>\", \"api\": \"<snake_case API>\"}`.\n\nBuilt by [`ReasoningRoute::new`] from a typed backend, or read from that\nform, which refuses a backend that is not a provider-matrix backend\nstring. Either way `backend` is always one. Displays as `backend/api`.",
+        "properties": {
+          "api": {
+            "$ref": "#/components/schemas/ModelApi",
+            "description": "The provider API of the route."
+          },
+          "backend": {
+            "description": "The provider-matrix backend string (`openai_api`, `copilot`,\n`bedrock`, ...).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "backend",
+          "api"
+        ],
+        "type": "object"
       },
       "RenderClass": {
         "description": "Standardized rendering class for injected ordinary work.\n\nThis metadata is for normalization/injection rendering, not for core\nruntime scheduling. It lets the system consistently frame peer messages,\nexternal events, tool-scope notices, and similar inputs when they are\nrendered into model-visible context.",
@@ -27391,6 +27807,17 @@
                 "type": "null"
               }
             ]
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReasoningEffortReport"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The provider-neutral `reasoning_effort` level the run's requests\nnamed and what the run sent; see `RunResult::reasoning_effort`."
           },
           "request_usage": {
             "description": "One row per provider request this run made, in order; see\n`RunResult::request_usage`.",

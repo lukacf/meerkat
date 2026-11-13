@@ -346,6 +346,140 @@ them.
 - `meerkat-core`, `meerkat-contracts`, `meerkat-runtime`, `meerkat-session`,
   `meerkat-mob`, `meerkat-rpc`, `meerkat-llm-core`: a session can store a
   provider-neutral reasoning effort level, `reasoning_effort`, and a turn
+  can set or clear it. It is stored and carried here; nothing resolves it
+  for a provider route yet, so a request that carries it is refused, never
+  sent (see the last paragraph).
+
+  The level is one of `none`, `minimal`, `low`, `medium`, `high`, `xhigh`
+  and `max` (`EffortLevel`), with one spelling each: `x_high` is refused
+  with the list of levels. It lives in the provider params, as
+  `provider_params.reasoning_effort` (`ProviderParamsOverride`,
+  `WireProviderParamsOverride`), so it is part of the session's LLM identity
+  and of every stored form of it. Wherever provider params are accepted as
+  an object (RPC `session/create` and `turn/start`, REST session requests,
+  MCP `meerkat_run` and `meerkat_resume`, mob profiles, the CLI's `--param`
+  and `--provider-params-json`), the nested key is accepted too. No request
+  has a top-level `reasoning_effort` parameter yet.
+
+  A turn carries the level as a field of its own beside `provider_params`,
+  with the same three states: a level sets it, `{"action":"clear"}` removes
+  it, and an absent field keeps it (`RuntimeTurnMetadata.reasoning_effort`,
+  `WireRuntimeTurnMetadata.reasoning_effort`,
+  `SessionLlmReconfigureRequest.reasoning_effort`,
+  `SessionLlmIdentityOverride.reasoning_effort`). The setting is sticky and
+  independent of the other params: a turn that replaces or clears
+  `provider_params` keeps the session's level, unless it also sets or clears
+  `reasoning_effort` or its new params name the nested key. A turn that
+  names the level in both places must ask for one outcome: two different
+  levels are refused, and so is a turn that clears `reasoning_effort` while
+  its new `provider_params` name a level, whatever level that is
+  (`SessionLlmIdentityOverrideError::ReasoningEffortSpellingsDisagree`,
+  whose `top_level` is the level the field sets, or `None` when the field
+  clears it). The same level in both places is accepted, and a clear beside
+  new params that name no level is a clear. One
+  function decides this, `resolve_session_provider_params`, for all three
+  ways a session's identity changes: a live session's turn override, the
+  recovered build of a session that is not live
+  (`SurfaceSessionRecoveryOverrides.reasoning_effort`), and a resumed
+  build's merge, where a build that claims `provider_params` keeps the
+  stored level unless its params name one and a build that claims the level
+  (`ResumeOverrideMask.reasoning_effort`) seats the level its params name,
+  or none. Two different turn levels in one batch are a merge conflict, an
+  input that carries the level takes its own turn instead of joining a
+  running one, and a batch contributor that carries it counts as an explicit
+  reasoning setting. A mob member turn whose delivery path carries no turn
+  metadata (a remotely hosted or peer-only member, an autonomous inbox)
+  refuses the field by name, and a running Steer refuses it like any other
+  per-turn model setting.
+
+  The level is applied by the executor that runs the turn, through an LLM
+  reconfigure before the turn: the JSON-RPC session runtime and the mob
+  member executor do that. The session service checks it. A turn whose
+  metadata names a level starts only on a session that is already there
+  (the session's level is that level, or it has none for a clear);
+  otherwise the caller is answered with the configuration error `the turn's
+  reasoning_effort was not applied to the session before the turn` and
+  nothing is sent to a provider. So an executor that applies no per-turn
+  reconfigure refuses such a turn instead of running it without the level.
+  The refusal comes before the run starts, so the runtime replays the input
+  as it replays any start that failed, refuses it again each time, and ends
+  it abandoned at its retry cap: the stored input's reason is
+  `max_attempts_exhausted`, not the refusal.
+
+  Until the level can be resolved for the route that serves a request, a
+  request whose params carry it reaches no provider. The turn fails with the
+  configuration error `reasoning_effort cannot be resolved by this build`
+  before any client is called, a compaction summary request included, and
+  the provider adapter independently refuses a request that still carries
+  the level (`reasoning_effort reached the provider adapter unresolved`).
+  The level stays on the session, so its later turns are refused too until a
+  turn clears it. Provider-specific effort settings (`provider_tag`) are
+  unchanged. The LayerDecision schema that adaptive mob packs bundle does
+  not carry the level, so the schema stays the released one.
+
+- `meerkat-core`, `meerkat-contracts`, `meerkat`, `meerkat-runtime`,
+  `meerkat-rpc`, `meerkat-rest`, `meerkat-mob`: a reasoning effort level the
+  model's route does not accept is refused when the agent is built or a
+  caller reconfigures it, with one typed answer on every surface.
+
+  A session's level (`provider_params.reasoning_effort`) is judged against
+  the route of the client its build made and the model's catalog row, next
+  to the other build-time request checks: at a fresh build, at a resumed
+  build (which keeps the stored level through the resume merge, a mob
+  member's included), at the build that recovers a session that is not
+  live, and when a caller reconfigures a live session (a turn's model,
+  provider params or level override; the JSON-RPC session runtime and the
+  mob member executor apply those). A level the route does not accept is
+  refused before anything is published: no session is created, no provider
+  request is made, a refused resume or recovery leaves the stored identity
+  as it was, and a refused reconfiguration leaves the live session's
+  identity, client and stored params as they were. The stored params are
+  never rewritten: the level stays in the neutral field. A build or a
+  target that carries no level is not judged. A supported level passes this
+  check and is still refused at its first request until the level is
+  resolved for requests (see the entry above this one).
+
+  The refusal is `ReasoningEffortRefusal`, raised as
+  `AgentError::ReasoningEffortRefused` (from a build:
+  `BuildAgentError::ReasoningEffortRefused`; from a live reconfiguration:
+  `RuntimeDriverError::ReasoningEffortRefused`, with
+  `RuntimeDriverError::reasoning_effort_refused_session_error()` giving the
+  session error). Its error class is `config`, its turn failure source is
+  `ConfigError`, the agent loop never retries it and it is never a model
+  fallback trigger (for the stored record of a turn refused before its run
+  starts, see Known limitations).
+  Surfaces answer it as `INVALID_PARAMS` (JSON-RPC `-32602`, HTTP `400`)
+  with the data
+  `{"kind": "reasoning_effort_refused", "retryable": <bool>, "reasoning_effort_refusal": {...}}`
+  (`SessionError::REASONING_EFFORT_REFUSED_KIND`, read back by
+  `SessionError::reasoning_effort_refusal_from_data`). `retryable` is `true`
+  only for the reason `supported_levels_unavailable`
+  (`ReasoningEffortRefusalReason::is_transient()`): the account's model
+  list is not loaded, and the same request can succeed later with no
+  change. Meerkat does not retry it for the caller. A turn that fails for the
+  refusal carries it as its typed reason
+  (`AgentErrorReason::ReasoningEffortRefused`, in `run_failed` as
+  `{"reason_type": "reasoning_effort_refused", "refusal": {...}}`), and
+  JSON-RPC and REST answer such a turn exactly as they answer a refused
+  build, so a caller sees one shape whichever checkpoint refused. On REST,
+  a refused turn of the request that created its session also names the
+  created session in `details` (`session_id`, `session_ref`,
+  `session_created`, `resumable`).
+
+  `SessionLlmReconfigureHost` (`meerkat-runtime`) gains the defaulted method
+  `judge_requested_target_session_llm_identity`: the host's judgement of a
+  target a caller asked for, called by
+  `reconfigure_session_llm_identity` after the target is resolved and
+  before anything is staged. It decides nothing about a committed
+  model-routing handoff, whose lifecycle the routing machine owns: a
+  `brain_swap` handoff and a switch-turn request are applied as before and
+  keep the session's level, and a level their target's route does not
+  accept is then refused at each request until it is changed or cleared.
+  The default accepts every target; the facade's host judges the level.
+
+- `meerkat-core`, `meerkat-contracts`, `meerkat-runtime`, `meerkat-session`,
+  `meerkat-mob`, `meerkat-rpc`, `meerkat-llm-core`: a session can store a
+  provider-neutral reasoning effort level, `reasoning_effort`, and a turn
   can set or clear it. It is stored and carried here; it is resolved for
   the provider route right before each request (see the last paragraph).
 

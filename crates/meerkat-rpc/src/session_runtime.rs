@@ -41972,8 +41972,7 @@ mod tests {
         /// Wait for the client's `expected`th model request and release it.
         async fn release_request(&self, expected: usize, description: &str) {
             assert!(
-                self.request_entered(expected, Duration::from_secs(60))
-                    .await,
+                self.request_entered(expected, Duration::from_mins(1)).await,
                 "{description} did not reach the provider"
             );
             self.client.release.notify_one();
@@ -42018,7 +42017,7 @@ mod tests {
                 .store(true, AtomicOrdering::SeqCst);
             let turn = self.spawn_turn(prompt, None);
             assert!(
-                self.request_entered(requests + 2, Duration::from_secs(60))
+                self.request_entered(requests + 2, Duration::from_mins(1))
                     .await,
                 "the turn reaches its second model request"
             );
@@ -42104,7 +42103,7 @@ mod tests {
             self.client
                 .provider_read_released
                 .store(true, AtomicOrdering::SeqCst);
-            let (_, waiter) = tokio::time::timeout(Duration::from_secs(60), accept)
+            let (_, waiter) = tokio::time::timeout(Duration::from_mins(1), accept)
                 .await
                 .expect("the runtime answers the queued input's admission")
                 .expect("the admission task")
@@ -42574,7 +42573,7 @@ mod tests {
             .expect("the queued request's input is cancelled");
 
         let serving = session.serve_model_requests();
-        let cancelled = tokio::time::timeout(Duration::from_secs(60), queued)
+        let cancelled = tokio::time::timeout(Duration::from_mins(1), queued)
             .await
             .expect("the cancelled request is answered")
             .expect("the request task");
@@ -42791,7 +42790,7 @@ mod tests {
             .expect("the queued request's input is cancelled");
 
         let serving = session.serve_model_requests();
-        let cancelled = tokio::time::timeout(Duration::from_secs(60), cancelled)
+        let cancelled = tokio::time::timeout(Duration::from_mins(1), cancelled)
             .await
             .expect("the cancelled request is answered")
             .expect("the request task");
@@ -42873,7 +42872,7 @@ mod tests {
             .expect("the member admits the turn");
         assert!(
             session
-                .request_entered(requests + 2, Duration::from_secs(60))
+                .request_entered(requests + 2, Duration::from_mins(1))
                 .await,
             "the member's running turn reaches its second model request"
         );
@@ -42933,7 +42932,7 @@ mod tests {
             .await
             .expect("cancel all of the member's work");
         session.client.release.notify_one();
-        let cancelled = tokio::time::timeout(Duration::from_secs(60), queued)
+        let cancelled = tokio::time::timeout(Duration::from_mins(1), queued)
             .await
             .expect("the queued request is answered")
             .expect("the request task");
@@ -42998,7 +42997,7 @@ mod tests {
                     .await
             })
         };
-        let failed = tokio::time::timeout(Duration::from_secs(60), failing)
+        let failed = tokio::time::timeout(Duration::from_mins(1), failing)
             .await
             .expect("the member's turn is answered")
             .expect("the turn task")
@@ -43086,7 +43085,7 @@ mod tests {
                     .await
             })
         };
-        let failed = tokio::time::timeout(Duration::from_secs(60), failing)
+        let failed = tokio::time::timeout(Duration::from_mins(1), failing)
             .await
             .expect("the member's turn is answered")
             .expect("the turn task")

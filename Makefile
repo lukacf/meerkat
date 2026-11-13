@@ -362,6 +362,7 @@ ci-lanes-selftest:
 	@scripts/test-ci-clippy-sccache-wrapper.sh
 	@scripts/test-setup-sccache-ci.sh
 	@scripts/test-ci-release-downloads.sh
+	@scripts/test-install-ripgrep.sh
 
 .PHONY: native-cost-analysis-selftest
 native-cost-analysis-selftest:
@@ -756,6 +757,7 @@ bench:
 
 # Hard gate: Rust workspace, Python SDK, TypeScript SDK, and contract versions must match
 verify-version-parity:
+	@$(PYTHON) scripts/test_check_inrepo_version_pins.py
 	@scripts/verify-version-parity.sh
 
 # Verify committed schema artifacts match freshly emitted ones

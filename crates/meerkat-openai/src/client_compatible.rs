@@ -157,10 +157,15 @@ impl OpenAiCompatibleClient {
     ) -> Self {
         let http = http::build_http_client_for_base_url(reqwest::Client::builder(), &base_url);
         let responses_delegate = matches!(mode, OpenAiCompatibleMode::Responses).then(|| {
+            // The delegate speaks the public API's wire to this client's
+            // server; it is not the public API. As an issuer of continuity
+            // material it is a self-hosted server: the configured one this
+            // client declares, or the one at this base URL.
             crate::OpenAiClient::new_with_optional_api_key_and_base_url(
                 bearer_token.clone(),
                 trim_v1_suffix(&base_url),
             )
+            .into_self_hosted_delegate(None)
         });
         Self {
             mode,
@@ -183,6 +188,45 @@ impl OpenAiCompatibleClient {
             openai_backend: None,
             copilot_chat_stream: false,
         }
+    }
+
+    /// Declare which configured self-hosted server
+    /// (`[self_hosted.servers.<id>]`) this client speaks to. Responses
+    /// continuity material (encrypted reasoning, item and response ids) is
+    /// replayed only to the issuer the process received it from; a declared
+    /// server is that issuer by its id, whatever its base URL, and a client
+    /// that declares none is the self-hosted server at its base URL.
+    #[must_use]
+    pub fn with_self_hosted_server(mut self, server: impl Into<String>) -> Self {
+        let server = server.into();
+        self.responses_delegate = self
+            .responses_delegate
+            .take()
+            .map(|delegate| delegate.into_self_hosted_delegate(Some(server)));
+        self
+    }
+
+    /// The issuer of this client's Responses continuity material; `None`
+    /// for a Chat Completions client, whose wire carries none.
+    pub fn continuity_issuer(&self) -> Option<meerkat_core::OpenAiContinuityIssuer> {
+        self.responses_delegate
+            .as_ref()
+            .map(crate::OpenAiClient::continuity_issuer)
+    }
+
+    /// Give this client its own record of what it received from which
+    /// issuer, in place of the one every client of the process shares (see
+    /// [`crate::OpenAiClient::with_continuity_ledger`]).
+    #[must_use]
+    pub fn with_continuity_ledger(
+        mut self,
+        ledger: Arc<meerkat_core::OpenAiContinuityLedger>,
+    ) -> Self {
+        self.responses_delegate = self
+            .responses_delegate
+            .take()
+            .map(|delegate| delegate.with_continuity_ledger(ledger));
+        self
     }
 
     /// For GitHub Copilot's Chat Completions routes only. A stream counts
@@ -261,13 +305,23 @@ impl OpenAiCompatibleClient {
         self
     }
 
-    /// Remove from `diagnostic`, text a response carried, any credential the
-    /// authorizer signed the request with: a provider, proxy or gateway can
-    /// echo the request's headers in an error.
+    /// Remove from `diagnostic`, text a response carried, the credentials
+    /// that signed the request: the authorizer's, and this client's own
+    /// static bearer, which is sent with or without an authorizer. A
+    /// provider, proxy or gateway can echo the request's headers in an
+    /// error.
     fn redact_diagnostic(&self, diagnostic: &mut String) {
         if let Some(authorizer) = &self.authorizer {
             authorizer.redact_response_diagnostic(diagnostic);
+            if self.bearer_token.is_none() {
+                return;
+            }
         }
+        meerkat_core::redact::redact_credentials(diagnostic, |visit| {
+            if let Some(bearer_token) = &self.bearer_token {
+                visit(bearer_token);
+            }
+        });
     }
 
     /// `error` with every field that can carry provider text redacted as
@@ -889,7 +943,10 @@ impl OpenAiCompatibleClient {
                 };
                 let inner: LlmStream<'a> = Box::pin(async_stream::try_stream! {
                     let mut translated = self.request_with_remote_model(request);
-                    translated.messages = self.project_replay_messages(&request.messages)?;
+                    translated.messages = self.project_replay_messages_for(
+                        &request.messages,
+                        self.decided_continuity(prepared).as_ref(),
+                    )?;
                     let lowered;
                     let mut stream = if let Some(prepared) = prepared {
                         lowered = prepared.with_lowered_request(translated);
@@ -915,9 +972,9 @@ impl OpenAiCompatibleClient {
                         }
                     }
                 });
-                streaming::redact_stream_diagnostics(
+                streaming::redact_stream_errors(
                     streaming::ensure_terminal_done(inner),
-                    self.authorizer.as_deref(),
+                    move |diagnostic: &mut String| self.redact_diagnostic(diagnostic),
                 )
             }
             OpenAiCompatibleMode::ChatCompletions => {
@@ -983,8 +1040,10 @@ impl OpenAiCompatibleClient {
                         Ok(response.bytes_stream())
                     } else {
                         let headers = response.headers().clone();
-                        let mut text = response.text().await.unwrap_or_default();
-                        self.redact_diagnostic(&mut text);
+                        let text = response.text().await.unwrap_or_default();
+                        // Classified from the body as received, then
+                        // redacted: what the redaction removes can never
+                        // change the error's class.
                         Err(self.redacted_error(LlmError::from_http_response(
                             status_code,
                             text,
@@ -1398,9 +1457,9 @@ impl OpenAiCompatibleClient {
                 // Every error the stream ends with is redacted here, whichever
                 // path built it (a rejection body, an error envelope, a data
                 // line that does not parse, an incomplete buffer).
-                streaming::redact_stream_diagnostics(
+                streaming::redact_stream_errors(
                     streaming::ensure_terminal_done(inner),
-                    self.authorizer.as_deref(),
+                    move |diagnostic: &mut String| self.redact_diagnostic(diagnostic),
                 )
             }
         }
@@ -1439,7 +1498,121 @@ impl LlmClient for OpenAiCompatibleClient {
         }
     }
 
+    /// Project for this client's server and, on the Responses wire, freeze
+    /// the decision into the projection's replay witness (see
+    /// `OpenAiClient::project_replay_request`).
+    fn project_replay_request(
+        &self,
+        messages: &[Message],
+    ) -> Result<meerkat_llm_core::LlmReplayProjection, LlmError> {
+        let continuity = self.live_continuity();
+        let projected = self.project_replay_messages_for(messages, continuity.as_ref())?;
+        let projection = match &continuity {
+            Some(continuity) => {
+                let decision = crate::client::OpenAiReplayDecision::freeze(
+                    continuity.issuer(),
+                    messages,
+                    &projected,
+                );
+                meerkat_llm_core::LlmReplayProjection::new(projected)
+                    .with_replay_witness(decision.witness())
+            }
+            None => meerkat_llm_core::LlmReplayProjection::new(projected),
+        };
+        Ok(projection)
+    }
+
     fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
+        self.project_replay_messages_for(messages, self.live_continuity().as_ref())
+    }
+
+    fn request_pressure(
+        &self,
+        request: &LlmRequest,
+    ) -> Result<Option<meerkat_core::ProviderRequestPressure>, LlmError> {
+        self.request_pressure_for(request, None)
+    }
+
+    fn prepared_request_pressure(
+        &self,
+        request: &PreparedLlmRequest,
+    ) -> Result<Option<meerkat_core::ProviderRequestPressure>, LlmError> {
+        self.request_pressure_for(request.request(), Some(request))
+    }
+
+    fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
+        self.stream_request(request, None)
+    }
+
+    fn stream_prepared<'a>(&'a self, request: &'a PreparedLlmRequest) -> LlmStream<'a> {
+        self.stream_request(request.request(), Some(request))
+    }
+
+    fn provider(&self) -> meerkat_core::Provider {
+        self.provider
+    }
+
+    async fn health_check(&self) -> Result<(), LlmError> {
+        let url = format!("{}/models", self.base_url);
+        let response = self
+            .apply_dynamic_auth(self.http()?.get(&url), "GET", &url, "application/json")
+            .await?
+            .send()
+            .await
+            .map_err(|e| LlmError::Unknown {
+                message: e.to_string(),
+            })?;
+        let status = response.status().as_u16();
+        if (200..=299).contains(&status) {
+            Ok(())
+        } else {
+            let headers = response.headers().clone();
+            let text = response.text().await.unwrap_or_default();
+            // Classified from the body as received, then redacted, as a
+            // refused model request is.
+            Err(self.redacted_error(LlmError::from_http_response(status, text, &headers)))
+        }
+    }
+
+    fn compile_schema(&self, output_schema: &OutputSchema) -> Result<CompiledSchema, SchemaError> {
+        let mut schema = output_schema.schema.as_value().clone();
+        if output_schema.strict {
+            ensure_additional_properties_false(&mut schema);
+        }
+        Ok(CompiledSchema {
+            schema,
+            warnings: Vec::new(),
+        })
+    }
+}
+
+impl OpenAiCompatibleClient {
+    /// What the process knows now, for this client's server: its
+    /// delegate's continuity target. `None` on the Chat Completions wire,
+    /// which carries no continuity material.
+    fn live_continuity(&self) -> Option<meerkat_core::OpenAiContinuityTarget> {
+        self.responses_delegate
+            .as_ref()
+            .map(crate::OpenAiClient::continuity_target)
+    }
+
+    /// The continuity target a request is lowered against: the decision its
+    /// projection froze, when it carries one, and otherwise what the process
+    /// knows now.
+    fn decided_continuity(
+        &self,
+        prepared: Option<&PreparedLlmRequest>,
+    ) -> Option<meerkat_core::OpenAiContinuityTarget> {
+        self.responses_delegate
+            .as_ref()
+            .map(|delegate| delegate.decided_continuity(prepared))
+    }
+
+    fn project_replay_messages_for(
+        &self,
+        messages: &[Message],
+        continuity: Option<&meerkat_core::OpenAiContinuityTarget>,
+    ) -> Result<Vec<Message>, LlmError> {
         let mode = match self.mode {
             OpenAiCompatibleMode::Responses => OpenAiReplayProjectionMode::Responses,
             OpenAiCompatibleMode::ChatCompletions => OpenAiReplayProjectionMode::ChatCompletions,
@@ -1449,22 +1622,32 @@ impl LlmClient for OpenAiCompatibleClient {
             mode,
             self.supports_image_input,
             self.supports_image_tool_results,
+            continuity,
         )
     }
 
-    fn request_pressure(
+    fn request_pressure_for(
         &self,
         request: &LlmRequest,
+        prepared: Option<&PreparedLlmRequest>,
     ) -> Result<Option<meerkat_core::ProviderRequestPressure>, LlmError> {
         let mut projected_request = request.clone();
-        projected_request.messages = self.project_replay_messages(&request.messages)?;
+        projected_request.messages = self.project_replay_messages_for(
+            &request.messages,
+            self.decided_continuity(prepared).as_ref(),
+        )?;
         match self.mode {
             OpenAiCompatibleMode::Responses => {
                 let Some(delegate) = self.responses_delegate.as_ref() else {
                     return Ok(None);
                 };
                 let translated = self.request_with_remote_model(&projected_request);
-                let Some(mut pressure) = delegate.request_pressure(&translated)? else {
+                let pressure = match prepared {
+                    Some(prepared) => delegate
+                        .prepared_request_pressure(&prepared.with_lowered_request(translated))?,
+                    None => delegate.request_pressure(&translated)?,
+                };
+                let Some(mut pressure) = pressure else {
                     return Ok(None);
                 };
                 pressure.max_bytes = meerkat_models::approximate_request_byte_cap(self.provider);
@@ -1496,50 +1679,6 @@ impl LlmClient for OpenAiCompatibleClient {
                 ))
             }
         }
-    }
-
-    fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
-        self.stream_request(request, None)
-    }
-
-    fn stream_prepared<'a>(&'a self, request: &'a PreparedLlmRequest) -> LlmStream<'a> {
-        self.stream_request(request.request(), Some(request))
-    }
-
-    fn provider(&self) -> meerkat_core::Provider {
-        self.provider
-    }
-
-    async fn health_check(&self) -> Result<(), LlmError> {
-        let url = format!("{}/models", self.base_url);
-        let response = self
-            .apply_dynamic_auth(self.http()?.get(&url), "GET", &url, "application/json")
-            .await?
-            .send()
-            .await
-            .map_err(|e| LlmError::Unknown {
-                message: e.to_string(),
-            })?;
-        let status = response.status().as_u16();
-        if (200..=299).contains(&status) {
-            Ok(())
-        } else {
-            let headers = response.headers().clone();
-            let mut text = response.text().await.unwrap_or_default();
-            self.redact_diagnostic(&mut text);
-            Err(self.redacted_error(LlmError::from_http_response(status, text, &headers)))
-        }
-    }
-
-    fn compile_schema(&self, output_schema: &OutputSchema) -> Result<CompiledSchema, SchemaError> {
-        let mut schema = output_schema.schema.as_value().clone();
-        if output_schema.strict {
-            ensure_additional_properties_false(&mut schema);
-        }
-        Ok(CompiledSchema {
-            schema,
-            warnings: Vec::new(),
-        })
     }
 }
 
@@ -2743,6 +2882,475 @@ mod tests {
         );
     }
 
+    /// How the upstream repeats the credential that signed the request.
+    #[derive(Debug, Clone, Copy)]
+    enum CredentialEcho {
+        /// HTTP 400 whose message names the `authorization` header as sent.
+        HeaderLine,
+        /// HTTP 400 whose message carries the credential alone.
+        Bare,
+        /// HTTP 400 whose message carries a URL with the credential in it.
+        Url,
+        /// HTTP 200 stream whose error envelope names the header as sent.
+        StreamError,
+    }
+
+    /// The message an upstream that received `authorization` answers with.
+    fn credential_echo_message(echo: CredentialEcho, authorization: &str) -> String {
+        let bare = authorization
+            .strip_prefix("Bearer ")
+            .unwrap_or(authorization);
+        match echo {
+            CredentialEcho::HeaderLine | CredentialEcho::StreamError => format!(
+                "upstream echo: rejected request with header authorization: {authorization}"
+            ),
+            CredentialEcho::Bare => format!("upstream echo: credential {bare} was refused"),
+            CredentialEcho::Url => format!(
+                "upstream echo: GET http://upstream.invalid/v1/models?session={bare}&page=2 failed"
+            ),
+        }
+    }
+
+    async fn spawn_credential_echo_chat_server(
+        echo: CredentialEcho,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(move |headers: axum::http::HeaderMap| async move {
+                let authorization = headers
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default();
+                let message = credential_echo_message(echo, authorization);
+                let body = serde_json::json!({
+                    "error": {"message": message, "type": "invalid_request_error"},
+                });
+                match echo {
+                    CredentialEcho::StreamError => (
+                        [("content-type", "text/event-stream")],
+                        format!("data: {body}\n\n"),
+                    )
+                        .into_response(),
+                    CredentialEcho::HeaderLine | CredentialEcho::Bare | CredentialEcho::Url => {
+                        (axum::http::StatusCode::BAD_REQUEST, Json(body)).into_response()
+                    }
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind echoing server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve echoing server");
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    /// Who signs the request with the credential.
+    #[derive(Debug, Clone, Copy)]
+    enum CredentialSigner {
+        /// The client's own static bearer: an API-key or static-bearer route
+        /// (a self-hosted server), which has no authorizer.
+        ClientBearer,
+        /// A static bearer authorizer.
+        StaticBearerAuthorizer,
+    }
+
+    fn credential_signed_chat_client(
+        signer: CredentialSigner,
+        base_url: String,
+        credential: &str,
+    ) -> OpenAiCompatibleClient {
+        let bearer =
+            matches!(signer, CredentialSigner::ClientBearer).then(|| credential.to_string());
+        let client = OpenAiCompatibleClient::new_with_options(
+            OpenAiCompatibleMode::ChatCompletions,
+            "remote-model".to_string(),
+            base_url,
+            bearer,
+            options(true, true, true, true),
+        );
+        match signer {
+            CredentialSigner::ClientBearer => client,
+            CredentialSigner::StaticBearerAuthorizer => client.with_authorizer(Arc::new(
+                meerkat_auth_core::authorizers::StaticBearerAuthorizer::new(
+                    credential.to_string(),
+                    "static-bearer",
+                ),
+            )),
+        }
+    }
+
+    /// The failure of one request through `client` as the agent loop carries
+    /// it: the `AgentError` (`Display` and `Debug`), the typed turn error
+    /// (its `detail` and `reason`) and every event published for the attempt.
+    async fn agent_failure_forms(client: Arc<dyn LlmClient>) -> String {
+        use meerkat_core::AgentLlmClient as _;
+        let (events_tx, mut events_rx) = tokio::sync::mpsc::channel(64);
+        let adapter = meerkat_llm_core::LlmClientAdapter::with_event_channel(
+            client,
+            "catalog-model".to_string(),
+            events_tx,
+        );
+        let error = match adapter
+            .stream_response(
+                &[Message::User(UserMessage::text("hello"))],
+                &[],
+                256,
+                None,
+                None,
+            )
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("the request fails"),
+        };
+        let metadata = meerkat_core::TurnErrorMetadata::from_agent_error(&error)
+            .expect("a provider failure has typed turn error metadata");
+        let metadata = serde_json::to_value(&metadata).expect("metadata JSON");
+        assert!(
+            metadata["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("upstream echo")),
+            "the provider's answer reaches the typed detail: {metadata}"
+        );
+        let events = std::iter::from_fn(|| events_rx.try_recv().ok()).collect::<Vec<_>>();
+        format!("{error} {error:?} {metadata} {events:?}")
+    }
+
+    /// A self-hosted or other OpenAI-compatible server that repeats the
+    /// request's credential (its `authorization` header as sent, the bare
+    /// value, a URL carrying it, or a stream error envelope) never puts it
+    /// in the error the Chat Completions client returns (`Display`, `Debug`,
+    /// wire JSON) or in what the agent loop derives from it (the
+    /// `AgentError`, the typed turn error's `detail` and
+    /// `reason.provider_error.message`, published events), whether the
+    /// client's own static bearer or an authorizer signed the request. The
+    /// server's answer still reaches the error.
+    #[tokio::test]
+    async fn echoed_credential_stays_out_of_chat_errors_for_every_signer() {
+        let credential = format!("selfhosted-{}", "madeupcredential".repeat(3));
+        for signer in [
+            CredentialSigner::ClientBearer,
+            CredentialSigner::StaticBearerAuthorizer,
+        ] {
+            for echo in [
+                CredentialEcho::HeaderLine,
+                CredentialEcho::Bare,
+                CredentialEcho::Url,
+                CredentialEcho::StreamError,
+            ] {
+                let (base_url, server) = spawn_credential_echo_chat_server(echo).await;
+                let client = credential_signed_chat_client(signer, base_url, &credential);
+                let request = LlmRequest::new(
+                    "catalog-model",
+                    vec![Message::User(UserMessage::text("hello"))],
+                );
+                let events = client.stream(&request).collect::<Vec<_>>().await;
+                let error = events
+                    .into_iter()
+                    .find_map(|event| match event {
+                        Err(error)
+                        | Ok(LlmEvent::Done {
+                            outcome: LlmDoneOutcome::Error { error },
+                        }) => Some(error),
+                        Ok(_) => None,
+                    })
+                    .unwrap_or_else(|| panic!("{signer:?} {echo:?}: the stream ends in an error"));
+                let rendered = rendered_forms(&error);
+                let agent_forms = agent_failure_forms(Arc::new(client)).await;
+                server.abort();
+                for (surface, text) in [("client error", &rendered), ("agent", &agent_forms)] {
+                    assert!(
+                        !text.contains(&credential),
+                        "{signer:?} {echo:?}: the {surface} leaked the credential: {text}"
+                    );
+                    assert!(
+                        text.contains("upstream echo"),
+                        "{signer:?} {echo:?}: the server's answer reached the {surface}: {text}"
+                    );
+                }
+                if matches!(echo, CredentialEcho::HeaderLine) {
+                    // The rejection keeps its class, and the redaction removes
+                    // the credential and nothing else: the body is still the
+                    // JSON the server sent.
+                    let LlmError::InvalidRequest { message } = &error else {
+                        panic!("{signer:?}: the rejection keeps its class: {error:?}");
+                    };
+                    let body: serde_json::Value =
+                        serde_json::from_str(message).unwrap_or_else(|parse| {
+                            panic!("{signer:?}: the body is kept whole: {parse}: {message}")
+                        });
+                    assert!(
+                        body["error"]["message"].as_str().is_some_and(|echoed| {
+                            echoed.starts_with("upstream echo: rejected request with header ")
+                                && echoed.ends_with("[REDACTED]")
+                        }),
+                        "{signer:?}: only the credential is replaced: {message}"
+                    );
+                    assert!(
+                        body["error"]
+                            .as_object()
+                            .is_some_and(|fields| fields.len() > 1),
+                        "{signer:?}: the fields after the message are kept: {message}"
+                    );
+                    assert!(
+                        agent_forms.contains("\"provider_error\":{\"message\":"),
+                        "{signer:?}: the typed reason carries the provider message: {agent_forms}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A client built with a static bearer and an authorizer sends both.
+    /// The bearer is the client's own: a server that repeats it (alone, or
+    /// in a URL) never puts it in the error, like the values the authorizer
+    /// names.
+    #[tokio::test]
+    async fn echoed_client_bearer_is_removed_when_an_authorizer_signs_too() {
+        let bearer = format!("selfhosted-{}", "madeupcredential".repeat(3));
+        let header_key = format!("resolver-{}", "madeupkey".repeat(3));
+        for echo in [CredentialEcho::Bare, CredentialEcho::Url] {
+            let (base_url, server) = spawn_credential_echo_chat_server(echo).await;
+            let client =
+                credential_signed_chat_client(CredentialSigner::ClientBearer, base_url, &bearer)
+                    .with_authorizer(Arc::new(
+                        meerkat_auth_core::resolver::StaticHeadersAuthorizer::new(
+                            vec![("x-api-key".to_string(), header_key.clone())],
+                            "external:static_headers",
+                        ),
+                    ));
+            let request = LlmRequest::new(
+                "catalog-model",
+                vec![Message::User(UserMessage::text("hello"))],
+            );
+            let events = client.stream(&request).collect::<Vec<_>>().await;
+            let error = events
+                .into_iter()
+                .find_map(|event| match event {
+                    Err(error)
+                    | Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Error { error },
+                    }) => Some(error),
+                    Ok(_) => None,
+                })
+                .unwrap_or_else(|| panic!("{echo:?}: the stream ends in an error"));
+            let rendered = rendered_forms(&error);
+            let agent_forms = agent_failure_forms(Arc::new(client)).await;
+            server.abort();
+            for (surface, text) in [("client error", &rendered), ("agent", &agent_forms)] {
+                assert!(
+                    !text.contains(&bearer),
+                    "{echo:?}: the {surface} leaked the client's bearer: {text}"
+                );
+                assert!(
+                    text.contains("upstream echo"),
+                    "{echo:?}: the server's answer reached the {surface}: {text}"
+                );
+            }
+        }
+    }
+
+    /// A refusal for exhausted quota stays one whatever the redaction
+    /// removes from its body. This body repeats the request's credential
+    /// and holds the begin marker of a private-key block, which the shape
+    /// rules replace together with its whole line: the error is classified
+    /// from the body as received, and carries no credential.
+    #[tokio::test]
+    async fn a_quota_refusal_keeps_its_class_whatever_the_redaction_removes() {
+        let credential = format!("selfhosted-{}", "madeupcredential".repeat(3));
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|headers: axum::http::HeaderMap| async move {
+                let authorization = headers
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default();
+                // (The marker is assembled here so no scanner reads the
+                // source as a secret.)
+                let marker = format!("-----BEGIN {}-----", "PRIVATE KEY");
+                (
+                    axum::http::StatusCode::TOO_MANY_REQUESTS,
+                    Json(serde_json::json!({
+                        "error": {
+                            "message": format!(
+                                "You exceeded your current quota. Request header \
+                                 authorization: {authorization} {marker}"
+                            ),
+                            "type": "insufficient_quota",
+                            "code": "insufficient_quota",
+                        },
+                    })),
+                )
+                    .into_response()
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind quota refusal server");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve quota refusal server");
+        });
+        for signer in [
+            CredentialSigner::ClientBearer,
+            CredentialSigner::StaticBearerAuthorizer,
+        ] {
+            let client =
+                credential_signed_chat_client(signer, format!("http://{addr}"), &credential);
+            let request = LlmRequest::new(
+                "catalog-model",
+                vec![Message::User(UserMessage::text("hello"))],
+            );
+            let events = client.stream(&request).collect::<Vec<_>>().await;
+            let error = events
+                .into_iter()
+                .find_map(|event| match event {
+                    Err(error)
+                    | Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Error { error },
+                    }) => Some(error),
+                    Ok(_) => None,
+                })
+                .unwrap_or_else(|| panic!("{signer:?}: the stream ends in an error"));
+            assert!(
+                matches!(error, LlmError::QuotaExhausted { .. }),
+                "{signer:?}: an exhausted quota stays one: {error:?}"
+            );
+            let rendered = rendered_forms(&error);
+            assert!(
+                !rendered.contains(&credential),
+                "{signer:?}: the error leaked the credential: {rendered}"
+            );
+        }
+        server.abort();
+    }
+
+    /// A refused health check is classified from the body as received, like
+    /// a refused model request: an exhausted-quota body that repeats the
+    /// request's credential and holds the begin marker of a private-key
+    /// block stays an exhausted quota, and carries no credential.
+    #[tokio::test]
+    async fn a_refused_health_check_keeps_its_class_whatever_the_redaction_removes() {
+        let credential = format!("selfhosted-{}", "madeupcredential".repeat(3));
+        let app = Router::new().route(
+            "/models",
+            axum::routing::get(|headers: axum::http::HeaderMap| async move {
+                let authorization = headers
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default();
+                // (The marker is assembled here so no scanner reads the
+                // source as a secret.)
+                let marker = format!("-----BEGIN {}-----", "PRIVATE KEY");
+                (
+                    axum::http::StatusCode::TOO_MANY_REQUESTS,
+                    Json(serde_json::json!({
+                        "error": {
+                            "message": format!(
+                                "You exceeded your current quota. Request header \
+                                 authorization: {authorization} {marker}"
+                            ),
+                            "type": "insufficient_quota",
+                            "code": "insufficient_quota",
+                        },
+                    })),
+                )
+                    .into_response()
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind quota refusal server");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve quota refusal server");
+        });
+        for signer in [
+            CredentialSigner::ClientBearer,
+            CredentialSigner::StaticBearerAuthorizer,
+        ] {
+            let client =
+                credential_signed_chat_client(signer, format!("http://{addr}"), &credential);
+            let error = client
+                .health_check()
+                .await
+                .expect_err("the health check is refused");
+            assert!(
+                matches!(error, LlmError::QuotaExhausted { .. }),
+                "{signer:?}: an exhausted quota stays one: {error:?}"
+            );
+            let rendered = rendered_forms(&error);
+            assert!(
+                !rendered.contains(&credential),
+                "{signer:?}: the error leaked the credential: {rendered}"
+            );
+        }
+        server.abort();
+    }
+
+    /// An ordinary provider error that carries no credential (a message, a
+    /// type, a code, a request id, a URL without credentials) reaches the
+    /// caller byte for byte, whoever signed the request.
+    #[tokio::test]
+    async fn an_error_without_a_credential_is_returned_unchanged() {
+        const BODY: &str = r#"{"error":{"message":"The model `remote-model` does not exist or you do not have access to it. See https://docs.upstream.invalid/v1/models?page=2 for the list.","type":"invalid_request_error","param":"model","code":"model_not_found"},"request_id":"req_0123456789abcdef"}"#;
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|| async {
+                (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    [("content-type", "application/json")],
+                    BODY,
+                )
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ordinary error server");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve ordinary error server");
+        });
+        let credential = format!("selfhosted-{}", "madeupcredential".repeat(3));
+        for signer in [
+            CredentialSigner::ClientBearer,
+            CredentialSigner::StaticBearerAuthorizer,
+        ] {
+            let client =
+                credential_signed_chat_client(signer, format!("http://{addr}"), &credential);
+            let request = LlmRequest::new(
+                "catalog-model",
+                vec![Message::User(UserMessage::text("hello"))],
+            );
+            let events = client.stream(&request).collect::<Vec<_>>().await;
+            let error = events
+                .into_iter()
+                .find_map(|event| match event {
+                    Err(error)
+                    | Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Error { error },
+                    }) => Some(error),
+                    Ok(_) => None,
+                })
+                .unwrap_or_else(|| panic!("{signer:?}: the stream ends in an error"));
+            assert!(
+                matches!(&error, LlmError::InvalidRequest { message } if message == BODY),
+                "{signer:?}: {error:?}"
+            );
+        }
+        server.abort();
+    }
     /// What the raw stub does after the scripted head bytes are on the wire.
     #[derive(Debug, Clone, Copy)]
     enum RawStubTail {
@@ -5178,6 +5786,13 @@ mod tests {
             None,
             options(true, true, true, true),
         );
+        // The OpenAI-family material is this server's own: the process
+        // received it from the server the client declares.
+        let ledger = Arc::new(meerkat_core::OpenAiContinuityLedger::new());
+        let server = meerkat_core::OpenAiContinuityIssuer::self_hosted_server("local");
+        let client = client
+            .with_self_hosted_server("local")
+            .with_continuity_ledger(Arc::clone(&ledger));
         assert_eq!(client.provider(), Provider::SelfHosted);
         let messages = vec![Message::BlockAssistant(BlockAssistantMessage::new(
             vec![
@@ -5210,6 +5825,7 @@ mod tests {
             StopReason::EndTurn,
         ))];
 
+        crate::client::record_received_for_test(&ledger, &server, &messages);
         let projected = client
             .project_replay_messages(&messages)
             .expect("SelfHosted OpenAI-family projection");

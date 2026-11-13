@@ -622,17 +622,56 @@ anything you serialize still contain the values. Rust hosts can reuse
 Since 0.9.9 credential header values are marked sensitive on every OpenAI
 Responses, Chat Completions and Anthropic Messages request: the values a
 dynamic authorizer supplies and a static API key's (`Authorization`,
-`api-key`, `x-api-key`; the Gemini client's are not marked). A value that is
-not a valid header value fails the request as an authentication failure
-before it is sent. Those clients pass what they read from a text generation
-response (rejection bodies, stream errors, unparsable data lines, logged
-provider error fields) through `HttpAuthorizer::redact_response_diagnostic`
-before it reaches a caller or a log. The GitHub Copilot authorizer redacts
-the last four bearers its account signed with (shown as `<redacted>`); other
-authorizers change nothing unless they implement it, and nothing redacts a
-static API key a gateway echoes back. Only a verbatim echo is caught: an
-echo a provider or gateway truncated, re-encoded or otherwise transformed
-can keep part of a credential.
+`api-key`, `x-api-key`). The Gemini client marks its `x-goog-api-key` and an
+authorizer's values too. A value that is not a valid header value fails the
+request as an authentication failure before it is sent. Those clients
+remove the credential that signed a request from what they read from its
+response (rejection bodies, stream errors, unparsable data lines, an OpenAI
+or Gemini image request's failure, logged provider error fields) before it
+reaches a caller or a log; the OpenAI realtime clients (the text client for
+realtime-capable models and a live session, its opt-in frame trace
+included) do the same for their error text, and the Google Code Assist
+setup requests for a refusal's body.
+With an authorizer the removal goes through
+`HttpAuthorizer::redact_response_diagnostic`, whose default removes every
+value the authorizer names (`visit_signed_credentials`: the static bearer,
+AWS, Azure AD, Google and managed OAuth authorizers, a refreshed-out token
+included; the static header authorizer names the value of `authorization`,
+`proxy-authorization`, `cookie` and of a header whose name contains `key`,
+`token`, `secret`, `auth`, `password`, `credential`, `signature` or
+`session`, and no other header's); without one, the client's own API key or
+static bearer. Values are replaced by `[REDACTED]`: as sent, without a
+`Bearer`/`Basic` scheme, and as an encoder rewrites them (`/` as `\/`, a
+character as its JSON `\u00XX` escape or percent-encoded); not a value
+under 8 bytes. A second step replaces credential-looking values (8 or more
+credential characters with a digit, or 32 or more) after `Bearer`/`Basic`,
+in an `authorization` header and after a secret-looking key, plus known
+token prefixes, JWTs, URL userinfo and PEM private-key blocks. A rejection
+is classified from the body as received, then redacted, so an error keeps
+its class.
+
+Not removed: a named value in another form (base64 of it, a decoded `Basic`
+pair, a copy cut short or masked); what the second of two named values that
+overlap without one containing the other holds beyond the overlap, where a
+response runs them together (the two are replaced independently, longest
+first); a secret no route names outside the
+second step's positions (that step is a second line only: it also leaves an
+all-letter value under 32 bytes, a JSON web token directly followed by
+`.`, `/`, `+` or `=`, a quoted header dump without a `Bearer`/`Basic`
+scheme and JSON nested in a JSON string); URL userinfo whose text before a
+first quoting byte (`'`, `"`, `\`, `<`, `>`) reads as a bare host (not
+empty, and no `:` or a `:` followed by one or more digits and nothing else)
+and that holds a second quoting byte before the `@`
+(`app:1234're'st@db`, `o'bri'en:pass@db`; a password or a user name
+wrapped in quotes is replaced); on SigV4 the
+`Signature=` of a request older than the two most recent; the body of a
+refused request that obtains a credential (token, device-code, cloud
+identity, API-key provisioning). A placeholder key of 8 bytes or more
+(`not-needed`) is replaced wherever an error uses the word. A bare host
+followed by one quoting byte and a later `@`, and a bracketed IPv6 host
+followed by a later `@`, are replaced as userinfo (readability only). The
+GitHub Copilot authorizer keeps its own redaction: the last four bearers
+its account signed with, by exact value as sent (shown as `<redacted>`).
 
 ## Common questions
 

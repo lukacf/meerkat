@@ -172,12 +172,14 @@ jobs:
       - name: Setup Rust
         uses: ./.github/actions/setup-rust-ci
 
+      # ripgrep for the surface/backend scans: the pinned release from GitHub,
+      # sha256 checked (scripts/install-ripgrep.sh). The Ubuntu package is
+      # only the fallback, for a download that fails or does not match: on
+      # 2026-11-11 the runners could not resolve the package mirror.
       - name: Install governance scan dependencies
-        run: |
-          if ! command -v rg >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y ripgrep
-          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/install-ripgrep.sh
 
       - name: Setup sccache
         id: sccache

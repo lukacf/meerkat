@@ -147,3 +147,83 @@ pub async fn poll_device_code(
         body: "non-2xx without error field".into(),
     })
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use crate::auth_oauth::credential_http_client;
+    use crate::oauth_flow::{OAuthProviderIdentity, oauth_provider_resolution};
+
+    /// Each request as the endpoint received it: its path and its headers.
+    type Recorded = std::sync::Arc<parking_lot::Mutex<Vec<(String, axum::http::HeaderMap)>>>;
+
+    async fn record(
+        axum::extract::State(recorded): axum::extract::State<Recorded>,
+        uri: axum::http::Uri,
+        headers: axum::http::HeaderMap,
+    ) -> axum::Json<serde_json::Value> {
+        let path = uri.path().to_owned();
+        let answer = if path == "/device/code" {
+            serde_json::json!({
+                "device_code": "device",
+                "user_code": "USER-CODE",
+                "verification_uri": "https://example.test/device",
+                "expires_in": 900,
+                "interval": 5
+            })
+        } else {
+            serde_json::json!({"error": "authorization_pending"})
+        };
+        recorded.lock().push((path, headers));
+        axum::Json(answer)
+    }
+
+    /// The GitHub Copilot device sign-in's own requests to GitHub, the
+    /// device-code request and the token poll, carry the Copilot
+    /// `User-Agent`, pinned here by value: no backend option reaches these
+    /// requests, so the constant is all they send. The endpoints are the
+    /// sign-in's own (`oauth_provider_resolution`); only the two URLs point
+    /// at a local server.
+    #[tokio::test]
+    async fn github_copilot_device_sign_in_requests_carry_the_pinned_user_agent() {
+        let recorded = Recorded::default();
+        let app = axum::Router::new()
+            .route("/device/code", axum::routing::post(record))
+            .route("/token", axum::routing::post(record))
+            .with_state(std::sync::Arc::clone(&recorded));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let mut endpoints = oauth_provider_resolution(
+            OAuthProviderIdentity::GitHubCopilot,
+            "http://127.0.0.1/callback",
+        )
+        .endpoints;
+        endpoints.device_code_url = Some(format!("http://{address}/device/code"));
+        endpoints.token_url = format!("http://{address}/token");
+
+        let http = credential_http_client().unwrap();
+        let device = request_device_code(&http, &endpoints).await.unwrap();
+        let outcome = poll_device_code(&http, &endpoints, &device.device_code, None)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, DevicePollOutcome::Pending));
+
+        let recorded = recorded.lock().clone();
+        let paths: Vec<&str> = recorded.iter().map(|(path, _)| path.as_str()).collect();
+        assert_eq!(paths, ["/device/code", "/token"]);
+        for (path, headers) in &recorded {
+            let header = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
+            assert_eq!(
+                header("user-agent"),
+                Some("GitHubCopilotChat/0.73.0"),
+                "{path}"
+            );
+            assert_eq!(header("accept"), Some("application/json"), "{path}");
+        }
+    }
+}

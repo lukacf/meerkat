@@ -225,6 +225,9 @@ mod operation_refusal_wire {
 /// until the quota resets or request a quota increase." The neighbouring
 /// per-minute codes on that table (`rate_limit_exceeded`, `too_many_requests`)
 /// are deliberately absent so they keep the retryable rate-limit class.
+/// `usage_limit_reached` is the ChatGPT backend's plan usage limit, named as
+/// the `type` of its 429 error object, whose body states when the plan's
+/// usage window resets; no provider document is cited for it.
 const QUOTA_EXHAUSTED_ERROR_CODES: &[&str] = &[
     "insufficient_quota",
     "credit_balance_exhausted",
@@ -234,6 +237,7 @@ const QUOTA_EXHAUSTED_ERROR_CODES: &[&str] = &[
     "billing_hard_limit_reached",
     "enforced_spend_limit_reached",
     "quota_exceeded",
+    "usage_limit_reached",
 ];
 
 /// Anthropic reports a self-configured organization or workspace spend limit
@@ -1679,6 +1683,23 @@ mod tests {
         }
     }
 
+    /// The ChatGPT backend's plan usage limit, named as the `type` of its
+    /// 429 error object and as a stream error code: exhausted quota, which
+    /// no retry inside a turn clears.
+    #[test]
+    fn chatgpt_usage_limit_reached_is_quota_exhaustion() {
+        assert!(LlmError::code_signals_quota_exhausted(
+            "usage_limit_reached"
+        ));
+        let body = r#"{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","resets_in_seconds":78366}}"#;
+        let err = LlmError::from_http_status(429, body.to_string(), Some(1000));
+        assert_quota_exhausted_is_terminal(&err, "openai");
+        // The list is read for every other 4xx body too: the same body under
+        // HTTP 400 is exhausted quota, not an invalid request.
+        let err = LlmError::from_http_status(400, body.to_string(), None);
+        assert_quota_exhausted_is_terminal(&err, "openai");
+    }
+
     #[test]
     fn openai_transient_429_bodies_keep_the_rate_limit_class_and_hint() {
         for body in [
@@ -1753,6 +1774,25 @@ mod tests {
         let body = r#"{"error":{"code":"quota_exceeded","message":"You have exceeded your daily quota."}}"#;
         let err = LlmError::from_http_status(429, body.to_string(), None);
         assert_quota_exhausted_is_terminal(&err, "gemini");
+    }
+
+    /// A provider client redacts an error's code before it classifies on
+    /// it (a realtime error's `code` is provider text). Every code this
+    /// crate decides on must come through that redaction unchanged, with
+    /// and without a credential named, or an exhausted quota would stop
+    /// being one. A code added to the list is covered here.
+    #[test]
+    fn quota_codes_pass_credential_redaction_unchanged() {
+        let key = format!("realtime-{}", "madeupcredential".repeat(3));
+        assert!(!QUOTA_EXHAUSTED_ERROR_CODES.is_empty());
+        for code in QUOTA_EXHAUSTED_ERROR_CODES {
+            let mut redacted = (*code).to_string();
+            meerkat_core::redact::redact_credentials(&mut redacted, |visit| visit(&key));
+            assert_eq!(&redacted, code, "a named credential");
+            meerkat_core::redact::redact_credentials(&mut redacted, |_| {});
+            assert_eq!(&redacted, code, "no named credential");
+            assert!(LlmError::code_signals_quota_exhausted(&redacted));
+        }
     }
 
     #[test]

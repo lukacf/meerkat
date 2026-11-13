@@ -73,6 +73,12 @@ const REFUSED_TOOL: &str = "refused_tool";
 /// replays no thinking block.
 const OVERLOADED_TOOL: &str = "overloaded_tool";
 
+/// A tool the mock account answers with a 429 for a reached spend limit
+/// when the request replays no thinking block. The body repeats the
+/// request's `x-api-key` header and holds the begin marker of a private-key
+/// block.
+const SPEND_LIMIT_TOOL: &str = "spend_limit_tool";
+
 /// Whether `body` lists a tool named `name`.
 fn carries_tool(body: &Value, name: &str) -> bool {
     body.get("tools")
@@ -144,6 +150,31 @@ async fn messages(
             json!({
                 "type": "error",
                 "error": {"type": "overloaded_error", "message": "Overloaded"}
+            })
+            .to_string(),
+        )
+            .into_response();
+    }
+    if carries_tool(&body, SPEND_LIMIT_TOOL) && replayed_thinking_blocks(&body) == 0 {
+        let key = headers
+            .get("x-api-key")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        // (The marker is assembled here so no scanner reads the source as a
+        // secret.)
+        let marker = format!("-----BEGIN {}-----", "PRIVATE KEY");
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [("content-type", "application/json")],
+            json!({
+                "type": "error",
+                "error": {
+                    "type": "rate_limit_error",
+                    "message": format!(
+                        "You have reached your specified API usage limits. Request header \
+                         x-api-key: {key} {marker}"
+                    )
+                }
             })
             .to_string(),
         )
@@ -1658,4 +1689,36 @@ async fn a_resend_that_fails_with_a_retryable_error_returns_that_error() {
         "the resend's overload is returned: {error:?}"
     );
     assert!(error.is_retryable(), "{error:?}");
+}
+
+/// A resend refused for a reached spend limit is an exhausted quota, which
+/// the client does not retry, so the caller gets the first error. The
+/// refusal's body repeats the request's API key and holds the begin marker
+/// of a private-key block, which the credential shapes replace together
+/// with its whole line: the refusal is classified from the body as
+/// received, so it does not turn into a rate limit that is retried.
+#[tokio::test]
+async fn a_resend_refused_for_a_spend_limit_is_not_retried_as_a_rate_limit() {
+    let (account, client, server) = spawn_account_without_the_control().await;
+    let mut tools = tools_after();
+    tools.push(tool(SPEND_LIMIT_TOOL));
+    let (_, continuation, sent) =
+        tool_round(&account, &client, "claude-opus-5-5", unchanged, tools).await;
+    server.abort();
+    assert_eq!(sent.len(), 2, "one attempt, then one resend: {sent:#?}");
+    let error = continuation.error.expect("the call fails");
+    assert!(
+        !error.is_retryable(),
+        "the resend's spend limit is not a rate limit to retry: {error:?}"
+    );
+    let rendered = format!("{error} {error:?}");
+    assert!(
+        matches!(error, LlmError::InvalidRequest { .. })
+            && rendered.contains("bound to a different conversation"),
+        "the first refusal surfaces: {rendered}"
+    );
+    assert!(
+        !rendered.contains("test-key"),
+        "the error carries no API key: {rendered}"
+    );
 }

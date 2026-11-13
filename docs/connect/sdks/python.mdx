@@ -4,7 +4,7 @@ description: "Call service operations and embed native setup in a Python applica
 icon: "python"
 ---
 
-The distribution is `meerkat-toolkit` version `0.9.10`, requiring Python 3.11
+The distribution is `meerkat-toolkit` version `0.9.14`, requiring Python 3.11
 or newer. Import concrete `meerkat_toolkit` submodules; the root package exports
 no operation classes.
 
@@ -15,7 +15,7 @@ Install the release wheel with the optional service profile you need:
 ```sh
 python3 -m venv .venv-toolkit
 .venv-toolkit/bin/python -m pip install \
-  'meerkat-toolkit[slack] @ https://github.com/lukacf/meerkat/releases/download/connect-v0.9.10/meerkat_toolkit-0.9.10-py3-none-any.whl'
+  'meerkat-toolkit[slack] @ https://github.com/lukacf/meerkat/releases/download/connect-v0.9.14/meerkat_toolkit-0.9.14-py3-none-any.whl'
 ```
 
 For source development, use `.venv-toolkit/bin/python -m pip install './connect/sdk/python[slack]'` from the repository root.
@@ -25,7 +25,7 @@ For source development, use `.venv-toolkit/bin/python -m pip install './connect/
 | `home-assistant`, `gmail`, `google-calendar`, `google-drive`, `slack` | Selected HTTPX/AnyIO service operations |
 | `paired-host-live` | Live image input for a paired host |
 | `telegram` | Telegram provider normalization dependency |
-| `native-host` | Application composition with `meerkat-meta==0.9.10`; requires the matching SDK and Connect gateway |
+| `native-host` | Application composition with `meerkat-meta==0.9.14`; requires the matching SDK and Connect gateway |
 
 Service extras currently require HTTPX `>=0.28.1,<0.29` and AnyIO `>=4.13,<5`. The stdlib-only Gmail formatting and base Telegram wire transport do not require those extras.
 

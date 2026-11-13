@@ -758,7 +758,7 @@ Paths support `{name}` interpolation (replaced with the agent's comms name). Rel
 | `--agent-label key=value` | Metadata label (repeatable). Shown to peers via `peers()` |
 | `--comms-listen-tcp <ADDR>` | TCP address to listen on for signed comms (e.g., `"0.0.0.0:4200"`) |
 | `--comms-advertise-tcp <ADDR>` | TCP address advertised to signed peers. Required when binding a wildcard address. |
-| `--comms-binding-out <PATH>` | Write this session's external runtime binding JSON for mob hosts or other supervisors. |
+| `--comms-binding-out <PATH>` | Write this session's external runtime binding JSON for mob hosts or other supervisors. The file carries a bootstrap token. It is a new file that replaces the one at the path. A symbolic link at the path is never followed: a link to a regular file or to nothing is replaced by the new file, and a link to a named pipe, a socket, a device or a directory is refused, as those things themselves are. A path in `/proc`, or in `/dev` other than under `/dev/shm`, is refused whatever it holds (`/dev/stdout`). The file is readable by its owner only on Unix (mode 0600), and a supervisor under another account cannot read it. |
 | `--comms-pairing-password <PASSWORD>` | Accept initial signed comms enrollment with a shared one-time password. |
 | `--comms-pairing-password-env <ENV>` | Read the pairing password from an environment variable. |
 | `--comms-pairing-password-file <PATH>` | Read the pairing password from a file. |

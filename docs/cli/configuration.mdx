@@ -454,6 +454,12 @@ request to a server of its choice. Writes refuse a realm server holding `${`,
 and a realm config that already holds one fails when its MCP servers are
 resolved. Put env-derived values in an `mcp.toml` server.
 
+A literal token in a server's args, env or headers is in the file as written.
+On Unix `rkat` writes `mcp.toml`, like every config document, readable by its
+owner only (mode 0600), or by the directory's group too (0640) when its
+`.rkat` directory has the setgid bit (see
+[File permissions](/concepts/configuration#file-permissions)).
+
 `rkat run` (and `--resume`) starts the servers of all three scopes, and
 `rkat mcp login` resolves them. The RPC and REST servers do not start configured
 servers in their sessions; hosts attach servers with `mcp/add`.
@@ -502,11 +508,86 @@ check made by the CLI itself, exits 1.
 | 59 | A write refused because a realm admission fence it needs could not be used: a config write, `realm govern`, `realm grant`, `realm revoke-grant` or `realm delete`; nothing was written or removed (`ADMISSION_FENCE_UNAVAILABLE`, since 0.9.11) |
 
 A mob error with a typed console detail (codes 45-48 and 56) also prints one
-`detail:` line with that detail as JSON. Inspect the diagnostic or an
-available typed error payload rather than classifying a failure solely by its
-numeric code; not every CLI error has structured JSON, and code 2 is shared
-by usage errors and `INVALID_PARAMS`. Session persistence and compaction
-disabled conditions exit 1 like other internal errors.
+`detail:` line with that detail as JSON. Do not classify a failure by its
+numeric code alone: code 2 is shared by usage errors and `INVALID_PARAMS`,
+and a failed turn exits 1 whatever its cause. `rkat run --output json` writes
+the typed error as a [failure document](#json-failure-document); other
+commands have no structured failure output. Session persistence and
+compaction disabled conditions exit 1 like other internal errors.
+
+### JSON failure document
+
+When `rkat run --output json` (or `--json`, with or without `--resume`)
+fails, the last document on stdout is the failure document:
+
+```json
+{
+  "error": {
+    "code": "PROVIDER_ERROR",
+    "category": "provider",
+    "message": "turn abandoned: ...; error={...}",
+    "details": {
+      "error": {
+        "kind": "llm_failure",
+        "terminal": true,
+        "outcome": "failed",
+        "detail": "...",
+        "provider": "openai",
+        "retryable": false,
+        "reason": {
+          "reason_type": "llm_provider_error",
+          "provider_error_kind": "invalid_request",
+          "provider_error_retryability": "non_retryable",
+          "provider_error": { "message": "..." }
+        }
+      }
+    }
+  }
+}
+```
+
+`error` is the error envelope of the other surfaces (`WireError`): `code` is
+the public `ErrorCode`, `category` its group, `message` the text of stderr's
+`Error:` line, and `details` the typed data, left out when there is none.
+
+| Failure | `code` | `details` | Exit status |
+|---------|--------|-----------|-------------|
+| A turn that ended in failure | By the turn error's `kind`, the code JSON-RPC answers for the same turn: `PROVIDER_ERROR` (`llm_failure`, `retry_exhausted`), `BUDGET_EXHAUSTED` (`budget_exhausted`, `time_budget_exceeded`), `HOOK_DENIED` (`hook_denied`), otherwise `INTERNAL_ERROR` | `{"error": <turn error>}`: `kind`, `retryable`, `provider`, `model`, the typed `reason` and the diagnostic `detail`, each when known | 1 |
+| A typed error before the turn, such as an unknown session, a busy session or a refused input | The error's own code | The error's typed data, when it has any | The code's exit status in the table above |
+| A check made by the CLI itself, and a typed error without a public code | `INTERNAL_ERROR` | None | 1 |
+| An argument the parser refuses, and a host that cannot start | No document | | 2 |
+
+The typed data of an error before the turn is the data the other surfaces
+report for the same error. A refused or not-ready input (`INPUT_REFUSED`,
+`INPUT_NOT_READY`) carries its admission detail,
+`{"type": "refused", "kind": ...}` or
+`{"type": "not_ready", "reason": {"kind": ...}}` (see the
+[error code reference](/reference/api-reference#error-code-reference)). A
+session another runtime owner hosts, one whose hosting claim is unavailable
+and one whose runtime teardown is still running carry their `kind`
+(`session_served_elsewhere`, `session_hosting_unavailable`,
+`runtime_teardown_in_progress`), and a help session that cannot be resumed
+carries `kind` `help_session_not_resumable`.
+
+The exit status of a failed turn stays 1 and is not the exit status of the
+document's code. One turn's code differs from JSON-RPC: a turn abandoned
+because its session's build refused a scoped tool grant gate is a failed turn
+here (`INTERNAL_ERROR`, exit status 1, the typed refusal in
+`error.details.error.reason`), where JSON-RPC answers invalid params.
+
+To tell a transient failure from a permanent one without reading text, read
+`error.details.error.retryable`. `true` says the failure is of a class that
+can succeed on a later attempt; it is no promise that it will. A provider or
+transport failure that outlasted Meerkat's own retries (`kind`
+`retry_exhausted`) carries it, with the `provider` and the typed `reason` of
+the last attempt. `false` or absent is not transient.
+
+stdout ends with exactly one of the run result, the pending document
+(`"status": "pending_tool_call"`) or the failure document. With `--stream`,
+the streamed text precedes it. Exit statuses do not depend on the output
+mode, and stderr carries the same `Error:` line (or `Budget exhausted:`, and
+a mob error's `detail:` line) as in text mode. Text and HTML output print no
+failure document, and neither does any command other than `rkat run`.
 
 ## See also
 

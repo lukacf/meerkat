@@ -78,6 +78,42 @@ impl ContractVersion {
 }
 EOF
 printf 'export const VERSION = "1.2.3";\n' > "$TEST_ROOT/sdks/web/src/runtime.ts"
+# Another product's npm manifest and lock pin Core's TypeScript SDK: the release
+# hook moves that range (scripts/check_inrepo_version_pins.py --write) and
+# nothing else, not the product's own version nor another package's range.
+mkdir -p "$TEST_ROOT/ci" "$TEST_ROOT/sdks/typescript" "$TEST_ROOT/connect/sdk"
+printf '{"products": [{"name": "core", "root": ""}, {"name": "connect", "root": "connect"}]}\n' \
+  > "$TEST_ROOT/ci/products.json"
+printf '{\n  "name": "@rkat/sdk",\n  "version": "1.2.3"\n}\n' > "$TEST_ROOT/sdks/typescript/package.json"
+cat > "$TEST_ROOT/connect/sdk/package.json" <<'EOF'
+{
+  "name": "@rkat/toolkit",
+  "version": "1.2.3",
+  "devDependencies": {
+    "@rkat/sdk": "file:../../sdks/typescript",
+    "other": "1.2.3"
+  },
+  "peerDependencies": {
+    "@rkat/sdk": ">=1.2.3 <2.0.0"
+  }
+}
+EOF
+cat > "$TEST_ROOT/connect/sdk/package-lock.json" <<'EOF'
+{
+  "name": "@rkat/toolkit",
+  "version": "1.2.3",
+  "lockfileVersion": 3,
+  "packages": {
+    "": {
+      "name": "@rkat/toolkit",
+      "version": "1.2.3",
+      "peerDependencies": {
+        "@rkat/sdk": ">=1.2.3 <2.0.0"
+      }
+    }
+  }
+}
+EOF
 # A standalone example workspace lock (scripts/example-locks.py refreshes
 # it in the release hook): only its path packages carry the release version.
 cat > "$TEST_ROOT/examples/demo/Cargo.lock" <<'EOF'
@@ -117,8 +153,12 @@ apply_projection() {
     "$TEST_ROOT/Cargo.toml" \
     "$TEST_ROOT/Cargo.lock" \
     "$TEST_ROOT/crate/BUILD.bazel" \
-    "$TEST_ROOT/sdks/web/src/runtime.ts"
-  rm -f "$TEST_ROOT"/*.bak "$TEST_ROOT/crate"/*.bak "$TEST_ROOT/sdks/web/src"/*.bak
+    "$TEST_ROOT/sdks/web/src/runtime.ts" \
+    "$TEST_ROOT/sdks/typescript/package.json"
+  rm -f "$TEST_ROOT"/*.bak "$TEST_ROOT/crate"/*.bak "$TEST_ROOT/sdks/web/src"/*.bak "$TEST_ROOT/sdks/typescript"/*.bak
+  sed -i.bak 's/"@rkat\/sdk": ">=1\.2\.3 /"@rkat\/sdk": ">=1.2.4 /' \
+    "$TEST_ROOT/connect/sdk/package.json" "$TEST_ROOT/connect/sdk/package-lock.json"
+  rm -f "$TEST_ROOT/connect/sdk"/*.bak
   sed -i.bak 's/patch: 3/patch: 4/' "$TEST_ROOT/crates/meerkat-contracts/src/version.rs"
   rm -f "$TEST_ROOT/crates/meerkat-contracts/src/version.rs.bak"
   sed -i.bak '/^name = "fixture"$/{n;s/1\.2\.3/1.2.4/;}' "$TEST_ROOT/examples/demo/Cargo.lock"
@@ -132,7 +172,8 @@ apply_projection
 git -C "$TEST_ROOT" add .
 git -C "$TEST_ROOT" commit -qm projection
 projection="$(git -C "$TEST_ROOT" rev-parse HEAD)"
-for path in docs/guides/install.md docs/api/contract.mdx README.md .claude/skills/meerkat-platform/SKILL.md examples/demo/Cargo.lock; do
+for path in docs/guides/install.md docs/api/contract.mdx README.md .claude/skills/meerkat-platform/SKILL.md examples/demo/Cargo.lock \
+  connect/sdk/package.json connect/sdk/package-lock.json; do
   if git -C "$TEST_ROOT" diff --quiet "$base" "$projection" -- "$path"; then
     echo "the projection fixture must change ${path}" >&2
     exit 1
@@ -393,6 +434,15 @@ assert_projection_plus_rejected example-lock-registry-drift examples/demo/Cargo.
   "examples/demo/Cargo.lock contains changes beyond the version projection"
 assert_projection_plus_rejected changelog-hand-edit CHANGELOG.md 's/^- Pipeline-only fixture note\.$/- Pipeline-only fixture note, edited./' \
   "CHANGELOG.md is not the changelog stamper's projection of the base file"
+# In another product's npm manifest the bump moves only the ranges on Core's
+# packages: never the product's own version, nor another package's range.
+product_npm_reason="contains changes beyond the moved ranges on Core's npm packages"
+assert_projection_plus_rejected product-own-version connect/sdk/package.json \
+  's/^  "version": "1\.2\.3",$/  "version": "1.2.4",/' "connect/sdk/package.json ${product_npm_reason}"
+assert_projection_plus_rejected product-other-range connect/sdk/package.json \
+  's/"other": "1\.2\.3"/"other": "1.2.4"/' "connect/sdk/package.json ${product_npm_reason}"
+assert_projection_plus_rejected product-lock-own-version connect/sdk/package-lock.json \
+  's/^      "version": "1\.2\.3",$/      "version": "1.2.4",/' "connect/sdk/package-lock.json ${product_npm_reason}"
 
 # Only the stamped documents may keep the old version; every other
 # projection surface must carry the release version everywhere.

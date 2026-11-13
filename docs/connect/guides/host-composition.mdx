@@ -220,12 +220,55 @@ replies, or Mob/Realm Recorder scopes. The source-reviewed sender path is not
 proof of recipient delivery or a complete conversation.
 
 The separately reviewed receiver candidate requires standing authority retained
-during a newly accepted member Add. It selects replies to the actual sender and
-the receiver's own-identity Recorder Write for the triggered work. An older
+during a newly accepted member Add. It selects messages and replies to the
+actual sender (not requests), and the receiver's own-identity Recorder Write
+for the triggered work. An older
 admission without that selection does not gain it through Restore, same-ID Add
 replay or incoming message content. This receiver path still awaits native
 validation. See the
 [current development status](https://github.com/lukacf/meerkat-connect/blob/main/docs/releases/follow-up.md#native-collaboration-and-recorder-gap).
+
+<Note>
+Documentation clarification, 2026-11-12: the conditions below clarify the
+peer-delivery limitation recorded under 0.9.11 in the changelog carried
+forward with Connect 0.9.14. This is a documentation correction, not new
+runtime behavior or a guarantee that an operation succeeds. See the
+[dated erratum](https://github.com/lukacf/meerkat/blob/main/connect/CHANGELOG.md).
+</Note>
+
+When a member's governed work sends to another member in the same process (a
+reply, a message or a request), Core carries that work's origin with the
+delivery. Connect binds the receiving work under that work's requester, with
+the sending member as its ingress actor and the sending work as its
+contributors; the receiver's selected targets stay its own. Every operation of
+the receiving work is also narrowed by the sending work's current grants for
+that target, so the receiver's standing grants never widen it. Connect refuses
+such a delivery before it records anything when its origin names another
+realm, another ingress domain or another agent than the member that delivered
+it (`origin_unverifiable`), when an original of the sending work narrows
+nothing (`sender_basis_unbounded`), or when the sending work names more than
+64 works (`contributor_bound_exceeded`). A host-triggered delivery, one from a
+member that runs no governed work and one over a network carry no governed
+origin. These still require Connect's normal receiver admission and standing
+selection; a peer sender must resolve to a member in the same local mob roster.
+
+In Connect 0.9.14's member composition, admitting a same-process governed
+peer delivery does not by itself authorize a message, reply or Recorder
+write. Each operation must fit both the receiver's standing selection and the sending
+work's current grants for that target. The receiver's standing selection
+allows messages and replies to its actual sender (not requests), and writes
+to its own Recorder. If the sending work's grants do not cover those targets,
+the receiver's messages, replies and Recorder writes are refused. Requests
+and sends to other peers are outside the receiver's standing selection
+whether or not the delivery carries a governed origin. Target coverage is a
+necessary condition, not a guarantee that an operation succeeds.
+
+A host-triggered delivery carries no governed origin, but still uses the
+receiver's standing selection: writes to its own Recorder, and messages and
+replies to the sender when a member sender is identified (not requests).
+Connect declines a delivery without the required standing selection. This
+describes the receiver binder and member composition Connect selects, not a
+general rule for all Core hosts.
 
 Member admission and standing grants do not declare peer topology. Select the
 intended peer relationship through the existing native topology owner before

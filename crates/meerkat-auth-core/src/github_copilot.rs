@@ -1,7 +1,12 @@
 //! Target-neutral GitHub Copilot identity and endpoint declaration.
 
 pub const GITHUB_COPILOT_CLIENT_ID: &str = concat!("Iv1.", "b507a08c87ecfe98");
-pub const GITHUB_COPILOT_USER_AGENT: &str = "GitHubCopilotChat/0.35.0";
+/// The `User-Agent` of every GitHub and Copilot API request of a Copilot
+/// route: the device sign-in, the token exchange, the identity lookup, the
+/// model listing and inference. Its version is the `Editor-Plugin-Version`
+/// of `meerkat-copilot`'s default client identity; change the three together
+/// (see `DEFAULT_EDITOR_VERSION` there).
+pub const GITHUB_COPILOT_USER_AGENT: &str = "GitHubCopilotChat/0.73.0";
 pub const GITHUB_COPILOT_AUTHORIZE_URL: &str = "https://github.com/login/device";
 pub const GITHUB_COPILOT_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 pub const GITHUB_COPILOT_DEVICE_CODE_URL: &str = "https://github.com/login/device/code";

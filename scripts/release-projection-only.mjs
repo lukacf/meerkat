@@ -25,6 +25,11 @@
 //   - CHANGELOG.md: exactly the output of the base's
 //     scripts/stamp-changelog-release.py for the new version and the date in
 //     the stamped heading;
+//   - the npm manifests and locks of the other products (ci/products.json at
+//     the base): exactly the base file with each dependency range on Core's
+//     npm packages (the names of Core's SDK manifests at the base) moved from
+//     the old to the new version, the pins the hook moves with
+//     scripts/check_inrepo_version_pins.py --write;
 //   - every other projection surface (SDK manifests and generated types,
 //     schemas, BUILD.bazel, other docs, ContractVersion::CURRENT): every
 //     occurrence of the old version becomes the new one;
@@ -213,6 +218,26 @@ export function isProjectedPath(path) {
   );
 }
 
+// Core's SDK manifests; the names they carry are Core's npm packages.
+const CORE_NPM_MANIFESTS = ["sdks/typescript/package.json", "sdks/web/package.json"];
+const NPM_MANIFEST_NAMES = new Set(["package.json", "package-lock.json", "npm-shrinkwrap.json"]);
+
+// An npm manifest or lock under the root of another product (ci/products.json).
+export function isProductNpmManifest(path, productRoots) {
+  const name = path.split("/").at(-1);
+  return NPM_MANIFEST_NAMES.has(name) && productRoots.some((root) => path.startsWith(`${root}/`));
+}
+
+// The base text of another product's npm manifest with every dependency range
+// on one of `corePackages` moved from `oldVersion` to `newVersion`: exactly the
+// edit scripts/check_inrepo_version_pins.py --write makes in the release hook.
+export function moveCoreNpmRanges(text, oldVersion, newVersion, corePackages) {
+  const token = new RegExp(`(?<![0-9.])${escapeRegExp(oldVersion)}(?![0-9]|\\.[0-9])`);
+  return text.replace(/"(@?[A-Za-z0-9._/-]+)"(\s*:\s*)"([^"\n]*)"/g, (whole, name, separator, spec) =>
+    corePackages.has(name) ? `"${name}"${separator}"${spec.replace(token, newVersion)}"` : whole,
+  );
+}
+
 function makeGit(cwd) {
   const bytes = (gitArgs, { allowFailure = false } = {}) => {
     const result = spawnSync("git", gitArgs, { cwd, maxBuffer: GIT_MAX_BUFFER });
@@ -339,6 +364,33 @@ export function classifyReleaseProjection({ base, head, cwd = process.cwd() }) {
 
     const stampedDocuments = [];
     let changelog = null;
+    let productNpm = null;
+    const productNpmContext = () => {
+      if (productNpm === null) {
+        const products = revisionText(git, base, "ci/products.json");
+        let roots = [];
+        try {
+          roots = products === null ? [] : JSON.parse(products).products
+            .map((product) => product.root)
+            .filter((root) => typeof root === "string" && root !== "");
+        } catch {
+          notProjection("ci/products.json at the base is not valid JSON");
+        }
+        const names = new Set();
+        for (const manifest of CORE_NPM_MANIFESTS) {
+          const text = revisionText(git, base, manifest);
+          if (text === null) continue;
+          try {
+            const name = JSON.parse(text).name;
+            if (typeof name === "string" && name) names.add(name);
+          } catch {
+            notProjection(`${manifest} at the base is not valid JSON`);
+          }
+        }
+        productNpm = { roots, names };
+      }
+      return productNpm;
+    };
     for (const change of changes) {
       const { status, path, oldMode, newMode } = change;
       if (status !== "M") notProjection(`${path} has non-modification status ${status}`);
@@ -355,7 +407,14 @@ export function classifyReleaseProjection({ base, head, cwd = process.cwd() }) {
         changelog = { before, after };
         continue;
       }
-      if (!isProjectedPath(path)) notProjection(`${path} is not a release projection surface`);
+      if (!isProjectedPath(path)) {
+        const context = productNpmContext();
+        if (!isProductNpmManifest(path, context.roots)) notProjection(`${path} is not a release projection surface`);
+        if (moveCoreNpmRanges(before, oldVersion, newVersion, context.names) !== after) {
+          notProjection(`${path} contains changes beyond the moved ranges on Core's npm packages`);
+        }
+        continue;
+      }
       if (isStampedDocument(path)) {
         stampedDocuments.push({ path, before, after });
         continue;

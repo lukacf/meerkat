@@ -7157,6 +7157,130 @@ mod skill_activation_effect_tests {
         assert_eq!(agent.session().messages(), before);
     }
 
+    /// Fails every provider call with a failure no retry clears.
+    struct InvalidRequestLlmClient;
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentLlmClient for InvalidRequestLlmClient {
+        async fn stream_response(
+            &self,
+            _messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<super::super::LlmStreamResult, AgentError> {
+            Err(AgentError::llm(
+                "mock",
+                crate::error::LlmFailureReason::ProviderError(
+                    crate::error::LlmProviderError::non_retryable(
+                        crate::error::LlmProviderErrorKind::InvalidRequest,
+                        serde_json::json!({ "status": 400 }),
+                    ),
+                ),
+                "Invalid request (400)",
+            ))
+        }
+
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
+        }
+
+        fn model(&self) -> &'static str {
+            "mock-model"
+        }
+    }
+
+    /// The typed turn error's kind is the generated terminal cause, never the
+    /// diagnostic sidecar's: a sidecar that names another kind is refused,
+    /// so provider facts cannot relabel a terminal. Here the generated cause
+    /// is `llm_failure` and the sidecar claims `retry_exhausted`.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn runtime_witness_refuses_a_sidecar_kind_other_than_the_generated_cause() {
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .build_standalone(
+                Arc::new(InvalidRequestLlmClient),
+                Arc::new(NoTools),
+                Arc::new(NoopStore),
+            )
+            .await;
+        agent.set_runtime_execution_kind(Some(crate::lifecycle::RuntimeExecutionKind::ContentTurn));
+        let error = agent
+            .run("a provider failure no retry clears".to_string().into())
+            .await
+            .expect_err("the provider failure fails the run");
+        let honest = agent
+            .take_runtime_terminal_failure_witness()
+            .expect("the terminal witness projects")
+            .expect("a failed runtime turn carries its typed turn error");
+        assert_eq!(honest.kind, crate::TurnTerminalCauseKind::LlmFailure);
+
+        let snapshot = agent
+            .execution_snapshot()
+            .expect("snapshot projects")
+            .expect("the test turn-state handle exposes a snapshot");
+        assert_eq!(
+            snapshot.terminal_cause_kind,
+            Some(crate::TurnTerminalCauseKind::LlmFailure)
+        );
+
+        // Re-arm the finished run's witness inputs and offer a sidecar that
+        // carries the same provider facts under another kind.
+        let mut relabelled = honest;
+        relabelled.kind = crate::TurnTerminalCauseKind::RetryExhausted;
+        relabelled.retryable = Some(true);
+        agent.terminal_error_metadata = Some(relabelled);
+        agent.runtime_started_run_id = snapshot.terminal_run_id.clone();
+        agent.set_runtime_execution_kind(Some(crate::lifecycle::RuntimeExecutionKind::ContentTurn));
+        agent.record_runtime_terminal_failure_witness(&error);
+
+        let refused = agent
+            .take_runtime_terminal_failure_witness()
+            .expect_err("a sidecar kind other than the generated cause is refused");
+        assert!(
+            matches!(
+                &refused,
+                AgentError::InternalError(message)
+                    if message.contains("disagreed with generated terminal truth")
+            ),
+            "{refused:?}"
+        );
+
+        // The facts the retry-exhausted constructor builds are refused the
+        // same way beside this `llm_failure` terminal: it can only describe a
+        // terminal the machine itself ended as `retry_exhausted`.
+        let retried_failure = AgentError::llm(
+            "mock",
+            crate::error::LlmFailureReason::RateLimited { retry_after: None },
+            "Rate limited (429)",
+        );
+        let retry_exhausted =
+            crate::TurnErrorMetadata::retry_exhausted_from_llm_error(&retried_failure)
+                .expect("a rate limit is a retried class");
+        assert_eq!(
+            retry_exhausted.kind,
+            crate::TurnTerminalCauseKind::RetryExhausted
+        );
+        agent.terminal_error_metadata = Some(retry_exhausted);
+        agent.runtime_started_run_id = snapshot.terminal_run_id;
+        agent.set_runtime_execution_kind(Some(crate::lifecycle::RuntimeExecutionKind::ContentTurn));
+        agent.record_runtime_terminal_failure_witness(&error);
+
+        let refused = agent
+            .take_runtime_terminal_failure_witness()
+            .expect_err("retry-exhausted facts beside another generated cause are refused");
+        assert!(
+            matches!(
+                &refused,
+                AgentError::InternalError(message)
+                    if message.contains("disagreed with generated terminal truth")
+            ),
+            "{refused:?}"
+        );
+    }
+
     #[cfg(feature = "workspace-tests")]
     #[tokio::test]
     async fn work_authorization_clears_after_completion_and_early_refusal() {

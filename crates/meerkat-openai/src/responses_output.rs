@@ -876,7 +876,9 @@ mod tests {
         let restored: Session =
             serde_json::from_slice(&serde_json::to_vec(&session).unwrap()).unwrap();
         assert_eq!(restored.messages(), session.messages());
-        let replay_client = OpenAiClient::new("unused".into());
+        // The rows are read back by the process that received them: a
+        // client of the same service in the same process.
+        let replay_client = OpenAiClient::new("unused".into()).having_received(restored.messages());
         let projected = replay_client
             .project_replay_messages(restored.messages())
             .unwrap();
@@ -934,6 +936,7 @@ mod tests {
                 meerkat_core::StopReason::MaxTokens,
             ),
         )];
+        let client = client.having_received(&messages);
         let projected = client.project_replay_messages(&messages).unwrap();
         let body = client
             .build_request_body(&LlmRequest::new("gpt-6-astra", projected))
@@ -1217,7 +1220,12 @@ mod tests {
                 "usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}),
         ];
         let (client, server) = copilot_stub(events).await;
-        let result = LlmClientAdapter::new(Arc::new(client), "gpt-5.5".into())
+        // The client keeps its own record of what it receives: every test
+        // of this binary answers from a stub of its own with the same ids.
+        let client = Arc::new(
+            client.with_continuity_ledger(Arc::new(meerkat_core::OpenAiContinuityLedger::new())),
+        );
+        let result = LlmClientAdapter::new(client.clone(), "gpt-5.5".into())
             .stream_response(&[], &[], 1000, None, None)
             .await;
         server.abort();
@@ -1231,6 +1239,7 @@ mod tests {
             "the slot id and the terminal ciphertext are lowered together"
         );
         assert_replayed_reasoning(
+            &client,
             result.into_message(),
             &[("A", "terminal-cipher")],
             "re-encoded",
@@ -1312,14 +1321,15 @@ mod tests {
     /// Asserts that `assistant` replays exactly the reasoning items
     /// `expected`, as `(id, encrypted_content)` pairs in replay order.
     fn assert_replayed_reasoning(
+        client: &OpenAiClient,
         assistant: meerkat_core::BlockAssistantMessage,
         expected: &[(&str, &str)],
         case: &str,
     ) {
-        let client = OpenAiClient::new("unused".into());
-        let projected = client
-            .project_replay_messages(&[Message::BlockAssistant(assistant)])
-            .unwrap();
+        // Replayed by the client that received the step, to the Copilot
+        // endpoint it came from: nothing but that receipt makes it known.
+        let messages = [Message::BlockAssistant(assistant)];
+        let projected = client.project_replay_messages(&messages).unwrap();
         let body = client
             .build_request_body(&LlmRequest::new("gpt-5.5", projected))
             .unwrap();
@@ -1361,9 +1371,15 @@ mod tests {
                 );
                 let slot_ids: [&str; 2] = if streamed { ["A0", "A1"] } else { ["B", "C"] };
                 let (client, server) = copilot_stub(events).await;
+                // The client keeps its own record of what it receives: every test
+                // of this binary answers from a stub of its own with the same ids.
+                let client =
+                    Arc::new(client.with_continuity_ledger(Arc::new(
+                        meerkat_core::OpenAiContinuityLedger::new(),
+                    )));
                 let (tx, mut rx) = tokio::sync::mpsc::channel(32);
                 let result =
-                    LlmClientAdapter::with_event_channel(Arc::new(client), "gpt-5.5".into(), tx)
+                    LlmClientAdapter::with_event_channel(client.clone(), "gpt-5.5".into(), tx)
                         .stream_response(&[], &[], 1000, None, None)
                         .await;
                 server.abort();
@@ -1382,6 +1398,7 @@ mod tests {
                     .count();
                 assert_eq!(completions, 2, "{case}: each reasoning item completes once");
                 assert_replayed_reasoning(
+                    &client,
                     result.into_message(),
                     &[(slot_ids[0], "cipher-I"), (slot_ids[1], "cipher-J")],
                     &case,
@@ -1447,7 +1464,13 @@ mod tests {
                 ["B", "E", "C"]
             };
             let (client, server) = copilot_stub(events).await;
-            let result = LlmClientAdapter::new(Arc::new(client), "gpt-5.5".into())
+            // The client keeps its own record of what it receives: every test
+            // of this binary answers from a stub of its own with the same ids.
+            let client = Arc::new(
+                client
+                    .with_continuity_ledger(Arc::new(meerkat_core::OpenAiContinuityLedger::new())),
+            );
+            let result = LlmClientAdapter::new(client.clone(), "gpt-5.5".into())
                 .stream_response(&[], &[], 1000, None, None)
                 .await;
             server.abort();
@@ -1460,6 +1483,7 @@ mod tests {
                 "streamed {streamed}: the blocks are the terminal items under their slot ids"
             );
             assert_replayed_reasoning(
+                &client,
                 result.into_message(),
                 &[
                     (slot_ids[0], "cipher-I"),
@@ -1481,7 +1505,12 @@ mod tests {
             false,
         );
         let (client, server) = copilot_stub(events).await;
-        let result = LlmClientAdapter::new(Arc::new(client), "gpt-5.5".into())
+        // The client keeps its own record of what it receives: every test
+        // of this binary answers from a stub of its own with the same ids.
+        let client = Arc::new(
+            client.with_continuity_ledger(Arc::new(meerkat_core::OpenAiContinuityLedger::new())),
+        );
+        let result = LlmClientAdapter::new(client.clone(), "gpt-5.5".into())
             .stream_response(&[], &[], 1000, None, None)
             .await;
         server.abort();
@@ -1493,6 +1522,7 @@ mod tests {
             "the blocks are the terminal items under their slot ids"
         );
         assert_replayed_reasoning(
+            &client,
             result.into_message(),
             &[("B", "cipher-B"), ("C", "cipher-J")],
             "kept slot id",
@@ -1523,13 +1553,19 @@ mod tests {
         let terminal = events.last_mut().unwrap();
         terminal["response"]["output"] = json!(indexed);
         let (client, server) = copilot_stub(events).await;
-        let result = LlmClientAdapter::new(Arc::new(client), "gpt-5.5".into())
+        // The client keeps its own record of what it receives: every test
+        // of this binary answers from a stub of its own with the same ids.
+        let client = Arc::new(
+            client.with_continuity_ledger(Arc::new(meerkat_core::OpenAiContinuityLedger::new())),
+        );
+        let result = LlmClientAdapter::new(client.clone(), "gpt-5.5".into())
             .stream_response(&[], &[], 1000, None, None)
             .await;
         server.abort();
         let result =
             result.unwrap_or_else(|error| panic!("each item names its own output_index: {error}"));
         assert_replayed_reasoning(
+            &client,
             result.into_message(),
             &[("B", "cipher-I"), ("C", "cipher-J")],
             "own output_index",

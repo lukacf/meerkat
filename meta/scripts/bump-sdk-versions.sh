@@ -120,4 +120,22 @@ for DOC in "$ROOT/docs/quickstart.mdx" "$ROOT/docs/sdks/rust.mdx"; do
     fi
 done
 
+# In the repository that holds Meta beside the other products, their pins on
+# Meta's packages move with this bump (scripts/check_inrepo_version_pins.py
+# --write): Connect's TypeScript SDK accepts @rkat/meta-sdk, and its Python
+# native-host extra requires meerkat-meta, from this version. A pin it cannot
+# move stays listed for CI's version parity check; only an error stops the bump.
+TOPLEVEL="$(git -C "$ROOT" rev-parse --show-toplevel 2>/dev/null || true)"
+if [ -n "$TOPLEVEL" ] && [ -f "$TOPLEVEL/scripts/check_inrepo_version_pins.py" ]; then
+    set +e
+    python3 "$TOPLEVEL/scripts/check_inrepo_version_pins.py" --root "$TOPLEVEL" --write
+    PINS_STATUS=$?
+    set -e
+    if [ "$PINS_STATUS" -gt 1 ]; then
+        echo "The in-repo pin check could not run (status $PINS_STATUS)" >&2
+        exit "$PINS_STATUS"
+    fi
+    echo "  In-repo pins on Meta's packages: $VERSION"
+fi
+
 echo "Done"

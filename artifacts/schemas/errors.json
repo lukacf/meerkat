@@ -372,5 +372,214 @@
     ],
     "title": "WireError",
     "type": "object"
+  },
+  "WireRunFailure": {
+    "$defs": {
+      "CapabilityHint": {
+        "description": "Hint about which capability is needed.",
+        "properties": {
+          "capability_id": {
+            "$ref": "#/$defs/CapabilityId"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "capability_id",
+          "message"
+        ],
+        "type": "object"
+      },
+      "CapabilityId": {
+        "description": "Every capability known to Meerkat. Adding a variant forces updates to\nthe registry, error mappings, and codegen templates.",
+        "oneOf": [
+          {
+            "enum": [
+              "sessions",
+              "streaming",
+              "structured_output",
+              "hooks",
+              "builtins",
+              "shell",
+              "comms",
+              "memory_store",
+              "schedule",
+              "work_graph",
+              "session_store",
+              "session_compaction",
+              "skills",
+              "mcp_live"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "adaptive_flow",
+            "description": "Adaptive mobpack flow execution (FlowMaster planning loop, layer\ncompilation, policy composition). Stamped into a mobpack's\n`[requires]` section by the pack builder whenever the manifest\ndeclares an `[adaptive]` section, so hosts that do not know this\ncapability fail closed instead of silently downgrading the pack.",
+            "type": "string"
+          }
+        ]
+      },
+      "ErrorCategory": {
+        "description": "Error category for grouping.",
+        "enum": [
+          "session",
+          "request",
+          "provider",
+          "budget",
+          "hook",
+          "agent",
+          "capability",
+          "skill",
+          "validation",
+          "internal"
+        ],
+        "type": "string"
+      },
+      "ErrorCode": {
+        "description": "Stable error codes for wire protocol.",
+        "oneOf": [
+          {
+            "enum": [
+              "SESSION_NOT_FOUND",
+              "SCHEDULE_NOT_FOUND",
+              "SESSION_BUSY",
+              "SESSION_NOT_RUNNING",
+              "REQUEST_CANCELLED",
+              "PROVIDER_ERROR",
+              "BUDGET_EXHAUSTED",
+              "HOOK_DENIED",
+              "AGENT_ERROR",
+              "CAPABILITY_UNAVAILABLE",
+              "SKILL_NOT_FOUND",
+              "SKILL_RESOLUTION_FAILED",
+              "INVALID_PARAMS",
+              "INTERNAL_ERROR",
+              "DUPLICATE_INPUT",
+              "SUPERVISOR_ROTATION_INCOMPLETE"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "SCOPE_DENIED",
+            "description": "Plane-(b) control-scope denial; wire detail carries\n`{ required, presented }`.",
+            "type": "string"
+          },
+          {
+            "const": "HOST_UNAVAILABLE",
+            "description": "Member host unreachable/timeout; observation degrades typed, never\nquiet.",
+            "type": "string"
+          },
+          {
+            "const": "STALE_CURSOR",
+            "description": "Event cursor overran an ephemeral host's buffer; reply carries the\ncurrent watermark.",
+            "type": "string"
+          },
+          {
+            "const": "STALE_FENCE",
+            "description": "Command carried a superseded `(generation, fence)` tuple.",
+            "type": "string"
+          },
+          {
+            "const": "MEMBER_RELOAD_REQUIRED",
+            "description": "A mob member's runtime registration is durability-degraded and\nrefuses ordinary work until an explicit registration-authorized cold\nreload replaces it (`MobError::MemberReloadRequired`). Deliberately\nits own code rather than [`Self::SessionBusy`]: the condition never\nclears on its own, so ordinary busy/backoff retry is never correct —\nonly the named `reload_member_registration` repair resolves it.",
+            "type": "string"
+          },
+          {
+            "const": "INPUT_REFUSED",
+            "description": "The native owner declined an unaccepted input. Details retain the\ncanonical refusal kind without private policy or principal data.",
+            "type": "string"
+          },
+          {
+            "const": "INPUT_NOT_READY",
+            "description": "Current native input readiness is unavailable. This is an operational\ncondition, not a permission verdict or a terminal result for prior work.",
+            "type": "string"
+          },
+          {
+            "const": "SESSION_RUNTIME_UNAVAILABLE",
+            "description": "Runtime authority is unavailable before a session operation starts.",
+            "type": "string"
+          },
+          {
+            "const": "APPROVAL_STORE_UNAVAILABLE",
+            "description": "The approval store committed nothing (unavailable or contended). An\nexplicitly attempted retry through fresh checks is valid.",
+            "type": "string"
+          },
+          {
+            "const": "APPROVAL_CONFLICT",
+            "description": "Another owner of the approval store changed the approval first; it\nis reconciled before reuse.",
+            "type": "string"
+          },
+          {
+            "const": "APPROVAL_COMMIT_UNKNOWN",
+            "description": "The approval store cannot confirm whether the commit happened; the\napproval is reconciled from the store before reuse, never resent.",
+            "type": "string"
+          },
+          {
+            "const": "STALE_DELIVERY_SCOPE",
+            "description": "A scope-bound mob submit named a member session that is no longer the\nmember's current session binding: the session rotated under a still\ncurrent runtime incarnation and fence. Distinct from\n[`Self::StaleFence`] (a superseded incarnation): the recovery is to\nre-capture the delivery scope, not to re-resolve the member.",
+            "type": "string"
+          },
+          {
+            "const": "FORK_INSTRUCTION_REFUSED",
+            "description": "A durable fork was refused before commit because of the activation\nrows its child would inherit, under the host's fork instruction\npolicy. No child exists; the typed cause and keys ride in the error\ndata. A fork request may set `inherited_instructions` to\n`reactivate_inherited` to carry the source's effective activations.",
+            "type": "string"
+          },
+          {
+            "const": "ADMISSION_IN_PROGRESS",
+            "description": "A realm admission fence the operation needs is held, by an admission\nor another fenced operation, beyond the operation's bound. The\noperation did not start and wrote nothing. It may be retried once the\nhold ends, which after an interrupted admission can be only when the\nprocess holding it restarts: an immediate retry is not promised to\nsucceed.",
+            "type": "string"
+          },
+          {
+            "const": "ADMISSION_FENCE_UNAVAILABLE",
+            "description": "A realm admission fence the operation needs could not be opened,\ncreated, locked or identity-checked. The operation did not start and\nwrote nothing; it fails closed.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireError": {
+        "description": "Canonical wire error envelope.\n\nSurfaces map this to their native format (RPC error, HTTP response, CLI exit).",
+        "properties": {
+          "capability_hint": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/CapabilityHint"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "category": {
+            "$ref": "#/$defs/ErrorCategory"
+          },
+          "code": {
+            "$ref": "#/$defs/ErrorCode"
+          },
+          "details": true,
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "category",
+          "message"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "The failure document of `rkat run --output json`: the last document on\nstdout when the run fails, in place of the run result.\n\n`error` is the same envelope the other surfaces report. For a turn that\nended in failure its `code` is [`turn_failure_error_code`] and its\n`details` are `{\"error\": TurnErrorMetadata}`; for any other typed failure\nthey are that error's own code and wire data.",
+    "properties": {
+      "error": {
+        "$ref": "#/$defs/WireError"
+      }
+    },
+    "required": [
+      "error"
+    ],
+    "title": "WireRunFailure",
+    "type": "object"
   }
 }

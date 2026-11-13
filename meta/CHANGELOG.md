@@ -9,27 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Security
 
-- A mob that a member private to a person creates with its own `mob_create`
-  stays private to that person after a restart, so every member spawned into
-  it after the restart is private to that person too, as the members spawned
-  before it are. The restart reads who each such mob is private to from the
-  mob's creation record, and in 0.9.11 through 0.9.13 (0.9.11 is the first
-  release with members private to a person) it read the creating member
-  only from the record of a create a host makes for a member's session
-  (`MobProvenance::Member`):
-  a member's own `mob_create` (`MobProvenance::OperatorMember`) came back
-  private to no one, so a member spawned into that mob after the restart
-  carried no private owner, the label that hides it from other people. Both
-  records now name the creating member, and the mob is private to whoever
-  that member is private to. A mob whose record names no member (a host's
-  create, a session that is no member's) stays private to no one, as does a
-  mob a shared member creates. A mob whose record says that several rosters
-  named the session that created it, and picks none
-  (`MobProvenance::Ambiguous`), no longer comes back private to no one: the
-  restart cannot read who it is private to, so a spawn into it is refused
-  from then on, and the members already seated in it keep the owner their
-  own spawn gave them.
-
 - A console whose visibility policy includes nested members listed the
   participants of a running temporary council as members and read their
   history into the timeline. The `ConsoleVisibilityPolicy` trait default and
@@ -84,13 +63,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   start, and a holder that does not run this check itself (a release before
   0.9.4, or a Core-only tool on the directory). Under heavy file-lock churn
   on the host a read could miss a held lock; on a quiet host it did not.
-  Meta 0.9.4 through 0.9.13. The check now reads the table up to three
+  Meta 0.9.4 through 0.9.14. The check now reads the table up to three
   times, each read split at other entries, and refuses the start as soon as
   any read names another holder; it admits the start only when no read
   does. That makes a miss far less likely, not impossible: after a read
   that missed, the next read named the holder in every measured case. Where
   the table names no holder at all (macOS, Windows, and on Linux btrfs
   subvolumes and overlayfs, the 0.9.4 known limitation), nothing changes.
+
+## [0.9.14] - 2026-11-11
+
+Meta 0.9.14 is part of Meerkat 0.9.14 (Core 0.9.14, Meta 0.9.14 and Connect
+0.9.14, released together) and pins Core `=0.9.14`.
+
+A mob that a member private to a person creates itself stays private to
+that person after a restart. See Security.
+
+### Security
+
+- A mob that a member private to a person creates with its own `mob_create`
+  stays private to that person after a restart, so every member spawned into
+  it after the restart is private to that person too, as the members spawned
+  before it are. The restart reads who each such mob is private to from the
+  mob's creation record, and in 0.9.11 through 0.9.13 (0.9.11 is the first
+  release with members private to a person) it read the creating member
+  only from the record of a create a host makes for a member's session
+  (`MobProvenance::Member`):
+  a member's own `mob_create` (`MobProvenance::OperatorMember`) came back
+  private to no one, so a member spawned into that mob after the restart
+  carried no private owner, the label that hides it from other people. Both
+  records now name the creating member, and the mob is private to whoever
+  that member is private to. A mob whose record names no member (a host's
+  create, a session that is no member's) stays private to no one, as does a
+  mob a shared member creates. A mob whose record says that several rosters
+  named the session that created it, and picks none
+  (`MobProvenance::Ambiguous`), no longer comes back private to no one: the
+  restart cannot read who it is private to, so a spawn into it is refused
+  from then on, and the members already seated in it keep the owner their
+  own spawn gave them.
+
+### Known limitations
+
+- `rustix` 1.1.5 in Cargo.lock is named by RUSTSEC-2026-0486, as in 0.9.12
+  and 0.9.13: the `getxattr` and `listxattr` functions of `rustix::fs` (with
+  their `l` and `f` forms) mark bytes they never wrote as initialized when
+  they are given a zero-length buffer. `meerkat-meta` depends on `rustix`
+  directly, and it is also taken through Meerkat Core, `tempfile`, and
+  `xattr` through `tar`. No Meta crate calls those functions. Of the crates
+  Meta builds with only `xattr` does, and `tar`, the one crate that uses
+  `xattr`, calls it only to set attributes while unpacking, so Meta's own
+  use is not known to be affected. `rustix` 1.1.6 has the fix; this release
+  still builds with 1.1.5.
 
 ## [0.9.13] - 2026-11-11
 

@@ -157,6 +157,13 @@ pub struct OpenAiClient {
     /// request's: the request's model and the id the wire names for it. Set
     /// by the GitHub Copilot route (`with_wire_model`).
     wire_model: Option<(String, String)>,
+    /// Which service this client is as an issuer of continuity material
+    /// (encrypted reasoning, item and response ids, hosted-tool items); see
+    /// [`Self::continuity_issuer`].
+    continuity_identity: ContinuityIdentity,
+    /// What this process received from which issuer. Written by this
+    /// client's response path, read by the replay owner.
+    continuity_ledger: std::sync::Arc<meerkat_core::OpenAiContinuityLedger>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,6 +179,18 @@ impl Default for AzureOpenAiWireConfig {
             image_generation_api_version: "preview".to_string(),
         }
     }
+}
+
+/// What a client is, as an issuer of continuity material, besides the base
+/// URL it sends to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ContinuityIdentity {
+    /// The backend of the client's wire.
+    Backend,
+    /// The Responses delegate of a self-hosted client. It speaks the public
+    /// API's wire and is not the public API: it is the configured server
+    /// that client declared, or a self-hosted server known by its base URL.
+    SelfHosted { server: Option<String> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -315,7 +334,7 @@ impl ResponsesCacheBreakpoints {
 // string.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct OpenAiContinuationPlan {
+pub(crate) struct OpenAiContinuationPlan {
     previous_response_id: String,
     replay_from_message_index: usize,
 }
@@ -523,6 +542,98 @@ fn project_openai_tool_result(
         .map_err(|error| invalid_replay(error.to_string()))
 }
 
+/// What a projection decided, carried with the request it prepared
+/// (`LlmReplayProjection::with_replay_witness`): the service the projecting
+/// client is, and a ledger of its own that knows exactly the steps the
+/// projection admitted. The client that later lowers, measures and sends the
+/// request reads this instead of the process ledger, so every use of one
+/// request sees one decision whatever the process receives or forgets in
+/// between.
+#[derive(Debug, Clone)]
+pub(crate) struct OpenAiReplayDecision {
+    target: meerkat_core::OpenAiContinuityTarget,
+}
+
+impl OpenAiReplayDecision {
+    /// Freeze the decision of a projection of `source` made for `issuer`:
+    /// `projected` keeps continuity material only on the steps that were
+    /// admitted, so those steps are recorded, as received from `issuer`, in
+    /// a ledger that belongs to this request and never forgets.
+    pub(crate) fn freeze(
+        issuer: &meerkat_core::OpenAiContinuityIssuer,
+        source: &[Message],
+        projected: &[Message],
+    ) -> Self {
+        let ledger = meerkat_core::OpenAiContinuityLedger::with_generation(usize::MAX);
+        for message in projected {
+            if let Message::BlockAssistant(assistant) = message {
+                ledger.record_step(issuer, &assistant.blocks);
+            }
+        }
+        // The one trace of a decision that otherwise shows only as missing
+        // reasoning: how many steps carried provider material, and how many
+        // of them go out as the service returned them. The service is named
+        // by its kind; no endpoint and no material is logged.
+        let carrying = |messages: &[Message]| {
+            messages
+                .iter()
+                .filter(|message| {
+                    matches!(message, Message::BlockAssistant(assistant) if assistant
+                    .blocks
+                    .iter()
+                    .any(|block| {
+                        meerkat_core::OpenAiContinuityMaterial::of_block(block)
+                            .next()
+                            .is_some()
+                    }))
+                })
+                .count()
+        };
+        let with_material = carrying(source);
+        let as_received = carrying(projected);
+        tracing::debug!(
+            service = ?issuer.service(),
+            steps_with_provider_material = with_material,
+            replayed_as_received = as_received,
+            sent_in_plain_form = with_material.saturating_sub(as_received),
+            "OpenAI-family replay decision"
+        );
+        Self {
+            target: meerkat_core::OpenAiContinuityTarget::new(
+                issuer.clone(),
+                std::sync::Arc::new(ledger),
+            ),
+        }
+    }
+
+    /// The decision as a replay target, when it was made for `issuer`.
+    pub(crate) fn target_for(
+        &self,
+        issuer: &meerkat_core::OpenAiContinuityIssuer,
+    ) -> Option<meerkat_core::OpenAiContinuityTarget> {
+        (self.target.issuer() == issuer).then(|| self.target.clone())
+    }
+
+    pub(crate) fn witness(self) -> meerkat_llm_core::LlmRequestRouteWitness {
+        meerkat_llm_core::LlmRequestRouteWitness::new(self)
+    }
+}
+
+/// Test scaffolding: record every assistant step of `messages` in `ledger`
+/// as received from `issuer`.
+#[cfg(test)]
+pub(crate) fn record_received_for_test(
+    ledger: &meerkat_core::OpenAiContinuityLedger,
+    issuer: &meerkat_core::OpenAiContinuityIssuer,
+    messages: &[Message],
+) {
+    for message in messages {
+        if let Message::BlockAssistant(assistant) = message {
+            ledger.record_step(issuer, &assistant.blocks);
+        }
+    }
+}
+
 fn openai_reasoning_replayable(
     mode: OpenAiReplayProjectionMode,
     meta: &Option<Box<ProviderMeta>>,
@@ -598,54 +709,87 @@ fn openai_response_id_from_response(response: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-fn openai_continuation_plan(request: &LlmRequest) -> Option<OpenAiContinuationPlan> {
+/// The server-side continuation a `store: true` request may ask for: the
+/// response id of the transcript's last assistant step, with only what
+/// followed it as input. The id is one of the continuity values a service
+/// issues, so the shortcut exists only when `continuity` admits that step
+/// (this process received it from the target service); a step of another
+/// service, or of unknown issuer, is never named, and neither is an older
+/// step behind it.
+fn openai_continuation_plan(
+    request: &LlmRequest,
+    continuity: Option<&meerkat_core::OpenAiContinuityTarget>,
+) -> Option<OpenAiContinuationPlan> {
     let tag = openai_tag(request)?;
     if tag.store != Some(true) {
         return None;
     }
 
-    request
-        .messages
+    let (index, assistant) =
+        request
+            .messages
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, message)| match message {
+                Message::BlockAssistant(assistant) => Some((index, assistant)),
+                _ => None,
+            })?;
+    let admission = meerkat_core::ReplayStepAdmission::of(
+        meerkat_core::ReplayWireFamily::OpenAi,
+        continuity,
+        &assistant.blocks,
+    );
+    assistant
+        .blocks
         .iter()
-        .enumerate()
         .rev()
-        .find_map(|(index, message)| {
-            let Message::BlockAssistant(assistant) = message else {
-                return None;
-            };
-            assistant
-                .blocks
-                .iter()
-                .rev()
-                .find_map(openai_response_id_from_block)
-                .map(|response_id| OpenAiContinuationPlan {
-                    previous_response_id: response_id.to_string(),
-                    replay_from_message_index: index + 1,
-                })
+        .filter(|block| {
+            meerkat_core::replay_provider_metadata(block)
+                .is_some_and(|metadata| admission.admits(metadata))
+        })
+        .find_map(openai_response_id_from_block)
+        .map(|response_id| OpenAiContinuationPlan {
+            previous_response_id: response_id.to_string(),
+            replay_from_message_index: index + 1,
         })
         .filter(|plan| plan.replay_from_message_index < request.messages.len())
 }
 
+/// Project one assistant step for an OpenAI-wire target. `admission` says
+/// whether the target is sent the step's continuity material
+/// ([`meerkat_core::ReplayStepAdmission`]). A step that is not admitted
+/// keeps what the conversation said (text, tool calls) and loses everything
+/// a service issued: its reasoning items, its hosted-tool items (they carry
+/// a provider item id and are paired with the step's reasoning item), an
+/// identity-only empty message, and the metadata of what remains.
 fn project_openai_assistant_blocks(
     replay_application: &mut meerkat_core::ReplayApplication<'_>,
+    admission: meerkat_core::ReplayStepAdmission,
     message: meerkat_core::ReplayMessageIndex,
     mode: OpenAiReplayProjectionMode,
     web_search_evidence: bool,
     blocks: &[AssistantBlock],
 ) -> Result<Vec<AssistantBlock>, LlmError> {
     let mut projected = Vec::with_capacity(blocks.len());
+    let admitted = |meta: &Option<Box<ProviderMeta>>| {
+        meta.as_deref()
+            .is_some_and(|metadata| admission.admits(metadata))
+    };
     let has_output_item = blocks.iter().any(|block| match block {
         AssistantBlock::Text { text, meta } => {
             !text.is_empty()
-                || matches!(
-                    meta.as_deref(),
-                    Some(ProviderMeta::OpenAiAssistantMessage { .. })
-                )
+                || (admitted(meta)
+                    && matches!(
+                        meta.as_deref(),
+                        Some(ProviderMeta::OpenAiAssistantMessage { .. })
+                    ))
         }
         AssistantBlock::Transcript { text, .. } => !text.is_empty(),
         AssistantBlock::ToolUse { .. } => true,
         AssistantBlock::ServerToolContent { content, .. } => {
-            openai_server_tool_content_replayable(mode, content)
+            admission.admits_provider_items()
+                && openai_server_tool_content_replayable(mode, content)
         }
         _ => false,
     });
@@ -653,15 +797,16 @@ fn project_openai_assistant_blocks(
         let projected_block = match block {
             AssistantBlock::Text { text, meta }
                 if text.is_empty()
-                    && !matches!(
-                        meta.as_deref(),
-                        Some(ProviderMeta::OpenAiAssistantMessage { .. })
-                    ) =>
+                    && !(admitted(meta)
+                        && matches!(
+                            meta.as_deref(),
+                            Some(ProviderMeta::OpenAiAssistantMessage { .. })
+                        )) =>
             {
                 None
             }
             AssistantBlock::Text { .. } | AssistantBlock::ToolUse { .. } => {
-                Some(meerkat_core::ReplayWireFamily::OpenAi.strip_foreign_metadata(block.clone()))
+                Some(admission.strip_foreign_metadata(block.clone()))
             }
             // Spoken transcripts replay back to the provider as plain text;
             // OpenAI Responses API sees the assistant's visible output
@@ -672,14 +817,15 @@ fn project_openai_assistant_blocks(
                 meta: None,
             }),
             AssistantBlock::Reasoning { meta, .. }
-                if has_output_item && openai_reasoning_replayable(mode, meta) =>
+                if has_output_item && admitted(meta) && openai_reasoning_replayable(mode, meta) =>
             {
-                Some(meerkat_core::ReplayWireFamily::OpenAi.strip_foreign_metadata(block.clone()))
+                Some(block.clone())
             }
             AssistantBlock::ServerToolContent { content, .. }
-                if openai_server_tool_content_replayable(mode, content) =>
+                if admission.admits_provider_items()
+                    && openai_server_tool_content_replayable(mode, content) =>
             {
-                Some(meerkat_core::ReplayWireFamily::OpenAi.strip_foreign_metadata(block.clone()))
+                Some(admission.strip_foreign_metadata(block.clone()))
             }
             // A message's web-search citations, on a wire that carries search
             // evidence: the Responses lowering puts them back on that
@@ -688,11 +834,12 @@ fn project_openai_assistant_blocks(
                 id: Some(_),
                 content,
                 ..
-            } if web_search_evidence
+            } if admission.admits_provider_items()
+                && web_search_evidence
                 && matches!(mode, OpenAiReplayProjectionMode::Responses)
                 && is_web_search_citations(content) =>
             {
-                Some(meerkat_core::ReplayWireFamily::OpenAi.strip_foreign_metadata(block.clone()))
+                Some(admission.strip_foreign_metadata(block.clone()))
             }
             AssistantBlock::Reasoning { .. }
             | AssistantBlock::ServerToolContent { .. }
@@ -741,14 +888,18 @@ fn project_openai_replay_messages(
     messages: &[Message],
     mode: OpenAiReplayProjectionMode,
 ) -> Result<Vec<Message>, LlmError> {
-    project_openai_replay_messages_for_capabilities(messages, mode, true, true)
+    project_openai_replay_messages_for_capabilities(messages, mode, true, true, None)
 }
 
+/// `continuity`: the service the target is and what this process received
+/// from which service; `None` for a target that issues no Responses
+/// continuity material or does not know which service it is.
 pub(crate) fn project_openai_replay_messages_for_capabilities(
     messages: &[Message],
     mode: OpenAiReplayProjectionMode,
     image_input: bool,
     image_tool_results: bool,
+    continuity: Option<&meerkat_core::OpenAiContinuityTarget>,
 ) -> Result<Vec<Message>, LlmError> {
     project_openai_replay_messages_for_target(
         messages,
@@ -756,6 +907,7 @@ pub(crate) fn project_openai_replay_messages_for_capabilities(
         image_input,
         image_tool_results,
         false,
+        continuity,
     )
 }
 
@@ -769,6 +921,7 @@ pub(crate) fn project_openai_replay_messages_for_target(
     image_input: bool,
     image_tool_results: bool,
     web_search_evidence: bool,
+    continuity: Option<&meerkat_core::OpenAiContinuityTarget>,
 ) -> Result<Vec<Message>, LlmError> {
     let mut projected = Vec::with_capacity(messages.len());
     // Responses can now accept image parts in `function_call_output.output`.
@@ -778,7 +931,7 @@ pub(crate) fn project_openai_replay_messages_for_target(
     // fresh-vs-historical projection policy instead of changing this default.
     let image_tool_results =
         matches!(mode, OpenAiReplayProjectionMode::Responses) && image_tool_results;
-    let replay_plan = meerkat_core::ReplayPlan::build(
+    let replay_plan = meerkat_core::ReplayPlan::build_with_openai_continuity(
         messages,
         meerkat_core::ReplayTarget::new(
             meerkat_core::ReplayWireFamily::OpenAi,
@@ -799,6 +952,7 @@ pub(crate) fn project_openai_replay_messages_for_target(
                 }
             },
         ),
+        continuity,
     )
     .map_err(|error| invalid_replay(error.to_string()))?;
     let mut replay_application = replay_plan.application();
@@ -863,6 +1017,7 @@ pub(crate) fn project_openai_replay_messages_for_target(
             Message::BlockAssistant(assistant) => {
                 let blocks = project_openai_assistant_blocks(
                     &mut replay_application,
+                    replay_plan.step_admission(message_index),
                     message_index,
                     mode,
                     web_search_evidence,
@@ -953,7 +1108,178 @@ impl OpenAiClient {
             supports_image_input: true,
             copilot_responses_item_identity: false,
             wire_model: None,
+            continuity_identity: ContinuityIdentity::Backend,
+            continuity_ledger: meerkat_core::OpenAiContinuityLedger::process(),
         }
+    }
+
+    /// Give this client its own record of what it received from which
+    /// issuer, in place of the one every client of the process shares. For a
+    /// host or a test that runs clients which must not see each other's
+    /// responses; a new ledger knows nothing, as a new process.
+    #[must_use]
+    pub fn with_continuity_ledger(
+        mut self,
+        ledger: std::sync::Arc<meerkat_core::OpenAiContinuityLedger>,
+    ) -> Self {
+        self.continuity_ledger = ledger;
+        self
+    }
+
+    /// Test scaffolding: this client in a process of its own that received
+    /// every assistant step of `messages` from this client's service. For
+    /// rows that write a transcript by hand and mean "this session's own
+    /// history on this service".
+    #[cfg(test)]
+    pub(crate) fn having_received(mut self, messages: &[Message]) -> Self {
+        self.continuity_ledger = std::sync::Arc::new(meerkat_core::OpenAiContinuityLedger::new());
+        record_received_for_test(&self.continuity_ledger, &self.continuity_issuer(), messages);
+        self
+    }
+
+    /// The service this client speaks to, as an issuer of continuity
+    /// material: the kind of service its wire names and the base URL it
+    /// sends to, or for a self-hosted client's delegate the configured
+    /// server it declared (its base URL when it declared none). Computed
+    /// from what the client is, never from a wrapper around it, and compared
+    /// by value, so a client rebuilt for the same service is the same
+    /// issuer.
+    pub fn continuity_issuer(&self) -> meerkat_core::OpenAiContinuityIssuer {
+        use meerkat_core::{OpenAiContinuityIssuer, OpenAiContinuityService};
+        match &self.continuity_identity {
+            ContinuityIdentity::Backend => OpenAiContinuityIssuer::at_base_url(
+                self.backend_wire.backend_kind().into(),
+                &self.base_url,
+            ),
+            ContinuityIdentity::SelfHosted {
+                server: Some(server),
+            } => OpenAiContinuityIssuer::self_hosted_server(server.clone()),
+            ContinuityIdentity::SelfHosted { server: None } => OpenAiContinuityIssuer::at_base_url(
+                OpenAiContinuityService::SelfHosted,
+                &self.base_url,
+            ),
+        }
+    }
+
+    /// The record of received continuity material this client writes and
+    /// replays from.
+    pub fn continuity_ledger(&self) -> &std::sync::Arc<meerkat_core::OpenAiContinuityLedger> {
+        &self.continuity_ledger
+    }
+
+    /// For the self-hosted client's Responses delegate: it is a
+    /// self-hosted server, the configured one `server` names when the
+    /// client was given it.
+    pub(crate) fn into_self_hosted_delegate(mut self, server: Option<String>) -> Self {
+        self.continuity_identity = ContinuityIdentity::SelfHosted { server };
+        self
+    }
+
+    /// This client as a receiver of continuity material: the service it
+    /// is and the ledger of what this process received.
+    pub(crate) fn continuity_target(&self) -> meerkat_core::OpenAiContinuityTarget {
+        meerkat_core::OpenAiContinuityTarget::new(
+            self.continuity_issuer(),
+            std::sync::Arc::clone(&self.continuity_ledger),
+        )
+    }
+
+    /// The continuity target a request is lowered against: the decision
+    /// its projection froze, when the request carries one made for this
+    /// client's service, and otherwise what the process knows now.
+    pub(crate) fn decided_continuity(
+        &self,
+        prepared: Option<&PreparedLlmRequest>,
+    ) -> meerkat_core::OpenAiContinuityTarget {
+        let issuer = self.continuity_issuer();
+        prepared
+            .and_then(|request| request.replay_witness::<OpenAiReplayDecision>())
+            .and_then(|decision| decision.target_for(&issuer))
+            .unwrap_or_else(|| self.continuity_target())
+    }
+
+    fn project_replay_messages_for(
+        &self,
+        messages: &[Message],
+        continuity: &meerkat_core::OpenAiContinuityTarget,
+    ) -> Result<Vec<Message>, LlmError> {
+        project_openai_replay_messages_for_target(
+            messages,
+            OpenAiReplayProjectionMode::Responses,
+            self.supports_image_input,
+            true,
+            self.backend_wire.carries_web_search_evidence(),
+            Some(continuity),
+        )
+    }
+
+    /// The response path's one write to the continuity ledger. When a
+    /// response ends successfully, everything it carried is recorded as
+    /// received from this client's service, as one response: the metadata
+    /// and hosted-tool items of every event and of the final output blocks.
+    /// That is a superset of what any commit path stores (the final blocks,
+    /// the blocks assembled from the events, the `[DONE]` fallback), so the
+    /// stored step is always known, and it holds nothing but material this
+    /// response itself delivered from this service, so it can make nothing
+    /// known that the process did not receive from that issuer. A response
+    /// that fails records nothing.
+    fn record_received_continuity<'a>(&'a self, inner: LlmStream<'a>) -> LlmStream<'a> {
+        let issuer = self.continuity_issuer();
+        let ledger = std::sync::Arc::clone(&self.continuity_ledger);
+        let mut metadata: Vec<ProviderMeta> = Vec::new();
+        let mut hosted_items: Vec<Value> = Vec::new();
+        Box::pin(inner.map(move |event| {
+            let mut receive = |meta: Option<&ProviderMeta>, hosted: Option<&Value>| {
+                if let Some(meta) = meta
+                    && !metadata.contains(meta)
+                {
+                    metadata.push(meta.clone());
+                }
+                if let Some(hosted) = hosted
+                    && !hosted_items.contains(hosted)
+                {
+                    hosted_items.push(hosted.clone());
+                }
+            };
+            match &event {
+                Ok(
+                    LlmEvent::TextDelta { meta, .. }
+                    | LlmEvent::ReasoningComplete { meta, .. }
+                    | LlmEvent::ToolCallComplete { meta, .. },
+                ) => receive(meta.as_deref(), None),
+                Ok(LlmEvent::ServerToolContent { content, meta, .. }) => {
+                    receive(meta.as_deref(), Some(content));
+                }
+                Ok(LlmEvent::AssistantOutput { blocks, .. }) => {
+                    for block in blocks {
+                        let hosted = match block {
+                            AssistantBlock::ServerToolContent { content, .. } => Some(content),
+                            _ => None,
+                        };
+                        receive(meerkat_core::replay_provider_metadata(block), hosted);
+                    }
+                }
+                Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Success { .. },
+                }) => {
+                    ledger.record_response(
+                        &issuer,
+                        metadata
+                            .iter()
+                            .map(meerkat_core::OpenAiContinuityMaterial::Metadata)
+                            .chain(
+                                hosted_items
+                                    .iter()
+                                    .map(meerkat_core::OpenAiContinuityMaterial::HostedToolItem),
+                            ),
+                    );
+                    metadata.clear();
+                    hosted_items.clear();
+                }
+                _ => {}
+            }
+            event
+        }))
     }
 
     /// Install a set of (name, value) headers to include on every request.
@@ -1133,12 +1459,18 @@ impl OpenAiClient {
             .map(|(request, _)| request)
     }
 
-    /// Remove from `diagnostic`, text a response carried, any credential the
-    /// authorizer signed the request with: a provider, proxy or gateway can
+    /// Remove from `diagnostic`, text a response carried, the credential
+    /// that signed the request: the authorizer's, or without an authorizer
+    /// this client's own API key. A provider, proxy or gateway can
     /// echo the request's headers in an error.
     fn redact_diagnostic(&self, diagnostic: &mut String) {
-        if let Some(authorizer) = &self.authorizer {
-            authorizer.redact_response_diagnostic(diagnostic);
+        match &self.authorizer {
+            Some(authorizer) => authorizer.redact_response_diagnostic(diagnostic),
+            None => meerkat_core::redact::redact_credentials(diagnostic, |visit| {
+                if let Some(api_key) = &self.api_key {
+                    visit(api_key);
+                }
+            }),
         }
     }
 
@@ -1182,8 +1514,23 @@ impl OpenAiClient {
     /// runs every built-in tool definition through this exact builder to prove
     /// the emitted `tools[].parameters` carry no root-level combinator. It is
     /// not a supported host API.
+    ///
+    /// The lowering asks the replay owner for every assistant step, under
+    /// what the process knows now: continuity material of a step the process
+    /// did not receive from this client's service is not lowered, whether or
+    /// not the caller projected the transcript first.
     #[doc(hidden)]
     pub fn build_request_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
+        self.lower_request_body(request, Some(&self.continuity_target()))
+    }
+
+    /// Lower a request to the Responses body under `continuity`, the
+    /// decision the request was prepared with.
+    fn lower_request_body(
+        &self,
+        request: &LlmRequest,
+        continuity: Option<&meerkat_core::OpenAiContinuityTarget>,
+    ) -> Result<Value, LlmError> {
         let wire_tag = self.wire_openai_tag(request);
         let cache_breakpoints =
             ResponsesCacheBreakpoints::for_request(request, wire_tag.as_deref());
@@ -1195,6 +1542,7 @@ impl OpenAiClient {
                 SystemMessageMode::ExtractToInstructions,
                 cache_breakpoints,
                 web_search_evidence,
+                continuity,
             )?
         } else {
             Self::convert_to_responses_input_with_system_mode(
@@ -1202,6 +1550,7 @@ impl OpenAiClient {
                 SystemMessageMode::IncludeInInput,
                 cache_breakpoints,
                 web_search_evidence,
+                continuity,
             )?
         };
         let reasoning_enabled = Self::request_supports_reasoning_payload(request);
@@ -1549,19 +1898,33 @@ impl OpenAiClient {
         Ok(())
     }
 
-    fn build_request_body_with_continuation(
+    /// The request body under what the process knows now (rows lower a
+    /// transcript directly; a request in flight is lowered under the decision
+    /// it was prepared with).
+    #[cfg(test)]
+    pub(crate) fn build_request_body_with_continuation(
         &self,
         request: &LlmRequest,
     ) -> Result<(Value, Option<OpenAiContinuationPlan>), LlmError> {
-        let Some(plan) = openai_continuation_plan(request) else {
-            return self.build_request_body(request).map(|body| (body, None));
+        self.build_request_body_with_continuation_for(request, &self.continuity_target())
+    }
+
+    fn build_request_body_with_continuation_for(
+        &self,
+        request: &LlmRequest,
+        continuity: &meerkat_core::OpenAiContinuityTarget,
+    ) -> Result<(Value, Option<OpenAiContinuationPlan>), LlmError> {
+        let Some(plan) = openai_continuation_plan(request, Some(continuity)) else {
+            return self
+                .lower_request_body(request, Some(continuity))
+                .map(|body| (body, None));
         };
 
         let mut continuation_request = request.clone();
         continuation_request.messages = request.messages[plan.replay_from_message_index..].to_vec();
-        let mut body = self.build_request_body(&continuation_request)?;
+        let mut body = self.lower_request_body(&continuation_request, Some(continuity))?;
         if self.is_chatgpt_backend_wire() {
-            let full_body = self.build_request_body(request)?;
+            let full_body = self.lower_request_body(request, Some(continuity))?;
             if let Some(instructions) = full_body.get("instructions").cloned() {
                 body["instructions"] = instructions;
             }
@@ -1672,16 +2035,16 @@ impl OpenAiClient {
                 return Ok(response);
             }
             let headers = response.headers().clone();
-            let mut text = response
+            let text = response
                 .text()
                 .await
                 .map_err(|error| LlmError::StreamParseError {
                     message: format!("cannot read Responses rejection body: {error}"),
                 })?;
-            // The body is redacted before it is classified, and the decoded
-            // error again: a JSON escape can hide an echoed credential from
-            // the first pass and decoding reveals it.
-            self.redact_diagnostic(&mut text);
+            // The rejection is classified from the body as received, and the
+            // error built from it is redacted: what the redaction removes
+            // can then never change the error's class. (The continuation
+            // fallback below reads the same body; it never shows it.)
             let rejection =
                 self.redacted_error(LlmError::from_http_response(status, text.clone(), &headers));
             // A policy stop must reach the recovery owner before auth refresh
@@ -1739,6 +2102,9 @@ impl OpenAiClient {
             SystemMessageMode::IncludeInInput,
             ResponsesCacheBreakpoints::None,
             web_search_evidence,
+            // The image path sends user and system content only; under no
+            // service it lowers no continuity material at all.
+            None,
         )
         .map(|(input, _, _)| input)
     }
@@ -1918,6 +2284,7 @@ impl OpenAiClient {
         system_mode: SystemMessageMode,
         cache_breakpoints: ResponsesCacheBreakpoints,
         web_search_evidence: bool,
+        continuity: Option<&meerkat_core::OpenAiContinuityTarget>,
     ) -> Result<
         (
             Vec<Value>,
@@ -2029,7 +2396,24 @@ impl OpenAiClient {
                     }
                 }
                 Message::BlockAssistant(a) => {
-                    let citations = if web_search_evidence {
+                    // The replay owner decides, for the step as a whole,
+                    // whether the target is sent what a service issued:
+                    // reasoning items, item ids and phases, hosted-tool
+                    // items. Everything else is lowered as the conversation
+                    // it was.
+                    let admission = meerkat_core::ReplayStepAdmission::of(
+                        meerkat_core::ReplayWireFamily::OpenAi,
+                        continuity,
+                        &a.blocks,
+                    );
+                    fn admitted<'m>(
+                        admission: &meerkat_core::ReplayStepAdmission,
+                        meta: &'m Option<Box<ProviderMeta>>,
+                    ) -> Option<&'m ProviderMeta> {
+                        meta.as_deref()
+                            .filter(|metadata| admission.admits(metadata))
+                    }
+                    let citations = if web_search_evidence && admission.admits_provider_items() {
                         WebSearchCitations::of(&a.blocks)
                     } else {
                         WebSearchCitations::default()
@@ -2038,9 +2422,10 @@ impl OpenAiClient {
                     for block in &a.blocks {
                         match block {
                             AssistantBlock::Text { text, meta } => {
+                                let meta = admitted(&admission, meta);
                                 if !text.is_empty()
                                     || matches!(
-                                        meta.as_deref(),
+                                        meta,
                                         Some(ProviderMeta::OpenAiAssistantMessage { .. })
                                     )
                                 {
@@ -2053,7 +2438,7 @@ impl OpenAiClient {
                                         id,
                                         phase,
                                         ..
-                                    }) = meta.as_deref()
+                                    }) = meta
                                     {
                                         item["id"] = Value::String(id.clone());
                                         item["status"] = Value::String("completed".into());
@@ -2078,13 +2463,14 @@ impl OpenAiClient {
                                 }));
                             }
                             AssistantBlock::Reasoning { text, meta } => {
-                                if let Some(item) = meta
-                                    .as_deref()
+                                if let Some(item) = admitted(&admission, meta)
                                     .and_then(|meta| Self::openai_reasoning_input_item(text, meta))
                                 {
                                     items.push(item);
                                 }
                             }
+                            AssistantBlock::ServerToolContent { .. }
+                                if !admission.admits_provider_items() => {}
                             AssistantBlock::ServerToolContent { content, .. } => {
                                 match content.get("type").and_then(Value::as_str) {
                                     // Its citations ride on their message's
@@ -2747,6 +3133,29 @@ impl ImageGenerationExecutor for OpenAiClient {
         &self,
         request: ProviderImageGenerationRequest,
     ) -> Result<ProviderImageGenerationOutput, LlmError> {
+        // What a failed image request reports comes from the response (a
+        // rejection body, a stream error event): it is redacted as every
+        // other response diagnostic is.
+        let mut result = self.execute_image_plan(request).await;
+        match &mut result {
+            Ok(output) => {
+                for warning in &mut output.warnings {
+                    if let ImageGenerationWarning::ProviderExecutionFailed { message } = warning {
+                        self.redact_diagnostic(message);
+                    }
+                }
+            }
+            Err(error) => error.redact_diagnostics(|message| self.redact_diagnostic(message)),
+        }
+        result
+    }
+}
+
+impl OpenAiClient {
+    async fn execute_image_plan(
+        &self,
+        request: ProviderImageGenerationRequest,
+    ) -> Result<ProviderImageGenerationOutput, LlmError> {
         match request.execution_plan.clone() {
             plan if OpenAiImageGenerationProfile.matches_provider_id(&plan.provider.0) => {
                 match plan.backend {
@@ -2818,12 +3227,15 @@ impl OpenAiClient {
         prepared: Option<&'a PreparedLlmRequest>,
     ) -> LlmStream<'a> {
         let inner: LlmStream<'a> = Box::pin(async_stream::try_stream! {
+            let continuity = self.decided_continuity(prepared);
             let mut projected_request = request.clone();
-            projected_request.messages = self.project_replay_messages(&request.messages)?;
+            projected_request.messages =
+                self.project_replay_messages_for(&request.messages, &continuity)?;
             let request = &projected_request;
-            let (body, continuation_plan) = self.build_request_body_with_continuation(request)?;
+            let (body, continuation_plan) =
+                self.build_request_body_with_continuation_for(request, &continuity)?;
             let fallback_body = if continuation_plan.is_some() {
-                Some(self.build_request_body(request)?)
+                Some(self.lower_request_body(request, Some(&continuity))?)
             } else {
                 None
             };
@@ -2870,6 +3282,14 @@ impl OpenAiClient {
             let mut streamed_web_search_ids: HashSet<String> = HashSet::new();
             let mut done_emitted = false;
             let mut saw_terminal_fallback_output = false;
+            // A `response.failed` that named no cause was read. The response
+            // failed, and what ends it is its cause (an `error` event, or a
+            // `response.failed` that carries one) or the end of the wait for
+            // one: the end of the stream, a frame that cannot be read, or
+            // `MAX_FRAMES_AWAITING_CAUSE` frames that are not the cause.
+            let mut failed_without_cause = false;
+            let mut frames_awaiting_cause = 0usize;
+            let mut cause_wait_over = false;
             // The output_index of every item the stream added: one ended by
             // `[DONE]` without a terminal response must have completed.
             let mut announced_items: std::collections::BTreeSet<u64> =
@@ -2895,10 +3315,24 @@ impl OpenAiClient {
                 let mut chunk_consumed_line = false;
                 while let Some(step) = events.next_step() {
                     chunk_consumed_line = true;
-                    let meerkat_llm_core::streaming::SseStep::Event(data) = step? else {
+                    let step = match step {
+                        // A line that cannot be read while waiting for a
+                        // cause is not the cause: the wait is over.
+                        Err(_) if failed_without_cause => {
+                            cause_wait_over = true;
+                            break;
+                        }
+                        step => step?,
+                    };
+                    let meerkat_llm_core::streaming::SseStep::Event(data) = step else {
                         continue;
                     };
                     if data == "[DONE]" {
+                        if failed_without_cause && !done_emitted {
+                            // The stream ended and no cause came.
+                            cause_wait_over = true;
+                            break;
+                        }
                         if !done_emitted && saw_terminal_fallback_output {
                             // Without a terminal response only what completed
                             // is committed: an item the stream announced and
@@ -2968,17 +3402,44 @@ impl OpenAiClient {
                     // is the event the end cut: the response is incomplete, as
                     // for a body cut anywhere else, not a malformed event. A
                     // complete event that does not parse stays a parse error.
-                    let parsed_event = Self::parse_responses_sse_data(&data).map_err(|error| {
-                        if body_ended {
-                            LlmError::IncompleteResponse {
-                                message: "OpenAI Responses stream ended mid-event".to_string(),
-                            }
-                        } else {
-                            error
+                    let parsed_event = match Self::parse_responses_sse_data(&data) {
+                        // Data that cannot be read while waiting for a cause
+                        // is not the cause: the wait is over.
+                        Err(_) if failed_without_cause => {
+                            cause_wait_over = true;
+                            break;
                         }
-                    })?;
+                        parsed => parsed.map_err(|error| {
+                            if body_ended {
+                                LlmError::IncompleteResponse {
+                                    message: "OpenAI Responses stream ended mid-event".to_string(),
+                                }
+                            } else {
+                                error
+                            }
+                        })?,
+                    };
 
                     if let Some(mut event) = parsed_event {
+                        // A failed response has no output. After a
+                        // `response.failed` that named no cause only its
+                        // cause is read: an `error` event, or a
+                        // `response.failed` that carries one. Every other
+                        // frame is counted and skipped, and after
+                        // `MAX_FRAMES_AWAITING_CAUSE` of them the wait is
+                        // over, however long the body stays open.
+                        if failed_without_cause
+                            && event.event_type != "error"
+                            && (event.event_type != "response.failed"
+                                || responses_stream_cause(&event).is_none())
+                        {
+                            frames_awaiting_cause += 1;
+                            if frames_awaiting_cause >= MAX_FRAMES_AWAITING_CAUSE {
+                                cause_wait_over = true;
+                                break;
+                            }
+                            continue;
+                        }
                         let terminal_event = event.event_type == "response.completed"
                             || event.event_type == "response.incomplete"
                             || event.event_type == "response.done";
@@ -3483,24 +3944,21 @@ impl OpenAiClient {
                             };
                         }
                         else if event.event_type == "response.failed" {
-                            let error_msg = event.response
-                                .as_ref()
-                                .and_then(responses_error_object)
-                                .and_then(|e| e.get("message"))
-                                .and_then(|m| m.as_str())
-                                .or_else(|| event.response
-                                    .as_ref()
-                                    .and_then(|r| r.get("status_details"))
-                                    .and_then(|d| d.get("error"))
-                                    .and_then(|e| e.get("message"))
-                                    .and_then(|m| m.as_str()))
-                                .unwrap_or("response failed");
-                            let error_code = event.response
-                                .as_ref()
-                                .and_then(responses_error_object)
-                                .and_then(|e| e.get("code"))
-                                .and_then(|c| c.as_str())
-                                .unwrap_or("server_error");
+                            let Some(cause) = responses_stream_cause(&event) else {
+                                // No error object: this event decides
+                                // nothing by itself. The cause, when the
+                                // stream carries one, is in an event after
+                                // it, so the stream is read on: under the
+                                // same stream timeouts as any other event,
+                                // and for a bounded number of frames.
+                                tracing::warn!(
+                                    "OpenAI response failed without an error object; reading on for its cause"
+                                );
+                                failed_without_cause = true;
+                                continue;
+                            };
+                            let error_msg = cause.message.unwrap_or("response failed");
+                            let error_code = cause.classifying_code().unwrap_or("server_error");
 
                             let logged_code = self.redacted(error_code);
                             let logged_message = self.redacted(error_msg);
@@ -3510,7 +3968,7 @@ impl OpenAiClient {
                                 "OpenAI response failed"
                             );
 
-                            let error = map_responses_stream_error(error_code, error_msg);
+                            let error = cause.error(error_code, error_msg);
 
                             done_emitted = true;
                             chunk_yielded.set(true);
@@ -3520,18 +3978,9 @@ impl OpenAiClient {
                         }
                         else if event.event_type == "error" {
                             // Streaming error event from OpenAI
-                            let error_msg = event.error
-                                .as_ref()
-                                .and_then(|e| e.get("message"))
-                                .and_then(|m| m.as_str())
-                                .or(event.message.as_deref())
-                                .unwrap_or("unknown streaming error");
-                            let error_code = event.error
-                                .as_ref()
-                                .and_then(|e| e.get("code"))
-                                .and_then(|c| c.as_str())
-                                .or(event.code.as_deref())
-                                .unwrap_or("unknown");
+                            let cause = responses_stream_cause(&event).unwrap_or_default();
+                            let error_msg = cause.message.unwrap_or("unknown streaming error");
+                            let error_code = cause.classifying_code().unwrap_or("unknown");
 
                             let logged_code = self.redacted(error_code);
                             let logged_message = self.redacted(error_msg);
@@ -3541,7 +3990,7 @@ impl OpenAiClient {
                                 "OpenAI streaming error"
                             );
 
-                            let error = map_responses_stream_error(error_code, error_msg);
+                            let error = cause.error(error_code, error_msg);
 
                             done_emitted = true;
                             chunk_yielded.set(true);
@@ -3551,11 +4000,26 @@ impl OpenAiClient {
                         }
                     }
                 }
+                // The wait for a cause is over and none came: the stream
+                // ended (`[DONE]`, or the end of the body), a frame could
+                // not be read, or too many frames that are not the cause
+                // followed the `response.failed`.
+                if failed_without_cause && !done_emitted && (body_ended || cause_wait_over) {
+                    done_emitted = true;
+                    chunk_yielded.set(true);
+                    yield LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Error {
+                            error: response_failed_without_cause(),
+                        },
+                    };
+                }
                 // A chunk whose lines produced no semantic event is still wire
                 // liveness (keepalive comments, lifecycle bookkeeping); surface
                 // it so the stream-inactivity watchdog re-arms. Bytes that never
-                // complete a line intentionally do not count.
-                if chunk_consumed_line && !chunk_yielded.get() {
+                // complete a line intentionally do not count, and nothing does
+                // while a failed response waits for its cause: the watchdog
+                // bounds that wait whatever the body keeps sending.
+                if chunk_consumed_line && !chunk_yielded.get() && !failed_without_cause {
                     yield LlmEvent::WireLiveness;
                 }
             }
@@ -3563,9 +4027,9 @@ impl OpenAiClient {
 
         // Every error the stream ends with is redacted here, whichever path
         // built it (a rejection body, an error event, a parse failure).
-        streaming::redact_stream_diagnostics(
-            streaming::ensure_terminal_done(inner),
-            self.authorizer.as_deref(),
+        streaming::redact_stream_errors(
+            streaming::ensure_terminal_done(self.record_received_continuity(inner)),
+            move |diagnostic: &mut String| self.redact_diagnostic(diagnostic),
         )
     }
 }
@@ -3593,32 +4057,108 @@ impl LlmClient for OpenAiClient {
         )
     }
 
+    /// Project for this client's service and freeze the decision into
+    /// the projection's replay witness, so the request prepared from it is
+    /// lowered, measured and sent under that one decision.
+    fn project_replay_request(
+        &self,
+        messages: &[Message],
+    ) -> Result<meerkat_llm_core::LlmReplayProjection, LlmError> {
+        let continuity = self.continuity_target();
+        let projected = self.project_replay_messages_for(messages, &continuity)?;
+        let decision = OpenAiReplayDecision::freeze(continuity.issuer(), messages, &projected);
+        Ok(meerkat_llm_core::LlmReplayProjection::new(projected)
+            .with_replay_witness(decision.witness()))
+    }
+
     fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
-        project_openai_replay_messages_for_target(
-            messages,
-            OpenAiReplayProjectionMode::Responses,
-            self.supports_image_input,
-            true,
-            self.backend_wire.carries_web_search_evidence(),
-        )
+        self.project_replay_messages_for(messages, &self.continuity_target())
     }
 
     fn request_pressure(
         &self,
         request: &LlmRequest,
     ) -> Result<Option<meerkat_core::ProviderRequestPressure>, LlmError> {
-        let mut projected_request = request.clone();
-        projected_request.messages = self.project_replay_messages(&request.messages)?;
-        let (body, continuation_plan) =
-            self.build_request_body_with_continuation(&projected_request)?;
+        self.request_pressure_for(request, &self.continuity_target())
+    }
+
+    fn prepared_request_pressure(
+        &self,
+        request: &PreparedLlmRequest,
+    ) -> Result<Option<meerkat_core::ProviderRequestPressure>, LlmError> {
+        self.request_pressure_for(request.request(), &self.decided_continuity(Some(request)))
+    }
+
+    fn authored_cache_breakpoints(
+        &self,
+        request: &LlmRequest,
+        canonical_messages: &[Message],
+    ) -> Result<Vec<meerkat_core::ProviderCacheBreakpointClaim>, LlmError> {
+        self.authored_cache_breakpoints_for(request, canonical_messages, &self.continuity_target())
+    }
+
+    fn prepared_cache_breakpoints(
+        &self,
+        request: &PreparedLlmRequest,
+        canonical_messages: &[Message],
+    ) -> Result<Vec<meerkat_core::ProviderCacheBreakpointClaim>, LlmError> {
+        self.authored_cache_breakpoints_for(
+            request.request(),
+            canonical_messages,
+            &self.decided_continuity(Some(request)),
+        )
+    }
+    fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
+        self.stream_request(request, None)
+    }
+
+    fn stream_prepared<'a>(&'a self, request: &'a PreparedLlmRequest) -> LlmStream<'a> {
+        self.stream_request(request.request(), Some(request))
+    }
+
+    fn provider(&self) -> meerkat_core::Provider {
+        meerkat_core::Provider::OpenAI
+    }
+
+    async fn health_check(&self) -> Result<(), LlmError> {
+        Ok(())
+    }
+
+    fn compile_schema(&self, output_schema: &OutputSchema) -> Result<CompiledSchema, SchemaError> {
+        let mut schema = output_schema.schema.as_value().clone();
+        // OpenAI `strict` controls constrained decoding behavior for structured
+        // output. `compat` is only used for provider-lowering policies where
+        // warnings/errors may be emitted (e.g. Gemini keyword compatibility).
+        if output_schema.strict {
+            ensure_additional_properties_false(&mut schema);
+        }
+
+        Ok(CompiledSchema {
+            schema,
+            warnings: Vec::new(),
+        })
+    }
+}
+
+impl OpenAiClient {
+    /// The pressure of `body`, the lowering of `projected_request`; with a
+    /// continuation, of the larger of it and the full replay it may fall
+    /// back to.
+    fn request_pressure_of(
+        &self,
+        projected_request: &LlmRequest,
+        body: Value,
+        has_continuation: bool,
+        continuity: &meerkat_core::OpenAiContinuityTarget,
+    ) -> Result<Option<meerkat_core::ProviderRequestPressure>, LlmError> {
         let mut encoded_body =
             serde_json::to_vec(&body).map_err(|error| LlmError::InvalidRequest {
                 message: format!("failed to serialize OpenAI request body: {error}"),
             })?;
         // A rejected continuation is retried as a full replay. The pressure
         // witness must cover the largest body this one invocation may send.
-        if continuation_plan.is_some() {
-            let fallback_body = self.build_request_body(&projected_request)?;
+        if has_continuation {
+            let fallback_body = self.lower_request_body(projected_request, Some(continuity))?;
             let fallback_encoded =
                 serde_json::to_vec(&fallback_body).map_err(|error| LlmError::InvalidRequest {
                     message: format!("failed to serialize OpenAI fallback request body: {error}"),
@@ -3642,10 +4182,29 @@ impl LlmClient for OpenAiClient {
         ))
     }
 
-    fn authored_cache_breakpoints(
+    fn request_pressure_for(
+        &self,
+        request: &LlmRequest,
+        continuity: &meerkat_core::OpenAiContinuityTarget,
+    ) -> Result<Option<meerkat_core::ProviderRequestPressure>, LlmError> {
+        let mut projected_request = request.clone();
+        projected_request.messages =
+            self.project_replay_messages_for(&request.messages, continuity)?;
+        let (body, continuation_plan) =
+            self.build_request_body_with_continuation_for(&projected_request, continuity)?;
+        self.request_pressure_of(
+            &projected_request,
+            body,
+            continuation_plan.is_some(),
+            continuity,
+        )
+    }
+
+    fn authored_cache_breakpoints_for(
         &self,
         request: &LlmRequest,
         canonical_messages: &[Message],
+        continuity: &meerkat_core::OpenAiContinuityTarget,
     ) -> Result<Vec<meerkat_core::ProviderCacheBreakpointClaim>, LlmError> {
         let Some(tag) = self.wire_openai_tag(request) else {
             return Ok(Vec::new());
@@ -3663,13 +4222,13 @@ impl LlmClient for OpenAiClient {
         // A previous_response_id request lowers only a replay suffix and may
         // fall back to full replay after provider rejection. It has no single
         // authored rendered prefix, so cache inheritance is unavailable.
-        if openai_continuation_plan(request).is_some() {
+        if openai_continuation_plan(request, Some(continuity)).is_some() {
             return Ok(Vec::new());
         }
 
         // Validate the exact full lowering first. Boundary evidence is minted
         // only if the same renderer successfully authored the body.
-        let body = self.build_request_body(request)?;
+        let body = self.lower_request_body(request, Some(continuity))?;
         let encoded_body = serde_json::to_vec(&body).map_err(|error| LlmError::InvalidRequest {
             message: format!("failed to serialize OpenAI cache evidence body: {error}"),
         })?;
@@ -3684,6 +4243,7 @@ impl LlmClient for OpenAiClient {
             system_mode,
             ResponsesCacheBreakpoints::EveryInput,
             self.backend_wire.carries_web_search_evidence(),
+            Some(continuity),
         )?;
         // Every authored breakpoint is `{"mode": "explicit"}` without its own
         // `ttl`, so it takes the request-level `prompt_cache_options.ttl`.
@@ -3751,37 +4311,6 @@ impl LlmClient for OpenAiClient {
             })
             .collect()
     }
-
-    fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
-        self.stream_request(request, None)
-    }
-
-    fn stream_prepared<'a>(&'a self, request: &'a PreparedLlmRequest) -> LlmStream<'a> {
-        self.stream_request(request.request(), Some(request))
-    }
-
-    fn provider(&self) -> meerkat_core::Provider {
-        meerkat_core::Provider::OpenAI
-    }
-
-    async fn health_check(&self) -> Result<(), LlmError> {
-        Ok(())
-    }
-
-    fn compile_schema(&self, output_schema: &OutputSchema) -> Result<CompiledSchema, SchemaError> {
-        let mut schema = output_schema.schema.as_value().clone();
-        // OpenAI `strict` controls constrained decoding behavior for structured
-        // output. `compat` is only used for provider-lowering policies where
-        // warnings/errors may be emitted (e.g. Gemini keyword compatibility).
-        if output_schema.strict {
-            ensure_additional_properties_false(&mut schema);
-        }
-
-        Ok(CompiledSchema {
-            schema,
-            warnings: Vec::new(),
-        })
-    }
 }
 
 /// SSE event from OpenAI Responses API streaming
@@ -3845,10 +4374,159 @@ fn map_responses_stream_error(error_code: &str, error_message: &str) -> LlmError
             max: 0,
             requested: 1,
         },
-        "invalid_request_error" => LlmError::from_http_status(400, error_message.to_string(), None),
+        // A refused request: over HTTP a 400, in a stream one of these codes
+        // (`invalid_request_error` is also the `type` of such an error
+        // object). The message is classified as the body of that 400 is, so
+        // a message that names another terminal class (a context overflow,
+        // an oversized request, exhausted quota) keeps it; otherwise the
+        // error is the invalid request, with the code in front of the
+        // service's message, and the turn fails once instead of being sent
+        // again. `invalid_request_body` is a general code, used for more
+        // than one request fault: the message says which fault.
+        "invalid_request_error"
+        | "invalid_request_body"
+        | "invalid_encrypted_content"
+        | "invalid_prompt"
+        | "invalid_value"
+        | "invalid_argument"
+        | "unsupported_value"
+        | "unsupported_parameter" => refused_request_error(error_code, error_message),
+        // One code, one class, whatever carries it: over HTTP this code is a
+        // 404 (`LlmError::from_http_status`), and the realtime adapter maps
+        // it the same way. Built here, not through the HTTP classifier: the
+        // message is text, never an error body to parse.
+        "model_not_found" => LlmError::ModelNotFound {
+            model: error_message.to_string(),
+        },
         _ => LlmError::Unknown {
             message: format!("{error_code}: {error_message}"),
         },
+    }
+}
+
+/// A refused request named by `error_code`, classified as the body of an
+/// HTTP 400 with `error_message` is: the invalid request with the code in
+/// front of the message, or the class the message itself names (a context
+/// overflow, an oversized request, exhausted quota). The message is text:
+/// one that is itself a JSON object naming a policy violation selects no
+/// policy stop, which only a structured code establishes.
+fn refused_request_error(error_code: &str, error_message: &str) -> LlmError {
+    match LlmError::from_http_status(400, error_message.to_string(), None) {
+        LlmError::InvalidRequest { .. } | LlmError::PolicyStop { .. } => LlmError::InvalidRequest {
+            message: format!("{error_code}: {error_message}"),
+        },
+        other => other,
+    }
+}
+
+/// How many frames that are not the cause the client reads after a
+/// `response.failed` without an error object before it stops waiting for
+/// one. A count, not a timer: it ends the wait on a body that keeps sending
+/// data frames without waiting for the stream-inactivity window, and where
+/// no window is configured. Comment lines are not frames and are not
+/// counted: a body that stays open and sends only those is ended by the
+/// stream-inactivity window (no liveness is reported while waiting), and
+/// where no window is configured this bound does not end it.
+const MAX_FRAMES_AWAITING_CAUSE: usize = 16;
+
+/// The cause a Responses stream event gives for a failed response.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ResponsesStreamCause<'a> {
+    code: Option<&'a str>,
+    /// The `type` of the error object.
+    error_type: Option<&'a str>,
+    message: Option<&'a str>,
+}
+
+impl<'a> ResponsesStreamCause<'a> {
+    /// The code that classifies this cause: its `code`, or, when it names
+    /// none, its `type` where the type names a class by itself (the
+    /// request-refusal type and the exhausted-quota codes). Any other type
+    /// decides nothing, and the event keeps its default class: a type alone
+    /// never establishes a policy stop, a rate limit or a server error.
+    fn classifying_code(&self) -> Option<&'a str> {
+        self.code.or_else(|| {
+            self.error_type.filter(|error_type| {
+                *error_type == "invalid_request_error"
+                    || LlmError::code_signals_quota_exhausted(error_type)
+            })
+        })
+    }
+
+    /// The typed error of this cause for `error_code` (its classifying
+    /// code, or the event's default) and `error_message`. A code this
+    /// client does not know, on an error object whose type is the
+    /// request-refusal type, is classified by that type, as the status
+    /// classifies the same refusal over HTTP 400; the message keeps the
+    /// code. With any other type an unknown code stays the unknown class.
+    fn error(&self, error_code: &str, error_message: &str) -> LlmError {
+        match map_responses_stream_error(error_code, error_message) {
+            LlmError::Unknown { .. }
+                if self.code.is_some() && self.error_type == Some("invalid_request_error") =>
+            {
+                refused_request_error(error_code, error_message)
+            }
+            error => error,
+        }
+    }
+}
+
+/// The cause `event` gives for a failed response, read from every place a
+/// stream event can carry it, into one shape: the error object of the
+/// event's response (`response.failed`; `error`, else
+/// `status_details.error`), the event's own `error` object (the nested form
+/// of an `error` event), or `code` and `message` at the top level of the
+/// event (the flat form). An error given as a plain string is the message.
+/// `None` when the event names no code, no type and no message: a
+/// `response.failed` whose `error` is null or an empty object.
+fn responses_stream_cause(event: &ResponsesStreamEvent) -> Option<ResponsesStreamCause<'_>> {
+    fn non_empty(value: &Value) -> Option<&str> {
+        value.as_str().filter(|text| !text.is_empty())
+    }
+    let response_error = event.response.as_ref().and_then(responses_error_object);
+    let object = response_error
+        .filter(|error| error.is_object())
+        .or_else(|| event.error.as_ref().filter(|error| error.is_object()));
+    let field = |name: &str| object.and_then(|error| error.get(name)).and_then(non_empty);
+    // The message a response states under `status_details` when its error
+    // object has none, and an error that is a plain string.
+    let details_message = event
+        .response
+        .as_ref()
+        .and_then(|response| response.get("status_details"))
+        .and_then(|details| details.get("error"))
+        .and_then(|error| error.get("message"))
+        .and_then(non_empty);
+    let string_error = response_error
+        .and_then(non_empty)
+        .or_else(|| event.error.as_ref().and_then(non_empty));
+    let flat_code = event.code.as_deref().filter(|code| !code.is_empty());
+    let flat_message = event
+        .message
+        .as_deref()
+        .filter(|message| !message.is_empty());
+    let cause = ResponsesStreamCause {
+        code: field("code").or(flat_code),
+        error_type: field("type"),
+        message: field("message")
+            .or(details_message)
+            .or(string_error)
+            .or(flat_message),
+    };
+    (cause != ResponsesStreamCause::default()).then_some(cause)
+}
+
+/// How a response ends whose `response.failed` named no cause and whose
+/// wait for one ended without it: the stream ended, a frame could not be
+/// read, or `MAX_FRAMES_AWAITING_CAUSE` other frames followed. Retryable,
+/// as a failure without a cause was before: nothing says the request itself
+/// was refused.
+fn response_failed_without_cause() -> LlmError {
+    LlmError::ServerError {
+        status: 500,
+        message: "response failed with no cause: `response.failed` carried no error and no \
+                  cause followed it"
+            .to_string(),
     }
 }
 
@@ -4508,6 +5186,7 @@ mod tests {
             )),
         ];
 
+        let client = client.having_received(&messages);
         let projected = client.project_replay_messages(&messages)?;
 
         let Message::User(user) = &projected[0] else {
@@ -5563,6 +6242,719 @@ mod tests {
         );
     }
 
+    /// An authorizer that redacts response text by itself is the only
+    /// redaction of its route's errors: the client asks it and adds no step
+    /// of its own. Text the authorizer leaves, credential-shaped or not,
+    /// reaches the error as the provider sent it. (The made-up value is
+    /// assembled here so no scanner reads the source as a secret.)
+    #[tokio::test]
+    async fn an_authorizer_that_redacts_by_itself_is_the_only_redaction_of_a_stream_error() {
+        let unsigned = format!("{}7", "notsignedbythisroute".repeat(2));
+        let sent = format!(
+            "upstream echo: authorization: Bearer {AUTHORIZATION_CANARY}; another route sent api_key={unsigned}"
+        );
+        let event = serde_json::json!({"type": "error", "code": "server_error", "message": sent});
+        let body = format!("data: {event}\n\n");
+        let app = Router::new().fallback(move || {
+            let body = body.clone();
+            async move { ([("content-type", "text/event-stream")], body).into_response() }
+        });
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind echoing server");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve echoing server");
+        });
+        let client =
+            OpenAiClient::new_with_base_url("unused".to_string(), format!("http://{addr}"))
+                .with_authorizer(Arc::new(CanaryBearerAuthorizer));
+        let request = LlmRequest::new("gpt-5.4", vec![Message::User(UserMessage::text("hello"))]);
+        let events = client.stream(&request).collect::<Vec<_>>().await;
+        server.abort();
+        let error = events
+            .into_iter()
+            .find_map(|event| match event {
+                Err(error)
+                | Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Error { error },
+                }) => Some(error),
+                Ok(_) => None,
+            })
+            .expect("the stream ends in an error");
+        let LlmError::ServerError {
+            status: 500,
+            message,
+        } = &error
+        else {
+            panic!("the stream error keeps its class: {error:?}");
+        };
+        assert_eq!(
+            message,
+            &format!(
+                "upstream echo: authorization: Bearer <redacted>; another route sent api_key={unsigned}"
+            ),
+            "the authorizer's replacement and nothing else"
+        );
+        // The step a client without such an authorizer applies would have
+        // replaced the value: without that, this row could not notice a
+        // second step.
+        let mut stepped = message.clone();
+        meerkat_core::redact::redact_credentials(&mut stepped, |_| {});
+        assert!(
+            !stepped.contains(&unsigned),
+            "the credential-shape step replaces the value: {stepped}"
+        );
+    }
+
+    /// How the upstream repeats the credential that signed the request.
+    #[derive(Debug, Clone, Copy)]
+    enum CredentialEcho {
+        /// HTTP 400 whose message names the credential header as sent.
+        HeaderLine,
+        /// HTTP 400 whose message carries the credential alone.
+        Bare,
+        /// HTTP 400 whose message carries a URL with the credential in it.
+        Url,
+        /// HTTP 200 stream whose `error` event names the header as sent.
+        StreamError,
+        /// HTTP 200 stream that fails with a code of its own and names the
+        /// header as sent in its message. `code` is the code the event
+        /// carries; `None` makes the code itself repeat the credential,
+        /// after a fixed word. The failure arrives as an `error` event, or
+        /// as a `response.failed` event when `failed_response` is set.
+        StreamCodedError {
+            code: Option<&'static str>,
+            failed_response: bool,
+        },
+    }
+
+    /// The message an upstream that received the credential header `name`
+    /// with `value` answers with.
+    fn credential_echo_message(echo: CredentialEcho, name: &str, value: &str) -> String {
+        let bare = value.strip_prefix("Bearer ").unwrap_or(value);
+        match echo {
+            CredentialEcho::HeaderLine
+            | CredentialEcho::StreamError
+            | CredentialEcho::StreamCodedError { .. } => {
+                format!("upstream echo: rejected request with header {name}: {value}")
+            }
+            CredentialEcho::Bare => format!("upstream echo: credential {bare} was refused"),
+            CredentialEcho::Url => format!(
+                "upstream echo: GET http://upstream.invalid/v1/models?session={bare}&page=2 failed"
+            ),
+        }
+    }
+
+    /// Answers every request, whatever its path, by repeating the header
+    /// that carries its credential (`authorization`, or Azure's `api-key`).
+    async fn spawn_credential_echo_server(
+        echo: CredentialEcho,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new().fallback(move |headers: HeaderMap| async move {
+            let (name, value) = ["authorization", "api-key"]
+                .into_iter()
+                .find_map(|name| {
+                    let value = headers.get(name)?.to_str().ok()?;
+                    Some((name, value.to_string()))
+                })
+                .unwrap_or(("authorization", String::new()));
+            let message = credential_echo_message(echo, name, &value);
+            match echo {
+                CredentialEcho::StreamError => {
+                    let event = serde_json::json!({
+                        "type": "error",
+                        "code": "server_error",
+                        "message": message,
+                    });
+                    (
+                        [("content-type", "text/event-stream")],
+                        format!("data: {event}\n\n"),
+                    )
+                        .into_response()
+                }
+                CredentialEcho::StreamCodedError {
+                    code,
+                    failed_response,
+                } => {
+                    let bare = value.strip_prefix("Bearer ").unwrap_or(&value);
+                    let code = code.map_or_else(
+                        || format!("rejected_credential:{bare}"),
+                        ToString::to_string,
+                    );
+                    let event = if failed_response {
+                        serde_json::json!({
+                            "type": "response.failed",
+                            "response": {
+                                "id": "resp_echo",
+                                "status": "failed",
+                                "error": {"code": code, "message": message},
+                            },
+                        })
+                    } else {
+                        serde_json::json!({"type": "error", "code": code, "message": message})
+                    };
+                    (
+                        [("content-type", "text/event-stream")],
+                        format!("data: {event}\n\n"),
+                    )
+                        .into_response()
+                }
+                CredentialEcho::HeaderLine | CredentialEcho::Bare | CredentialEcho::Url => (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": {"message": message, "type": "invalid_request_error"},
+                    })),
+                )
+                    .into_response(),
+            }
+        });
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind echoing server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve echoing server");
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    /// Who signs the request with the credential.
+    #[derive(Debug, Clone, Copy)]
+    enum CredentialSigner {
+        /// The client's own API key, sent as `Authorization: Bearer`: an
+        /// API-key route, which has no authorizer.
+        ClientApiKey,
+        /// The client's own API key on the Azure OpenAI wire, sent as
+        /// `api-key`.
+        ClientAzureApiKey,
+        /// A static bearer authorizer.
+        StaticBearerAuthorizer,
+    }
+
+    fn credential_signed_client(
+        signer: CredentialSigner,
+        base_url: String,
+        credential: &str,
+    ) -> OpenAiClient {
+        match signer {
+            CredentialSigner::ClientApiKey => {
+                OpenAiClient::new_with_base_url(credential.to_string(), base_url)
+            }
+            CredentialSigner::ClientAzureApiKey => {
+                OpenAiClient::new_with_base_url(credential.to_string(), base_url)
+                    .with_azure_openai_wire(AzureOpenAiWireConfig::default())
+            }
+            CredentialSigner::StaticBearerAuthorizer => {
+                OpenAiClient::new_with_optional_api_key_and_base_url(None, base_url)
+                    .with_authorizer(Arc::new(
+                        meerkat_auth_core::authorizers::StaticBearerAuthorizer::new(
+                            credential.to_string(),
+                            "static-bearer",
+                        ),
+                    ))
+            }
+        }
+    }
+
+    /// The failure of one request through `client` as the agent loop carries
+    /// it: the `AgentError` (`Display` and `Debug`), the typed turn error
+    /// (its `detail` and `reason`) and every event published for the attempt.
+    async fn agent_failure_forms(client: Arc<dyn LlmClient>) -> String {
+        use meerkat_core::AgentLlmClient as _;
+        let (events_tx, mut events_rx) = tokio::sync::mpsc::channel(64);
+        let adapter =
+            LlmClientAdapter::with_event_channel(client, "gpt-5.4".to_string(), events_tx);
+        let error = match adapter
+            .stream_response(
+                &[Message::User(UserMessage::text("hello"))],
+                &[],
+                256,
+                None,
+                None,
+            )
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("the request fails"),
+        };
+        let metadata = meerkat_core::TurnErrorMetadata::from_agent_error(&error)
+            .expect("a provider failure has typed turn error metadata");
+        let metadata = serde_json::to_value(&metadata).expect("metadata JSON");
+        assert!(
+            metadata["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("upstream echo")),
+            "the provider's answer reaches the typed detail: {metadata}"
+        );
+        let events = std::iter::from_fn(|| events_rx.try_recv().ok()).collect::<Vec<_>>();
+        format!("{error} {error:?} {metadata} {events:?}")
+    }
+
+    /// A provider, proxy or gateway that repeats the request's credential
+    /// (its header as sent, the bare value, a URL carrying it, or a stream
+    /// `error` event) never puts it in the error the Responses client
+    /// returns (`Display`, `Debug`, wire JSON) or in what the agent loop
+    /// derives from it (the `AgentError`, the typed turn error's `detail`
+    /// and `reason.provider_error.message`, published events), whether the
+    /// client's own API key (as a bearer, or as Azure's `api-key`) or an
+    /// authorizer signed the request. The server's answer still reaches the
+    /// error.
+    #[tokio::test]
+    async fn echoed_credential_stays_out_of_responses_errors_for_every_signer() {
+        let credential = format!("responses-{}", "madeupcredential".repeat(3));
+        for signer in [
+            CredentialSigner::ClientApiKey,
+            CredentialSigner::ClientAzureApiKey,
+            CredentialSigner::StaticBearerAuthorizer,
+        ] {
+            for echo in [
+                CredentialEcho::HeaderLine,
+                CredentialEcho::Bare,
+                CredentialEcho::Url,
+                CredentialEcho::StreamError,
+            ] {
+                let (base_url, server) = spawn_credential_echo_server(echo).await;
+                let client = credential_signed_client(signer, base_url, &credential);
+                let request =
+                    LlmRequest::new("gpt-5.4", vec![Message::User(UserMessage::text("hello"))]);
+                let events = client.stream(&request).collect::<Vec<_>>().await;
+                let error = events
+                    .into_iter()
+                    .find_map(|event| match event {
+                        Err(error)
+                        | Ok(LlmEvent::Done {
+                            outcome: LlmDoneOutcome::Error { error },
+                        }) => Some(error),
+                        Ok(_) => None,
+                    })
+                    .unwrap_or_else(|| panic!("{signer:?} {echo:?}: the stream ends in an error"));
+                let rendered = format!(
+                    "{error} {error:?} {}",
+                    serde_json::to_string(&error).expect("error JSON")
+                );
+                let agent_forms = agent_failure_forms(Arc::new(client)).await;
+                server.abort();
+                for (surface, text) in [("client error", &rendered), ("agent", &agent_forms)] {
+                    assert!(
+                        !text.contains(&credential),
+                        "{signer:?} {echo:?}: the {surface} leaked the credential: {text}"
+                    );
+                    assert!(
+                        text.contains("upstream echo"),
+                        "{signer:?} {echo:?}: the server's answer reached the {surface}: {text}"
+                    );
+                }
+                if matches!(echo, CredentialEcho::HeaderLine) {
+                    // The rejection keeps its class, and the redaction removes
+                    // the credential and nothing else: the body is still the
+                    // JSON the server sent.
+                    let LlmError::InvalidRequest { message } = &error else {
+                        panic!("{signer:?}: the rejection keeps its class: {error:?}");
+                    };
+                    let body: serde_json::Value =
+                        serde_json::from_str(message).unwrap_or_else(|parse| {
+                            panic!("{signer:?}: the body is kept whole: {parse}: {message}")
+                        });
+                    assert!(
+                        body["error"]["message"].as_str().is_some_and(|echoed| {
+                            echoed.starts_with("upstream echo: rejected request with header ")
+                                && echoed.ends_with("[REDACTED]")
+                        }),
+                        "{signer:?}: only the credential is replaced: {message}"
+                    );
+                    assert!(
+                        body["error"]
+                            .as_object()
+                            .is_some_and(|fields| fields.len() > 1),
+                        "{signer:?}: the fields after the message are kept: {message}"
+                    );
+                    assert!(
+                        agent_forms.contains("\"provider_error\":{\"message\":"),
+                        "{signer:?}: the typed reason carries the provider message: {agent_forms}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A stream that fails with more than a server error's message: a model
+    /// the service does not know (the message becomes the error's `model`),
+    /// a refused request (the code goes in front of the message), and a
+    /// code that itself repeats the credential (the code is a log field and
+    /// part of the error), as an `error` event and as a `response.failed`
+    /// event. None of them puts the credential in the error the Responses
+    /// client returns, in what the agent loop derives from it and publishes,
+    /// or in a field the client logs, whoever signed the request; each keeps
+    /// its class.
+    #[tokio::test]
+    async fn echoed_credential_stays_out_of_coded_stream_errors_and_their_log_fields() {
+        let log = LogCapture::default();
+        let capture = CaptureSubscriber::dispatch(log.clone());
+        // A second registered dispatcher makes callsite interest come from
+        // every dispatcher, so a callsite first reached under no subscriber
+        // still reaches this one.
+        let _anchor = CaptureSubscriber::dispatch(LogCapture::default());
+        let _guard = tracing::dispatcher::set_default(&capture);
+
+        let credential = format!("responses-{}", "madeupcredential".repeat(3));
+        for signer in [
+            CredentialSigner::ClientApiKey,
+            CredentialSigner::ClientAzureApiKey,
+            CredentialSigner::StaticBearerAuthorizer,
+        ] {
+            for (code, failed_response) in [
+                (Some("model_not_found"), false),
+                (Some("invalid_request_body"), true),
+                (None, false),
+                (None, true),
+            ] {
+                let echo = CredentialEcho::StreamCodedError {
+                    code,
+                    failed_response,
+                };
+                let (base_url, server) = spawn_credential_echo_server(echo).await;
+                let client = credential_signed_client(signer, base_url, &credential);
+                let request =
+                    LlmRequest::new("gpt-5.4", vec![Message::User(UserMessage::text("hello"))]);
+                let events = client.stream(&request).collect::<Vec<_>>().await;
+                let error = events
+                    .into_iter()
+                    .find_map(|event| match event {
+                        Err(error)
+                        | Ok(LlmEvent::Done {
+                            outcome: LlmDoneOutcome::Error { error },
+                        }) => Some(error),
+                        Ok(_) => None,
+                    })
+                    .unwrap_or_else(|| panic!("{signer:?} {echo:?}: the stream ends in an error"));
+                let rendered = format!(
+                    "{error} {error:?} {}",
+                    serde_json::to_string(&error).expect("error JSON")
+                );
+                let agent_forms = agent_failure_forms(Arc::new(client)).await;
+                server.abort();
+                for (surface, text) in [("client error", &rendered), ("agent", &agent_forms)] {
+                    assert!(
+                        !text.contains(&credential),
+                        "{signer:?} {echo:?}: the {surface} leaked the credential: {text}"
+                    );
+                    assert!(
+                        text.contains("upstream echo"),
+                        "{signer:?} {echo:?}: the server's answer reached the {surface}: {text}"
+                    );
+                }
+                match (code, &error) {
+                    (Some("model_not_found"), LlmError::ModelNotFound { model }) => assert!(
+                        model.starts_with("upstream echo: rejected request with header "),
+                        "{signer:?} {echo:?}: the message is the model: {model}"
+                    ),
+                    (Some(code), LlmError::InvalidRequest { message }) => assert!(
+                        message.starts_with(&format!(
+                            "{code}: upstream echo: rejected request with header "
+                        )),
+                        "{signer:?} {echo:?}: the code stands in front of the message: {message}"
+                    ),
+                    (None, LlmError::Unknown { message }) => assert!(
+                        message.starts_with("rejected_credential:[REDACTED]: upstream echo: "),
+                        "{signer:?} {echo:?}: the code keeps its word and loses the credential: {message}"
+                    ),
+                    _ => panic!("{signer:?} {echo:?}: the failure keeps its class: {error:?}"),
+                }
+            }
+        }
+
+        let logged = log.text();
+        assert!(
+            logged.contains("upstream echo") && logged.contains("rejected_credential:"),
+            "the capture saw the client's error log fields, the code included: {logged}"
+        );
+        assert!(
+            !logged.contains(&credential),
+            "a log field leaked the credential: {logged}"
+        );
+    }
+
+    /// A rejection is redacted where it is read, before the stream carries
+    /// it: the error the request step returns holds no credential by itself,
+    /// whoever signed the request, and keeps its class. (The stream's last
+    /// wrapper redacts the same error again; this row pins the first step,
+    /// which a caller of the request step outside the stream relies on.)
+    #[tokio::test]
+    async fn a_rejection_is_redacted_where_it_is_read() {
+        let credential = format!("responses-{}", "madeupcredential".repeat(3));
+        for signer in [
+            CredentialSigner::ClientApiKey,
+            CredentialSigner::ClientAzureApiKey,
+            CredentialSigner::StaticBearerAuthorizer,
+        ] {
+            for echo in [
+                CredentialEcho::HeaderLine,
+                CredentialEcho::Bare,
+                CredentialEcho::Url,
+            ] {
+                let (base_url, server) = spawn_credential_echo_server(echo).await;
+                let client = credential_signed_client(signer, base_url, &credential);
+                let endpoint = client.responses_endpoint();
+                let error = client
+                    .responses_response_with_fallback(
+                        &endpoint,
+                        &serde_json::json!({"stream": true}),
+                        None,
+                        meerkat_core::HttpAuthorizationContent::default(),
+                        None,
+                        &mut Vec::new(),
+                    )
+                    .await
+                    .expect_err("the request is rejected");
+                server.abort();
+                let rendered = format!(
+                    "{error} {error:?} {}",
+                    serde_json::to_string(&error).expect("error JSON")
+                );
+                assert!(
+                    !rendered.contains(&credential),
+                    "{signer:?} {echo:?}: the rejection leaked the credential: {rendered}"
+                );
+                assert!(
+                    rendered.contains("upstream echo"),
+                    "{signer:?} {echo:?}: the server's answer reached the rejection: {rendered}"
+                );
+                assert!(
+                    matches!(error, LlmError::InvalidRequest { .. }),
+                    "{signer:?} {echo:?}: the rejection keeps its class: {error:?}"
+                );
+            }
+        }
+    }
+
+    /// An image request the provider refuses with a body that repeats the
+    /// request's credential reports the refusal without the credential.
+    #[tokio::test]
+    async fn echoed_credential_stays_out_of_an_image_request_failure() {
+        let credential = format!("responses-{}", "madeupcredential".repeat(3));
+        for signer in [
+            CredentialSigner::ClientApiKey,
+            CredentialSigner::StaticBearerAuthorizer,
+        ] {
+            for echo in [CredentialEcho::HeaderLine, CredentialEcho::Bare] {
+                let (base_url, server) = spawn_credential_echo_server(echo).await;
+                let client = credential_signed_client(signer, base_url, &credential);
+                let output = client
+                    .execute_image_generation(
+                        image_executor_request_json(hosted_openai_plan_json()),
+                    )
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!("{signer:?} {echo:?}: a provider failure output: {error}")
+                    });
+                server.abort();
+                let rendered = format!("{:?}", output.warnings);
+                assert!(
+                    !rendered.contains(&credential),
+                    "{signer:?} {echo:?}: the warning leaked the credential: {rendered}"
+                );
+                assert!(
+                    rendered.contains("upstream echo"),
+                    "{signer:?} {echo:?}: the server's answer reached the warning: {rendered}"
+                );
+            }
+        }
+    }
+
+    /// An image request whose streamed answer cannot be read fails with the
+    /// parse error. The parser quotes the value it could not read, so a
+    /// data line that repeats the request's credential there would put it
+    /// in the error: the error carries the answer without the credential.
+    #[tokio::test]
+    async fn echoed_credential_stays_out_of_an_image_request_error() {
+        let credential = format!("responses-{}", "madeupcredential".repeat(3));
+        let app = Router::new().fallback(|headers: HeaderMap| async move {
+            let authorization = headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default();
+            // `output_index` is a number: the parser reports the text it
+            // finds in its place.
+            let event = serde_json::json!({
+                "type": "response.created",
+                "output_index": format!("upstream echo: header authorization: {authorization}"),
+            });
+            (
+                [("content-type", "text/event-stream")],
+                format!("data: {event}\n\n"),
+            )
+                .into_response()
+        });
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind echoing stream server");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve echoing stream server");
+        });
+        for signer in [
+            CredentialSigner::ClientApiKey,
+            CredentialSigner::StaticBearerAuthorizer,
+        ] {
+            let client = credential_signed_client(signer, format!("http://{addr}"), &credential)
+                .with_chatgpt_backend_wire();
+            let error = match client
+                .execute_image_generation(image_executor_request_json(hosted_openai_plan_json()))
+                .await
+            {
+                Err(error) => error,
+                Ok(output) => panic!(
+                    "{signer:?}: an unreadable stream is an error: {:?}",
+                    output.warnings
+                ),
+            };
+            assert!(
+                matches!(error, LlmError::StreamParseError { .. }),
+                "{signer:?}: {error:?}"
+            );
+            let rendered = format!("{error} {error:?}");
+            assert!(
+                !rendered.contains(&credential),
+                "{signer:?}: the error leaked the credential: {rendered}"
+            );
+            assert!(
+                rendered.contains("upstream echo"),
+                "{signer:?}: the server's answer reached the error: {rendered}"
+            );
+        }
+        server.abort();
+    }
+
+    /// A refusal for exhausted quota stays one whatever the redaction
+    /// removes from its body. This body repeats the request's credential
+    /// and holds the begin marker of a private-key block, which the shape
+    /// rules replace together with its whole line: the error is classified
+    /// from the body as received, and carries no credential.
+    #[tokio::test]
+    async fn a_quota_refusal_keeps_its_class_whatever_the_redaction_removes() {
+        let credential = format!("responses-{}", "madeupcredential".repeat(3));
+        let app = Router::new().fallback(|headers: HeaderMap| async move {
+            let authorization = headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default();
+            // (The marker is assembled here so no scanner reads the source
+            // as a secret.)
+            let marker = format!("-----BEGIN {}-----", "PRIVATE KEY");
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({
+                    "error": {
+                        "message": format!(
+                            "You exceeded your current quota. Request header \
+                             authorization: {authorization} {marker}"
+                        ),
+                        "type": "insufficient_quota",
+                        "code": "insufficient_quota",
+                    },
+                })),
+            )
+                .into_response()
+        });
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind quota refusal server");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve quota refusal server");
+        });
+        for signer in [
+            CredentialSigner::ClientApiKey,
+            CredentialSigner::StaticBearerAuthorizer,
+        ] {
+            let client = credential_signed_client(signer, format!("http://{addr}"), &credential);
+            let request =
+                LlmRequest::new("gpt-5.4", vec![Message::User(UserMessage::text("hello"))]);
+            let events = client.stream(&request).collect::<Vec<_>>().await;
+            let error = events
+                .into_iter()
+                .find_map(|event| match event {
+                    Err(error)
+                    | Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Error { error },
+                    }) => Some(error),
+                    Ok(_) => None,
+                })
+                .unwrap_or_else(|| panic!("{signer:?}: the stream ends in an error"));
+            assert!(
+                matches!(error, LlmError::QuotaExhausted { .. }),
+                "{signer:?}: an exhausted quota stays one: {error:?}"
+            );
+            let rendered = format!(
+                "{error} {error:?} {}",
+                serde_json::to_string(&error).expect("error JSON")
+            );
+            assert!(
+                !rendered.contains(&credential),
+                "{signer:?}: the error leaked the credential: {rendered}"
+            );
+        }
+        server.abort();
+    }
+
+    /// An ordinary provider error that carries no credential (a message, a
+    /// type, a code, a request id, a URL without credentials) reaches the
+    /// caller byte for byte, whoever signed the request.
+    #[tokio::test]
+    async fn an_error_without_a_credential_is_returned_unchanged() {
+        const BODY: &str = r#"{"error":{"message":"The model `gpt-5.4` does not exist or you do not have access to it. See https://docs.upstream.invalid/v1/models?page=2 for the list.","type":"invalid_request_error","param":"model","code":"model_not_found"},"request_id":"req_0123456789abcdef"}"#;
+        let app = Router::new().fallback(|| async {
+            (
+                StatusCode::BAD_REQUEST,
+                [("content-type", "application/json")],
+                BODY,
+            )
+        });
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ordinary error server");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve ordinary error server");
+        });
+        let credential = format!("responses-{}", "madeupcredential".repeat(3));
+        for signer in [
+            CredentialSigner::ClientApiKey,
+            CredentialSigner::ClientAzureApiKey,
+            CredentialSigner::StaticBearerAuthorizer,
+        ] {
+            let client = credential_signed_client(signer, format!("http://{addr}"), &credential);
+            let request =
+                LlmRequest::new("gpt-5.4", vec![Message::User(UserMessage::text("hello"))]);
+            let events = client.stream(&request).collect::<Vec<_>>().await;
+            let error = events
+                .into_iter()
+                .find_map(|event| match event {
+                    Err(error)
+                    | Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Error { error },
+                    }) => Some(error),
+                    Ok(_) => None,
+                })
+                .unwrap_or_else(|| panic!("{signer:?}: the stream ends in an error"));
+            assert!(
+                matches!(&error, LlmError::InvalidRequest { message } if message == BODY),
+                "{signer:?}: {error:?}"
+            );
+        }
+        server.abort();
+    }
     /// Serves each element of `chunks` as a separate paced HTTP body chunk so
     /// tests can pin per-chunk wire behavior (lifecycle-only chunks etc.).
     async fn paced_responses_sse(State(chunks): State<Vec<String>>) -> impl IntoResponse {
@@ -7007,6 +8399,7 @@ mod tests {
         )
         .with_openai_tag_merge(|t| t.store = Some(true));
 
+        let client = client.having_received(&request.messages);
         let (body, plan) = client
             .build_request_body_with_continuation(&request)
             .expect("build continuation request");
@@ -7047,6 +8440,7 @@ mod tests {
         )
         .with_openai_tag_merge(|t| t.store = Some(true));
 
+        let client = client.having_received(&request.messages);
         let (body, plan) = client
             .build_request_body_with_continuation(&request)
             .expect("build continuation request");
@@ -7272,6 +8666,7 @@ mod tests {
         )
         .with_openai_tag_merge(|t| t.store = Some(true));
 
+        let client = client.having_received(&request.messages);
         let mut stream = client.stream(&request);
         let mut deltas = Vec::new();
         while let Some(event) = stream.next().await {
@@ -7336,6 +8731,7 @@ mod tests {
         )
         .with_openai_tag_merge(|tag| tag.store = Some(true));
 
+        let client = client.having_received(&request.messages);
         let events = client.stream(&request).collect::<Vec<_>>().await;
         server.abort();
 
@@ -8108,6 +9504,7 @@ mod tests {
             ],
         );
 
+        let client = client.having_received(&request.messages);
         let body = build_projected_request_body(&client, &request);
         let input = body["input"].as_array().expect("input should be array");
 
@@ -9903,6 +11300,7 @@ mod tests {
             ],
         );
 
+        let client = client.having_received(&request.messages);
         let body = client.build_request_body(&request).expect("build request");
         let input = body["input"].as_array().expect("input should be array");
 
@@ -10076,6 +11474,7 @@ mod tests {
             ],
         );
 
+        let client = client.having_received(&request.messages);
         let body = client.build_request_body(&request).expect("build request");
         let input = body["input"].as_array().expect("input should be array");
 
@@ -10120,6 +11519,7 @@ mod tests {
             ],
         );
 
+        let client = client.having_received(&request.messages);
         let body = client.build_request_body(&request).expect("build request");
         let input = body["input"].as_array().expect("input should be array");
 

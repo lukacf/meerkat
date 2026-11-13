@@ -890,6 +890,8 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "ErrorCode": schema_for!(crate::error::ErrorCode),
         "ErrorCategory": schema_for!(crate::error::ErrorCategory),
         "WireError": schema_for!(crate::error::WireError),
+        // The `rkat run --output json` failure document.
+        "WireRunFailure": schema_for!(crate::error::WireRunFailure),
         "CapabilityHint": schema_for!(crate::error::CapabilityHint),
         // Machine-readable numeric allocation for generated SDK factories.
         // ErrorCode remains the semantic vocabulary authority; this projection
@@ -2496,6 +2498,30 @@ mod tests {
         assert!(
             err.to_string().contains("unknown field"),
             "unexpected error: {err}"
+        );
+
+        fs::remove_dir_all(&output_dir).unwrap();
+    }
+
+    /// The `rkat run --output json` failure document is an emitted schema:
+    /// one required `error`, the wire error envelope.
+    #[test]
+    fn emitted_errors_schema_has_the_run_failure_document() {
+        let output_dir = temp_output_dir("errors-run-failure");
+        emit_all_schemas(&output_dir).expect("emit schemas");
+
+        let errors: serde_json::Value =
+            serde_json::from_slice(&fs::read(output_dir.join("errors.json")).unwrap()).unwrap();
+        let run_failure = errors
+            .get("WireRunFailure")
+            .expect("errors.json should publish WireRunFailure");
+        assert_eq!(
+            run_failure.pointer("/required"),
+            Some(&serde_json::json!(["error"]))
+        );
+        assert_eq!(
+            run_failure.pointer("/properties/error/$ref"),
+            Some(&serde_json::json!("#/$defs/WireError"))
         );
 
         fs::remove_dir_all(&output_dir).unwrap();

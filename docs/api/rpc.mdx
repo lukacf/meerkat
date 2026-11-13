@@ -628,9 +628,9 @@ Handshake. Returns server capabilities.
   "result": {
     "server_info": {
       "name": "meerkat-rpc",
-      "version": "0.9.13"
+      "version": "0.9.14"
     },
-    "contract_version": "0.9.13",
+    "contract_version": "0.9.14",
     "methods": [
       "initialize", "initialized",
       "session/create", "session/list", "session/read",
@@ -946,7 +946,7 @@ Trajectory Interchange Format) v1.7 trajectory document.
   "params": {
     "session_id": "01936f8a-7b2c-7000-8000-000000000001",
     "agent_name": "meerkat",
-    "agent_version": "0.9.13",
+    "agent_version": "0.9.14",
     "model_name": "claude-opus-5"
   }
 }
@@ -1599,6 +1599,52 @@ same causes: `-32010` (provider error) for `llm_failure` and
 `time_budget_exceeded`, `-32012` (hook denied) for `hook_denied`, and
 `-32005` for cancellation. Any other cause is `-32603`. The typed turn error
 (`kind`, `detail`, and the provider facts when known) is in `data.error`.
+
+For the two provider causes the provider facts are `provider`, `retryable`
+and `reason` (tagged on `reason_type`), plus `model` when the failure names
+one:
+
+| `kind` | When | `retryable` | `reason` |
+|--------|------|-------------|----------|
+| `llm_failure` | A provider failure of a class Meerkat does not retry, such as an invalid request, an authentication failure or a missing model | `false` for the failures listed; read the field | The failure's typed reason, for example `llm_provider_error` with `provider_error_kind` `invalid_request`, `llm_auth_error`, `llm_invalid_model` or `llm_context_exceeded` |
+| `retry_exhausted` | A provider failure of a class Meerkat retries, after the retries its [retry policy](/concepts/configuration#retry-and-stream-watchdog-settings) allowed | `true` | The typed reason of the last failed attempt: `llm_rate_limited` (with `retry_after_ms` when the provider sent a hint), `llm_network_timeout`, `llm_call_timeout` (a call timeout or a stalled stream), or `llm_provider_error` with `provider_error_kind` such as `server_overloaded`, `server_error` or `connection_reset` |
+
+`provider` and `reason` describe the attempt that ended the retries: after a
+[model fallback](/concepts/providers#model-fallback) they are the fallback
+target's.
+`retryable: true` names the class of the failure: a failure of that class can
+succeed on a later attempt. It does not say that this one will. It is advice
+for the caller, and Meerkat itself does not retry the turn again. Read
+`reason` beside it; the advice is weakest for three reasons:
+`llm_provider_error` with `provider_error_kind` `unknown` (a failure nothing
+classified, retried because nothing says it is final), `connection_reset` (an
+endpoint that is never reachable fails the same way every time) and
+`llm_call_timeout` (a `call_timeout` or `stream_inactivity_timeout` set
+shorter than the request needs ends every attempt). Treat the
+provider facts as optional: a turn error with only `kind`, `terminal`,
+`outcome` and `detail` is valid, and it is what a server sends for
+`retry_exhausted` before these fields were filled for it.
+
+The `data` of a turn whose provider answered 503 until the retries ran out:
+
+```json
+{
+  "error": {
+    "kind": "retry_exhausted",
+    "terminal": true,
+    "outcome": "failed",
+    "detail": "Terminal failure: Failed (RetryExhausted): retry exhausted: LLM error (anthropic): Server overloaded (503)",
+    "provider": "anthropic",
+    "retryable": true,
+    "reason": {
+      "reason_type": "llm_provider_error",
+      "provider_error_kind": "server_overloaded",
+      "provider_error_retryability": "retryable",
+      "provider_error": { "message": "Server overloaded (503)" }
+    }
+  }
+}
+```
 
 A turn the session's runtime refuses to admit keeps the refusal's typed code
 (see [Error codes](#error-codes)): `-32602` for an input the runtime rejects
@@ -3791,7 +3837,7 @@ Return the curated model catalog with provider profiles, capability metadata, an
   "jsonrpc": "2.0",
   "id": 17,
   "result": {
-    "contract_version": {"major": 0, "minor": 9, "patch": 13},
+    "contract_version": {"major": 0, "minor": 9, "patch": 14},
     "providers": [
       {
         "provider": "anthropic",
@@ -3855,7 +3901,7 @@ synthesized with that status.
   "jsonrpc": "2.0",
   "id": 8,
   "result": {
-    "contract_version": {"major": 0, "minor": 9, "patch": 13},
+    "contract_version": {"major": 0, "minor": 9, "patch": 14},
     "capabilities": [
       {
         "id": "sessions",

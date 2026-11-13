@@ -67,6 +67,41 @@ release manifest and release notes. Downstream Rust projects should declare
 that version as an exact pin in `Cargo.toml`, not only in `Cargo.lock`, so the
 supported combination is visible without reconstructing historical lockfiles.
 
+### In-repo products
+
+Every product of this repository (Core, Meta, Connect, Forge and their SDKs)
+consumes the others at the version this tree builds: in development and CI the
+build of the same commit, in a release the same release's artifacts. A pin of
+an in-repo package is a same-commit reference (a path, `file:` or workspace
+dependency) or names exactly that package's version in the tree; only
+upgrade-test fixtures and recorded history keep an older version, each listed
+with its reason in `ci/inrepo-version-pins.json` (an entry that names, in
+`removed_by`, the change that moves its pins is temporary and goes with that
+change). `make verify-version-parity`
+(CI's format and governance job, and the release hook) refuses any other pin
+below the version in the tree with `scripts/check_inrepo_version_pins.py`, and
+a version bump moves the pins on the packages it bumps in the same commit: the
+release hook and Meta's `bump-sdk-versions.sh` run the check with `--write`,
+and a Connect bump runs `python3 scripts/check_inrepo_version_pins.py --write`.
+`--write` moves a range's floor to the new version, and a ceiling the new
+version reaches to the next release that may break it (the next minor on the
+0.x line, else the next major): at 0.10.0, `>=0.9.11 <0.10.0` becomes
+`>=0.10.0 <0.11.0`. The check also refuses a requirement that shuts out the
+version in the tree: a ceiling at or below it, a strict floor at it (`>0.9.11`
+at 0.9.11), or a floor or an exact version above it. `--write` moves such a
+floor or exact version down to the version in the tree and makes a strict
+floor at it inclusive.
+Files that record a published release (Forge's release inputs and the Meta
+runtime the installer selects, listed under `published_release_inputs`) pin
+that release's assets by digest: they can name a release only once it is
+published, and move only after a publication. The check judges them together
+instead: they all name one release (the one the version constant among them
+names), and none names a release newer than the version in the tree; either
+fails the check. A selected release older than the version in the tree is a
+warning line with the number of pins and the release, and the check still
+passes, so a version bump does not fail on records it cannot move. A pin in a
+file beside them that the list does not name follows the ordinary rule.
+
 ## Release Checks
 
 Run the release gate before cutting a tag:

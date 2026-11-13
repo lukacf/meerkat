@@ -215,22 +215,36 @@ impl Keypair {
 
     /// Save the keypair to a directory.
     /// Writes `identity.key` (secret, mode 0600) and `identity.pub` (public).
+    /// On Unix the key file is 0600 from its creation, whatever the process
+    /// umask, and one that already exists is made 0600 before the key is
+    /// written to it: the key is never in a file others can read.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn save(&self, dir: &Path) -> Result<(), IdentityError> {
+        use tokio::io::AsyncWriteExt as _;
+
         tokio::fs::create_dir_all(dir).await?;
 
         let key_path = dir.join("identity.key");
-        let mut secret_bytes = self.signing_key.to_bytes();
-        tokio::fs::write(&key_path, &secret_bytes).await?;
-        secret_bytes.zeroize();
-
-        // Set restrictive permissions on private key (Unix only)
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut key_file = options.open(&key_path).await?;
+        // A key file that was already there keeps the mode it had.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let perms = std::fs::Permissions::from_mode(0o600);
-            tokio::fs::set_permissions(&key_path, perms).await?;
+            key_file.set_permissions(perms).await?;
         }
+        let mut secret_bytes = self.signing_key.to_bytes();
+        let written = match key_file.write_all(&secret_bytes).await {
+            Ok(()) => key_file.flush().await,
+            Err(error) => Err(error),
+        };
+        secret_bytes.zeroize();
+        written?;
+        drop(key_file);
 
         tokio::fs::write(
             dir.join("identity.pub"),
@@ -747,5 +761,136 @@ mod tests {
         let data = b"persistence test";
         let sig = loaded.sign(data);
         assert!(original.public_key().verify(data, &sig));
+    }
+
+    /// The mode of the key file [`Keypair::save`] writes, on Unix.
+    #[cfg(unix)]
+    mod key_file_mode {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        /// Set in the child process the row's scenario runs in.
+        const REFUSED_CHILD: &str = "MEERKAT_COMMS_TEST_WRITES_REFUSED_CHILD";
+        /// Printed by that child once the scenario passed.
+        const REFUSED_CHILD_DONE: &str = "meerkat-comms scenario passed with writes refused";
+        /// Printed by a child whose platform does not refuse writes under a
+        /// zero file size limit, in place of running the scenario.
+        const WRITES_NOT_REFUSED: &str =
+            "NOT exercised: a zero file size limit does not refuse writes here";
+
+        fn mode_bits(path: &Path) -> u32 {
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o7777
+        }
+
+        /// Run `scenario`, the body of the test `test` of this module, in a
+        /// child process of this test binary whose umask is the permissive
+        /// 022 and whose writes to regular files are all refused (a zero
+        /// file size limit with `SIGXFSZ` ignored): a file can be created,
+        /// and stays as its creation left it. The umask and the limit are
+        /// process-wide, so the shared test process never changes them.
+        /// On Linux the limit always refuses the write, so a child whose
+        /// probe write succeeded fails the row. Elsewhere the scenario does
+        /// not run then and the row says so on standard error.
+        fn with_writes_refused_under_a_permissive_umask(test: &str, scenario: impl FnOnce()) {
+            if std::env::var_os(REFUSED_CHILD).is_some() {
+                let probe = TempDir::new().unwrap();
+                if std::fs::write(probe.path().join("probe"), b"x").is_ok() {
+                    eprintln!("{test}: {WRITES_NOT_REFUSED}");
+                    println!("\n{WRITES_NOT_REFUSED}");
+                    return;
+                }
+                scenario();
+                println!("\n{REFUSED_CHILD_DONE}");
+                return;
+            }
+            let (_, module) = module_path!().split_once("::").unwrap();
+            #[allow(clippy::disallowed_methods)] // the test re-runs its own binary
+            let output = std::process::Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    "trap '' XFSZ && ulimit -f 0 && umask 022 && exec \"$@\"",
+                    "key-file-mode",
+                ])
+                .arg(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    format!("{module}::{test}").as_str(),
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(REFUSED_CHILD, "1")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let not_refused = output.status.success() && stdout.contains(WRITES_NOT_REFUSED);
+            if not_refused && !cfg!(target_os = "linux") {
+                eprintln!("{test}: {WRITES_NOT_REFUSED}");
+                return;
+            }
+            // On Linux the limit always refuses the write, so a probe write
+            // that succeeded there means the recipe broke: a proof that did
+            // not run must not pass.
+            assert!(
+                !not_refused,
+                "{test} proved nothing: {WRITES_NOT_REFUSED}, and Linux always does"
+            );
+            assert!(
+                output.status.success() && stdout.contains(REFUSED_CHILD_DONE),
+                "{test} failed with writes refused ({}):\n{stdout}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        /// The key file is owner-only from its creation, before any byte of
+        /// the key is in it. Every write to a regular file is refused in
+        /// this row's process, so the save stops right after it created the
+        /// file, which stays as the creation left it: empty, and 0600. RED
+        /// before: the file was created with the umask's mode (0644 under
+        /// 022) and made 0600 only after the key was written, so the key
+        /// was readable by every local user in between.
+        #[test]
+        fn a_saved_key_file_is_owner_only_before_any_byte() {
+            with_writes_refused_under_a_permissive_umask(
+                "a_saved_key_file_is_owner_only_before_any_byte",
+                || {
+                    let tmp = TempDir::new().unwrap();
+                    let saved = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap()
+                        .block_on(Keypair::generate().save(tmp.path()));
+                    saved.expect_err("the refused write fails the save");
+                    let key = tmp.path().join("identity.key");
+                    assert_eq!(
+                        std::fs::metadata(&key).unwrap().len(),
+                        0,
+                        "no byte was written"
+                    );
+                    assert_eq!(mode_bits(&key), 0o600, "the key file as it was created");
+                },
+            );
+        }
+
+        /// A save over a key file something left readable by group and
+        /// others ends owner-only, and a new one is owner-only.
+        #[tokio::test]
+        async fn a_saved_key_file_ends_owner_only() {
+            let tmp = TempDir::new().unwrap();
+            let key = tmp.path().join("identity.key");
+            let keypair = Keypair::generate();
+            keypair.save(tmp.path()).await.unwrap();
+            assert_eq!(mode_bits(&key), 0o600, "a new key file");
+
+            std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
+            keypair.save(tmp.path()).await.unwrap();
+            assert_eq!(
+                mode_bits(&key),
+                0o600,
+                "a key file that was readable by others"
+            );
+            let loaded = Keypair::load(tmp.path()).await.unwrap();
+            assert_eq!(loaded.public_key(), keypair.public_key());
+        }
     }
 }

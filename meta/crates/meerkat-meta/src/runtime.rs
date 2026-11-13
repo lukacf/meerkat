@@ -60,6 +60,8 @@ mod supervisor;
 
 pub use bootstrap::{start_meta_runtime, start_meta_runtime_with_options};
 #[cfg(test)]
+pub(crate) use console_ingress::console_rest_route_view;
+#[cfg(test)]
 pub(crate) use console_ingress::handle_console_rest_json_route_with_pending_rows;
 /// Applies no session fence; use the routers a [`crate::UnifiedRuntime`] builds,
 /// or the `_under_session_fences` variant
@@ -80,12 +82,12 @@ pub use console_ingress::{
 pub(crate) use console_ingress::{
     ConsoleCallerVerification, ConsoleLoginKind, ConsoleSignOutError, ConsoleSignedOut,
     ResolvedConsoleCaller, apply_identity_changes_to_experience, authorize_console_rest_json_route,
-    console_human_principal, console_member_access_attributes, fold_console_member_attributes,
-    render_console_rest_json_route, resolve_authorized_console_caller_from_token,
-    session_fence_first_accepted_iat,
+    console_human_principal, console_identifies_people, console_member_access_attributes,
+    fold_console_member_attributes, render_console_rest_json_route,
+    resolve_authorized_console_caller_from_token, session_fence_first_accepted_iat,
 };
 pub use event_transport::normalize_event_line;
-pub(crate) use gating::is_legacy_sequential_pending_id;
+pub(crate) use gating::{MEMORY_CONFLICT_LOOKUP_FAILED_EVENT, is_legacy_sequential_pending_id};
 pub(crate) use memory::staged_ledger_path;
 pub use metadata::{
     IdentityRotationIntent, IdentityToolRecord, InMemoryMetadataStore, LabelRpcResult,
@@ -1829,9 +1831,10 @@ pub fn run_meerkat_baseline_verification_once(
 /// a JWKS with at least one key.
 ///
 /// [`build_runtime_decision_state`] runs this only when
-/// `console.require_app_auth` is true. An open console never consults the
-/// snapshot unless an ABAC access controller is installed and a caller
-/// volunteers a token; a broken snapshot then degrades that caller to
+/// `console.require_app_auth` is true. An open console consults the snapshot
+/// only when an ABAC access controller is installed: it can identify a
+/// person, and resolves the token a caller volunteers, only while the
+/// snapshot passes this check; a broken snapshot then leaves every caller
 /// anonymous instead of refusing at startup. A host that wants the startup
 /// refusal on an open console calls this itself.
 pub fn validate_trusted_oidc_runtime_config(

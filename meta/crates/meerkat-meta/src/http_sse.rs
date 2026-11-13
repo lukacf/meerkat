@@ -2026,6 +2026,12 @@ fn mob_structural_events_sse_router_configured(
 /// SSE handlers can apply per-agent ABAC checks, and its authentication
 /// when a token identified it. `Err(())` means 401. A token is checked
 /// against the Console's session fence record `fences` as it is now.
+///
+/// The caller the route did not identify is told by its console, as the
+/// Console's own routes tell it ([`crate::runtime::console_identifies_people`]):
+/// kept apart from the console's people where it can identify a person, the
+/// one operator where it identifies nobody. A route with no decision state
+/// has no console to ask, and keeps its caller apart.
 pub(crate) fn sse_access_context(
     decisions: Option<&RuntimeDecisionState>,
     fences: &ConsoleSessionFences,
@@ -2041,6 +2047,7 @@ pub(crate) fn sse_access_context(
             authentication: None,
         });
     };
+    let identifies_people = crate::runtime::console_identifies_people(decisions, access);
     let bearer_token = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -2064,9 +2071,11 @@ pub(crate) fn sse_access_context(
         )
     } else {
         // Open route: identify callers that volunteered a valid token so
-        // per-user ABAC grants apply; everyone else is anonymous. Without an
-        // access controller a token grants nothing, so it identifies nobody.
-        token.filter(|_| access.is_some()).and_then(|token| {
+        // per-user ABAC grants apply; everyone else is anonymous. A token is
+        // resolved only where the console can identify a person: without an
+        // access controller a token grants nothing, and without a key no
+        // token verifies.
+        token.filter(|_| identifies_people).and_then(|token| {
             crate::runtime::resolve_authorized_console_caller_from_token(decisions, fences, &token)
         })
     };
@@ -2078,7 +2087,8 @@ pub(crate) fn sse_access_context(
         access,
         caller.as_ref().map(|caller| caller.auth.email.as_str()),
         private_owner_key.as_deref(),
-    );
+    )
+    .on_console(identifies_people);
     Ok(SseCaller {
         access_view: access.map(|_| audience.clone()),
         audience,

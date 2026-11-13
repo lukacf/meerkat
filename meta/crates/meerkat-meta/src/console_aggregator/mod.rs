@@ -6,6 +6,8 @@ mod tool_application_projection;
 
 #[cfg(test)]
 mod assistant_message_identity_tests;
+#[cfg(test)]
+mod conflict_signal_replay_tests;
 mod delta_compaction;
 #[cfg(test)]
 mod delta_compaction_tests;
@@ -196,7 +198,23 @@ type NoticeObservationCache =
 type StatusUnknownRedrives =
     BTreeMap<(uuid::Uuid, String, String, String), tokio::sync::oneshot::Sender<()>>;
 
+/// Which console aggregator a value names among the aggregators of this
+/// process: one per registry of served runtimes (a policy view has its own).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct ConsoleAggregatorId(u64);
+
+impl ConsoleAggregatorId {
+    /// The id of a new aggregator: each call answers one no aggregator
+    /// holds.
+    pub(crate) fn mint() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        Self(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
 struct AggregatorInner {
+    /// Which aggregator this is ([`MetaConsoleAggregator::id`]).
+    id: ConsoleAggregatorId,
     /// Policy views share one canonical projector and publish to its broadcaster.
     projection_owner: Option<Arc<AggregatorInner>>,
     store: Arc<dyn ConsoleLogStore>,
@@ -711,11 +729,15 @@ async fn member_provenance_for_identity(
     if crate::console_contracts::is_runtime_plane_identity(identity) {
         return None;
     }
-    // A witness belongs to the incarnation that wrote the frame, and only the
-    // frame's session names it. A frame that names no session records none,
-    // and is decided as uncaptured: a member live under the identity now, a
-    // retained witness and the durable search could all be another member
-    // under the same identity than the one that wrote it.
+    // A witness belongs to the incarnation the frame is about, and only what
+    // the frame itself names can say which incarnation that is. A frame that
+    // names a session is witnessed by that session's member only: a member
+    // live under the identity now, a retained witness and the durable search
+    // could all be another member under the same identity. A frame that
+    // names no session is never witnessed through its identity: the member
+    // that holds the identity when the frame is written or projected (a
+    // first projection, a replay at a registration or after a lag) can be
+    // another member than the one the record is about.
     let session_id = session_id?;
     let key = (
         entry.runtime_key.clone(),
@@ -746,6 +768,163 @@ async fn member_provenance_for_identity(
     // A missing live member still needs its durable policy witness. Cache only
     // a verified log prefix, never the absence of the member itself.
     recover_member_provenance(inner, entry, identity, Some(session_id), key).await
+}
+
+/// The witness of the member a console send is addressed to, for a send to a
+/// member that has no session yet: the identity's own member, captured from
+/// its row on the roster of `entry`'s own mob while the send is reserved.
+/// That is the member the send path resolved and delivers to, the row whose
+/// member id is the identity ([`row_names_itself`]). Any other row is
+/// another member, also when it carries the identity as its
+/// `agent_identity` label, or sits under the same member id in a mob the
+/// runtime's agents made: it is never the witness. Only the send path reads
+/// it, inside the request that was authorized against that member. No
+/// projection of a retained or stored record does: by then another member
+/// can hold the identity. `None` when the identity holds no row of its own:
+/// the send is then stored with no member witness.
+async fn member_witness_at_send(
+    inner: &AggregatorInner,
+    entry: &RuntimeEntry,
+    identity: &str,
+) -> Option<ConsoleFrameMemberProvenance> {
+    for resolved in Box::pin(primary_member_sources(entry)).await {
+        if !row_names_itself(&resolved) {
+            continue;
+        }
+        let Some(record) = identity_record_for_resolved_member(&resolved).await else {
+            continue;
+        };
+        if record.identity == identity {
+            return Some(Box::pin(capture_member_provenance(inner, &resolved, &record)).await);
+        }
+    }
+    None
+}
+
+/// Whether a roster row is listed under its own member id: it carries no
+/// `agent_identity` label, or the label names the member id itself (as
+/// every identity-first spawn writes it). A row whose label names something
+/// else is listed under that name, and is not the member a send to that
+/// name is made to.
+fn row_names_itself(resolved: &ResolvedConsoleMember) -> bool {
+    crate::member_comms_id::durable_identity_label(&resolved.member.labels).is_none_or(|label| {
+        crate::member_comms_id::live_member_is_identity(
+            resolved.member.agent_identity.as_str(),
+            label,
+        )
+    })
+}
+
+/// The witness of a member frame, by what the frame itself names: the member
+/// of the session it names, or, for a frame that names no session and names
+/// a console send (its interaction), the witness stored on that send's own
+/// frame. A frame that names neither has none. `registry` holds the runtime
+/// entries and the per-session witnesses, `log` the frames; nothing here
+/// reads a member by its identity alone.
+async fn witness_named_by_frame(
+    registry: &AggregatorInner,
+    log: &dyn ConsoleLogStore,
+    entry: &RuntimeEntry,
+    frame: &NewConsoleFrame,
+    refresh: bool,
+) -> Option<ConsoleFrameMemberProvenance> {
+    if crate::console_contracts::is_runtime_plane_identity(&frame.identity) {
+        return None;
+    }
+    if let Some(session_id) = frame.session_id.as_deref() {
+        return member_provenance_for_identity(
+            registry,
+            entry,
+            &frame.identity,
+            Some(session_id),
+            refresh,
+        )
+        .await;
+    }
+    // A send's interaction id is its own (derived from its dedupe key), so
+    // the send's frame is the record of the member that send was made to.
+    let interaction_id = frame.interaction_id.as_deref()?;
+    let send = log.send_frame_by_interaction(interaction_id).await.ok()??;
+    if send.runtime_key != frame.runtime_key || send.identity != frame.identity {
+        return None;
+    }
+    send.source.member_provenance
+}
+
+/// What the writer of a frame says about the frame's member witness, at the
+/// frame store call ([`append_frame`]). A writer cannot leave it unsaid.
+pub(crate) enum FrameWitness {
+    /// The member's attributes, captured for this frame.
+    Member(Box<ConsoleFrameMemberProvenance>),
+    /// The frame is stored with no member witness. A member's frame stored
+    /// so is shown to an administrator only by every timeline surface
+    /// ([`crate::access::AccessView::can_view_uncaptured_member`]). A
+    /// runtime-plane frame ([`NoMemberReason::RuntimePlane`]) is no
+    /// member's: every caller who may view its runtime-plane identity reads
+    /// it, whatever its payload names, except a record that carries text
+    /// written from memory records
+    /// ([`crate::memory::events::carries_record_text_with_no_member`]),
+    /// which is decided as a member's frame with no witness.
+    NoMember(NoMemberReason),
+}
+
+/// Why a frame is stored with no member witness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NoMemberReason {
+    /// The runtime's own frame, under one of its runtime-plane identities.
+    RuntimePlane,
+    /// No runtime is registered for the frame, so nothing can say whose it
+    /// is.
+    NoRuntimeRegistered,
+    /// Nothing the frame names leads to a member: it names no session and no
+    /// console send, or no member is live under the session it names and no
+    /// earlier frame of that session holds a witness, or the send it names
+    /// has no stored frame with one.
+    NoSuchMember,
+    /// The frame continues a stored frame that has no witness (its update
+    /// marker, a reply kept for it).
+    SourceFrameHasNone,
+}
+
+impl FrameWitness {
+    /// The witness of a frame that continues a stored one: the stored
+    /// frame's own.
+    pub(crate) fn of_source_frame(provenance: Option<&ConsoleFrameMemberProvenance>) -> Self {
+        match provenance {
+            Some(provenance) => Self::Member(Box::new(provenance.clone())),
+            None => Self::NoMember(NoMemberReason::SourceFrameHasNone),
+        }
+    }
+
+    /// The witness a capture for a member frame ended with.
+    fn of_capture(provenance: Option<ConsoleFrameMemberProvenance>) -> Self {
+        match provenance {
+            Some(provenance) => Self::Member(Box::new(provenance)),
+            None => Self::NoMember(NoMemberReason::NoSuchMember),
+        }
+    }
+}
+
+/// The one capture of a frame's witness, for every frame whose writer did
+/// not capture its member itself: the member the frame's session names, or
+/// the witness of the console send the frame names
+/// ([`witness_named_by_frame`]).
+async fn capture_frame_witness(inner: &AggregatorInner, frame: &NewConsoleFrame) -> FrameWitness {
+    if crate::console_contracts::is_runtime_plane_identity(&frame.identity) {
+        return FrameWitness::NoMember(NoMemberReason::RuntimePlane);
+    }
+    let owner = inner.projection_owner.as_deref().unwrap_or(inner);
+    let entry = owner
+        .runtimes
+        .read()
+        .ok()
+        .and_then(|entries| entries.get(&frame.runtime_key).cloned());
+    let Some(entry) = entry else {
+        return FrameWitness::NoMember(NoMemberReason::NoRuntimeRegistered);
+    };
+    FrameWitness::of_capture(
+        witness_named_by_frame(owner, inner.store.as_ref(), &entry, frame, false).await,
+    )
 }
 
 async fn recover_member_provenance(
@@ -997,6 +1176,7 @@ impl MetaConsoleAggregator {
         let (event_tx, _) = broadcast::channel(TIMELINE_CHANNEL_CAP);
         Self {
             inner: Arc::new(AggregatorInner {
+                id: ConsoleAggregatorId::mint(),
                 projection_owner: None,
                 store,
                 runtimes: RwLock::new(BTreeMap::new()),
@@ -1090,6 +1270,7 @@ impl MetaConsoleAggregator {
             .collect();
         let view = Self {
             inner: Arc::new(AggregatorInner {
+                id: ConsoleAggregatorId::mint(),
                 projection_owner: Some(owner.clone()),
                 store: owner.store.clone(),
                 runtimes: RwLock::new(runtimes),
@@ -1275,6 +1456,12 @@ impl MetaConsoleAggregator {
             console_events,
             visibility_policy,
         });
+    }
+
+    /// Which aggregator this is: what a console's reading of the runtimes
+    /// this aggregator serves is recorded under.
+    pub(crate) fn id(&self) -> ConsoleAggregatorId {
+        self.inner.id
     }
 
     pub(crate) fn panel_runtimes(&self) -> ConsoleLogResult<Vec<ConsolePanelRuntime>> {
@@ -3078,7 +3265,8 @@ impl MetaConsoleAggregator {
         let _ = SendState::Requested
             .apply(SendTransition::PersistAccepted)
             .map_err(ConsoleSendError::State)?;
-        let outcome = append_frame(&self.inner, new_frame)
+        let witness = FrameWitness::of_capture(new_frame.source.member_provenance.take());
+        let outcome = append_frame(&self.inner, new_frame, witness)
             .await
             .map_err(ConsoleSendError::Log)?;
         if outcome.disposition == AppendDisposition::Existing {
@@ -3629,11 +3817,23 @@ impl MetaConsoleAggregator {
             .read()
             .ok()
             .and_then(|entries| entries.get(&runtime_key).cloned());
-        let provenance = if let Some(entry) = entry {
-            member_provenance_for_identity(owner, &entry, &request.identity, session_id, false)
+        let provenance = match (entry, session_id) {
+            (Some(entry), Some(session_id)) => {
+                member_provenance_for_identity(
+                    owner,
+                    &entry,
+                    &request.identity,
+                    Some(session_id),
+                    false,
+                )
                 .await
-        } else {
-            None
+            }
+            // A send to a member that has no session yet (seated and not
+            // woken): the member the send is made to is captured here, at
+            // the send, so the frame is never judged later by whoever holds
+            // the identity then.
+            (Some(entry), None) => member_witness_at_send(owner, &entry, &request.identity).await,
+            (None, _) => None,
         };
         let thread = scope
             .is_scoped()
@@ -3669,7 +3869,8 @@ impl MetaConsoleAggregator {
         if governed && let Some(payload) = new_frame.payload.as_object_mut() {
             payload.insert(GOVERNED_SEND_FIELD.to_string(), Value::Bool(true));
         }
-        let outcome = append_frame(&self.inner, new_frame)
+        let witness = FrameWitness::of_capture(new_frame.source.member_provenance.take());
+        let outcome = append_frame(&self.inner, new_frame, witness)
             .await
             .map_err(ConsoleSendError::Log)?;
         if outcome.disposition == AppendDisposition::Existing {
@@ -7670,17 +7871,16 @@ where
             );
             for mut frame in frames {
                 // One member's history can derive a frame under another
-                // identity: a spawn call's initial message is projected under
-                // the member the call names, whether the spawn ran or was
-                // refused. No member holds a runtime-plane identity: drop such
-                // a frame and go on with the rest of the history.
-                if crate::console_contracts::is_runtime_plane_identity(&frame.identity) {
-                    crate::console_contracts::warn_runtime_plane_member_drop(
-                        &record.runtime_member_id,
-                        None,
-                        &frame.identity,
-                        "session history",
-                    );
+                // identity: the initial message of a spawn call, under the
+                // name the call gives. That frame is not written from here.
+                // This history does not say which incarnation the call made,
+                // or that it made one: the call may have been refused, and
+                // the name may be held by another member. The spawn records
+                // its kickoff itself, under the member it made and with that
+                // member's witness, when it makes it, and that member's own
+                // history holds the message; the call, its arguments and its
+                // outcome stand in this member's own frames.
+                if frame.identity != record.identity {
                     continue;
                 }
                 let current_canonical = assistant_identity_history
@@ -7695,18 +7895,7 @@ where
                 {
                     continue;
                 }
-                frame.source.member_provenance = if frame.identity == record.identity {
-                    provenance.clone()
-                } else {
-                    member_provenance_for_identity(
-                        &inner,
-                        &entry,
-                        &frame.identity,
-                        frame.session_id.as_deref(),
-                        false,
-                    )
-                    .await
-                };
+                frame.source.member_provenance = provenance.clone();
                 if !current_canonical
                     && history_frame_has_existing_counterpart(&inner, &frame).await?
                 {
@@ -8666,14 +8855,28 @@ async fn project_console_event(
     };
     let mut frame = frame_from_console_event(&entry, envelope);
     retain_legacy_reasoning_replay_key(inner.store.as_ref(), &mut frame).await?;
-    frame.source.member_provenance = member_provenance_for_identity(
+    // A frame is witnessed by what the event itself names, never by its
+    // member's name: this projection also runs when the retained events are
+    // replayed (at a registration, after a lag), and by then another member
+    // can hold the name.
+    frame.source.member_provenance = witness_named_by_frame(
         &inner,
+        inner.store.as_ref(),
         &entry,
-        &frame.identity,
-        frame.session_id.as_deref(),
+        &frame,
         matches!(frame.kind.as_str(), "interaction_started" | "run_started"),
     )
     .await;
+    // A spawn's kickoff is the record of the member that spawn made: it is
+    // written only with the witness of the session it names. One that names
+    // no session, or a session whose member cannot be read, is not written.
+    let kickoff_without_witness = frame.source.member_provenance.is_none()
+        && frame.kind == "user_input"
+        && frame
+            .payload
+            .get("source_event_type")
+            .and_then(Value::as_str)
+            == Some("spawn_initial_message");
     let source_cursor = frame
         .source_event_id
         .clone()
@@ -8709,6 +8912,11 @@ async fn project_console_event(
             None,
             &frame.identity,
             "runtime console events",
+        );
+    } else if kickoff_without_witness {
+        tracing::debug!(
+            identity = %frame.identity,
+            "console log wrote no spawn kickoff: it names no session whose member can be read"
         );
     } else {
         append_member_console_event(&inner, &entry, frame).await?;
@@ -8915,26 +9123,14 @@ async fn append_and_emit_frame(
     mut frame: NewConsoleFrame,
     policy: Arc<dyn ConsoleVisibilityPolicy>,
 ) -> ConsoleLogResult<AppendOutcome> {
-    if frame.source.member_provenance.is_none() {
-        let owner = inner.projection_owner.as_deref().unwrap_or(inner);
-        let entry = owner
-            .runtimes
-            .read()
-            .ok()
-            .and_then(|entries| entries.get(&frame.runtime_key).cloned());
-        if let Some(entry) = entry {
-            frame.source.member_provenance = member_provenance_for_identity(
-                owner,
-                &entry,
-                &frame.identity,
-                frame.session_id.as_deref(),
-                false,
-            )
-            .await;
-        }
-    }
+    // A writer that captured its member itself hands the witness over with
+    // the frame; every other frame's witness is captured here.
+    let witness = match frame.source.member_provenance.take() {
+        Some(provenance) => FrameWitness::Member(Box::new(provenance)),
+        None => capture_frame_witness(inner, &frame).await,
+    };
     redact_frame(policy.as_ref(), &mut frame);
-    let outcome = append_frame(inner, frame).await?;
+    let outcome = append_frame(inner, frame, witness).await?;
     if outcome.disposition == AppendDisposition::Inserted {
         let _ = inner.event_tx.send(ConsoleTimelineEvent::ConsoleFrame {
             frame: outcome.frame.clone(),
@@ -8945,11 +9141,26 @@ async fn append_and_emit_frame(
 
 /// Append one frame to the console log. Every frame this aggregator writes
 /// goes through here, so the in-memory last activity ([`last_activity`])
-/// merges each acting frame the log stores.
+/// merges each acting frame the log stores. The writer says the frame's
+/// member witness (`witness`): the stored frame holds exactly it, whatever
+/// the frame was built with.
 async fn append_frame(
     inner: &AggregatorInner,
-    frame: NewConsoleFrame,
+    mut frame: NewConsoleFrame,
+    witness: FrameWitness,
 ) -> ConsoleLogResult<AppendOutcome> {
+    frame.source.member_provenance = match witness {
+        FrameWitness::Member(provenance) => Some(*provenance),
+        FrameWitness::NoMember(reason) => {
+            tracing::debug!(
+                identity = %frame.identity,
+                kind = %frame.kind,
+                ?reason,
+                "console log stores a frame with no member witness"
+            );
+            None
+        }
+    };
     inner
         .last_activity
         .append(inner.store.as_ref(), frame)
@@ -8995,7 +9206,8 @@ async fn emit_frame_updated(
         parent_frame_id: Some(updated.id.clone()),
         caused_by_frame_id: Some(updated.id.clone()),
     };
-    let outcome = append_frame(inner, update_marker).await?;
+    let witness = FrameWitness::of_source_frame(updated.source.member_provenance.as_ref());
+    let outcome = append_frame(inner, update_marker, witness).await?;
     if outcome.disposition == AppendDisposition::Inserted {
         let _ = inner.event_tx.send(ConsoleTimelineEvent::ConsoleFrame {
             frame: outcome.frame,
@@ -10228,8 +10440,10 @@ enum FrameProjection {
 /// - a member frame with captured provenance is decided by the captured
 ///   lineage, under the most restrictive rule
 ///   ([`crate::access::AccessView::can_view_captured_member`]);
-/// - a member frame without it fails closed under any applicable deny its
-///   bare identity cannot decide
+/// - a member frame without it is shown to no caller a console keeps apart
+///   from other people, whatever the rules say and whoever holds the name
+///   now: an admin reads it, and so does the anonymous caller of a console
+///   without sign-in, as the identity decides
 ///   ([`crate::access::AccessView::can_view_uncaptured_member`]).
 ///
 /// With the access configuration enabled or not: a member private to
@@ -10258,6 +10472,14 @@ pub(crate) fn timeline_frame_visible_to(
         }
     }
     if crate::console_contracts::is_runtime_plane_identity(&frame.identity) {
+        // A runtime-plane record names no member. One that carries text
+        // written from memory records, or that speaks of a member it does
+        // not name (a memory conflict signal, a quarantined write, a taint
+        // transition, a promotion), is decided as a record with no member
+        // witness: nothing says whose records or which member it speaks of.
+        if runtime_plane_record_text(frame) {
+            return view.can_view_uncaptured_member(&frame.identity);
+        }
         return view.can_view_agent(&frame.identity);
     }
     match frame
@@ -10328,17 +10550,34 @@ fn captured_lineage(
         .collect()
 }
 
+/// Whether `frame` is a runtime-plane record that carries text written from
+/// memory records or speaks of a member it does not name
+/// ([`crate::memory::events::carries_record_text_with_no_member`]): the one
+/// input of the decision
+/// ([`timeline_frame_visible_to`]) that is neither the frame's identity nor
+/// its witness. The decision branches on it and the decider's cache key
+/// holds it, both through this function, so the decision kept for one
+/// record of a runtime-plane identity is never the answer for a record of
+/// the other class under the same identity.
+fn runtime_plane_record_text(frame: &ConsoleFrame) -> bool {
+    crate::console_contracts::is_runtime_plane_identity(&frame.identity)
+        && crate::memory::events::carries_record_text_with_no_member(&frame.kind)
+}
+
 /// One caller's [`timeline_frame_visible_to`] over the frames of one
-/// request, cached per (runtime, identity, captured provenance): a restricted
-/// caller scanning many hidden frames decides each distinct member context
-/// once.
+/// request, cached per everything the decision reads of a frame (runtime,
+/// identity, captured provenance, and whether it is a runtime-plane record
+/// that carries text written from memory records): a restricted caller
+/// scanning many hidden frames decides each distinct member context once.
 pub(crate) struct TimelineFrameDecider {
     view: crate::access::AccessView,
     decisions: std::sync::Mutex<HashMap<FrameDecisionKey, bool>>,
 }
 
-/// (runtime key, frame identity, encoded captured provenance).
-type FrameDecisionKey = (String, String, Option<String>);
+/// (runtime key, frame identity, encoded captured provenance,
+/// [`runtime_plane_record_text`]): every input of the decision for a frame
+/// that is no update marker. An input added to the decision belongs here.
+type FrameDecisionKey = (String, String, Option<String>, bool);
 
 impl TimelineFrameDecider {
     pub(crate) fn new(view: crate::access::AccessView) -> Self {
@@ -10364,6 +10603,7 @@ impl TimelineFrameDecider {
             frame.runtime_key.clone(),
             frame.identity.clone(),
             provenance,
+            runtime_plane_record_text(frame),
         );
         if let Some(visible) = self
             .decisions
@@ -10444,7 +10684,15 @@ async fn frame_is_visible_cached(
             .read()
             .map_err(|_| runtime_registry_lock_error())?;
         if entries.is_empty() {
-            return Ok(true);
+            // No runtime is registered, so no policy says whether the
+            // members of nested mobs are shown here: a frame whose captured
+            // member sat in a mob other than its runtime's own is not
+            // served. Every other stored frame stays queryable.
+            return Ok(frame
+                .source
+                .member_provenance
+                .as_ref()
+                .is_none_or(|provenance| provenance.source_mob_id == provenance.primary_mob_id));
         }
         let Some(entry) = entries.get(&frame.runtime_key) else {
             return Ok(false);
@@ -11106,7 +11354,7 @@ fn runtime_registry_lock_error() -> ConsoleLogError {
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::large_futures, clippy::panic)]
-mod tests {
+pub(crate) mod tests {
     /// Golden values: an empty skill selection must keep the exact
     /// fingerprint recorded before skill selection existed, so replays of
     /// sends persisted by older gateways still match. A nonempty selection
@@ -11304,9 +11552,10 @@ mod tests {
     }
 
     #[derive(Clone)]
-    pub(super) struct DelayedHistorySessionService {
+    pub(crate) struct DelayedHistorySessionService {
         inner: Arc<dyn MobSessionService>,
         delay: Duration,
+        resume_loads_refused: Arc<std::sync::atomic::AtomicBool>,
         read_calls: Arc<AtomicUsize>,
         application_read_calls: Arc<AtomicUsize>,
         active_reads: Arc<AtomicUsize>,
@@ -11362,10 +11611,11 @@ mod tests {
     }
 
     impl DelayedHistorySessionService {
-        fn new(inner: Arc<dyn MobSessionService>, delay: Duration) -> Self {
+        pub(crate) fn new(inner: Arc<dyn MobSessionService>, delay: Duration) -> Self {
             Self {
                 inner,
                 delay,
+                resume_loads_refused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 read_calls: Arc::new(AtomicUsize::new(0)),
                 application_read_calls: Arc::new(AtomicUsize::new(0)),
                 active_reads: Arc::new(AtomicUsize::new(0)),
@@ -11387,6 +11637,13 @@ mod tests {
                 .lock()
                 .expect("refused event sessions lock")
                 .insert(session_id.to_string());
+        }
+
+        /// Fail every later read of a stored session for a resume
+        /// ([`MobSessionService::load_session_for_resume`]), as a service
+        /// whose store cannot be read fails it.
+        pub(crate) fn refuse_resume_loads(&self) {
+            self.resume_loads_refused.store(true, Ordering::SeqCst);
         }
 
         fn session_events_refused(&self, session_id: &SessionId) -> bool {
@@ -11866,6 +12123,13 @@ mod tests {
             &self,
             session_id: &meerkat_core::types::SessionId,
         ) -> Result<meerkat_mob::ResumeSessionLoad, SessionError> {
+            if self.resume_loads_refused.load(Ordering::SeqCst) {
+                return Err(SessionError::Agent(
+                    meerkat_core::error::AgentError::InternalError(format!(
+                        "session {session_id}: the stored session could not be read"
+                    )),
+                ));
+            }
             self.inner.load_session_for_resume(session_id).await
         }
 
@@ -14033,13 +14297,16 @@ comms = true
             json!({"role": "user", "content": "Exact public content."}),
         )
         .expect("frame");
+        // The witness of a member of the runtime's own mob: with no runtime
+        // registered, as here, a console serves no stored frame of a member
+        // of a nested mob.
         frame.source.member_provenance = Some(serde_json::from_value(json!({
             "identity": {"identity":"member", "display_name":"Member", "runtime_key":"runtime-a",
                 "runtime_member_id":"member", "session_id":"session", "visibility":"addressable",
                 "addressable":true, "health":"ready", "labels":{"private-label":"private"}},
             "member": {"agent_identity":"member", "role":"delegate", "state":"running",
                 "session_id":"session", "wired_to":[], "labels":{"private-label":"private"}},
-            "primary_mob_id":"primary", "source_mob_id":"lower"
+            "primary_mob_id":"primary", "source_mob_id":"primary"
         }))?);
         let stored = append_and_emit(&aggregator.inner, frame.clone())
             .await?
@@ -22992,6 +23259,7 @@ comms = true
             labels: BTreeMap::new(),
             spawned_by: Some("ops-lead".to_string()),
             spawned_by_session: None,
+            session_id: None,
             via_tool: "mob_spawn_member".to_string(),
         })
         .await;
@@ -23156,6 +23424,16 @@ comms = true
             .await
             .expect("member spawns");
 
+        // A kickoff is the record of the member its spawn made: it names
+        // that member's session, as the outcomes of `fork_off` and
+        // `delegate` do, and is witnessed by it.
+        let member_session = runtime
+            .mob_handle()
+            .get_member(&AgentIdentity::from("worker-3"))
+            .await
+            .expect("roster read")
+            .and_then(|entry| entry.bridge_session_id().map(ToString::to_string))
+            .expect("the spawned member has a session");
         let seed = crate::console_spawn::ConsoleSpawnSeed {
             mob_id: Some("agent-spawn-console-test".to_string()),
             member_id: "worker-3".to_string(),
@@ -23164,7 +23442,8 @@ comms = true
             labels: BTreeMap::from([("group".to_string(), "workers".to_string())]),
             spawned_by: Some("ops-lead".to_string()),
             spawned_by_session: None,
-            via_tool: "mob_spawn_member".to_string(),
+            session_id: Some(member_session),
+            via_tool: "fork_off".to_string(),
         };
         sink.project_spawned_member(&seed).await;
         // Spawn retries must not fork or duplicate the chat.

@@ -51,7 +51,7 @@ pub use controller::{
 };
 pub(crate) use controller::{
     AccessEditError, AccessEditPrecondition, AccessMutation, CapturedLineageLink, LiveAccessView,
-    MAX_LINEAGE_DEPTH,
+    MAX_LINEAGE_DEPTH, PrivateOwnerRecordReader,
 };
 pub use engine::{AccessDecision, AccessPrincipal, AccessResource, evaluate_access};
 pub(crate) use model::is_ingress_name;

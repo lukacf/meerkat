@@ -42,7 +42,7 @@ use crate::access::{
     ACTION_MOB_MEMORY_READ, ACTION_MOB_OBSERVE, ACTION_OPERATOR_MEMORY_READ,
     ACTION_OPERATOR_MEMORY_READ_ANY, ACTION_RUNTIME_ADMIN, ACTION_SCHEDULE_MANAGE,
     ACTION_WORKGRAPH_MANAGE, ACTION_WORKGRAPH_VIEW, AccessController, AccessResource, AccessView,
-    AgentResourceAttributes, LiveAccessView,
+    AgentResourceAttributes, LiveAccessView, PrivateOwnerRecordReader,
 };
 // The test modules build access rules and groups through `use super::*`.
 #[cfg(test)]
@@ -923,18 +923,61 @@ fn gating_audit_entry_origin(entry: &crate::runtime::GatingAuditEntry) -> Option
         .and_then(Value::as_str)
 }
 
+/// Whether a caller may see a gating entry recorded with the origin
+/// `identity`: only a caller that may view that agent, and, for a caller the
+/// console keeps apart from other people, only when the console knows the
+/// agent ([`AccessView::withholds_unknown_member`]): an origin it does not
+/// know may have been private to a person.
+fn gating_origin_visible(access_view: Option<&AccessView>, identity: &str) -> bool {
+    access_view.is_none_or(|view| {
+        view.can_view_agent(identity) && !view.withholds_unknown_member(identity)
+    })
+}
+
 /// Whether a caller may see an audit entry: entries recorded with an origin
-/// are visible only to callers that may view that origin's agent.
+/// are visible only to callers that may see that origin
+/// ([`gating_origin_visible`]).
 fn gating_audit_entry_visible(
     entry: &crate::runtime::GatingAuditEntry,
     access_view: Option<&AccessView>,
 ) -> bool {
+    gating_audit_entry_origin(entry)
+        .is_none_or(|identity| gating_origin_visible(access_view, identity))
+}
+
+/// An audit entry as the console serves it to a caller who may see it. The
+/// entry for an action blocked on a memory conflict carries the conflict,
+/// and the conflict's reason is text written from the records that
+/// conflict, which the caller may not be allowed to read: a console that can
+/// identify a person serves that text to an admin only
+/// ([`AccessView::kept_apart_from_other_people`]) and leaves the conflict's
+/// entity and topic to every caller who may see the entry. The entry of a
+/// failed conflict lookup carries the error of the failed read, which can
+/// quote the memory module's answer: that text is served to an admin only
+/// as well, and the entry still says that the lookup failed and for what.
+/// The stored entry is unchanged.
+fn gating_audit_entry_served(
+    mut entry: crate::runtime::GatingAuditEntry,
+    access_view: Option<&AccessView>,
+) -> crate::runtime::GatingAuditEntry {
+    if access_view.is_some_and(AccessView::kept_apart_from_other_people)
+        && let Some(conflict) = entry
+            .detail
+            .get_mut("conflict")
+            .and_then(Value::as_object_mut)
+    {
+        conflict.remove("reason");
+    }
+    // The entry of a failed conflict lookup carries the failed read's
+    // error text, which can quote what the memory module answered about
+    // the conflict.
+    if access_view.is_some_and(AccessView::kept_apart_from_other_people)
+        && entry.event_type == crate::runtime::MEMORY_CONFLICT_LOOKUP_FAILED_EVENT
+        && let Some(detail) = entry.detail.as_object_mut()
+    {
+        detail.remove("error");
+    }
     entry
-        .detail
-        .get("origin")
-        .and_then(|origin| origin.get("identity"))
-        .and_then(Value::as_str)
-        .is_none_or(|identity| access_view.is_none_or(|view| view.can_view_agent(identity)))
 }
 
 /// Live gating change notifications for the console. A connection starts with
@@ -989,8 +1032,6 @@ async fn console_gating_stream_handler(
         )
             .into_response();
     };
-    let subject = audience.subject().map(ToString::to_string);
-    let private_owner_key = audience.private_owner_key().map(ToString::to_string);
     // The caller's audience controller: an installed access controller, kept
     // even while it is disabled (enabling a policy later must reach this
     // stream), else the stream's own. Either is primed: the private-owner
@@ -1048,7 +1089,7 @@ async fn console_gating_stream_handler(
             }
             let page = owner.lock().await.gating_audit_after(cursor.as_deref());
             if let Some(runtime) = &runtime {
-                let probe = access.view_for_caller(subject.as_deref(), private_owner_key.as_deref());
+                let probe = audience.refreshed();
                 if (!page.entries.is_empty() && prime_age.due(Instant::now()))
                     || page
                         .entries
@@ -1063,8 +1104,9 @@ async fn console_gating_stream_handler(
                 break;
             }
             // The view is derived after the last await, from the live
-            // configuration and attribute cache.
-            let view = access.view_for_caller(subject.as_deref(), private_owner_key.as_deref());
+            // configuration and attribute cache: the same caller's view of
+            // the same console, under the configuration committed now.
+            let view = audience.refreshed();
             if view.enforced() && !view.allows(ACTION_GATING_VIEW) {
                 yield Ok(axum::response::sse::Event::default()
                     .event("gating.access_revoked")
@@ -3385,7 +3427,10 @@ async fn console_send_gate(
 /// Record the access attributes of every runtime `aggregator` serves, each
 /// in its identity namespace, as every route that holds those runtimes
 /// records them ([`prime_access_cache_from_runtime_in_namespace`]): the
-/// priming of a Console route with no local runtime.
+/// priming of a Console route with no local runtime. Whether a runtime
+/// still owes the first read of who its members are private to is counted
+/// for that runtime (two runtimes under one namespace are two), and only
+/// while the Console serves it.
 async fn prime_access_cache_from_aggregator(
     aggregator: &MetaConsoleAggregator,
     access: &AccessController,
@@ -3401,9 +3446,26 @@ async fn prime_access_cache_from_aggregator(
         }
     };
     for runtime in runtimes {
-        prime_access_cache_from_runtime_in_namespace(&runtime.runtime, access, &runtime.namespace)
-            .await;
+        prime_access_cache_from_runtime_in_namespace(
+            &runtime.runtime,
+            access,
+            &runtime.namespace,
+            PrivateOwnerRecordReader::ServedRuntime(aggregator.id()),
+        )
+        .await;
     }
+    // No later reading of this aggregator's runtimes reaches a runtime it
+    // serves no longer, so none would find its first read done: this
+    // aggregator counts it no longer.
+    access.keep_served_private_owner_records(aggregator.id(), || {
+        let served = aggregator.panel_runtimes().ok()?;
+        Some(
+            served
+                .iter()
+                .map(|runtime| runtime.runtime.private_owners().record_id())
+                .collect(),
+        )
+    });
 }
 
 /// Whether the aggregator's identity record of `identity` (by identity or
@@ -3969,6 +4031,14 @@ mod console_private_side_chat_tests;
 #[cfg(test)]
 #[path = "console_private_audience_tests.rs"]
 mod console_private_audience_tests;
+
+#[cfg(test)]
+#[path = "console_frame_witness_tests.rs"]
+mod console_frame_witness_tests;
+
+#[cfg(test)]
+#[path = "console_kept_apart_tests.rs"]
+mod console_kept_apart_tests;
 
 #[cfg(test)]
 #[path = "console_schedule_tests.rs"]
@@ -7400,15 +7470,23 @@ impl<'a> MemoryPanelCaller<'a> {
 
     /// Whether the caller may not know of the agent `identity` names, as the
     /// console names it ([`AccessView::hides_agent`]): it is private to
-    /// another person. Holds with access enforced or not. On a console with
-    /// sign-in, a caller who is not an admin is also shown nothing of an
-    /// agent the console does not know
+    /// another person. Holds with access enforced or not. On a console that
+    /// can identify a person, a caller who is not an admin is also shown
+    /// nothing of an agent the console does not know
     /// ([`AccessView::withholds_unknown_member`]): it ended before this
     /// process read who its members belong to, and may have been private.
     fn hides_identity(self, identity: &str) -> bool {
+        self.hides_private_identity(identity)
+            || self.view.is_some_and(|view| {
+                view.withholds_unknown_member(&namespace_console_identity(identity, self.namespace))
+            })
+    }
+
+    /// The private-owner half of [`Self::hides_identity`]: the agent
+    /// `identity` names is private to another person.
+    fn hides_private_identity(self, identity: &str) -> bool {
         self.view.is_some_and(|view| {
-            let identity = namespace_console_identity(identity, self.namespace);
-            view.hides_agent(&identity) || view.withholds_unknown_member(&identity)
+            view.hides_agent(&namespace_console_identity(identity, self.namespace))
         })
     }
 }
@@ -7502,9 +7580,13 @@ fn memory_panel_scope_visible(
 /// deny of that kind applies to either action (fails closed). An agent
 /// private to another person is withheld, enforced access or not.
 fn memory_panel_identity_visible(caller: MemoryPanelCaller<'_>, identity: &str) -> bool {
-    if caller.hides_identity(identity) {
-        return false;
-    }
+    !caller.hides_identity(identity) && memory_panel_identity_allowed(caller, identity)
+}
+
+/// The access rules' half of [`memory_panel_identity_visible`]: whether the
+/// rules allow the caller the memory scope of `identity`, judged on its
+/// name.
+fn memory_panel_identity_allowed(caller: MemoryPanelCaller<'_>, identity: &str) -> bool {
     let Some(view) = caller.enforced() else {
         return true;
     };
@@ -7646,10 +7728,16 @@ async fn memory_panel_retain_readable_promotion_sources(
 /// store deletes none of those rows, so every scope a run read before named
 /// is then among the realm's scopes, and quarantine evidence stays. Without
 /// enforced access every scope is readable. The identity scope of an agent
-/// hidden from the caller ([`MemoryPanelCaller::hides_identity`]) is left out
-/// of the count: no dream covers a member private to a person, so its runs
-/// name nothing of it, and counting it would withhold every run from
-/// everyone else and tell them private memory exists.
+/// private to another person ([`MemoryPanelCaller::hides_private_identity`])
+/// is left out of the count: no dream covers a member private to a person,
+/// so its runs name nothing of it, and counting it would withhold every run
+/// from everyone else and tell them private memory exists. The scope of an
+/// agent the console withholds from the caller only because it does not
+/// know it ([`AccessView::withholds_unknown_member`]) stays in the count,
+/// judged by the access rules on its name
+/// ([`memory_panel_identity_allowed`]) as for a caller the console keeps
+/// apart from nobody: a dream can cover such an agent's harvest, so a deny
+/// that names it, or no rule that allows it, withholds the runs.
 async fn memory_panel_realm_fully_readable(
     store: &dyn crate::memory::capabilities::MemoryPanelStore,
     caller: MemoryPanelCaller<'_>,
@@ -7666,10 +7754,15 @@ async fn memory_panel_realm_fully_readable(
             !matches!(
                 scope,
                 crate::memory::records::MemoryScope::Identity { identity, .. }
-                    if caller.hides_identity(identity)
+                    if caller.hides_private_identity(identity)
             )
         })
-        .all(|scope| memory_panel_scope_visible(caller, scope));
+        .all(|scope| match scope {
+            crate::memory::records::MemoryScope::Identity { identity, .. } => {
+                memory_panel_identity_allowed(caller, identity)
+            }
+            scope => memory_panel_scope_visible(caller, scope),
+        });
     if !every_scope {
         return Ok(false);
     }
@@ -8038,8 +8131,8 @@ mod memory_panel_records_paging_tests {
         Ok(())
     }
 
-    /// An anonymous caller who may view router and read its memory, and
-    /// neither for delivery.
+    /// The anonymous caller of a console that identifies nobody, who may
+    /// view router and read its memory, and neither for delivery.
     fn router_reader() -> TestResult<AccessView> {
         let controller = AccessController::new(crate::access::AccessControlConfig {
             enabled: true,
@@ -8055,7 +8148,7 @@ mod memory_panel_records_paging_tests {
             }],
             ..crate::access::AccessControlConfig::default()
         })?;
-        Ok(controller.view_for_subject(None))
+        Ok(controller.view_for_subject(None).on_console(false))
     }
 
     /// One page of `meta/memory/panel/records`: its rows as
@@ -10172,7 +10265,11 @@ fn console_request_auth_context(
 
 /// The Console's request authentication, shared by the Console's own routes
 /// and [`ConsoleViewerResolver`]. A token is checked against the Console's
-/// session fence record `fences` as it is now.
+/// session fence record `fences` as it is now. Whether the console can
+/// identify a person is read from its own configuration, in one place
+/// ([`crate::runtime::console_identifies_people`]), and stated on the
+/// audience of the caller it did not identify: that is the only place a
+/// caller becomes the one operator of a console that identifies nobody.
 pub(crate) fn console_request_auth_context_for(
     decisions: &RuntimeDecisionState,
     fences: &crate::auth::session_fence::ConsoleSessionFences,
@@ -10182,13 +10279,22 @@ pub(crate) fn console_request_auth_context_for(
 ) -> Option<ConsoleHttpAuthContext> {
     if !decisions.console.require_app_auth {
         // Open console: identify callers that volunteered a valid token so
-        // per-user ABAC grants still apply; everyone else is anonymous.
-        let caller = access.and_then(|_| {
-            let token = console_request_token(headers, uri)?;
-            crate::runtime::resolve_authorized_console_caller_from_token(decisions, fences, &token)
-        });
+        // per-user ABAC grants still apply; everyone else is anonymous. A
+        // token is resolved only where the console can identify a person,
+        // and there the caller it did not identify is told apart from its
+        // people all the same: the audience states the console's fact, not
+        // the caller's.
+        let identifies_people = crate::runtime::console_identifies_people(decisions, access);
+        let caller = identifies_people
+            .then(|| {
+                let token = console_request_token(headers, uri)?;
+                crate::runtime::resolve_authorized_console_caller_from_token(
+                    decisions, fences, &token,
+                )
+            })
+            .flatten();
         let Some(caller) = caller else {
-            let audience = console_audience_view(access, None, None);
+            let audience = console_audience_view(access, None, None).on_console(identifies_people);
             return Some(ConsoleHttpAuthContext {
                 access_view: access.map(|_| audience.clone()),
                 audience,
@@ -11329,10 +11435,18 @@ enum SessionAttachDecision {
 /// Whether or not access is enforced, a session the caller may not know of
 /// is answered as a session that does not exist: one a member hidden from
 /// the caller owns ([`AccessView::hides_agent`]), one whose stored member
-/// labels name a private owner other than the caller, and, on a console with
-/// sign-in, for a caller who is not an admin, one whose owner the console
-/// does not know ([`AccessView::withholds_unknown_member`]) or that has no
-/// owner at all.
+/// labels name a private owner other than the caller
+/// ([`session_stored_private_owner`], which also reads the session of a
+/// member that ended), and, on a console that can identify a person, for a
+/// caller who is not an admin
+/// ([`AccessView::kept_apart_from_other_people`]), one whose owner the
+/// console does not know ([`AccessView::withholds_unknown_member`]) or that
+/// has no owner at all. A session no member holds whose owner could not be
+/// read (Core's member history did not answer, or the session's stored
+/// document could not be read or says nothing the console can decide by)
+/// is answered so to every caller who is not an admin, the one operator of
+/// a console that identifies nobody included: nothing says whether it was
+/// private to a person.
 async fn attached_session_decision(
     view: Option<&AccessView>,
     runtime: &MobRuntime,
@@ -11342,16 +11456,23 @@ async fn attached_session_decision(
     let Some(view) = view else {
         return SessionAttachDecision::Allowed;
     };
-    let owners = session_member_owners(&runtime.handle(), identity_runtime, session_id)
-        .await
-        .unwrap_or_default();
+    // Whether Core's member history answered: a failed read establishes no
+    // owner, and says nothing of whether the session had one.
+    let (owners, owners_read) =
+        match session_member_owners(&runtime.handle(), identity_runtime, session_id).await {
+            Some(owners) => (owners, true),
+            None => (Vec::new(), false),
+        };
     let stored_owner = session_stored_private_owner(runtime, session_id).await;
     let hidden = owners
         .iter()
         .any(|owner| view.hides_agent(owner) || view.withholds_unknown_member(owner))
-        || stored_owner
-            .as_deref()
-            .is_some_and(|owner| !view.is_admin() && view.private_owner_key() != Some(owner));
+        || match &stored_owner {
+            StoredPrivateOwner::Owner(owner) => {
+                !view.is_admin() && view.private_owner_key() != Some(owner.as_str())
+            }
+            StoredPrivateOwner::NoOwner | StoredPrivateOwner::Unreadable => false,
+        };
     if hidden {
         return SessionAttachDecision::Absent;
     }
@@ -11370,7 +11491,14 @@ async fn attached_session_decision(
                 })),
             });
         }
-        return if view.subject().is_some() {
+        // A console that can identify a person keeps what it cannot
+        // attribute from every caller who is not an admin, signed in or not.
+        // A session whose owner could not be read is attributed by nothing,
+        // on any console.
+        return if view.kept_apart_from_other_people()
+            || !owners_read
+            || matches!(stored_owner, StoredPrivateOwner::Unreadable)
+        {
             SessionAttachDecision::Absent
         } else {
             SessionAttachDecision::Allowed
@@ -11395,19 +11523,83 @@ async fn attached_session_decision(
     SessionAttachDecision::Allowed
 }
 
-/// The private owner the stored labels of session `session_id` name
-/// ([`crate::access::PRIVATE_TO_LABEL`]), read from the runtime's session
-/// service: a private member's session keeps its owner after the member
-/// ended.
+/// What the labels a session was created with say of its private owner
+/// ([`crate::access::PRIVATE_TO_LABEL`]).
+enum StoredPrivateOwner {
+    /// The labels name this private owner.
+    Owner(String),
+    /// The labels were read and name no private owner, or the session
+    /// service holds no session of the id.
+    NoOwner,
+    /// The labels could not be read: nothing says whether the session was
+    /// private to a person.
+    Unreadable,
+}
+
+impl StoredPrivateOwner {
+    fn of_labels(labels: &std::collections::BTreeMap<String, String>) -> Self {
+        crate::access::private_owner(labels)
+            .map_or(Self::NoOwner, |owner| Self::Owner(owner.to_string()))
+    }
+
+    /// What the stored document of a session says. The build of a mob
+    /// member's session writes the member's labels into the session
+    /// metadata's peer labels ([`meerkat_core::SessionMetadata::peer_meta`]),
+    /// beside its member binding, and nothing removes them when the member
+    /// ends. A document that carries neither was built for no mob member
+    /// and has no private owner. One whose metadata is missing or does not
+    /// decode, or that names a member binding without peer labels, cannot
+    /// be decided.
+    fn of_stored_session(session: &meerkat_core::Session) -> Self {
+        let Ok(view) = meerkat_core::PersistedSessionMetadataView::try_from_session(session) else {
+            return Self::Unreadable;
+        };
+        match view.session_metadata {
+            Some(metadata) => match (&metadata.peer_meta, &metadata.mob_member_binding) {
+                (Some(peer), _) => Self::of_labels(&peer.labels),
+                (None, None) => Self::NoOwner,
+                (None, Some(_)) => Self::Unreadable,
+            },
+            None => Self::Unreadable,
+        }
+    }
+}
+
+/// The private owner the labels of session `session_id` name: a private
+/// member's session keeps its owner after the member ended. A session Core
+/// serves is read through the runtime's session service. Core answers the
+/// read of an archived session as a session it does not hold, and a member
+/// that ended leaves its session archived, so such a session is read
+/// through the same service's resume read
+/// ([`meerkat_mob::MobSessionService::load_session_for_resume`]): the read
+/// an attach loads the session through, so whatever an attach can load is
+/// decided by the labels it was created with, on every composition. The
+/// read builds, seats and wakes nothing. A session that read does not hold
+/// has no owner. A failed read, an archived session the read does not hand
+/// out, and a runtime with no session service (one taken from a bare
+/// handle) answer [`StoredPrivateOwner::Unreadable`].
 async fn session_stored_private_owner(
     runtime: &MobRuntime,
     session_id: &meerkat_core::types::SessionId,
-) -> Option<String> {
-    let service = runtime.session_service()?;
-    let view = meerkat_core::service::SessionService::read(service.as_ref(), session_id)
+) -> StoredPrivateOwner {
+    let Some(service) = runtime.session_service() else {
+        return StoredPrivateOwner::Unreadable;
+    };
+    match meerkat_core::service::SessionService::read(service.as_ref(), session_id).await {
+        Ok(view) => return StoredPrivateOwner::of_labels(&view.state.labels),
+        Err(meerkat_core::service::SessionError::NotFound { .. }) => {}
+        Err(_) => return StoredPrivateOwner::Unreadable,
+    }
+    match meerkat_mob::MobSessionService::load_session_for_resume(service.as_ref(), session_id)
         .await
-        .ok()?;
-    crate::access::private_owner(&view.state.labels).map(str::to_string)
+    {
+        Ok(
+            meerkat_mob::ResumeSessionLoad::Active(session)
+            | meerkat_mob::ResumeSessionLoad::Revivable(session),
+        ) => StoredPrivateOwner::of_stored_session(&session),
+        Ok(meerkat_mob::ResumeSessionLoad::Absent) => StoredPrivateOwner::NoOwner,
+        Ok(_) | Err(_) => StoredPrivateOwner::Unreadable,
+    }
 }
 
 /// The session a console attach goes on with, and, for a session the caller
@@ -15649,9 +15841,10 @@ async fn handle_console_runtime_rpc_with_visibility(
                 .list_gating_pending()
                 .into_iter()
                 .filter(|entry| {
-                    entry.origin.as_ref().is_none_or(|origin| {
-                        access_view.is_none_or(|view| view.can_view_agent(&origin.identity))
-                    })
+                    entry
+                        .origin
+                        .as_ref()
+                        .is_none_or(|origin| gating_origin_visible(access_view, &origin.identity))
                 })
                 .collect::<Vec<_>>();
             response_value(response_id, Some(json!({ "pending": pending })), None)
@@ -15697,6 +15890,7 @@ async fn handle_console_runtime_rpc_with_visibility(
                 .into_iter()
                 .filter(|entry| gating_audit_entry_visible(entry, access_view))
                 .take(limit)
+                .map(|entry| gating_audit_entry_served(entry, access_view))
                 .collect::<Vec<_>>();
             // Hidden entries never move the cursor, so a stretch of them is
             // re-read next time, and a gap may be reported if the last
@@ -19724,7 +19918,13 @@ pub(crate) async fn prime_access_cache_from_runtime(
     runtime: &MobRuntime,
     access: &AccessController,
 ) {
-    prime_access_cache_from_runtime_in_namespace(runtime, access, "").await;
+    prime_access_cache_from_runtime_in_namespace(
+        runtime,
+        access,
+        "",
+        PrivateOwnerRecordReader::OwnRuntime,
+    )
+    .await;
     if let Some(identity_runtime) = runtime.installed_identity_runtime() {
         prime_current_runtime_aliases(&identity_runtime, access).await;
     }
@@ -19961,11 +20161,15 @@ fn namespace_console_attributes(
 /// from its own record ([`unseated_agent_access_attributes`]), so a rule
 /// about a role or a label and the rule about an agent private to a person
 /// decide such an agent wherever it is named.
+/// `first_read_reader` says which reading of the runtime this is, for the
+/// first read of who its members are private to
+/// ([`AccessController::record_private_owner_record`]).
 /// Returns the recorded live identities and those agents, namespaced.
 async fn prime_access_cache_from_runtime_in_namespace(
     runtime: &MobRuntime,
     access: &AccessController,
     namespace: &str,
+    first_read_reader: PrivateOwnerRecordReader,
 ) -> BTreeSet<String> {
     let registered = runtime.console_identity_labels().await;
     let mut roster_identities = BTreeSet::new();
@@ -20004,7 +20208,21 @@ async fn prime_access_cache_from_runtime_in_namespace(
         .filter_map(|member| member.agent_id.as_deref())
         .map(crate::member_comms_id::logical_memory_identity)
         .collect();
-    let mut known_members = runtime.private_owners().memory_members();
+    // A first read of that record that is still on its first attempt is
+    // waited for, a bounded time; whether a read is still owed is taken
+    // before the record itself, so a record read as complete is complete.
+    // While a read is owed the controller keeps every caller who is not
+    // an admin apart: an ended private member is not known as one yet.
+    let owners = runtime.private_owners();
+    owners
+        .first_attempts_settled(crate::private_owners::FIRST_READ_WAIT)
+        .await;
+    access.record_private_owner_record(
+        owners.record_id(),
+        first_read_reader,
+        owners.first_read_pending(),
+    );
+    let mut known_members = owners.memory_members();
     known_members.retain(|identity, _| !live_rows.contains(identity));
     let unseated = unseated_agent_access_attributes(
         &runtime.handle(),
@@ -33275,11 +33493,11 @@ mod console_viewer_resolver_tests {
 
     // HS256 fixtures are accepted only for a development issuer.
     const ISSUER: &str = "https://trusted.meta.localhost";
-    const BOB: &str = "bob@example.test";
-    const CAROL: &str = "carol@example.test";
+    pub(super) const BOB: &str = "bob@example.test";
+    pub(super) const CAROL: &str = "carol@example.test";
     const ROBOT: &str = "svc:robot";
 
-    fn decisions(require_app_auth: bool) -> RuntimeDecisionState {
+    pub(super) fn decisions(require_app_auth: bool) -> RuntimeDecisionState {
         crate::build_runtime_decision_state(crate::RuntimeDecisionInputs {
             bigquery: crate::BigQueryNaming {
                 dataset: "viewer_dataset".to_string(),
@@ -33331,7 +33549,7 @@ mod console_viewer_resolver_tests {
         .expect("signed fixture JWT")
     }
 
-    fn bearer(subject: &str) -> HeaderMap {
+    pub(super) fn bearer(subject: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
         headers.insert(
             header::AUTHORIZATION,
@@ -33823,6 +34041,203 @@ mod console_viewer_resolver_tests {
                 issuer: ISSUER.to_string(),
             }
         );
+    }
+
+    /// The audience the console builds for a request that carries
+    /// `subject`'s token, or no token.
+    fn audience(
+        decisions: &RuntimeDecisionState,
+        access: Option<&AccessController>,
+        subject: Option<&str>,
+    ) -> AccessView {
+        console_request_auth_context_for(
+            decisions,
+            &crate::auth::session_fence::ConsoleSessionFences::detached(),
+            access,
+            &subject.map(bearer).unwrap_or_default(),
+            &Uri::from_static("/console/timeline"),
+        )
+        .expect("the console admits the request")
+        .audience
+    }
+
+    /// `decisions` with a trusted key set that holds no key: no token
+    /// verifies against it.
+    pub(super) fn with_no_key(mut decisions: RuntimeDecisionState) -> RuntimeDecisionState {
+        decisions.trusted_oidc.jwks_json = r#"{"keys":[]}"#.to_string();
+        decisions
+    }
+
+    /// Rules that are off, with Carol the one administrator: every caller
+    /// may reach every agent.
+    pub(super) fn rules_off() -> AccessControlConfig {
+        AccessControlConfig {
+            enabled: false,
+            admins: vec![CAROL.to_string()],
+            ..AccessControlConfig::default()
+        }
+    }
+
+    /// The access configurations that grant a caller who sends no token:
+    /// an allow rule that names no subject and no group, and rules that are
+    /// off. Carol is the one administrator of both.
+    fn configurations_that_grant_a_caller_with_no_token() -> [AccessControlConfig; 2] {
+        [
+            AccessControlConfig {
+                enabled: true,
+                admins: vec![CAROL.to_string()],
+                rules: vec![AccessRule {
+                    id: "every-caller-reads-every-agent".to_string(),
+                    actions: vec!["agent.*".to_string()],
+                    agents: vec!["*".to_string()],
+                    ..AccessRule::default()
+                }],
+                ..AccessControlConfig::default()
+            },
+            rules_off(),
+        ]
+    }
+
+    /// Whether a read of `member`'s memory scope reaches that member for
+    /// `view`, or is answered as a read of a member that does not exist.
+    fn reads_memory_scope_of(view: &AccessView, member: &str) -> bool {
+        let mut params = json!({ "identity": member });
+        console_rpc_resolve_members(Some(view), "meta/agent_memory/manifest", &mut params)
+            .expect("a member a method reads is never refused");
+        params["identity"] == json!(member)
+    }
+
+    /// A console where sign-in is optional and a token is verified can
+    /// identify a person, so a member can be private to one there. A caller
+    /// who sends no token is then one more caller who is not an
+    /// administrator: refused a record with no captured member attributes,
+    /// under a name a shared member holds and under a name no member ever
+    /// held, and the memory scope of a member the console does not know. A
+    /// console that can identify nobody (no key to verify a token with, or
+    /// no access controller to resolve one for) serves its one operator as
+    /// before. A console that requires sign-in tells its people apart with
+    /// or without an access configuration.
+    #[test]
+    fn a_console_that_can_identify_a_person_exempts_no_caller_with_no_token() {
+        const SHARED: &str = "alpha";
+        const UNSEATED: &str = "ghost-x";
+        let open = decisions(false);
+        for config in configurations_that_grant_a_caller_with_no_token() {
+            let enabled = config.enabled;
+            let controller = AccessController::new(config).expect("controller");
+            controller.record_agent_attributes(crate::access::AgentResourceAttributes {
+                identity: SHARED.to_string(),
+                agent_id: None,
+                role: Some("worker".to_string()),
+                labels: Default::default(),
+            });
+            let nobody = audience(&open, Some(&controller), None);
+            let bob = audience(&open, Some(&controller), Some(BOB));
+            let admin = audience(&open, Some(&controller), Some(CAROL));
+            assert!(admin.is_admin() && !bob.is_admin() && nobody.subject().is_none());
+            for name in [SHARED, UNSEATED] {
+                assert!(
+                    !nobody.can_view_uncaptured_member(name),
+                    "rules on {enabled}: a caller with no token reads no record with no \
+                     captured attributes under {name}"
+                );
+                assert!(!bob.can_view_uncaptured_member(name), "{name}");
+                assert!(admin.can_view_uncaptured_member(name), "{name}");
+            }
+            assert!(
+                !reads_memory_scope_of(&nobody, UNSEATED),
+                "rules on {enabled}: a caller with no token is shown no memory scope of a \
+                 member the console does not know"
+            );
+            assert!(!reads_memory_scope_of(&bob, UNSEATED));
+            assert!(reads_memory_scope_of(&admin, UNSEATED));
+            assert!(
+                reads_memory_scope_of(&nobody, SHARED),
+                "a member the console knows is withheld from nobody"
+            );
+
+            // The same controller on a console with no key: nobody can be
+            // identified, so nobody can be an administrator either.
+            let operator = audience(&with_no_key(open.clone()), Some(&controller), None);
+            for name in [SHARED, UNSEATED] {
+                assert!(
+                    operator.can_view_uncaptured_member(name),
+                    "rules on {enabled}: the one operator of a console that verifies no \
+                     token reads the record under {name} as before"
+                );
+            }
+            assert!(reads_memory_scope_of(&operator, UNSEATED));
+        }
+
+        // No access controller: a token is never resolved, with a key or
+        // without one.
+        for console in [open.clone(), with_no_key(open)] {
+            let operator = audience(&console, None, None);
+            assert!(operator.can_view_uncaptured_member(UNSEATED));
+            assert!(reads_memory_scope_of(&operator, UNSEATED));
+        }
+
+        // Sign-in required and no access configuration: every caller is a
+        // person, and none is an administrator.
+        let person = audience(&decisions(true), None, Some(BOB));
+        assert!(!person.can_view_uncaptured_member(UNSEATED));
+        assert!(!reads_memory_scope_of(&person, UNSEATED));
+    }
+
+    /// A session that no member owns is answered as a session that does not
+    /// exist to every caller of a console that can identify a person, except
+    /// its administrator, whether the caller sent a token or not. A console
+    /// that can identify nobody attaches it for its one operator as before.
+    #[tokio::test]
+    async fn a_session_with_no_established_owner_is_absent_on_a_console_that_can_identify_a_person()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        async fn attach(view: &AccessView, runtime: &MobRuntime) -> &'static str {
+            let session_id = meerkat_core::types::SessionId::new();
+            match attached_session_decision(Some(view), runtime, None, &session_id).await {
+                SessionAttachDecision::Allowed => "allowed",
+                SessionAttachDecision::Absent => "absent",
+                SessionAttachDecision::Denied(_) => "denied",
+            }
+        }
+        // A runtime that keeps its sessions in a durable store, where the
+        // console reads that no session of this id was ever stored.
+        let state_dir = tempfile::tempdir()?;
+        let runtime = super::console_side_chat_tests::persistent_gateway_runtime_in(
+            state_dir.path(),
+            "attach-unowned-open-console",
+            "",
+            "",
+        )
+        .await?;
+        let controller = AccessController::new(rules_off())?;
+        let open = decisions(false);
+        let nobody = audience(&open, Some(&controller), None);
+        assert_eq!(
+            attach(&nobody, &runtime).await,
+            "absent",
+            "a caller with no token on a console that can identify a person"
+        );
+        assert_eq!(
+            attach(&audience(&open, Some(&controller), Some(BOB)), &runtime).await,
+            "absent"
+        );
+        assert_eq!(
+            attach(&audience(&open, Some(&controller), Some(CAROL)), &runtime).await,
+            "allowed",
+            "the administrator"
+        );
+        let no_key = with_no_key(open.clone());
+        assert_eq!(
+            attach(&audience(&no_key, Some(&controller), None), &runtime).await,
+            "allowed",
+            "the one operator of a console that verifies no token"
+        );
+        assert_eq!(
+            attach(&audience(&open, None, None), &runtime).await,
+            "allowed",
+            "the one operator of a console with no access controller"
+        );
+        Ok(())
     }
 }
 
@@ -37263,6 +37678,7 @@ mod console_access_priming_tests {
             ]),
             spawned_by: Some("lead".to_string()),
             spawned_by_session: None,
+            session_id: None,
             via_tool: "mob_spawn_member".to_string(),
         })
         .await;
@@ -37319,6 +37735,7 @@ mod console_access_priming_tests {
             ]),
             spawned_by: Some("lead".to_string()),
             spawned_by_session: None,
+            session_id: None,
             via_tool: "mob_spawn_member".to_string(),
         })
         .await;
@@ -37594,6 +38011,7 @@ mod console_access_priming_tests {
             labels: BTreeMap::from([("role".to_string(), "worker".to_string())]),
             spawned_by: Some("lead".to_string()),
             spawned_by_session: None,
+            session_id: None,
             via_tool: "mob_spawn_member".to_string(),
         })
         .await;
@@ -37766,6 +38184,7 @@ comms = true
                 labels: BTreeMap::new(),
                 spawned_by: Some(spawner.to_string()),
                 spawned_by_session: None,
+                session_id: None,
                 via_tool: "mob_spawn_member".to_string(),
             })
             .await;

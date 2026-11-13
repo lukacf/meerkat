@@ -419,6 +419,57 @@ pub(crate) fn authorize_console_rest_json_route(
     Ok(resolved_auth)
 }
 
+/// Whether this console can identify a person: it requires sign-in, or it
+/// has an access controller, for which it resolves the token a caller
+/// volunteers, and a trusted OIDC snapshot a token can verify against
+/// ([`validate_trusted_oidc_runtime_config`]). Only on such a console can a
+/// member be private to a person. A console that can identify nobody has
+/// one anonymous operator and nobody to keep apart. Computed here and
+/// nowhere else, from the console's own configuration: every route that
+/// takes a view for a caller it did not identify asks this one function
+/// what its console is.
+pub(crate) fn console_identifies_people(
+    decisions: &RuntimeDecisionState,
+    access: Option<&AccessController>,
+) -> bool {
+    decisions.console.require_app_auth
+        || (access.is_some()
+            && validate_trusted_oidc_runtime_config(&decisions.trusted_oidc).is_ok())
+}
+
+/// The view of a caller whose request carries no audience the Console
+/// resolved (an embedder's own REST route): the view of the subject the
+/// route's authentication resolved, or, where sign-in is optional, of the
+/// person a token the caller volunteered names. A token is resolved only on
+/// a console that can identify a person ([`console_identifies_people`]), and
+/// the caller the route did not identify is told by that same answer: kept
+/// apart from the console's people there, the one operator on a console
+/// that identifies nobody. Invalid tokens fall back to that caller.
+pub(crate) fn console_rest_route_view(
+    decisions: &RuntimeDecisionState,
+    fences: &ConsoleSessionFences,
+    request: &ConsoleRestJsonRequest,
+    resolved_auth: Option<&ConsoleAccessRequest>,
+    access: Option<&AccessController>,
+) -> AccessView {
+    let (_, query_params) = split_path_and_query(&request.path);
+    let identifies_people = console_identifies_people(decisions, access);
+    let mut access_subject = resolved_auth.map(|auth| auth.email.clone());
+    if access_subject.is_none()
+        && identifies_people
+        && !decisions.console.require_app_auth
+        && let Some(token) = query_params.get("auth_token")
+    {
+        access_subject = resolve_authorized_console_auth_from_token(decisions, fences, token)
+            .map(|auth| auth.email);
+    }
+    access
+        .cloned()
+        .unwrap_or_else(AccessController::audience_only)
+        .view_for_caller(access_subject.as_deref(), None)
+        .on_console(identifies_people)
+}
+
 /// The response to a request [`authorize_console_rest_json_route`] accepted,
 /// given the authentication it resolved. `audience` is the caller's agent
 /// audience when the Console resolved it ([`crate::http_console`]'s routes:
@@ -437,30 +488,10 @@ pub(crate) fn render_console_rest_json_route(
     workgraph_available: bool,
     pending: &BTreeSet<String>,
 ) -> ConsoleRestJsonResponse {
-    let (base_path, query_params) = split_path_and_query(&request.path);
+    let (base_path, _) = split_path_and_query(&request.path);
     let view = match audience {
         Some(audience) => audience.clone(),
-        None => {
-            // Subject for ABAC. When app auth is not required the auth
-            // resolver returns None without looking at credentials; still
-            // identify callers that *did* present a valid token so per-user
-            // grants apply on auth-optional consoles. Invalid tokens fall
-            // back to anonymous.
-            let mut access_subject = resolved_auth.map(|auth| auth.email.clone());
-            if access_subject.is_none()
-                && access.is_some()
-                && !decisions.console.require_app_auth
-                && let Some(token) = query_params.get("auth_token")
-            {
-                access_subject =
-                    resolve_authorized_console_auth_from_token(decisions, fences, token)
-                        .map(|auth| auth.email);
-            }
-            access
-                .cloned()
-                .unwrap_or_else(AccessController::audience_only)
-                .view_for_caller(access_subject.as_deref(), None)
-        }
+        None => console_rest_route_view(decisions, fences, request, resolved_auth, access),
     };
     // The access configuration's own view, when one is installed.
     let access_view = access.map(|_| &view);

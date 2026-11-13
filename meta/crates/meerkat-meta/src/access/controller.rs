@@ -16,6 +16,8 @@ use super::model::{
     ACTION_AGENT_VIEW, AccessConfigError, AccessControlConfig, AccessGroup, AccessRule,
     check_declared_ingresses, private_owner, validate_access_config,
 };
+use crate::console_aggregator::ConsoleAggregatorId;
+use crate::private_owners::PrivateOwnerRecordId;
 
 /// Cached resource attributes for one agent, keyed by console identity.
 ///
@@ -143,6 +145,52 @@ fn now_ms() -> u64 {
         })
 }
 
+/// Which reading of a runtime found that it owes the first read of who
+/// its members are private to
+/// ([`AccessController::record_private_owner_record`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PrivateOwnerRecordReader {
+    /// A route that holds the runtime itself: its console's own runtime,
+    /// which the console reads for as long as it runs.
+    OwnRuntime,
+    /// The reading of the runtimes one console aggregator serves, named by
+    /// that aggregator: it reads a runtime only while the aggregator serves
+    /// it.
+    ServedRuntime(ConsoleAggregatorId),
+}
+
+/// The readings that found a runtime owing the first read of who its
+/// members are private to.
+#[derive(Debug, Default)]
+struct OwedReadFinders {
+    /// A route that holds the runtime itself found the read owed.
+    own_route: bool,
+    /// The aggregators whose reading of their served runtimes found it owed.
+    served_by: BTreeSet<ConsoleAggregatorId>,
+}
+
+impl OwedReadFinders {
+    /// Whether `reader` is one of these readings.
+    fn holds(&self, reader: PrivateOwnerRecordReader) -> bool {
+        match reader {
+            PrivateOwnerRecordReader::OwnRuntime => self.own_route,
+            PrivateOwnerRecordReader::ServedRuntime(aggregator) => {
+                self.served_by.contains(&aggregator)
+            }
+        }
+    }
+
+    /// Add `reader` to these readings.
+    fn add(&mut self, reader: PrivateOwnerRecordReader) {
+        match reader {
+            PrivateOwnerRecordReader::OwnRuntime => self.own_route = true,
+            PrivateOwnerRecordReader::ServedRuntime(aggregator) => {
+                self.served_by.insert(aggregator);
+            }
+        }
+    }
+}
+
 struct AccessControllerInner {
     owner_instance: Option<String>,
     #[cfg(test)]
@@ -150,6 +198,15 @@ struct AccessControllerInner {
     state: RwLock<AccessState>,
     persist_path: RwLock<Option<PathBuf>>,
     attributes: RwLock<BTreeMap<String, Arc<AgentResourceAttributes>>>,
+    /// The runtimes that still owe the first read of who their members are
+    /// private to, each by its record, as the last priming of each found it
+    /// ([`AccessController::record_private_owner_record`]), with the
+    /// readings that found the read owed. What a route that holds the
+    /// runtime found lasts until a reading finds the read done; what an
+    /// aggregator's reading of its served runtimes found lasts while that
+    /// aggregator serves the runtime
+    /// ([`AccessController::keep_served_private_owner_records`]).
+    unread_private_owner_records: RwLock<BTreeMap<PrivateOwnerRecordId, OwedReadFinders>>,
     /// The runtime alias of each durable identity's current incarnation,
     /// keyed like `attributes` (console namespace included).
     current_runtime_aliases: RwLock<BTreeMap<String, String>>,
@@ -234,6 +291,7 @@ impl AccessController {
                 }),
                 persist_path: RwLock::new(None),
                 attributes: RwLock::new(BTreeMap::new()),
+                unread_private_owner_records: RwLock::new(BTreeMap::new()),
                 current_runtime_aliases: RwLock::new(BTreeMap::new()),
                 mutation: Mutex::new(()),
                 publication: OnceLock::new(),
@@ -631,13 +689,22 @@ impl AccessController {
     /// for an open/unauthenticated console). The view owns no private
     /// member: an agent private to a person ([`super::PRIVATE_TO_LABEL`]) is
     /// hidden from it unless the subject is an admin.
+    ///
+    /// A view taken for no subject says nothing of the console it is taken
+    /// for, so its caller is kept apart from other people like every caller
+    /// who is not an admin: shown nothing the console cannot attribute.
+    /// Only the console's own request authentication, which knows whether
+    /// its console can identify a person, takes the view of the one operator
+    /// of a console that identifies nobody.
     pub fn view_for_subject(&self, subject: Option<&str>) -> AccessView {
         self.view_and_revision(subject).0
     }
 
     /// [`Self::view_for_subject`] for a caller who owns the agents private
     /// to `private_owner_key` ([`super::PRIVATE_TO_LABEL`]): a signed-in
-    /// person's console caller scope, `None` for every other caller.
+    /// person's console caller scope, `None` for every other caller. As
+    /// there, a view taken for no subject is kept apart from other people
+    /// unless the console that takes it states that it identifies nobody.
     pub fn view_for_caller(
         &self,
         subject: Option<&str>,
@@ -672,6 +739,12 @@ impl AccessController {
         AccessView {
             inner: Arc::clone(&self.inner),
             config,
+            // Nothing here knows which console takes the view, so the view
+            // is of one that can identify a person: its caller is kept
+            // apart from other people unless it is an admin. Only the
+            // console's request authentication states that its console
+            // identifies nobody ([`AccessView::on_console`]).
+            console_identifies_people: true,
             principal,
             is_admin,
             private_owner_key: private_owner_key
@@ -693,6 +766,105 @@ impl AccessController {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         cache.insert(attributes.identity.clone(), Arc::new(attributes));
+    }
+
+    /// Record whether the runtime whose private-owner record is `record`
+    /// still owes the first read of who its members are private to
+    /// (`first_read_pending`), as the priming that reads that record found
+    /// it, and which reading that was (`reader`). Each runtime is counted
+    /// by its own record, whatever namespace a console gives it. While any
+    /// runtime's read is pending, this controller's views keep every caller
+    /// who is not an admin apart from other people
+    /// ([`AccessView::kept_apart_from_other_people`]): the attributes it
+    /// holds cannot yet tell an ended private member from any other name.
+    /// A read found done ends the wait for that runtime, whichever reading
+    /// found it owed.
+    pub(crate) fn record_private_owner_record(
+        &self,
+        record: PrivateOwnerRecordId,
+        reader: PrivateOwnerRecordReader,
+        first_read_pending: bool,
+    ) {
+        // Whether the runtime is recorded, and whether by this reading.
+        let recorded = self
+            .inner
+            .unread_private_owner_records
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&record)
+            .map(|finders| finders.holds(reader));
+        let unchanged = match recorded {
+            Some(by_this_reading) => first_read_pending && by_this_reading,
+            None => !first_read_pending,
+        };
+        if unchanged {
+            return;
+        }
+        // The views' answer changes only when a runtime is added or removed.
+        let _published = (recorded.is_some() != first_read_pending)
+            .then(|| self.publish_owner_change())
+            .flatten();
+        let mut unread = self
+            .inner
+            .unread_private_owner_records
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if first_read_pending {
+            unread.entry(record).or_default().add(reader);
+        } else {
+            unread.remove(&record);
+        }
+    }
+
+    /// Count no longer, for one aggregator, the owed first reads of the
+    /// runtimes it serves no longer. `served` lists the records of the
+    /// runtimes `aggregator` serves now, or `None` when they cannot be
+    /// listed, which changes nothing. What that aggregator's reading found
+    /// owing ([`PrivateOwnerRecordReader::ServedRuntime`]) is taken back
+    /// for every runtime it does not list: none of its later readings
+    /// reaches that runtime, so none would find its read done. A runtime
+    /// stays counted while any other reading that found it owing stands: a
+    /// route that holds the runtime, or another aggregator that serves it.
+    /// The list is taken again under the write, so a runtime registered and
+    /// read meanwhile is kept.
+    pub(crate) fn keep_served_private_owner_records(
+        &self,
+        aggregator: ConsoleAggregatorId,
+        served: impl Fn() -> Option<BTreeSet<PrivateOwnerRecordId>>,
+    ) {
+        let drops = {
+            let unread = self
+                .inner
+                .unread_private_owner_records
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            unread
+                .values()
+                .any(|finders| finders.served_by.contains(&aggregator))
+                && served().is_some_and(|served| {
+                    unread.iter().any(|(record, finders)| {
+                        finders.served_by.contains(&aggregator) && !served.contains(record)
+                    })
+                })
+        };
+        if !drops {
+            return;
+        }
+        let _published = self.publish_owner_change();
+        let mut unread = self
+            .inner
+            .unread_private_owner_records
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(served) = served() else {
+            return;
+        };
+        unread.retain(|record, finders| {
+            if !served.contains(record) {
+                finders.served_by.remove(&aggregator);
+            }
+            finders.own_route || !finders.served_by.is_empty()
+        });
     }
 
     /// Record which runtime alias is each durable identity's current
@@ -964,12 +1136,33 @@ pub struct AccessView {
     config: Arc<AccessControlConfig>,
     principal: AccessPrincipal,
     is_admin: bool,
+    /// Whether the console this view was taken for can identify a person
+    /// ([`Self::on_console`]): a fact about the console, the same for every
+    /// caller of it. True until a console states that it identifies nobody.
+    console_identifies_people: bool,
     /// The private-owner key this caller owns private agents under
     /// ([`super::PRIVATE_TO_LABEL`]); `None` for a caller who owns none.
     private_owner_key: Option<String>,
 }
 
 impl AccessView {
+    /// This view, taken for a caller of a console that can identify a
+    /// person (`identifies_people`) or cannot. A console can when it
+    /// requires sign-in, or resolves the token a caller volunteers: a member
+    /// can then be private to one of its people, and a caller it did not
+    /// identify is kept apart from them like every caller who is not an
+    /// admin ([`Self::kept_apart_from_other_people`]). The console's request
+    /// authentication states it, from its own configuration, for the caller
+    /// it did not identify, and nothing else states that a console
+    /// identifies nobody: a view nobody stated it for is kept apart. A view
+    /// taken for a person stays one of a console that can identify a person
+    /// whatever is stated: a console that identified a person is not one
+    /// that identifies nobody.
+    pub(crate) fn on_console(mut self, identifies_people: bool) -> Self {
+        self.console_identifies_people = identifies_people || self.principal.subject.is_some();
+        self
+    }
+
     /// True when this view actually enforces anything.
     pub fn enforced(&self) -> bool {
         self.config.enabled
@@ -1498,13 +1691,19 @@ impl AccessView {
     }
 
     /// `agent.view` on a record a member wrote that carries no captured
-    /// member attributes (written before they were captured, or with no
-    /// confirmed incarnation). Any applicable deny the bare identity cannot
-    /// decide refuses it (fails closed); otherwise it is decided as the
-    /// identity, as before, so allow rules keep their behaviour. A member
-    /// this caller may not know of ([`Self::hides_agent`]) is refused with
-    /// the configuration enabled or not.
+    /// member attributes (written before they were captured, or by a writer
+    /// that could name no member). Nothing says whose record it is: the
+    /// attributes of whoever holds the name now belong to another
+    /// incarnation, so they never decide it. Every caller a console keeps
+    /// apart from other people ([`Self::kept_apart_from_other_people`]) is
+    /// refused, whatever the rules say; an admin reads it. The one operator
+    /// of a console that identifies nobody is decided as before: any
+    /// applicable deny the bare identity cannot decide refuses it, otherwise
+    /// the identity decides.
     pub(crate) fn can_view_uncaptured_member(&self, identity: &str) -> bool {
+        if self.kept_apart_from_other_people() {
+            return false;
+        }
         if self.config.enabled
             && super::engine::deny_undecidable_by_identity(
                 &self.config,
@@ -1560,15 +1759,50 @@ impl AccessView {
                 .any(|attributes| attributes.agent_id.as_deref() == Some(identity))
     }
 
-    /// Whether a console with sign-in withholds from this caller the member
-    /// `identity` names because the attribute cache does not know it: a
-    /// member that ended before this process read who it was private to may
-    /// have been private, so a signed-in caller who is not an admin is shown
-    /// no memory scope of it and attaches no session of it. An anonymous
-    /// caller of a console without sign-in, and an admin, are withheld
-    /// nothing for it.
+    /// Whether a console that can identify a person withholds from this
+    /// caller the member `identity` names because the attribute cache does
+    /// not know it: a member that ended before this process read who it was
+    /// private to may have been private, so a caller who is not an admin,
+    /// signed in or not, is shown no memory scope of it and attaches no
+    /// session of it. The one operator of a console that identifies nobody,
+    /// and an admin, are withheld nothing for it.
     pub(crate) fn withholds_unknown_member(&self, identity: &str) -> bool {
-        self.principal.subject.is_some() && !self.is_admin && !self.knows_agent(identity)
+        self.kept_apart_from_other_people() && !self.knows_agent(identity)
+    }
+
+    /// Whether the console keeps this caller apart from other people: the
+    /// caller is not an admin, and the console can identify a person
+    /// ([`Self::on_console`]) or has not yet read who its runtimes' members
+    /// are private to ([`AccessController::record_private_owner_record`]).
+    /// A console that can identify a person tells its people apart and holds
+    /// members private to one of them, so what it cannot attribute it shows
+    /// to none of them, and a caller it did not identify (one who sent no
+    /// token where sign-in is optional) is one of them all the same: the
+    /// decision reads the console, never whether this caller signed in. The
+    /// one operator of a console that identifies nobody has no other person
+    /// to be kept apart from, and an admin reads everything. The unknown
+    /// member rule ([`Self::withholds_unknown_member`]), the rule for a
+    /// record with no captured member attributes
+    /// ([`Self::can_view_uncaptured_member`]) and the console's rule for a
+    /// session with no established owner all decide by it. Until a console
+    /// has read who its members are private to (right after a start, and
+    /// for as long as that read fails) it cannot tell an ended private
+    /// member from any other name, so it keeps that one operator apart as
+    /// well: a member private to a person may have been carried over from
+    /// a console that could identify one.
+    pub(crate) fn kept_apart_from_other_people(&self) -> bool {
+        !self.is_admin && (self.console_identifies_people || self.awaits_private_owner_record())
+    }
+
+    /// Whether a runtime this view's controller was primed from still owes
+    /// the first read of who its members are private to.
+    fn awaits_private_owner_record(&self) -> bool {
+        !self
+            .inner
+            .unread_private_owner_records
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty()
     }
 
     /// Can this principal read and edit the access configuration?
@@ -1596,6 +1830,7 @@ impl std::fmt::Debug for AccessView {
             .field("subject", &self.principal.subject)
             .field("groups", &self.principal.groups)
             .field("is_admin", &self.is_admin)
+            .field("console_identifies_people", &self.console_identifies_people)
             .field("enforced", &self.config.enabled)
             .field("owns_private_agents", &self.private_owner_key.is_some())
             .finish()
@@ -1612,10 +1847,12 @@ fn private_owner_denial(identity: &str) -> AccessDecision {
 }
 
 impl AccessView {
-    /// This principal's view under the configuration committed now.
+    /// This principal's view under the configuration committed now, of the
+    /// same console.
     pub(crate) fn refreshed(&self) -> AccessView {
         self.controller()
             .view_for_caller(self.subject(), self.private_owner_key())
+            .on_console(self.console_identifies_people)
     }
 }
 
@@ -2644,10 +2881,15 @@ mod tests {
         ]));
     }
 
-    /// A record without captured attributes fails closed under a label deny
-    /// and keeps today's decision under an allow-only view.
+    /// A record without captured attributes is refused to every caller of a
+    /// console that can identify a person, except an admin, whatever the
+    /// rules say, with an access configuration or without one, signed in or
+    /// not. The one operator of a console that identifies nobody keeps the
+    /// identity decision, and only a console that says so is one: a view
+    /// taken for no subject is kept apart until then, however it was taken,
+    /// and a view taken for a person is never of such a console.
     #[test]
-    fn an_uncaptured_record_fails_closed_only_under_undecidable_denies() {
+    fn a_record_with_no_captured_attributes_is_read_by_an_admin_only() {
         let controller = secret_label_deny_controller();
         let bob = controller.view_for_subject(Some("bob@example.test"));
         assert!(!bob.can_view_uncaptured_member("anyone"));
@@ -2655,16 +2897,170 @@ mod tests {
         assert!(root.can_view_uncaptured_member("anyone"));
         let allow_only = AccessController::new(enabled_config()).expect("controller");
         assert!(
-            allow_only
+            !allow_only
                 .view_for_subject(Some("alice@example.test"))
-                .can_view_uncaptured_member("anyone")
+                .can_view_uncaptured_member("anyone"),
+            "an allow rule grants a signed-in caller no record with no captured attributes"
         );
         assert!(
-            !allow_only
-                .view_for_subject(Some("bob@example.test"))
-                .can_view_uncaptured_member("anyone"),
-            "no allow for bob: the identity decision denies as before"
+            allow_only
+                .view_for_subject(Some("root@example.test"))
+                .can_view_uncaptured_member("anyone")
         );
+        let unconfigured = AccessController::disabled();
+        assert!(
+            !unconfigured
+                .view_for_subject(Some("alice@example.test"))
+                .can_view_uncaptured_member("anyone"),
+            "nor does a console with sign-in and no access configuration"
+        );
+        // A view taken for no subject says nothing of its console, so its
+        // caller is kept apart, however the view was taken.
+        for (taken, view) in [
+            ("view_for_subject", unconfigured.view_for_subject(None)),
+            ("view_for_caller", unconfigured.view_for_caller(None, None)),
+            ("view_and_revision", unconfigured.view_and_revision(None).0),
+            (
+                "a console with no access configuration",
+                AccessController::audience_only().view_for_caller(None, None),
+            ),
+            ("enforced rules", allow_only.view_for_subject(None)),
+        ] {
+            assert!(
+                view.kept_apart_from_other_people(),
+                "{taken}: a view taken for no subject is kept apart until a console says it \
+                 identifies nobody"
+            );
+            assert!(!view.can_view_uncaptured_member("anyone"), "{taken}");
+            assert!(view.withholds_unknown_member("anyone"), "{taken}");
+            assert!(
+                view.refreshed().kept_apart_from_other_people(),
+                "{taken}: and stays kept apart when the view is taken again"
+            );
+        }
+        // The one operator of a console that says it identifies nobody reads
+        // the record as before, and stays that operator when the view is
+        // taken again.
+        let operator = unconfigured.view_for_subject(None).on_console(false);
+        assert!(
+            operator.can_view_uncaptured_member("anyone"),
+            "the one operator of a console that identifies nobody reads it as before"
+        );
+        assert!(!operator.withholds_unknown_member("anyone"));
+        assert!(operator.refreshed().can_view_uncaptured_member("anyone"));
+        // The decision reads the console, never whether the caller signed
+        // in: a caller a console that can identify a person did not identify
+        // is refused, and stays refused when the view is taken again.
+        let unidentified = unconfigured.view_for_subject(None).on_console(true);
+        assert!(!unidentified.can_view_uncaptured_member("anyone"));
+        assert!(unidentified.withholds_unknown_member("anyone"));
+        assert!(
+            !unidentified
+                .refreshed()
+                .can_view_uncaptured_member("anyone")
+        );
+        // A console that identified a person is not one that identifies
+        // nobody: a view taken for a person cannot be stated as its
+        // operator's.
+        let person = allow_only
+            .view_for_subject(Some("bob@example.test"))
+            .on_console(false);
+        assert!(
+            person.kept_apart_from_other_people(),
+            "a view taken for a person is kept apart whatever is said of its console"
+        );
+        assert!(!person.can_view_uncaptured_member("anyone"));
+        assert!(
+            allow_only
+                .view_for_subject(Some("root@example.test"))
+                .on_console(false)
+                .can_view_uncaptured_member("anyone"),
+            "an admin reads it on every console"
+        );
+    }
+
+    /// While a runtime a console reads still owes the first read of who its
+    /// members are private to, the console keeps every caller who is not an
+    /// admin apart, the one operator of a console that identifies nobody
+    /// included: a record with no captured attributes and a member the
+    /// console does not know are withheld. It ends when every runtime's read
+    /// has succeeded. An admin reads throughout.
+    #[test]
+    fn a_console_that_has_not_read_who_members_are_private_to_keeps_every_caller_apart() {
+        let controller = AccessController::disabled();
+        let operator = controller.view_for_subject(None).on_console(false);
+        assert!(!operator.kept_apart_from_other_people());
+        assert!(operator.can_view_uncaptured_member("anyone"));
+
+        let by_route = PrivateOwnerRecordReader::OwnRuntime;
+        let (console, another_console) = (ConsoleAggregatorId::mint(), ConsoleAggregatorId::mint());
+        let by_serving = PrivateOwnerRecordReader::ServedRuntime(console);
+        let record = || crate::private_owners::PrivateOwners::default().record_id();
+        let (own, team) = (record(), record());
+        controller.record_private_owner_record(own, by_route, true);
+        assert!(
+            operator.kept_apart_from_other_people(),
+            "a view decides by what its console knows now"
+        );
+        assert!(!operator.can_view_uncaptured_member("anyone"));
+        assert!(operator.withholds_unknown_member("anyone"));
+        assert!(operator.refreshed().kept_apart_from_other_people());
+
+        // Two runtimes: kept apart until both have been read.
+        controller.record_private_owner_record(team, by_serving, true);
+        controller.record_private_owner_record(own, by_route, false);
+        assert!(operator.kept_apart_from_other_people());
+        controller.record_private_owner_record(team, by_serving, false);
+        assert!(!operator.kept_apart_from_other_people());
+        assert!(operator.can_view_uncaptured_member("anyone"));
+        assert!(!operator.withholds_unknown_member("anyone"));
+
+        // A runtime that a route which holds it found owing stays counted,
+        // whatever its console's aggregator serves, until a reading finds
+        // its read done, whichever reading that is.
+        controller.record_private_owner_record(own, by_serving, true);
+        controller.record_private_owner_record(own, by_route, true);
+        controller.keep_served_private_owner_records(console, || Some(BTreeSet::new()));
+        assert!(
+            operator.kept_apart_from_other_people(),
+            "the console's own runtime owes its read, whatever the console serves"
+        );
+        controller.record_private_owner_record(own, by_serving, false);
+        assert!(
+            !operator.kept_apart_from_other_people(),
+            "a read found done ends the wait, whichever reading found it owed"
+        );
+
+        // A runtime an aggregator serves is counted while that aggregator
+        // serves it: another aggregator's reading does not count it out,
+        // and a listing that cannot be read changes nothing.
+        controller.record_private_owner_record(team, by_serving, true);
+        controller.keep_served_private_owner_records(another_console, || Some(BTreeSet::new()));
+        assert!(
+            operator.kept_apart_from_other_people(),
+            "another aggregator's reading counts no runtime out"
+        );
+        controller.keep_served_private_owner_records(console, || None);
+        assert!(
+            operator.kept_apart_from_other_people(),
+            "served runtimes that cannot be listed change nothing"
+        );
+        controller.keep_served_private_owner_records(console, || Some(BTreeSet::from([team])));
+        assert!(
+            operator.kept_apart_from_other_people(),
+            "a served runtime still owes its read"
+        );
+        controller.keep_served_private_owner_records(console, || Some(BTreeSet::new()));
+        assert!(
+            !operator.kept_apart_from_other_people(),
+            "the runtime its aggregator no longer serves is counted no longer"
+        );
+
+        let configured = AccessController::new(enabled_config()).expect("controller");
+        configured.record_private_owner_record(record(), by_route, true);
+        let root = configured.view_for_subject(Some("root@example.test"));
+        assert!(!root.kept_apart_from_other_people());
+        assert!(root.can_view_uncaptured_member("anyone"));
     }
 
     #[test]

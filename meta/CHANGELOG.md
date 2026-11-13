@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+A console that can identify a person shows a timeline frame stored without
+member attributes, the memory steward's conflict signals and the system
+page's records that speak of an agent, to an administrator only. See
+Security, Upgrade and Changed.
+
 ### Breaking
 
 - Rust API of `meerkat-meta`, `identity_creation`: `ChangeClass` gains the
@@ -79,6 +84,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   and shows an endpoint of a runtime that none of its agents holds to an
   access administrator only.
 
+- Console timeline: a frame stored without the attributes of the member it
+  is about is shown to an administrator only, whatever the access rules say
+  and whoever holds the member's name now. In 0.9.11 through 0.9.14 such a
+  frame was decided by its member's name. Records of a member that is
+  private to one person could therefore be shown to other people who had
+  signed in and, on a console where sign-in is optional, to a caller who
+  sent no token, when that name was, or later became, the name of a shared
+  member, or while the console did not know the ended member. The records
+  stored without attributes were a member's memory events, the initial
+  message of a spawn, a console send to a member with no session, lifecycle
+  and failure records, and live image records. The initial message, the
+  send, the failure record of a send and the image record carry content; the
+  others carry status and memory metadata. An administrator, here and
+  below, is a person listed under `admins` in the access configuration; a
+  subject that a rule grants the `access.admin` action is not one for this
+  rule. Only a console that can identify nobody is exempt: one that does
+  not require sign-in and has no access controller, or no trusted OIDC
+  configuration to verify a token against. It has one anonymous operator
+  and nobody to keep apart, and that operator reads such frames as before.
+  On every other console only an administrator reads them, and a caller who
+  sends no token is treated like any person who is not an administrator
+  (see Upgrade).
+- A frame's member attributes are now those of the exact member its record
+  names, and never those of whoever holds the member's name: the member of
+  the session the record names; for a console send to a member that has no
+  session yet, the member the send was made to, captured at the send, and
+  never another member listed under the same name; and for the failure
+  record of such a send, the attributes stored with the send. This also
+  holds when the console projects retained records again (when it starts
+  to read a runtime, or catches up after a lag). A record that names none
+  of these is stored without attributes and is shown to an administrator
+  only (see Changed for the kinds).
+- The initial message of a spawn is no longer copied from the spawning
+  agent's session history under the name the call gave, which in 0.9.11
+  through 0.9.14 could put the text of a private member's call on another
+  member's timeline. A spawn's kickoff record is written only when the
+  spawn tool's own outcome names the session of the member it made
+  (`fork_off`, `delegate`), and a refused call leaves nothing under the name
+  it gave.
+- The memory steward's conflict signals (`memory.conflict.signal` on the
+  system page) are shown to an administrator only. Their text is written by
+  the steward from the records it compared, and could quote a quarantined
+  record or a record of an agent that an access rule keeps from the person
+  reading. Affects 0.9.14 and earlier. On a console that can identify
+  nobody the signal is read as a member's record with no attributes is, so
+  an access deny that matches the anonymous caller also refuses it.
+- The system page's records that speak of an agent without being that
+  agent's own (a memory write that landed quarantined, a session's taint
+  transition, a promoted record and a promotion that awaits approval) are
+  shown to an administrator only as well. They name the author, session or
+  scope of the agent they are about and carry no message content. Affects
+  releases through 0.9.14.
+- On a console that can identify a person, gating audit entries served by
+  the Console no longer carry a memory conflict's reason text, nor the error
+  text of a failed conflict lookup, for a caller who is not an
+  administrator. The one operator of a console that can identify nobody
+  receives both as before.
+- On a console that can identify a person, a gating audit entry or pending
+  request whose origin is an agent the console does not know is shown to an
+  administrator only, like every other record the console cannot attribute.
+- In 0.9.11 through 0.9.14, on a console that does not require sign-in and
+  whose access rules are off, a caller who sent no token could read the
+  conversation of a private side chat after that side chat had ended.
+- A deny rule naming an agent's memory now also withholds the realm's dream
+  history when the console does not know that agent (for example after it
+  was retired); before, such a rule was not consulted for signed-in people
+  who are not administrators.
+- With no runtime registered, a console serves no stored frame whose member
+  sat in a nested mob (a mob other than its runtime's own).
+
 ### Upgrade
 
 - A Rust host that composes its runtime through `UnifiedRuntime::bootstrap`
@@ -133,6 +208,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the first send over one is delivered, and builds the recipient when it
   is not built. Before upgrading, unwire the ones you do not want
   (`meta/cross_mob/unwire`).
+
+- No backfill is done. A timeline frame stored without member attributes is
+  shown to administrators only, whichever release through 0.9.14 stored it
+  and whatever its kind: member memory events, spawn initial messages,
+  sends to a member with no session, lifecycle and failure records, live
+  image records, and every frame of a release that stored no member
+  attributes at all. No setting or migration returns them
+  to the view of a person who is not an administrator, the member's owner
+  included. Nothing is removed from the console log, and an administrator
+  reads them as before.
+- The memory steward's conflict signals stored by earlier releases, and the
+  system page's records of quarantined writes, taint transitions and
+  promotions, are shown to an administrator only as well.
+- A console that can identify a person and has no access configuration has
+  no administrator: it shows these frames to nobody. A console that can
+  identify nobody is unchanged: its one anonymous operator reads them as
+  before.
+- A console where sign-in is optional, an access controller is installed
+  and tokens are verified changes for a caller who sends no token. That
+  caller no longer reads timeline frames stored without member attributes
+  (the frames 0.9.11 through 0.9.14 stored among them), is no longer shown
+  the memory scopes and memory panel rows of a member the console does not
+  know, and no longer attaches a session whose owner the console does not
+  know or that has no established owner (it is answered as a session that
+  does not exist). An administrator signs in to read them. With the access
+  configuration on, a caller with no token is granted only by an allow rule
+  that names no subject and no group (`subjects: ["*"]` does not grant it),
+  so the visible change is on such consoles whose access configuration is
+  off, or on with such a rule. A console that requires sign-in has no
+  anonymous caller and is unchanged in this respect, and so is the stock
+  console gateway: launched with an auth configuration it requires sign-in,
+  and without one it can identify nobody.
+- Frames written from this release on carry their member's attributes when
+  their record names its session or the console send it belongs to. The
+  kinds listed under Changed are still stored without attributes and stay
+  administrator-only.
+- A host that builds its runtime from a bare mob handle
+  (`MobRuntime::from_handle`): the Console of such a runtime attaches an
+  ended session that no agent holds for an administrator only. Every other
+  caller is answered "access denied: the session has no established owner"
+  where access rules are enforced, and as for a session that does not
+  exist otherwise.
 
 ### Added
 
@@ -1002,6 +1119,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   "identity": ..., "include_forks": true}`. A record for the member alone
   reads as before, without the member.
 
+- People who are not administrators no longer see these records on the
+  console timeline, whether this release or an earlier one wrote them:
+  retire, reset, respawn and delete markers of an agent; memory harvest
+  records; the memory steward's conflict signals; the system page's records
+  of quarantined writes, taint transitions and promotions; the failure
+  record of a send that the console's log does not hold (a send made
+  through the SDK, or one made before the console log was replaced); a send
+  to an identity that has no member yet; and an image or memory record that
+  names no session. An administrator sees them all.
+- A spawn's kickoff record (`user_input` with
+  `source_event_type: spawn_initial_message`) is written for `fork_off` and
+  `delegate` only, and carries the child's session as `session_id`.
+  `mob_spawn_member`, `spawn_member` and `spawn_many_members` write none:
+  the new member's first message appears on its timeline from its own
+  session history, as a `user_input` frame of its session. The copy derived
+  from the spawning agent's session history
+  (`session_history_spawn_initial_message`) is no longer written. The call,
+  its arguments and its result stay on the spawning agent's own timeline.
+- A member's memory event that names its session (`session_key`) and a live
+  image record carry that session as `session_id` on their timeline frame.
+- For a person who is not an administrator, a realm's dream history is
+  listed only when access rules allow that person to read the memory of
+  every agent the realm holds memory for. An agent the console no longer
+  knows (for example one retired before a restart) has no role or labels,
+  so an allow rule scoped by role or label does not cover it and the
+  history is withheld while such memory exists; before, that agent was left
+  out of the check. An allow rule with no agent selector, with agents `*`,
+  or naming the agent keeps the history listed.
+- Until a console has read who its runtime's agents are private to (the
+  read runs in the background from the start), and for as long as that read
+  fails, it keeps every caller who is not an administrator apart, a console
+  that can identify nobody included: such a caller is shown no timeline
+  frame stored without member attributes and no memory scope of an agent
+  the console does not know, and attaches no session whose owner the
+  console does not know or that has none. A request made while the first
+  attempt of that read is running waits for it, at most five seconds. A
+  console that serves several runtimes waits for the read of each runtime
+  it serves, while it serves it. Once the read has succeeded, a console
+  that can identify nobody serves its one operator as before, except for
+  what belongs to an agent it now knows as private to a person.
+- The session of an agent that was private to a person is answered as a
+  session that does not exist to everyone but that person and an
+  administrator, also after the agent has ended and also on a console that
+  can identify nobody: the console takes the owner from the labels the
+  session was created with, read through the runtime's session service. A
+  session no agent holds whose owner the console cannot establish (the
+  read fails, or the runtime has no session service, as one made with
+  `MobRuntime::from_handle`) is attached for an administrator only: every
+  other caller is answered "access denied: the session has no established
+  owner" where access rules are enforced, and as for a session that does
+  not exist otherwise. The session of an ordinary agent that ended is
+  attached as before.
+- Three things this release gives up on purpose. The owner of a private
+  side chat no longer sees its lifecycle markers, memory harvest records and
+  the failure records of sends the console's log does not hold.
+  `mob_spawn_member`, `spawn_member` and `spawn_many_members` write no
+  kickoff record. A console that can identify nobody shows no frame stored
+  without member attributes until it has read who its agents are private
+  to.
+
 ### Fixed
 
 - An agent created at run time that the mob's start seats before the
@@ -1460,6 +1637,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   it reads as not active, both of its halves are unwired, and the two
   members cannot message each other until the next apply that succeeds
   (the connection stays desired).
+
+- Memory panel: for a realm's dream history, a deny scoped by role or label
+  that applies to the caller is treated as matching an agent the console
+  does not know.
+- Console: the last-activity time shown for an agent name is kept per name,
+  not per agent that held it. A later release decides it with the frame
+  rule.
+- Gating: an audit entry or pending request is decided by the agent that
+  holds the name of its origin now. Only a host supplies an entry's origin.
 
 ## [0.9.14] - 2026-11-11
 

@@ -63,7 +63,7 @@ member by stable `AgentIdentity`, not by an internal session or runtime binding.
 | Wiring | Undirected peer connectivity and mutual trust between members |
 | Runtime mode | `autonomous_host` by default, `turn_driven` when explicit control is needed |
 | Flow | Declarative workflow that dispatches steps to members |
-| Work lane | Cancellable tracked work submitted to a mob or member |
+| Work lane | Tracked work submitted to a mob or member |
 | Mobpack | Portable signed artifact containing a mob definition and optional assets |
 
 ## Agent Tools Vs Host APIs
@@ -1129,7 +1129,7 @@ to work-lane APIs as-is instead of constructing it from `mob_id` and
 ### Cancel work
 
 One submitted unit cannot be cancelled. The host lists `mob/cancel_work`, and
-every call is refused with `-32602`:
+it is always refused. An otherwise valid call is refused with `-32602`:
 
 ```text
 per-unit work cancellation is unsupported for <work_ref>: no work-tracking ledger is wired
@@ -1142,8 +1142,8 @@ step earlier, also with `-32602` (`work_ref must be a valid UUID: ...`).
 cancels the work that member had admitted when the cancel was taken, not one
 unit: the member's current run is cancelled at the run's next boundary, and
 the input it held queued is abandoned. Input admitted after the cancel is
-untouched. Cancelling an idle member is not an error. The result is
-`{"mob_id": "...", "ok": true}`.
+untouched. Cancelling an idle member is not an error. On success the result
+is `{"mob_id": "...", "ok": true}`.
 
 <Warning>
 Known issue in 0.9.14 (earlier releases are being checked), noted 2026-11-13:

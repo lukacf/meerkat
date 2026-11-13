@@ -1,0 +1,328 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Inputs of the reasoning effort execution receipt",
+  "description": "The two documents scripts/reasoning-effort-receipt.mjs reads: the row manifest (which rows and cells the receipt lists, committed beside the script) and a leg result (what one leg recorded, or the statement that it did not run). The script validates each against its definition here and refuses anything else.",
+  "$defs": {
+    "count": { "type": "integer", "minimum": 0 },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "token": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$", "maxLength": 64 },
+    "row_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$", "maxLength": 96 },
+    "sentence": { "type": "string", "minLength": 1, "maxLength": 400 },
+    "mode": { "enum": ["in_process", "built_binary", "live"] },
+    "provider_family": { "enum": ["openai", "anthropic", "gemini", "self_hosted"] },
+    "api": { "enum": ["responses", "chat_completions", "messages", "generate_content", "realtime"] },
+    "level": { "enum": ["none", "minimal", "low", "medium", "high", "xhigh", "max"] },
+    "model_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$", "maxLength": 128 },
+    "by_rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rule"],
+      "properties": { "rule": { "$ref": "#/$defs/token" } }
+    },
+    "model": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id"],
+          "properties": { "id": { "$ref": "#/$defs/model_id" } }
+        },
+        { "$ref": "#/$defs/by_rule" }
+      ]
+    },
+    "requested_level": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["level"],
+          "properties": { "level": { "$ref": "#/$defs/level" } }
+        },
+        { "$ref": "#/$defs/by_rule" }
+      ]
+    },
+    "test_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["package", "target", "name", "source"],
+      "properties": {
+        "package": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$", "maxLength": 64 },
+        "target": {
+          "description": "lib for the package's library tests, the name of a tests/*.rs target, or kind/name for another target kind.",
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9_/-]*$",
+          "maxLength": 96
+        },
+        "name": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*(::[A-Za-z_][A-Za-z0-9_]*)*$", "maxLength": 200 },
+        "source": {
+          "description": "The repository path of the file that defines the test.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*\\.rs$",
+          "maxLength": 200
+        }
+      }
+    },
+    "manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "kind", "rules", "cells", "legs", "rows"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "kind": { "const": "reasoning_effort_receipt_manifest" },
+        "rules": {
+          "description": "How a row picks a model or a level when it runs, where the manifest cannot name one.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "text"],
+            "properties": {
+              "id": { "$ref": "#/$defs/token" },
+              "text": { "$ref": "#/$defs/sentence" }
+            }
+          }
+        },
+        "cells": {
+          "description": "The routes of the matrix: a provider family, the backend that serves it and the provider API.",
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "provider_family", "backend", "api"],
+            "properties": {
+              "id": { "$ref": "#/$defs/token" },
+              "provider_family": { "$ref": "#/$defs/provider_family" },
+              "backend": { "$ref": "#/$defs/token" },
+              "api": { "$ref": "#/$defs/api" }
+            }
+          }
+        },
+        "legs": {
+          "description": "The runs whose results the receipt reads, one result file each.",
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "mode", "title"],
+            "properties": {
+              "id": { "$ref": "#/$defs/token" },
+              "mode": { "$ref": "#/$defs/mode" },
+              "title": { "$ref": "#/$defs/sentence" }
+            }
+          }
+        },
+        "rows": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "oneOf": [{ "$ref": "#/$defs/declared_row" }, { "$ref": "#/$defs/observed_row" }]
+          }
+        }
+      }
+    },
+    "declared_row": {
+      "description": "A row whose cells the manifest lists: one test that covers each of them and asserts the outcome.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "leg", "title", "test", "outcome", "model", "requested_level", "cells"],
+      "properties": {
+        "id": { "$ref": "#/$defs/row_id" },
+        "leg": { "$ref": "#/$defs/token" },
+        "title": { "$ref": "#/$defs/sentence" },
+        "test": { "oneOf": [{ "$ref": "#/$defs/test_ref" }, { "type": "null" }] },
+        "outcome": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind"],
+              "properties": { "kind": { "const": "sent" } }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "reason"],
+              "properties": {
+                "kind": { "const": "refused" },
+                "reason": { "$ref": "#/$defs/token" }
+              }
+            }
+          ]
+        },
+        "model": {
+          "description": "The model of every cell that names none of its own; null only while the row has no test.",
+          "oneOf": [{ "$ref": "#/$defs/model" }, { "type": "null" }]
+        },
+        "requested_level": {
+          "description": "The level of every cell that names none of its own; null only while the row has no test.",
+          "oneOf": [{ "$ref": "#/$defs/requested_level" }, { "type": "null" }]
+        },
+        "cells": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["cell"],
+            "properties": {
+              "cell": { "$ref": "#/$defs/token" },
+              "model": { "$ref": "#/$defs/model" },
+              "requested_level": { "$ref": "#/$defs/requested_level" }
+            }
+          }
+        }
+      }
+    },
+    "observed_row": {
+      "description": "A row whose cells only its run knows (the models of a live account): the leg result lists what it saw.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "leg", "title", "test", "cells"],
+      "properties": {
+        "id": { "$ref": "#/$defs/row_id" },
+        "leg": { "$ref": "#/$defs/token" },
+        "title": { "$ref": "#/$defs/sentence" },
+        "test": { "oneOf": [{ "$ref": "#/$defs/test_ref" }, { "type": "null" }] },
+        "cells": { "const": "observed" }
+      }
+    },
+    "leg_result": {
+      "oneOf": [{ "$ref": "#/$defs/leg_result_run" }, { "$ref": "#/$defs/leg_result_not_run" }]
+    },
+    "leg_result_not_run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "kind", "leg", "status", "reason"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "kind": { "const": "reasoning_effort_leg_result" },
+        "leg": { "$ref": "#/$defs/token" },
+        "status": { "const": "not_run" },
+        "reason": {
+          "enum": [
+            "rows_not_built",
+            "not_scheduled",
+            "credential_unavailable",
+            "request_budget_not_agreed",
+            "stopped_on_provider_status",
+            "infrastructure_failure"
+          ]
+        }
+      }
+    },
+    "leg_result_run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "kind",
+        "leg",
+        "status",
+        "commit",
+        "command",
+        "exit_status",
+        "output",
+        "counts",
+        "tests_complete",
+        "tests",
+        "observations"
+      ],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "kind": { "const": "reasoning_effort_leg_result" },
+        "leg": { "$ref": "#/$defs/token" },
+        "status": { "const": "run" },
+        "commit": { "$ref": "#/$defs/commit" },
+        "command": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "exit_status": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "output": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["format", "sha256", "bytes"],
+          "properties": {
+            "format": { "enum": ["nextest_libtest_json_plus", "nextest_human_log"] },
+            "sha256": { "$ref": "#/$defs/sha256" },
+            "bytes": { "$ref": "#/$defs/count" }
+          }
+        },
+        "counts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["run", "passed", "failed", "skipped"],
+          "properties": {
+            "run": { "$ref": "#/$defs/count" },
+            "passed": { "$ref": "#/$defs/count" },
+            "failed": { "$ref": "#/$defs/count" },
+            "skipped": { "$ref": "#/$defs/count" }
+          }
+        },
+        "tests_complete": {
+          "description": "Whether tests names every test the leg ran.",
+          "type": "boolean"
+        },
+        "tests": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["package", "target", "name", "outcome", "tries"],
+            "properties": {
+              "package": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$", "maxLength": 64 },
+              "target": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_/-]*$", "maxLength": 96 },
+              "name": {
+                "type": "string",
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]*(::[A-Za-z_][A-Za-z0-9_]*)*$",
+                "maxLength": 200
+              },
+              "outcome": { "enum": ["pass", "fail", "skip"] },
+              "tries": { "type": "integer", "minimum": 1 }
+            }
+          }
+        },
+        "observations": {
+          "description": "The cells a row with observed cells saw, one item each.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["row", "provider_family", "backend", "api", "model", "requested_level", "outcome", "result"],
+            "properties": {
+              "row": { "$ref": "#/$defs/row_id" },
+              "provider_family": { "$ref": "#/$defs/provider_family" },
+              "backend": { "$ref": "#/$defs/token" },
+              "api": { "$ref": "#/$defs/api" },
+              "model": { "$ref": "#/$defs/model_id" },
+              "requested_level": { "$ref": "#/$defs/level" },
+              "outcome": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind", "level"],
+                    "properties": {
+                      "kind": { "const": "sent" },
+                      "level": { "$ref": "#/$defs/level" }
+                    }
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind", "reason"],
+                    "properties": {
+                      "kind": { "const": "refused" },
+                      "reason": { "$ref": "#/$defs/token" }
+                    }
+                  }
+                ]
+              },
+              "result": { "enum": ["pass", "fail", "skip"] }
+            }
+          }
+        }
+      }
+    }
+  }
+}

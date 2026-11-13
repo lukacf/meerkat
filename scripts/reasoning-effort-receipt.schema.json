@@ -1,0 +1,476 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Reasoning effort execution receipt",
+  "description": "What was executed for the provider-neutral reasoning effort level at one commit of one product version, and what was not. Written by scripts/reasoning-effort-receipt.mjs from recorded leg results; every executed entry names the result file it was read from and that file's digest. The Markdown file beside a receipt is rendered from this document.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "kind", "product", "manifest", "totals", "legs", "entries", "gaps", "rules"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "kind": { "const": "reasoning_effort_execution_receipt" },
+    "product": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "commit"],
+      "properties": {
+        "name": { "const": "meerkat" },
+        "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.]+)?$" },
+        "commit": { "$ref": "#/$defs/commit" }
+      }
+    },
+    "manifest": {
+      "description": "The row manifest the receipt was built from.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "sha256"],
+      "properties": {
+        "name": { "$ref": "#/$defs/file_name" },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "totals": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entries", "leg_tests", "by_mode", "gaps"],
+      "properties": {
+        "entries": { "$ref": "#/$defs/entry_counts" },
+        "leg_tests": {
+          "description": "The test counts of the legs that ran at the product commit, summed. A leg that ran at another commit adds nothing.",
+          "$ref": "#/$defs/test_counts"
+        },
+        "by_mode": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["mode", "total", "executed", "passed", "failed", "source_only", "not_run"],
+            "properties": {
+              "mode": { "$ref": "#/$defs/mode" },
+              "total": { "$ref": "#/$defs/count" },
+              "executed": { "$ref": "#/$defs/count" },
+              "passed": { "$ref": "#/$defs/count" },
+              "failed": { "$ref": "#/$defs/count" },
+              "source_only": { "$ref": "#/$defs/count" },
+              "not_run": { "$ref": "#/$defs/count" }
+            }
+          }
+        },
+        "gaps": { "$ref": "#/$defs/count" }
+      }
+    },
+    "legs": {
+      "type": "array",
+      "items": {
+        "oneOf": [{ "$ref": "#/$defs/leg_run" }, { "$ref": "#/$defs/leg_not_run" }]
+      }
+    },
+    "entries": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          { "$ref": "#/$defs/entry_executed" },
+          { "$ref": "#/$defs/entry_source_only" },
+          { "$ref": "#/$defs/entry_not_run" }
+        ]
+      }
+    },
+    "gaps": {
+      "description": "Everything the receipt does not show as executed at the product commit, one item each: legs first, then entries.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["scope", "id", "reason"],
+        "properties": {
+          "scope": { "enum": ["leg", "entry"] },
+          "id": { "type": "string", "pattern": "^[a-z][a-z0-9_.]*(/([a-z][a-z0-9_]*|#[0-9]+|-))?$" },
+          "reason": { "$ref": "#/$defs/gap_reason" }
+        }
+      }
+    },
+    "rules": {
+      "description": "The selection rules the entries name where a row picks its model or level when it runs.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "text"],
+        "properties": {
+          "id": { "$ref": "#/$defs/token" },
+          "text": { "$ref": "#/$defs/sentence" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "count": { "type": "integer", "minimum": 0 },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "token": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$", "maxLength": 64 },
+    "row_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$", "maxLength": 96 },
+    "file_name": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*\\.json$", "maxLength": 128 },
+    "sentence": { "type": "string", "minLength": 1, "maxLength": 400 },
+    "mode": { "enum": ["in_process", "built_binary", "live"] },
+    "provider_family": { "enum": ["openai", "anthropic", "gemini", "self_hosted"] },
+    "api": { "enum": ["responses", "chat_completions", "messages", "generate_content", "realtime"] },
+    "level": { "enum": ["none", "minimal", "low", "medium", "high", "xhigh", "max"] },
+    "route": { "type": "string", "pattern": "^[a-z][a-z0-9_]*/[a-z][a-z0-9_]*$", "maxLength": 96 },
+    "model_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$", "maxLength": 128 },
+    "model": {
+      "description": "The model of a cell: its id, or the rule the row picks it by when it runs.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id"],
+          "properties": { "id": { "$ref": "#/$defs/model_id" } }
+        },
+        { "$ref": "#/$defs/by_rule" }
+      ]
+    },
+    "requested_level": {
+      "description": "The level a cell asks for: the level, or the rule the row picks it by when it runs.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["level"],
+          "properties": { "level": { "$ref": "#/$defs/level" } }
+        },
+        { "$ref": "#/$defs/by_rule" }
+      ]
+    },
+    "by_rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rule"],
+      "properties": { "rule": { "$ref": "#/$defs/token" } }
+    },
+    "outcome": {
+      "description": "What the cell's request comes to: the level sent to the provider, or the reason it was refused before any request.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "level"],
+          "properties": {
+            "kind": { "const": "sent" },
+            "level": { "$ref": "#/$defs/requested_level" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "reason"],
+          "properties": {
+            "kind": { "const": "refused" },
+            "reason": { "$ref": "#/$defs/token" }
+          }
+        }
+      ]
+    },
+    "outcome_planned": {
+      "description": "The outcome a row is written for, for an entry that has no result: as outcome, with no level where the row does not exist yet.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "level"],
+          "properties": {
+            "kind": { "const": "sent" },
+            "level": { "oneOf": [{ "$ref": "#/$defs/requested_level" }, { "type": "null" }] }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "reason"],
+          "properties": {
+            "kind": { "const": "refused" },
+            "reason": { "$ref": "#/$defs/token" }
+          }
+        }
+      ]
+    },
+    "outcome_basis": {
+      "description": "test_assertion: the row's test asserts the outcome and the receipt takes it from the manifest. observation: the leg recorded the outcome it saw.",
+      "enum": ["test_assertion", "observation"]
+    },
+    "test": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["package", "target", "name", "source", "source_sha256"],
+      "properties": {
+        "package": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$", "maxLength": 64 },
+        "target": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_/-]*$", "maxLength": 96 },
+        "name": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*(::[A-Za-z_][A-Za-z0-9_]*)*$", "maxLength": 200 },
+        "source": { "type": "string", "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*\\.rs$", "maxLength": 200 },
+        "source_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "result_file": {
+      "description": "A recorded leg result: its file name in the results directory and the digest of its bytes.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "sha256"],
+      "properties": {
+        "name": { "$ref": "#/$defs/file_name" },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "test_counts": {
+      "description": "skipped is what the leg's output reports as not run: ignored tests in nextest's JSON output, ignored and filtered-out tests in its summary line.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run", "passed", "failed", "skipped"],
+      "properties": {
+        "run": { "$ref": "#/$defs/count" },
+        "passed": { "$ref": "#/$defs/count" },
+        "failed": { "$ref": "#/$defs/count" },
+        "skipped": { "$ref": "#/$defs/count" }
+      }
+    },
+    "entry_counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total", "executed", "passed", "failed", "source_only", "not_run"],
+      "properties": {
+        "total": { "$ref": "#/$defs/count" },
+        "executed": { "$ref": "#/$defs/count" },
+        "passed": { "$ref": "#/$defs/count" },
+        "failed": { "$ref": "#/$defs/count" },
+        "source_only": { "$ref": "#/$defs/count" },
+        "not_run": { "$ref": "#/$defs/count" }
+      }
+    },
+    "leg_gap_reason": {
+      "enum": [
+        "rows_not_built",
+        "not_scheduled",
+        "credential_unavailable",
+        "request_budget_not_agreed",
+        "stopped_on_provider_status",
+        "infrastructure_failure"
+      ]
+    },
+    "gap_reason": {
+      "enum": [
+        "rows_not_built",
+        "not_scheduled",
+        "credential_unavailable",
+        "request_budget_not_agreed",
+        "stopped_on_provider_status",
+        "infrastructure_failure",
+        "leg_not_run",
+        "no_test_row",
+        "ran_at_another_commit",
+        "no_per_test_result",
+        "test_not_in_leg_result",
+        "test_skipped",
+        "no_cells_observed",
+        "cell_skipped"
+      ]
+    },
+    "leg_run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "mode",
+        "title",
+        "status",
+        "commit",
+        "at_product_commit",
+        "command",
+        "exit_status",
+        "counts",
+        "per_test_results",
+        "output",
+        "result_file"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/token" },
+        "mode": { "$ref": "#/$defs/mode" },
+        "title": { "$ref": "#/$defs/sentence" },
+        "status": { "const": "run" },
+        "commit": { "$ref": "#/$defs/commit" },
+        "at_product_commit": { "type": "boolean" },
+        "command": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "exit_status": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "counts": { "$ref": "#/$defs/test_counts" },
+        "per_test_results": {
+          "description": "complete: the leg's output names every test it ran. partial: it names some. none: it gives counts only.",
+          "enum": ["complete", "partial", "none"]
+        },
+        "output": {
+          "description": "The test runner output the leg result was read from. Only its format, size and digest are kept.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["format", "sha256", "bytes"],
+          "properties": {
+            "format": { "enum": ["nextest_libtest_json_plus", "nextest_human_log"] },
+            "sha256": { "$ref": "#/$defs/sha256" },
+            "bytes": { "$ref": "#/$defs/count" }
+          }
+        },
+        "result_file": { "$ref": "#/$defs/result_file" }
+      }
+    },
+    "leg_not_run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "mode", "title", "status", "reason", "result_file"],
+      "properties": {
+        "id": { "$ref": "#/$defs/token" },
+        "mode": { "$ref": "#/$defs/mode" },
+        "title": { "$ref": "#/$defs/sentence" },
+        "status": { "const": "not_run" },
+        "reason": { "$ref": "#/$defs/leg_gap_reason" },
+        "result_file": { "$ref": "#/$defs/result_file" }
+      }
+    },
+    "entry_executed": {
+      "description": "A cell whose row ran at the product commit and reported its own result.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "row",
+        "cell",
+        "title",
+        "provider_family",
+        "model",
+        "api",
+        "route",
+        "requested_level",
+        "outcome",
+        "outcome_basis",
+        "status",
+        "mode",
+        "result",
+        "tries",
+        "leg",
+        "result_file",
+        "test",
+        "gap"
+      ],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9_.]*/([a-z][a-z0-9_]*|#[0-9]+)$" },
+        "row": { "$ref": "#/$defs/row_id" },
+        "cell": { "oneOf": [{ "$ref": "#/$defs/token" }, { "type": "null" }] },
+        "title": { "$ref": "#/$defs/sentence" },
+        "provider_family": { "$ref": "#/$defs/provider_family" },
+        "model": { "$ref": "#/$defs/model" },
+        "api": { "$ref": "#/$defs/api" },
+        "route": { "$ref": "#/$defs/route" },
+        "requested_level": { "$ref": "#/$defs/requested_level" },
+        "outcome": { "$ref": "#/$defs/outcome" },
+        "outcome_basis": { "$ref": "#/$defs/outcome_basis" },
+        "status": { "const": "executed" },
+        "mode": { "$ref": "#/$defs/mode" },
+        "result": { "enum": ["pass", "fail"] },
+        "tries": { "type": "integer", "minimum": 1 },
+        "leg": { "$ref": "#/$defs/token" },
+        "result_file": { "$ref": "#/$defs/result_file" },
+        "test": { "$ref": "#/$defs/test" },
+        "gap": { "type": "null" }
+      }
+    },
+    "entry_source_only": {
+      "description": "A cell whose row is in the source at the product commit and has no result of its own there.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "row",
+        "cell",
+        "title",
+        "provider_family",
+        "model",
+        "api",
+        "route",
+        "requested_level",
+        "outcome",
+        "outcome_basis",
+        "status",
+        "mode",
+        "result",
+        "tries",
+        "leg",
+        "result_file",
+        "test",
+        "gap"
+      ],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9_.]*/([a-z][a-z0-9_]*|-)$" },
+        "row": { "$ref": "#/$defs/row_id" },
+        "cell": { "oneOf": [{ "$ref": "#/$defs/token" }, { "type": "null" }] },
+        "title": { "$ref": "#/$defs/sentence" },
+        "provider_family": { "oneOf": [{ "$ref": "#/$defs/provider_family" }, { "type": "null" }] },
+        "model": { "oneOf": [{ "$ref": "#/$defs/model" }, { "type": "null" }] },
+        "api": { "oneOf": [{ "$ref": "#/$defs/api" }, { "type": "null" }] },
+        "route": { "oneOf": [{ "$ref": "#/$defs/route" }, { "type": "null" }] },
+        "requested_level": { "oneOf": [{ "$ref": "#/$defs/requested_level" }, { "type": "null" }] },
+        "outcome": { "oneOf": [{ "$ref": "#/$defs/outcome_planned" }, { "type": "null" }] },
+        "outcome_basis": { "oneOf": [{ "$ref": "#/$defs/outcome_basis" }, { "type": "null" }] },
+        "status": { "const": "source_only" },
+        "mode": { "$ref": "#/$defs/mode" },
+        "result": { "type": "null" },
+        "tries": { "type": "null" },
+        "leg": { "$ref": "#/$defs/token" },
+        "result_file": { "type": "null" },
+        "test": { "$ref": "#/$defs/test" },
+        "gap": { "$ref": "#/$defs/gap_reason" }
+      }
+    },
+    "entry_not_run": {
+      "description": "A cell with no row in the source at the product commit, or a cell its leg saw and skipped.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "row",
+        "cell",
+        "title",
+        "provider_family",
+        "model",
+        "api",
+        "route",
+        "requested_level",
+        "outcome",
+        "outcome_basis",
+        "status",
+        "mode",
+        "result",
+        "tries",
+        "leg",
+        "result_file",
+        "test",
+        "gap"
+      ],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9_.]*/([a-z][a-z0-9_]*|#[0-9]+|-)$" },
+        "row": { "$ref": "#/$defs/row_id" },
+        "cell": { "oneOf": [{ "$ref": "#/$defs/token" }, { "type": "null" }] },
+        "title": { "$ref": "#/$defs/sentence" },
+        "provider_family": { "oneOf": [{ "$ref": "#/$defs/provider_family" }, { "type": "null" }] },
+        "model": { "oneOf": [{ "$ref": "#/$defs/model" }, { "type": "null" }] },
+        "api": { "oneOf": [{ "$ref": "#/$defs/api" }, { "type": "null" }] },
+        "route": { "oneOf": [{ "$ref": "#/$defs/route" }, { "type": "null" }] },
+        "requested_level": { "oneOf": [{ "$ref": "#/$defs/requested_level" }, { "type": "null" }] },
+        "outcome": { "oneOf": [{ "$ref": "#/$defs/outcome_planned" }, { "type": "null" }] },
+        "outcome_basis": { "oneOf": [{ "$ref": "#/$defs/outcome_basis" }, { "type": "null" }] },
+        "status": { "const": "not_run" },
+        "mode": { "$ref": "#/$defs/mode" },
+        "result": { "oneOf": [{ "const": "skip" }, { "type": "null" }] },
+        "tries": { "type": "null" },
+        "leg": { "$ref": "#/$defs/token" },
+        "result_file": { "type": "null" },
+        "test": { "oneOf": [{ "$ref": "#/$defs/test" }, { "type": "null" }] },
+        "gap": { "$ref": "#/$defs/gap_reason" }
+      }
+    }
+  }
+}

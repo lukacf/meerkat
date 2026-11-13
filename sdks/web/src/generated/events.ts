@@ -78,6 +78,9 @@ export type AgentErrorReason = {
 } | {
   reason_type: "tool_grant_gate_refused";
   refusal: GrantGateRefusal;
+} | {
+  reason_type: "reasoning_effort_refused";
+  refusal: ReasoningEffortRefusal;
 };
 
 export type AgentErrorReport = {
@@ -559,6 +562,8 @@ export interface MobMemberBinding {
   role: string;
 }
 
+export type ModelApi = "responses" | "chat_completions" | "messages" | "generate_content" | "realtime";
+
 export type ModelFallbackSkipReason = "provider_boundary" | "auth_unavailable" | "context_fit" | "context_unknown" | "output_budget" | "tool_parity" | "modality_parity" | "request_unsupported" | "admission_unavailable" | "tool_choice_unsupported";
 
 export type ModelFallbackSkippedTarget = {
@@ -764,6 +769,22 @@ export type ReasoningBatchDisposition = {
 
 export type ReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh" | "max";
 
+export type ReasoningEffortRefusal = {
+  conflicting_level?: EffortLevel | null;
+  conflicting_param?: string | null;
+  facts?: ReasoningFactsSource | null;
+  model: string;
+  provider: Provider;
+  reason: ReasoningEffortRefusalReason;
+  requested: EffortLevel;
+  route?: ReasoningRoute | null;
+  supported?: EffortLevel[] | null;
+};
+
+export type ReasoningEffortRefusalReason = "unsupported_level" | "supported_levels_unknown" | "supported_levels_unavailable" | "conflicting_provider_effort" | "conflicting_thinking_budget" | "conflicting_thinking_type" | "conflicting_reasoning_body" | "conflicting_reasoning_mode";
+
+export type ReasoningFactsSource = "catalog" | "account" | "operator";
+
 export type ReasoningLoweringBaseline = {
   kind: "explicit";
   level: EffortLevel;
@@ -782,6 +803,11 @@ export type ReasoningLoweringOutcome = {
 export type ReasoningMode = "emit" | "silent" | "off";
 
 export type ReasoningNotAppliedReason = "no_catalog_fact" | "unsupported_level" | "unknown_supported_levels" | "budget_conflict" | "thinking_mode_conflict" | "opaque_reasoning_body" | "reasoning_disabled_by_baseline";
+
+export interface ReasoningRoute {
+  api: ModelApi;
+  backend: string;
+}
 
 export type RequestedCompactionSkipReason = "first_model_request" | "nothing_to_fold";
 

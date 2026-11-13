@@ -260,6 +260,67 @@ class ProviderStopDetailGemini(TypedDict, total=False):
 ProviderStopDetail = ProviderStopDetailAnthropic | ProviderStopDetailOpenAi | ProviderStopDetailGemini
 
 
+# Reasoning/effort control level, the shared typed vocabulary behind both
+# Anthropic `output_config.effort` and OpenAI `reasoning.effort`.
+#
+# The two providers expose effort in different request shapes but draw from
+# the same level vocabulary; modeling it as a typed enum keeps the catalog
+# value-domain compiler-checked instead of relying on raw string literals.
+# Each catalog row declares its accepted subset via `effort_levels`.
+EffortLevel = Literal['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+
+
+# Why a requested `reasoning_effort` level is refused.
+#
+# A closed set: every reader matches it exhaustively, so adding a variant
+# is a breaking change. The variants serialize as the snake_case strings
+# below and keep this order.
+ReasoningEffortRefusalReason = Literal['unsupported_level', 'supported_levels_unknown', 'supported_levels_unavailable', 'conflicting_provider_effort', 'conflicting_thinking_budget', 'conflicting_thinking_type', 'conflicting_reasoning_body', 'conflicting_reasoning_mode']
+
+
+# The source of the effort levels a route accepts for a model. Each
+# backend kind names its own (`reasoning_levels_source()` on the
+# provider-matrix kinds, [`ReasoningBackend::levels_source`]); a refusal
+# and a resolution report it as `facts`.
+ReasoningFactsSource = Literal['catalog', 'account', 'operator']
+
+
+# The provider API a request is sent on.
+ModelApi = Literal['responses', 'chat_completions', 'messages', 'generate_content', 'realtime']
+
+
+class ReasoningRoute(TypedDict, total=False):
+    """The route a request is served on, in its reported form:
+    `{"backend": "<provider-matrix string>", "api": "<snake_case API>"}`.
+
+    Built by [`ReasoningRoute::new`] from a typed backend, or read from that
+    form, which refuses a backend that is not a provider-matrix backend
+    string. Either way `backend` is always one. Displays as `backend/api`.
+    """
+    api: Required[ModelApi]
+    backend: Required[str]
+
+
+class ReasoningEffortRefusal(TypedDict, total=False):
+    """A refused `reasoning_effort` level: what was requested, for which model
+    and route, and why. Raised before any provider request is sent.
+
+    `route`, `supported` and `facts` are always serialized, as `null` when
+    absent (`facts` is absent exactly when `supported` is). The two
+    `conflicting_*` fields are serialized only when present. The `Display`
+    text is for people and is not a contract; read the fields.
+    """
+    conflicting_level: NotRequired[Optional[EffortLevel]]
+    conflicting_param: NotRequired[Optional[str]]
+    facts: NotRequired[Optional[ReasoningFactsSource]]
+    model: Required[str]
+    provider: Required[Provider]
+    reason: Required[ReasoningEffortRefusalReason]
+    requested: Required[EffortLevel]
+    route: NotRequired[Optional[ReasoningRoute]]
+    supported: NotRequired[Optional[list[EffortLevel]]]
+
+
 # Closed machine-owned classifier for why a turn reached a terminal failure.
 TurnTerminalCauseKind = Literal['unknown', 'hook_denied', 'hook_failure', 'llm_failure', 'tool_failure', 'structured_output_validation_failed', 'budget_exhausted', 'time_budget_exceeded', 'retry_exhausted', 'turn_limit_reached', 'runtime_apply_failure', 'fatal_failure']
 
@@ -392,7 +453,12 @@ class AgentErrorReasonToolGrantGateRefused(TypedDict, total=False):
     refusal: Required[GrantGateRefusal]
 
 
-AgentErrorReason = AgentErrorReasonLlmRateLimited | AgentErrorReasonLlmContextExceeded | AgentErrorReasonLlmAuthError | AgentErrorReasonLlmInvalidModel | AgentErrorReasonLlmProviderError | AgentErrorReasonLlmNetworkTimeout | AgentErrorReasonLlmCallTimeout | AgentErrorReasonHookDenied | AgentErrorReasonHookTimeout | AgentErrorReasonHookExecutionFailed | AgentErrorReasonHookConfigInvalid | AgentErrorReasonStructuredOutputValidationFailed | AgentErrorReasonInvalidOutputSchema | AgentErrorReasonAuthReauthRequired | AgentErrorReasonCallbackPending | AgentErrorReasonTurnTerminalCause | AgentErrorReasonModelFallbackResumeHeld | AgentErrorReasonHookLaunchRefused | AgentErrorReasonContentFiltered | AgentErrorReasonToolGrantGateRefused
+class AgentErrorReasonReasoningEffortRefused(TypedDict, total=False):
+    reason_type: Required[Literal['reasoning_effort_refused']]
+    refusal: Required[ReasoningEffortRefusal]
+
+
+AgentErrorReason = AgentErrorReasonLlmRateLimited | AgentErrorReasonLlmContextExceeded | AgentErrorReasonLlmAuthError | AgentErrorReasonLlmInvalidModel | AgentErrorReasonLlmProviderError | AgentErrorReasonLlmNetworkTimeout | AgentErrorReasonLlmCallTimeout | AgentErrorReasonHookDenied | AgentErrorReasonHookTimeout | AgentErrorReasonHookExecutionFailed | AgentErrorReasonHookConfigInvalid | AgentErrorReasonStructuredOutputValidationFailed | AgentErrorReasonInvalidOutputSchema | AgentErrorReasonAuthReauthRequired | AgentErrorReasonCallbackPending | AgentErrorReasonTurnTerminalCause | AgentErrorReasonModelFallbackResumeHeld | AgentErrorReasonHookLaunchRefused | AgentErrorReasonContentFiltered | AgentErrorReasonToolGrantGateRefused | AgentErrorReasonReasoningEffortRefused
 
 
 class AgentErrorReport(TypedDict, total=False):
@@ -1102,16 +1168,6 @@ class AuthBindingRef(TypedDict, total=False):
     origin: NotRequired[BindingOrigin]
     profile: NotRequired[Optional[ProfileId]]
     realm: Required[RealmId]
-
-
-# Reasoning/effort control level, the shared typed vocabulary behind both
-# Anthropic `output_config.effort` and OpenAI `reasoning.effort`.
-#
-# The two providers expose effort in different request shapes but draw from
-# the same level vocabulary; modeling it as a typed enum keeps the catalog
-# value-domain compiler-checked instead of relying on raw string literals.
-# Each catalog row declares its accepted subset via `effort_levels`.
-EffortLevel = Literal['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 
 
 # Typed shape of Anthropic's prompt-cache breakpoint policy.

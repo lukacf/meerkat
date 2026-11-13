@@ -584,6 +584,22 @@
               "refusal"
             ],
             "type": "object"
+          },
+          {
+            "properties": {
+              "reason_type": {
+                "const": "reasoning_effort_refused",
+                "type": "string"
+              },
+              "refusal": {
+                "$ref": "#/$defs/ReasoningEffortRefusal"
+              }
+            },
+            "required": [
+              "reason_type",
+              "refusal"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -4985,6 +5001,36 @@
         ],
         "type": "object"
       },
+      "ModelApi": {
+        "description": "The provider API a request is sent on.",
+        "oneOf": [
+          {
+            "const": "responses",
+            "description": "The OpenAI Responses API.",
+            "type": "string"
+          },
+          {
+            "const": "chat_completions",
+            "description": "The OpenAI Chat Completions API and endpoints compatible with it.",
+            "type": "string"
+          },
+          {
+            "const": "messages",
+            "description": "The Anthropic Messages API.",
+            "type": "string"
+          },
+          {
+            "const": "generate_content",
+            "description": "The Gemini `generateContent` API.",
+            "type": "string"
+          },
+          {
+            "const": "realtime",
+            "description": "The OpenAI realtime API.",
+            "type": "string"
+          }
+        ]
+      },
       "ModelFallbackSkipReason": {
         "oneOf": [
           {
@@ -6196,6 +6242,149 @@
         ],
         "type": "string"
       },
+      "ReasoningEffortRefusal": {
+        "description": "A refused `reasoning_effort` level: what was requested, for which model\nand route, and why. Raised before any provider request is sent.\n\n`route`, `supported` and `facts` are always serialized, as `null` when\nabsent (`facts` is absent exactly when `supported` is). The two\n`conflicting_*` fields are serialized only when present. The `Display`\ntext is for people and is not a contract; read the fields.",
+        "properties": {
+          "conflicting_level": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/EffortLevel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "For a conflict whose conflicting setting is itself a level: that\nlevel."
+          },
+          "conflicting_param": {
+            "description": "For a conflict: the path of the conflicting setting, for example\n`provider_params.provider_tag.effort`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "facts": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ReasoningFactsSource"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The source of `supported`."
+          },
+          "model": {
+            "description": "The model the request would use.",
+            "type": "string"
+          },
+          "provider": {
+            "$ref": "#/$defs/Provider",
+            "description": "The provider family of the model."
+          },
+          "reason": {
+            "$ref": "#/$defs/ReasoningEffortRefusalReason",
+            "description": "Why the level is refused."
+          },
+          "requested": {
+            "$ref": "#/$defs/EffortLevel",
+            "description": "The level the request named."
+          },
+          "route": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ReasoningRoute"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The route the request would be served on. `None` when the client\nthat serves the request reports no route: a route nobody observed\nis never guessed."
+          },
+          "supported": {
+            "description": "The levels the route accepts for the model: `None` when unknown or\nunavailable, empty when the route or the model takes no effort.",
+            "items": {
+              "$ref": "#/$defs/EffortLevel"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "requested",
+          "provider",
+          "model",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "ReasoningEffortRefusalReason": {
+        "description": "Why a requested `reasoning_effort` level is refused.\n\nA closed set: every reader matches it exhaustively, so adding a variant\nis a breaking change. The variants serialize as the snake_case strings\nbelow and keep this order.",
+        "oneOf": [
+          {
+            "const": "unsupported_level",
+            "description": "A source states the levels the route accepts for the model and the\nrequested level is not among them (an empty set: the route or the\nmodel takes no effort).",
+            "type": "string"
+          },
+          {
+            "const": "supported_levels_unknown",
+            "description": "No source states the levels the route accepts for the model.",
+            "type": "string"
+          },
+          {
+            "const": "supported_levels_unavailable",
+            "description": "The source of the levels exists and cannot be read now (an account's\nmodel list that is not loaded). The one reason an identical later\nrequest can succeed without a configuration change.",
+            "type": "string"
+          },
+          {
+            "const": "conflicting_provider_effort",
+            "description": "The request also sets a provider-specific effort that differs from\nthe level.",
+            "type": "string"
+          },
+          {
+            "const": "conflicting_thinking_budget",
+            "description": "The request also sets a thinking budget: a budget and a level are two\ncontrols.",
+            "type": "string"
+          },
+          {
+            "const": "conflicting_thinking_type",
+            "description": "The request also sets a thinking type the model does not accept\ntogether with the level on the route.",
+            "type": "string"
+          },
+          {
+            "const": "conflicting_reasoning_body",
+            "description": "The request also carries a raw provider reasoning body, which may\ncarry an effort of its own.",
+            "type": "string"
+          },
+          {
+            "const": "conflicting_reasoning_mode",
+            "description": "The request also turns reasoning off.",
+            "type": "string"
+          }
+        ]
+      },
+      "ReasoningFactsSource": {
+        "description": "The source of the effort levels a route accepts for a model. Each\nbackend kind names its own (`reasoning_levels_source()` on the\nprovider-matrix kinds, [`ReasoningBackend::levels_source`]); a refusal\nand a resolution report it as `facts`.",
+        "oneOf": [
+          {
+            "const": "catalog",
+            "description": "The model's catalog row: the backend forwards the provider's own API\nto the provider's own validation.",
+            "type": "string"
+          },
+          {
+            "const": "account",
+            "description": "The account's model list entry for the model: the backend answers\nfor itself, and the catalog row is never a source of its levels.",
+            "type": "string"
+          },
+          {
+            "const": "operator",
+            "description": "The levels the operator declared in the model's configuration.",
+            "type": "string"
+          }
+        ]
+      },
       "ReasoningLoweringBaseline": {
         "description": "What one provider attempt's baseline request already said about effort,\nbefore any preference was considered.",
         "oneOf": [
@@ -6329,6 +6518,24 @@
             "type": "string"
           }
         ]
+      },
+      "ReasoningRoute": {
+        "description": "The route a request is served on, in its reported form:\n`{\"backend\": \"<provider-matrix string>\", \"api\": \"<snake_case API>\"}`.\n\nBuilt by [`ReasoningRoute::new`] from a typed backend, or read from that\nform, which refuses a backend that is not a provider-matrix backend\nstring. Either way `backend` is always one. Displays as `backend/api`.",
+        "properties": {
+          "api": {
+            "$ref": "#/$defs/ModelApi",
+            "description": "The provider API of the route."
+          },
+          "backend": {
+            "description": "The provider-matrix backend string (`openai_api`, `copilot`,\n`bedrock`, ...).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "backend",
+          "api"
+        ],
+        "type": "object"
       },
       "RequestedCompactionSkipReason": {
         "description": "Why the compaction check that consumed a host's compaction request\ncompacted nothing, as [`AgentEvent::RequestedCompactionSkipped`] reports\nit. The vocabulary may grow.",
@@ -27338,6 +27545,22 @@
               "refusal"
             ],
             "type": "object"
+          },
+          {
+            "properties": {
+              "reason_type": {
+                "const": "reasoning_effort_refused",
+                "type": "string"
+              },
+              "refusal": {
+                "$ref": "#/$defs/ReasoningEffortRefusal"
+              }
+            },
+            "required": [
+              "reason_type",
+              "refusal"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -31903,6 +32126,36 @@
         ],
         "type": "object"
       },
+      "ModelApi": {
+        "description": "The provider API a request is sent on.",
+        "oneOf": [
+          {
+            "const": "responses",
+            "description": "The OpenAI Responses API.",
+            "type": "string"
+          },
+          {
+            "const": "chat_completions",
+            "description": "The OpenAI Chat Completions API and endpoints compatible with it.",
+            "type": "string"
+          },
+          {
+            "const": "messages",
+            "description": "The Anthropic Messages API.",
+            "type": "string"
+          },
+          {
+            "const": "generate_content",
+            "description": "The Gemini `generateContent` API.",
+            "type": "string"
+          },
+          {
+            "const": "realtime",
+            "description": "The OpenAI realtime API.",
+            "type": "string"
+          }
+        ]
+      },
       "ModelFallbackSkipReason": {
         "oneOf": [
           {
@@ -33114,6 +33367,149 @@
         ],
         "type": "string"
       },
+      "ReasoningEffortRefusal": {
+        "description": "A refused `reasoning_effort` level: what was requested, for which model\nand route, and why. Raised before any provider request is sent.\n\n`route`, `supported` and `facts` are always serialized, as `null` when\nabsent (`facts` is absent exactly when `supported` is). The two\n`conflicting_*` fields are serialized only when present. The `Display`\ntext is for people and is not a contract; read the fields.",
+        "properties": {
+          "conflicting_level": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/EffortLevel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "For a conflict whose conflicting setting is itself a level: that\nlevel."
+          },
+          "conflicting_param": {
+            "description": "For a conflict: the path of the conflicting setting, for example\n`provider_params.provider_tag.effort`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "facts": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ReasoningFactsSource"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The source of `supported`."
+          },
+          "model": {
+            "description": "The model the request would use.",
+            "type": "string"
+          },
+          "provider": {
+            "$ref": "#/$defs/Provider",
+            "description": "The provider family of the model."
+          },
+          "reason": {
+            "$ref": "#/$defs/ReasoningEffortRefusalReason",
+            "description": "Why the level is refused."
+          },
+          "requested": {
+            "$ref": "#/$defs/EffortLevel",
+            "description": "The level the request named."
+          },
+          "route": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ReasoningRoute"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The route the request would be served on. `None` when the client\nthat serves the request reports no route: a route nobody observed\nis never guessed."
+          },
+          "supported": {
+            "description": "The levels the route accepts for the model: `None` when unknown or\nunavailable, empty when the route or the model takes no effort.",
+            "items": {
+              "$ref": "#/$defs/EffortLevel"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "requested",
+          "provider",
+          "model",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "ReasoningEffortRefusalReason": {
+        "description": "Why a requested `reasoning_effort` level is refused.\n\nA closed set: every reader matches it exhaustively, so adding a variant\nis a breaking change. The variants serialize as the snake_case strings\nbelow and keep this order.",
+        "oneOf": [
+          {
+            "const": "unsupported_level",
+            "description": "A source states the levels the route accepts for the model and the\nrequested level is not among them (an empty set: the route or the\nmodel takes no effort).",
+            "type": "string"
+          },
+          {
+            "const": "supported_levels_unknown",
+            "description": "No source states the levels the route accepts for the model.",
+            "type": "string"
+          },
+          {
+            "const": "supported_levels_unavailable",
+            "description": "The source of the levels exists and cannot be read now (an account's\nmodel list that is not loaded). The one reason an identical later\nrequest can succeed without a configuration change.",
+            "type": "string"
+          },
+          {
+            "const": "conflicting_provider_effort",
+            "description": "The request also sets a provider-specific effort that differs from\nthe level.",
+            "type": "string"
+          },
+          {
+            "const": "conflicting_thinking_budget",
+            "description": "The request also sets a thinking budget: a budget and a level are two\ncontrols.",
+            "type": "string"
+          },
+          {
+            "const": "conflicting_thinking_type",
+            "description": "The request also sets a thinking type the model does not accept\ntogether with the level on the route.",
+            "type": "string"
+          },
+          {
+            "const": "conflicting_reasoning_body",
+            "description": "The request also carries a raw provider reasoning body, which may\ncarry an effort of its own.",
+            "type": "string"
+          },
+          {
+            "const": "conflicting_reasoning_mode",
+            "description": "The request also turns reasoning off.",
+            "type": "string"
+          }
+        ]
+      },
+      "ReasoningFactsSource": {
+        "description": "The source of the effort levels a route accepts for a model. Each\nbackend kind names its own (`reasoning_levels_source()` on the\nprovider-matrix kinds, [`ReasoningBackend::levels_source`]); a refusal\nand a resolution report it as `facts`.",
+        "oneOf": [
+          {
+            "const": "catalog",
+            "description": "The model's catalog row: the backend forwards the provider's own API\nto the provider's own validation.",
+            "type": "string"
+          },
+          {
+            "const": "account",
+            "description": "The account's model list entry for the model: the backend answers\nfor itself, and the catalog row is never a source of its levels.",
+            "type": "string"
+          },
+          {
+            "const": "operator",
+            "description": "The levels the operator declared in the model's configuration.",
+            "type": "string"
+          }
+        ]
+      },
       "ReasoningLoweringBaseline": {
         "description": "What one provider attempt's baseline request already said about effort,\nbefore any preference was considered.",
         "oneOf": [
@@ -33247,6 +33643,24 @@
             "type": "string"
           }
         ]
+      },
+      "ReasoningRoute": {
+        "description": "The route a request is served on, in its reported form:\n`{\"backend\": \"<provider-matrix string>\", \"api\": \"<snake_case API>\"}`.\n\nBuilt by [`ReasoningRoute::new`] from a typed backend, or read from that\nform, which refuses a backend that is not a provider-matrix backend\nstring. Either way `backend` is always one. Displays as `backend/api`.",
+        "properties": {
+          "api": {
+            "$ref": "#/$defs/ModelApi",
+            "description": "The provider API of the route."
+          },
+          "backend": {
+            "description": "The provider-matrix backend string (`openai_api`, `copilot`,\n`bedrock`, ...).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "backend",
+          "api"
+        ],
+        "type": "object"
       },
       "RequestedCompactionSkipReason": {
         "description": "Why the compaction check that consumed a host's compaction request\ncompacted nothing, as [`AgentEvent::RequestedCompactionSkipped`] reports\nit. The vocabulary may grow.",
@@ -42685,6 +43099,22 @@
               "refusal"
             ],
             "type": "object"
+          },
+          {
+            "properties": {
+              "reason_type": {
+                "const": "reasoning_effort_refused",
+                "type": "string"
+              },
+              "refusal": {
+                "$ref": "#/$defs/ReasoningEffortRefusal"
+              }
+            },
+            "required": [
+              "reason_type",
+              "refusal"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -49731,6 +50161,36 @@
         ],
         "type": "object"
       },
+      "ModelApi": {
+        "description": "The provider API a request is sent on.",
+        "oneOf": [
+          {
+            "const": "responses",
+            "description": "The OpenAI Responses API.",
+            "type": "string"
+          },
+          {
+            "const": "chat_completions",
+            "description": "The OpenAI Chat Completions API and endpoints compatible with it.",
+            "type": "string"
+          },
+          {
+            "const": "messages",
+            "description": "The Anthropic Messages API.",
+            "type": "string"
+          },
+          {
+            "const": "generate_content",
+            "description": "The Gemini `generateContent` API.",
+            "type": "string"
+          },
+          {
+            "const": "realtime",
+            "description": "The OpenAI realtime API.",
+            "type": "string"
+          }
+        ]
+      },
       "ModelFallbackSkipReason": {
         "oneOf": [
           {
@@ -50950,6 +51410,149 @@
         ],
         "type": "string"
       },
+      "ReasoningEffortRefusal": {
+        "description": "A refused `reasoning_effort` level: what was requested, for which model\nand route, and why. Raised before any provider request is sent.\n\n`route`, `supported` and `facts` are always serialized, as `null` when\nabsent (`facts` is absent exactly when `supported` is). The two\n`conflicting_*` fields are serialized only when present. The `Display`\ntext is for people and is not a contract; read the fields.",
+        "properties": {
+          "conflicting_level": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/EffortLevel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "For a conflict whose conflicting setting is itself a level: that\nlevel."
+          },
+          "conflicting_param": {
+            "description": "For a conflict: the path of the conflicting setting, for example\n`provider_params.provider_tag.effort`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "facts": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ReasoningFactsSource"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The source of `supported`."
+          },
+          "model": {
+            "description": "The model the request would use.",
+            "type": "string"
+          },
+          "provider": {
+            "$ref": "#/$defs/Provider",
+            "description": "The provider family of the model."
+          },
+          "reason": {
+            "$ref": "#/$defs/ReasoningEffortRefusalReason",
+            "description": "Why the level is refused."
+          },
+          "requested": {
+            "$ref": "#/$defs/EffortLevel",
+            "description": "The level the request named."
+          },
+          "route": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ReasoningRoute"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The route the request would be served on. `None` when the client\nthat serves the request reports no route: a route nobody observed\nis never guessed."
+          },
+          "supported": {
+            "description": "The levels the route accepts for the model: `None` when unknown or\nunavailable, empty when the route or the model takes no effort.",
+            "items": {
+              "$ref": "#/$defs/EffortLevel"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "requested",
+          "provider",
+          "model",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "ReasoningEffortRefusalReason": {
+        "description": "Why a requested `reasoning_effort` level is refused.\n\nA closed set: every reader matches it exhaustively, so adding a variant\nis a breaking change. The variants serialize as the snake_case strings\nbelow and keep this order.",
+        "oneOf": [
+          {
+            "const": "unsupported_level",
+            "description": "A source states the levels the route accepts for the model and the\nrequested level is not among them (an empty set: the route or the\nmodel takes no effort).",
+            "type": "string"
+          },
+          {
+            "const": "supported_levels_unknown",
+            "description": "No source states the levels the route accepts for the model.",
+            "type": "string"
+          },
+          {
+            "const": "supported_levels_unavailable",
+            "description": "The source of the levels exists and cannot be read now (an account's\nmodel list that is not loaded). The one reason an identical later\nrequest can succeed without a configuration change.",
+            "type": "string"
+          },
+          {
+            "const": "conflicting_provider_effort",
+            "description": "The request also sets a provider-specific effort that differs from\nthe level.",
+            "type": "string"
+          },
+          {
+            "const": "conflicting_thinking_budget",
+            "description": "The request also sets a thinking budget: a budget and a level are two\ncontrols.",
+            "type": "string"
+          },
+          {
+            "const": "conflicting_thinking_type",
+            "description": "The request also sets a thinking type the model does not accept\ntogether with the level on the route.",
+            "type": "string"
+          },
+          {
+            "const": "conflicting_reasoning_body",
+            "description": "The request also carries a raw provider reasoning body, which may\ncarry an effort of its own.",
+            "type": "string"
+          },
+          {
+            "const": "conflicting_reasoning_mode",
+            "description": "The request also turns reasoning off.",
+            "type": "string"
+          }
+        ]
+      },
+      "ReasoningFactsSource": {
+        "description": "The source of the effort levels a route accepts for a model. Each\nbackend kind names its own (`reasoning_levels_source()` on the\nprovider-matrix kinds, [`ReasoningBackend::levels_source`]); a refusal\nand a resolution report it as `facts`.",
+        "oneOf": [
+          {
+            "const": "catalog",
+            "description": "The model's catalog row: the backend forwards the provider's own API\nto the provider's own validation.",
+            "type": "string"
+          },
+          {
+            "const": "account",
+            "description": "The account's model list entry for the model: the backend answers\nfor itself, and the catalog row is never a source of its levels.",
+            "type": "string"
+          },
+          {
+            "const": "operator",
+            "description": "The levels the operator declared in the model's configuration.",
+            "type": "string"
+          }
+        ]
+      },
       "ReasoningLoweringBaseline": {
         "description": "What one provider attempt's baseline request already said about effort,\nbefore any preference was considered.",
         "oneOf": [
@@ -51083,6 +51686,24 @@
             "type": "string"
           }
         ]
+      },
+      "ReasoningRoute": {
+        "description": "The route a request is served on, in its reported form:\n`{\"backend\": \"<provider-matrix string>\", \"api\": \"<snake_case API>\"}`.\n\nBuilt by [`ReasoningRoute::new`] from a typed backend, or read from that\nform, which refuses a backend that is not a provider-matrix backend\nstring. Either way `backend` is always one. Displays as `backend/api`.",
+        "properties": {
+          "api": {
+            "$ref": "#/$defs/ModelApi",
+            "description": "The provider API of the route."
+          },
+          "backend": {
+            "description": "The provider-matrix backend string (`openai_api`, `copilot`,\n`bedrock`, ...).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "backend",
+          "api"
+        ],
+        "type": "object"
       },
       "RequestedCompactionSkipReason": {
         "description": "Why the compaction check that consumed a host's compaction request\ncompacted nothing, as [`AgentEvent::RequestedCompactionSkipped`] reports\nit. The vocabulary may grow.",
@@ -59592,6 +60213,22 @@
               },
               "refusal": {
                 "$ref": "#/$defs/GrantGateRefusal"
+              }
+            },
+            "required": [
+              "reason_type",
+              "refusal"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason_type": {
+                "const": "reasoning_effort_refused",
+                "type": "string"
+              },
+              "refusal": {
+                "$ref": "#/$defs/ReasoningEffortRefusal"
               }
             },
             "required": [
@@ -70559,6 +71196,36 @@
         ],
         "type": "object"
       },
+      "ModelApi": {
+        "description": "The provider API a request is sent on.",
+        "oneOf": [
+          {
+            "const": "responses",
+            "description": "The OpenAI Responses API.",
+            "type": "string"
+          },
+          {
+            "const": "chat_completions",
+            "description": "The OpenAI Chat Completions API and endpoints compatible with it.",
+            "type": "string"
+          },
+          {
+            "const": "messages",
+            "description": "The Anthropic Messages API.",
+            "type": "string"
+          },
+          {
+            "const": "generate_content",
+            "description": "The Gemini `generateContent` API.",
+            "type": "string"
+          },
+          {
+            "const": "realtime",
+            "description": "The OpenAI realtime API.",
+            "type": "string"
+          }
+        ]
+      },
       "ModelFallbackConfig": {
         "additionalProperties": false,
         "description": "Ordered model failover policy used when a turn reaches a recoverable LLM\nfailure boundary.\n\nFallback is off unless explicitly enabled with a nonempty chain. A present\ntable replaces the inherited policy as a whole; a chain never enables it.",
@@ -72569,6 +73236,149 @@
         ],
         "type": "string"
       },
+      "ReasoningEffortRefusal": {
+        "description": "A refused `reasoning_effort` level: what was requested, for which model\nand route, and why. Raised before any provider request is sent.\n\n`route`, `supported` and `facts` are always serialized, as `null` when\nabsent (`facts` is absent exactly when `supported` is). The two\n`conflicting_*` fields are serialized only when present. The `Display`\ntext is for people and is not a contract; read the fields.",
+        "properties": {
+          "conflicting_level": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/EffortLevel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "For a conflict whose conflicting setting is itself a level: that\nlevel."
+          },
+          "conflicting_param": {
+            "description": "For a conflict: the path of the conflicting setting, for example\n`provider_params.provider_tag.effort`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "facts": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ReasoningFactsSource"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The source of `supported`."
+          },
+          "model": {
+            "description": "The model the request would use.",
+            "type": "string"
+          },
+          "provider": {
+            "$ref": "#/$defs/Provider",
+            "description": "The provider family of the model."
+          },
+          "reason": {
+            "$ref": "#/$defs/ReasoningEffortRefusalReason",
+            "description": "Why the level is refused."
+          },
+          "requested": {
+            "$ref": "#/$defs/EffortLevel",
+            "description": "The level the request named."
+          },
+          "route": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ReasoningRoute"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The route the request would be served on. `None` when the client\nthat serves the request reports no route: a route nobody observed\nis never guessed."
+          },
+          "supported": {
+            "description": "The levels the route accepts for the model: `None` when unknown or\nunavailable, empty when the route or the model takes no effort.",
+            "items": {
+              "$ref": "#/$defs/EffortLevel"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "requested",
+          "provider",
+          "model",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "ReasoningEffortRefusalReason": {
+        "description": "Why a requested `reasoning_effort` level is refused.\n\nA closed set: every reader matches it exhaustively, so adding a variant\nis a breaking change. The variants serialize as the snake_case strings\nbelow and keep this order.",
+        "oneOf": [
+          {
+            "const": "unsupported_level",
+            "description": "A source states the levels the route accepts for the model and the\nrequested level is not among them (an empty set: the route or the\nmodel takes no effort).",
+            "type": "string"
+          },
+          {
+            "const": "supported_levels_unknown",
+            "description": "No source states the levels the route accepts for the model.",
+            "type": "string"
+          },
+          {
+            "const": "supported_levels_unavailable",
+            "description": "The source of the levels exists and cannot be read now (an account's\nmodel list that is not loaded). The one reason an identical later\nrequest can succeed without a configuration change.",
+            "type": "string"
+          },
+          {
+            "const": "conflicting_provider_effort",
+            "description": "The request also sets a provider-specific effort that differs from\nthe level.",
+            "type": "string"
+          },
+          {
+            "const": "conflicting_thinking_budget",
+            "description": "The request also sets a thinking budget: a budget and a level are two\ncontrols.",
+            "type": "string"
+          },
+          {
+            "const": "conflicting_thinking_type",
+            "description": "The request also sets a thinking type the model does not accept\ntogether with the level on the route.",
+            "type": "string"
+          },
+          {
+            "const": "conflicting_reasoning_body",
+            "description": "The request also carries a raw provider reasoning body, which may\ncarry an effort of its own.",
+            "type": "string"
+          },
+          {
+            "const": "conflicting_reasoning_mode",
+            "description": "The request also turns reasoning off.",
+            "type": "string"
+          }
+        ]
+      },
+      "ReasoningFactsSource": {
+        "description": "The source of the effort levels a route accepts for a model. Each\nbackend kind names its own (`reasoning_levels_source()` on the\nprovider-matrix kinds, [`ReasoningBackend::levels_source`]); a refusal\nand a resolution report it as `facts`.",
+        "oneOf": [
+          {
+            "const": "catalog",
+            "description": "The model's catalog row: the backend forwards the provider's own API\nto the provider's own validation.",
+            "type": "string"
+          },
+          {
+            "const": "account",
+            "description": "The account's model list entry for the model: the backend answers\nfor itself, and the catalog row is never a source of its levels.",
+            "type": "string"
+          },
+          {
+            "const": "operator",
+            "description": "The levels the operator declared in the model's configuration.",
+            "type": "string"
+          }
+        ]
+      },
       "ReasoningLoweringBaseline": {
         "description": "What one provider attempt's baseline request already said about effort,\nbefore any preference was considered.",
         "oneOf": [
@@ -72702,6 +73512,24 @@
             "type": "string"
           }
         ]
+      },
+      "ReasoningRoute": {
+        "description": "The route a request is served on, in its reported form:\n`{\"backend\": \"<provider-matrix string>\", \"api\": \"<snake_case API>\"}`.\n\nBuilt by [`ReasoningRoute::new`] from a typed backend, or read from that\nform, which refuses a backend that is not a provider-matrix backend\nstring. Either way `backend` is always one. Displays as `backend/api`.",
+        "properties": {
+          "api": {
+            "$ref": "#/$defs/ModelApi",
+            "description": "The provider API of the route."
+          },
+          "backend": {
+            "description": "The provider-matrix backend string (`openai_api`, `copilot`,\n`bedrock`, ...).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "backend",
+          "api"
+        ],
+        "type": "object"
       },
       "RequestedCompactionSkipReason": {
         "description": "Why the compaction check that consumed a host's compaction request\ncompacted nothing, as [`AgentEvent::RequestedCompactionSkipped`] reports\nit. The vocabulary may grow.",
@@ -84902,6 +85730,22 @@
               "refusal"
             ],
             "type": "object"
+          },
+          {
+            "properties": {
+              "reason_type": {
+                "const": "reasoning_effort_refused",
+                "type": "string"
+              },
+              "refusal": {
+                "$ref": "#/$defs/ReasoningEffortRefusal"
+              }
+            },
+            "required": [
+              "reason_type",
+              "refusal"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -92848,6 +93692,36 @@
         ],
         "type": "object"
       },
+      "ModelApi": {
+        "description": "The provider API a request is sent on.",
+        "oneOf": [
+          {
+            "const": "responses",
+            "description": "The OpenAI Responses API.",
+            "type": "string"
+          },
+          {
+            "const": "chat_completions",
+            "description": "The OpenAI Chat Completions API and endpoints compatible with it.",
+            "type": "string"
+          },
+          {
+            "const": "messages",
+            "description": "The Anthropic Messages API.",
+            "type": "string"
+          },
+          {
+            "const": "generate_content",
+            "description": "The Gemini `generateContent` API.",
+            "type": "string"
+          },
+          {
+            "const": "realtime",
+            "description": "The OpenAI realtime API.",
+            "type": "string"
+          }
+        ]
+      },
       "ModelFallbackSkipReason": {
         "oneOf": [
           {
@@ -94067,6 +94941,149 @@
         ],
         "type": "string"
       },
+      "ReasoningEffortRefusal": {
+        "description": "A refused `reasoning_effort` level: what was requested, for which model\nand route, and why. Raised before any provider request is sent.\n\n`route`, `supported` and `facts` are always serialized, as `null` when\nabsent (`facts` is absent exactly when `supported` is). The two\n`conflicting_*` fields are serialized only when present. The `Display`\ntext is for people and is not a contract; read the fields.",
+        "properties": {
+          "conflicting_level": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/EffortLevel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "For a conflict whose conflicting setting is itself a level: that\nlevel."
+          },
+          "conflicting_param": {
+            "description": "For a conflict: the path of the conflicting setting, for example\n`provider_params.provider_tag.effort`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "facts": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ReasoningFactsSource"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The source of `supported`."
+          },
+          "model": {
+            "description": "The model the request would use.",
+            "type": "string"
+          },
+          "provider": {
+            "$ref": "#/$defs/Provider",
+            "description": "The provider family of the model."
+          },
+          "reason": {
+            "$ref": "#/$defs/ReasoningEffortRefusalReason",
+            "description": "Why the level is refused."
+          },
+          "requested": {
+            "$ref": "#/$defs/EffortLevel",
+            "description": "The level the request named."
+          },
+          "route": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ReasoningRoute"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The route the request would be served on. `None` when the client\nthat serves the request reports no route: a route nobody observed\nis never guessed."
+          },
+          "supported": {
+            "description": "The levels the route accepts for the model: `None` when unknown or\nunavailable, empty when the route or the model takes no effort.",
+            "items": {
+              "$ref": "#/$defs/EffortLevel"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "requested",
+          "provider",
+          "model",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "ReasoningEffortRefusalReason": {
+        "description": "Why a requested `reasoning_effort` level is refused.\n\nA closed set: every reader matches it exhaustively, so adding a variant\nis a breaking change. The variants serialize as the snake_case strings\nbelow and keep this order.",
+        "oneOf": [
+          {
+            "const": "unsupported_level",
+            "description": "A source states the levels the route accepts for the model and the\nrequested level is not among them (an empty set: the route or the\nmodel takes no effort).",
+            "type": "string"
+          },
+          {
+            "const": "supported_levels_unknown",
+            "description": "No source states the levels the route accepts for the model.",
+            "type": "string"
+          },
+          {
+            "const": "supported_levels_unavailable",
+            "description": "The source of the levels exists and cannot be read now (an account's\nmodel list that is not loaded). The one reason an identical later\nrequest can succeed without a configuration change.",
+            "type": "string"
+          },
+          {
+            "const": "conflicting_provider_effort",
+            "description": "The request also sets a provider-specific effort that differs from\nthe level.",
+            "type": "string"
+          },
+          {
+            "const": "conflicting_thinking_budget",
+            "description": "The request also sets a thinking budget: a budget and a level are two\ncontrols.",
+            "type": "string"
+          },
+          {
+            "const": "conflicting_thinking_type",
+            "description": "The request also sets a thinking type the model does not accept\ntogether with the level on the route.",
+            "type": "string"
+          },
+          {
+            "const": "conflicting_reasoning_body",
+            "description": "The request also carries a raw provider reasoning body, which may\ncarry an effort of its own.",
+            "type": "string"
+          },
+          {
+            "const": "conflicting_reasoning_mode",
+            "description": "The request also turns reasoning off.",
+            "type": "string"
+          }
+        ]
+      },
+      "ReasoningFactsSource": {
+        "description": "The source of the effort levels a route accepts for a model. Each\nbackend kind names its own (`reasoning_levels_source()` on the\nprovider-matrix kinds, [`ReasoningBackend::levels_source`]); a refusal\nand a resolution report it as `facts`.",
+        "oneOf": [
+          {
+            "const": "catalog",
+            "description": "The model's catalog row: the backend forwards the provider's own API\nto the provider's own validation.",
+            "type": "string"
+          },
+          {
+            "const": "account",
+            "description": "The account's model list entry for the model: the backend answers\nfor itself, and the catalog row is never a source of its levels.",
+            "type": "string"
+          },
+          {
+            "const": "operator",
+            "description": "The levels the operator declared in the model's configuration.",
+            "type": "string"
+          }
+        ]
+      },
       "ReasoningLoweringBaseline": {
         "description": "What one provider attempt's baseline request already said about effort,\nbefore any preference was considered.",
         "oneOf": [
@@ -94200,6 +95217,24 @@
             "type": "string"
           }
         ]
+      },
+      "ReasoningRoute": {
+        "description": "The route a request is served on, in its reported form:\n`{\"backend\": \"<provider-matrix string>\", \"api\": \"<snake_case API>\"}`.\n\nBuilt by [`ReasoningRoute::new`] from a typed backend, or read from that\nform, which refuses a backend that is not a provider-matrix backend\nstring. Either way `backend` is always one. Displays as `backend/api`.",
+        "properties": {
+          "api": {
+            "$ref": "#/$defs/ModelApi",
+            "description": "The provider API of the route."
+          },
+          "backend": {
+            "description": "The provider-matrix backend string (`openai_api`, `copilot`,\n`bedrock`, ...).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "backend",
+          "api"
+        ],
+        "type": "object"
       },
       "RequestedCompactionSkipReason": {
         "description": "Why the compaction check that consumed a host's compaction request\ncompacted nothing, as [`AgentEvent::RequestedCompactionSkipped`] reports\nit. The vocabulary may grow.",
@@ -104063,6 +105098,22 @@
               "refusal"
             ],
             "type": "object"
+          },
+          {
+            "properties": {
+              "reason_type": {
+                "const": "reasoning_effort_refused",
+                "type": "string"
+              },
+              "refusal": {
+                "$ref": "#/$defs/ReasoningEffortRefusal"
+              }
+            },
+            "required": [
+              "reason_type",
+              "refusal"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -108528,6 +109579,36 @@
         ],
         "type": "object"
       },
+      "ModelApi": {
+        "description": "The provider API a request is sent on.",
+        "oneOf": [
+          {
+            "const": "responses",
+            "description": "The OpenAI Responses API.",
+            "type": "string"
+          },
+          {
+            "const": "chat_completions",
+            "description": "The OpenAI Chat Completions API and endpoints compatible with it.",
+            "type": "string"
+          },
+          {
+            "const": "messages",
+            "description": "The Anthropic Messages API.",
+            "type": "string"
+          },
+          {
+            "const": "generate_content",
+            "description": "The Gemini `generateContent` API.",
+            "type": "string"
+          },
+          {
+            "const": "realtime",
+            "description": "The OpenAI realtime API.",
+            "type": "string"
+          }
+        ]
+      },
       "ModelFallbackSkipReason": {
         "oneOf": [
           {
@@ -109739,6 +110820,149 @@
         ],
         "type": "string"
       },
+      "ReasoningEffortRefusal": {
+        "description": "A refused `reasoning_effort` level: what was requested, for which model\nand route, and why. Raised before any provider request is sent.\n\n`route`, `supported` and `facts` are always serialized, as `null` when\nabsent (`facts` is absent exactly when `supported` is). The two\n`conflicting_*` fields are serialized only when present. The `Display`\ntext is for people and is not a contract; read the fields.",
+        "properties": {
+          "conflicting_level": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/EffortLevel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "For a conflict whose conflicting setting is itself a level: that\nlevel."
+          },
+          "conflicting_param": {
+            "description": "For a conflict: the path of the conflicting setting, for example\n`provider_params.provider_tag.effort`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "facts": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ReasoningFactsSource"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The source of `supported`."
+          },
+          "model": {
+            "description": "The model the request would use.",
+            "type": "string"
+          },
+          "provider": {
+            "$ref": "#/$defs/Provider",
+            "description": "The provider family of the model."
+          },
+          "reason": {
+            "$ref": "#/$defs/ReasoningEffortRefusalReason",
+            "description": "Why the level is refused."
+          },
+          "requested": {
+            "$ref": "#/$defs/EffortLevel",
+            "description": "The level the request named."
+          },
+          "route": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ReasoningRoute"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The route the request would be served on. `None` when the client\nthat serves the request reports no route: a route nobody observed\nis never guessed."
+          },
+          "supported": {
+            "description": "The levels the route accepts for the model: `None` when unknown or\nunavailable, empty when the route or the model takes no effort.",
+            "items": {
+              "$ref": "#/$defs/EffortLevel"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "requested",
+          "provider",
+          "model",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "ReasoningEffortRefusalReason": {
+        "description": "Why a requested `reasoning_effort` level is refused.\n\nA closed set: every reader matches it exhaustively, so adding a variant\nis a breaking change. The variants serialize as the snake_case strings\nbelow and keep this order.",
+        "oneOf": [
+          {
+            "const": "unsupported_level",
+            "description": "A source states the levels the route accepts for the model and the\nrequested level is not among them (an empty set: the route or the\nmodel takes no effort).",
+            "type": "string"
+          },
+          {
+            "const": "supported_levels_unknown",
+            "description": "No source states the levels the route accepts for the model.",
+            "type": "string"
+          },
+          {
+            "const": "supported_levels_unavailable",
+            "description": "The source of the levels exists and cannot be read now (an account's\nmodel list that is not loaded). The one reason an identical later\nrequest can succeed without a configuration change.",
+            "type": "string"
+          },
+          {
+            "const": "conflicting_provider_effort",
+            "description": "The request also sets a provider-specific effort that differs from\nthe level.",
+            "type": "string"
+          },
+          {
+            "const": "conflicting_thinking_budget",
+            "description": "The request also sets a thinking budget: a budget and a level are two\ncontrols.",
+            "type": "string"
+          },
+          {
+            "const": "conflicting_thinking_type",
+            "description": "The request also sets a thinking type the model does not accept\ntogether with the level on the route.",
+            "type": "string"
+          },
+          {
+            "const": "conflicting_reasoning_body",
+            "description": "The request also carries a raw provider reasoning body, which may\ncarry an effort of its own.",
+            "type": "string"
+          },
+          {
+            "const": "conflicting_reasoning_mode",
+            "description": "The request also turns reasoning off.",
+            "type": "string"
+          }
+        ]
+      },
+      "ReasoningFactsSource": {
+        "description": "The source of the effort levels a route accepts for a model. Each\nbackend kind names its own (`reasoning_levels_source()` on the\nprovider-matrix kinds, [`ReasoningBackend::levels_source`]); a refusal\nand a resolution report it as `facts`.",
+        "oneOf": [
+          {
+            "const": "catalog",
+            "description": "The model's catalog row: the backend forwards the provider's own API\nto the provider's own validation.",
+            "type": "string"
+          },
+          {
+            "const": "account",
+            "description": "The account's model list entry for the model: the backend answers\nfor itself, and the catalog row is never a source of its levels.",
+            "type": "string"
+          },
+          {
+            "const": "operator",
+            "description": "The levels the operator declared in the model's configuration.",
+            "type": "string"
+          }
+        ]
+      },
       "ReasoningLoweringBaseline": {
         "description": "What one provider attempt's baseline request already said about effort,\nbefore any preference was considered.",
         "oneOf": [
@@ -109872,6 +111096,24 @@
             "type": "string"
           }
         ]
+      },
+      "ReasoningRoute": {
+        "description": "The route a request is served on, in its reported form:\n`{\"backend\": \"<provider-matrix string>\", \"api\": \"<snake_case API>\"}`.\n\nBuilt by [`ReasoningRoute::new`] from a typed backend, or read from that\nform, which refuses a backend that is not a provider-matrix backend\nstring. Either way `backend` is always one. Displays as `backend/api`.",
+        "properties": {
+          "api": {
+            "$ref": "#/$defs/ModelApi",
+            "description": "The provider API of the route."
+          },
+          "backend": {
+            "description": "The provider-matrix backend string (`openai_api`, `copilot`,\n`bedrock`, ...).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "backend",
+          "api"
+        ],
+        "type": "object"
       },
       "RequestedCompactionSkipReason": {
         "description": "Why the compaction check that consumed a host's compaction request\ncompacted nothing, as [`AgentEvent::RequestedCompactionSkipped`] reports\nit. The vocabulary may grow.",
@@ -177245,6 +178487,22 @@
               "refusal"
             ],
             "type": "object"
+          },
+          {
+            "properties": {
+              "reason_type": {
+                "const": "reasoning_effort_refused",
+                "type": "string"
+              },
+              "refusal": {
+                "$ref": "#/$defs/ReasoningEffortRefusal"
+              }
+            },
+            "required": [
+              "reason_type",
+              "refusal"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -181684,6 +182942,36 @@
         ],
         "type": "object"
       },
+      "ModelApi": {
+        "description": "The provider API a request is sent on.",
+        "oneOf": [
+          {
+            "const": "responses",
+            "description": "The OpenAI Responses API.",
+            "type": "string"
+          },
+          {
+            "const": "chat_completions",
+            "description": "The OpenAI Chat Completions API and endpoints compatible with it.",
+            "type": "string"
+          },
+          {
+            "const": "messages",
+            "description": "The Anthropic Messages API.",
+            "type": "string"
+          },
+          {
+            "const": "generate_content",
+            "description": "The Gemini `generateContent` API.",
+            "type": "string"
+          },
+          {
+            "const": "realtime",
+            "description": "The OpenAI realtime API.",
+            "type": "string"
+          }
+        ]
+      },
       "ModelFallbackSkipReason": {
         "oneOf": [
           {
@@ -182895,6 +184183,149 @@
         ],
         "type": "string"
       },
+      "ReasoningEffortRefusal": {
+        "description": "A refused `reasoning_effort` level: what was requested, for which model\nand route, and why. Raised before any provider request is sent.\n\n`route`, `supported` and `facts` are always serialized, as `null` when\nabsent (`facts` is absent exactly when `supported` is). The two\n`conflicting_*` fields are serialized only when present. The `Display`\ntext is for people and is not a contract; read the fields.",
+        "properties": {
+          "conflicting_level": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/EffortLevel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "For a conflict whose conflicting setting is itself a level: that\nlevel."
+          },
+          "conflicting_param": {
+            "description": "For a conflict: the path of the conflicting setting, for example\n`provider_params.provider_tag.effort`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "facts": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ReasoningFactsSource"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The source of `supported`."
+          },
+          "model": {
+            "description": "The model the request would use.",
+            "type": "string"
+          },
+          "provider": {
+            "$ref": "#/$defs/Provider",
+            "description": "The provider family of the model."
+          },
+          "reason": {
+            "$ref": "#/$defs/ReasoningEffortRefusalReason",
+            "description": "Why the level is refused."
+          },
+          "requested": {
+            "$ref": "#/$defs/EffortLevel",
+            "description": "The level the request named."
+          },
+          "route": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ReasoningRoute"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The route the request would be served on. `None` when the client\nthat serves the request reports no route: a route nobody observed\nis never guessed."
+          },
+          "supported": {
+            "description": "The levels the route accepts for the model: `None` when unknown or\nunavailable, empty when the route or the model takes no effort.",
+            "items": {
+              "$ref": "#/$defs/EffortLevel"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "requested",
+          "provider",
+          "model",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "ReasoningEffortRefusalReason": {
+        "description": "Why a requested `reasoning_effort` level is refused.\n\nA closed set: every reader matches it exhaustively, so adding a variant\nis a breaking change. The variants serialize as the snake_case strings\nbelow and keep this order.",
+        "oneOf": [
+          {
+            "const": "unsupported_level",
+            "description": "A source states the levels the route accepts for the model and the\nrequested level is not among them (an empty set: the route or the\nmodel takes no effort).",
+            "type": "string"
+          },
+          {
+            "const": "supported_levels_unknown",
+            "description": "No source states the levels the route accepts for the model.",
+            "type": "string"
+          },
+          {
+            "const": "supported_levels_unavailable",
+            "description": "The source of the levels exists and cannot be read now (an account's\nmodel list that is not loaded). The one reason an identical later\nrequest can succeed without a configuration change.",
+            "type": "string"
+          },
+          {
+            "const": "conflicting_provider_effort",
+            "description": "The request also sets a provider-specific effort that differs from\nthe level.",
+            "type": "string"
+          },
+          {
+            "const": "conflicting_thinking_budget",
+            "description": "The request also sets a thinking budget: a budget and a level are two\ncontrols.",
+            "type": "string"
+          },
+          {
+            "const": "conflicting_thinking_type",
+            "description": "The request also sets a thinking type the model does not accept\ntogether with the level on the route.",
+            "type": "string"
+          },
+          {
+            "const": "conflicting_reasoning_body",
+            "description": "The request also carries a raw provider reasoning body, which may\ncarry an effort of its own.",
+            "type": "string"
+          },
+          {
+            "const": "conflicting_reasoning_mode",
+            "description": "The request also turns reasoning off.",
+            "type": "string"
+          }
+        ]
+      },
+      "ReasoningFactsSource": {
+        "description": "The source of the effort levels a route accepts for a model. Each\nbackend kind names its own (`reasoning_levels_source()` on the\nprovider-matrix kinds, [`ReasoningBackend::levels_source`]); a refusal\nand a resolution report it as `facts`.",
+        "oneOf": [
+          {
+            "const": "catalog",
+            "description": "The model's catalog row: the backend forwards the provider's own API\nto the provider's own validation.",
+            "type": "string"
+          },
+          {
+            "const": "account",
+            "description": "The account's model list entry for the model: the backend answers\nfor itself, and the catalog row is never a source of its levels.",
+            "type": "string"
+          },
+          {
+            "const": "operator",
+            "description": "The levels the operator declared in the model's configuration.",
+            "type": "string"
+          }
+        ]
+      },
       "ReasoningLoweringBaseline": {
         "description": "What one provider attempt's baseline request already said about effort,\nbefore any preference was considered.",
         "oneOf": [
@@ -183028,6 +184459,24 @@
             "type": "string"
           }
         ]
+      },
+      "ReasoningRoute": {
+        "description": "The route a request is served on, in its reported form:\n`{\"backend\": \"<provider-matrix string>\", \"api\": \"<snake_case API>\"}`.\n\nBuilt by [`ReasoningRoute::new`] from a typed backend, or read from that\nform, which refuses a backend that is not a provider-matrix backend\nstring. Either way `backend` is always one. Displays as `backend/api`.",
+        "properties": {
+          "api": {
+            "$ref": "#/$defs/ModelApi",
+            "description": "The provider API of the route."
+          },
+          "backend": {
+            "description": "The provider-matrix backend string (`openai_api`, `copilot`,\n`bedrock`, ...).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "backend",
+          "api"
+        ],
+        "type": "object"
       },
       "RequestedCompactionSkipReason": {
         "description": "Why the compaction check that consumed a host's compaction request\ncompacted nothing, as [`AgentEvent::RequestedCompactionSkipped`] reports\nit. The vocabulary may grow.",

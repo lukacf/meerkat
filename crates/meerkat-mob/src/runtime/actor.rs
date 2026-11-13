@@ -13588,21 +13588,6 @@ impl MobActor {
         }
     }
 
-    /// Command-deferral aggregator for every actor-owned effect lane.
-    ///
-    /// The dispatch loop and `wait_for_actor_wake` both consult this: `true`
-    /// parks the command in `deferred_commands` (bounded by
-    /// `MEMBER_ADMISSION_LANE_CAPACITY`) and re-offers it once the owning
-    /// lane settles. Each lane contributes ONE predicate over its own exact
-    /// custody — never a global mutex and never a phase guess.
-    ///
-    /// Lane owners add their predicate here as a single early-return arm
-    /// (`if self.<lane>_control_is_pending(command) { return true; }`) and
-    /// keep its body in their own module. Global lifecycle verbs are NOT
-    /// deferred here: a lane that must fence them drains its custody at the
-    /// lifecycle barrier instead — `begin_placed_completion_lifecycle_quiesce`
-    /// (Stop/Complete/Reset/Destroy/RetireAll) and the `Shutdown` arm, where
-    /// `drain_wiring_io_for_lifecycle` already runs.
     #[inline(never)]
     fn log_shutdown_admitted(&self) {
         tracing::info!(
@@ -13634,6 +13619,30 @@ impl MobActor {
         }
     }
 
+    /// Command-deferral aggregator for every actor-owned effect lane.
+    ///
+    /// The dispatch loop and `wait_for_actor_wake` both consult this: `true`
+    /// parks the command in `deferred_commands` (bounded by
+    /// `MEMBER_ADMISSION_LANE_CAPACITY`) and re-offers it once the owning
+    /// lane settles. Each lane contributes ONE predicate over its own exact
+    /// custody - never a global mutex and never a phase guess.
+    ///
+    /// Lane owners add their predicate here as a single early-return arm
+    /// (`if self.<lane>_control_is_pending(command) { return true; }`) and
+    /// keep its body in their own module. A lane's own predicate does not
+    /// defer the global lifecycle verbs. This function defers them itself, in
+    /// one place: a Stop, Complete, Reset, Destroy, RetireAll or Shutdown
+    /// waits while a spawn activation holds custody (outside an explicit
+    /// resume attempt, whose topology control parks activations instead),
+    /// while wiring I/O is in flight, and while the member effects its
+    /// barrier names are running; a Retire or a Respawn of a member waits for
+    /// that member's own activation (`retirement_control_is_pending`).
+    /// So no lifecycle step removes or re-seats a member while one of its
+    /// activation stages is in flight. What still runs at the lifecycle
+    /// barrier is each lane's drain of the custody it kept:
+    /// `begin_placed_completion_lifecycle_quiesce`
+    /// (Stop/Complete/Reset/Destroy/RetireAll) and the `Shutdown` arm, where
+    /// `drain_wiring_io_for_lifecycle` runs.
     fn resume_member_control_is_pending(&self, command: &MobCommand) -> bool {
         if self.submit_work_pump_control_is_pending(command) {
             return true;

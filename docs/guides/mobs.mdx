@@ -897,6 +897,21 @@ and earlier failed that resume with an internal error). A store written
 before 0.9.4 whose last epoch already reused a generation still resumes, and
 that identity's next spawn goes above the recovered high-water.
 
+A retired member's session is archived, and the mobs that session owns (the
+mobs its agent created with `mob_create`, and the session's implicit mob with
+its delegates and forks) end with it, at the next start of the host. A
+worker's respawn (`respawn`, `mob/respawn`, the `mob_respawn` tool of
+`MobMcpDispatcher`) retires the member and gives its successor a new session,
+so the mobs the old incarnation created and its delegates are not carried
+over to the successor.
+An identity entry's member is respawned on its own session
+(`MobHandle::respawn_member`, and `respawn` of such a member) and keeps its
+mobs. Which side a member is on follows from how it was created: a member a
+host seats through an identity entry (a declared or store-owned identity, the
+way a host keeps a durable roster) is an entry's member; a member spawned
+directly (a host's spawn call, an agent's `mob_spawn_member`, a helper) is a
+worker.
+
 ### Dormant seats and comms keys (Rust hosts)
 
 A dormant seat (`MobHandle::seat_dormant_members`, a `rotate_member` that

@@ -10653,7 +10653,8 @@ impl MobMcpDispatcher {
             ),
             tool(
                 "mob_retire_member",
-                &format!("Retire a spawned mob member by identity. {COMMON}"),
+                &format!("Retire a spawned mob member by identity. The member's session is \
+                     archived: the mobs that member created and its delegates end with it. {COMMON}"),
                 json!({"type":"object","properties":{"mob_id":{"type":"string"},"agent_identity":{"type":"string"}},"required":["mob_id","agent_identity"]}),
             ),
             tool(
@@ -10729,7 +10730,9 @@ impl MobMcpDispatcher {
                 "mob_respawn",
                 &format!("Retire and re-spawn a member with the same profile. \
                      Required: mob_id, agent_identity. Optional: initial_message. \
-                     Returns an identity-native respawn receipt. {COMMON}"),
+                     Returns an identity-native respawn receipt. A worker's successor starts on a \
+                     new session: the mobs the old member created and its delegates are not \
+                     carried over. {COMMON}"),
                 json!({"type":"object","properties":{"mob_id":{"type":"string"},"agent_identity":{"type":"string"},"initial_message": content_input_schema()},"required":["mob_id","agent_identity"]}),
             ),
             tool(

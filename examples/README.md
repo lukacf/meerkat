@@ -6,7 +6,7 @@ from "Hello World" to production-shaped multi-agent systems.
 ## Quick Start
 
 ```bash
-# Set API keys. The quick-start examples below (002, 003, 010) select
+# Set the API key. The quick-start examples below (002, 003, 010) select
 # claude-sonnet-4-6 and need only the Anthropic key.
 export ANTHROPIC_API_KEY=sk-...
 
@@ -43,7 +43,8 @@ pass `--model claude-sonnet-4-6` on every command that starts a session, so
 they need the Anthropic key. A `rkat run` without `--model` on a fresh
 configuration selects `gpt-6-astra` and needs an OpenAI key. Both scripts keep
 their state, context and user-config roots under their own `.work/`
-directory, so a model pinned in your ordinary realm does not apply to them.
+directory, so a model pinned in your own project, user or realm configuration
+does not apply to them.
 
 Most numbered Rust examples are registered in `crates/meerkat/Cargo.toml`; 017-019
 are registered in `crates/meerkat-mob/Cargo.toml` and use `-p meerkat-mob`. Examples

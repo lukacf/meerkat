@@ -1496,11 +1496,14 @@ them.
   stopped mob when it starts (the Meta gateways do) always meets this: retire
   the member, then restart the host.
 
-- `rkat run --skill <name>` with a name that matches no skill is accepted
-  without a message, and the run goes to the model without it. This is
-  confirmed by a run on a build with the Linux x86_64 release archive fix of
-  this release (see Fixed): that fix restores the built-in skills, it does
-  not make an unknown name an error. A fix is planned for a later release.
+- A preloaded skill that cannot be resolved (a mistyped name, or a skill the
+  build does not have) is dropped without an error when a session is first
+  built: the session starts without it. This applies to `rkat run --skill`,
+  JSON-RPC `session/create` (and the Python and TypeScript SDK create
+  calls), REST `POST /sessions`, the MCP server's `meerkat_run`, a
+  schedule's first occurrence and mob member spawns; the only signs are a
+  `skill_resolution_failed` event where the surface delivers events and one
+  warning in the server's log (read from the source).
 
 - Until Connect 0.9.15 is published, Connect 0.9.14 is the Connect release
   for Core 0.9.15 and Meta 0.9.15. That pairing was not run as a whole, in

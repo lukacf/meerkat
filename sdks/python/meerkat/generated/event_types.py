@@ -1564,6 +1564,24 @@ class ReasoningBatchDispositionMixedWithUnpreferred(TypedDict, total=False):
 ReasoningBatchDisposition = ReasoningBatchDispositionApply | ReasoningBatchDispositionSupersededByExplicit | ReasoningBatchDispositionConflicting | ReasoningBatchDispositionMixedWithUnpreferred
 
 
+# Who decided the level a request was sent with.
+ReasoningEffortDecidedBy = Literal['request', 'preference']
+
+
+class ReasoningEffortResolution(TypedDict, total=False):
+    """A resolved `reasoning_effort` level: what one provider request is sent
+    with, for which model and route.
+    """
+    decided_by: Required[ReasoningEffortDecidedBy]
+    facts: Required[ReasoningFactsSource]
+    fields: Required[list[str]]
+    level: Required[EffortLevel]
+    model: Required[str]
+    provider: Required[Provider]
+    requested: Required[EffortLevel]
+    route: Required[ReasoningRoute]
+
+
 class ReasoningLoweringBaselineExplicit(TypedDict, total=False):
     """The baseline carried this effort level explicitly.
     """
@@ -2185,6 +2203,7 @@ class AgentEventRunStarted(TypedDict, total=False):
     """
     identity: NotRequired[TranscriptMessageIdentity]
     input: Required[RunInput]
+    reasoning_effort: NotRequired[Optional[ReasoningEffortResolution]]
     request_reasoning: NotRequired[Optional[ReasoningBatchDisposition]]
     session_id: Required[SessionId]
     type: Required[Literal['run_started']]
@@ -2818,6 +2837,7 @@ class AgentEventRunResumed(TypedDict, total=False):
     run continues with its next model call, after the last committed
     round.
     """
+    reasoning_effort: NotRequired[Optional[ReasoningEffortResolution]]
     resume_point: Required[RunResumePointKind]
     round: Required[int]
     run_id: Required[RunId]
@@ -2894,10 +2914,32 @@ class AgentEventOperatorInstructionsApplied(TypedDict, total=False):
     type: Required[Literal['operator_instructions_applied']]
 
 
+class AgentEventRequestReasoningEffortResolved(TypedDict, total=False):
+    """One provider request was sent with the session's provider-neutral
+    `reasoning_effort` level: the level the request named, the level
+    sent, the model, the route and the provider fields it was written
+    to. Published once for each request that was handed to the provider
+    (a turn's request, an extraction request, a compaction summary
+    request, a controller request, a model-fallback attempt), after the
+    request settled; a request refused before it was sent reports
+    nothing. Requests of a session that sets no level report nothing.
+    The event states what was sent, never what was planned: a request
+    that is prepared again (after a route change, say) reports the
+    resolution of the preparation that was sent.
+
+    Appended after every released variant: declaration order is the
+    implicit discriminant (the xtask `released_enum_ordinals` test).
+    """
+    fallback_attempt: NotRequired[Optional[int]]
+    resolution: Required[ReasoningEffortResolution]
+    turn_number: NotRequired[Optional[int]]
+    type: Required[Literal['request_reasoning_effort_resolved']]
+
+
 # Events emitted during agent execution
 #
 # These events form the streaming API for consumers.
-AgentEvent = AgentEventRunStarted | AgentEventRunCompleted | AgentEventExtractionSucceeded | AgentEventExtractionFailed | AgentEventRunFailed | AgentEventHookStarted | AgentEventHookCompleted | AgentEventHookFailed | AgentEventHookDenied | AgentEventTurnStarted | AgentEventReasoningDelta | AgentEventReasoningComplete | AgentEventTextDelta | AgentEventTextComplete | AgentEventServerToolContent | AgentEventAssistantImageAppended | AgentEventToolCallRequested | AgentEventToolResultReceived | AgentEventTurnCompleted | AgentEventToolExecutionStarted | AgentEventToolExecutionCompleted | AgentEventToolExecutionTimedOut | AgentEventCompactionStarted | AgentEventCompactionCompleted | AgentEventCompactionFailed | AgentEventBudgetWarning | AgentEventRetrying | AgentEventSkillsResolved | AgentEventSkillResolutionFailed | AgentEventInteractionComplete | AgentEventInteractionCallbackPending | AgentEventInteractionFailed | AgentEventStreamTruncated | AgentEventToolConfigChanged | AgentEventBackgroundJobCompleted | AgentEventTranscriptRewriteCommitted | AgentEventTranscriptRewriteAuditReceiptCommitted | AgentEventProviderCacheBreakpointsDiscarded | AgentEventPeerContentIngested | AgentEventTurnUsageAccountingUnmeasured | AgentEventTurnUsageAccountingIdentityDisputed | AgentEventModelFallbackSkipped | AgentEventModelFallbackStaged | AgentEventModelFallbackCommitted | AgentEventModelFallbackTargetFailed | AgentEventBoundaryAppendApplied | AgentEventBoundaryAppendsDiscarded | AgentEventLiveChannelClosed | AgentEventOperationObservationFailed | AgentEventHookLaunchRefused | AgentEventRequestReasoningLowered | AgentEventRunResumed | AgentEventToolResultsBoundedForRequest | AgentEventRequestedCompactionSkipped | AgentEventOperatorInstructionsApplied
+AgentEvent = AgentEventRunStarted | AgentEventRunCompleted | AgentEventExtractionSucceeded | AgentEventExtractionFailed | AgentEventRunFailed | AgentEventHookStarted | AgentEventHookCompleted | AgentEventHookFailed | AgentEventHookDenied | AgentEventTurnStarted | AgentEventReasoningDelta | AgentEventReasoningComplete | AgentEventTextDelta | AgentEventTextComplete | AgentEventServerToolContent | AgentEventAssistantImageAppended | AgentEventToolCallRequested | AgentEventToolResultReceived | AgentEventTurnCompleted | AgentEventToolExecutionStarted | AgentEventToolExecutionCompleted | AgentEventToolExecutionTimedOut | AgentEventCompactionStarted | AgentEventCompactionCompleted | AgentEventCompactionFailed | AgentEventBudgetWarning | AgentEventRetrying | AgentEventSkillsResolved | AgentEventSkillResolutionFailed | AgentEventInteractionComplete | AgentEventInteractionCallbackPending | AgentEventInteractionFailed | AgentEventStreamTruncated | AgentEventToolConfigChanged | AgentEventBackgroundJobCompleted | AgentEventTranscriptRewriteCommitted | AgentEventTranscriptRewriteAuditReceiptCommitted | AgentEventProviderCacheBreakpointsDiscarded | AgentEventPeerContentIngested | AgentEventTurnUsageAccountingUnmeasured | AgentEventTurnUsageAccountingIdentityDisputed | AgentEventModelFallbackSkipped | AgentEventModelFallbackStaged | AgentEventModelFallbackCommitted | AgentEventModelFallbackTargetFailed | AgentEventBoundaryAppendApplied | AgentEventBoundaryAppendsDiscarded | AgentEventLiveChannelClosed | AgentEventOperationObservationFailed | AgentEventHookLaunchRefused | AgentEventRequestReasoningLowered | AgentEventRunResumed | AgentEventToolResultsBoundedForRequest | AgentEventRequestedCompactionSkipped | AgentEventOperatorInstructionsApplied | AgentEventRequestReasoningEffortResolved
 
 
 class StreamScopeFramePrimary(TypedDict, total=False):

@@ -4342,6 +4342,21 @@
         ],
         "type": "string"
       },
+      "ReasoningEffortDecidedBy": {
+        "description": "Who decided the level a request was sent with.",
+        "oneOf": [
+          {
+            "const": "request",
+            "description": "The level the request named.",
+            "type": "string"
+          },
+          {
+            "const": "preference",
+            "description": "A reasoning preference replaced the level.",
+            "type": "string"
+          }
+        ]
+      },
       "ReasoningEffortRefusal": {
         "description": "A refused `reasoning_effort` level: what was requested, for which model\nand route, and why. Raised before any provider request is sent.\n\n`route`, `supported` and `facts` are always serialized, as `null` when\nabsent (`facts` is absent exactly when `supported` is). The two\n`conflicting_*` fields are serialized only when present. The `Display`\ntext is for people and is not a contract; read the fields.",
         "properties": {
@@ -4464,6 +4479,57 @@
             "type": "string"
           }
         ]
+      },
+      "ReasoningEffortResolution": {
+        "description": "A resolved `reasoning_effort` level: what one provider request is sent\nwith, for which model and route.",
+        "properties": {
+          "decided_by": {
+            "$ref": "#/$defs/ReasoningEffortDecidedBy",
+            "description": "Who decided `level`."
+          },
+          "facts": {
+            "$ref": "#/$defs/ReasoningFactsSource",
+            "description": "The source of the levels the route accepts for the model."
+          },
+          "fields": {
+            "description": "The wire paths the level is written to, for example\n`reasoning.effort`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "level": {
+            "$ref": "#/$defs/EffortLevel",
+            "description": "The level sent."
+          },
+          "model": {
+            "description": "The model the request uses.",
+            "type": "string"
+          },
+          "provider": {
+            "$ref": "#/$defs/Provider",
+            "description": "The provider family of the model."
+          },
+          "requested": {
+            "$ref": "#/$defs/EffortLevel",
+            "description": "The level the request named."
+          },
+          "route": {
+            "$ref": "#/$defs/ReasoningRoute",
+            "description": "The route the request is served on."
+          }
+        },
+        "required": [
+          "requested",
+          "level",
+          "provider",
+          "model",
+          "route",
+          "fields",
+          "facts",
+          "decided_by"
+        ],
+        "type": "object"
       },
       "ReasoningFactsSource": {
         "description": "The source of the effort levels a route accepts for a model. Each\nbackend kind names its own (`reasoning_levels_source()` on the\nprovider-matrix kinds, [`ReasoningBackend::levels_source`]); a refusal\nand a resolution report it as `facts`.",
@@ -7069,6 +7135,17 @@
             "$ref": "#/$defs/RunInput",
             "description": "Typed run input: caller content, or the pending tool-results\ncontinuation variant (no fabricated empty prompt)."
           },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ReasoningEffortResolution"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The session's provider-neutral `reasoning_effort` level as it\nresolves on the session's route when the run starts, before any\nprovider request; absent when the session sets no level. What\neach request was sent with is reported per request by\n`request_reasoning_effort_resolved`."
+          },
           "request_reasoning": {
             "anyOf": [
               {
@@ -8596,6 +8673,17 @@
       {
         "description": "A durable run resumed from its run cursor, in place of `run_started`:\nafter a restart, or in the same process once a store fence gap that\nsuspended it ended. The same run continues under its run id, and its\nterminal follows as for any run.\n\nAt `tools_pending` the run takes the round's staged assistant message\nas the model's response and dispatches its tool calls again under\ntheir call ids; nothing is published again for the staged message (no\n`tool_call_requested`, no `turn_completed`). At `awaiting_model` the\nrun continues with its next model call, after the last committed\nround.",
         "properties": {
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ReasoningEffortResolution"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The session's provider-neutral `reasoning_effort` level as it\nresolves on the session's route when the run resumes; absent\nwhen the session sets no level (see `run_started`)."
+          },
           "resume_point": {
             "$ref": "#/$defs/RunResumePointKind"
           },
@@ -8729,6 +8817,42 @@
           "session_id",
           "entry_sequence",
           "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "One provider request was sent with the session's provider-neutral\n`reasoning_effort` level: the level the request named, the level\nsent, the model, the route and the provider fields it was written\nto. Published once for each request that was handed to the provider\n(a turn's request, an extraction request, a compaction summary\nrequest, a controller request, a model-fallback attempt), after the\nrequest settled; a request refused before it was sent reports\nnothing. Requests of a session that sets no level report nothing.\nThe event states what was sent, never what was planned: a request\nthat is prepared again (after a route change, say) reports the\nresolution of the preparation that was sent.\n\nAppended after every released variant: declaration order is the\nimplicit discriminant (the xtask `released_enum_ordinals` test).",
+        "properties": {
+          "fallback_attempt": {
+            "description": "Set when the request is a model-fallback attempt: the failed\nattempt it replaces.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "resolution": {
+            "$ref": "#/$defs/ReasoningEffortResolution",
+            "description": "What the request was sent with."
+          },
+          "turn_number": {
+            "description": "The provider turn the request belongs to; absent for a request\noutside a turn (a compaction summary).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "type": {
+            "const": "request_reasoning_effort_resolved",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "resolution"
         ],
         "type": "object"
       }
@@ -9237,6 +9361,17 @@
               "input": {
                 "$ref": "#/$defs/RunInput",
                 "description": "Typed run input: caller content, or the pending tool-results\ncontinuation variant (no fabricated empty prompt)."
+              },
+              "reasoning_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ReasoningEffortResolution"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The session's provider-neutral `reasoning_effort` level as it\nresolves on the session's route when the run starts, before any\nprovider request; absent when the session sets no level. What\neach request was sent with is reported per request by\n`request_reasoning_effort_resolved`."
               },
               "request_reasoning": {
                 "anyOf": [
@@ -10765,6 +10900,17 @@
           {
             "description": "A durable run resumed from its run cursor, in place of `run_started`:\nafter a restart, or in the same process once a store fence gap that\nsuspended it ended. The same run continues under its run id, and its\nterminal follows as for any run.\n\nAt `tools_pending` the run takes the round's staged assistant message\nas the model's response and dispatches its tool calls again under\ntheir call ids; nothing is published again for the staged message (no\n`tool_call_requested`, no `turn_completed`). At `awaiting_model` the\nrun continues with its next model call, after the last committed\nround.",
             "properties": {
+              "reasoning_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ReasoningEffortResolution"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The session's provider-neutral `reasoning_effort` level as it\nresolves on the session's route when the run resumes; absent\nwhen the session sets no level (see `run_started`)."
+              },
               "resume_point": {
                 "$ref": "#/$defs/RunResumePointKind"
               },
@@ -10898,6 +11044,42 @@
               "session_id",
               "entry_sequence",
               "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "One provider request was sent with the session's provider-neutral\n`reasoning_effort` level: the level the request named, the level\nsent, the model, the route and the provider fields it was written\nto. Published once for each request that was handed to the provider\n(a turn's request, an extraction request, a compaction summary\nrequest, a controller request, a model-fallback attempt), after the\nrequest settled; a request refused before it was sent reports\nnothing. Requests of a session that sets no level report nothing.\nThe event states what was sent, never what was planned: a request\nthat is prepared again (after a route change, say) reports the\nresolution of the preparation that was sent.\n\nAppended after every released variant: declaration order is the\nimplicit discriminant (the xtask `released_enum_ordinals` test).",
+            "properties": {
+              "fallback_attempt": {
+                "description": "Set when the request is a model-fallback attempt: the failed\nattempt it replaces.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "resolution": {
+                "$ref": "#/$defs/ReasoningEffortResolution",
+                "description": "What the request was sent with."
+              },
+              "turn_number": {
+                "description": "The provider turn the request belongs to; absent for a request\noutside a turn (a compaction summary).",
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "request_reasoning_effort_resolved",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "resolution"
             ],
             "type": "object"
           }
@@ -14757,6 +14939,21 @@
         ],
         "type": "string"
       },
+      "ReasoningEffortDecidedBy": {
+        "description": "Who decided the level a request was sent with.",
+        "oneOf": [
+          {
+            "const": "request",
+            "description": "The level the request named.",
+            "type": "string"
+          },
+          {
+            "const": "preference",
+            "description": "A reasoning preference replaced the level.",
+            "type": "string"
+          }
+        ]
+      },
       "ReasoningEffortRefusal": {
         "description": "A refused `reasoning_effort` level: what was requested, for which model\nand route, and why. Raised before any provider request is sent.\n\n`route`, `supported` and `facts` are always serialized, as `null` when\nabsent (`facts` is absent exactly when `supported` is). The two\n`conflicting_*` fields are serialized only when present. The `Display`\ntext is for people and is not a contract; read the fields.",
         "properties": {
@@ -14879,6 +15076,57 @@
             "type": "string"
           }
         ]
+      },
+      "ReasoningEffortResolution": {
+        "description": "A resolved `reasoning_effort` level: what one provider request is sent\nwith, for which model and route.",
+        "properties": {
+          "decided_by": {
+            "$ref": "#/$defs/ReasoningEffortDecidedBy",
+            "description": "Who decided `level`."
+          },
+          "facts": {
+            "$ref": "#/$defs/ReasoningFactsSource",
+            "description": "The source of the levels the route accepts for the model."
+          },
+          "fields": {
+            "description": "The wire paths the level is written to, for example\n`reasoning.effort`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "level": {
+            "$ref": "#/$defs/EffortLevel",
+            "description": "The level sent."
+          },
+          "model": {
+            "description": "The model the request uses.",
+            "type": "string"
+          },
+          "provider": {
+            "$ref": "#/$defs/Provider",
+            "description": "The provider family of the model."
+          },
+          "requested": {
+            "$ref": "#/$defs/EffortLevel",
+            "description": "The level the request named."
+          },
+          "route": {
+            "$ref": "#/$defs/ReasoningRoute",
+            "description": "The route the request is served on."
+          }
+        },
+        "required": [
+          "requested",
+          "level",
+          "provider",
+          "model",
+          "route",
+          "fields",
+          "facts",
+          "decided_by"
+        ],
+        "type": "object"
       },
       "ReasoningFactsSource": {
         "description": "The source of the effort levels a route accepts for a model. Each\nbackend kind names its own (`reasoning_levels_source()` on the\nprovider-matrix kinds, [`ReasoningBackend::levels_source`]); a refusal\nand a resolution report it as `facts`.",
@@ -17594,7 +17842,8 @@
       "run_resumed",
       "tool_results_bounded_for_request",
       "requested_compaction_skipped",
-      "operator_instructions_applied"
+      "operator_instructions_applied",
+      "request_reasoning_effort_resolved"
     ],
     "known_payloads": {
       "tool_config_changed": {

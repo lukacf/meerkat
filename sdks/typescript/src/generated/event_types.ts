@@ -1213,6 +1213,26 @@ export type ReasoningBatchDisposition = {
 };
 
 /**
+ * Who decided the level a request was sent with.
+ */
+export type ReasoningEffortDecidedBy = "request" | "preference";
+
+/**
+ * A resolved `reasoning_effort` level: what one provider request is sent
+ * with, for which model and route.
+ */
+export interface ReasoningEffortResolution {
+  decided_by: ReasoningEffortDecidedBy;
+  facts: ReasoningFactsSource;
+  fields: string[];
+  level: EffortLevel;
+  model: string;
+  provider: Provider;
+  requested: EffortLevel;
+  route: ReasoningRoute;
+}
+
+/**
  * What one provider attempt's baseline request already said about effort,
  * before any preference was considered.
  */
@@ -1605,6 +1625,7 @@ export interface UnmeasuredTurnUsageAccounting {
 export type AgentEvent = {
   identity?: TranscriptMessageIdentity;
   input: RunInput;
+  reasoning_effort?: ReasoningEffortResolution | null;
   request_reasoning?: ReasoningBatchDisposition | null;
   session_id: SessionId;
   type: "run_started";
@@ -1867,6 +1888,7 @@ export type AgentEvent = {
   turn_number?: number | null;
   type: "request_reasoning_lowered";
 } | {
+  reasoning_effort?: ReasoningEffortResolution | null;
   resume_point: RunResumePointKind;
   round: number;
   run_id: RunId;
@@ -1889,6 +1911,11 @@ export type AgentEvent = {
   run_id?: RunId | null;
   session_id: SessionId;
   type: "operator_instructions_applied";
+} | {
+  fallback_attempt?: number | null;
+  resolution: ReasoningEffortResolution;
+  turn_number?: number | null;
+  type: "request_reasoning_effort_resolved";
 };
 
 /**

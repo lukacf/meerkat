@@ -1191,6 +1191,9 @@ Security, Upgrade and Changed.
   kickoff record. A console that can identify nobody shows no frame stored
   without member attributes until it has read who its agents are private
   to.
+- Console sidebar: the Workbench section now sits between **Needs you** and
+  the roster, so the roster's search and view controls are directly above
+  the roster list.
 
 ### Fixed
 

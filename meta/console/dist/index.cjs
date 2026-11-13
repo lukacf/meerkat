@@ -87453,102 +87453,6 @@ var Sidebar = import_react97.default.memo(function Sidebar2({
       }
     ),
     approvals || hostAttentionCount || attentionReplyCount ? /* @__PURE__ */ (0, import_jsx_runtime120.jsx)(ApprovalAttention, { snapshot: approvals, hostItems: hostAttentionCount, replies: attentionReplyCount, onOpen: onOpenApproval || (() => onOpenControl("gating")) }) : null,
-    /* @__PURE__ */ (0, import_jsx_runtime120.jsxs)("div", { className: "sidebar__head cc-reveal-host", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime120.jsxs)("div", { className: "sidebar__mast", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime120.jsxs)("div", { className: "sidebar__mast-text", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime120.jsx)("div", { className: "sidebar__mast-title", children: "Roster" }),
-          /* @__PURE__ */ (0, import_jsx_runtime120.jsxs)(
-            "div",
-            {
-              className: "sidebar__mast-sub",
-              title: viewIsDefault ? void 0 : [mastCount, ...viewSummary].join(" \xB7 "),
-              children: [
-                /* @__PURE__ */ (0, import_jsx_runtime120.jsx)("span", { className: "sidebar__mast-count", "data-testid": "sidebar-agent-count", children: mastCount }),
-                viewIsDefault ? null : /* @__PURE__ */ (0, import_jsx_runtime120.jsxs)(import_jsx_runtime120.Fragment, { children: [
-                  /* @__PURE__ */ (0, import_jsx_runtime120.jsx)(
-                    "button",
-                    {
-                      type: "button",
-                      className: "sidebar__view-summary",
-                      "aria-haspopup": "dialog",
-                      "aria-expanded": viewMenuOpen,
-                      "aria-controls": viewMenuOpen ? viewMenuId : void 0,
-                      "aria-label": "Roster view: ".concat(viewSummary.join(", "), ". Change the view"),
-                      "data-testid": "sidebar-view-summary",
-                      onClick: () => setViewMenuOpen(true),
-                      children: viewSummary.map((part) => " \xB7 ".concat(part)).join("")
-                    }
-                  ),
-                  /* @__PURE__ */ (0, import_jsx_runtime120.jsx)(
-                    IconButton,
-                    {
-                      label: "Reset roster view",
-                      glyph: "close",
-                      size: "sm",
-                      quiet: true,
-                      className: "sidebar__view-reset",
-                      "data-testid": "sidebar-view-reset",
-                      onClick: () => {
-                        resetView();
-                        viewTriggerRef.current?.focus();
-                      }
-                    }
-                  )
-                ] })
-              ]
-            }
-          )
-        ] }),
-        /* @__PURE__ */ (0, import_jsx_runtime120.jsx)(
-          IconButton,
-          {
-            ref: viewTriggerRef,
-            label: "Roster view options",
-            glyph: "ellipsis",
-            size: "sm",
-            quiet: true,
-            reveal: viewIsDefault,
-            badge: !viewIsDefault,
-            "aria-haspopup": "dialog",
-            "aria-expanded": viewMenuOpen,
-            "aria-controls": viewMenuOpen ? viewMenuId : void 0,
-            className: "sidebar__view-trigger",
-            "data-testid": "sidebar-view-menu",
-            "data-customized": viewIsDefault ? void 0 : "true",
-            onClick: () => setViewMenuOpen((open) => !open)
-          }
-        ),
-        /* @__PURE__ */ (0, import_jsx_runtime120.jsx)(
-          ViewOptions,
-          {
-            open: viewMenuOpen,
-            anchorRef: viewTriggerRef,
-            onClose: () => setViewMenuOpen(false),
-            ariaLabel: "Roster view",
-            controls: viewControls,
-            onReset: resetView,
-            resetDisabled: viewIsDefault,
-            resetTestId: "sidebar-view-options-reset",
-            id: viewMenuId,
-            testId: "sidebar-view-options",
-            className: "sidebar__view-options"
-          }
-        )
-      ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime120.jsx)("div", { className: "sidebar__search", children: /* @__PURE__ */ (0, import_jsx_runtime120.jsx)(
-        SearchField,
-        {
-          ref: searchRef,
-          label: "Search agents",
-          placeholder: "Search agents",
-          value: q2,
-          onChange: (value) => setQ(value),
-          shortcut: "/",
-          "aria-keyshortcuts": "/",
-          testId: "sidebar-search"
-        }
-      ) })
-    ] }),
     (navKinds.length > 0 || customSidebarButtons.length > 0 || customPanels.length > 0) && /* @__PURE__ */ (0, import_jsx_runtime120.jsxs)(
       "nav",
       {
@@ -87701,6 +87605,102 @@ var Sidebar = import_react97.default.memo(function Sidebar2({
         ]
       }
     ),
+    /* @__PURE__ */ (0, import_jsx_runtime120.jsxs)("div", { className: "sidebar__head cc-reveal-host", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime120.jsxs)("div", { className: "sidebar__mast", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime120.jsxs)("div", { className: "sidebar__mast-text", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime120.jsx)("div", { className: "sidebar__mast-title", children: "Roster" }),
+          /* @__PURE__ */ (0, import_jsx_runtime120.jsxs)(
+            "div",
+            {
+              className: "sidebar__mast-sub",
+              title: viewIsDefault ? void 0 : [mastCount, ...viewSummary].join(" \xB7 "),
+              children: [
+                /* @__PURE__ */ (0, import_jsx_runtime120.jsx)("span", { className: "sidebar__mast-count", "data-testid": "sidebar-agent-count", children: mastCount }),
+                viewIsDefault ? null : /* @__PURE__ */ (0, import_jsx_runtime120.jsxs)(import_jsx_runtime120.Fragment, { children: [
+                  /* @__PURE__ */ (0, import_jsx_runtime120.jsx)(
+                    "button",
+                    {
+                      type: "button",
+                      className: "sidebar__view-summary",
+                      "aria-haspopup": "dialog",
+                      "aria-expanded": viewMenuOpen,
+                      "aria-controls": viewMenuOpen ? viewMenuId : void 0,
+                      "aria-label": "Roster view: ".concat(viewSummary.join(", "), ". Change the view"),
+                      "data-testid": "sidebar-view-summary",
+                      onClick: () => setViewMenuOpen(true),
+                      children: viewSummary.map((part) => " \xB7 ".concat(part)).join("")
+                    }
+                  ),
+                  /* @__PURE__ */ (0, import_jsx_runtime120.jsx)(
+                    IconButton,
+                    {
+                      label: "Reset roster view",
+                      glyph: "close",
+                      size: "sm",
+                      quiet: true,
+                      className: "sidebar__view-reset",
+                      "data-testid": "sidebar-view-reset",
+                      onClick: () => {
+                        resetView();
+                        viewTriggerRef.current?.focus();
+                      }
+                    }
+                  )
+                ] })
+              ]
+            }
+          )
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime120.jsx)(
+          IconButton,
+          {
+            ref: viewTriggerRef,
+            label: "Roster view options",
+            glyph: "ellipsis",
+            size: "sm",
+            quiet: true,
+            reveal: viewIsDefault,
+            badge: !viewIsDefault,
+            "aria-haspopup": "dialog",
+            "aria-expanded": viewMenuOpen,
+            "aria-controls": viewMenuOpen ? viewMenuId : void 0,
+            className: "sidebar__view-trigger",
+            "data-testid": "sidebar-view-menu",
+            "data-customized": viewIsDefault ? void 0 : "true",
+            onClick: () => setViewMenuOpen((open) => !open)
+          }
+        ),
+        /* @__PURE__ */ (0, import_jsx_runtime120.jsx)(
+          ViewOptions,
+          {
+            open: viewMenuOpen,
+            anchorRef: viewTriggerRef,
+            onClose: () => setViewMenuOpen(false),
+            ariaLabel: "Roster view",
+            controls: viewControls,
+            onReset: resetView,
+            resetDisabled: viewIsDefault,
+            resetTestId: "sidebar-view-options-reset",
+            id: viewMenuId,
+            testId: "sidebar-view-options",
+            className: "sidebar__view-options"
+          }
+        )
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime120.jsx)("div", { className: "sidebar__search", children: /* @__PURE__ */ (0, import_jsx_runtime120.jsx)(
+        SearchField,
+        {
+          ref: searchRef,
+          label: "Search agents",
+          placeholder: "Search agents",
+          value: q2,
+          onChange: (value) => setQ(value),
+          shortcut: "/",
+          "aria-keyshortcuts": "/",
+          testId: "sidebar-search"
+        }
+      ) })
+    ] }),
     /* @__PURE__ */ (0, import_jsx_runtime120.jsxs)(
       "div",
       {

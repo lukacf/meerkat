@@ -1763,6 +1763,69 @@ async fn a_runtime_a_console_no_longer_serves_keeps_no_caller_apart() -> TestRes
     Ok(())
 }
 
+/// Two runtimes a console serves under one namespace are each counted for
+/// themselves. While either of them has not read who its members are
+/// private to, the one operator of a console that identifies nobody is kept
+/// apart, whichever of the two the console reads last, and reading both
+/// again changes nothing. Once the console no longer serves the runtime
+/// that owes the read, the operator is kept apart no longer.
+#[tokio::test]
+async fn each_of_two_runtimes_under_one_namespace_keeps_callers_apart_until_it_is_read()
+-> TestResult {
+    let home_state = tempfile::tempdir()?;
+    let home =
+        persistent_gateway_runtime_in(home_state.path(), "kept-apart-shared-home", "", "").await?;
+    let home_handle = home.handle();
+    assert!(home.private_owners().seeded(&home_handle).await.landed());
+    let team_state = tempfile::tempdir()?;
+    let team_mob =
+        persistent_gateway_runtime_in(team_state.path(), "kept-apart-shared-team", "", "").await?;
+    let team = runtime_whose_first_read_failed(&team_mob).await;
+
+    // A console reads its runtimes in the order of their keys: the runtime
+    // that owes its read is read first on one console and last on the other.
+    for (owing, read) in [("a", "b"), ("b", "a")] {
+        let aggregator = MetaConsoleAggregator::in_memory();
+        for (key, runtime) in [(owing, &team), (read, &home)] {
+            aggregator.register_runtime_handles_with_policy(
+                key,
+                "shared",
+                runtime.clone(),
+                None,
+                crate::unified_runtime::ConsoleEventStore::new(),
+                Arc::new(AllowAllConsoleVisibilityPolicy),
+            );
+        }
+        let operator = console_request_auth_context(
+            &console_that_identifies_nobody(&home),
+            &HeaderMap::new(),
+            &Uri::from_static("/console/timeline"),
+        )
+        .expect("the console admits its operator")
+        .audience;
+        for reading in ["first", "second"] {
+            prime_access_cache_from_aggregator(&aggregator, &operator.controller()).await;
+            assert_eq!(
+                kept_apart_rules(&operator),
+                (true, false, true),
+                "the runtime that owes its read is registered as `{owing}`, the {reading} \
+                 reading of both: the operator is kept apart"
+            );
+        }
+
+        aggregator.unregister_runtime(owing);
+        prime_access_cache_from_aggregator(&aggregator, &operator.controller()).await;
+        assert_eq!(
+            kept_apart_rules(&operator),
+            (false, true, false),
+            "the runtime that owed its read was registered as `{owing}`: once the console no \
+             longer serves it, the operator is kept apart no longer"
+        );
+        aggregator.unregister_runtime(read);
+    }
+    Ok(())
+}
+
 /// A member whose run is in flight is retired. The run ends on the console
 /// with a failure record that names the run's session: it carries the
 /// member's witness, so everyone who may view the member reads that the run

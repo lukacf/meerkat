@@ -1198,11 +1198,12 @@ them.
   `web/dist/assets/`: 031 wrote every variable with the `VITE_` prefix that
   was set, 033 the six key variables it reads. The READMEs did not mention
   these variables, so a build is affected only if they were set in its
-  environment. In 0.4.4 only, the build of 033 also wrote
-  `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and `GEMINI_API_KEY`, or their
-  `RKAT_`-prefixed forms where those were set (confirmed by a build of the
-  0.4.4 source). The `VITE_` prefix is now exposed only to the local dev
-  server; a build exposes only variables whose names start with
+  environment or in an env file Vite reads in `web/` (`.env`, `.env.local`,
+  `.env.production`, `.env.production.local`). In 0.4.4 only, the build of
+  033 also wrote `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and `GEMINI_API_KEY`,
+  or their `RKAT_`-prefixed forms where those were set (confirmed by a build
+  of the 0.4.4 source). The `VITE_` prefix is now exposed only to the local
+  dev server; a build exposes only variables whose names start with
   `VITE_BUILD_PUBLIC_`, so any other `VITE_` variable a build of these two
   examples relied on is now empty in the built page. Affects every release
   that ships the examples: 031 from 0.4.1 and 033 from 0.4.4, through

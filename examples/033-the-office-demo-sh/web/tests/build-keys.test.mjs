@@ -3,7 +3,7 @@
 // write every exposed variable into the bundle, so the build exposes none of
 // them (see vite.config.ts).
 import assert from "node:assert/strict";
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -59,5 +59,42 @@ test("vite build inlines no provider key from the environment", async () => {
       else process.env[name] = value;
     }
     await rm(outDir, { recursive: true, force: true });
+  }
+});
+
+test("vite build inlines no provider key from an env file", async () => {
+  // Vite also reads `.env`, `.env.local` and the mode's files. Point it at a
+  // scratch directory holding one, so the developer's own files are untouched.
+  const outDir = await mkdtemp(path.join(tmpdir(), "office-build-keys-"));
+  const envDir = await mkdtemp(path.join(tmpdir(), "office-build-env-"));
+  const saved = {};
+  for (const name of Object.keys(SENTINELS)) {
+    saved[name] = process.env[name];
+    delete process.env[name];
+  }
+  try {
+    const lines = Object.entries(SENTINELS).map(([name, value]) => `${name}=${value}`);
+    await writeFile(path.join(envDir, ".env.local"), lines.join("\n") + "\n");
+    await build({
+      root: webRoot,
+      envDir,
+      logLevel: "silent",
+      publicDir: false,
+      build: { outDir, emptyOutDir: true },
+    });
+    const files = await filesUnder(outDir);
+    assert.ok(files.some((file) => file.endsWith(".js")), "the build wrote a script");
+    for (const file of files) {
+      const text = await readFile(file, "latin1");
+      for (const [name, value] of Object.entries(SENTINELS)) {
+        assert.ok(!text.includes(value), `${name} from .env.local is inlined in ${path.relative(outDir, file)}`);
+      }
+    }
+  } finally {
+    for (const [name, value] of Object.entries(saved)) {
+      if (value !== undefined) process.env[name] = value;
+    }
+    await rm(outDir, { recursive: true, force: true });
+    await rm(envDir, { recursive: true, force: true });
   }
 });

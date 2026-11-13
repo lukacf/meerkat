@@ -2022,6 +2022,123 @@ async fn a_runtime_a_route_holds_stays_counted_when_its_aggregator_stops_serving
     Ok(())
 }
 
+/// A priming counts a runtime's first read as done only once it has
+/// recorded who the runtime's members are private to. While the priming that
+/// finds the read done is still reading the agents no member is seated for,
+/// the one operator of a console that identifies nobody stays kept apart and
+/// is served no frame with no witness under an ended private member's name.
+/// Once that priming has finished, the operator is kept apart no longer, the
+/// ordinary ended member's frame is served and the private member's stays
+/// hidden.
+#[tokio::test]
+async fn a_priming_keeps_callers_apart_until_it_has_recorded_who_members_are_private_to()
+-> TestResult {
+    const MOB: &str = "kept-apart-priming-order";
+    let left = state_after_a_console_with_sign_in(MOB).await?;
+    let restarted = persistent_gateway_runtime_in(left.state.path(), MOB, "", "").await?;
+    let runtime = runtime_whose_first_read_failed(&restarted).await;
+    // A first priming, while the read is owed.
+    let operator = primed_operator(&runtime).await;
+    assert_eq!(
+        kept_apart_rules(&operator),
+        (true, false, true),
+        "while the first read is owed the operator is kept apart"
+    );
+
+    // The read succeeds, and the next priming is held at its read of the
+    // agents no member is seated for.
+    let handle = runtime.handle();
+    assert!(runtime.private_owners().seeded(&handle).await.landed());
+    let (open, gate) = tokio::sync::watch::channel(false);
+    let reached = super::unseated_read_hold::hold(MOB, gate);
+    let priming = tokio::spawn({
+        let runtime = runtime.clone();
+        let controller = operator.controller();
+        async move { prime_access_cache_from_runtime(&runtime, &controller).await }
+    });
+    for _ in 0..500 {
+        if reached.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        reached.load(std::sync::atomic::Ordering::SeqCst),
+        "the priming reached its read of the agents no member is seated for"
+    );
+    assert_eq!(
+        (
+            kept_apart_rules(&operator),
+            knows_and_reads(&operator, "alpha-side").await.1
+        ),
+        ((true, false, true), false),
+        "while that priming has not recorded who the members are private to, the operator is \
+         kept apart and is not served the ended private member's frame"
+    );
+
+    open.send(true)?;
+    priming.await?;
+    assert_eq!(
+        (
+            kept_apart_rules(&operator),
+            knows_and_reads(&operator, "alpha-side").await,
+            knows_and_reads(&operator, "beta").await
+        ),
+        ((false, true, false), (true, false), (true, true)),
+        "once the priming has finished the operator is kept apart no longer: the private \
+         member's frame stays hidden and the ordinary ended member's is served"
+    );
+
+    // The same holds for the first priming of a console that starts when
+    // the read is already done: nothing has been recorded for the runtime
+    // yet, and the operator is kept apart from the start of that priming.
+    let operator = console_request_auth_context(
+        &console_that_identifies_nobody(&runtime),
+        &HeaderMap::new(),
+        &Uri::from_static("/console/rpc"),
+    )
+    .expect("the console admits its operator")
+    .audience;
+    let (open, gate) = tokio::sync::watch::channel(false);
+    let reached = super::unseated_read_hold::hold(MOB, gate);
+    let priming = tokio::spawn({
+        let runtime = runtime.clone();
+        let controller = operator.controller();
+        async move { prime_access_cache_from_runtime(&runtime, &controller).await }
+    });
+    for _ in 0..500 {
+        if reached.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        reached.load(std::sync::atomic::Ordering::SeqCst),
+        "the first priming reached its read of the agents no member is seated for"
+    );
+    assert_eq!(
+        (
+            kept_apart_rules(&operator),
+            knows_and_reads(&operator, "alpha-side").await.1
+        ),
+        ((true, false, true), false),
+        "while a console's first priming has not recorded who the members are private to, \
+         the operator is kept apart and is not served the ended private member's frame"
+    );
+    open.send(true)?;
+    priming.await?;
+    assert_eq!(
+        (
+            kept_apart_rules(&operator),
+            knows_and_reads(&operator, "alpha-side").await,
+            knows_and_reads(&operator, "beta").await
+        ),
+        ((false, true, false), (true, false), (true, true)),
+        "once the first priming has finished the operator is kept apart no longer"
+    );
+    Ok(())
+}
+
 /// A member whose run is in flight is retired. The run ends on the console
 /// with a failure record that names the run's session: it carries the
 /// member's witness, so everyone who may view the member reads that the run

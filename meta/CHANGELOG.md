@@ -918,6 +918,37 @@ Security, Upgrade and Changed.
   (`runtime_options.member_comms_address`), as TypeScript `memberCommsTcp`
   does: what a member of another gateway needs to reach them.
 
+- Mob members get the stock tool `ask_user`: an agent asks a person a set of
+  multiple-choice questions (1 to 10 questions with 2 to 8 choices each, a
+  recommended choice and free text where the agent allows them), the call
+  returns at once, and the typed answers reach the agent later as an input
+  of its own. A set is a durable decision of kind `ask_user.questions`: it
+  survives a restart and ends `timed_out` at its deadline (one hour unless
+  the call says otherwise). The call answers `no_human_surface`, and holds
+  nothing, when the gateway serves no Console, when it keeps no durable
+  decisions (no persistent state directory), and on a candidate launch.
+  `meta/gating/questions` lists the open sets, soonest deadline first: all
+  of them on the stdio gateway, and on the Console (with `gating.view`) the
+  ones whose asking agent the caller may view. A set is answered through
+  `meta/gating/decide` with its `pending_id`: `approve` with
+  `presented_digest` and `answers` answers it, `reject` with
+  `presented_digest` dismisses it, and the result is
+  `{pending_id, kind: "question_set", outcome, decided_at_ms}`. On the
+  Console a signed-in person with `gating.decide` who can view the asking
+  agent answers; the refusals are the existing `access_denied`,
+  `approver_unauthenticated` and invalid params. The Console shows each
+  open set as a card, at the top of the inbox's Pending tab and in the
+  asking agent's chat: one group of choices per question, the agent's
+  recommendation marked and never preselected, "Something else" for the
+  person's own words where allowed, Send answers and Dismiss, and a state
+  for answered, dismissed, timed out and not permitted. Python
+  `MobHandle.gating_questions`, `gating_answer` and `gating_dismiss` and
+  TypeScript `gatingQuestions`, `gatingAnswer` and `gatingDismiss` wrap the
+  two methods. An SDK or Console older than this release does not list
+  question sets (they are not part of `meta/gating/pending`), so it never
+  shows one as an approval; a set nobody answers ends `timed_out` at its
+  deadline. See [Question sets](docs/concepts/gating.mdx#question-sets).
+
 ### Changed
 
 - A host that labels its members in its customizer must put those labels

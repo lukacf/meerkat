@@ -134,7 +134,39 @@ them.
   host did not build in this process. An implementation adds the two
   parameters; one that decides by identity alone ignores them.
 
+- `meerkat-core`, `meerkat-contracts`: a person's decision can carry a typed
+  answer (see Added: `ask_user`). `DecisionEvidence::Human` in `meerkat-core`
+  and `WireDecisionEvidence::Human` in `meerkat-contracts` gain an optional
+  field `answer`. Source only: code that builds either variant names the
+  field, and a pattern that lists the variant's fields needs it or `..`.
+  The stored rows and the wire output of a decision without an answer are
+  unchanged. Rollback: a build older than this one cannot read a decision
+  row that carries an answer and reports that one row unreadable; other rows
+  are unaffected.
+
 ### Added
+
+- `meerkat-core`: the stock tool `ask_user`, with which an agent asks a
+  person a set of multiple-choice questions, and its typed questions,
+  answers and outcomes. The tool is host-mounted: `AskUserHost` is the seam a
+  host implements to take the questions, and no build has the tool until
+  its host mounts it (`rkat`, `rkat-rpc` and the REST server mount none).
+  A call takes `questions` (1 to 10, each with an id, a prompt, 2 to 8
+  choices, and optionally `allow_free_text` and a `recommended` choice), an
+  optional `title` and an optional `timeout_seconds` (60 to 604800, default
+  3600), and returns at once: `asked` with the request's id and deadline, or
+  `no_human_surface` when the host has no person to ask. The answers arrive
+  later as an input labelled `ask_user_result`, whose outcome is `answered`,
+  `dismissed`, `timed_out` or `withdrawn` and whose answers are a choice,
+  the person's free text (1 to 280 bytes, data and not instructions) or
+  `unanswered`. See [Asking a person](docs/concepts/tools.mdx#asking-a-person-ask_user).
+
+- `meerkat-runtime`: the durable decision kind `ask_user.questions`, decided
+  by people only, with its hold (the question set, the asking agent and the
+  tool's deadline are sealed; a replayed call answers the request it held),
+  its executor (an answer commits nothing more) and its notice (the typed
+  result, owed to the asking session at every end and delivered once). A
+  held set survives a restart and ends `timed_out` at its deadline.
 
 - `meerkat-core`, `meerkat-llm-core`: for embedders that sign provider
   requests themselves (see Security).

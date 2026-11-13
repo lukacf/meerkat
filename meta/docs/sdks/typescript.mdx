@@ -572,6 +572,43 @@ minted, with no decision: it returns `pendingId`, `actionId`, `actorId`,
 `outcome` (`safe_draft`), `withdrawnAtMs`, `withdrawnBy` and `reason`. A request
 that was already decided, timed out or withdrawn is refused as an unknown id.
 
+`handle.gatingQuestions()` lists the open
+[question sets](/concepts/gating#question-sets) agents asked with `ask_user`
+(they are not part of `gatingPending()`). Each `GatingQuestionSet` carries the
+`pendingId` a decision takes, the asking agent as `origin`, a `title` (or
+`null`), its `questions` (`id`, `prompt`, `choices`, `allowFreeText`,
+`recommended`), `createdAtMs`, `deadlineAtMs` and the `subjectDigest` a
+decision sends back. Both decisions go through `meta/gating/decide`, so the
+host names the approver:
+
+```ts
+for (const set of await handle.gatingQuestions()) {
+  const result = await handle.gatingAnswer(set.pendingId, {
+    approverId: "operator",
+    presentedDigest: set.subjectDigest,
+    answers: [
+      { questionId: "region", answer: { kind: "choice", choiceId: "eu" } },
+      { questionId: "start", answer: { kind: "free_text", text: "After the 16:00 freeze" } },
+    ],
+  });
+  // result.outcome === "answered"
+}
+```
+
+At least one answer is needed (`gatingAnswer` throws otherwise, before
+anything is sent); a question left out reaches the agent as `unanswered`, and
+free text is allowed only where the question sets `allowFreeText`.
+`handle.gatingDismiss(pendingId, { approverId, presentedDigest })` tells the
+agent no answer is coming. Both return a `GatingQuestionSetResult`
+(`pendingId`, `kind`, `outcome`: `answered` or `dismissed`, `decidedAtMs`). The
+gateway refuses an invalid answer set and a set that is no longer open as
+invalid params.
+
+There is no Meta SDK for the browser: the browser client of these methods is
+the Console's own `@console-core` package (`normalizeQuestionSet`,
+`createQuestionSetResource` and the `listQuestionSets` command), and the Core
+Web SDK (`@rkat/web`) has no Meta surface.
+
 `ModuleConfig` is not a public TypeScript SDK export. Pass module declaration
 objects to `.modules(...)`, whose public parameter type is `unknown[]`.
 

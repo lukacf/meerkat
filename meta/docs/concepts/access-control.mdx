@@ -37,7 +37,7 @@ There are no roles. Every check evaluates the caller's attributes (subject, grou
 | `agent.identity.create` | Create long-term agents (`meta/identity/create`; see [Agent changes](/api/rpc#agent-changes)). It names no agent, so a rule grants it without a resource selector. Which profiles a caller may create agents of, and under which outcome, is the host's [identity policy](/reference/identity-policy) |
 | `agent.identity.manage` | Update, archive, unarchive and adopt the agent (`meta/identity/update`, `archive`, `unarchive`, `adopt`); reading agents (`meta/identity/list`, `get`, `directory`, `operation`, `plan`) needs `agent.view` |
 | `agent.identity.remove` | Remove the agent for good (`meta/identity/remove`): its name is never available again |
-| `gating.view` / `gating.decide` | Read and decide approval gates |
+| `gating.view` / `gating.decide` | Read and decide approval gates. `gating.view` also reads the open [question sets](/concepts/gating#question-sets) (`meta/gating/questions`), and `gating.decide` answers or dismisses them; both only for agents the caller may view |
 | `decisions.view` | Read the durable decisions the caller may see on the Console: `meta/decisions/list`, `get` and `rendering` (see [durable decision methods](/api/rpc#durable-decision-methods)) |
 | `decisions.decide` | Reserved for deciding durable decisions on the Console; the Console decides none yet |
 | `decisions.admin` | Read every durable decision whole on the Console, and withdraw one (`meta/decisions/withdraw`) |

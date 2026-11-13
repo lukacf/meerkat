@@ -453,6 +453,45 @@ Configure action tiers through the host's gating configuration. For SDK-launched
 stdio gateways, see [`gating_config_path`](/reference/configuration#sdk-and-gateway-runtime-options).
 That option does not configure unrelated HTTP or library entrypoints.
 
+### Question sets
+
+An agent can ask a person a set of multiple-choice questions with the
+`ask_user` tool (see [Question sets](/concepts/gating#question-sets)). The
+console shows each open set as one card, in two places: at the top of the
+**Pending** tab of **Approvals**, above the approval requests, and in the
+asking agent's chat, with that chat's approvals. Both read the same set, and
+the Pending tab's count includes the open sets. **Needs you** does not count
+them.
+
+The card names the set (its title, or "Questions from" the agent), who asked,
+its status and its deadline. Each question is a group of radio buttons, one
+per choice. A choice the agent recommends carries a **Recommended** chip and
+is never preselected. Where the agent allowed it, a last choice **Something
+else** opens a text field for the person's own answer (at most 280 bytes; a
+counter appears near the limit). **Clear** removes a question's answer. Pick
+one choice per question, leave out the ones you cannot answer (the agent
+reads them as unanswered), then **Send answers**; **Dismiss** tells the agent
+no answer is coming. Titles, prompts, labels and answers are shown as plain
+text. The agent's identity, the request id and the question and choice ids
+are under **Technical details**.
+
+| The card says | When |
+|---------------|------|
+| **Answer needed** | The set is open and you can answer it |
+| **Answered** ("Answers sent.") | You sent answers; the card lists what was chosen for each question |
+| **Dismissed** ("Dismissed. The agent was told no answer is coming.") | You dismissed the set |
+| **Timed out** ("This question set timed out before it was answered.") | The deadline passed before anyone answered |
+| **Not permitted** ("Sign in as yourself to answer") | The caller is not a signed-in person; the questions are shown and nothing can be sent |
+| **Not permitted** ("You cannot answer for this agent") | The console is read-only, or the gateway refused the caller for this agent |
+| **Not permitted** ("This question set is no longer open, or the answer was not accepted.") | The gateway refused the decision; its own message is under **Details**, and the answers can be corrected and sent again while the set stays listed |
+
+While answers are on their way both buttons are disabled. If the gateway's
+reply is lost the card says the answer may not have been sent and updates on
+the next read. The console reads the open sets every 15 seconds while the
+page is visible, like the approvals. A set that someone else answers leaves
+the list. A gateway older than question sets (no `meta/gating/questions`)
+shows no cards and no error.
+
 ### Dock — Chat panels
 
 The center area is a multi-panel tabbed workspace. Each panel contains a `ConversationPane` with a `ConsoleComposer`.

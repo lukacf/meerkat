@@ -176,6 +176,46 @@ The console route applies the same audience as pending entries: an entry recorde
 
 For `r2` and `r3`, the runtime checks the supplied `entity` and `topic` against memory conflicts. If the `memory` module is loaded, that core MCP boundary must provide the `memory.conflict_read` tool. Without a loaded memory module, the runtime uses its in-process conflict ledger.
 
+## Question sets
+
+A mob member can ask a person a set of multiple-choice questions with the
+stock tool `ask_user` (see
+[Asking a person](https://docs.rkat.ai/concepts/tools#asking-a-person-ask_user)
+for its arguments, limits and results). Meta mounts the tool for members and
+shows each set to people as one card in the [Console](/guides/console#question-sets):
+in the inbox and in the asking agent's conversation. The call returns to the
+agent at once; the answers reach it later as an input of their own.
+
+A question set is not a gating request. It is a durable decision of kind
+`ask_user.questions`, so it survives a restart, it ends at its deadline (the
+tool's `timeout_seconds`, one hour by default), and its result is delivered
+to the asking agent once. It is not part of `meta/gating/pending`; the open
+sets are read with [`meta/gating/questions`](/api/rpc#metagatingquestions).
+
+- **Who may answer.** On the Console, a signed-in person with `gating.decide`
+  who can view the asking agent. The person comes from the connection, as
+  for every Console decision: no request field names an approver, and a
+  caller who is not a signed-in person is refused `approver_unauthenticated`.
+  A person who cannot view the asking agent neither sees its sets nor
+  answers them (`access_denied`); a set of a member private to someone else
+  is not listed to anyone else. Over the SDK transport the embedding host
+  names `approver_id`, as for every `meta/gating/decide`.
+- **Answering.** `meta/gating/decide` with the set's `pending_id`, the
+  `presented_digest` the set was shown with and `decision` `approve` plus
+  `answers` answers it; `reject` dismisses it; `escalate` is refused. A
+  person picks one choice per question, or writes their own answer where
+  the agent allowed it, and may leave questions out: at least one answer is
+  needed, and a question left out reaches the agent as `unanswered`. See
+  [Answering a question set](/api/rpc#answering-a-question-set).
+- **How a set ends.** The agent receives one of `answered`, `dismissed`,
+  `timed_out` (nobody answered before the deadline) or `withdrawn` (the host
+  or an administrator ended it). A free-text answer is the person's own
+  words: the agent receives it as data inside the typed result.
+- **When there is no person to ask.** The call answers `no_human_surface` at
+  once, and holds nothing, when the gateway serves no Console, when it keeps
+  no durable decisions (a launch without a persistent state directory), and
+  on a candidate launch.
+
 ## API methods
 
 The JSON-RPC methods are:
@@ -185,6 +225,7 @@ The JSON-RPC methods are:
 - `meta/gating/decide`
 - `meta/gating/withdraw`
 - `meta/gating/audit`
+- `meta/gating/questions`
 
 ## See also
 

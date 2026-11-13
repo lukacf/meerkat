@@ -83,6 +83,16 @@ All notable changes to the Python SDK are documented here.
   `unwire_local` on both sides with current `peer_info`,
   `wire_cross_mob`); with member socket endpoints, one member per gateway
   today.
+- `MobHandle.gating_questions()` lists the open question sets agents asked
+  with `ask_user` (`meta/gating/questions`) as `GatingQuestionSet`
+  (`GatingQuestion`, `GatingQuestionChoice`). `MobHandle.gating_answer(
+  pending_id, *, approver_id, presented_digest, answers)` answers one and
+  `MobHandle.gating_dismiss(pending_id, *, approver_id, presented_digest)`
+  dismisses one, both through `meta/gating/decide`; they return a
+  `GatingQuestionSetResult` (`outcome`: `answered` or `dismissed`). An answer
+  is a `GatingQuestionAnswer` (`.choice(...)`, or `.free_text(...)` where the
+  question allows it) or its wire form; `gating_answer` raises `ValueError`
+  without at least one. `gating_pending()` does not list question sets.
 
 ## 0.9.14
 

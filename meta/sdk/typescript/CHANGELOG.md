@@ -71,6 +71,16 @@
   process); the way to wire such a member again (`respawnMember`,
   `unwireLocal` on both sides with current `peerInfo`, `wireCrossMob`);
   with member socket endpoints, one member per gateway today.
+- `MobHandle.gatingQuestions()` lists the open question sets agents asked
+  with `ask_user` (`meta/gating/questions`) as `GatingQuestionSet`
+  (`GatingQuestion`, `GatingQuestionChoice`). `MobHandle.gatingAnswer(pendingId,
+  { approverId, presentedDigest, answers })` answers one and
+  `MobHandle.gatingDismiss(pendingId, { approverId, presentedDigest })`
+  dismisses one, both through `meta/gating/decide`; they resolve a
+  `GatingQuestionSetResult` (`outcome`: `answered` or `dismissed`). An answer
+  is a `GatingQuestionAnswer` (a choice, or free text where the question
+  allows it); `gatingAnswer` throws without at least one. `gatingPending()`
+  does not list question sets.
 
 ## 0.9.14
 

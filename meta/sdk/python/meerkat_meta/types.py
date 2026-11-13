@@ -1161,20 +1161,45 @@ class GatingQuestionChoice:
     id: str
     label: str
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> GatingQuestionChoice:
+        return cls(id=data["id"], label=data["label"])
+
 
 @dataclass(frozen=True)
 class GatingQuestion:
-    """One multiple-choice question of a question set."""
+    """One multiple-choice question of a question set.
+
+    ``allow_free_text`` says whether a person may write their own answer
+    instead of a choice; ``recommended`` is the choice id the asking agent
+    recommends.
+    """
     id: str
     prompt: str
     choices: list[GatingQuestionChoice]
     allow_free_text: bool = False
     recommended: str | None = None
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> GatingQuestion:
+        recommended = data.get("recommended")
+        return cls(
+            id=data["id"],
+            prompt=data["prompt"],
+            choices=[GatingQuestionChoice.from_dict(c) for c in data.get("choices", [])],
+            allow_free_text=data.get("allow_free_text") is True,
+            recommended=recommended if isinstance(recommended, str) and recommended else None,
+        )
+
 
 @dataclass(frozen=True)
 class GatingQuestionSet:
-    """An open question set (``meta/gating/questions``)."""
+    """An open question set (``meta/gating/questions``).
+
+    ``pending_id`` is the id a decision takes and ``subject_digest`` the
+    digest it sends back as ``presented_digest``; ``origin`` names the
+    asking agent.
+    """
     pending_id: str
     questions: list[GatingQuestion]
     subject_digest: str
@@ -1185,12 +1210,26 @@ class GatingQuestionSet:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> GatingQuestionSet:
-        return cls(pending_id="", questions=[], subject_digest="")
+        def millis(value: Any) -> int | None:
+            return value if type(value) is int and value >= 0 else None
+
+        title = data.get("title")
+        return cls(
+            pending_id=data["pending_id"],
+            questions=[GatingQuestion.from_dict(q) for q in data.get("questions", [])],
+            subject_digest=data["subject_digest"],
+            origin=GatingOrigin.from_dict(data.get("origin")),
+            title=title if isinstance(title, str) and title.strip() else None,
+            created_at_ms=millis(data.get("created_at_ms")),
+            deadline_at_ms=millis(data.get("deadline_at_ms")),
+        )
 
 
 @dataclass(frozen=True)
 class GatingQuestionAnswer:
-    """A person's answer to one question of a question set."""
+    """A person's answer to one question of a question set: one of its
+    choices (:meth:`choice`) or, where the question allows it, the person's
+    own words (:meth:`free_text`)."""
     question_id: str
     kind: str
     choice_id: str | None = None
@@ -1205,12 +1244,20 @@ class GatingQuestionAnswer:
         return cls(question_id=question_id, kind="free_text", text=text)
 
     def to_wire(self) -> dict[str, Any]:
-        return {}
+        """The ``{question_id, answer}`` entry ``meta/gating/decide`` takes."""
+        if self.kind == "choice":
+            answer: dict[str, Any] = {"kind": "choice", "choice_id": self.choice_id}
+        elif self.kind == "free_text":
+            answer = {"kind": "free_text", "text": self.text}
+        else:
+            raise ValueError(f"unknown answer kind: {self.kind!r}")
+        return {"question_id": self.question_id, "answer": answer}
 
 
 @dataclass(frozen=True)
 class GatingQuestionSetResult:
-    """The recorded end of a question set a person answered or dismissed."""
+    """The recorded end of a question set a person answered or dismissed:
+    ``outcome`` is ``answered`` or ``dismissed``."""
     pending_id: str
     kind: str
     outcome: str
@@ -1218,7 +1265,13 @@ class GatingQuestionSetResult:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> GatingQuestionSetResult:
-        return cls(pending_id="", kind="", outcome="")
+        decided = data.get("decided_at_ms")
+        return cls(
+            pending_id=data["pending_id"],
+            kind=data["kind"],
+            outcome=data["outcome"],
+            decided_at_ms=decided if type(decided) is int and decided >= 0 else None,
+        )
 
 
 @dataclass(frozen=True)

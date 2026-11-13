@@ -1068,7 +1068,9 @@ export interface GatingQuestionChoice {
   readonly label: string;
 }
 
-/** One multiple-choice question of a question set. */
+/** One multiple-choice question of a question set. `allowFreeText` says
+ * whether a person may write their own answer instead of a choice;
+ * `recommended` is the choice id the asking agent recommends. */
 export interface GatingQuestion {
   readonly id: string;
   readonly prompt: string;
@@ -1077,7 +1079,9 @@ export interface GatingQuestion {
   readonly recommended: string | null;
 }
 
-/** An open question set (`meta/gating/questions`). */
+/** An open question set (`meta/gating/questions`). `pendingId` is the id a
+ * decision takes and `subjectDigest` the digest it sends back as
+ * `presentedDigest`; `origin` names the asking agent. */
 export interface GatingQuestionSet {
   readonly pendingId: string;
   readonly origin: GatingOrigin | null;
@@ -1088,7 +1092,8 @@ export interface GatingQuestionSet {
   readonly subjectDigest: string;
 }
 
-/** A person's answer to one question of a question set. */
+/** A person's answer to one question of a question set: one of its choices
+ * or, where the question allows it, the person's own words. */
 export interface GatingQuestionAnswer {
   readonly questionId: string;
   readonly answer:
@@ -1096,7 +1101,8 @@ export interface GatingQuestionAnswer {
     | { readonly kind: "free_text"; readonly text: string };
 }
 
-/** The recorded end of a question set a person answered or dismissed. */
+/** The recorded end of a question set a person answered or dismissed:
+ * `outcome` is `answered` or `dismissed`. */
 export interface GatingQuestionSetResult {
   readonly pendingId: string;
   readonly kind: string;
@@ -1104,28 +1110,57 @@ export interface GatingQuestionSetResult {
   readonly decidedAtMs: number | null;
 }
 
-export function parseGatingQuestionSet(_raw: unknown): GatingQuestionSet {
+export function parseGatingQuestionSet(raw: unknown): GatingQuestionSet {
+  const d = asRecord(raw);
+  const text = (value: unknown): string | null =>
+    typeof value === "string" && value.trim() ? value : null;
+  const millis = (value: unknown): number | null =>
+    typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+      ? value : null;
   return {
-    pendingId: "",
-    origin: null,
-    title: null,
-    questions: [],
-    createdAtMs: null,
-    deadlineAtMs: null,
-    subjectDigest: "",
+    pendingId: String(d.pending_id ?? ""),
+    origin: parseGatingOrigin(d.origin),
+    title: text(d.title),
+    questions: asRecordArray(d.questions).map((question) => ({
+      id: String(question.id ?? ""),
+      prompt: String(question.prompt ?? ""),
+      choices: asRecordArray(question.choices).map((choice) => ({
+        id: String(choice.id ?? ""),
+        label: String(choice.label ?? ""),
+      })),
+      allowFreeText: question.allow_free_text === true,
+      recommended: text(question.recommended),
+    })),
+    createdAtMs: millis(d.created_at_ms),
+    deadlineAtMs: millis(d.deadline_at_ms),
+    subjectDigest: String(d.subject_digest ?? ""),
   };
 }
 
+/** The `{question_id, answer}` entry `meta/gating/decide` takes. */
 export function gatingQuestionAnswerToWire(
-  _answer: GatingQuestionAnswer,
+  answer: GatingQuestionAnswer,
 ): Record<string, unknown> {
-  return {};
+  return {
+    question_id: answer.questionId,
+    answer: answer.answer.kind === "choice"
+      ? { kind: "choice", choice_id: answer.answer.choiceId }
+      : { kind: "free_text", text: answer.answer.text },
+  };
 }
 
 export function parseGatingQuestionSetResult(
-  _raw: unknown,
+  raw: unknown,
 ): GatingQuestionSetResult {
-  return { pendingId: "", kind: "", outcome: "", decidedAtMs: null };
+  const d = asRecord(raw);
+  return {
+    pendingId: String(d.pending_id ?? ""),
+    kind: String(d.kind ?? ""),
+    outcome: String(d.outcome ?? ""),
+    decidedAtMs: typeof d.decided_at_ms === "number"
+      && Number.isSafeInteger(d.decided_at_ms) && d.decided_at_ms >= 0
+      ? d.decided_at_ms : null,
+  };
 }
 
 // -- ReconcileEdgesReport -------------------------------------------------

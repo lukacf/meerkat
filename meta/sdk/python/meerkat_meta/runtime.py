@@ -4899,8 +4899,16 @@ class MobHandle:
         return GatingWithdrawResult.from_dict(raw)
 
     async def gating_questions(self) -> list[GatingQuestionSet]:
-        """List the open question sets agents asked with ``ask_user``."""
-        return []
+        """List the open question sets agents asked with ``ask_user``
+        (``meta/gating/questions``), soonest deadline first.
+
+        A question set is not part of :meth:`gating_pending`. Answer one with
+        :meth:`gating_answer` or dismiss it with :meth:`gating_dismiss`; a set
+        nobody answers ends ``timed_out`` at its deadline.
+        """
+        raw = await self._runtime._rpc("meta/gating/questions")
+        entries = raw.get("question_sets", []) if isinstance(raw, dict) else []
+        return [GatingQuestionSet.from_dict(e) for e in entries]
 
     async def gating_answer(
         self,
@@ -4910,8 +4918,33 @@ class MobHandle:
         presented_digest: str,
         answers: Sequence[GatingQuestionAnswer | Mapping[str, Any]],
     ) -> GatingQuestionSetResult:
-        """Answer an open question set."""
-        return GatingQuestionSetResult.from_dict({})
+        """Answer an open question set (``meta/gating/decide`` with
+        ``answers``); the asking agent then receives the typed answers.
+
+        ``presented_digest`` is the set's ``subject_digest``. ``answers``
+        holds one entry per answered question, a :class:`GatingQuestionAnswer`
+        or its wire form ``{"question_id", "answer"}``; at least one is
+        needed, and a question left out reaches the agent as ``unanswered``.
+        The gateway refuses an invalid answer set and a set that is no longer
+        open as invalid params.
+        """
+        wire_answers = [
+            answer.to_wire() if isinstance(answer, GatingQuestionAnswer) else dict(answer)
+            for answer in answers
+        ]
+        if not wire_answers:
+            raise ValueError("gating_answer needs at least one answer")
+        raw = await self._runtime._rpc(
+            "meta/gating/decide",
+            {
+                "pending_id": pending_id,
+                "decision": "approve",
+                "approver_id": approver_id,
+                "presented_digest": presented_digest,
+                "answers": wire_answers,
+            },
+        )
+        return GatingQuestionSetResult.from_dict(raw)
 
     async def gating_dismiss(
         self,
@@ -4920,8 +4953,21 @@ class MobHandle:
         approver_id: str,
         presented_digest: str,
     ) -> GatingQuestionSetResult:
-        """Dismiss an open question set."""
-        return GatingQuestionSetResult.from_dict({})
+        """Dismiss an open question set (``meta/gating/decide`` with
+        ``reject``): the asking agent is told no answer is coming.
+
+        ``presented_digest`` is the set's ``subject_digest``.
+        """
+        raw = await self._runtime._rpc(
+            "meta/gating/decide",
+            {
+                "pending_id": pending_id,
+                "decision": "reject",
+                "approver_id": approver_id,
+                "presented_digest": presented_digest,
+            },
+        )
+        return GatingQuestionSetResult.from_dict(raw)
 
     async def gating_audit(self, limit: int = 100) -> list[GatingAuditEntry]:
         """Query the gating audit log."""

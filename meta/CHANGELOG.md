@@ -7,7 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-
 ### Added
 
 - A spawn whose draft sets one provider param keeps the
@@ -26,6 +25,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   and the dispatch taint observer) now forward the call. A wrapper that kept
   the default would report no route for the members it decorates, whatever
   the provider client states.
+
+## [0.9.14] - 2026-11-11
+
+Meta 0.9.14 is part of Meerkat 0.9.14 (Core 0.9.14, Meta 0.9.14 and Connect
+0.9.14, released together) and pins Core `=0.9.14`.
+
+A mob that a member private to a person creates itself stays private to
+that person after a restart. See Security.
 
 ### Security
 
@@ -49,6 +56,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   restart cannot read who it is private to, so a spawn into it is refused
   from then on, and the members already seated in it keep the owner their
   own spawn gave them.
+
+### Known limitations
+
+- `rustix` 1.1.5 in Cargo.lock is named by RUSTSEC-2026-0486, as in 0.9.12
+  and 0.9.13: the `getxattr` and `listxattr` functions of `rustix::fs` (with
+  their `l` and `f` forms) mark bytes they never wrote as initialized when
+  they are given a zero-length buffer. `meerkat-meta` depends on `rustix`
+  directly, and it is also taken through Meerkat Core, `tempfile`, and
+  `xattr` through `tar`. No Meta crate calls those functions. Of the crates
+  Meta builds with only `xattr` does, and `tar`, the one crate that uses
+  `xattr`, calls it only to set attributes while unpacking, so Meta's own
+  use is not known to be affected. `rustix` 1.1.6 has the fix; this release
+  still builds with 1.1.5.
 
 ## [0.9.13] - 2026-11-11
 

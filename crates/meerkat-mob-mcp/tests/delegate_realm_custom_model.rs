@@ -103,6 +103,7 @@ fn self_hosted_config() -> meerkat::Config {
             supports_web_search: false,
             call_timeout_secs: Some(600),
             stream_inactivity_timeout_secs: None,
+            reasoning_effort_levels: None,
         },
     );
     config

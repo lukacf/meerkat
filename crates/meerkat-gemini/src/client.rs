@@ -959,6 +959,19 @@ impl GeminiClient {
         Ok(request)
     }
 
+    /// Remove from `diagnostic`, text a response carried, the credential
+    /// that signed the request: the authorizer's, or without an authorizer
+    /// this client's own API key. A provider, proxy or gateway can
+    /// echo the request's headers in an error.
+    fn redact_diagnostic(&self, diagnostic: &mut String) {
+        match &self.authorizer {
+            Some(authorizer) => authorizer.redact_response_diagnostic(diagnostic),
+            None => meerkat_core::redact::redact_credentials(diagnostic, |visit| {
+                visit(&self.api_key);
+            }),
+        }
+    }
+
     async fn post_gemini_json(
         &self,
         endpoint: &str,
@@ -1438,7 +1451,16 @@ impl ImageGenerationExecutor for GeminiClient {
                     .map_err(|err| LlmError::InvalidRequest {
                         message: format!("invalid Gemini image plan: {err}"),
                     })?;
-                self.execute_native_image(request, provider_plan).await
+                // What a failed image request reports can come from a
+                // response (the Files API's refusal to register a referenced
+                // video): it is redacted as every other response diagnostic
+                // is.
+                self.execute_native_image(request, provider_plan)
+                    .await
+                    .map_err(|mut error| {
+                        error.redact_diagnostics(|message| self.redact_diagnostic(message));
+                        error
+                    })
             }
             other => Err(LlmError::InvalidRequest {
                 message: format!("Gemini image executor cannot run plan {other:?}"),
@@ -2430,7 +2452,12 @@ impl GeminiClient {
             }
         });
 
-        streaming::ensure_terminal_done(inner)
+        // Every error the stream ends with is redacted here, whichever path
+        // built it (a rejection body, a Files API answer, a parse failure).
+        streaming::redact_stream_errors(
+            streaming::ensure_terminal_done(inner),
+            move |diagnostic: &mut String| self.redact_diagnostic(diagnostic),
+        )
     }
 }
 
@@ -2532,6 +2559,17 @@ impl LlmClient for GeminiClient {
             &self.stream_generate_content_url(logical_model),
             self.stream_wire_model(logical_model),
         )
+    }
+
+    /// The `generateContent` API on the backend this client was built for.
+    /// No account list and no operator levels are this client's to state.
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        Some(meerkat_core::ReasoningRouteObservation {
+            backend: meerkat_core::ReasoningBackend::Google(self.google_backend_kind),
+            api: meerkat_core::ModelApi::GenerateContent,
+            account: meerkat_core::AccountLevelStatement::NotApplicable,
+            operator_levels: None,
+        })
     }
 
     fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
@@ -3125,6 +3163,326 @@ mod tests {
         }
     }
 
+    /// How the upstream repeats the credential that signed the request.
+    #[derive(Debug, Clone, Copy)]
+    enum CredentialEcho {
+        /// HTTP 400 whose message names the credential header as sent.
+        HeaderLine,
+        /// HTTP 400 whose message carries the credential alone.
+        Bare,
+        /// HTTP 400 whose message carries a URL with the credential in it.
+        Url,
+    }
+
+    /// The message an upstream that received the credential header `name`
+    /// with `value` answers with.
+    fn credential_echo_message(echo: CredentialEcho, name: &str, value: &str) -> String {
+        let bare = value.strip_prefix("Bearer ").unwrap_or(value);
+        match echo {
+            CredentialEcho::HeaderLine => {
+                format!("upstream echo: rejected request with header {name}: {value}")
+            }
+            CredentialEcho::Bare => format!("upstream echo: credential {bare} was refused"),
+            CredentialEcho::Url => format!(
+                "upstream echo: GET http://upstream.invalid/v1/models?session={bare}&page=2 failed"
+            ),
+        }
+    }
+
+    /// Answers every request, whatever its path, by repeating the header
+    /// that carries its credential (`x-goog-api-key`, or `authorization`).
+    async fn spawn_credential_echo_server(
+        echo: CredentialEcho,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new().fallback(move |headers: axum::http::HeaderMap| async move {
+            let (name, value) = ["x-goog-api-key", "authorization"]
+                .into_iter()
+                .find_map(|name| {
+                    let value = headers.get(name)?.to_str().ok()?;
+                    Some((name, value.to_string()))
+                })
+                .unwrap_or(("authorization", String::new()));
+            let message = credential_echo_message(echo, name, &value);
+            match echo {
+                CredentialEcho::HeaderLine | CredentialEcho::Bare | CredentialEcho::Url => (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": {"code": 400, "message": message, "status": "INVALID_ARGUMENT"},
+                    })),
+                )
+                    .into_response(),
+            }
+        });
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind echoing server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve echoing server");
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    /// Who signs the request with the credential.
+    #[derive(Debug, Clone, Copy)]
+    enum CredentialSigner {
+        /// The client's own API key, sent as `x-goog-api-key`: an API-key
+        /// route, which has no authorizer.
+        ClientApiKey,
+        /// A static bearer authorizer.
+        StaticBearerAuthorizer,
+    }
+
+    fn credential_signed_client(
+        signer: CredentialSigner,
+        base_url: String,
+        credential: &str,
+    ) -> GeminiClient {
+        match signer {
+            CredentialSigner::ClientApiKey => {
+                GeminiClient::new_with_base_url(credential.to_string(), base_url)
+            }
+            CredentialSigner::StaticBearerAuthorizer => {
+                GeminiClient::new_with_base_url(String::new(), base_url).with_authorizer(Arc::new(
+                    meerkat_auth_core::authorizers::StaticBearerAuthorizer::new(
+                        credential.to_string(),
+                        "static-bearer",
+                    ),
+                ))
+            }
+        }
+    }
+
+    /// The failure of one request through `client` as the agent loop carries
+    /// it: the `AgentError` (`Display` and `Debug`), the typed turn error
+    /// (its `detail` and `reason`) and every event published for the attempt.
+    async fn agent_failure_forms(client: Arc<dyn LlmClient>) -> String {
+        use meerkat_core::AgentLlmClient as _;
+        let (events_tx, mut events_rx) = tokio::sync::mpsc::channel(64);
+        let adapter = meerkat_llm_core::LlmClientAdapter::with_event_channel(
+            client,
+            "gemini-3.5-flash".to_string(),
+            events_tx,
+        );
+        let error = match adapter
+            .stream_response(
+                &[Message::User(UserMessage::text("hello"))],
+                &[],
+                256,
+                None,
+                None,
+            )
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("the request fails"),
+        };
+        let metadata = meerkat_core::TurnErrorMetadata::from_agent_error(&error)
+            .expect("a provider failure has typed turn error metadata");
+        let metadata = serde_json::to_value(&metadata).expect("metadata JSON");
+        assert!(
+            metadata["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("upstream echo")),
+            "the provider's answer reaches the typed detail: {metadata}"
+        );
+        let events = std::iter::from_fn(|| events_rx.try_recv().ok()).collect::<Vec<_>>();
+        format!("{error} {error:?} {metadata} {events:?}")
+    }
+
+    /// A provider, proxy or gateway that repeats the request's credential
+    /// (its header as sent, the bare value, a URL carrying it)
+    /// never puts it in the error the Gemini client
+    /// returns (`Display`, `Debug`, wire JSON) or in what the agent loop
+    /// derives from it (the `AgentError`, the typed turn error's `detail`
+    /// and `reason.provider_error.message`, published events), whether the
+    /// client's own API key or an authorizer signed the request. The
+    /// server's answer still reaches the error.
+    #[tokio::test]
+    async fn echoed_credential_stays_out_of_gemini_errors_for_every_signer() {
+        let credential = format!("gemini-{}", "madeupcredential".repeat(3));
+        for signer in [
+            CredentialSigner::ClientApiKey,
+            CredentialSigner::StaticBearerAuthorizer,
+        ] {
+            for echo in [
+                CredentialEcho::HeaderLine,
+                CredentialEcho::Bare,
+                CredentialEcho::Url,
+            ] {
+                let (base_url, server) = spawn_credential_echo_server(echo).await;
+                let client = credential_signed_client(signer, base_url, &credential);
+                let request = LlmRequest::new(
+                    "gemini-3.5-flash",
+                    vec![Message::User(UserMessage::text("hello"))],
+                );
+                let events = client.stream(&request).collect::<Vec<_>>().await;
+                let error = events
+                    .into_iter()
+                    .find_map(|event| match event {
+                        Err(error)
+                        | Ok(LlmEvent::Done {
+                            outcome: LlmDoneOutcome::Error { error },
+                        }) => Some(error),
+                        Ok(_) => None,
+                    })
+                    .unwrap_or_else(|| panic!("{signer:?} {echo:?}: the stream ends in an error"));
+                let rendered = format!(
+                    "{error} {error:?} {}",
+                    serde_json::to_string(&error).expect("error JSON")
+                );
+                let agent_forms = agent_failure_forms(Arc::new(client)).await;
+                server.abort();
+                for (surface, text) in [("client error", &rendered), ("agent", &agent_forms)] {
+                    assert!(
+                        !text.contains(&credential),
+                        "{signer:?} {echo:?}: the {surface} leaked the credential: {text}"
+                    );
+                    assert!(
+                        text.contains("upstream echo"),
+                        "{signer:?} {echo:?}: the server's answer reached the {surface}: {text}"
+                    );
+                }
+                if matches!(echo, CredentialEcho::HeaderLine) {
+                    // The rejection keeps its class, and the redaction removes
+                    // the credential and nothing else: the body is still the
+                    // JSON the server sent.
+                    let LlmError::InvalidRequest { message } = &error else {
+                        panic!("{signer:?}: the rejection keeps its class: {error:?}");
+                    };
+                    let body: serde_json::Value =
+                        serde_json::from_str(message).unwrap_or_else(|parse| {
+                            panic!("{signer:?}: the body is kept whole: {parse}: {message}")
+                        });
+                    assert!(
+                        body["error"]["message"].as_str().is_some_and(|echoed| {
+                            echoed.starts_with("upstream echo: rejected request with header ")
+                                && echoed.ends_with("[REDACTED]")
+                        }),
+                        "{signer:?}: only the credential is replaced: {message}"
+                    );
+                    assert!(
+                        body["error"]
+                            .as_object()
+                            .is_some_and(|fields| fields.len() > 1),
+                        "{signer:?}: the fields after the message are kept: {message}"
+                    );
+                    assert!(
+                        agent_forms.contains("\"provider_error\":{\"message\":"),
+                        "{signer:?}: the typed reason carries the provider message: {agent_forms}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// An image request that refers to a `gs://` video registers it through
+    /// the Files API first. A refusal of that registration that repeats the
+    /// request's credential (its header as sent, the bare value) reports
+    /// the refusal without the credential.
+    #[tokio::test]
+    async fn echoed_credential_stays_out_of_an_image_request_failure() {
+        let credential = format!("gemini-{}", "madeupcredential".repeat(3));
+        for echo in [CredentialEcho::HeaderLine, CredentialEcho::Bare] {
+            let (base_url, server) = spawn_credential_echo_server(echo).await;
+            let client = credential_signed_client(
+                CredentialSigner::StaticBearerAuthorizer,
+                base_url,
+                &credential,
+            )
+            .with_google_backend_kind(GoogleBackendKind::GoogleGenAi);
+            let mut request = gemini_image_executor_request_json();
+            request.projected_messages = vec![Message::User(UserMessage::with_blocks(vec![
+                ContentBlock::Video {
+                    media_type: "video/mp4".to_string(),
+                    duration_ms: 12_000,
+                    data: meerkat_core::VideoData::Uri {
+                        uri: "gs://bucket/camera-timeline.mp4".to_string(),
+                    },
+                },
+                ContentBlock::Text {
+                    text: "Use this video as context.".to_string(),
+                },
+            ]))];
+            let error = match client.execute_image_generation(request).await {
+                Err(error) => error,
+                Ok(output) => panic!(
+                    "{echo:?}: a refused registration is an error: {:?}",
+                    output.terminal_observation
+                ),
+            };
+            server.abort();
+            assert!(
+                matches!(error, LlmError::InvalidRequest { .. }),
+                "{echo:?}: the refusal keeps its class: {error:?}"
+            );
+            let rendered = format!(
+                "{error} {error:?} {}",
+                serde_json::to_string(&error).expect("error JSON")
+            );
+            assert!(
+                !rendered.contains(&credential),
+                "{echo:?}: the error leaked the credential: {rendered}"
+            );
+            assert!(
+                rendered.contains("upstream echo"),
+                "{echo:?}: the server's answer reached the error: {rendered}"
+            );
+        }
+    }
+
+    /// An ordinary provider error that carries no credential (a message, a
+    /// type, a request id, a URL without credentials) reaches the caller
+    /// byte for byte, whoever signed the request.
+    #[tokio::test]
+    async fn an_error_without_a_credential_is_returned_unchanged() {
+        const BODY: &str = r#"{"error":{"code":400,"message":"models/gemini-3.5-flash is not found for API version v1beta. See https://docs.upstream.invalid/v1beta/models?pageSize=2 for the list.","status":"INVALID_ARGUMENT","details":[{"@type":"type.googleapis.com/google.rpc.RequestInfo","requestId":"req_0123456789abcdef"}]}}"#;
+        let app = Router::new().fallback(|| async {
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                [("content-type", "application/json")],
+                BODY,
+            )
+        });
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ordinary error server");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve ordinary error server");
+        });
+        let credential = format!("gemini-{}", "madeupcredential".repeat(3));
+        for signer in [
+            CredentialSigner::ClientApiKey,
+            CredentialSigner::StaticBearerAuthorizer,
+        ] {
+            let client = credential_signed_client(signer, format!("http://{addr}"), &credential);
+            let request = LlmRequest::new(
+                "gemini-3.5-flash",
+                vec![Message::User(UserMessage::text("hello"))],
+            );
+            let events = client.stream(&request).collect::<Vec<_>>().await;
+            let error = events
+                .into_iter()
+                .find_map(|event| match event {
+                    Err(error)
+                    | Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Error { error },
+                    }) => Some(error),
+                    Ok(_) => None,
+                })
+                .unwrap_or_else(|| panic!("{signer:?}: the stream ends in an error"));
+            assert!(
+                matches!(&error, LlmError::InvalidRequest { message } if message == BODY),
+                "{signer:?}: {error:?}"
+            );
+        }
+        server.abort();
+    }
     /// The credential header values a Gemini request carries are marked
     /// sensitive, as on the other provider clients: an authorizer's
     /// (`Authorization: Bearer ...`) and the static API key's
@@ -4455,6 +4813,87 @@ mod tests {
                     body["generationConfig"]["thinkingConfig"]["thinkingLevel"], wire,
                     "{model} (nested: {nested})"
                 );
+            }
+        }
+    }
+
+    /// R2.1, the Gemini family: the generateContent client reports the
+    /// backend it was built for. No account list and no operator levels are
+    /// its to state.
+    #[test]
+    fn every_adapter_reports_its_route() {
+        use meerkat_core::{
+            AccountLevelStatement, ModelApi, ReasoningBackend, ReasoningRouteObservation,
+        };
+
+        let observation = |backend: GoogleBackendKind| ReasoningRouteObservation {
+            backend: ReasoningBackend::Google(backend),
+            api: ModelApi::GenerateContent,
+            account: AccountLevelStatement::NotApplicable,
+            operator_levels: None,
+        };
+        assert_eq!(
+            GeminiClient::new("test-key".to_string()).reasoning_route(),
+            Some(observation(GoogleBackendKind::GoogleGenAi)),
+            "a client built directly serves the Gemini API"
+        );
+        for backend in [
+            GoogleBackendKind::GoogleGenAi,
+            GoogleBackendKind::VertexAi,
+            GoogleBackendKind::GoogleCodeAssist,
+        ] {
+            assert_eq!(
+                GeminiClient::new("test-key".to_string())
+                    .with_google_backend_kind(backend)
+                    .reasoning_route(),
+                Some(observation(backend)),
+                "{backend:?}"
+            );
+        }
+        assert_eq!(
+            GeminiClient::new("test-key".to_string())
+                .with_code_assist_wire()
+                .reasoning_route(),
+            Some(observation(GoogleBackendKind::GoogleCodeAssist)),
+            "the Code Assist wire"
+        );
+    }
+
+    /// R2.2, generateContent: the level Core writes on the tag reaches the
+    /// wire as `generationConfig.thinkingConfig.thinkingLevel`, in the flat
+    /// field and in the nested config, on every backend, and no thinking
+    /// budget is written with it.
+    #[test]
+    fn translated_level_reaches_the_wire() {
+        for backend in [
+            GoogleBackendKind::GoogleGenAi,
+            GoogleBackendKind::VertexAi,
+            GoogleBackendKind::GoogleCodeAssist,
+        ] {
+            let client =
+                GeminiClient::new("test-key".to_string()).with_google_backend_kind(backend);
+            for (model, level, wire) in [
+                (
+                    "gemini-3.5-flash-lite",
+                    GeminiThinkingLevel::Minimal,
+                    "minimal",
+                ),
+                ("gemini-3.8-flash", GeminiThinkingLevel::Low, "low"),
+                ("gemini-3.8-flash", GeminiThinkingLevel::Medium, "medium"),
+                ("gemini-3.8-flash", GeminiThinkingLevel::High, "high"),
+            ] {
+                for nested in [false, true] {
+                    let body = client
+                        .build_request_body(&thinking_level_request(model, level, nested))
+                        .unwrap_or_else(|error| {
+                            panic!("{backend:?} {model} (nested: {nested}): {error}")
+                        });
+                    assert_eq!(
+                        body["generationConfig"]["thinkingConfig"],
+                        serde_json::json!({"thinkingLevel": wire}),
+                        "{backend:?} {model} (nested: {nested})"
+                    );
+                }
             }
         }
     }

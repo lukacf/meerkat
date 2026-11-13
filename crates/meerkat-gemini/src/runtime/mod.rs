@@ -63,6 +63,9 @@ struct ManagedGoogleOauthAuthorizer {
     metadata: AuthMetadata,
     runtime: oauth::GoogleCodeAssistOAuthRuntime,
     cached: std::sync::Mutex<Option<ManagedGoogleOauthCredential>>,
+    /// The access tokens requests were signed with, a refreshed-out one
+    /// included.
+    signed_tokens: meerkat_core::auth::SignedCredentials,
 }
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
@@ -93,6 +96,7 @@ impl ManagedGoogleOauthAuthorizer {
             metadata: metadata.clone(),
             runtime,
             cached: std::sync::Mutex::new(None),
+            signed_tokens: meerkat_core::auth::SignedCredentials::new(),
         };
         let lease = authorizer.lease_key();
         // Unattended setup never waits behind an operating-system credential
@@ -306,9 +310,14 @@ impl meerkat_core::HttpAuthorizer for ManagedGoogleOauthAuthorizer {
         req: &mut meerkat_core::HttpAuthorizationRequest<'_>,
     ) -> Result<(), AuthError> {
         let (_guard, access_token) = self.current_credential().await?;
+        self.signed_tokens.record(&access_token);
         req.headers
             .push(("Authorization".into(), format!("Bearer {access_token}")));
         Ok(())
+    }
+
+    fn visit_signed_credentials(&self, visit: &mut dyn FnMut(&str)) {
+        self.signed_tokens.visit(visit);
     }
 
     fn label(&self) -> &'static str {
@@ -469,6 +478,19 @@ impl GeminiCopilotChatClient {
 impl LlmClient for GeminiCopilotChatClient {
     async fn prepare_controller_credential(&self) -> Result<(), meerkat_core::auth::AuthError> {
         self.inner.prepare_controller_credential().await
+    }
+
+    /// Chat Completions on the Copilot backend of the Gemini family. This
+    /// client answers for itself: the Chat Completions client it wraps is
+    /// built for another family and does not know this route. The GitHub
+    /// Copilot routed client adds the account's statement.
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        Some(meerkat_core::ReasoningRouteObservation {
+            backend: meerkat_core::ReasoningBackend::Google(GoogleBackendKind::Copilot),
+            api: meerkat_core::ModelApi::ChatCompletions,
+            account: meerkat_core::AccountLevelStatement::NotApplicable,
+            operator_levels: None,
+        })
     }
 
     fn stream_prepared<'a>(
@@ -650,8 +672,11 @@ async fn post_code_assist_json<T: serde::de::DeserializeOwned>(
             status.as_u16(),
         )));
     }
-    let text = response.text().await.unwrap_or_default();
+    let mut text = response.text().await.unwrap_or_default();
     if !status.is_success() {
+        // The endpoint, or a gateway in front of it, can repeat the
+        // request's bearer in its refusal.
+        meerkat_core::redact::redact_credentials(&mut text, |visit| visit(access_token));
         return Err(ProviderAuthError::SourceResolutionFailed(format!(
             "Google Code Assist setup request failed: status={} body={}",
             status.as_u16(),
@@ -685,8 +710,11 @@ async fn get_code_assist_json<T: serde::de::DeserializeOwned>(
             status.as_u16(),
         )));
     }
-    let text = response.text().await.unwrap_or_default();
+    let mut text = response.text().await.unwrap_or_default();
     if !status.is_success() {
+        // The endpoint, or a gateway in front of it, can repeat the
+        // request's bearer in its refusal.
+        meerkat_core::redact::redact_credentials(&mut text, |visit| visit(access_token));
         return Err(ProviderAuthError::SourceResolutionFailed(format!(
             "Google Code Assist operation request failed: status={} body={}",
             status.as_u16(),
@@ -1792,7 +1820,11 @@ mod copilot_wire_model_tests {
         let copilot = Arc::new(meerkat_copilot::CopilotRuntime::new());
         let listed: meerkat_copilot::CopilotModelsEnvelope =
             serde_json::from_value(serde_json::json!({
-                "data": [{"id": ACCOUNT_ID, "supported_endpoints": ["/chat/completions"]}]
+                "data": [{
+                    "id": ACCOUNT_ID,
+                    "supported_endpoints": ["/chat/completions"],
+                    "capabilities": {"supports": {"reasoning_effort": ["low", "medium", "high"]}}
+                }]
             }))
             .expect("the account's list");
         let _seated = copilot
@@ -1850,6 +1882,26 @@ mod copilot_wire_model_tests {
             [ACCOUNT_ID.to_string()],
             "the route asks for the Chat Completions client of the account's id"
         );
+        // The session's client reports the route the account's list gives
+        // the model, with the levels the entry it resolved states.
+        {
+            use meerkat_core::model_profile::capabilities::EffortLevel;
+            assert_eq!(
+                client.reasoning_route(),
+                Some(meerkat_core::ReasoningRouteObservation {
+                    backend: meerkat_core::ReasoningBackend::Google(
+                        super::GoogleBackendKind::Copilot
+                    ),
+                    api: meerkat_core::ModelApi::ChatCompletions,
+                    account: meerkat_core::AccountLevelStatement::Stated(vec![
+                        EffortLevel::Low,
+                        EffortLevel::Medium,
+                        EffortLevel::High,
+                    ]),
+                    operator_levels: None,
+                })
+            );
+        }
 
         let messages = vec![Message::User(UserMessage::text("hello"))];
         let projection = client
@@ -1979,6 +2031,70 @@ mod tests {
         assert!(!rendered.contains(LOCATION_CANARY) && !rendered.contains(BODY_CANARY));
         assert!(!rendered.contains("bearer-secret"));
         assert_eq!(target_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// A Code Assist setup endpoint, or a gateway in front of it, that
+    /// refuses a request with a body repeating the request's access token
+    /// (the bare value, the header as sent) is reported by status and body
+    /// without the token, for the setup request and for the operation poll.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+    #[tokio::test]
+    #[allow(clippy::unwrap_used, clippy::panic)]
+    async fn code_assist_setup_refusal_carries_no_access_token() {
+        let token = format!("codeassist-{}", "madeupaccesstoken".repeat(3));
+        let app = axum::Router::new().fallback(|headers: axum::http::HeaderMap| async move {
+            let authorization = headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default();
+            let bare = authorization
+                .strip_prefix("Bearer ")
+                .unwrap_or(authorization);
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                axum::Json(serde_json::json!({
+                    "error": {
+                        "code": 400,
+                        "message": format!(
+                            "upstream echo: credential {bare} was refused; header \
+                             authorization: {authorization}"
+                        ),
+                        "status": "INVALID_ARGUMENT",
+                    },
+                })),
+            )
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let http = meerkat_auth_core::auth_oauth::credential_http_client().unwrap();
+        let url = format!("http://{addr}/v1internal:loadCodeAssist");
+        let posted = post_code_assist_json::<serde_json::Value>(
+            &http,
+            &token,
+            url.clone(),
+            serde_json::json!({}),
+        )
+        .await;
+        let polled = get_code_assist_json::<serde_json::Value>(&http, &token, url).await;
+        server.abort();
+        for (request, result) in [("setup request", posted), ("operation poll", polled)] {
+            let error = match result {
+                Err(error) => error,
+                Ok(_) => panic!("{request}: a refusal is an error"),
+            };
+            let rendered = format!("{error} {error:?}");
+            assert!(
+                !rendered.contains(&token),
+                "{request}: the error leaked the access token: {rendered}"
+            );
+            assert!(
+                rendered.contains("status=400") && rendered.contains("upstream echo"),
+                "{request}: the refusal is reported by status and body: {rendered}"
+            );
+        }
     }
     #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
     use std::sync::Mutex;
@@ -2257,6 +2373,50 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn redacts_the_access_token_it_signed_with() {
+            use meerkat_core::HttpAuthorizer as _;
+            let fixture = fixture("echo", None).await;
+            let mut headers = Vec::new();
+            let mut request = meerkat_core::HttpAuthorizationRequest {
+                method: "POST",
+                url: "http://127.0.0.1:9/model",
+                headers: &mut headers,
+            };
+            fixture.authorizer.authorize(&mut request).await.unwrap();
+            let bearer = headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                .map(|(_, value)| value.clone())
+                .unwrap();
+            let token = bearer.strip_prefix("Bearer ").unwrap();
+            assert!(!token.is_empty());
+            // A response that repeats the access token (its header as sent,
+            // the bare value, a URL carrying it) loses it in the
+            // authorizer's redaction.
+            for echo in [
+                format!("upstream echo: rejected request with header authorization: {bearer}"),
+                format!("upstream echo: value {bearer} was refused"),
+                format!("upstream echo: credential {token} was refused"),
+                format!(
+                    "upstream echo: GET http://upstream.invalid/v1/models?session={token}&page=2"
+                ),
+            ] {
+                let mut diagnostic = echo;
+                fixture
+                    .authorizer
+                    .redact_response_diagnostic(&mut diagnostic);
+                assert!(
+                    !diagnostic.contains(token),
+                    "a credential is left in: {diagnostic}"
+                );
+                assert!(
+                    diagnostic.contains("upstream echo"),
+                    "the text around the credential is kept: {diagnostic}"
+                );
+            }
+        }
+
+        #[tokio::test]
         async fn optional_account_claim_may_be_absent_but_cannot_repin_the_authorizer() {
             let fixture = fixture("claims", Some("same-account")).await;
             let snapshot = fixture.owner.snapshot(&fixture.lease);
@@ -2391,6 +2551,69 @@ mod tests {
             Err(meerkat_llm_core::LlmError::InvalidRequest { message })
                 if message.contains("top_p")
         ));
+    }
+
+    /// R2.1: the Gemini family's Copilot client serves Chat Completions on
+    /// the Copilot backend. It answers for itself: the Chat Completions
+    /// client it wraps is another family's and reports no route here. The
+    /// account's statement is the routed client's to add.
+    #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
+    #[test]
+    fn every_adapter_reports_its_route() {
+        let inner = Arc::new(CapturingCopilotChatClient {
+            seen_provider_params: Arc::new(Mutex::new(None)),
+        });
+        assert_eq!(inner.reasoning_route(), None);
+        let client = GeminiCopilotChatClient { inner };
+        assert_eq!(
+            client.reasoning_route(),
+            Some(meerkat_core::ReasoningRouteObservation {
+                backend: meerkat_core::ReasoningBackend::Google(GoogleBackendKind::Copilot),
+                api: meerkat_core::ModelApi::ChatCompletions,
+                account: meerkat_core::AccountLevelStatement::NotApplicable,
+                operator_levels: None,
+            })
+        );
+    }
+
+    /// R2.2, Chat Completions for the Gemini family on Copilot: the level
+    /// Core writes on the Gemini tag (`thinking_level`) is handed to the
+    /// Chat Completions client as its typed effort, which that client writes
+    /// as `reasoning_effort` and `reasoning.effort` (pinned in
+    /// `meerkat-openai`).
+    #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
+    #[test]
+    fn translated_level_reaches_the_wire() {
+        use meerkat_core::lifecycle::run_primitive::{
+            GeminiProviderTag, GeminiThinkingLevel, ProviderTag, ReasoningEffort,
+        };
+
+        for (level, effort) in [
+            (GeminiThinkingLevel::Low, ReasoningEffort::Low),
+            (GeminiThinkingLevel::Medium, ReasoningEffort::Medium),
+            (GeminiThinkingLevel::High, ReasoningEffort::High),
+        ] {
+            let seen = Arc::new(Mutex::new(None));
+            let client = GeminiCopilotChatClient {
+                inner: Arc::new(CapturingCopilotChatClient {
+                    seen_provider_params: Arc::clone(&seen),
+                }),
+            };
+            let mut request = meerkat_llm_core::LlmRequest::new("gemini-test", Vec::new());
+            request.provider_params = Some(ProviderTag::Gemini(GeminiProviderTag {
+                thinking_level: Some(level),
+                ..Default::default()
+            }));
+            client
+                .request_pressure(&request)
+                .expect("Gemini Copilot request lowers");
+            let captured = seen.lock().expect("capture lock").clone();
+            let Some(ProviderTag::OpenAi(tag)) = captured else {
+                panic!("Gemini Copilot must lower into the Chat Completions wire tag");
+            };
+            assert_eq!(tag.reasoning_effort, Some(effort), "{level:?}");
+            assert_eq!(tag.supports_reasoning_override, Some(true), "{level:?}");
+        }
     }
 
     #[test]

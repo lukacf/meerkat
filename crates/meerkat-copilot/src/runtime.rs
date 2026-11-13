@@ -1145,6 +1145,94 @@ impl From<&CopilotRouteResolution> for CopilotRouteFingerprint {
     }
 }
 
+/// What a Copilot route of `provider`'s family states for the
+/// provider-neutral `reasoning_effort` option: the Copilot backend of the
+/// family, the API of the endpoint the route serves, and the effort levels
+/// the account's model list states for the route's model. It reads only the
+/// route it is given, as the account's cached list resolved it: the
+/// capabilities are those of the entry the route resolved for the session's
+/// model, and nothing is looked up or fetched.
+///
+/// - A route the account's list does not serve (the model is absent, more
+///   than one entry matches it, its policy is not enabled, or the family has
+///   no endpoint on it) has no observation.
+/// - A route resolved while the account holds no list is on the family's
+///   optimistic endpoint, and the account's statement is unavailable.
+/// - An entry states its levels in `capabilities.supports.reasoning_effort`
+///   ([`crate::CopilotModelSupports::stated_effort_levels`]); an entry
+///   without the statement states none. An empty statement says that the
+///   model takes no level. A statement made only of words that name no
+///   level this binary knows cannot be read: the entry is reported as
+///   stating none, so a level asked for there is refused as unknown and not
+///   as unsupported.
+/// - On the Messages endpoint a level is sent only as the pair adaptive
+///   thinking with effort. An entry there that states levels and states
+///   `adaptive_thinking: false` cannot take that pair, so its levels are not
+///   usable and it is reported as stating none. An entry that does not state
+///   `adaptive_thinking` keeps its levels, and an empty statement stays an
+///   empty statement.
+fn reasoning_route_observation(
+    provider: Provider,
+    route: &CopilotRouteFingerprint,
+) -> Option<meerkat_core::ReasoningRouteObservation> {
+    use meerkat_core::provider_matrix::{
+        AnthropicBackendKind, GoogleBackendKind, OpenAiBackendKind,
+    };
+    use meerkat_core::{AccountLevelStatement, ModelApi, ReasoningBackend};
+
+    let backend = match provider {
+        Provider::OpenAI => ReasoningBackend::OpenAi(OpenAiBackendKind::Copilot),
+        Provider::Anthropic => ReasoningBackend::Anthropic(AnthropicBackendKind::Copilot),
+        Provider::Gemini => ReasoningBackend::Google(GoogleBackendKind::Copilot),
+        Provider::SelfHosted | Provider::Other => return None,
+    };
+    let (endpoint, list_loaded) = match route.access {
+        CopilotModelAccess::Available { endpoint } => (endpoint, true),
+        CopilotModelAccess::Unknown => (CopilotEndpoint::optimistic_for_provider(provider)?, false),
+        CopilotModelAccess::Unavailable => return None,
+    };
+    let api = match endpoint {
+        CopilotEndpoint::Responses => ModelApi::Responses,
+        CopilotEndpoint::ChatCompletions => ModelApi::ChatCompletions,
+        CopilotEndpoint::Messages => ModelApi::Messages,
+        CopilotEndpoint::Unknown => return None,
+    };
+    let account = if list_loaded {
+        let supports = route
+            .capabilities
+            .as_ref()
+            .map(|capabilities| &capabilities.supports);
+        let refuses_the_messages_pair = api == ModelApi::Messages
+            && supports.is_some_and(|supports| supports.adaptive_thinking == Some(false));
+        // Whether the entry's statement holds any word, and the levels
+        // among its words.
+        let statement = supports.and_then(|supports| {
+            let holds_words = !supports.reasoning_effort.as_ref()?.is_empty();
+            Some((holds_words, supports.stated_effort_levels()?))
+        });
+        match statement {
+            // An empty statement: the model takes no level, on any endpoint.
+            Some((false, levels)) => AccountLevelStatement::Stated(levels),
+            // Words, none of which this binary knows as a level: the
+            // statement cannot be read, so it states nothing to check
+            // against.
+            Some((true, levels)) if levels.is_empty() => AccountLevelStatement::NotStated,
+            Some((true, levels)) if !refuses_the_messages_pair => {
+                AccountLevelStatement::Stated(levels)
+            }
+            Some((true, _)) | None => AccountLevelStatement::NotStated,
+        }
+    } else {
+        AccountLevelStatement::ListUnavailable
+    };
+    Some(meerkat_core::ReasoningRouteObservation {
+        backend,
+        api,
+        account,
+        operator_levels: None,
+    })
+}
+
 #[derive(Clone)]
 struct PreparedCopilotRoute {
     fingerprint: CopilotRouteFingerprint,
@@ -1342,6 +1430,22 @@ impl meerkat_llm_core::LlmClient for CopilotRoutedClient {
     /// The current route's account prompt limit for `output_budget`.
     fn prompt_token_limit(&self, output_budget: u32) -> Option<u32> {
         self.sync_client().prompt_token_limit(output_budget)
+    }
+
+    /// What the route the account's list resolves now states
+    /// ([`reasoning_route_observation`]), not the route this client last
+    /// prepared a request on: a level that is refused prepares no request,
+    /// so nothing else would bring the answer up to date once the account's
+    /// list has loaded or changed. This client answers for the route: the
+    /// adapter it wraps knows the backend and the API but not the account's
+    /// list. No I/O: the same read of the account's cached entry a request
+    /// preparation makes, with no lock held past it. An account whose state
+    /// is gone has no route to report.
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        let current = self
+            .runtime
+            .resolve_route(&self.connection, self.provider, &self.model)?;
+        reasoning_route_observation(self.provider, &CopilotRouteFingerprint::from(&current))
     }
 
     async fn prepare_controller_credential(&self) -> Result<(), AuthError> {
@@ -1676,6 +1780,11 @@ fn account_prompt_limit(limits: &crate::CopilotModelLimits, output_budget: u32) 
 impl meerkat_llm_core::LlmClient for CopilotCapabilityGatedClient {
     async fn prepare_controller_credential(&self) -> Result<(), AuthError> {
         self.inner.prepare_controller_credential().await
+    }
+
+    /// The route of the adapter this gate stands in front of.
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        self.inner.reasoning_route()
     }
 
     /// The account model's own output limit, the one the gate enforces.
@@ -2055,10 +2164,12 @@ impl CachedCopilotToken {
         self.expires_at = DateTime::<Utc>::MIN_UTC;
     }
 
-    /// An account whose first token exchange failed transiently: no token
-    /// serves, the API base is the default one until a token names the
-    /// account's own, and no model list is known, so the account's routes
-    /// resolve without one. The next use tries the exchange again.
+    /// An account whose sign-in has minted no token yet, because its first
+    /// token exchange failed transiently (the account's first sign-in, or a
+    /// new one after an earlier sign-in's token): no token serves, the API
+    /// base is the default one until a token names the account's own, and
+    /// no model list is known, so the account's routes resolve without one.
+    /// The next use tries the exchange again.
     fn awaiting_first_token(
         generation: u64,
         source_generation: u64,
@@ -2363,14 +2474,24 @@ impl CopilotAuthorizer {
             "Copilot token exchange failed transiently and no valid token is left; the turn fails with the retryable error and is retried"
         );
         if !same_source {
-            // The entry's token was minted from an earlier sign-in. The entry
-            // now speaks for the current one, so a build admitted during the
-            // outage publishes the current sign-in's expiry, and the earlier
-            // sign-in's token is refused so it never serves this one.
-            cached.refuse();
-            cached.source_generation = source_generation;
-            cached.source_published_at_millis = source_published_at_millis;
-            cached.source_expires_at = source.expires_at;
+            // The entry's token was minted from an earlier sign-in, and its
+            // model list and API base are the ones that token fetched and
+            // named. The current sign-in has minted no token yet, so the
+            // account gets the entry of a sign-in that awaits its first
+            // token, under a generation of its own: it holds nothing of the
+            // earlier sign-in (not its token's bytes, its generation, its
+            // list or its base), a build admitted during the outage
+            // publishes the current sign-in's expiry, and the account's
+            // routes resolve without a list, on the default base, until the
+            // current sign-in's own token brings both.
+            *cache = Some(CachedCopilotToken::awaiting_first_token(
+                self.state.next_generation.fetch_add(1, Ordering::Relaxed),
+                source_generation,
+                source_published_at_millis,
+                source.expires_at,
+                unavailable,
+            ));
+            return Err(CopilotTokenError::ExchangeUnavailable(error));
         }
         cached.exchange_unavailable = Some(unavailable);
         Err(CopilotTokenError::ExchangeUnavailable(error))
@@ -7174,6 +7295,62 @@ mod tests {
                 Err(meerkat_llm_core::LlmError::ContextLengthExceeded { max: 96_000, .. })
             ),
             "{refused:?}"
+        );
+    }
+
+    /// The account capability gate stands in front of a route's adapter and
+    /// does not hide the route the adapter reports for the provider-neutral
+    /// `reasoning_effort` option; in front of an adapter that reports none
+    /// it reports none.
+    #[test]
+    fn the_capability_gate_forwards_its_clients_route() {
+        use meerkat_core::provider_matrix::OpenAiBackendKind;
+        use meerkat_core::{
+            AccountLevelStatement, ModelApi, ReasoningBackend, ReasoningRouteObservation,
+        };
+
+        struct ReportingClient(ReasoningRouteObservation);
+
+        #[async_trait]
+        impl meerkat_llm_core::LlmClient for ReportingClient {
+            fn reasoning_route(&self) -> Option<ReasoningRouteObservation> {
+                Some(self.0.clone())
+            }
+
+            fn stream<'a>(
+                &'a self,
+                _request: &'a meerkat_llm_core::LlmRequest,
+            ) -> meerkat_llm_core::LlmStream<'a> {
+                Box::pin(futures::stream::empty())
+            }
+
+            fn provider(&self) -> Provider {
+                Provider::OpenAI
+            }
+
+            async fn health_check(&self) -> Result<(), meerkat_llm_core::LlmError> {
+                Ok(())
+            }
+        }
+
+        let reported = ReasoningRouteObservation {
+            backend: ReasoningBackend::OpenAi(OpenAiBackendKind::Copilot),
+            api: ModelApi::Responses,
+            account: AccountLevelStatement::NotApplicable,
+            operator_levels: None,
+        };
+        let gated = capability_gated_client(
+            Arc::new(ReportingClient(reported.clone())),
+            Some(crate::CopilotModelCapabilities::default()),
+        );
+        assert_eq!(gated.reasoning_route(), Some(reported));
+        assert_eq!(
+            capability_gated_client(
+                Arc::new(NoopLlmClient),
+                Some(crate::CopilotModelCapabilities::default()),
+            )
+            .reasoning_route(),
+            None
         );
     }
 
@@ -12542,6 +12719,19 @@ mod tests {
                 diagnostic,
                 "upstream echo: Bearer <redacted>, then Bearer <redacted>"
             );
+
+            // Only the bearers this account signed with are replaced: any
+            // other text, credential-shaped or not, is returned as it was.
+            // (The made-up values are assembled here so no scanner reads the
+            // source as a secret.)
+            let other = format!(
+                "upstream echo: authorization: Bearer {}, api_key={}",
+                "notsignedbythisaccount".repeat(2),
+                "notsignedeither".repeat(2),
+            );
+            let mut diagnostic = other.clone();
+            authorizer.redact_response_diagnostic(&mut diagnostic);
+            assert_eq!(diagnostic, other);
         }
 
         /// T11: no token in any variable, or only whitespace, is
@@ -14203,6 +14393,313 @@ mod tests {
             );
         }
 
+        /// A model listing of `gpt-test` and `gpt-other`, both served on
+        /// Responses. `gpt-test` states `levels` as its reasoning effort
+        /// levels; `gpt-other` states the same ones in every listing.
+        fn listing_stating_levels(levels: &[&str]) -> CopilotHttpResponse {
+            json_response(
+                200,
+                serde_json::json!({
+                    "data": [
+                        {
+                            "id": "gpt-test",
+                            "supported_endpoints": ["/responses"],
+                            "capabilities": {
+                                "supports": {"streaming": true, "reasoning_effort": levels}
+                            }
+                        },
+                        {
+                            "id": "gpt-other",
+                            "supported_endpoints": ["/responses"],
+                            "capabilities": {
+                                "supports": {
+                                    "streaming": true,
+                                    "reasoning_effort": ["low", "medium", "high"]
+                                }
+                            }
+                        }
+                    ]
+                }),
+            )
+        }
+
+        /// A session's routed client for `gpt-test` on `account`, as its
+        /// concrete type and built as [`routed_client`] builds it, so a row
+        /// can ask it to refresh its prepared route.
+        async fn concrete_routed_client(account: &RouteAccount) -> CopilotRoutedClient {
+            let resolved = account
+                .runtime
+                .resolve(&account.binding, &account.env)
+                .await
+                .expect("the session's auth resolves");
+            let connection = meerkat_llm_core::provider_runtime::ResolvedConnection {
+                provider: Provider::OpenAI,
+                backend: account.binding.backend(),
+                backend_profile: account.binding.backend_profile().clone(),
+                credential_identity: account.binding.credential_identity().clone(),
+                auth_lease: Arc::new(
+                    meerkat_llm_core::provider_runtime::DynamicLease::from_authorizer(
+                        resolved.authorizer(),
+                        resolved.metadata().clone(),
+                        crate::GITHUB_COPILOT_AUTHORIZER_LABEL,
+                    ),
+                ),
+            };
+            let factory: CopilotRouteClientFactory = Arc::new(|_, _| Ok(Arc::new(NoopLlmClient)));
+            let route = account
+                .runtime
+                .resolve_route(&connection, Provider::OpenAI, "gpt-test")
+                .expect("the resolution cached a route");
+            let schema_compiler = factory(&route, &connection).expect("the stand-in adapter");
+            CopilotRoutedClient {
+                runtime: Arc::clone(&account.runtime),
+                prepared_route: RwLock::new(PreparedCopilotRoute {
+                    fingerprint: CopilotRouteFingerprint::from(&route),
+                    client: capability_gated_client(
+                        Arc::clone(&schema_compiler),
+                        route.capabilities.clone(),
+                    ),
+                }),
+                connection,
+                provider: Provider::OpenAI,
+                model: "gpt-test".to_string(),
+                factory,
+                schema_compiler,
+            }
+        }
+
+        /// A route's identity compares what the account's list states about
+        /// the model's capabilities, its reasoning effort levels included:
+        /// once a refreshed list states other levels for a model, the model
+        /// resolves to a different route and a session's prepared route is
+        /// rebuilt. A model whose entry did not change keeps its route.
+        #[tokio::test]
+        async fn a_list_that_changes_a_models_levels_changes_its_route() {
+            let clock = TestClock::new();
+            let transport = Arc::new(ScriptedTransport::new([
+                token_response("derived-one"),
+                listing_stating_levels(&["low", "medium", "high"]),
+                listing_stating_levels(&["low", "medium", "high", "xhigh"]),
+            ]));
+            let account = RouteAccount::new(transport.clone(), &clock).await;
+            let client = concrete_routed_client(&account).await;
+            assert_eq!(transport.request_count(), 2, "one mint and one listing");
+            let state = account
+                .runtime
+                .connection_state(&client.connection)
+                .expect("the account's state");
+            let loaded_list = || {
+                state
+                    .cache
+                    .read()
+                    .as_ref()
+                    .and_then(|cached| cached.models.clone())
+                    .expect("a loaded model list")
+            };
+            let fingerprint = |model: &str| {
+                CopilotRouteFingerprint::from(
+                    &resolve_route_for_state(&state, Provider::OpenAI, model)
+                        .expect("a cached route"),
+                )
+            };
+            let first_list = loaded_list();
+            let first = fingerprint("gpt-test");
+            let first_other = fingerprint("gpt-other");
+            assert!(
+                !client.refresh_prepared_route().expect("the route resolves"),
+                "the list did not change, so the prepared route stands"
+            );
+
+            // Model discovery is due again (300 s); the token is still fresh.
+            // The next request preparation starts it off the request path.
+            clock.set(301);
+            client
+                .connection
+                .resolved_authorizer()
+                .expect("the route's authorizer")
+                .prepare_request()
+                .await
+                .expect("the token is fresh");
+            settle(|| !Arc::ptr_eq(&first_list, &loaded_list())).await;
+            assert_eq!(transport.request_count(), 3, "one more listing");
+
+            assert!(
+                fingerprint("gpt-other") == first_other,
+                "a model whose entry did not change keeps its route"
+            );
+            assert!(
+                fingerprint("gpt-test") != first,
+                "a list that states other reasoning effort levels for the model is another route"
+            );
+            assert!(
+                client.refresh_prepared_route().expect("the route resolves"),
+                "the prepared route is rebuilt for the levels the list now states"
+            );
+            assert!(
+                !client.refresh_prepared_route().expect("the route resolves"),
+                "the rebuilt route stands while the list does not change"
+            );
+        }
+
+        /// A refreshed list that states the same levels for a model in
+        /// another order, or states one of them twice, states nothing new:
+        /// the model keeps its route and a session's prepared route stands.
+        #[tokio::test]
+        async fn a_list_that_reorders_a_models_levels_keeps_its_route() {
+            let clock = TestClock::new();
+            let transport = Arc::new(ScriptedTransport::new([
+                token_response("derived-one"),
+                listing_stating_levels(&["low", "medium", "high"]),
+                listing_stating_levels(&["high", "low", "medium", "low"]),
+            ]));
+            let account = RouteAccount::new(transport.clone(), &clock).await;
+            let client = concrete_routed_client(&account).await;
+            assert_eq!(transport.request_count(), 2, "one mint and one listing");
+            let state = account
+                .runtime
+                .connection_state(&client.connection)
+                .expect("the account's state");
+            let loaded_list = || {
+                state
+                    .cache
+                    .read()
+                    .as_ref()
+                    .and_then(|cached| cached.models.clone())
+                    .expect("a loaded model list")
+            };
+            let fingerprint = |model: &str| {
+                CopilotRouteFingerprint::from(
+                    &resolve_route_for_state(&state, Provider::OpenAI, model)
+                        .expect("a cached route"),
+                )
+            };
+            let first_list = loaded_list();
+            let first = fingerprint("gpt-test");
+
+            // Model discovery is due again (300 s); the token is still fresh.
+            clock.set(301);
+            client
+                .connection
+                .resolved_authorizer()
+                .expect("the route's authorizer")
+                .prepare_request()
+                .await
+                .expect("the token is fresh");
+            settle(|| !Arc::ptr_eq(&first_list, &loaded_list())).await;
+            assert_eq!(transport.request_count(), 3, "one more listing");
+
+            assert!(
+                fingerprint("gpt-test") == first,
+                "the same levels in another order, one of them twice, are the same route"
+            );
+            assert!(
+                !client.refresh_prepared_route().expect("the route resolves"),
+                "the prepared route stands: the list states nothing new for the model"
+            );
+        }
+
+        /// A session's routed client observes the route the account's list
+        /// resolves now, not the route it last prepared a request on. A
+        /// session built while the account holds no list answers that the
+        /// list is unavailable. Once the account's model discovery has
+        /// loaded the list, the same session answers the levels the list
+        /// states, and after a refreshed list states other levels it answers
+        /// those: no new session, and no request sent through the session in
+        /// between (a level that was refused prepares no request, so nothing
+        /// else would bring the answer up to date).
+        #[tokio::test]
+        async fn a_session_observes_the_levels_once_the_accounts_list_loads() {
+            use meerkat_core::AccountLevelStatement;
+            use meerkat_core::model_profile::capabilities::EffortLevel;
+
+            let clock = TestClock::new();
+            let transport = Arc::new(ScriptedTransport::new([
+                token_at("derived-one", clock.at(3600), 1800),
+                // The first listing fails, and so does its one immediate retry.
+                json_response(503, serde_json::json!({"message": "temporary"})),
+                json_response(503, serde_json::json!({"message": "temporary"})),
+                listing_stating_levels(&["low", "medium", "high"]),
+                listing_stating_levels(&["low", "medium", "high", "xhigh"]),
+            ]));
+            let account = RouteAccount::new(transport.clone(), &clock).await;
+            let session = account.session([]).await;
+            assert_eq!(
+                transport.request_count(),
+                3,
+                "one mint, two failed listings"
+            );
+            let state = account
+                .runtime
+                .accounts
+                .lock()
+                .values()
+                .find_map(Weak::upgrade)
+                .expect("the account's state");
+            let loaded_list = || {
+                state
+                    .cache
+                    .read()
+                    .as_ref()
+                    .and_then(|cached| cached.models.clone())
+            };
+            let stated_now = || {
+                session
+                    .client
+                    .reasoning_route()
+                    .map(|observed| observed.account)
+            };
+            assert!(loaded_list().is_none());
+            assert_eq!(stated_now(), Some(AccountLevelStatement::ListUnavailable));
+
+            // The listing is due again (30 s after it failed); the token is
+            // still fresh. Preparing the session's credential starts the
+            // discovery off the request path.
+            clock.set(31);
+            session
+                .client
+                .prepare_controller_credential()
+                .await
+                .expect("the token is fresh");
+            settle(|| loaded_list().is_some()).await;
+            assert_eq!(transport.request_count(), 4, "one more listing");
+            assert_eq!(
+                stated_now(),
+                Some(AccountLevelStatement::Stated(vec![
+                    EffortLevel::Low,
+                    EffortLevel::Medium,
+                    EffortLevel::High,
+                ])),
+                "the session answers the list the account now holds"
+            );
+
+            // A refreshed list (300 s later) states one more level.
+            let first_list = loaded_list().expect("a loaded model list");
+            clock.set(31 + 301);
+            session
+                .client
+                .prepare_controller_credential()
+                .await
+                .expect("the token is fresh");
+            settle(|| loaded_list().is_some_and(|current| !Arc::ptr_eq(&first_list, &current)))
+                .await;
+            assert_eq!(transport.request_count(), 5, "one more listing");
+            assert_eq!(
+                stated_now(),
+                Some(AccountLevelStatement::Stated(vec![
+                    EffortLevel::Low,
+                    EffortLevel::Medium,
+                    EffortLevel::High,
+                    EffortLevel::Xhigh,
+                ])),
+                "the session answers the levels the refreshed list states"
+            );
+            assert!(
+                session.bearers().is_empty(),
+                "no request was sent through the session: {:?}",
+                session.bearers()
+            );
+        }
+
         /// A model listing 403 that asks for no account action (a policy, an
         /// integration the account does not allow) is a discovery failure:
         /// the token keeps serving, the sign-in stays valid, and the list is
@@ -14762,6 +15259,108 @@ mod tests {
             assert_eq!(transport.request_count(), 4);
         }
 
+        /// A model list states what the sign-in whose token fetched it may
+        /// use. After a new sign-in whose token exchange is down, the account
+        /// holds no list until that sign-in's own token fetches one: its
+        /// routes resolve as they do before a first listing, never from the
+        /// earlier sign-in's statement.
+        #[tokio::test]
+        async fn an_outage_after_a_new_sign_in_holds_no_model_list() {
+            let clock = TestClock::new();
+            let transport = Arc::new(ScriptedTransport::new([
+                token_at("derived-one", clock.at(3600), 200),
+                listing_stating_levels(&["low", "medium", "high"]),
+                json_response(503, serde_json::json!({"message": "unavailable"})),
+            ]));
+            let account = RouteAccount::admitting_pending_limits(transport.clone(), &clock).await;
+            let _first = account.session([]).await;
+            let state = account
+                .runtime
+                .accounts
+                .lock()
+                .values()
+                .find_map(Weak::upgrade)
+                .expect("the account's state");
+            let route = || {
+                resolve_route_for_state(&state, Provider::OpenAI, "gpt-test")
+                    .expect("the account's route")
+            };
+            assert!(account.lists_model("gpt-test"));
+            assert_eq!(
+                route()
+                    .capabilities
+                    .expect("the first sign-in's list states the model")
+                    .supports
+                    .stated_effort_levels()
+                    .map(|levels| levels.len()),
+                Some(3)
+            );
+            assert_eq!(
+                route().api_base,
+                "https://copilot.example.test",
+                "the first sign-in's token named its own API base"
+            );
+            let earlier_generation = {
+                let cache = state.cache.read();
+                let entry = cache.as_ref().expect("the account's entry");
+                assert!(
+                    !entry.token.is_empty(),
+                    "the first sign-in's token is the one the entry holds"
+                );
+                entry.generation
+            };
+
+            // A new sign-in while the exchange is down: the list the account
+            // holds was fetched with the earlier sign-in's token.
+            let new_expiry =
+                DateTime::from_timestamp(clock.at(86_400).timestamp(), 0).expect("a whole second");
+            account.sign_in_again("github-new-token", new_expiry).await;
+            account
+                .runtime
+                .resolve(&account.binding, &account.env)
+                .await
+                .expect("a build that knows its output budget is admitted during the outage");
+            assert_eq!(transport.request_count(), 3);
+            assert!(account.recorded_outage().is_some());
+
+            assert!(
+                !account.lists_model("gpt-test"),
+                "the earlier sign-in's model list must not stay under the new sign-in"
+            );
+            let route = route();
+            assert_eq!(
+                route.access,
+                CopilotModelAccess::Unknown,
+                "the route resolves as it does before a first listing"
+            );
+            assert_eq!(
+                route.capabilities, None,
+                "nothing the earlier sign-in's list stated is the new sign-in's"
+            );
+            assert_eq!(
+                route.api_base, DEFAULT_COPILOT_API_BASE,
+                "the API base the earlier sign-in's token named is not the new sign-in's: \
+                 the default one stands until its own token names one"
+            );
+
+            // The entry is the new sign-in's own: it holds nothing the
+            // earlier sign-in's token brought, the token included.
+            let cache = state.cache.read();
+            let entry = cache
+                .as_ref()
+                .expect("the outage is kept on the account's entry");
+            assert!(
+                entry.token.is_empty(),
+                "the entry must hold no bytes of the earlier sign-in's token"
+            );
+            assert!(
+                entry.generation > earlier_generation,
+                "the entry must carry a generation of its own, not the earlier token's: \
+                 {} after {earlier_generation}",
+                entry.generation
+            );
+        }
+
         #[tokio::test]
         async fn a_session_restored_after_expiry_recovers_once_the_exchange_answers() {
             let clock = TestClock::new();
@@ -14849,6 +15448,620 @@ mod tests {
                 1,
                 "both builds share one exchange"
             );
+        }
+    }
+
+    /// What a session's routed client observes about its route for the
+    /// provider-neutral `reasoning_effort` option: the Copilot backend of
+    /// the session's family, the endpoint the account's list gives the
+    /// model, and the effort levels the list states for it. The lists here
+    /// are hand-written and generic: they name no real model and no account.
+    mod reasoning_route_observations {
+        use super::*;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+        use meerkat_core::provider_matrix::{AnthropicBackendKind, GoogleBackendKind};
+        use meerkat_core::{
+            AccountLevelStatement, ModelApi, ReasoningBackend, ReasoningRouteObservation,
+        };
+
+        const FIXTURE_LIST: &str = include_str!("fixtures/copilot_models_generic.json");
+
+        const LOW_TO_HIGH: [EffortLevel; 3] =
+            [EffortLevel::Low, EffortLevel::Medium, EffortLevel::High];
+        const LOW_TO_MAX: [EffortLevel; 5] = [
+            EffortLevel::Low,
+            EffortLevel::Medium,
+            EffortLevel::High,
+            EffortLevel::Xhigh,
+            EffortLevel::Max,
+        ];
+
+        /// A model listing with `entries` as its `data`.
+        fn listing(entries: serde_json::Value) -> CopilotHttpResponse {
+            json_response(200, serde_json::json!({ "data": entries }))
+        }
+
+        /// The fixture list as the listing's answer.
+        fn fixture_listing() -> CopilotHttpResponse {
+            CopilotHttpResponse {
+                status: 200,
+                body: FIXTURE_LIST.as_bytes().to_vec(),
+                retry_after: None,
+                rate_limited: false,
+                rate_limit_reset: None,
+            }
+        }
+
+        /// One entry served on `endpoint` whose `supports` block is
+        /// `supports`.
+        fn entry(id: &str, endpoint: &str, supports: serde_json::Value) -> serde_json::Value {
+            serde_json::json!({
+                "id": id,
+                "supported_endpoints": [endpoint],
+                "capabilities": {"supports": supports}
+            })
+        }
+
+        /// One Copilot account over a transport that answers `script`: its
+        /// token exchange, then its model listings. The account keeps every
+        /// session it built: the runtime holds an account's token and list
+        /// only while a session holds them, and these rows read several
+        /// sessions of one account.
+        struct ObservedAccount {
+            runtime: Arc<CopilotRuntime>,
+            binding: ValidatedBinding,
+            env: ResolverEnvironment,
+            transport: Arc<ScriptedTransport>,
+            sessions: Mutex<Vec<Arc<dyn meerkat_llm_core::LlmClient>>>,
+        }
+
+        impl ObservedAccount {
+            async fn new(script: impl IntoIterator<Item = CopilotHttpResponse>) -> Self {
+                let (auth_binding, binding) = validated_binding();
+                let (env, _) = resolver_environment(&auth_binding).await;
+                let transport = Arc::new(ScriptedTransport::new(script));
+                Self {
+                    runtime: Arc::new(CopilotRuntime {
+                        accounts: Mutex::new(BTreeMap::new()),
+                        pacing: Mutex::new(BTreeMap::new()),
+                        transport: transport.clone(),
+                    }),
+                    binding,
+                    env,
+                    transport,
+                    sessions: Mutex::new(Vec::new()),
+                }
+            }
+
+            /// A session's routed client for `model` of `provider`'s family,
+            /// built as an agent build does: the session's auth resolves on
+            /// the account, then [`routed_client`] builds over a stand-in
+            /// adapter.
+            async fn session(
+                &self,
+                provider: Provider,
+                model: &str,
+            ) -> Arc<dyn meerkat_llm_core::LlmClient> {
+                let resolved = self
+                    .runtime
+                    .resolve(&self.binding, &self.env)
+                    .await
+                    .expect("the session's auth resolves");
+                let connection = meerkat_llm_core::provider_runtime::ResolvedConnection {
+                    provider,
+                    backend: self.binding.backend(),
+                    backend_profile: self.binding.backend_profile().clone(),
+                    credential_identity: self.binding.credential_identity().clone(),
+                    auth_lease: Arc::new(
+                        meerkat_llm_core::provider_runtime::DynamicLease::from_authorizer(
+                            resolved.authorizer(),
+                            resolved.metadata().clone(),
+                            crate::GITHUB_COPILOT_AUTHORIZER_LABEL,
+                        ),
+                    ),
+                };
+                let factory: CopilotRouteClientFactory =
+                    Arc::new(|_, _| Ok(Arc::new(NoopLlmClient)));
+                let client = routed_client(
+                    Arc::clone(&self.runtime),
+                    connection,
+                    provider,
+                    model.to_string(),
+                    factory,
+                )
+                .expect("the routed client builds once its auth resolved");
+                self.sessions.lock().push(Arc::clone(&client));
+                client
+            }
+
+            /// What the session's routed client for `model` observes.
+            async fn observed(
+                &self,
+                provider: Provider,
+                model: &str,
+            ) -> Option<ReasoningRouteObservation> {
+                self.session(provider, model).await.reasoning_route()
+            }
+        }
+
+        fn copilot_backend(provider: Provider) -> ReasoningBackend {
+            match provider {
+                Provider::OpenAI => ReasoningBackend::OpenAi(OpenAiBackendKind::Copilot),
+                Provider::Anthropic => ReasoningBackend::Anthropic(AnthropicBackendKind::Copilot),
+                Provider::Gemini => ReasoningBackend::Google(GoogleBackendKind::Copilot),
+                other => panic!("{other:?} has no Copilot backend"),
+            }
+        }
+
+        fn observation(
+            provider: Provider,
+            api: ModelApi,
+            account: AccountLevelStatement,
+        ) -> Option<ReasoningRouteObservation> {
+            Some(ReasoningRouteObservation {
+                backend: copilot_backend(provider),
+                api,
+                account,
+                operator_levels: None,
+            })
+        }
+
+        fn stated(levels: &[EffortLevel]) -> AccountLevelStatement {
+            AccountLevelStatement::Stated(levels.to_vec())
+        }
+
+        /// R2.5: the levels are those of the entry the route resolved for
+        /// the session's model. A session on the catalog spelling of a
+        /// model the account writes with a dot observes that entry's levels
+        /// on its endpoint; a model the account lists under its own id
+        /// observes its own entry; an id that two entries match and none
+        /// exactly, and a model the list does not name, have no route.
+        #[tokio::test]
+        async fn copilot_observation_reads_the_resolved_entry() {
+            let account = ObservedAccount::new([
+                token_response("derived"),
+                listing(serde_json::json!([
+                    entry(
+                        "claude-fixture-5.5",
+                        "/v1/messages",
+                        serde_json::json!({
+                            "adaptive_thinking": true,
+                            "reasoning_effort": ["low", "medium", "high", "xhigh", "max"]
+                        }),
+                    ),
+                    entry(
+                        "claude-fixture-6",
+                        "/v1/messages",
+                        serde_json::json!({
+                            "adaptive_thinking": true,
+                            "reasoning_effort": ["low", "medium", "high"]
+                        }),
+                    ),
+                    entry(
+                        "claude-twin-7.1",
+                        "/v1/messages",
+                        serde_json::json!({"reasoning_effort": ["low"]}),
+                    ),
+                    entry(
+                        "claude.twin-7-1",
+                        "/v1/messages",
+                        serde_json::json!({"reasoning_effort": ["high"]}),
+                    ),
+                ])),
+            ])
+            .await;
+
+            for spelling in ["claude-fixture-5-5", "claude-fixture-5.5"] {
+                assert_eq!(
+                    account.observed(Provider::Anthropic, spelling).await,
+                    observation(Provider::Anthropic, ModelApi::Messages, stated(&LOW_TO_MAX)),
+                    "{spelling} reads the entry the account writes with a dot"
+                );
+            }
+            assert_eq!(
+                account
+                    .observed(Provider::Anthropic, "claude-fixture-6")
+                    .await,
+                observation(
+                    Provider::Anthropic,
+                    ModelApi::Messages,
+                    stated(&LOW_TO_HIGH)
+                ),
+            );
+            assert_eq!(
+                account
+                    .observed(Provider::Anthropic, "claude-twin-7-1")
+                    .await,
+                None,
+                "an id that two entries match and none exactly has no route"
+            );
+            assert_eq!(
+                account
+                    .observed(Provider::Anthropic, "claude-twin-7.1")
+                    .await,
+                observation(
+                    Provider::Anthropic,
+                    ModelApi::Messages,
+                    stated(&[EffortLevel::Low])
+                ),
+                "the exact id reads its own entry"
+            );
+            assert_eq!(
+                account
+                    .observed(Provider::Anthropic, "claude-absent-1")
+                    .await,
+                None,
+                "a model the list does not name has no route"
+            );
+            assert_eq!(
+                account.observed(Provider::OpenAI, "claude-fixture-6").await,
+                None,
+                "a model served on no endpoint of the family has no route"
+            );
+        }
+
+        /// R2.5, over the fixture list: every family's routed client reports
+        /// its Copilot backend, the endpoint the list gives the model, and
+        /// the statement of that model's entry.
+        #[tokio::test]
+        async fn every_adapter_reports_its_route() {
+            let account =
+                ObservedAccount::new([token_response("derived"), fixture_listing()]).await;
+            for (provider, model, api, account_statement) in [
+                (
+                    Provider::OpenAI,
+                    "fixture-responses-a",
+                    ModelApi::Responses,
+                    stated(&[
+                        EffortLevel::None,
+                        EffortLevel::Low,
+                        EffortLevel::Medium,
+                        EffortLevel::High,
+                        EffortLevel::Xhigh,
+                        EffortLevel::Max,
+                    ]),
+                ),
+                (
+                    Provider::OpenAI,
+                    "fixture-responses-b",
+                    ModelApi::Responses,
+                    stated(&LOW_TO_MAX),
+                ),
+                (
+                    Provider::OpenAI,
+                    "fixture-responses-c",
+                    ModelApi::Responses,
+                    stated(&LOW_TO_HIGH),
+                ),
+                (
+                    Provider::OpenAI,
+                    "fixture-chat-a",
+                    ModelApi::ChatCompletions,
+                    stated(&LOW_TO_HIGH),
+                ),
+                (
+                    Provider::OpenAI,
+                    "fixture-legacy-a",
+                    ModelApi::ChatCompletions,
+                    AccountLevelStatement::NotStated,
+                ),
+                (
+                    Provider::Anthropic,
+                    "fixture-messages-a",
+                    ModelApi::Messages,
+                    stated(&LOW_TO_MAX),
+                ),
+                (
+                    Provider::Anthropic,
+                    "fixture-messages-b",
+                    ModelApi::Messages,
+                    AccountLevelStatement::NotStated,
+                ),
+                (
+                    Provider::Gemini,
+                    "fixture-chat-a",
+                    ModelApi::ChatCompletions,
+                    stated(&LOW_TO_HIGH),
+                ),
+                (
+                    Provider::Gemini,
+                    "fixture-chat-b",
+                    ModelApi::ChatCompletions,
+                    stated(&[]),
+                ),
+                (
+                    Provider::Gemini,
+                    "fixture-messages-a",
+                    ModelApi::ChatCompletions,
+                    stated(&LOW_TO_MAX),
+                ),
+            ] {
+                assert_eq!(
+                    account.observed(provider, model).await,
+                    observation(provider, api, account_statement),
+                    "{model} on the {provider:?} family"
+                );
+            }
+        }
+
+        /// R2.6: the account's token is minted and its model discovery
+        /// failed, so the account holds no list. Each family's route is on
+        /// its optimistic endpoint and the account's statement is
+        /// unavailable: nothing stands in for the list.
+        #[tokio::test]
+        async fn copilot_observation_without_a_list_is_unavailable() {
+            // The listing's 503 is tried once more at once, and fails again.
+            let account = ObservedAccount::new([
+                token_response("derived"),
+                json_response(503, serde_json::json!({"message": "temporary"})),
+                json_response(503, serde_json::json!({"message": "temporary"})),
+            ])
+            .await;
+            for (provider, model, api) in [
+                (Provider::OpenAI, "fixture-responses-a", ModelApi::Responses),
+                (
+                    Provider::Anthropic,
+                    "fixture-messages-a",
+                    ModelApi::Messages,
+                ),
+                (
+                    Provider::Gemini,
+                    "fixture-chat-a",
+                    ModelApi::ChatCompletions,
+                ),
+            ] {
+                assert_eq!(
+                    account.observed(provider, model).await,
+                    observation(provider, api, AccountLevelStatement::ListUnavailable),
+                    "{provider:?}"
+                );
+            }
+            assert_eq!(
+                account.transport.request_count(),
+                3,
+                "one mint and the failed listing with its one retry"
+            );
+        }
+
+        /// R2.7: an observation reads the route the account's cached list
+        /// resolves. It sends nothing, with a loaded list and without one,
+        /// however often it is asked.
+        #[tokio::test]
+        async fn observation_does_no_io() {
+            for (script, requests) in [
+                (vec![token_response("derived"), fixture_listing()], 2),
+                (
+                    vec![
+                        token_response("derived"),
+                        json_response(503, serde_json::json!({"message": "temporary"})),
+                        json_response(503, serde_json::json!({"message": "temporary"})),
+                    ],
+                    3,
+                ),
+            ] {
+                let account = ObservedAccount::new(script).await;
+                let clients = [
+                    account
+                        .session(Provider::OpenAI, "fixture-responses-a")
+                        .await,
+                    account
+                        .session(Provider::Anthropic, "fixture-messages-a")
+                        .await,
+                    account.session(Provider::Gemini, "fixture-chat-a").await,
+                ];
+                assert_eq!(account.transport.request_count(), requests);
+                let first: Vec<_> = clients
+                    .iter()
+                    .map(|client| client.reasoning_route())
+                    .collect();
+                assert!(first.iter().all(Option::is_some));
+                for _ in 0..16 {
+                    let again: Vec<_> = clients
+                        .iter()
+                        .map(|client| client.reasoning_route())
+                        .collect();
+                    assert_eq!(again, first);
+                }
+                assert_eq!(
+                    account.transport.request_count(),
+                    requests,
+                    "observing the route sends nothing"
+                );
+            }
+        }
+
+        /// R2.11: an entry without the field states no levels; an empty
+        /// array states that the model takes none. The two are different
+        /// statements.
+        #[tokio::test]
+        async fn an_entry_that_states_no_levels_is_not_stated() {
+            let account = ObservedAccount::new([
+                token_response("derived"),
+                listing(serde_json::json!([
+                    entry(
+                        "fixture-silent",
+                        "/responses",
+                        serde_json::json!({"streaming": true}),
+                    ),
+                    entry(
+                        "fixture-empty",
+                        "/responses",
+                        serde_json::json!({"streaming": true, "reasoning_effort": []}),
+                    ),
+                    entry(
+                        "fixture-null",
+                        "/responses",
+                        serde_json::json!({"reasoning_effort": null}),
+                    ),
+                    {"id": "fixture-bare", "supported_endpoints": ["/responses"]},
+                ])),
+            ])
+            .await;
+            for (model, account_statement) in [
+                ("fixture-silent", AccountLevelStatement::NotStated),
+                ("fixture-empty", stated(&[])),
+                ("fixture-null", AccountLevelStatement::NotStated),
+                ("fixture-bare", AccountLevelStatement::NotStated),
+            ] {
+                assert_eq!(
+                    account.observed(Provider::OpenAI, model).await,
+                    observation(Provider::OpenAI, ModelApi::Responses, account_statement),
+                    "{model}"
+                );
+            }
+        }
+
+        /// R2.13: Copilot Messages takes a level only as the pair adaptive
+        /// thinking with effort. An entry there that states levels and
+        /// states `adaptive_thinking: false` cannot take the pair, so it
+        /// states no usable levels; with `adaptive_thinking: true`, or with
+        /// the key absent, its levels stand. The same entry shape on
+        /// Responses or Chat Completions is unaffected.
+        #[tokio::test]
+        async fn a_messages_entry_that_refuses_adaptive_thinking_states_no_usable_levels() {
+            let levels = serde_json::json!(["low", "medium", "high"]);
+            let shapes = |endpoint: &str, prefix: &str| {
+                [
+                    entry(
+                        &format!("{prefix}-adaptive"),
+                        endpoint,
+                        serde_json::json!({"adaptive_thinking": true, "reasoning_effort": levels}),
+                    ),
+                    entry(
+                        &format!("{prefix}-unstated"),
+                        endpoint,
+                        serde_json::json!({"reasoning_effort": levels}),
+                    ),
+                    entry(
+                        &format!("{prefix}-refusing"),
+                        endpoint,
+                        serde_json::json!({"adaptive_thinking": false, "reasoning_effort": levels}),
+                    ),
+                ]
+            };
+            let mut entries = Vec::new();
+            entries.extend(shapes("/v1/messages", "messages"));
+            entries.extend(shapes("/responses", "responses"));
+            entries.extend(shapes("/chat/completions", "chat"));
+            let account = ObservedAccount::new([
+                token_response("derived"),
+                listing(serde_json::Value::Array(entries)),
+            ])
+            .await;
+
+            for (provider, prefix, api) in [
+                (Provider::Anthropic, "messages", ModelApi::Messages),
+                (Provider::OpenAI, "responses", ModelApi::Responses),
+                (Provider::OpenAI, "chat", ModelApi::ChatCompletions),
+                (Provider::Gemini, "chat", ModelApi::ChatCompletions),
+            ] {
+                for (shape, on_messages, elsewhere) in [
+                    ("adaptive", stated(&LOW_TO_HIGH), stated(&LOW_TO_HIGH)),
+                    ("unstated", stated(&LOW_TO_HIGH), stated(&LOW_TO_HIGH)),
+                    (
+                        "refusing",
+                        AccountLevelStatement::NotStated,
+                        stated(&LOW_TO_HIGH),
+                    ),
+                ] {
+                    let model = format!("{prefix}-{shape}");
+                    let expected = if api == ModelApi::Messages {
+                        on_messages
+                    } else {
+                        elsewhere
+                    };
+                    assert_eq!(
+                        account.observed(provider, &model).await,
+                        observation(provider, api, expected),
+                        "{model} on the {provider:?} family"
+                    );
+                }
+            }
+        }
+
+        /// An empty statement says the model takes no level, on every
+        /// endpoint, the Messages endpoint with `adaptive_thinking: false`
+        /// included: the account said so, and a level asked for there is
+        /// refused as unsupported. A statement made only of words this
+        /// binary does not know as levels says something it cannot read, so
+        /// the entry is reported as stating none and a level asked for
+        /// there is refused as unknown, not as unsupported with an empty
+        /// list. A statement that mixes known and unknown words states the
+        /// known ones.
+        #[tokio::test]
+        async fn an_empty_statement_and_unreadable_words_are_told_apart() {
+            let account = ObservedAccount::new([
+                token_response("derived"),
+                listing(serde_json::json!([
+                    entry(
+                        "responses-unreadable",
+                        "/responses",
+                        serde_json::json!({"reasoning_effort": ["ultra", "hyper"]}),
+                    ),
+                    entry(
+                        "responses-mixed",
+                        "/responses",
+                        serde_json::json!({"reasoning_effort": ["ultra", "low"]}),
+                    ),
+                    entry(
+                        "messages-empty",
+                        "/v1/messages",
+                        serde_json::json!({"reasoning_effort": []}),
+                    ),
+                    entry(
+                        "messages-empty-refusing",
+                        "/v1/messages",
+                        serde_json::json!({"adaptive_thinking": false, "reasoning_effort": []}),
+                    ),
+                    entry(
+                        "messages-unreadable-refusing",
+                        "/v1/messages",
+                        serde_json::json!({
+                            "adaptive_thinking": false,
+                            "reasoning_effort": ["ultra"]
+                        }),
+                    ),
+                ])),
+            ])
+            .await;
+            for (provider, model, api, account_statement) in [
+                (
+                    Provider::OpenAI,
+                    "responses-unreadable",
+                    ModelApi::Responses,
+                    AccountLevelStatement::NotStated,
+                ),
+                (
+                    Provider::OpenAI,
+                    "responses-mixed",
+                    ModelApi::Responses,
+                    stated(&[EffortLevel::Low]),
+                ),
+                (
+                    Provider::Anthropic,
+                    "messages-empty",
+                    ModelApi::Messages,
+                    stated(&[]),
+                ),
+                (
+                    Provider::Anthropic,
+                    "messages-empty-refusing",
+                    ModelApi::Messages,
+                    stated(&[]),
+                ),
+                (
+                    Provider::Anthropic,
+                    "messages-unreadable-refusing",
+                    ModelApi::Messages,
+                    AccountLevelStatement::NotStated,
+                ),
+            ] {
+                assert_eq!(
+                    account.observed(provider, model).await,
+                    observation(provider, api, account_statement),
+                    "{model}"
+                );
+            }
         }
     }
 }

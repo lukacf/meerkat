@@ -99,6 +99,8 @@ pub mod confinement_config;
 pub mod connection;
 pub mod context_budget;
 mod digest_observability;
+#[cfg(not(target_arch = "wasm32"))]
+mod document_file;
 pub mod error;
 pub mod event;
 pub mod event_injector;
@@ -543,8 +545,9 @@ pub use realtime_transcript_sidecar::{
 pub use reasoning_effort::{
     AccountLevelStatement, ModelApi, ReasoningBackend, ReasoningEffortDecidedBy,
     ReasoningEffortRefusal, ReasoningEffortRefusalReason, ReasoningEffortReport,
-    ReasoningEffortResolution, ReasoningEffortSent, ReasoningFactsSource, ReasoningRoute,
-    ReasoningRouteObservation,
+    ReasoningEffortResolution, ReasoningEffortSent, ReasoningFactsSource, ReasoningLevelFacts,
+    ReasoningResolveInput, ReasoningResolveMode, ReasoningRoute, ReasoningRouteObservation,
+    direct_route_observation, resolve_reasoning_effort, supported_reasoning_levels,
 };
 pub use retry::{
     DEFAULT_STREAM_INACTIVITY_TIMEOUT, LlmRetryFailure, LlmRetryFailureKind, LlmRetryPlan,

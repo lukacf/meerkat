@@ -131,6 +131,9 @@ struct ClaudeAiOAuthAuthorizer {
     metadata: AuthMetadata,
     runtime: oauth::AnthropicOAuthRuntime,
     cached: std::sync::Mutex<Option<ManagedClaudeAiCredential>>,
+    /// The access tokens requests were signed with, a refreshed-out one
+    /// included.
+    signed_tokens: meerkat_core::auth::SignedCredentials,
 }
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
@@ -161,6 +164,7 @@ impl ClaudeAiOAuthAuthorizer {
             metadata: metadata.clone(),
             runtime,
             cached: std::sync::Mutex::new(None),
+            signed_tokens: meerkat_core::auth::SignedCredentials::new(),
         };
         let lease = authorizer.lease_key();
         // Unattended setup never waits behind an operating-system credential
@@ -371,6 +375,7 @@ impl HttpAuthorizer for ClaudeAiOAuthAuthorizer {
         req: &mut meerkat_core::HttpAuthorizationRequest<'_>,
     ) -> Result<(), AuthError> {
         let (_guard, access_token) = self.current_credential().await?;
+        self.signed_tokens.record(&access_token);
         req.headers
             .push(("Authorization".into(), format!("Bearer {access_token}")));
         req.headers.push((
@@ -379,6 +384,10 @@ impl HttpAuthorizer for ClaudeAiOAuthAuthorizer {
         ));
         req.headers.push(("x-app".to_string(), "cli".to_string()));
         Ok(())
+    }
+
+    fn visit_signed_credentials(&self, visit: &mut dyn FnMut(&str)) {
+        self.signed_tokens.visit(visit);
     }
 
     fn label(&self) -> &'static str {
@@ -1003,6 +1012,7 @@ fn copilot_messages_route_client(
     wire_model: &str,
 ) -> Result<crate::AnthropicClient, ProviderClientError> {
     crate::AnthropicClient::builder(String::new())
+        .backend(AnthropicBackendKind::Copilot)
         .authorizer(authorizer)
         .base_url(api_base)
         .default_cache_control(default_cache_control_for_backend(
@@ -1075,6 +1085,7 @@ fn build_anthropic_client(
             }
         };
         let client = crate::AnthropicClient::builder(String::new())
+            .backend(backend_kind)
             .authorizer(authorizer)
             .base_url(base_url)
             .default_cache_control(default_cache_control_for_backend(backend_kind))
@@ -1105,6 +1116,7 @@ fn build_anthropic_client(
         // rather than from the builder's own constant.
         AnthropicBackendKind::AnthropicApi | AnthropicBackendKind::Foundry => {
             let mut builder = crate::AnthropicClient::builder(secret)
+                .backend(backend_kind)
                 .default_cache_control(default_cache_control_for_backend(backend_kind))
                 .automatic_cache_control_supported(backend_supports_automatic_cache_control(
                     backend_kind,
@@ -1139,6 +1151,7 @@ fn build_anthropic_client(
                     "bedrock-bearer",
                 ));
             let client = crate::AnthropicClient::builder(String::new())
+                .backend(backend_kind)
                 .authorizer(authorizer)
                 .base_url(base_url)
                 .default_cache_control(default_cache_control_for_backend(backend_kind))
@@ -1178,6 +1191,7 @@ fn build_anthropic_client(
                     "vertex-bearer",
                 ));
             let client = crate::AnthropicClient::builder(String::new())
+                .backend(backend_kind)
                 .authorizer(authorizer)
                 .base_url(base_url)
                 .default_cache_control(default_cache_control_for_backend(backend_kind))
@@ -1529,6 +1543,50 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn redacts_the_access_token_it_signed_with() {
+            use meerkat_core::HttpAuthorizer as _;
+            let fixture = fixture("echo", None).await;
+            let mut headers = Vec::new();
+            let mut request = meerkat_core::HttpAuthorizationRequest {
+                method: "POST",
+                url: "http://127.0.0.1:9/model",
+                headers: &mut headers,
+            };
+            fixture.authorizer.authorize(&mut request).await.unwrap();
+            let bearer = headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                .map(|(_, value)| value.clone())
+                .unwrap();
+            let token = bearer.strip_prefix("Bearer ").unwrap();
+            assert!(!token.is_empty());
+            // A response that repeats the access token (its header as sent,
+            // the bare value, a URL carrying it) loses it in the
+            // authorizer's redaction.
+            for echo in [
+                format!("upstream echo: rejected request with header authorization: {bearer}"),
+                format!("upstream echo: value {bearer} was refused"),
+                format!("upstream echo: credential {token} was refused"),
+                format!(
+                    "upstream echo: GET http://upstream.invalid/v1/models?session={token}&page=2"
+                ),
+            ] {
+                let mut diagnostic = echo;
+                fixture
+                    .authorizer
+                    .redact_response_diagnostic(&mut diagnostic);
+                assert!(
+                    !diagnostic.contains(token),
+                    "a credential is left in: {diagnostic}"
+                );
+                assert!(
+                    diagnostic.contains("upstream echo"),
+                    "the text around the credential is kept: {diagnostic}"
+                );
+            }
+        }
+
+        #[tokio::test]
         async fn optional_account_claim_may_be_absent_but_cannot_repin_the_authorizer() {
             let fixture = fixture("claims", Some("same-account")).await;
             let snapshot = fixture.owner.snapshot(&fixture.lease);
@@ -1768,6 +1826,185 @@ mod tests {
                 );
             } else {
                 assert!(body.get("thinking").is_none(), "{backend:?}: {body}");
+            }
+        }
+    }
+
+    /// A connection whose lease is a dynamic authorizer: the shape the cloud
+    /// backends' own authorizers (and an OAuth sign-in) give
+    /// `build_anthropic_client`.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn authorizer_connection(
+        backend: AnthropicBackendKind,
+        base_url: Option<&str>,
+    ) -> ResolvedConnection {
+        const LABEL: &str = "test-authorizer";
+
+        struct BearerAuthorizer;
+
+        #[async_trait::async_trait]
+        impl meerkat_core::HttpAuthorizer for BearerAuthorizer {
+            async fn authorize(
+                &self,
+                request: &mut meerkat_core::HttpAuthorizationRequest<'_>,
+            ) -> Result<(), meerkat_core::AuthError> {
+                request
+                    .headers
+                    .push(("Authorization".to_string(), "Bearer test-token".to_string()));
+                Ok(())
+            }
+
+            fn label(&self) -> &str {
+                LABEL
+            }
+        }
+
+        let mut connection = inline_secret_connection(backend, base_url);
+        connection.auth_lease = Arc::new(
+            meerkat_llm_core::provider_runtime::binding::DynamicLease::from_authorizer(
+                Arc::new(BearerAuthorizer),
+                meerkat_core::AuthMetadata::default(),
+                LABEL,
+            ),
+        );
+        connection
+    }
+
+    /// R2.1, the Claude family: the Messages client reports the backend the
+    /// connection it was built for names, whichever credential shape built
+    /// it, and the client a host builds directly reports the Claude API. No
+    /// account list and no operator levels are theirs to state.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn every_adapter_reports_its_route() {
+        use meerkat_core::{
+            AccountLevelStatement, ModelApi, ReasoningBackend, ReasoningRouteObservation,
+        };
+        use meerkat_llm_core::LlmClient;
+
+        let observation = |backend: AnthropicBackendKind| ReasoningRouteObservation {
+            backend: ReasoningBackend::Anthropic(backend),
+            api: ModelApi::Messages,
+            account: AccountLevelStatement::NotApplicable,
+            operator_levels: None,
+        };
+        let base_url = |backend: AnthropicBackendKind| match backend {
+            AnthropicBackendKind::AnthropicApi => None,
+            AnthropicBackendKind::Bedrock => {
+                Some("https://bedrock-runtime.us-east-1.amazonaws.com")
+            }
+            AnthropicBackendKind::Vertex => Some("https://us-east5-aiplatform.googleapis.com"),
+            AnthropicBackendKind::Foundry => {
+                Some("https://example.services.ai.azure.com/anthropic")
+            }
+            AnthropicBackendKind::Copilot => None,
+        };
+
+        let mut built = Vec::new();
+        for backend in AnthropicBackendKind::ALL.iter().copied() {
+            // The Copilot route's client is built by its own route closure
+            // (see `copilot_wire_model_tests`), never from a connection.
+            if backend == AnthropicBackendKind::Copilot {
+                for connection in [
+                    inline_secret_connection(backend, None),
+                    authorizer_connection(backend, None),
+                ] {
+                    assert!(build_anthropic_client(connection).is_err());
+                }
+                continue;
+            }
+            for (credential, connection) in [
+                (
+                    "inline secret",
+                    inline_secret_connection(backend, base_url(backend)),
+                ),
+                (
+                    "authorizer",
+                    authorizer_connection(backend, base_url(backend)),
+                ),
+            ] {
+                let client = build_anthropic_client(connection)
+                    .unwrap_or_else(|error| panic!("{backend:?} ({credential}) client: {error}"));
+                assert_eq!(
+                    client.reasoning_route(),
+                    Some(observation(backend)),
+                    "{backend:?} built from an {credential} connection"
+                );
+            }
+            built.push(backend);
+        }
+        assert_eq!(
+            built,
+            [
+                AnthropicBackendKind::AnthropicApi,
+                AnthropicBackendKind::Bedrock,
+                AnthropicBackendKind::Vertex,
+                AnthropicBackendKind::Foundry,
+            ],
+            "every backend a connection builds a client for"
+        );
+
+        assert_eq!(
+            crate::AnthropicClient::new("test-key".to_string())
+                .expect("the default client builds")
+                .reasoning_route(),
+            Some(observation(AnthropicBackendKind::AnthropicApi)),
+            "a client built directly serves the Claude API"
+        );
+    }
+
+    /// R2.2, Messages on the direct backends: the level Core writes on the
+    /// tag (`effort` alone) reaches the wire as `output_config.effort`, and
+    /// the rest of the body is the body of the same request without a level.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn translated_level_reaches_the_wire() {
+        use meerkat_core::lifecycle::run_primitive::AnthropicEffort;
+        use meerkat_core::{Message, UserMessage};
+        use meerkat_llm_core::LlmRequest;
+
+        let request = || {
+            LlmRequest::new(
+                "claude-opus-4-8",
+                vec![Message::User(UserMessage::text("hello"))],
+            )
+        };
+        for (backend, base_url) in [
+            (AnthropicBackendKind::AnthropicApi, None),
+            (
+                AnthropicBackendKind::Bedrock,
+                Some("https://bedrock-runtime.us-east-1.amazonaws.com"),
+            ),
+            (
+                AnthropicBackendKind::Vertex,
+                Some("https://us-east5-aiplatform.googleapis.com"),
+            ),
+            (
+                AnthropicBackendKind::Foundry,
+                Some("https://example.services.ai.azure.com/anthropic"),
+            ),
+        ] {
+            let client = build_anthropic_client(inline_secret_connection(backend, base_url))
+                .unwrap_or_else(|error| panic!("{backend:?} client: {error}"));
+            let baseline = client
+                .build_request_body(&request())
+                .unwrap_or_else(|error| panic!("{backend:?} request body: {error}"));
+            assert!(baseline.get("output_config").is_none(), "{backend:?}");
+            for (level, wire) in [
+                (AnthropicEffort::Low, "low"),
+                (AnthropicEffort::Medium, "medium"),
+                (AnthropicEffort::High, "high"),
+                (AnthropicEffort::XHigh, "xhigh"),
+                (AnthropicEffort::Max, "max"),
+            ] {
+                let body = client
+                    .build_request_body(
+                        &request().with_anthropic_tag_merge(|tag| tag.effort = Some(level)),
+                    )
+                    .unwrap_or_else(|error| panic!("{backend:?} {wire}: {error}"));
+                let mut expected = baseline.clone();
+                expected["output_config"] = serde_json::json!({"effort": wire});
+                assert_eq!(body, expected, "{backend:?}, level {wire}");
             }
         }
     }
@@ -2106,6 +2343,81 @@ mod copilot_wire_model_tests {
         assert_eq!(recorded.body["model"], "claude-opus-5");
     }
 
+    /// R2.1: the Copilot route's Messages client reports the Copilot backend
+    /// of the Claude family. The account's statement is the routed client's
+    /// to add, so this client states none.
+    #[test]
+    fn every_adapter_reports_its_route() {
+        let client = copilot_messages_route_client(
+            "https://copilot.example.test".to_string(),
+            Arc::new(CopilotLabelledAuthorizer),
+            "claude-sonnet-5-5",
+            "claude-sonnet-5.5",
+        )
+        .expect("the Copilot Messages route client builds");
+        assert_eq!(
+            client.reasoning_route(),
+            Some(meerkat_core::ReasoningRouteObservation {
+                backend: meerkat_core::ReasoningBackend::Anthropic(
+                    super::AnthropicBackendKind::Copilot
+                ),
+                api: meerkat_core::ModelApi::Messages,
+                account: meerkat_core::AccountLevelStatement::NotApplicable,
+                operator_levels: None,
+            })
+        );
+    }
+
+    /// R2.2, Messages on the Copilot route: Core writes the level there as
+    /// the pair adaptive thinking with effort. The request that carries the
+    /// pair sends `thinking: {"type": "adaptive"}` and `output_config.effort`
+    /// and nothing else the same request without a level does not send: no
+    /// other body field and no header, an `anthropic-beta` value included.
+    #[tokio::test]
+    async fn translated_level_reaches_the_wire() {
+        use meerkat_core::lifecycle::run_primitive::AnthropicEffort;
+
+        const CATALOG_ID: &str = "claude-sonnet-5-5";
+        const ACCOUNT_ID: &str = "claude-sonnet-5.5";
+        let without_level = || {
+            LlmRequest::new(CATALOG_ID, vec![Message::User(UserMessage::text("hello"))])
+                .with_max_tokens(4096)
+        };
+
+        let baseline = sent(CATALOG_ID, ACCOUNT_ID, &without_level()).await;
+        assert!(baseline.body.get("output_config").is_none());
+        for (level, wire) in [
+            (AnthropicEffort::Low, "low"),
+            (AnthropicEffort::Medium, "medium"),
+            (AnthropicEffort::High, "high"),
+            (AnthropicEffort::XHigh, "xhigh"),
+            (AnthropicEffort::Max, "max"),
+        ] {
+            let with_pair = without_level().with_anthropic_tag_merge(|tag| {
+                tag.thinking = Some(AnthropicThinkingConfig::Adaptive);
+                tag.effort = Some(level);
+            });
+            let recorded = sent(CATALOG_ID, ACCOUNT_ID, &with_pair).await;
+            assert_eq!(
+                recorded.body["thinking"],
+                serde_json::json!({"type": "adaptive"}),
+                "level {wire}"
+            );
+            assert_eq!(recorded.body["output_config"]["effort"], wire);
+            let mut expected = baseline.body.clone();
+            expected["thinking"] = serde_json::json!({"type": "adaptive"});
+            expected["output_config"] = serde_json::json!({"effort": wire});
+            assert_eq!(
+                recorded.body, expected,
+                "level {wire}: only the pair is added to the body"
+            );
+            assert_eq!(
+                recorded.headers, baseline.headers,
+                "level {wire}: the pair adds no header and no anthropic-beta value"
+            );
+        }
+    }
+
     /// Signs like the Copilot authorizer and names the persistence the
     /// runtime keys the account by.
     struct SeatedAuthorizer {
@@ -2179,7 +2491,14 @@ mod copilot_wire_model_tests {
         let copilot = Arc::new(meerkat_copilot::CopilotRuntime::new());
         let listed: meerkat_copilot::CopilotModelsEnvelope =
             serde_json::from_value(serde_json::json!({
-                "data": [{"id": ACCOUNT_ID, "supported_endpoints": ["/v1/messages"]}]
+                "data": [{
+                    "id": ACCOUNT_ID,
+                    "supported_endpoints": ["/v1/messages"],
+                    "capabilities": {"supports": {
+                        "adaptive_thinking": true,
+                        "reasoning_effort": ["low", "medium", "high"]
+                    }}
+                }]
             }))
             .expect("the account's list");
         let _seated = copilot
@@ -2232,6 +2551,27 @@ mod copilot_wire_model_tests {
                     .expect("the target names one provider"),
             )
             .expect("the session's text client builds on the Copilot route");
+        // The session's client reports the route the account's list gives
+        // the model, with the levels the entry it resolved states: the
+        // entry the account writes with a dot, read for the catalog id.
+        {
+            use meerkat_core::model_profile::capabilities::EffortLevel;
+            assert_eq!(
+                client.reasoning_route(),
+                Some(meerkat_core::ReasoningRouteObservation {
+                    backend: meerkat_core::ReasoningBackend::Anthropic(
+                        super::AnthropicBackendKind::Copilot
+                    ),
+                    api: meerkat_core::ModelApi::Messages,
+                    account: meerkat_core::AccountLevelStatement::Stated(vec![
+                        EffortLevel::Low,
+                        EffortLevel::Medium,
+                        EffortLevel::High,
+                    ]),
+                    operator_levels: None,
+                })
+            );
+        }
 
         let messages = vec![Message::User(UserMessage::text("hello"))];
         let projection = client

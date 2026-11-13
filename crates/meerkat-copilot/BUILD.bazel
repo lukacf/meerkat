@@ -56,12 +56,13 @@ rust_library(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/fixtures/copilot_models_generic.json",
         "src/runtime.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.13",
+        "CARGO_PKG_VERSION": "0.9.14",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-copilot",
     },
     proc_macro_deps = all_crate_deps(
@@ -90,6 +91,7 @@ rust_library(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/fixtures/copilot_models_generic.json",
         "src/runtime.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
@@ -97,7 +99,7 @@ rust_library(
         "//crates/meerkat:__pkg__",
     ],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.13",
+        "CARGO_PKG_VERSION": "0.9.14",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-copilot",
     },
     proc_macro_deps = all_crate_deps(
@@ -132,12 +134,13 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/fixtures/copilot_models_generic.json",
         "src/runtime.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.13",
+        "CARGO_PKG_VERSION": "0.9.14",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-copilot",
     },
     tags = [

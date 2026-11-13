@@ -608,8 +608,9 @@ impl LlmClient for ProviderAgnosticLlmClient {
         self.inner.controller_model_selection()
     }
 
-    // The wrapped client's reasoning route. The trait default reports none,
-    // which would hide the route of every member built on this wrapper.
+    // The route the wrapped client serves, for the provider-neutral
+    // reasoning effort option. The trait's default is no route, and a level
+    // set on a member whose client reports none is refused as unknown.
     fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
         self.inner.reasoning_route()
     }
@@ -733,16 +734,17 @@ impl meerkat_core::AgentLlmClient for ReplaySanitizingAgentLlmClient {
         self.inner.controller_model_selection()
     }
 
+    // The route the wrapped client serves, for the provider-neutral
+    // reasoning effort option. The trait's default is no route, and a level
+    // set on a member whose client reports none is refused as unknown.
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        self.inner.reasoning_route()
+    }
+
     fn controller_model_facts(
         &self,
     ) -> Result<meerkat_core::ControllerModelFacts, meerkat_core::ControllerFactsUnavailable> {
         self.inner.controller_model_facts()
-    }
-
-    // The wrapped client's reasoning route. The trait default reports none,
-    // which would hide the route of every member built on this wrapper.
-    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
-        self.inner.reasoning_route()
     }
 
     async fn prepare_controller_credential(&self) -> Result<(), meerkat_core::auth::AuthError> {
@@ -951,8 +953,9 @@ impl LlmClient for ReplaySanitizingLlmClient {
         self.inner.controller_model_selection()
     }
 
-    // The wrapped client's reasoning route. The trait default reports none,
-    // which would hide the route of every member built on this wrapper.
+    // The route the wrapped client serves, for the provider-neutral
+    // reasoning effort option. The trait's default is no route, and a level
+    // set on a member whose client reports none is refused as unknown.
     fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
         self.inner.reasoning_route()
     }
@@ -17199,6 +17202,10 @@ realm_profile = "worker-v2"
             Some(crate::memory::dispatch_taint::controller_test_support::selection())
         }
 
+        fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+            Some(crate::memory::dispatch_taint::controller_test_support::reasoning_route())
+        }
+
         fn plain_model_route(
             &self,
             logical_model: &str,
@@ -17292,6 +17299,54 @@ realm_profile = "worker-v2"
                     [meerkat_core::AssistantBlock::Text { .. }]
                 )
         )
+    }
+
+    /// A member's client reports the route of the client it wraps for the
+    /// provider-neutral `reasoning_effort` option, through every wrapper
+    /// Meta puts around a member's client: the two raw wrappers in both
+    /// orders the builder composes them, and the replay sanitizer around the
+    /// agent client. The trait's default is no route, and a level set on a
+    /// member whose client reports no route is refused as unknown on every
+    /// route, so a wrapper that omits the forward compiles and takes the
+    /// option away from every member.
+    #[test]
+    fn member_client_wrappers_forward_the_wrapped_clients_reasoning_route() {
+        use crate::memory::dispatch_taint::controller_test_support::{
+            PinnedInner, reasoning_route,
+        };
+        let inner: Arc<dyn LlmClient> = Arc::new(GovernedRawClient::default());
+        assert_eq!(inner.reasoning_route(), Some(reasoning_route()));
+        for (shape, client) in [
+            (
+                "provider-agnostic",
+                ProviderAgnosticLlmClient::wrap(Arc::clone(&inner)),
+            ),
+            (
+                "sanitizer",
+                ReplaySanitizingLlmClient::wrap(Arc::clone(&inner)),
+            ),
+            (
+                "sanitizer over provider-agnostic",
+                ReplaySanitizingLlmClient::wrap(ProviderAgnosticLlmClient::wrap(Arc::clone(
+                    &inner,
+                ))),
+            ),
+            (
+                "provider-agnostic over sanitizer",
+                ProviderAgnosticLlmClient::wrap(ReplaySanitizingLlmClient::wrap(Arc::clone(
+                    &inner,
+                ))),
+            ),
+        ] {
+            assert_eq!(client.reasoning_route(), Some(reasoning_route()), "{shape}");
+        }
+
+        let wrapped = ReplaySanitizingAgentLlmClient::new(Arc::new(PinnedInner::default()));
+        assert_eq!(
+            meerkat_core::AgentLlmClient::reasoning_route(&wrapped),
+            Some(reasoning_route()),
+            "the replay sanitizer around the agent client"
+        );
     }
 
     /// Both raw wrappers, in both orders the builder composes them, carry the

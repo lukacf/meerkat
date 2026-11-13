@@ -789,6 +789,25 @@ mod tests {
         assert_eq!(tail.text, "a [REDACTED] b [REDACTED] c\n");
     }
 
+    /// A connection string a server prints to stderr loses its userinfo,
+    /// also when the password holds a quoting byte: the authority is read
+    /// to whitespace, `/`, `?` or `#`, as it always was.
+    #[test]
+    fn url_userinfo_with_a_quoting_byte_is_redacted() {
+        for quoting in ["'", "\"", "\\", "<", ">"] {
+            let record = record_with(&[]);
+            record.append_stderr(
+                format!("connect postgres://app:pa{quoting}ss99word@db.internal/app failed\n")
+                    .as_bytes(),
+            );
+            let tail = record.stderr_tail().expect("captured");
+            assert_eq!(
+                tail.text, "connect postgres://[REDACTED]@db.internal/app failed\n",
+                "{quoting}"
+            );
+        }
+    }
+
     #[test]
     fn overlapping_launch_values_become_one_redaction() {
         let record = record_with(&["aaaabbbbcc", "bbbbccdddd"]);

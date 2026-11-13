@@ -933,7 +933,7 @@ mod tests {
         assert!(target_seen.lock().await.is_empty());
     }
 
-    /// R2.1: the fallback client reports the route of its active candidate,
+    /// The fallback client reports the route of its active candidate,
     /// before and after a fallback moves it to another target. It answers
     /// with the candidate's own observation and adds nothing to it.
     #[test]

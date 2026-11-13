@@ -222,7 +222,7 @@ CREATE TABLE IF NOT EXISTS mob_runtime_incarnations (
     origin TEXT NOT NULL CHECK (origin IN ('created', 'migrated')),
     provenance TEXT NOT NULL,
     finalized_at_ms INTEGER
-)
+);
 CREATE INDEX IF NOT EXISTS mob_events_mob_cursor ON mob_events (mob_id, cursor);
 CREATE TABLE meerkat_schema (domain TEXT PRIMARY KEY, version INTEGER NOT NULL);
 INSERT INTO meerkat_schema VALUES ('mob', 13);

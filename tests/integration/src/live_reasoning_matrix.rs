@@ -146,16 +146,53 @@ impl Redactor {
     /// `text` with every private value and every token-shaped word replaced
     /// by [`REDACTED`].
     pub fn redact(&self, text: &str) -> String {
-        let _ = &self.needles;
-        text.to_string()
+        let lower = text.to_ascii_lowercase();
+        let mut out = String::with_capacity(text.len());
+        let mut index = 0;
+        while index < text.len() {
+            if let Some(needle) = self
+                .needles
+                .iter()
+                .find(|needle| lower[index..].starts_with(needle.as_str()))
+            {
+                out.push_str(REDACTED);
+                index += needle.len();
+                continue;
+            }
+            // `index` is a char boundary: it starts at 0 and advances by a
+            // whole char or by a matched needle, which is valid UTF-8.
+            let Some(character) = text[index..].chars().next() else {
+                break;
+            };
+            out.push(character);
+            index += character.len_utf8();
+        }
+        scrub_token_shapes(&out)
     }
 }
 
 /// `text` with every word shaped like a GitHub token (one of the known
 /// prefixes and the token characters after it) replaced by [`REDACTED`].
 pub fn scrub_token_shapes(text: &str) -> String {
-    let _ = TOKEN_PREFIXES;
-    text.to_string()
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    loop {
+        let found = TOKEN_PREFIXES
+            .iter()
+            .filter_map(|prefix| rest.find(prefix).map(|at| (at, prefix.len())))
+            .min();
+        let Some((at, prefix_len)) = found else {
+            out.push_str(rest);
+            return out;
+        };
+        out.push_str(&rest[..at]);
+        out.push_str(REDACTED);
+        let after = &rest[at + prefix_len..];
+        let token_len = after
+            .find(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+            .unwrap_or(after.len());
+        rest = &after[token_len..];
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -272,11 +309,23 @@ pub struct CellPlan {
 /// goes; and the lowest level outside the set, at or above `low` where there
 /// is one.
 pub fn plan_cell(supported: &[EffortLevel], requests: u32) -> CellPlan {
-    let _ = (requests, LADDER);
-    CellPlan {
-        levels: supported.to_vec(),
-        refused: None,
-    }
+    let mut set = supported.to_vec();
+    set.sort();
+    set.dedup();
+    let lowest = set
+        .iter()
+        .copied()
+        .find(|level| *level >= EffortLevel::Low)
+        .or_else(|| set.first().copied());
+    let mut levels: Vec<EffortLevel> = lowest.into_iter().chain(set.last().copied()).collect();
+    levels.dedup();
+    levels.truncate(usize::try_from(requests).unwrap_or(usize::MAX));
+    let outside = |level: &EffortLevel| !set.contains(level);
+    let refused = LADDER
+        .into_iter()
+        .find(|level| *level >= EffortLevel::Low && outside(level))
+        .or_else(|| LADDER.into_iter().find(outside));
+    CellPlan { levels, refused }
 }
 
 // ---------------------------------------------------------------------------
@@ -375,11 +424,35 @@ impl ProviderFailure {
 /// The class and status of an error of the route's client. The error's own
 /// message is never read.
 pub fn classify(error: &LlmError) -> ProviderFailure {
-    let _ = error;
-    ProviderFailure {
-        class: FailureClass::ProviderOther,
-        status: None,
-    }
+    let (class, status) = match error {
+        LlmError::AuthenticationFailed { .. } => (FailureClass::AuthenticationFailed, Some(401)),
+        LlmError::InvalidApiKey => (FailureClass::Forbidden, Some(403)),
+        LlmError::RateLimited { .. } => (FailureClass::RateLimited, Some(429)),
+        LlmError::QuotaExhausted { .. } => (FailureClass::QuotaExhausted, None),
+        LlmError::PolicyStop { .. } => (FailureClass::PolicyStop, None),
+        LlmError::ModelNotFound { .. } => (FailureClass::ModelNotFound, Some(404)),
+        LlmError::ServerOverloaded => (FailureClass::ServerOverloaded, Some(503)),
+        LlmError::ServerError { status, .. } => (FailureClass::ServerError, Some(*status)),
+        LlmError::NetworkTimeout { .. } | LlmError::ConnectionReset => {
+            (FailureClass::Network, None)
+        }
+        LlmError::InvalidRequest { .. }
+        | LlmError::RequestTooLarge { .. }
+        | LlmError::InvalidInputShape { .. }
+        | LlmError::InvalidConfig { .. }
+        | LlmError::ContextLengthExceeded { .. } => (FailureClass::InvalidRequest, None),
+        LlmError::ContentFiltered { .. } => (FailureClass::ContentFiltered, None),
+        LlmError::IncompleteResponse { .. } | LlmError::StreamParseError { .. } => {
+            (FailureClass::IncompleteResponse, None)
+        }
+        LlmError::OperationRefused { .. }
+        | LlmError::OperationObservationUnavailable
+        | LlmError::OperationAuthorizationUnavailable
+        | LlmError::OperationReviewRefused { .. }
+        | LlmError::ToolChoiceUnsupported { .. } => (FailureClass::LocalRefusal, None),
+        _ => (FailureClass::ProviderOther, None),
+    };
+    ProviderFailure { class, status }
 }
 
 /// Why an account did not resolve, as a fixed word: a token GitHub rejected
@@ -388,8 +461,15 @@ pub fn classify(error: &LlmError) -> ProviderFailure {
 /// at all. The failure's own text, which can name the account, is never
 /// read.
 pub fn account_failure_class(error: &ProviderAuthError) -> &'static str {
-    let _ = error;
-    "not_resolved"
+    match error {
+        ProviderAuthError::Auth(AuthError::UserReauthRequired) => "token_rejected",
+        ProviderAuthError::Auth(AuthError::RefreshFailed(_)) => "account_refused",
+        ProviderAuthError::Auth(AuthError::SourceUnavailable { .. }) => {
+            "rate_limited_or_unavailable"
+        }
+        ProviderAuthError::Auth(AuthError::MissingSecret) => "no_token",
+        _ => "not_resolved",
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -430,19 +510,32 @@ impl RequestBudget {
     /// Count one request of `cell`, or refuse it. A refused request is not
     /// counted.
     pub fn admit(&self, cell: CellKey) -> Result<(), GateRefusal> {
-        let _ = self.per_cell;
         let mut state = lock(&self.state);
-        match state.spent.iter_mut().find(|(key, _)| *key == cell) {
-            Some((_, spent)) => *spent += 1,
-            None => state.spent.push((cell, 1)),
+        if state.stop.is_some() {
+            return Err(GateRefusal::Stopped);
         }
+        let index = match state.spent.iter().position(|(key, _)| *key == cell) {
+            Some(index) => index,
+            None => {
+                state.spent.push((cell, 0));
+                state.spent.len() - 1
+            }
+        };
+        let spent = &mut state.spent[index].1;
+        if *spent >= self.per_cell {
+            return Err(GateRefusal::CellBudgetSpent);
+        }
+        *spent += 1;
         Ok(())
     }
 
     /// Record a failure of the route's client. The first one that stops the
     /// run is kept, and from then on every request is refused.
     pub fn record_failure(&self, failure: ProviderFailure) {
-        let _ = failure;
+        let mut state = lock(&self.state);
+        if failure.stops_the_run() && state.stop.is_none() {
+            state.stop = Some(failure);
+        }
     }
 
     /// The failure the run stopped on.
@@ -496,8 +589,12 @@ pub struct GateRecord {
 /// thinking. On a Copilot Messages route the level is always sent as the
 /// pair.
 pub fn effort_without_adaptive_thinking(request: &LlmRequest) -> bool {
-    let _ = request;
-    false
+    match &request.provider_params {
+        Some(ProviderTag::Anthropic(tag)) => {
+            tag.effort.is_some() && tag.thinking != Some(AnthropicThinkingConfig::Adaptive)
+        }
+        _ => false,
+    }
 }
 
 /// Stands between an agent loop and the client of a route. Every request is
@@ -671,7 +768,7 @@ impl LlmClient for GatedClient {
     }
 
     async fn health_check(&self) -> Result<(), LlmError> {
-        self.inner.health_check().await
+        Ok(())
     }
 
     fn compile_schema(
@@ -806,8 +903,105 @@ fn status_word(status: Option<u16>) -> String {
 impl MatrixLine {
     /// The line as text, for `lane`. Built from the typed fields alone.
     pub fn render(&self, lane: Lane) -> String {
-        let _ = lane;
-        String::new()
+        let label = lane.label();
+        match self {
+            Self::Pass {
+                route,
+                model,
+                shape,
+                levels,
+                refused,
+                requests,
+            } => {
+                let levels = levels
+                    .iter()
+                    .map(|level| level.as_wire_str())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!(
+                    "{label} PASS route={route} model={model} shape={} levels=[{levels}] \
+                     refused={} requests={requests}",
+                    shape.as_str(),
+                    level_word(*refused),
+                )
+            }
+            Self::Local {
+                route,
+                model,
+                refused,
+            } => format!(
+                "{label} LOCAL route={route} model={model} refused={} requests=0",
+                reason_word(*refused)
+            ),
+            Self::Fail {
+                route,
+                model,
+                shape,
+                level,
+                class,
+                status,
+                detail,
+            } => format!(
+                "{label} FAIL route={route} model={model} shape={} level={} class={} status={} \
+                 detail={}",
+                shape.map_or("-", BodyShape::as_str),
+                level_word(*level),
+                class.as_str(),
+                status_word(*status),
+                detail.unwrap_or("-"),
+            ),
+            Self::Cut {
+                route,
+                model,
+                shape,
+                level,
+            } => format!(
+                "{label} CUT route={route} model={model} shape={} level={} \
+                 reason=second_request_refused_by_budget first_request=answered",
+                shape.as_str(),
+                level.as_wire_str(),
+            ),
+            Self::Skip { route, reason } => {
+                format!("{label} SKIP route={route} reason={}", reason.as_str())
+            }
+            Self::Note {
+                route,
+                stated_models,
+                probed_models,
+                stated_levels,
+                probed_levels,
+            } => format!(
+                "{label} NOTE route={route} models_with_stated_levels={stated_models} \
+                 models_probed={probed_models} levels_of_probed_model={stated_levels} \
+                 levels_probed={probed_levels}"
+            ),
+            Self::Stop {
+                class,
+                status,
+                requests,
+                ceiling,
+            } => format!(
+                "{label} STOP class={} status={} requests={requests}/{ceiling} \
+                 no further request is sent",
+                class.as_str(),
+                status_word(*status),
+            ),
+            Self::AccountStop { class } => format!(
+                "{label} STOP stage=account class={class} requests=0 no inference request is sent"
+            ),
+            Self::Summary {
+                pass,
+                fail,
+                cut,
+                skip,
+                local,
+                requests,
+                ceiling,
+            } => format!(
+                "{label} SUMMARY pass={pass} fail={fail} cut={cut} skip={skip} local={local} \
+                 requests={requests}/{ceiling} account={REDACTED}"
+            ),
+        }
     }
 }
 
@@ -1343,6 +1537,8 @@ pub async fn run_matrix(
     for cell in cells {
         let reason = if run.budget.stop().is_some() {
             Some(SkipReason::Stopped)
+        } else if Instant::now() >= run.deadline {
+            Some(SkipReason::RunDeadline)
         } else {
             None
         };

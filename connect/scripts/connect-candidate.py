@@ -1923,6 +1923,16 @@ def macos_cargo_environment(**extra):
     return {"RUST_LANE_ID": MACOS_LANE, "CARGO_TERM_COLOR": "never", **extra}
 
 
+def macos_cargo_argv(command, *arguments):
+    """One locked release build of the macOS steps (`build` or `test`), through the repository wrapper.
+
+    The producer reads every Cargo log (the JSON messages of a build, in a log that also holds Cargo's
+    stderr), so every command says `--color never` itself, beside the environment above: what the
+    caller's environment or terminal asks of Cargo must not change what is read.
+    """
+    return [ROOT / "scripts/repo-cargo", command, "--locked", "--release", "--color", "never", *arguments]
+
+
 def macos_begin(work, step):
     """Start one step: its earlier steps ran, it did not, and the checkout is still the recorded commit."""
     require(step in MACOS_STEPS and step != "preflight", "unknown macOS producer step")
@@ -2226,11 +2236,35 @@ def macos_preflight(work, source_sha):
 
 
 def macos_tool_argv(name, feature):
-    argv = [ROOT / "scripts/repo-cargo", "build", "--locked", "--release", "--manifest-path",
-            WORKSPACE / "Cargo.toml", "-p", "toolkit-package"]
+    argv = macos_cargo_argv("build", "--manifest-path", WORKSPACE / "Cargo.toml", "-p", "toolkit-package")
     if feature:
         argv += ["--features", feature]
     return [*argv, "--bin", name, "--message-format=json-render-diagnostics"]
+
+
+def macos_tool_dependencies_argv():
+    """The crates the six tools are built from: the fetch step's closure command, word for word
+    (TOOL_CLOSURE_ARGUMENTS of fetch-pinned-inputs.py, which ends in `--color never`). It builds nothing."""
+    return [ROOT / "scripts/repo-cargo", "tree", "--locked", "--manifest-path", WORKSPACE / "Cargo.toml",
+            "-p", "toolkit-package", "--features", "local-recipes,local-artifacts", "--target", MACOS_TRIPLE,
+            "-e", "normal,build", "--prefix", "none", "--format", "{p}", "--color", "never"]
+
+
+def macos_tool_dependency_lines(text):
+    """The package lines of the listing's log. The recorder keeps stdout and stderr in one log, so Cargo's
+    status lines are in it too and are left out by their shape. Terminal control text is neither a package
+    line nor a status line: a line with an escape sequence is refused, never skipped or stripped."""
+    said = text.splitlines()
+    require(not any("\x1b" in line for line in said),
+            "the tool dependency listing has a terminal escape sequence")
+    lines = [line for line in said if PACKAGE_LINE.fullmatch(line)]
+    require(lines, "the tool dependency listing is empty")
+    return lines
+
+
+def macos_rkat_argv():
+    return macos_cargo_argv("build", "--manifest-path", WORKSPACE / "Cargo.toml",
+                            "-p", "rkat", "--bin", "rkat", "--message-format=json-render-diagnostics")
 
 
 def macos_owner_argv(context, pins, pinned_inputs, step, **values):
@@ -2295,21 +2329,10 @@ def macos_library(work, pins, pinned_inputs):
             "build": {"record": binding(record.records / ("tool-" + name + ".json")), "messages": binding(log)},
             "scope": "one tool of the integration library built from this commit; not native or business execution"})
         outputs["tools"][name] = binding(build)
-    # The crates the tools were built from, for the kit's archives and licence texts. It builds nothing.
-    # The command is the fetch step's closure command. `--color never` is in it, beside the environment
-    # every Cargo child gets: the listing is read line by line and must be plain text on every host.
-    _, listing = record.run("tool-dependencies", [ROOT / "scripts/repo-cargo", "tree", "--locked",
-        "--manifest-path", WORKSPACE / "Cargo.toml", "-p", "toolkit-package",
-        "--features", "local-recipes,local-artifacts", "--target", MACOS_TRIPLE, "-e", "normal,build",
-        "--prefix", "none", "--format", "{p}", "--color", "never"],
-        cwd=WORKSPACE, env=macos_cargo_environment(), seconds=1800)
-    said = listing.read_text().splitlines()
-    # The log holds Cargo's status lines too, which are left out by their shape. Terminal control text is
-    # neither: a line with an escape sequence is refused, never skipped or stripped.
-    require(not any("\x1b" in line for line in said),
-            "the tool dependency listing has a terminal escape sequence")
-    lines = [line for line in said if PACKAGE_LINE.fullmatch(line)]
-    require(lines, "the tool dependency listing is empty")
+    # The crates the tools were built from, for the kit's archives and licence texts.
+    _, listing = record.run("tool-dependencies", macos_tool_dependencies_argv(), cwd=WORKSPACE,
+                            env=macos_cargo_environment(), seconds=1800)
+    lines = macos_tool_dependency_lines(listing.read_text())
     (tools / "dependencies.txt").write_text("\n".join(lines) + "\n")
     _, sysroot = record.run("rust-sysroot", ["rustc", "--print", "sysroot"], cwd=WORKSPACE)
     rust_license = Path(sysroot.read_text().strip()) / "share/doc/rust/COPYRIGHT-library.html"
@@ -2400,9 +2423,9 @@ def macos_resource_digest(context):
 
 
 def macos_native_argv(context, *selection):
-    return [ROOT / "scripts/repo-cargo", selection[0], "--locked", "--release", "--manifest-path",
+    return macos_cargo_argv(selection[0], "--manifest-path",
             WORKSPACE / "Cargo.toml", "-p", "meerkat-connect", "--features", context["inputs"]["features"],
-            *selection[1:], "--message-format=json-render-diagnostics"]
+            *selection[1:], "--message-format=json-render-diagnostics")
 
 
 def macos_source_check(context, label):
@@ -2647,9 +2670,7 @@ def macos_rkat(context, archive, archive_sha256, from_checkout):
     destination.parent.mkdir()
     core = context["preflight"]["versions"]["core"]
     if from_checkout:
-        _, log = record.run("rkat-build", [ROOT / "scripts/repo-cargo", "build", "--locked", "--release",
-            "--manifest-path", WORKSPACE / "Cargo.toml", "-p", "rkat", "--bin", "rkat",
-            "--message-format=json-render-diagnostics"], cwd=WORKSPACE, env=macos_cargo_environment(),
+        _, log = record.run("rkat-build", macos_rkat_argv(), cwd=WORKSPACE, env=macos_cargo_environment(),
             seconds=MACOS_BUILD_SECONDS)
         copy_exact(emitted_executable(log, "rkat", test=False), destination)
         described = {"source": "built_from_checkout", "version": core,

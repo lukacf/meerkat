@@ -675,12 +675,18 @@ jobs:
     timeout-minutes: 330
     permissions:
       contents: read
+    # CARGO_TERM_COLOR: the Rust setup action writes `always` into the job
+    # when the variable is unset, and Cargo then colours even what it writes
+    # into a file. Set here it stays `never` for every step. Each Cargo
+    # command whose output is read says `--color never` as well, so none
+    # depends on this line.
     env:
       CONNECT_CHECKOUT: /Users/runner/work/meerkat/meerkat
       CONNECT_WORK: /private/tmp/cw
       CONNECT_PINS: /private/tmp/cw/pins
       CONNECT_RESOLVED_PINS: /private/tmp/cw/pins/library-pins-macos-arm64.resolved.json
       PYTHONDONTWRITEBYTECODE: "1"
+      CARGO_TERM_COLOR: never
     outputs:
       work_artifact: ${{ steps.pack.outputs.work_artifact }}
     steps:
@@ -757,9 +763,9 @@ jobs:
       # given. Its record and the resolved file are kept under the work
       # root's records, so the stage record carries them. The test first
       # checks that this tree's closure resolves against its lock. The
-      # listing is read line by line, so the command says `--color never`:
-      # the Rust setup above exports CARGO_TERM_COLOR=always, and Cargo then
-      # colours its listing even into a file.
+      # listing is read line by line, so the command says `--color never`
+      # itself: Cargo colours its listing even into a file whenever its
+      # environment asks for colour, and the reader refuses such a line.
       - name: Fetch the pinned public inputs
         shell: bash
         env:
@@ -855,12 +861,14 @@ jobs:
       contents: read
       id-token: write
       attestations: write
+    # CARGO_TERM_COLOR: as in stage_macos_build.
     env:
       CONNECT_CHECKOUT: /Users/runner/work/meerkat/meerkat
       CONNECT_WORK: /private/tmp/cw
       CONNECT_PINS: /private/tmp/cw/pins
       CONNECT_RESOLVED_PINS: /private/tmp/cw/pins/library-pins-macos-arm64.resolved.json
       PYTHONDONTWRITEBYTECODE: "1"
+      CARGO_TERM_COLOR: never
     steps:
       - name: Checkout the dispatched source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -1079,12 +1087,15 @@ jobs:
     permissions:
       actions: read
       contents: read
+    # CARGO_TERM_COLOR: as in stage_macos_build (this job runs no Cargo; the
+    # three jobs of the installation share one setting).
     env:
       CONNECT_CHECKOUT: /Users/runner/work/meerkat/meerkat
       CONNECT_WORK: /private/tmp/cw
       CONNECT_STAGE: /private/tmp/cs
       CONNECT_ASSEMBLY: /private/tmp/ca
       PYTHONDONTWRITEBYTECODE: "1"
+      CARGO_TERM_COLOR: never
     steps:
       - name: Checkout the dispatched source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

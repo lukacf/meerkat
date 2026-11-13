@@ -10063,6 +10063,42 @@ mod tests {
         linked
     }
 
+    /// A host reads a runtime's inbox and registers a route to it in a second
+    /// namespace in two steps. When the runtime releases its route between
+    /// the two, the route is not installed: a route never outlives its inbox.
+    #[test]
+    fn a_route_to_a_released_runtimes_inbox_is_not_installed() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let name = format!("mob.late-{suffix}/worker/w-1");
+        let namespace = format!("mob.late-{suffix}");
+        let linked = format!("{namespace}-linked");
+        let runtime = CommsRuntime::inproc_only_scoped(&name, Some(namespace.clone()))
+            .expect("the runtime publishes");
+        let key = runtime.public_key();
+        let read = InprocRegistry::global()
+            .get_by_pubkey_in_namespace(&namespace, &key)
+            .expect("the runtime's own route is published");
+
+        assert!(runtime.retire_inproc_route());
+
+        let outcome = InprocRegistry::global().register_with_meta_in_namespace(
+            &linked,
+            name.as_str(),
+            key,
+            read,
+            crate::PeerMeta::default(),
+        );
+        assert!(
+            outcome.is_rejected(),
+            "a route to a released runtime's inbox was installed: {outcome:?}"
+        );
+        assert!(
+            InprocRegistry::global()
+                .get_by_pubkey_in_namespace(&linked, &key)
+                .is_none()
+        );
+    }
+
     /// A route never outlives its inbox: a runtime that releases its route
     /// takes the route a second namespace holds to its inbox with it.
     #[test]

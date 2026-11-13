@@ -1563,6 +1563,174 @@ fn a_route_removed_by_key_takes_no_other_registration_of_its_inbox() {
     );
 }
 
+/// The rule holds at registration too. A host reads a member's inbox and
+/// registers a route to it in a second namespace in two steps. When the
+/// inbox leaves between the two, the registration installs nothing and is
+/// refused: no route, and the name stays free. The inbox does not come back
+/// at home either.
+#[test]
+fn a_registration_of_an_inbox_that_left_installs_nothing() {
+    let registry = InprocRegistry::new();
+    let member = make_keypair().public_key();
+    let (_inbox, inbox_sender) = open_inbox();
+    let outcome = registry.register_with_meta_in_namespace(
+        "realm-b",
+        "worker-1",
+        member,
+        inbox_sender.clone(),
+        PeerMeta::default(),
+    );
+    assert!(!outcome.is_rejected(), "{outcome:?}");
+    // Step one of the host: the member's inbox, as its own namespace routes it.
+    let read = registry
+        .get_by_pubkey_in_namespace("realm-b", &member)
+        .expect("the member is routed in its own namespace");
+    // The member is released.
+    assert!(registry.unregister_sender_in_namespace("realm-b", &member, &inbox_sender));
+
+    // Step two of the host.
+    let outcome = registry.register_with_meta_in_namespace(
+        "realm-a",
+        LINKED_NAME,
+        member,
+        read.clone(),
+        PeerMeta::default(),
+    );
+    assert!(
+        outcome.is_rejected(),
+        "a route to an inbox that left was installed: {outcome:?}"
+    );
+    assert!(
+        registry
+            .get_by_pubkey_in_namespace("realm-a", &member)
+            .is_none()
+    );
+    assert!(!routes_the_linked_name(&registry, "realm-a"));
+
+    let outcome = registry.register_with_meta_in_namespace(
+        "realm-b",
+        "worker-1",
+        member,
+        read,
+        PeerMeta::default(),
+    );
+    assert!(
+        outcome.is_rejected(),
+        "an inbox that left came back: {outcome:?}"
+    );
+    // The name the refused route asked for is free for the member's next inbox.
+    let (_next_inbox, next) = open_inbox();
+    let outcome = registry.register_with_meta_in_namespace(
+        "realm-a",
+        LINKED_NAME,
+        member,
+        next,
+        PeerMeta::default(),
+    );
+    assert!(!outcome.is_rejected(), "{outcome:?}");
+}
+
+/// The same for an inbox the exact-generation seam replaced between the
+/// host's two steps: the route to the replaced inbox is not installed. The
+/// replacement registers.
+#[test]
+fn a_registration_of_an_inbox_that_was_replaced_installs_nothing() {
+    let registry = InprocRegistry::new();
+    let member = make_keypair().public_key();
+    let (_replaced_inbox, replaced) = open_inbox();
+    let (_inbox, replacement) = open_inbox();
+    let outcome = registry.register_with_meta_in_namespace(
+        "realm-b",
+        "worker-1",
+        member,
+        replaced.clone(),
+        PeerMeta::default(),
+    );
+    assert!(!outcome.is_rejected(), "{outcome:?}");
+    let read = registry
+        .get_by_pubkey_in_namespace("realm-b", &member)
+        .expect("the member is routed in its own namespace");
+    registry
+        .replace_sender_in_namespace(
+            "realm-b",
+            "worker-1",
+            (&member, &replaced),
+            member,
+            replacement.clone(),
+        )
+        .expect("the exact generation is replaced");
+
+    let outcome = registry.register_with_meta_in_namespace(
+        "realm-a",
+        LINKED_NAME,
+        member,
+        read,
+        PeerMeta::default(),
+    );
+    assert!(
+        outcome.is_rejected(),
+        "a route to an inbox that was replaced was installed: {outcome:?}"
+    );
+    assert!(
+        registry
+            .get_by_pubkey_in_namespace("realm-a", &member)
+            .is_none()
+    );
+
+    let outcome = registry.register_with_meta_in_namespace(
+        "realm-a",
+        LINKED_NAME,
+        member,
+        replacement.clone(),
+        PeerMeta::default(),
+    );
+    assert!(!outcome.is_rejected(), "{outcome:?}");
+    let routed = registry
+        .get_by_pubkey_in_namespace("realm-a", &member)
+        .expect("the route to the replacement is installed");
+    assert!(routed.same_inbox(&replacement));
+}
+
+/// Control: only an inbox that LEFT is refused. An inbox closed for peer
+/// ingress has not left, and a route a host took back by its key says
+/// nothing about the inbox: both still register in another namespace.
+#[test]
+fn an_inbox_that_has_not_left_still_registers_in_another_namespace() {
+    let registry = InprocRegistry::new();
+    let member = make_keypair().public_key();
+    let (_inbox, inbox_sender) = open_inbox();
+    routed_in_two_namespaces(&registry, member, &inbox_sender);
+
+    // The host takes its route back by key and installs it again.
+    assert!(registry.unregister_in_namespace("realm-a", &member));
+    let outcome = registry.register_with_meta_in_namespace(
+        "realm-a",
+        LINKED_NAME,
+        member,
+        inbox_sender.clone(),
+        PeerMeta::default(),
+    );
+    assert!(!outcome.is_rejected(), "{outcome:?}");
+
+    // The inbox is closed for peer ingress in its own namespace (its mob
+    // stopped): the host's route can still be installed.
+    assert!(registry.unregister_in_namespace("realm-a", &member));
+    assert!(registry.close_sender_in_namespace("realm-b", &member, &inbox_sender));
+    let outcome = registry.register_with_meta_in_namespace(
+        "realm-a",
+        LINKED_NAME,
+        member,
+        inbox_sender.clone(),
+        PeerMeta::default(),
+    );
+    assert!(!outcome.is_rejected(), "{outcome:?}");
+    assert!(registry.reopen_sender_in_namespace("realm-b", &member, &inbox_sender));
+    let routed = registry
+        .get_by_pubkey_in_namespace("realm-a", &member)
+        .expect("the host's route stays over the close and the reopen");
+    assert!(routed.same_inbox(&inbox_sender));
+}
+
 /// A wake route never claims a name: a live registration under the member's
 /// name still succeeds, and a lifecycle notice classifies as lifecycle.
 #[test]

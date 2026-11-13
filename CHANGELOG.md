@@ -121,6 +121,12 @@ them.
   Added). A match over the enum without a wildcard arm handles the new
   variant.
 
+- The generated TypeScript and Web SDK types gain the new union members:
+  the event `request_reasoning_effort_resolved` and the run-failure reason
+  `reasoning_effort_refused`. An exhaustive `switch` without a default
+  over one of these unions needs the new case; nothing changes at run time
+  (an SDK that does not know the event or the value keeps the raw data).
+
 - `meerkat-core`: `AgentEvent::RunStarted` and `AgentEvent::RunResumed` gain
   the field `reasoning_effort: Option<ReasoningEffortResolution>`, `RunResult`
   gains the public field `reasoning_effort: Option<ReasoningEffortReport>`,
